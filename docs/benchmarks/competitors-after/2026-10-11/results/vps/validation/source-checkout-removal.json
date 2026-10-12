@@ -1,0 +1,9 @@
+{
+  "path": "/home/ubuntu/bench-ouro-after/src",
+  "bytes": 121770788,
+  "files": 7893,
+  "archive_sha256": "3f9ce288783e44bf196334615a77a243f7aa23363fe023d1224db876e89cc1a7",
+  "preserved_local_archive": "archives/vps-build-source.tar.gz",
+  "every_file_verified_before_removal": true,
+  "reason": "Own completed source checkout; binaries, source snapshot and validation evidence retained."
+}

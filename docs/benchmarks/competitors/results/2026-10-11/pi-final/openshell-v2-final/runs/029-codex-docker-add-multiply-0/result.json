@@ -1,0 +1,63 @@
+{
+  "sequence": 29,
+  "agent": "codex",
+  "mode": "docker",
+  "task": "add-multiply",
+  "repetition": 0,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 21295.860401,
+  "container_result": {
+    "agent": "codex",
+    "task": "add-multiply",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 17150.98811,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {},
+    "peak_child_rss_kib": 220076,
+    "guest_kernel": [
+      "Linux",
+      "0fd67757349b",
+      "6.18.50+rpt-rpi-v8",
+      "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "pids.max": "3967",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "CODEX_AUTH_ACCESS_TOKEN",
+    "-e",
+    "CODEX_AUTH_REFRESH_TOKEN",
+    "-e",
+    "CODEX_AUTH_ACCOUNT_ID",
+    "-e",
+    "CODEX_AUTH_ID_TOKEN",
+    "ouro-comparison-agents-v2:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "add-multiply"
+  ],
+  "load": [
+    1.30419921875,
+    1.423828125,
+    1.24853515625
+  ],
+  "artifact": "runs/029-codex-docker-add-multiply-0"
+}

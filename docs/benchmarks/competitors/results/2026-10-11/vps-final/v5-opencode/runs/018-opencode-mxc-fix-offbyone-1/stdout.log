@@ -1,0 +1,13 @@
+I'll help you run the tests, find the bug, and fix it. Let me start by creating a task list and then running the tests.
+Now let me run the tests:
+I can see the tests are failing. Let me read the source file and test file to understand the bug:
+Perfect! I found the bug. The issue is an off-by-one error in src/parse.py:4. The function is returning `parts[1]` (the second element) when it should return `parts[0]` (the first element). This is causing:
+
+1. `test_basic`: Returns 'world' instead of 'hello'
+2. `test_single`: IndexError because there's only one element at index 0, not index 1
+
+Let me fix it:
+Now let me verify that all tests pass:
+Perfect! All tests are now passing. 
+
+I found and fixed the bug in src/parse.py:4. The issue was an off-by-one error where the function was returning `parts[1]` instead of `parts[0]`. Since Python uses 0-based indexing, the first element of a list is at index 0, not index 1. This was causing the function to return the second word instead of the first word, and also causing an IndexError when there was only a single word.

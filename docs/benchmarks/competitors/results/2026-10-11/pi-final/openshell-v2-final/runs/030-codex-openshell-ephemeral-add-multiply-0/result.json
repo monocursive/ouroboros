@@ -1,0 +1,38 @@
+{
+  "sequence": 30,
+  "agent": "codex",
+  "mode": "openshell-ephemeral",
+  "task": "add-multiply",
+  "repetition": 0,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 8403.021891,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "ouro-comparison-agents-v2:20261011",
+    "--policy",
+    "/home/monocursive/bench-ouro/results/openshell-v2-final/policy.yaml",
+    "--provider",
+    "benchmark-codex-v3",
+    "--env",
+    "BENCH_CODEX_ROUTING_ACCOUNT_ID=<CODEX_ACCOUNT_ID>",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "add-multiply"
+  ],
+  "load": [
+    1.17724609375,
+    1.392578125,
+    1.240234375
+  ],
+  "artifact": "runs/030-codex-openshell-ephemeral-add-multiply-0"
+}

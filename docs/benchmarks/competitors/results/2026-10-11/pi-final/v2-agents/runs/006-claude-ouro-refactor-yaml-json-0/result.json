@@ -1,0 +1,52 @@
+{
+  "sequence": 6,
+  "agent": "claude",
+  "mode": "ouro",
+  "task": "refactor-yaml-json",
+  "repetition": 0,
+  "started_utc": "2026-10-11T15:44:41Z",
+  "elapsed_ms": 28670.899276,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_roundtrip (test_store.TestStore.test_roundtrip) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/monocursive/bench-ouro/bin/ouro-jail",
+    "run",
+    "--profile",
+    "agent",
+    "--launch",
+    "claude",
+    "--workspace",
+    "/home/monocursive/bench-ouro/results/v2-agents/runs/006-claude-ouro-refactor-yaml-json-0/workspace/refactor-yaml-json",
+    "--ro",
+    "/home/monocursive/bench-ouro/bin",
+    "--limit",
+    "wall=180s",
+    "--receipt",
+    "/home/monocursive/bench-ouro/results/v2-agents/runs/006-claude-ouro-refactor-yaml-json-0/jail.json",
+    "--",
+    "/home/monocursive/bench-ouro/bin/claude",
+    "-p",
+    "Refactor src/store.py to use the json module instead of yaml. Keep the same class names and method signatures. Make all tests pass: python3 -m unittest discover -s tests -v. Do not modify the tests.",
+    "--model",
+    "claude-sonnet-4-5",
+    "--max-turns",
+    "15",
+    "--dangerously-skip-permissions",
+    "--output-format",
+    "json"
+  ],
+  "load": [
+    0.22509765625,
+    0.28173828125,
+    0.2080078125
+  ],
+  "artifact": "runs/006-claude-ouro-refactor-yaml-json-0"
+}

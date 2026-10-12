@@ -1,0 +1,66 @@
+{
+  "claude/direct": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      74450.841709
+    ],
+    "median_ms": 74450.841709
+  },
+  "claude/greywall": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "claude/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      76976.273625
+    ],
+    "median_ms": 76976.273625
+  },
+  "opencode/direct": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      58357.410042
+    ],
+    "median_ms": 58357.410042
+  },
+  "opencode/greywall": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "opencode/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      74560.461667
+    ],
+    "median_ms": 74560.461667
+  },
+  "codex/greywall": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "codex/direct": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      46727.675458
+    ],
+    "median_ms": 46727.675458
+  },
+  "codex/mxc": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  }
+}

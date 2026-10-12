@@ -1,0 +1,10 @@
+{
+  "opencode/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      24424.331088
+    ],
+    "median_ms": 24424.331088
+  }
+}

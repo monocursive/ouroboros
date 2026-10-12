@@ -1,0 +1,39 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Let me read the key files to understand the current implementation:
+Now I understand the structure. Let me create a plan for implementing the category summaries feature:
+Let me start implementing the feature:
+Now let me run the tests to see if everything is working correctly:
+Excellent! All tests pass. Let me verify the implementation works as expected by running it manually:
+Perfect! Let me also verify error handling:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's what was done:
+
+## Summary
+
+✅ **Added `--group-by-category` flag** to inventory/cli.py:11
+- The flag is a boolean action argument that triggers grouped output
+
+✅ **Created `category_summary` function** in inventory/report.py:8-37
+- Applies `--min-quantity` filter before grouping (as required)
+- Groups items by category and computes totals
+- Returns JSON array sorted alphabetically by category
+- Each object contains:
+  - `category` (string)
+  - `quantity` (sum of quantities)
+  - `stock_value` (sum of quantity × unit_price, formatted as decimal string with 2 digits)
+
+✅ **Updated cli.py** to route to appropriate function based on flag (inventory/cli.py:14-17)
+
+✅ **Updated README.md** with grouped example and expected output
+
+✅ **All tests pass** (10/10):
+- Ungrouped output maintains current behavior
+- Invalid CSV produces exit code 2 with useful stderr message (no traceback)
+- Category summaries work correctly
+- Filtering before grouping works correctly
+
+✅ **Module separation maintained**:
+- Processing logic in `report.py`
+- Argument parsing in `cli.py`
+- CSV loading in `loader.py`
+
+The implementation correctly handles all requirements including exact decimal arithmetic, proper error handling, and maintaining backward compatibility with existing functionality.

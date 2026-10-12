@@ -1,0 +1,3 @@
+I couldn’t access the workspace because the execution tool failed to start: `codex-code-mode-host` is missing. No files were changed, and tests weren’t run.
+
+Restore the execution tool so I can add `multiply(a, b)` and run `python3 -m unittest discover -s tests -v`.

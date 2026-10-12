@@ -1,0 +1,594 @@
+2026-10-11T18:33:16.522Z INFO openshell_supervisor: Starting sandbox supervision
+2026-10-11T18:33:16.625Z INFO openshell_supervisor: Fetching sandbox policy via gRPC
+2026-10-11T18:33:16.649Z OCSF CONFIG:ENRICHED [INFO] Enriched policy with baseline filesystem paths for proxy mode
+2026-10-11T18:33:16.662Z INFO openshell_supervisor_network::opa: Configured OPA runtime binary identity mode
+2026-10-11T18:33:16.662Z OCSF CONFIG:CONFIGURED [INFO] OPA runtime binary identity mode configured [source:proto require_binary_identity:true] [source:proto]
+2026-10-11T18:33:16.677Z INFO openshell_supervisor: Isolation boundary attached
+2026-10-11T18:33:16.678Z INFO openshell_supervisor: Isolation boundary enforcement confirmed
+2026-10-11T18:33:16.680Z OCSF CONFIG:ENABLED [INFO] TLS termination enabled: ephemeral CA generated
+2026-10-11T18:33:16.680Z OCSF CONFIG:READY [INFO] Policy DNS connected to isolation boundary
+2026-10-11T18:33:16.680Z OCSF NET:LISTEN [INFO] 127.0.0.1:3128
+2026-10-11T18:33:16.680Z WARN openshell_supervisor_network::proxy: host.openshell.internal maps to a non-link-local IP; trusted-gateway SSRF exemption disabled
+2026-10-11T18:33:16.702Z INFO openshell_supervisor: Isolation boundary agent started
+2026-10-11T18:33:16.705Z OCSF SSH:LISTEN [INFO]
+2026-10-11T18:33:16.705Z INFO openshell_supervisor: Control-mode access plane started
+2026-10-11T18:33:16.717Z OCSF CONFIG:LOADED [INFO] Acknowledged initial policy revision as loaded [version:2] [hash:6e7fad75f66a6cbed8aca0f346e023a22932960cfc97f160fb9505f13eb8211a]
+2026-10-11T18:33:16.719Z OCSF NET:OPEN [INFO] 127.0.0.1:17670
+2026-10-11T18:33:16.775Z OCSF EVENT [INFO] ssh relay open (channel_id=ad7c80f7-3b0d-41dc-a568-ad6faf369ad0, target=unix:/run/openshell/ssh.sock)
+2026-10-11T18:33:16.775Z OCSF SSH:OPEN [INFO] ALLOWED
+2026-10-11T18:33:17.168Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=351b8f5e-4243-4b4f-83dc-7224167c18a9
+2026-10-11T18:33:17.442Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=5fd20189-6146-4b87-b12d-12870c58d397
+2026-10-11T18:33:17.442Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=4977c43d-fafb-419e-9700-9eb87ef7c369
+2026-10-11T18:33:17.442Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=70677d8c-a0c4-4d4d-967a-9ff3c396a880
+2026-10-11T18:33:17.446Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=c2700df8-38cc-4def-add6-ea1e6c7e0dc9
+2026-10-11T18:33:17.446Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=cc87e8b5-6e7c-46e6-a9cc-acf0f273dcd1
+2026-10-11T18:33:17.446Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=8261b8fc-9e7d-46f1-b0a5-fcff6fe36a64
+2026-10-11T18:33:17.447Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=f076332b-a5e5-48fe-953b-ae63d9800732
+2026-10-11T18:33:17.447Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.450Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.452Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.455Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.455Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.459Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.462Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.467Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/installed [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.469Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.472Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.472Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/plugins/featured [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.477Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/codex/models [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.478Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/installed [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.479Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/codex/models [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.479Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/list [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.482Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.540Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=c47e83eb-7a53-445a-b421-56abd112a845
+2026-10-11T18:33:17.548Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.557Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.557Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=c0751695-fb0e-47d5-aca9-64dbb6ddbdef
+2026-10-11T18:33:17.564Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.572Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/installed [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.671Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=0dc4b817-0ccc-437e-be8f-9bfd9e86e5d3
+2026-10-11T18:33:17.676Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=75ea3351-47af-4d64-b43d-9741ccdbff5b
+2026-10-11T18:33:17.680Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.684Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.687Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.688Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=137b279e-b590-4061-b525-2ceee9492fc2
+2026-10-11T18:33:17.694Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.697Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.697Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=b66bd703-6375-4095-9d6a-bd035669b444
+2026-10-11T18:33:17.698Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.706Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/ps/mcp [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.706Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.715Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/codex/analytics-events/events [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.763Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/ps/mcp [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.773Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=3006e523-8c14-4a28-b49c-0f1cacd5be86
+2026-10-11T18:33:17.783Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.794Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.864Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=135ee42e-cacd-4d70-ab59-b1f831c792b5
+2026-10-11T18:33:17.871Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:17.881Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:17.997Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=ba6c4b79-c4ae-4399-b76c-5969fcc709c2
+2026-10-11T18:33:18.005Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:18.018Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:18.123Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=8b5e94e9-2e63-41c7-b76c-3895ec656883
+2026-10-11T18:33:18.132Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:18.140Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:18.255Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=8527828f-3338-402f-925a-848d7244d682
+2026-10-11T18:33:18.263Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:18.271Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:18.363Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=e470b03e-49a2-445a-b377-8850198f2269
+2026-10-11T18:33:18.376Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:18.387Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:18.451Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=cc6f1c6a-e4fa-47d2-b94b-1e58e9b4ef59
+2026-10-11T18:33:18.460Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:18.470Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:18.557Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=515dfc08-53fb-46f6-baf1-4dc654e61cc1
+2026-10-11T18:33:18.565Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:18.574Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/settings/user [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:18.696Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=d5e7c322-8148-499b-9861-d863064013c9
+2026-10-11T18:33:18.704Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:18.714Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/settings/user [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:18.785Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=0377d6ba-8f00-4dd5-bff2-d12b256f79a3
+2026-10-11T18:33:18.793Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:18.801Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/settings/user [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:18.892Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=5d4f6710-72fe-4d2a-b0e3-d9e9ca85b06c
+2026-10-11T18:33:18.900Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:18.908Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:19.008Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=094c8561-cbb3-4627-9fcd-66a893204eb1
+2026-10-11T18:33:19.016Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:19.025Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:19.106Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=a4db7304-8f6f-4e43-9de2-2bdef074b551
+2026-10-11T18:33:19.114Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:19.122Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:19.192Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=87a1e385-f1c0-4f8d-a6b3-cbbbfff3ee8a
+2026-10-11T18:33:19.200Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:19.208Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:19.476Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=4729b9c9-3104-4753-9a3a-52b5ad8144fe
+2026-10-11T18:33:19.484Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:19.493Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:19.634Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=debe5767-2e36-498b-a634-24de546d55df
+2026-10-11T18:33:19.642Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:19.651Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:19.740Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=f74f065b-a04b-4f59-81f2-938d469665b8
+2026-10-11T18:33:19.748Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:19.757Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:20.186Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=e764af86-9f58-453d-9d2e-b0d1569ad90e
+2026-10-11T18:33:20.195Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:20.205Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:20.283Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=86c98595-309e-4ff0-8eee-fa93008f15b1
+2026-10-11T18:33:20.291Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:20.301Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:20.371Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=c297d143-7cd8-4ed3-acd4-d09a98b48d17
+2026-10-11T18:33:20.379Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:20.387Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:21.212Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=5fa185b0-f448-4bd1-94c5-642eece79cc0
+2026-10-11T18:33:21.220Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:21.229Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:21.310Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=030bc1af-4876-490a-8f2a-dc94df19a2d3
+2026-10-11T18:33:21.319Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:21.331Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:21.401Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=135a8b60-b9eb-4f48-b63e-62fecc9260c6
+2026-10-11T18:33:21.409Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:21.418Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:23.241Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=959f02a7-a338-4840-a81a-efb34ed4a02a
+2026-10-11T18:33:23.249Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:23.258Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:23.361Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=729d0864-3fe2-4b8e-bc9c-9a14865e9f58
+2026-10-11T18:33:23.369Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:23.378Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:23.474Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=b96ac305-c548-4c25-8ef0-f2af7e9898bb
+2026-10-11T18:33:23.483Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:23.495Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:26.715Z OCSF CONFIG:DETECTED [INFO] Settings poll: config change detected [old_revision:13011494408213638003 new_revision:13011494408213638003 policy_changed:false provider_env_changed:true]
+2026-10-11T18:33:26.722Z INFO openshell_supervisor_network::opa: Configured OPA runtime binary identity mode
+2026-10-11T18:33:26.722Z OCSF CONFIG:CONFIGURED [INFO] OPA runtime binary identity mode configured [source:proto require_binary_identity:true] [source:proto]
+2026-10-11T18:33:26.729Z OCSF NET:OPEN [MED] DENIED chatgpt.com:443 [reason:L7 tunnel closed before inspection because policy changed: policy generation is stale [captured_generation:1 current_generation:2]]
+2026-10-11T18:33:27.226Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=8926e3d6-6a5d-4d50-8840-a0e941818a2c
+2026-10-11T18:33:27.234Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:27.242Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:27.307Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=8ab344c4-64aa-4298-97fd-2bfb3571edc7
+2026-10-11T18:33:27.315Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:27.324Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:27.416Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=cba89f40-703a-47ba-a409-445f4c5a3e1c
+2026-10-11T18:33:27.424Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:27.433Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:27.512Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=61b060e9-11c0-4c74-89e6-82f1aca33e78
+2026-10-11T18:33:27.520Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:27.531Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:27.593Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=983562be-4bd4-4248-9e51-2ae75ba5f3c6
+2026-10-11T18:33:27.600Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:27.609Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:27.731Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=94bb6fbc-87fe-4fcf-b76c-d1c88e7fa865
+2026-10-11T18:33:27.739Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:27.748Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:28.017Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=9d17f526-cc67-4279-8726-0c20e252905a
+2026-10-11T18:33:28.025Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:28.033Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:28.091Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=d8727149-69b7-45db-b210-69f5297e10a4
+2026-10-11T18:33:28.099Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:28.108Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:28.245Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=4364d1e2-6f2c-47e8-9438-a6912fb52434
+2026-10-11T18:33:28.253Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:28.265Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:28.739Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=8400cd7a-fed3-400b-96ed-bac411f5b757
+2026-10-11T18:33:28.746Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:28.755Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:28.846Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=33970ecb-240a-4afd-a221-5f4f0c5d637c
+2026-10-11T18:33:28.855Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:28.864Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:28.938Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=249a2a05-0b7e-4bd1-9f7e-26ec98cf677e
+2026-10-11T18:33:28.945Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:28.954Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:29.785Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=1195f473-9332-43d3-b825-d10cafe70704
+2026-10-11T18:33:29.797Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:29.805Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:29.883Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=3691f157-86be-43f9-abda-63513c131cf6
+2026-10-11T18:33:29.891Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:29.900Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:29.986Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=d881bbe4-37c2-499f-a883-3aba695ac36e
+2026-10-11T18:33:29.995Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:30.005Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:31.555Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=3509269a-abed-450d-8b4f-e45a31f9c596
+2026-10-11T18:33:31.565Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:31.574Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:31.771Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=60f3bf1a-e70f-41a8-b9cb-4c5e47371ade
+2026-10-11T18:33:31.778Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:31.788Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:31.880Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=29d9606c-3900-4516-a223-a72d80ca603d
+2026-10-11T18:33:31.889Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:31.898Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:34.928Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=3476d4ea-ea0d-434a-9d00-fd69fbe91f1e
+2026-10-11T18:33:34.935Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:34.945Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:35.093Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=5863faa4-4984-453b-ae77-322b279edb00
+2026-10-11T18:33:35.102Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:35.112Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:35.245Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=269262da-639c-490f-a935-a313e1541744
+2026-10-11T18:33:35.253Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:35.261Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:35.331Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=dde06cde-6b70-42e5-8a92-413ea8263092
+2026-10-11T18:33:35.339Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:35.349Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/codex/analytics-events/events [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:35.548Z OCSF EVENT [INFO] ssh relay closed (channel_id=ad7c80f7-3b0d-41dc-a568-ad6faf369ad0, target=unix:/run/openshell/ssh.sock)
+2026-10-11T18:33:56.858Z OCSF EVENT [INFO] ssh relay open (channel_id=3a432721-b7db-4160-8c1e-7f9fa918e1cc, target=unix:/run/openshell/ssh.sock)
+2026-10-11T18:33:56.858Z OCSF SSH:OPEN [INFO] ALLOWED
+2026-10-11T18:33:57.228Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=8110d228-eadd-4d3e-a814-6fa935b7f895
+2026-10-11T18:33:57.237Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.243Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=05ad4473-d648-4df3-9b36-044237587f70
+2026-10-11T18:33:57.250Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/codex/models [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.253Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.258Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=2f4d39ca-e963-4200-a8cb-0f11c631b528
+2026-10-11T18:33:57.259Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=4bc2f873-0597-4d07-a4f9-23559c8f9b36
+2026-10-11T18:33:57.264Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.269Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.272Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.274Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=9eed5a57-0848-40a9-b46d-4dc1528a7520
+2026-10-11T18:33:57.274Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=6ac04a20-f3ea-4334-ad46-7b4487c284d0
+2026-10-11T18:33:57.275Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=00c5f38c-681d-43a0-8cbf-5682228818b2
+2026-10-11T18:33:57.278Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/list [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.281Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/installed [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.283Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=4a466f64-707b-4fc4-8647-f51df0cedf80
+2026-10-11T18:33:57.283Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.284Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.289Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.293Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/installed [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.293Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.296Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/plugins/featured [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.300Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.302Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/codex/models [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.371Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=1378041b-c27b-4922-8852-73359b0ed902
+2026-10-11T18:33:57.382Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.390Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=77660a78-6379-4f9a-8489-8205e00a7b38
+2026-10-11T18:33:57.393Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/installed [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.400Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.412Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.420Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=ffe4e4f6-a4fe-4010-9523-ebe8ea3f621a
+2026-10-11T18:33:57.431Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.440Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.449Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=a1668b0d-dbbc-47da-9dd5-fb84d517647e
+2026-10-11T18:33:57.460Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.463Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=659a36b7-fc9f-4ac4-963b-1e2858883966
+2026-10-11T18:33:57.469Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/ps/mcp [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.471Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.479Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/codex/analytics-events/events [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.520Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/ps/mcp [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.573Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=e3e9844c-f8fd-4c43-b144-fa76b97742c5
+2026-10-11T18:33:57.581Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.590Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.669Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=a2247f5e-c1f9-4a8c-b9cb-1bb00e6c1449
+2026-10-11T18:33:57.679Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.692Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.776Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=67cdd56a-8f4b-4b29-9c83-a1a1fe18db61
+2026-10-11T18:33:57.784Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.794Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:57.878Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=b91f9f17-76be-4e9a-ac1d-fa61cff79341
+2026-10-11T18:33:57.894Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:57.904Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:58.098Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=52026140-1889-4ec6-89d5-7b7c83598ab1
+2026-10-11T18:33:58.106Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:58.115Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:58.214Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=6476d1f6-2b48-426b-83a4-57a1874ac132
+2026-10-11T18:33:58.223Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:58.236Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:58.359Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=881bcaf9-c7f1-4d9e-9a66-0caab1a92310
+2026-10-11T18:33:58.366Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:58.375Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:58.469Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=06666168-b4d0-4a6b-a557-20fe33a5b5f2
+2026-10-11T18:33:58.476Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:58.484Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:58.559Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=674ee464-2f8b-400d-8695-86a38e0057bc
+2026-10-11T18:33:58.568Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:58.577Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/settings/user [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:58.655Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=2baaa104-e59d-4d8f-9731-bc5ec86c49aa
+2026-10-11T18:33:58.663Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:58.672Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/settings/user [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:58.795Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=70ee311a-3687-4155-8cf0-616e46b6ed3b
+2026-10-11T18:33:58.802Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:58.810Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/settings/user [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:58.894Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=105a57e0-d4d6-4a50-ac11-1743d84454b2
+2026-10-11T18:33:58.902Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:58.910Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:59.009Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=cfeda109-6a00-4946-a9cc-12d87f9bc179
+2026-10-11T18:33:59.016Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:59.025Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:59.443Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=c774332a-433b-44a8-95a1-f49d27d125ca
+2026-10-11T18:33:59.450Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:59.459Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:59.555Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=aecf8078-7f7c-41f8-975d-0cd939828a6c
+2026-10-11T18:33:59.562Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:59.570Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:59.841Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=fdfd71d7-27a9-4a7e-8c69-82b1a1b254ab
+2026-10-11T18:33:59.850Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:59.859Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:33:59.941Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=b6fb22c7-966c-460b-a3c6-e51d1567f88d
+2026-10-11T18:33:59.948Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:33:59.957Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:00.066Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=6fad0ee1-5495-48d4-aaf1-d95d1f24fbe5
+2026-10-11T18:34:00.073Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:00.081Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:00.612Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=608a340c-f164-4623-bafc-19291dd7c34a
+2026-10-11T18:34:00.620Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:00.629Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:00.696Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=954b89e7-6b0d-45a4-a258-2359e6feff4a
+2026-10-11T18:34:00.703Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:00.712Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:00.843Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=bdf70f66-7528-45ce-b754-02ea9f87e940
+2026-10-11T18:34:00.850Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:00.858Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:01.730Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=f1936e8a-4040-4897-bd01-0d28f3125609
+2026-10-11T18:34:01.740Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:01.749Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:02.203Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=25c7f45a-6314-446f-86ac-b11a32cf406b
+2026-10-11T18:34:02.211Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:02.220Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:02.413Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=98ce9c8a-9c81-4275-93c7-dd81c68e3582
+2026-10-11T18:34:02.421Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:02.431Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:04.052Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=12887324-5da0-4245-8e9e-a66a07e3fd5a
+2026-10-11T18:34:04.060Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:04.069Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:04.143Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=fec7c2e3-b7ee-418a-b75c-84042e5d6cac
+2026-10-11T18:34:04.153Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:04.163Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:04.241Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=53dfb357-9a90-486d-90c8-784cb8c8568a
+2026-10-11T18:34:04.249Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:04.258Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:07.955Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=0b006f51-69ff-4331-9c35-8ce5cbba4def
+2026-10-11T18:34:07.963Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:07.971Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:08.119Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=56157a54-4c8b-4fd0-9458-f115372eaff4
+2026-10-11T18:34:08.126Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:08.137Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:08.255Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=91b6a797-6b96-4805-8c73-50cf652a5902
+2026-10-11T18:34:08.263Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:08.274Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:08.495Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=60451a2f-c834-4e29-898b-098afb3045dd
+2026-10-11T18:34:08.505Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:08.525Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:08.600Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=014aa2e6-6c4b-408d-87ee-5f73fe7b1986
+2026-10-11T18:34:08.608Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:08.617Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:08.733Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=7d985afc-26c6-4b56-add1-eab76e84b358
+2026-10-11T18:34:08.742Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:08.750Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:09.025Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=ad336260-38ba-4985-aa59-85272676e21e
+2026-10-11T18:34:09.033Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:09.041Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:09.200Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=5f7f705e-b313-435e-90e7-a6be073f82e2
+2026-10-11T18:34:09.208Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:09.217Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:09.306Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=6cb7d925-bff6-4c58-9f58-bceb2c3d24b1
+2026-10-11T18:34:09.314Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:09.323Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:09.826Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=86774853-4e47-41c4-9530-177be92083fc
+2026-10-11T18:34:09.834Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:09.844Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:09.927Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=65daa32c-0356-41dd-8b53-70dbee39b4b8
+2026-10-11T18:34:09.935Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:09.944Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:10.039Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=d5b19d68-ffd7-491a-a62b-090a499e9e69
+2026-10-11T18:34:10.048Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:10.057Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:10.926Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=effcffbb-7034-40ae-820e-5b14cf4dd2da
+2026-10-11T18:34:10.934Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:10.943Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:11.003Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=9122bf4b-63a3-48c1-896d-2361164c1de3
+2026-10-11T18:34:11.011Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:11.020Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:11.088Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=be0f0354-9e1f-4402-8dc0-00257794e5f0
+2026-10-11T18:34:11.096Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:11.106Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:12.959Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=b170b26f-410f-431a-8a33-9ba4b7ca18fc
+2026-10-11T18:34:12.966Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:12.977Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:13.072Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=fb473bb7-4db1-43f2-b2ff-7ef90f973843
+2026-10-11T18:34:13.081Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:13.090Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:13.166Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=2d310a46-263d-400a-8c54-2f70290075b6
+2026-10-11T18:34:13.175Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:13.185Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:16.551Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=8975a3a3-f941-420e-a134-3ba385881600
+2026-10-11T18:34:16.558Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:16.568Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:16.663Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=27fb3291-f27b-4da0-b5d6-0db1c30e6904
+2026-10-11T18:34:16.671Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:16.680Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:16.750Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=023ea5fa-06b7-4995-8e35-822b062787c5
+2026-10-11T18:34:16.758Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:16.767Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:16.863Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=443a1c04-73f3-43e6-9457-f086f50ee04d
+2026-10-11T18:34:16.871Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:34:16.880Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/codex/analytics-events/events [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:34:17.071Z OCSF EVENT [INFO] ssh relay closed (channel_id=3a432721-b7db-4160-8c1e-7f9fa918e1cc, target=unix:/run/openshell/ssh.sock)
+2026-10-11T18:35:01.955Z OCSF EVENT [INFO] ssh relay open (channel_id=3127d0df-2aa6-4d1a-8435-fc2909cc6b88, target=unix:/run/openshell/ssh.sock)
+2026-10-11T18:35:01.955Z OCSF SSH:OPEN [INFO] ALLOWED
+2026-10-11T18:35:02.330Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=2408aca7-9a3c-48ba-a488-cfc5c120573a
+2026-10-11T18:35:02.340Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.350Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.364Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=c70a1f4c-1670-4901-9ba5-542e4014d361
+2026-10-11T18:35:02.375Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.380Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=e6056d22-b89a-4c42-ba3f-c5ab841a55d8
+2026-10-11T18:35:02.381Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=f9861743-93d2-4f65-a70d-319920eba729
+2026-10-11T18:35:02.382Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=816e79f3-fd98-46f5-bc99-1a3698204a42
+2026-10-11T18:35:02.383Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=9445b3a8-b08c-47b9-b75f-49ad55953bb7
+2026-10-11T18:35:02.383Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=c7cd1348-f0a4-4414-94c3-528b51467c49
+2026-10-11T18:35:02.387Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/plugins/featured [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.392Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.394Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.396Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.397Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=f9040c9d-3a02-457b-b738-34d1e7d401e1
+2026-10-11T18:35:02.398Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.400Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.402Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/list [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.406Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/codex/models [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.408Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.408Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.409Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/installed [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.412Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/installed [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.417Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/codex/models [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.432Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=babb8434-54f6-4077-a176-01f0a7007202
+2026-10-11T18:35:02.440Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.449Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.508Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=4da47732-17ba-49be-bcea-4826509716b5
+2026-10-11T18:35:02.516Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.525Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/installed [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.539Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=fe63b663-af3c-4d27-a4d8-6a33752a28f0
+2026-10-11T18:35:02.546Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.554Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.620Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=a21b93f6-a90c-469b-b715-681ac0bdcab6
+2026-10-11T18:35:02.629Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.638Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.649Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=768ac8cf-f3f0-41a1-9291-7b319a3d9062
+2026-10-11T18:35:02.654Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=cde2afd2-a089-4a7d-a27f-3695ac6d96df
+2026-10-11T18:35:02.657Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.663Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.666Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/ps/mcp [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.673Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/codex/analytics-events/events [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.684Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=f91028aa-3ca2-4879-a3c4-dfb5211c10c8
+2026-10-11T18:35:02.692Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.702Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.729Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/ps/mcp [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.765Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=641a9d2c-c849-40d2-896d-396232d168dc
+2026-10-11T18:35:02.773Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.782Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.874Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=24bba25a-88eb-4752-a4d7-2193741a0329
+2026-10-11T18:35:02.881Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:02.889Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:02.989Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=b3247b5f-6eae-4fba-98f9-a3af213ccf27
+2026-10-11T18:35:02.999Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:03.008Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:03.108Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=62ded453-c304-44f2-bfc2-a5f2b5ab395a
+2026-10-11T18:35:03.116Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:03.126Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:03.205Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=fe3c0b2a-3b4a-49f7-8165-d980154862b6
+2026-10-11T18:35:03.213Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:03.222Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:03.283Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=a3deccac-d8c1-4862-bde2-4468fee94064
+2026-10-11T18:35:03.293Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:03.303Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:03.392Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=78045d1c-d21d-46f7-8054-57b4b55227ea
+2026-10-11T18:35:03.401Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:03.410Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/settings/user [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:03.490Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=1afd6b62-59f0-4bd1-861d-2500f41631c8
+2026-10-11T18:35:03.498Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:03.506Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/settings/user [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:03.576Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=03964488-4ae1-4c40-9f4f-8157303d5443
+2026-10-11T18:35:03.584Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:03.594Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/settings/user [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:03.695Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=69417e34-9aab-4482-a391-18d96f803a16
+2026-10-11T18:35:03.703Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:03.712Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/ps/plugins/suggested/codex [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:03.795Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=bfe64dcb-9ead-4bd3-886e-bdb61228dc74
+2026-10-11T18:35:03.803Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:03.811Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:03.938Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=1e226ec7-1f35-4ac6-b27c-2ad1ebc0844f
+2026-10-11T18:35:03.949Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:03.959Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:04.047Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=a2f8a438-c914-4128-b860-4f5252646455
+2026-10-11T18:35:04.055Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:04.063Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:04.353Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=892813fe-6480-468e-9fbd-50d48a1bf5c4
+2026-10-11T18:35:04.362Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:04.370Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:04.434Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=c7d40a4f-34a0-4d0c-9cf1-48559eece6b1
+2026-10-11T18:35:04.442Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:04.451Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:04.548Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=16d31f67-1a79-4920-ae3a-f8f889c3a791
+2026-10-11T18:35:04.556Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:04.568Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:05.094Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=c709eda5-bf7c-4b48-9a7f-f5ea032a7934
+2026-10-11T18:35:05.106Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:05.116Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:05.184Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=3664a5c7-e777-46e1-b1d0-20135c8843fb
+2026-10-11T18:35:05.192Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:05.201Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:05.287Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=bfc334b5-b25c-418f-9128-50ae0dfeb4c8
+2026-10-11T18:35:05.294Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:05.303Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:06.148Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=e44cdea9-840a-405a-aa38-75774dc6ada1
+2026-10-11T18:35:06.155Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:06.163Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:06.245Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=adf9872d-69eb-4726-ae53-6d18eafb1929
+2026-10-11T18:35:06.253Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:06.261Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:06.350Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=d0ada74f-6aba-464e-83fb-b6fb26cd4e48
+2026-10-11T18:35:06.360Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:06.369Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:07.968Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=181dd636-147c-4e27-be98-a7e2b0beb9a4
+2026-10-11T18:35:07.976Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:07.984Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:08.043Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=96fbe5bf-2aa5-412f-b965-3487582e8598
+2026-10-11T18:35:08.050Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:08.060Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:08.210Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=eb648b8d-2055-4a32-9ff1-a98dd4455f10
+2026-10-11T18:35:08.217Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:08.225Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:11.775Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=17382615-61f1-4ab5-9b0b-6c08989b5a56
+2026-10-11T18:35:11.783Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:11.791Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:11.865Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=1d4d247c-fd2b-4b57-bf62-c3d51744a39f
+2026-10-11T18:35:11.873Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:11.883Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:11.960Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=71e863d3-2d79-45ce-95a6-36a16061df84
+2026-10-11T18:35:11.968Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:11.980Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:12.071Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=690ef472-09c1-4353-984f-5cdca7201ff1
+2026-10-11T18:35:12.080Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:12.088Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:12.258Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=5b44b745-f795-4d89-8dcb-f9fb52c7777c
+2026-10-11T18:35:12.269Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:12.277Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:12.352Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=298fb2f6-5b24-4eee-accd-4b88ab6ba26b
+2026-10-11T18:35:12.360Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:12.369Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:12.635Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=64a8ca2c-6f81-460d-8c38-855c504c33cf
+2026-10-11T18:35:12.643Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:12.653Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:12.746Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=b1b9fe12-c364-4a07-9d82-995dccc8c300
+2026-10-11T18:35:12.754Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:12.763Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:12.897Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=e15e67a1-51ce-47a7-805d-d870512e0332
+2026-10-11T18:35:12.906Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:12.915Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:13.408Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=8a11cf32-aa0d-4ac2-897c-a8ba364b59ff
+2026-10-11T18:35:13.420Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:13.431Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:13.526Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=28bff6d0-fcab-4c88-a21b-cd57de473aa9
+2026-10-11T18:35:13.535Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:13.545Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:13.613Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=aeb9069a-ba10-44b2-9926-d302f89867cb
+2026-10-11T18:35:13.622Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:13.631Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:14.548Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=dc59508d-bc4d-406c-9333-98646e7c8a5e
+2026-10-11T18:35:14.556Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:14.566Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:14.654Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=3aecbdd6-bc7c-4c7d-8902-63395740b606
+2026-10-11T18:35:14.662Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:14.670Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:14.740Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=f4a6d40e-7ac5-4c0c-8124-755cc28c7f57
+2026-10-11T18:35:14.748Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:14.756Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:16.464Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=e7da21b1-752a-40be-b2ca-82cc7e05b7c4
+2026-10-11T18:35:16.474Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:16.483Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:16.731Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=87d62883-9bc2-46af-866a-54da71e931cf
+2026-10-11T18:35:16.738Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:16.746Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:16.818Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=a7d5871c-95e4-4507-b752-5139ead28812
+2026-10-11T18:35:16.827Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:16.837Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:20.458Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=2175e91b-9a57-4461-8e23-b148b874e763
+2026-10-11T18:35:20.468Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:20.477Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:20.666Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=c39c6e8a-4175-40a8-a0b4-5354c2935b7e
+2026-10-11T18:35:20.674Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:20.683Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:20.759Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=77f6d6f2-f493-4f39-98f3-a34a2d473213
+2026-10-11T18:35:20.767Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:20.777Z OCSF HTTP:GET [INFO] ALLOWED GET http://chatgpt.com:443/backend-api/wham/accounts/check [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:20.897Z OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped chatgpt.com resolved=104.18.32.47,172.64.155.209 synthetic=198.18.0.2 ports=443 mapping_id=23ba0cf0-c8dc-43c0-9d8b-f042cf8a9e50
+2026-10-11T18:35:20.906Z OCSF NET:OPEN [INFO] ALLOWED /opt/agents/bin/codex(0) -> chatgpt.com:443 [policy:_provider_benchmark_codex_v2 engine:opa]
+2026-10-11T18:35:20.915Z OCSF HTTP:POST [INFO] ALLOWED POST http://chatgpt.com:443/backend-api/codex/analytics-events/events [policy:_provider_benchmark_codex_v2 engine:l7]
+2026-10-11T18:35:21.131Z OCSF EVENT [INFO] ssh relay closed (channel_id=3127d0df-2aa6-4d1a-8435-fc2909cc6b88, target=unix:/run/openshell/ssh.sock)
+2026-10-11T18:35:26.799Z OCSF CONFIG:DETECTED [INFO] Settings poll: config change detected [old_revision:13011494408213638003 new_revision:13011494408213638003 policy_changed:false provider_env_changed:true]
+2026-10-11T18:35:26.805Z INFO openshell_supervisor_network::opa: Configured OPA runtime binary identity mode
+2026-10-11T18:35:26.805Z OCSF CONFIG:CONFIGURED [INFO] OPA runtime binary identity mode configured [source:proto require_binary_identity:true] [source:proto]

@@ -1,0 +1,79 @@
+{
+  "schema": "competitor-comparison/1",
+  "host": {
+    "system": "Darwin",
+    "node": "muetdhiver2.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:20:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6020",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "cpu_count": 10,
+  "started_utc": "2026-10-11T21:20:21Z",
+  "samples": 0,
+  "warmup": 0,
+  "seed": 20261011,
+  "hashes": {
+    "bin/greywall": "cd71b0a96a59458d922d192de10e24e986060faea22e5eb854e6198735056d0c",
+    "bin/mxc-exec-mac": "df1a01bff34eaaa76c8e047e3ac4c8ede5ca2d642c96f6086d4234190495425e",
+    "work/workload": "382a5e216cfb62251027e8194c6637df1b0b0b43e2695e33d733789aaf6cee2c",
+    "work/payload.py": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+    "greywall.json": "20d0de2175164fadf188b7477860b7c7cf71676970a93a1aa44be7662c8cc410",
+    "harness/agentbench.py": "8bcdf08aea3a7d9fdc70577562dd68061f38abf0dbfcffde52c3d6612a8f14a1",
+    "harness/agentbench_v2.py": "237117502197af54532be18c5084c2f9cfa8fbdebcd36532ba82a2eb68654358",
+    "harness/agentbench_workflow.py": "6c28a1123d737a1dc67189baf6f1d0fd911fde4cd27807dad3e8fa056999ce50",
+    "harness/backing_probe.py": "3e8a6fded0cbad888409a1d945e026c6c972971d2eea14c31b6c93633bedc601",
+    "harness/cleanup_services.py": "80613e85ae8f7994ffa341ba9953d0abd0b2da4a1b2245c781c38f57c01daca1",
+    "harness/container_agent_runner.py": "11581ddbd122abfd1a07ecc8770d8ccda83226c2ed4fae9ddf8029a0dcd2eb11",
+    "harness/container_egress_probe.py": "979d0e7e1485099c30eedf92d41d188ca7ff3e9dfd756a15018283a4642d486e",
+    "harness/container_filesystem_probe.py": "b5270f190e22cc339e1de536051fcf7b20210d092e0ddc0464dd0a57ea2011c7",
+    "harness/container_limits_probe.py": "ab8d6ea19be15398eec3548771bd2e60f860214fdf883c65e84212e50234bbfe",
+    "harness/export_results.py": "f5f9cb7fc801e1f1eb52847cf3876c04fb60afc4f73cf72c4bcf9ec1a0fe24dd",
+    "harness/final_mac.sh": "8f0577e33b041fd16ef7985c8424a6224b76aea75a48722fceccb5257d0045af",
+    "harness/finish_export.sh": "d159aceccaf37563cb6c17cbc00eda70a0dd708d56fc16d1947c2719c2782800",
+    "harness/greyproxy-v0.4.5.yml": "33734715cfa59a309c7be3fc571595a260748256a5b6111ea2ad83e384bc3929",
+    "harness/host_snapshot.py": "e726002557927d8a420924f775623317baf05657e8a200fd9ffbaccb7c023bed",
+    "harness/mxc_keychain_variant.py": "70f497dc05b97d25718c5bf7b7695c380bbfe65336590a56f92646c5dc9bd73e",
+    "harness/next_mac.sh": "42447ff0c92b3b5ec7fc3be6dc79f922cb76f5a1bbc68d829aec1f584f7cb462",
+    "harness/next_native.sh": "ad725de11631cc467b1224904cf88986383bcbec6393ecb6aa75ef152d83d897",
+    "harness/openshell-provider-codex.yaml": "ea13f3d42e8c0d906e651eebab552e37e8cdca66b213f786bcf0b070cd4be255",
+    "harness/openshell_agent_after.py": "17157b7d2e52062f2917d0a7d7dc7525d6dd105f9ef15a2093869d3ea5b151ae",
+    "harness/openshell_agent_v2.py": "70ae3a92c4fff8734e6b0c13651f612c9f1a111139a57ae04b8dac714c41b64a",
+    "harness/openshell_lane.py": "98fb7d711831f8dd00b2146513184c27b749967b9b5c035ba8c1109e8d5c3dbc",
+    "harness/openshell_perf_v2.py": "bfbef534e80490b5f882f392640895def0b6216e50354235d95b64a8e5d745a0",
+    "harness/ouro_vm_lane.py": "22af16f09344a3a523622d62eeef4fcdb000c642dbbf3fbda56fc4e2c8c65da4",
+    "harness/payload.py": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+    "harness/post_mac.sh": "b162159a754f5062b49e033ce7dd9a8708363d14dd6764be5acf4cd2b181fd7f",
+    "harness/refresh_codex_from_cache.py": "ce18255a13d57d113ce293482952860c2ef90acc131b1d5937c8b78281ce7972",
+    "harness/resource_probes.py": "d59035cda40aa964f0fb996205e255bb6d0e48b0bdcb4f940e5ff73742e5d39a",
+    "harness/run_mac_container.sh": "7034e51b84c18fbb079883a786f853d60382c65c07d19bab7b8df309c02ddd94",
+    "harness/run_mac_native.sh": "97bb184c79dc3e5a050406b8d3df148d1d485f7e5fce62d0cc8d63b0b537ad1a",
+    "harness/start_gateway.py": "e0da71d1bd8178d207855c2013ae168cab47529e1b4f8e92d5d5c0bd1a01d145",
+    "harness/suite.py": "6fa737f2d4242dec2424e740ce7b1b6a423ad6923197bcc072d3daa8e156960e",
+    "harness/summarize.py": "fa08d2448f50a4cd8071e807fcf45fb207fe6ef0e887f7b59cd17a5d4984d99b",
+    "harness/syscalls.c": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+    "harness/workflow_fixture.py": "c5e6e543326fd8cb71eb4596f0ea90834b6e4b644c849f9102e731decb001ea7",
+    "harness/workload.c": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02"
+  },
+  "versions": {
+    "ouro_version": {
+      "error": "[Errno 2] No such file or directory: '/Users/monocursive/bench-ouro-after/runs/resource-after/bin/ouro-jail'"
+    },
+    "greywall_version": {
+      "exit": 0,
+      "output": "greywall - lightweight, container-free sandbox for running untrusted commands\n  Version: 0.3.7\n  Built:   2026-06-01T15:01:40Z\n  Commit:  5581056d0523bfa244d8061008744ed9f72a0361\nPlatform: macOS\n\nChecking system capabilities:\n  \u2713 sandbox-exec (Seatbelt)\n"
+    },
+    "python_version": {
+      "exit": 0,
+      "output": "Python 3.9.6\n"
+    },
+    "mxc_help": {
+      "exit": 0,
+      "output": "macOS sandbox executor for MXC\n\nUsage: mxc-exec-mac [OPTIONS] [CONFIG_PATH]\n\nArguments:\n  [CONFIG_PATH]  Path to config JSON file (positional)\n\nOptions:\n      --config <CONFIG>                Path to config JSON file\n      --config-base64 <CONFIG_BASE64>  Base64-encoded JSON config\n      --debug                          Enable debug/console output\n      --experimental                   Enable experimental features\n      --allow-testing-features         Allow testing-only features that must never run in production, currently `network.proxy.builtinTestServer` (a bundled, deliberately-permissive test HTTP proxy). Distinct from --experimental\n      --dry-run                        Parse and validate config then exit without executing\n      --log-file <LOG_FILE>            Path to diagnostic log file (appends, creates if missing)\n  -h, --help                           Print help\n"
+    },
+    "os": {
+      "exit": 0,
+      "output": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434\n"
+    }
+  }
+}

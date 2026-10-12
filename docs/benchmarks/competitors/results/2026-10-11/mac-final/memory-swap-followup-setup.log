@@ -1,0 +1,8 @@
+
+Created sandbox: bench-memory-v3
+
+  [0.0s] Requesting compute...
+[0.0s] Sandbox allocated
+[0.0s] Pulling image bench-openshell:latest
+[0.0s] Image already present
+[0.1s] Starting sandbox Container created

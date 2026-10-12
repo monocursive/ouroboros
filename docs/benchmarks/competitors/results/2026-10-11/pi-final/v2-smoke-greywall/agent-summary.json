@@ -1,0 +1,10 @@
+{
+  "opencode/greywall": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      42155.034053
+    ],
+    "median_ms": 42155.034053
+  }
+}

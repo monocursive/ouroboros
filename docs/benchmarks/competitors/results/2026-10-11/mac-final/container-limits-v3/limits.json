@@ -1,0 +1,180 @@
+[
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(192*1024*1024);print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 329.354167,
+    "exit": 0,
+    "stdout": "{\"started\": true}\n{\"allocated\": 201326592}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "memory",
+    "limited": false
+  },
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--memory",
+      "128m",
+      "--memory-swap",
+      "128m",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(192*1024*1024);print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 246.920125,
+    "exit": 137,
+    "stdout": "{\"started\": true}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "memory",
+    "limited": true
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(192*1024*1024);print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 728.653792,
+    "exit": 0,
+    "stdout": "\nCreated sandbox: loved-croaker\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n{\"started\": true}\n{\"allocated\": 201326592}\n\u2713 Sandbox loved-croaker deletion accepted; cleanup is pending\n",
+    "stderr": "",
+    "tool": "openshell",
+    "resource": "memory",
+    "limited": false
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--memory",
+      "128Mi",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(192*1024*1024);print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 676.285041,
+    "exit": 0,
+    "stdout": "\nCreated sandbox: amazed-ape\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n{\"started\": true}\n{\"allocated\": 201326592}\n\u2713 Deleted sandbox amazed-ape\n",
+    "stderr": "",
+    "tool": "openshell",
+    "resource": "memory",
+    "limited": true
+  },
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 535.93625,
+    "exit": 0,
+    "stdout": "{\"cpu_s\": 0.30033524899999997, \"wall_s\": 0.3003411829995457}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "cpu",
+    "limited": false
+  },
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--cpus",
+      "0.5",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 811.022125,
+    "exit": 0,
+    "stdout": "{\"cpu_s\": 0.30004724800000004, \"wall_s\": 0.6016296790003253}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "cpu",
+    "limited": true
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 844.100167,
+    "exit": 0,
+    "stdout": "\nCreated sandbox: dedicated-armadillo\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n{\"cpu_s\": 0.30025041399999997, \"wall_s\": 0.30028399900038494}\n\u2713 Deleted sandbox dedicated-armadillo\n",
+    "stderr": "",
+    "tool": "openshell",
+    "resource": "cpu",
+    "limited": false
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--cpu",
+      "500m",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 1190.804125,
+    "exit": 0,
+    "stdout": "\nCreated sandbox: secure-penguin\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n{\"cpu_s\": 0.300553956, \"wall_s\": 0.6087580950006668}\n\u2713 Deleted sandbox secure-penguin\n",
+    "stderr": "",
+    "tool": "openshell",
+    "resource": "cpu",
+    "limited": true
+  }
+]

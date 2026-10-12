@@ -1,0 +1,19 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/ubuntu/.opencode/bin",
+      "/home/ubuntu/bench-ouro-after/bin"
+    ],
+    "allowWrite": [
+      "/home/ubuntu/bench-ouro-after/results/native-after/runs/029-opencode-greywall-fix-offbyone-0/workspace/fix-offbyone",
+      "/home/ubuntu/bench-ouro-after/results/native-after/runs/029-opencode-greywall-fix-offbyone-0/home",
+      "/home/ubuntu/bench-ouro-after/results/native-after/runs/029-opencode-greywall-fix-offbyone-0/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

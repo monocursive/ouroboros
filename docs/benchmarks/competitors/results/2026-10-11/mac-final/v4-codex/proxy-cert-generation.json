@@ -1,0 +1,7 @@
+{
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 16.6915,
+  "stdout": "CA certificate: /Users/monocursive/bench-ouro/proxy/data/ca-cert.pem\nCA private key: /Users/monocursive/bench-ouro/proxy/data/ca-key.pem\n\nRun 'greyproxy cert install' to trust this CA on your system.\n",
+  "stderr": ""
+}

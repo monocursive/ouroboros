@@ -1,0 +1,68 @@
+{
+  "sequence": 39,
+  "agent": "codex",
+  "mode": "openshell-warm",
+  "task": "add-multiply",
+  "repetition": 0,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 17037.194834,
+  "container_result": {
+    "agent": "codex",
+    "task": "add-multiply",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 16865.955289,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {},
+    "peak_child_rss_kib": 313924,
+    "guest_kernel": [
+      "Linux",
+      "3f66945ae6d5",
+      "6.15.11-orbstack-00539-g9885ebd8e3f4",
+      "#1 SMP PREEMPT Fri Aug 22 08:24:56 UTC 2025",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "memory.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/memory.max'"
+      },
+      "memory.swap.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/memory.swap.max'"
+      },
+      "pids.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/pids.max'"
+      },
+      "cpu.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/cpu.max'"
+      }
+    }
+  },
+  "argv": [
+    "openshell",
+    "sandbox",
+    "exec",
+    "-n",
+    "bench-v2-codex",
+    "--no-tty",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "add-multiply"
+  ],
+  "load": [
+    2.150390625,
+    1.94482421875,
+    2.0185546875
+  ],
+  "artifact": "runs/039-codex-openshell-warm-add-multiply-0"
+}

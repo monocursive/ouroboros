@@ -1,0 +1,60 @@
+{
+  "claude/direct": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      21815.874811
+    ],
+    "median_ms": 21815.874811
+  },
+  "claude/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      20667.212732
+    ],
+    "median_ms": 20667.212732
+  },
+  "claude/ouro": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      22390.885349
+    ],
+    "median_ms": 22390.885349
+  },
+  "claude/greywall": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "codex/greywall": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "codex/direct": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      31778.077185
+    ],
+    "median_ms": 31778.077185
+  },
+  "codex/ouro": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "codex/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      22468.597989
+    ],
+    "median_ms": 22468.597989
+  }
+}

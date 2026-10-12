@@ -1,0 +1,23 @@
+{
+  "argv": [
+    "openshell",
+    "provider",
+    "create",
+    "--name",
+    "benchmark-codex-after",
+    "--type",
+    "benchmark-codex-agent",
+    "--credential",
+    "CODEX_AUTH_ACCESS_TOKEN",
+    "--credential",
+    "CODEX_AUTH_REFRESH_TOKEN",
+    "--credential",
+    "CODEX_AUTH_ACCOUNT_ID",
+    "--credential",
+    "CODEX_AUTH_ID_TOKEN"
+  ],
+  "exit": 0,
+  "stdout": "\u2713 Created provider benchmark-codex-after\n",
+  "stderr": "",
+  "cached_access_expiry": "2026-10-20T08:02:05+00:00"
+}

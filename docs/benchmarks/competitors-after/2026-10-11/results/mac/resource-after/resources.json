@@ -1,0 +1,161 @@
+[
+  {
+    "tool": "direct",
+    "resource": "wall",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 2,
+    "exit": 0,
+    "elapsed_ms": 3043.339375,
+    "records": [
+      {
+        "probe": "wall",
+        "started": true
+      },
+      {
+        "probe": "wall",
+        "completed": true
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "memory",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 3,
+    "exit": 0,
+    "elapsed_ms": 304.999125,
+    "records": [
+      {
+        "probe": "memory",
+        "started": true
+      },
+      {
+        "probe": "memory",
+        "allocated_bytes": 100663296
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "pids",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 4,
+    "exit": 0,
+    "elapsed_ms": 892.016209,
+    "records": [
+      {
+        "probe": "pids",
+        "forks": 32,
+        "errno": null
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "cpu",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 5,
+    "exit": 0,
+    "elapsed_ms": 256.966125,
+    "records": [
+      {
+        "probe": "cpu",
+        "cpu_s": 0.200162,
+        "wall_s": 0.200163792
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "ouro-jail",
+    "status": "unavailable",
+    "preflight_sequence": 6
+  },
+  {
+    "tool": "greywall",
+    "status": "unavailable",
+    "preflight_sequence": 7
+  },
+  {
+    "tool": "mxc",
+    "resource": "wall",
+    "requested_ceiling": [
+      "timeout=1000ms"
+    ],
+    "ceiling_supported": true,
+    "sequence": 9,
+    "exit": 255,
+    "elapsed_ms": 1027.362083,
+    "records": [],
+    "stderr": "python3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\npython3: error: couldn't create cache file '/tmp/xcrun_db-TCUA7lih' (errno=Operation not permitted)\n2026-10-11 23:20:29.064 xcodebuild[55347:17424126] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 \"Input/output error\". Using NSCachesDirectory instead.\npython3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\npython3: error: couldn't create cache file '/tmp/xcrun_db-7HVB5f8b' (errno=Operation not permitted)\n2026-10-11 23:20:29.633 xcodebuild[55349:17424143] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 \"Input/output error\". Using NSCachesDirectory instead.\n{\"error\":{\"code\":\"backend_error\",\"message\":\"script timed out after 1000ms\"}}\n",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "memory",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 10,
+    "exit": 0,
+    "elapsed_ms": 1993.57925,
+    "records": [
+      {
+        "probe": "memory",
+        "started": true
+      },
+      {
+        "probe": "memory",
+        "allocated_bytes": 100663296
+      }
+    ],
+    "stderr": "python3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\npython3: error: couldn't create cache file '/tmp/xcrun_db-QiYU6mas' (errno=Operation not permitted)\n2026-10-11 23:20:30.088 xcodebuild[55354:17424163] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 \"Input/output error\". Using NSCachesDirectory instead.\npython3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\npython3: error: couldn't create cache file '/tmp/xcrun_db-l7hn6bNn' (errno=Operation not permitted)\n2026-10-11 23:20:30.652 xcodebuild[55356:17424177] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 \"Input/output error\". Using NSCachesDirectory instead.\n",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "pids",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 11,
+    "exit": 0,
+    "elapsed_ms": 2594.564833,
+    "records": [
+      {
+        "probe": "pids",
+        "forks": 32,
+        "errno": null
+      }
+    ],
+    "stderr": "python3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\npython3: error: couldn't create cache file '/tmp/xcrun_db-3kN4qzWB' (errno=Operation not permitted)\n2026-10-11 23:20:32.131 xcodebuild[55364:17424223] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 \"Input/output error\". Using NSCachesDirectory instead.\npython3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\npython3: error: couldn't create cache file '/tmp/xcrun_db-tjEFmF85' (errno=Operation not permitted)\n2026-10-11 23:20:32.696 xcodebuild[55366:17424234] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 \"Input/output error\". Using NSCachesDirectory instead.\n",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "cpu",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 12,
+    "exit": 0,
+    "elapsed_ms": 1962.066708,
+    "records": [
+      {
+        "probe": "cpu",
+        "cpu_s": 0.200238,
+        "wall_s": 0.200245792
+      }
+    ],
+    "stderr": "python3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\npython3: error: couldn't create cache file '/tmp/xcrun_db-6CMvyycD' (errno=Operation not permitted)\n2026-10-11 23:20:34.715 xcodebuild[55406:17424322] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 \"Input/output error\". Using NSCachesDirectory instead.\npython3: warning: confstr() failed with code 5: couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\npython3: error: couldn't create cache file '/tmp/xcrun_db-8jAbgSp8' (errno=Operation not permitted)\n2026-10-11 23:20:35.276 xcodebuild[55409:17424336] [MT] DVTDeveloperPaths: Failed to get length of DARWIN_USER_CACHE_DIR from confstr(3), error = Error Domain=NSPOSIXErrorDomain Code=5 \"Input/output error\". Using NSCachesDirectory instead.\n",
+    "receipt": null
+  }
+]

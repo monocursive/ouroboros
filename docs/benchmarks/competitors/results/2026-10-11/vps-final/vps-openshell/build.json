@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "docker",
+    "build",
+    "-t",
+    "bench-openshell:latest",
+    "/home/ubuntu/bench-ouro/runs/vps-perf2/image"
+  ],
+  "elapsed_ms": 2956.154898,
+  "exit": 0,
+  "stdout": "Sending build context to Docker daemon  9.216kB\r\r\nStep 1/10 : FROM ubuntu:24.04\n ---> 534baea6a22c\nStep 2/10 : RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev python3 git && rm -rf /var/lib/apt/lists/*\n ---> Using cache\n ---> 07634f2e3ef5\nStep 3/10 : WORKDIR /work\n ---> Using cache\n ---> 7f591139b1f3\nStep 4/10 : COPY payload.py workload.c /work/\n ---> Using cache\n ---> 9c9ab537601c\nStep 5/10 : RUN cc -O2 /work/workload.c -o /work/workload\n ---> Using cache\n ---> a2ecbe134a17\nStep 6/10 : RUN python3 -c \"import pathlib; inputs = pathlib.Path('/work/inputs'); inputs.mkdir(parents=True, exist_ok=True); [ (inputs / ('f%04d' % i)).write_bytes(b'x' * 4096) for i in range(1000) ]\"\n ---> Using cache\n ---> 70f24275141f\nStep 7/10 : RUN echo 'outputs/' > /work/.gitignore\n ---> Using cache\n ---> e7c530ce500b\nStep 8/10 : RUN git init -q /work && git -C /work add inputs payload.py workload .gitignore\n ---> Using cache\n ---> 52548bf48de7\nStep 9/10 : RUN mkdir -p /work/outputs && chown -R 1000:1000 /work && git config --system --add safe.directory /work\n ---> Running in 00b81e139de9\n ---> Removed intermediate container 00b81e139de9\n ---> 8e2b04b67633\nStep 10/10 : CMD [\"/bin/true\"]\n ---> Running in 3c36374fd8e5\n ---> Removed intermediate container 3c36374fd8e5\n ---> bd448e738213\nSuccessfully built bd448e738213\nSuccessfully tagged bench-openshell:latest\n",
+  "stderr": "DEPRECATED: The legacy builder is deprecated and will be removed in a future release.\n            Install the buildx component to build images with BuildKit:\n            https://docs.docker.com/go/buildx/\n\n"
+}

@@ -1,0 +1,18 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/monocursive/bench-ouro/bin"
+    ],
+    "allowWrite": [
+      "/home/monocursive/bench-ouro/results/v4-agents/runs/012-claude-greywall-fix-offbyone-0/workspace/fix-offbyone",
+      "/home/monocursive/bench-ouro/results/v4-agents/runs/012-claude-greywall-fix-offbyone-0/home",
+      "/home/monocursive/bench-ouro/results/v4-agents/runs/012-claude-greywall-fix-offbyone-0/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

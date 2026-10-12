@@ -1,0 +1,7 @@
+{
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 258.443958,
+  "stdout": "",
+  "stderr": "Error:   \u00d7 code: 'Client specified an invalid argument', message: \"name exceeds\n  \u2502 maximum length (24 > 19)\"\n\n"
+}

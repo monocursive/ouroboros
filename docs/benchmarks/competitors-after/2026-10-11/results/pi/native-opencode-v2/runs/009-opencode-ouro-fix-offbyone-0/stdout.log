@@ -1,0 +1,21 @@
+I'll help you run the tests, identify the bug in src/parse.py, and fix it. Let me start by creating a task plan and running the tests.
+Now let me read the source files to understand the bug:
+Perfect! I've identified the bug. The issue is an **off-by-one error** in src/parse.py:4. The function is returning `parts[1]` (the second element) instead of `parts[0]` (the first element).
+
+This causes:
+1. **test_basic** to fail: Returns 'world' instead of 'hello'
+2. **test_single** to error: IndexError when there's only one word (no index 1 exists)
+
+Let me fix this:
+Now let me verify that all tests pass:
+Perfect! All tests now pass. 
+
+## Summary
+
+I found and fixed an **off-by-one error** in src/parse.py:4. The bug was that the function was returning `parts[1]` instead of `parts[0]`, which meant it was returning the second word instead of the first word.
+
+**The fix:** Changed `return parts[1]` to `return parts[0]`
+
+Both tests now pass:
+- `test_basic`: Correctly returns 'hello' from 'hello world'
+- `test_single`: Correctly returns 'solo' from 'solo' (no more IndexError)

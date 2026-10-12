@@ -1,0 +1,29 @@
+{
+  "sequence": 47,
+  "agent": "codex",
+  "mode": "mxc",
+  "task": "fix-offbyone",
+  "repetition": 1,
+  "started_utc": "2026-10-11T20:18:13Z",
+  "elapsed_ms": 98.419209,
+  "exit": 1,
+  "timeout": false,
+  "success": false,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": false,
+    "hidden_pass": false,
+    "test_output": "test_basic (test_parse.TestParse.test_basic) ... FAIL\ntest_single (test_parse.TestParse.test_single) ... ERROR\n\n======================================================================\nERROR: test_single (test_parse.TestParse.test_single)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/native-after/runs/047-codex-mxc-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py\", line 8, in test_single\n    self.assertEqual(first_word('solo'), 'solo')\n                     ~~~~~~~~~~^^^^^^^^\n  File \"/Users/monocursive/bench-ouro-after/results/native-after/runs/047-codex-mxc-fix-offbyone-1/workspace/fix-offbyone/src/parse.py\", line 4, in first_word\n    return parts[1]\n           ~~~~~^^^\nIndexError: list index out of range\n\n======================================================================\nFAIL: test_basic (test_parse.TestParse.test_basic)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/native-after/runs/047-codex-mxc-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py\", line 6, in test_basic\n    self.assertEqual(first_word('hello world'), 'hello')\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 'world' != 'hello'\n- world\n+ hello\n\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nFAILED (failures=1, errors=1)\n",
+    "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import sys;sys.path.insert(0,sys.argv[1]);from src.parse import first_word; assert first_word('one two')=='one'; assert first_word('single')=='single'; assert first_word('')==''\n                                                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+  },
+  "argv": [
+    "/Users/monocursive/bench-ouro-after/bin/mxc-exec-mac",
+    "/Users/monocursive/bench-ouro-after/results/native-after/runs/047-codex-mxc-fix-offbyone-1/mxc-private.json"
+  ],
+  "load": [
+    2.9794921875,
+    2.39599609375,
+    2.21533203125
+  ],
+  "artifact": "runs/047-codex-mxc-fix-offbyone-1"
+}

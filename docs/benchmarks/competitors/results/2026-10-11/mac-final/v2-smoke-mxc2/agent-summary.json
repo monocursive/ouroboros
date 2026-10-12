@@ -1,0 +1,24 @@
+{
+  "claude/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      25547.867083
+    ],
+    "median_ms": 25547.867083
+  },
+  "opencode/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      26200.171333
+    ],
+    "median_ms": 26200.171333
+  },
+  "codex/mxc": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  }
+}

@@ -1,0 +1,1297 @@
+[
+  {
+    "Type": "container",
+    "Action": "create",
+    "Actor": {
+      "ID": "49214fc471363902455d451e57b6c8188dcd6080cb1ddb8321cccf80d3a74bc6",
+      "Attributes": {
+        "image": "sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e",
+        "name": "openshell-supervisor-extract-167781-32-identity",
+        "openshell.ai/isolation-role": "identity",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "scope": "local",
+    "time": 1791746230,
+    "timeNano": 1791746230555235675
+  },
+  {
+    "Type": "container",
+    "Action": "archive-path",
+    "Actor": {
+      "ID": "49214fc471363902455d451e57b6c8188dcd6080cb1ddb8321cccf80d3a74bc6",
+      "Attributes": {
+        "image": "sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e",
+        "name": "openshell-supervisor-extract-167781-32-identity",
+        "openshell.ai/isolation-role": "identity",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "scope": "local",
+    "time": 1791746230,
+    "timeNano": 1791746230566079418
+  },
+  {
+    "Type": "container",
+    "Action": "archive-path",
+    "Actor": {
+      "ID": "49214fc471363902455d451e57b6c8188dcd6080cb1ddb8321cccf80d3a74bc6",
+      "Attributes": {
+        "image": "sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e",
+        "name": "openshell-supervisor-extract-167781-32-identity",
+        "openshell.ai/isolation-role": "identity",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "scope": "local",
+    "time": 1791746230,
+    "timeNano": 1791746230606783453
+  },
+  {
+    "Type": "container",
+    "Action": "destroy",
+    "Actor": {
+      "ID": "49214fc471363902455d451e57b6c8188dcd6080cb1ddb8321cccf80d3a74bc6",
+      "Attributes": {
+        "image": "sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e",
+        "name": "openshell-supervisor-extract-167781-32-identity",
+        "openshell.ai/isolation-role": "identity",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "scope": "local",
+    "time": 1791746230,
+    "timeNano": 1791746230682761930
+  },
+  {
+    "Type": "container",
+    "Action": "create",
+    "Actor": {
+      "ID": "9616d3d27284fa9c5b482ee57cd54bf9f625de2fd5cfa8374011b212c2d5ae72",
+      "Attributes": {
+        "image": "sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/caller-driver-config-used": "false",
+        "openshell.ai/isolation-backend": "openshell-sandbox",
+        "openshell.ai/isolation-role": "sandbox",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/private-image-volume-targets": "[]",
+        "openshell.ai/resource-admission-identities": "{}",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "openshell.ai/sandbox-workspace": "default",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "scope": "local",
+    "time": 1791746230,
+    "timeNano": 1791746230940492374
+  },
+  {
+    "Type": "container",
+    "Action": "extract-to-dir",
+    "Actor": {
+      "ID": "9616d3d27284fa9c5b482ee57cd54bf9f625de2fd5cfa8374011b212c2d5ae72",
+      "Attributes": {
+        "image": "sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/caller-driver-config-used": "false",
+        "openshell.ai/isolation-backend": "openshell-sandbox",
+        "openshell.ai/isolation-role": "sandbox",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/private-image-volume-targets": "[]",
+        "openshell.ai/resource-admission-identities": "{}",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "openshell.ai/sandbox-workspace": "default",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "scope": "local",
+    "time": 1791746230,
+    "timeNano": 1791746230986684002
+  },
+  {
+    "Type": "container",
+    "Action": "start",
+    "Actor": {
+      "ID": "9616d3d27284fa9c5b482ee57cd54bf9f625de2fd5cfa8374011b212c2d5ae72",
+      "Attributes": {
+        "image": "sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/caller-driver-config-used": "false",
+        "openshell.ai/isolation-backend": "openshell-sandbox",
+        "openshell.ai/isolation-role": "sandbox",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/private-image-volume-targets": "[]",
+        "openshell.ai/resource-admission-identities": "{}",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "openshell.ai/sandbox-workspace": "default",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "scope": "local",
+    "time": 1791746231,
+    "timeNano": 1791746231736384941
+  },
+  {
+    "Type": "container",
+    "Action": "die",
+    "Actor": {
+      "ID": "9616d3d27284fa9c5b482ee57cd54bf9f625de2fd5cfa8374011b212c2d5ae72",
+      "Attributes": {
+        "execDuration": "0",
+        "exitCode": "1",
+        "image": "sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/caller-driver-config-used": "false",
+        "openshell.ai/isolation-backend": "openshell-sandbox",
+        "openshell.ai/isolation-role": "sandbox",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/private-image-volume-targets": "[]",
+        "openshell.ai/resource-admission-identities": "{}",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "openshell.ai/sandbox-workspace": "default",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "scope": "local",
+    "time": 1791746231,
+    "timeNano": 1791746231915915357
+  },
+  {
+    "Type": "container",
+    "Action": "create",
+    "Actor": {
+      "ID": "4afe56e657c503087338e5255bea1aa7681f99ea218e5e06015e826ffbf546b7",
+      "Attributes": {
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor-stage",
+        "openshell.ai/isolation-role": "staging",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746232,
+    "timeNano": 1791746232186614171
+  },
+  {
+    "Type": "container",
+    "Action": "extract-to-dir",
+    "Actor": {
+      "ID": "4afe56e657c503087338e5255bea1aa7681f99ea218e5e06015e826ffbf546b7",
+      "Attributes": {
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor-stage",
+        "openshell.ai/isolation-role": "staging",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746232,
+    "timeNano": 1791746232193343418
+  },
+  {
+    "Type": "container",
+    "Action": "destroy",
+    "Actor": {
+      "ID": "4afe56e657c503087338e5255bea1aa7681f99ea218e5e06015e826ffbf546b7",
+      "Attributes": {
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor-stage",
+        "openshell.ai/isolation-role": "staging",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746232,
+    "timeNano": 1791746232277175426
+  },
+  {
+    "Type": "container",
+    "Action": "create",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746232,
+    "timeNano": 1791746232576992947
+  },
+  {
+    "Type": "container",
+    "Action": "start",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746232,
+    "timeNano": 1791746232867785596
+  },
+  {
+    "Type": "container",
+    "Action": "kill",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "signal": "15"
+      }
+    },
+    "scope": "local",
+    "time": 1791746232,
+    "timeNano": 1791746232915227248
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "e28d011c4db917d9d0894224585e2a942a2b82ce25db822f2e34ea33be75e61c",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746233,
+    "timeNano": 1791746233119884059
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "e28d011c4db917d9d0894224585e2a942a2b82ce25db822f2e34ea33be75e61c",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746233,
+    "timeNano": 1791746233120089002
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "e28d011c4db917d9d0894224585e2a942a2b82ce25db822f2e34ea33be75e61c",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746233,
+    "timeNano": 1791746233221027079
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "333fd605ea824fdda41715677f91eea8102d1a6553c3b57dfcf0503d89af201e",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746233,
+    "timeNano": 1791746233474744971
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "333fd605ea824fdda41715677f91eea8102d1a6553c3b57dfcf0503d89af201e",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746233,
+    "timeNano": 1791746233474837729
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "333fd605ea824fdda41715677f91eea8102d1a6553c3b57dfcf0503d89af201e",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746233,
+    "timeNano": 1791746233566941932
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "d1f1ca9ab1fa22b34826bf5eb1082e51cd2cf14ff9d40bee6cd6c3fd4a69da0f",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746233,
+    "timeNano": 1791746233819413818
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "d1f1ca9ab1fa22b34826bf5eb1082e51cd2cf14ff9d40bee6cd6c3fd4a69da0f",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746233,
+    "timeNano": 1791746233819586557
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "d1f1ca9ab1fa22b34826bf5eb1082e51cd2cf14ff9d40bee6cd6c3fd4a69da0f",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746233,
+    "timeNano": 1791746233910647493
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "3f4708d2dd6aacd2d217c09e2104df43b2f0cb44dccebc85df255c257ab7e88f",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746234,
+    "timeNano": 1791746234161983594
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "3f4708d2dd6aacd2d217c09e2104df43b2f0cb44dccebc85df255c257ab7e88f",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746234,
+    "timeNano": 1791746234162128074
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "3f4708d2dd6aacd2d217c09e2104df43b2f0cb44dccebc85df255c257ab7e88f",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746234,
+    "timeNano": 1791746234259013988
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "700b08ccbe3bced19c79f25ac59c161ace55794220dee1e3c6603fa9dd15df1f",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746234,
+    "timeNano": 1791746234512275717
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "700b08ccbe3bced19c79f25ac59c161ace55794220dee1e3c6603fa9dd15df1f",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746234,
+    "timeNano": 1791746234512382513
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "700b08ccbe3bced19c79f25ac59c161ace55794220dee1e3c6603fa9dd15df1f",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746234,
+    "timeNano": 1791746234613554402
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "f901b2a24cba952e7f837a607b98ca89bfdcfbf71d4bb0aa647325829bb281e4",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746234,
+    "timeNano": 1791746234865968937
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "f901b2a24cba952e7f837a607b98ca89bfdcfbf71d4bb0aa647325829bb281e4",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746234,
+    "timeNano": 1791746234866106157
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "f901b2a24cba952e7f837a607b98ca89bfdcfbf71d4bb0aa647325829bb281e4",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746234,
+    "timeNano": 1791746234967365805
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "8a6c738177c8bd3ee6059cb4e285cade08590f18168f58acb07b45eeae28ef6e",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746235,
+    "timeNano": 1791746235220347186
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "8a6c738177c8bd3ee6059cb4e285cade08590f18168f58acb07b45eeae28ef6e",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746235,
+    "timeNano": 1791746235220460666
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "8a6c738177c8bd3ee6059cb4e285cade08590f18168f58acb07b45eeae28ef6e",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746235,
+    "timeNano": 1791746235315703060
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "e42c60b05e8a029bcb85fcf45903eaea4b30eb807e61152dcd78ba611694c5cf",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746235,
+    "timeNano": 1791746235567773413
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "e42c60b05e8a029bcb85fcf45903eaea4b30eb807e61152dcd78ba611694c5cf",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746235,
+    "timeNano": 1791746235567892226
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "e42c60b05e8a029bcb85fcf45903eaea4b30eb807e61152dcd78ba611694c5cf",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746235,
+    "timeNano": 1791746235662287999
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "74cb247072fcc7eb41735d668bac1f307278be4d6c29ae05bbafe1b30e69d8ea",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746235,
+    "timeNano": 1791746235915348453
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "74cb247072fcc7eb41735d668bac1f307278be4d6c29ae05bbafe1b30e69d8ea",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746235,
+    "timeNano": 1791746235915462488
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "74cb247072fcc7eb41735d668bac1f307278be4d6c29ae05bbafe1b30e69d8ea",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746236,
+    "timeNano": 1791746236011916444
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "c0c8b426125de73d38b9c3d2204bf76e83d7016f39773bfcbfab54591eb2aa18",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746236,
+    "timeNano": 1791746236263431580
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "c0c8b426125de73d38b9c3d2204bf76e83d7016f39773bfcbfab54591eb2aa18",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746236,
+    "timeNano": 1791746236263548857
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "c0c8b426125de73d38b9c3d2204bf76e83d7016f39773bfcbfab54591eb2aa18",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746236,
+    "timeNano": 1791746236356395663
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "cf529e324aedd49f56ad8d56e507991091b58c00d1fe65308f106aadb7954d0a",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746236,
+    "timeNano": 1791746236607882651
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "cf529e324aedd49f56ad8d56e507991091b58c00d1fe65308f106aadb7954d0a",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746236,
+    "timeNano": 1791746236607987354
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "cf529e324aedd49f56ad8d56e507991091b58c00d1fe65308f106aadb7954d0a",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746236,
+    "timeNano": 1791746236692667520
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "e6eefd265c6c5bccde781fcdad0d06ef6b9281392dd673999066ac676a74516d",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746236,
+    "timeNano": 1791746236944676096
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "e6eefd265c6c5bccde781fcdad0d06ef6b9281392dd673999066ac676a74516d",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746236,
+    "timeNano": 1791746236944772873
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "e6eefd265c6c5bccde781fcdad0d06ef6b9281392dd673999066ac676a74516d",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746237,
+    "timeNano": 1791746237022183538
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "61b048798cc3a11644b84eb678c5d90d53e74a468b29c4ddddaafeef1c420628",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746237,
+    "timeNano": 1791746237274177632
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "61b048798cc3a11644b84eb678c5d90d53e74a468b29c4ddddaafeef1c420628",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746237,
+    "timeNano": 1791746237274273465
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "61b048798cc3a11644b84eb678c5d90d53e74a468b29c4ddddaafeef1c420628",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746237,
+    "timeNano": 1791746237354582286
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "bbdf4236e4db5f9c005d337fb54c71967b73345a8b1acf62a718e743866a5012",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746237,
+    "timeNano": 1791746237607026524
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "bbdf4236e4db5f9c005d337fb54c71967b73345a8b1acf62a718e743866a5012",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746237,
+    "timeNano": 1791746237607124893
+  },
+  {
+    "Type": "container",
+    "Action": "exec_die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "bbdf4236e4db5f9c005d337fb54c71967b73345a8b1acf62a718e743866a5012",
+        "exitCode": "1",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746237,
+    "timeNano": 1791746237697458447
+  },
+  {
+    "Type": "container",
+    "Action": "exec_create: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "1b16c0833bc069da41ccddc2765921964b1d67c005c45e1af7c1db98f0bc679d",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746237,
+    "timeNano": 1791746237949093045
+  },
+  {
+    "Type": "container",
+    "Action": "kill",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "signal": "9"
+      }
+    },
+    "scope": "local",
+    "time": 1791746237,
+    "timeNano": 1791746237951984423
+  },
+  {
+    "Type": "container",
+    "Action": "exec_start: /openshell-supervisor health --socket /run/openshell/health.sock",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execID": "1b16c0833bc069da41ccddc2765921964b1d67c005c45e1af7c1db98f0bc679d",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746237,
+    "timeNano": 1791746237952100181
+  },
+  {
+    "Type": "container",
+    "Action": "stop",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746238,
+    "timeNano": 1791746238104886292
+  },
+  {
+    "Type": "container",
+    "Action": "die",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "execDuration": "5",
+        "exitCode": "137",
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746238,
+    "timeNano": 1791746238119173148
+  },
+  {
+    "Type": "container",
+    "Action": "destroy",
+    "Actor": {
+      "ID": "646c64ac0b3b1792ddb66f964aa38b78d481be9741e5a92eaa21a202d497c8f7",
+      "Attributes": {
+        "image": "sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724-supervisor",
+        "openshell.ai/isolation-role": "supervisor",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default"
+      }
+    },
+    "scope": "local",
+    "time": 1791746238,
+    "timeNano": 1791746238235206499
+  },
+  {
+    "Type": "container",
+    "Action": "destroy",
+    "Actor": {
+      "ID": "9616d3d27284fa9c5b482ee57cd54bf9f625de2fd5cfa8374011b212c2d5ae72",
+      "Attributes": {
+        "image": "sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e",
+        "name": "openshell-default--bench-pi-debug-68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/caller-driver-config-used": "false",
+        "openshell.ai/isolation-backend": "openshell-sandbox",
+        "openshell.ai/isolation-role": "sandbox",
+        "openshell.ai/managed-by": "openshell",
+        "openshell.ai/private-image-volume-targets": "[]",
+        "openshell.ai/resource-admission-identities": "{}",
+        "openshell.ai/sandbox-id": "68494ffc-4f75-43be-b721-24c6a5ade724",
+        "openshell.ai/sandbox-name": "bench-pi-debug",
+        "openshell.ai/sandbox-namespace": "default",
+        "openshell.ai/sandbox-workspace": "default",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "scope": "local",
+    "time": 1791746238,
+    "timeNano": 1791746238318661271
+  }
+]

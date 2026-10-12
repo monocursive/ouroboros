@@ -1,0 +1,68 @@
+{
+  "sequence": 12,
+  "agent": "codex",
+  "mode": "openshell-warm",
+  "task": "refactor-yaml-json",
+  "repetition": 1,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 18820.511284,
+  "container_result": {
+    "agent": "codex",
+    "task": "refactor-yaml-json",
+    "agent_exit": 1,
+    "timeout": false,
+    "success": false,
+    "work_ms": 18521.124191,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": false,
+      "hidden_pass": false,
+      "test_output": "test_store (unittest.loader._FailedTest.test_store) ... ERROR\n\n======================================================================\nERROR: test_store (unittest.loader._FailedTest.test_store)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_store\nTraceback (most recent call last):\n  File \"/usr/lib/python3.12/unittest/loader.py\", line 394, in _find_test_path\n    module = self._get_module_from_name(name)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/unittest/loader.py\", line 337, in _get_module_from_name\n    __import__(name)\n  File \"/work/codex-1791743806163218307/workspace/refactor-yaml-json/tests/test_store.py\", line 2, in <module>\n    from src.store import Store\n  File \"/work/codex-1791743806163218307/workspace/refactor-yaml-json/src/store.py\", line 1, in <module>\n    import yaml\nModuleNotFoundError: No module named 'yaml'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n",
+      "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n  File \"/work/codex-1791743806163218307/workspace/refactor-yaml-json/src/store.py\", line 1, in <module>\n    import yaml\nModuleNotFoundError: No module named 'yaml'\n"
+    },
+    "usage": {},
+    "peak_child_rss_kib": 164380,
+    "guest_kernel": [
+      "Linux",
+      "ac389147f2bc",
+      "7.0.0-31-generic",
+      "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+      "x86_64"
+    ],
+    "resource_limits": {
+      "memory.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/memory.max'"
+      },
+      "memory.swap.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/memory.swap.max'"
+      },
+      "pids.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/pids.max'"
+      },
+      "cpu.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/cpu.max'"
+      }
+    }
+  },
+  "argv": [
+    "openshell",
+    "sandbox",
+    "exec",
+    "-n",
+    "bench-v2-codex",
+    "--no-tty",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "refactor-yaml-json"
+  ],
+  "load": [
+    2.1396484375,
+    2.10302734375,
+    1.95361328125
+  ],
+  "artifact": "runs/012-codex-openshell-warm-refactor-yaml-json-1"
+}

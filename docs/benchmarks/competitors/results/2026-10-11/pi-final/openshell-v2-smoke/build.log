@@ -1,0 +1,162 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load remote build context
+#1 DONE 47.1s
+
+#1 [internal] load remote build context
+#1 DONE 47.1s
+
+#2 copy /context /
+#2 DONE 37.6s
+
+#3 [internal] load metadata for docker.io/library/bench-openshell:latest
+#3 DONE 0.1s
+
+#4 [1/7] FROM docker.io/library/bench-openshell:latest@sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e
+#4 resolve docker.io/library/bench-openshell:latest@sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e
+#4 resolve docker.io/library/bench-openshell:latest@sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e 0.2s done
+#4 DONE 0.6s
+
+#5 [2/7] RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*
+#5 1.087 Get:1 http://ports.ubuntu.com/ubuntu-ports noble InRelease [256 kB]
+#5 1.635 Get:2 http://ports.ubuntu.com/ubuntu-ports noble-updates InRelease [126 kB]
+#5 1.768 Get:3 http://ports.ubuntu.com/ubuntu-ports noble-backports InRelease [126 kB]
+#5 1.902 Get:4 http://ports.ubuntu.com/ubuntu-ports noble-security InRelease [126 kB]
+#5 2.045 Get:5 http://ports.ubuntu.com/ubuntu-ports noble/restricted arm64 Packages [113 kB]
+#5 2.100 Get:6 http://ports.ubuntu.com/ubuntu-ports noble/multiverse arm64 Packages [274 kB]
+#5 2.155 Get:7 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages [19.0 MB]
+#5 4.755 Get:8 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages [1776 kB]
+#5 4.795 Get:9 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages [1761 kB]
+#5 4.834 Get:10 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages [3185 kB]
+#5 4.915 Get:11 http://ports.ubuntu.com/ubuntu-ports noble-updates/multiverse arm64 Packages [110 kB]
+#5 4.918 Get:12 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages [2212 kB]
+#5 4.969 Get:13 http://ports.ubuntu.com/ubuntu-ports noble-backports/multiverse arm64 Packages [671 B]
+#5 4.971 Get:14 http://ports.ubuntu.com/ubuntu-ports noble-backports/main arm64 Packages [49.0 kB]
+#5 4.972 Get:15 http://ports.ubuntu.com/ubuntu-ports noble-backports/universe arm64 Packages [36.3 kB]
+#5 4.975 Get:16 http://ports.ubuntu.com/ubuntu-ports noble-security/multiverse arm64 Packages [105 kB]
+#5 4.978 Get:17 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages [3063 kB]
+#5 5.405 Get:18 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages [1448 kB]
+#5 5.439 Get:19 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages [1636 kB]
+#5 11.37 Fetched 35.4 MB in 11s (3374 kB/s)
+#5 11.37 Reading package lists...
+#5 15.12 Reading package lists...
+#5 18.75 Building dependency tree...
+#5 19.43 Reading state information...
+#5 20.72 The following additional packages will be installed:
+#5 20.73   libssl3t64 openssl
+#5 20.94 The following NEW packages will be installed:
+#5 20.95   ca-certificates openssl ripgrep
+#5 20.96 The following packages will be upgraded:
+#5 20.96   libssl3t64
+#5 21.16 1 upgraded, 3 newly installed, 0 to remove and 2 not upgraded.
+#5 21.16 Need to get 4418 kB of archives.
+#5 21.16 After this operation, 7279 kB of additional disk space will be used.
+#5 21.16 Get:1 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 libssl3t64 arm64 3.0.13-0ubuntu3.16 [1838 kB]
+#5 21.66 Get:2 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 openssl arm64 3.0.13-0ubuntu3.16 [985 kB]
+#5 21.75 Get:3 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 ca-certificates all 20260601~24.04.1 [139 kB]
+#5 21.76 Get:4 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 ripgrep arm64 14.1.0-1 [1455 kB]
+#5 22.88 debconf: delaying package configuration, since apt-utils is not installed
+#5 23.07 Fetched 4418 kB in 1s (4966 kB/s)
+#5 23.23 (Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 11217 files and directories currently installed.)
+#5 23.41 Preparing to unpack .../libssl3t64_3.0.13-0ubuntu3.16_arm64.deb ...
+#5 23.46 Unpacking libssl3t64:arm64 (3.0.13-0ubuntu3.16) over (3.0.13-0ubuntu3.15) ...
+#5 24.63 Setting up libssl3t64:arm64 (3.0.13-0ubuntu3.16) ...
+#5 24.78 Selecting previously unselected package openssl.
+#5 24.78 (Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 11217 files and directories currently installed.)
+#5 24.80 Preparing to unpack .../openssl_3.0.13-0ubuntu3.16_arm64.deb ...
+#5 24.81 Unpacking openssl (3.0.13-0ubuntu3.16) ...
+#5 24.98 Selecting previously unselected package ca-certificates.
+#5 24.98 Preparing to unpack .../ca-certificates_20260601~24.04.1_all.deb ...
+#5 25.00 Unpacking ca-certificates (20260601~24.04.1) ...
+#5 25.14 Selecting previously unselected package ripgrep.
+#5 25.14 Preparing to unpack .../ripgrep_14.1.0-1_arm64.deb ...
+#5 25.16 Unpacking ripgrep (14.1.0-1) ...
+#5 25.36 Setting up ripgrep (14.1.0-1) ...
+#5 25.44 Setting up openssl (3.0.13-0ubuntu3.16) ...
+#5 25.49 Setting up ca-certificates (20260601~24.04.1) ...
+#5 25.80 debconf: unable to initialize frontend: Dialog
+#5 25.80 debconf: (TERM is not set, so the dialog frontend is not usable.)
+#5 25.80 debconf: falling back to frontend: Readline
+#5 25.82 debconf: unable to initialize frontend: Readline
+#5 25.82 debconf: (This frontend requires a controlling tty.)
+#5 25.82 debconf: falling back to frontend: Teletype
+#5 26.73 Updating certificates in /etc/ssl/certs...
+#5 30.43 121 added, 0 removed; done.
+#5 38.39 Processing triggers for libc-bin (2.39-0ubuntu8.9) ...
+#5 38.47 Processing triggers for ca-certificates (20260601~24.04.1) ...
+#5 38.49 Updating certificates in /etc/ssl/certs...
+#5 39.41 0 added, 0 removed; done.
+#5 39.41 Running hooks in /etc/ca-certificates/update.d...
+#5 39.42 done.
+#5 DONE 40.2s
+
+#6 [3/7] RUN mkdir -p /opt/agents/bin /opt/bench /home/agent /work && chown 1000:1000 /home/agent /work
+#6 DONE 0.9s
+
+#7 [4/7] COPY bin/ /opt/agents/bin/
+#7 DONE 55.4s
+
+#8 [5/7] COPY harness/ /opt/bench/
+#8 DONE 0.2s
+
+#9 [6/7] RUN chmod -R a+rX /opt/agents /opt/bench
+#9 DONE 53.0s
+
+#10 [7/7] WORKDIR /work
+#10 DONE 0.3s
+
+#11 exporting to image
+#11 exporting layers
+#11 exporting layers 143.9s done
+#11 exporting manifest sha256:ef6764824d8487c56ca9b9e7986d82c127cc61a175d9bad75ff1ba92b8fa90cc 0.0s done
+#11 exporting config sha256:f8b29c6c4d1044470cf4c51085d37e266277d81cc12f329ee0634948937cebd5 0.0s done
+#11 exporting attestation manifest sha256:9562178c049ea963971d5c8c14ad035fc85c743426a35a501ba327fba88304e9
+#11 exporting attestation manifest sha256:9562178c049ea963971d5c8c14ad035fc85c743426a35a501ba327fba88304e9 0.1s done
+#11 exporting manifest list sha256:e904ab56ca3f1c895ad3ffa182570d926982edc108a3d7efd97bdeab2aa6aeef 0.0s done
+#11 naming to docker.io/library/ouro-comparison-agents-v2:20261011
+#11 naming to docker.io/library/ouro-comparison-agents-v2:20261011 done
+#11 unpacking to docker.io/library/ouro-comparison-agents-v2:20261011
+#11 unpacking to docker.io/library/ouro-comparison-agents-v2:20261011 62.9s done
+#11 DONE 207.2s

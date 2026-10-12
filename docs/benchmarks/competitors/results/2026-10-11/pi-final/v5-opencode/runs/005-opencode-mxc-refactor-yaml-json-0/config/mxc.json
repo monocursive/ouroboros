@@ -1,0 +1,49 @@
+{
+  "version": "1.0.0",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "/home/monocursive/bench-ouro/bin/opencode run --dir /home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json --model anthropic/claude-sonnet-4-5 'Refactor src/store.py to use the json module instead of yaml. Keep the same class names and method signatures. Make all tests pass: python3 -m unittest discover -s tests -v. Do not modify the tests.'",
+    "cwd": "/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json",
+    "timeout": 180000,
+    "inheritDefaultEnv": true,
+    "env": [
+      "HOME=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home",
+      "PATH=/home/monocursive/bench-ouro/bin:/usr/local/bin:/usr/bin:/bin:/usr/games",
+      "TMPDIR=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home/tmp",
+      "ANTHROPIC_API_KEY=<ANTHROPIC_API_KEY>",
+      "CODEX_HOME=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/state",
+      "CLAUDE_CONFIG_DIR=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home/.claude",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+      "DISABLE_TELEMETRY=1",
+      "OPENCODE_DISABLE_AUTOUPDATE=true",
+      "XDG_CONFIG_HOME=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home/.config",
+      "XDG_DATA_HOME=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home/.local/share",
+      "XDG_STATE_HOME=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home/.local/state",
+      "XDG_CACHE_HOME=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home/.cache",
+      "NODE_EXTRA_CA_CERTS=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home/proxy-ca.pem",
+      "SSL_CERT_FILE=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home/proxy-ca.pem",
+      "REQUESTS_CA_BUNDLE=/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home/proxy-ca.pem",
+      "GIT_CONFIG_NOSYSTEM=1",
+      "GIT_CONFIG_GLOBAL=/dev/null"
+    ]
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "/home/monocursive/.opencode/bin",
+      "/home/monocursive/bench-ouro/bin"
+    ],
+    "readwritePaths": [
+      "/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json",
+      "/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/home",
+      "/home/monocursive/bench-ouro/results/v5-opencode/runs/005-opencode-mxc-refactor-yaml-json-0/state"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:43051"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "/home/monocursive/bench-ouro-after/bin/openshell-gateway",
+    "--compute-driver",
+    "docker",
+    "--tls-cert",
+    "/home/monocursive/bench-ouro-after/openshell/tls/server/tls.crt",
+    "--tls-key",
+    "/home/monocursive/bench-ouro-after/openshell/tls/server/tls.key",
+    "--tls-client-ca",
+    "/home/monocursive/bench-ouro-after/openshell/tls/ca.crt",
+    "--enable-mtls-auth",
+    "true"
+  ],
+  "pid": 402128,
+  "exit_at_ready_check": null,
+  "status_exit": 0,
+  "status_stdout": "Server Status\n\n  Gateway: benchmark-pi\n  Server: https://localhost:17670\n  Status: Connected\n  Authentication: Authenticated (mTLS transport)\n  Version: 0.1.3\n",
+  "status_stderr": ""
+}

@@ -1,0 +1,38 @@
+noop 0 34870 exit 0 valid True
+noop 1 34532 exit 0 valid True
+noop 2 34512 exit 0 valid True
+writes 0 34234 exit 0 valid True
+writes 1 34276 exit 0 valid True
+writes 2 34403 exit 0 valid True
+reads 0 34483 exit 0 valid True
+reads 1 34513 exit 0 valid True
+reads 2 34417 exit 0 valid True
+spawn 0 34346 exit 0 valid True
+spawn 1 34447 exit 0 valid True
+spawn 2 34959 exit 0 valid True
+{
+ "noop": {
+  "samples": 3,
+  "valid": 3,
+  "elapsed_ms_median": 34532.0,
+  "elapsed_ms_min": 34512.0
+ },
+ "writes": {
+  "samples": 3,
+  "valid": 3,
+  "elapsed_ms_median": 34276.5,
+  "elapsed_ms_min": 34234.4
+ },
+ "reads": {
+  "samples": 3,
+  "valid": 3,
+  "elapsed_ms_median": 34483.5,
+  "elapsed_ms_min": 34416.7
+ },
+ "spawn": {
+  "samples": 3,
+  "valid": 3,
+  "elapsed_ms_median": 34447.0,
+  "elapsed_ms_min": 34346.1
+ }
+}

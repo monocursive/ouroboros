@@ -1,0 +1,61 @@
+{
+  "sequence": 3,
+  "agent": "claude",
+  "mode": "docker",
+  "task": "refactor-yaml-json",
+  "repetition": 0,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 26200.039012,
+  "container_result": {
+    "agent": "claude",
+    "task": "refactor-yaml-json",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 24439.512934,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_roundtrip (test_store.TestStore.test_roundtrip) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.005s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {
+      "total_cost_usd": 0.08899575,
+      "num_turns": 7,
+      "duration_api_ms": 21613
+    },
+    "peak_child_rss_kib": 262476,
+    "guest_kernel": [
+      "Linux",
+      "4ec1a44c737d",
+      "6.18.50+rpt-rpi-v8",
+      "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "pids.max": "3967",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "ANTHROPIC_API_KEY",
+    "ouro-comparison-agents-after:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "claude",
+    "refactor-yaml-json"
+  ],
+  "load": [
+    1.54248046875,
+    1.75634765625,
+    1.3447265625
+  ],
+  "artifact": "runs/003-claude-docker-refactor-yaml-json-0"
+}

@@ -1,0 +1,16 @@
+[
+  {
+    "exit": 1,
+    "timeout": false,
+    "elapsed_ms": 80.004542,
+    "stdout": "",
+    "stderr": "Provider profile diagnostics:\n  error /Users/monocursive/bench-ouro/results/openshell-v2-smoke-ready/anthropic-profile.yaml profile=benchmark-anthropic-agent field=id custom provider profile 'benchmark-anthropic-agent' already exists\nError:   \u00d7 provider profile import failed\n\n"
+  },
+  {
+    "exit": 1,
+    "timeout": false,
+    "elapsed_ms": 36.301292,
+    "stdout": "",
+    "stderr": "Provider profile diagnostics:\n  error /Users/monocursive/bench-ouro/results/openshell-v2-smoke-ready/anthropic-profile.yaml profile=benchmark-anthropic-agent field=resource_version custom provider profile update requires a non-zero resource_version; export the current profile before editing it\nError:   \u00d7 provider profile update failed\n\n"
+  }
+]

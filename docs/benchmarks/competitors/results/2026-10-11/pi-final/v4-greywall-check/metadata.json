@@ -1,0 +1,44 @@
+{
+  "schema": "agent-comparison/2",
+  "host": {
+    "system": "Linux",
+    "node": "raspberrypi",
+    "release": "6.18.50+rpt-rpi-v8",
+    "version": "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "machine": "aarch64",
+    "processor": ""
+  },
+  "started_utc": "2026-10-11T15:54:04Z",
+  "seed": 20261011,
+  "schedule": [
+    [
+      "claude",
+      "add-multiply",
+      0,
+      "greywall"
+    ]
+  ],
+  "codex_model": "gpt-6.1-sol",
+  "anthropic_model": "claude-sonnet-4-5",
+  "wall_seconds": 100,
+  "bins": {
+    "claude": {
+      "sha256": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+      "version": "2.1.295 (Claude Code)"
+    },
+    "ouro-jail": {
+      "sha256": "25b85c8b2ed05c82263ae1931d38da4adccf18db71d190520629893b6f575e69"
+    },
+    "greywall": {
+      "sha256": "f307e14a8afafb69edb5cbda632c259e4af6a1359d41dd2d7818f40b136a30bc"
+    },
+    "greyproxy": {
+      "sha256": "61f97f1d049c1fe18cc4ab623466d24c71dac652fd87dcdfaf26f0026c212a85"
+    },
+    "lxc-exec": {
+      "sha256": "f1c8b9c6fc6450a75f5bf3adc6468da579a95ec6100dd85a50d390ac54c73d12"
+    }
+  },
+  "harness_sha256": "52db02d410eb843ee052ac4e52420aefafbb2dd25948481cc3cfb1627ab5c301",
+  "fixtures_sha256": "8bcdf08aea3a7d9fdc70577562dd68061f38abf0dbfcffde52c3d6612a8f14a1"
+}

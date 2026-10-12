@@ -1,0 +1,14 @@
+[
+  {
+    "name": "openshell",
+    "source": "/usr/bin/openshell",
+    "sha256": "557f8e2af1d91221211bb29cc7152d975084d2a8c9ab8c549d46c4370ccf492e",
+    "bytes_changed": false
+  },
+  {
+    "name": "openshell-gateway",
+    "source": "/usr/bin/openshell-gateway",
+    "sha256": "a6d230ccf79f777602e5a7d101775edcb8f59a29dc569d8cd41544ebb8e44fda",
+    "bytes_changed": false
+  }
+]

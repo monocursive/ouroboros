@@ -1,0 +1,58 @@
+{
+  "codex/direct": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      17326.080462
+    ],
+    "median_ms": 17326.080462
+  },
+  "codex/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      26687.826967
+    ],
+    "median_ms": 26687.826967
+  },
+  "codex/ouro": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "codex/greywall": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "opencode/greywall": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "opencode/direct": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "opencode/ouro": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      24330.975204
+    ],
+    "median_ms": 24330.975204
+  },
+  "opencode/mxc": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      22803.030508
+    ],
+    "median_ms": 22803.030508
+  }
+}

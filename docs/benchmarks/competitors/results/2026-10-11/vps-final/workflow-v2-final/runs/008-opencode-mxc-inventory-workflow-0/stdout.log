@@ -1,0 +1,45 @@
+I'll implement the category summaries feature for the inventory CLI. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the codebase structure. Let me plan and implement the required changes:
+Let me first create the category_summary function in report.py:
+Now let me update cli.py to add the --group-by-category argument and use the appropriate report function:
+Now let me update the README.md with a grouped example:
+Now let me run the tests to see if everything works:
+Excellent! All tests are passing. Let me verify the implementation works correctly with a manual test:
+Perfect! All implementation is complete and tests are passing. Let me verify the error handling works correctly with invalid CSV:
+Excellent! The implementation is complete and working correctly. Let me provide a summary:
+
+## Summary
+
+I've successfully implemented category summaries for the inventory CLI. Here's what was done:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_summary` function that:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category
+   - Sums quantities and calculates stock values (quantity × unit_price)
+   - Formats stock_value as a decimal string with exactly 2 fractional digits
+   - Returns results sorted by category name
+
+2. **inventory/cli.py** - Updated to:
+   - Add `--group-by-category` flag
+   - Import and call `category_summary` when flag is present
+   - Maintain existing ungrouped behavior when flag is not used
+   - Keep error handling with exit code 2 for invalid CSV
+
+3. **README.md** - Added documentation for:
+   - How to use `--group-by-category`
+   - Example command and expected JSON output
+   - Note that `--min-quantity` is applied before grouping
+
+### Test Results:
+
+All 10 tests pass successfully:
+- `test_category_summaries` - Verifies grouped output format and calculations
+- `test_filter_before_group` - Confirms min_quantity filtering happens before grouping  
+- `test_ungrouped` - Ensures existing behavior is preserved
+- `test_filter` - Validates ungrouped filtering still works
+- `test_bad_csv` - Confirms exit code 2 and clean error messages without tracebacks
+- All loader tests continue to pass
+
+The implementation keeps processing (`report.py`) and argument parsing (`cli.py`) in separate modules as required.

@@ -1,0 +1,155 @@
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            BuildKit is currently disabled; enable it by removing the DOCKER_BUILDKIT=0
+            environment-variable.
+
+Sending build context to Docker daemon  755.3MB
+
+Step 1/10 : FROM bench-openshell:latest
+ ---> 2a51b4b95408
+Step 2/10 : RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*
+ ---> Running in edca28c4f17f
+Get:1 http://ports.ubuntu.com/ubuntu-ports noble InRelease [256 kB]
+Get:2 http://ports.ubuntu.com/ubuntu-ports noble-updates InRelease [126 kB]
+Get:3 http://ports.ubuntu.com/ubuntu-ports noble-backports InRelease [126 kB]
+Get:4 http://ports.ubuntu.com/ubuntu-ports noble-security InRelease [126 kB]
+Get:5 http://ports.ubuntu.com/ubuntu-ports noble/restricted arm64 Packages [113 kB]
+Get:6 http://ports.ubuntu.com/ubuntu-ports noble/multiverse arm64 Packages [274 kB]
+Get:7 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages [1776 kB]
+Get:8 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages [19.0 MB]
+Get:9 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages [3185 kB]
+Get:10 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages [1761 kB]
+Get:11 http://ports.ubuntu.com/ubuntu-ports noble-updates/multiverse arm64 Packages [110 kB]
+Get:12 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages [2212 kB]
+Get:13 http://ports.ubuntu.com/ubuntu-ports noble-backports/multiverse arm64 Packages [671 B]
+Get:14 http://ports.ubuntu.com/ubuntu-ports noble-backports/main arm64 Packages [49.0 kB]
+Get:15 http://ports.ubuntu.com/ubuntu-ports noble-backports/universe arm64 Packages [36.3 kB]
+Get:16 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages [1636 kB]
+Get:17 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages [3063 kB]
+Get:18 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages [1448 kB]
+Get:19 http://ports.ubuntu.com/ubuntu-ports noble-security/multiverse arm64 Packages [105 kB]
+Fetched 35.4 MB in 3s (13.7 MB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following additional packages will be installed:
+  libssl3t64 openssl
+The following NEW packages will be installed:
+  ca-certificates openssl ripgrep
+The following packages will be upgraded:
+  libssl3t64
+1 upgraded, 3 newly installed, 0 to remove and 2 not upgraded.
+Need to get 4418 kB of archives.
+After this operation, 7279 kB of additional disk space will be used.
+Get:1 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 libssl3t64 arm64 3.0.13-0ubuntu3.16 [1838 kB]
+Get:2 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 openssl arm64 3.0.13-0ubuntu3.16 [985 kB]
+Get:3 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 ca-certificates all 20260601~24.04.1 [139 kB]
+Get:4 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 ripgrep arm64 14.1.0-1 [1455 kB]
+[91mdebconf: delaying package configuration, since apt-utils is not installed
+[0mFetched 4418 kB in 1s (7396 kB/s)
+(Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 11217 files and directories currently installed.)
+Preparing to unpack .../libssl3t64_3.0.13-0ubuntu3.16_arm64.deb ...
+Unpacking libssl3t64:arm64 (3.0.13-0ubuntu3.16) over (3.0.13-0ubuntu3.15) ...
+Setting up libssl3t64:arm64 (3.0.13-0ubuntu3.16) ...
+Selecting previously unselected package openssl.
+(Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 11217 files and directories currently installed.)
+Preparing to unpack .../openssl_3.0.13-0ubuntu3.16_arm64.deb ...
+Unpacking openssl (3.0.13-0ubuntu3.16) ...
+Selecting previously unselected package ca-certificates.
+Preparing to unpack .../ca-certificates_20260601~24.04.1_all.deb ...
+Unpacking ca-certificates (20260601~24.04.1) ...
+Selecting previously unselected package ripgrep.
+Preparing to unpack .../ripgrep_14.1.0-1_arm64.deb ...
+Unpacking ripgrep (14.1.0-1) ...
+Setting up ripgrep (14.1.0-1) ...
+Setting up openssl (3.0.13-0ubuntu3.16) ...
+Setting up ca-certificates (20260601~24.04.1) ...
+debconf: unable to initialize frontend: Dialog
+debconf: (TERM is not set, so the dialog frontend is not usable.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+Updating certificates in /etc/ssl/certs...
+rehash: warning: skipping orbstack-root.pem,it does not contain exactly one certificate or CRL
+122 added, 0 removed; done.
+Processing triggers for libc-bin (2.39-0ubuntu8.9) ...
+Processing triggers for ca-certificates (20260601~24.04.1) ...
+Updating certificates in /etc/ssl/certs...
+0 added, 0 removed; done.
+Running hooks in /etc/ca-certificates/update.d...
+done.
+ ---> Removed intermediate container edca28c4f17f
+ ---> 8dd19a22ecdc
+Step 3/10 : RUN mkdir -p /opt/agents/bin /opt/bench /home/agent /work && chown 1000:1000 /home/agent /work
+ ---> Running in e77d96297da4
+ ---> Removed intermediate container e77d96297da4
+ ---> f8cf254199cc
+Step 4/10 : COPY bin/ /opt/agents/bin/
+ ---> f4de74973fc7
+Step 5/10 : COPY harness/ /opt/bench/
+ ---> 05950162fec1
+Step 6/10 : RUN chmod -R a+rX /opt/agents /opt/bench
+ ---> Running in a95acd5d8bb7
+ ---> Removed intermediate container a95acd5d8bb7
+ ---> 0af62f1bc2cb
+Step 7/10 : ENV HOME=/home/agent PATH=/opt/agents/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ ---> Running in e67651cc1296
+ ---> Removed intermediate container e67651cc1296
+ ---> c7b4a4a0fcaa
+Step 8/10 : USER 1000:1000
+ ---> Running in e84948f0da3f
+ ---> Removed intermediate container e84948f0da3f
+ ---> 75e64a056a99
+Step 9/10 : WORKDIR /work
+ ---> Running in 93d896fa433c
+ ---> Removed intermediate container 93d896fa433c
+ ---> af20c36e4731
+Step 10/10 : CMD ["/bin/sleep", "infinity"]
+ ---> Running in 76a29ef82026
+ ---> Removed intermediate container 76a29ef82026
+ ---> 9f2f049800ec
+Successfully built 9f2f049800ec
+Successfully tagged ouro-comparison-agents-v2:20261011

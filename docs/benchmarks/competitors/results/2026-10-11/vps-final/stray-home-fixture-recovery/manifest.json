@@ -1,0 +1,47 @@
+[
+  {
+    "path": "/home/ubuntu/src/calc.py",
+    "artifact": "files/src/calc.py",
+    "birth_epoch": 1791733285,
+    "mtime_epoch": 1791733307.5894608,
+    "sha256": "754afb968c01043d5a25322b0298d6570393bda86819011c5235e84644180d13",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  },
+  {
+    "path": "/home/ubuntu/tests/test_calc.py",
+    "artifact": "files/tests/test_calc.py",
+    "birth_epoch": 1791733312,
+    "mtime_epoch": 1791733312.5262976,
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  },
+  {
+    "path": "/home/ubuntu/src/store.py",
+    "artifact": "files/src/store.py",
+    "birth_epoch": 1791735376,
+    "mtime_epoch": 1791735376.8615863,
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  },
+  {
+    "path": "/home/ubuntu/tests/test_store.py",
+    "artifact": "files/tests/test_store.py",
+    "birth_epoch": 1791735382,
+    "mtime_epoch": 1791735382.4877024,
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  },
+  {
+    "path": "/home/ubuntu/tests/__init__.py",
+    "artifact": "files/tests/__init__.py",
+    "birth_epoch": 1791733310,
+    "mtime_epoch": 1791733310.9215035,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  }
+]

@@ -1,0 +1,4 @@
+   Compiling ouro-jail v0.1.0 (/home/ubuntu/bench-ouro-after/src/crates/ouro-jail)
+error: failed to build archive at `/home/ubuntu/bench-ouro-after/src/target/release/deps/libouro_jail-6770337c92eff8eb.rlib`: No space left on device (os error 28)
+
+error: could not compile `ouro-jail` (lib) due to 1 previous error

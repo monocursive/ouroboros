@@ -1,0 +1,29 @@
+{
+  "version": "1.0.0",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "/home/monocursive/bench-ouro/bin/opencode run --model anthropic/claude-sonnet-4-5 'Add a function multiply(a, b) to src/calc.py that returns the product of two numbers. Then run the tests with: python3 -m unittest discover -s tests -v. Fix any failures until all tests pass. Do not modify the tests.'",
+    "cwd": "/home/monocursive/bench-ouro/results/v2-smoke-mxc/runs/001-opencode-mxc-add-multiply-0/workspace/add-multiply",
+    "timeout": 100000,
+    "inheritDefaultEnv": true
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "/home/monocursive/.opencode/bin",
+      "/home/monocursive/bench-ouro/bin"
+    ],
+    "readwritePaths": [
+      "/home/monocursive/bench-ouro/results/v2-smoke-mxc/runs/001-opencode-mxc-add-multiply-0/workspace/add-multiply",
+      "/home/monocursive/bench-ouro/results/v2-smoke-mxc/runs/001-opencode-mxc-add-multiply-0/home",
+      "/home/monocursive/bench-ouro/results/v2-smoke-mxc/runs/001-opencode-mxc-add-multiply-0/state"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:43151"
+  }
+}

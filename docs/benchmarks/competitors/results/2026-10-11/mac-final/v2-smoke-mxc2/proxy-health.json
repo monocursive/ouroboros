@@ -1,0 +1,12 @@
+{
+  "service": "greyproxy",
+  "version": "0.4.5",
+  "status": "ok",
+  "ports": {
+    "api": 43180,
+    "dns-proxy-tcp": 43153,
+    "dns-proxy-udp": 43153,
+    "http-proxy": 43151,
+    "socks5-proxy": 43152
+  }
+}

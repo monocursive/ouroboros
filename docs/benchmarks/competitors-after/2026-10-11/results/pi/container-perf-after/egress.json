@@ -1,0 +1,22 @@
+[
+  {
+    "tool": "docker-run",
+    "exit": 0,
+    "stdout": "{\"probe\": \"tcp\", \"allowed\": true}\n",
+    "stderr": "",
+    "host_accepts_during_probe": 1,
+    "bridge_gateway": "172.17.0.1",
+    "probe_destination": "172.17.0.1",
+    "port": 39583
+  },
+  {
+    "tool": "docker-warm",
+    "exit": 0,
+    "stdout": "{\"probe\": \"tcp\", \"allowed\": true}\n",
+    "stderr": "",
+    "host_accepts_during_probe": 1,
+    "bridge_gateway": "172.17.0.1",
+    "probe_destination": "172.17.0.1",
+    "port": 39583
+  }
+]

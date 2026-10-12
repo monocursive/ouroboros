@@ -1,0 +1,63 @@
+{
+  "sequence": 13,
+  "agent": "claude",
+  "mode": "docker",
+  "task": "add-multiply",
+  "repetition": 1,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 15651.757223,
+  "container_result": {
+    "agent": "claude",
+    "task": "add-multiply",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 15159.881903,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {
+      "total_cost_usd": 0.0674943,
+      "num_turns": 6,
+      "duration_api_ms": 14289
+    },
+    "peak_child_rss_kib": 261124,
+    "guest_kernel": [
+      "Linux",
+      "c1d54fea092e",
+      "7.0.0-31-generic",
+      "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+      "x86_64"
+    ],
+    "resource_limits": {
+      "memory.max": "max",
+      "memory.swap.max": "max",
+      "pids.max": "3548",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "ANTHROPIC_API_KEY",
+    "ouro-comparison-claude-v2:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "claude",
+    "add-multiply"
+  ],
+  "load": [
+    1.765625,
+    1.75048828125,
+    1.45849609375
+  ],
+  "artifact": "runs/013-claude-docker-add-multiply-1"
+}

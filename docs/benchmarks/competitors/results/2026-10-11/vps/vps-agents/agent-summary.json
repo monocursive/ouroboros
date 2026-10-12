@@ -1,0 +1,74 @@
+{
+  "claude/direct": {
+    "runs": 6,
+    "success": 6,
+    "elapsed_ms": [
+      20608,
+      17154,
+      19823,
+      19468,
+      24003,
+      23016
+    ],
+    "elapsed_ms_median": 20608
+  },
+  "claude/ouro": {
+    "runs": 6,
+    "success": 6,
+    "elapsed_ms": [
+      18766,
+      18077,
+      19260,
+      19082,
+      22404,
+      25243
+    ],
+    "elapsed_ms_median": 19260
+  },
+  "claude/greywall": {
+    "runs": 6,
+    "success": 0,
+    "elapsed_ms": []
+  },
+  "claude/mxc": {
+    "runs": 6,
+    "success": 0,
+    "elapsed_ms": []
+  },
+  "opencode/direct": {
+    "runs": 6,
+    "success": 6,
+    "elapsed_ms": [
+      32150,
+      34079,
+      42829,
+      41934,
+      30137,
+      31238
+    ],
+    "elapsed_ms_median": 34079
+  },
+  "opencode/ouro": {
+    "runs": 6,
+    "success": 6,
+    "elapsed_ms": [
+      22546,
+      24835,
+      32816,
+      32430,
+      28787,
+      27598
+    ],
+    "elapsed_ms_median": 28787
+  },
+  "opencode/greywall": {
+    "runs": 6,
+    "success": 0,
+    "elapsed_ms": []
+  },
+  "opencode/mxc": {
+    "runs": 6,
+    "success": 0,
+    "elapsed_ms": []
+  }
+}

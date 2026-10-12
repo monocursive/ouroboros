@@ -1,0 +1,29 @@
+{
+  "sequence": 50,
+  "agent": "codex",
+  "mode": "mxc",
+  "task": "add-multiply",
+  "repetition": 1,
+  "started_utc": "2026-10-11T20:18:14Z",
+  "elapsed_ms": 98.459167,
+  "exit": 1,
+  "timeout": false,
+  "success": false,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": false,
+    "hidden_pass": false,
+    "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ERROR\n\n======================================================================\nERROR: test_multiply (test_calc.TestCalc.test_multiply)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply/tests/test_calc.py\", line 8, in test_multiply\n    from src.calc import multiply\nImportError: cannot import name 'multiply' from 'src.calc' (/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply/src/calc.py)\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nFAILED (errors=1)\n",
+    "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import sys;sys.path.insert(0,sys.argv[1]);from src.calc import add,multiply; assert add(3,4)==7; assert multiply(0,9)==0; assert multiply(-3,-7)==21; assert multiply(2.5,4)==10\n                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nImportError: cannot import name 'multiply' from 'src.calc' (/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply/src/calc.py)\n"
+  },
+  "argv": [
+    "/Users/monocursive/bench-ouro-after/bin/mxc-exec-mac",
+    "/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/mxc-private.json"
+  ],
+  "load": [
+    2.9794921875,
+    2.39599609375,
+    2.21533203125
+  ],
+  "artifact": "runs/050-codex-mxc-add-multiply-1"
+}

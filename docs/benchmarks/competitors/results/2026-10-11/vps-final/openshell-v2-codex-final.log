@@ -1,0 +1,19 @@
+1/18 codex docker add-multiply #0 18.0s exit=0 success=True
+2/18 codex openshell-warm add-multiply #0 18.8s exit=1 success=False
+3/18 codex openshell-ephemeral add-multiply #0 21.2s exit=1 success=False
+4/18 codex openshell-warm refactor-yaml-json #0 20.3s exit=1 success=False
+5/18 codex docker refactor-yaml-json #0 24.6s exit=0 success=True
+6/18 codex openshell-ephemeral refactor-yaml-json #0 20.2s exit=1 success=False
+7/18 codex openshell-warm fix-offbyone #0 19.2s exit=1 success=False
+8/18 codex openshell-ephemeral fix-offbyone #0 21.0s exit=1 success=False
+9/18 codex docker fix-offbyone #0 18.4s exit=0 success=True
+10/18 codex openshell-ephemeral refactor-yaml-json #1 20.5s exit=1 success=False
+11/18 codex docker refactor-yaml-json #1 25.0s exit=0 success=True
+12/18 codex openshell-warm refactor-yaml-json #1 18.8s exit=1 success=False
+13/18 codex docker add-multiply #1 16.1s exit=0 success=True
+14/18 codex openshell-ephemeral add-multiply #1 23.9s exit=1 success=False
+15/18 codex openshell-warm add-multiply #1 18.9s exit=1 success=False
+16/18 codex openshell-ephemeral fix-offbyone #1 20.4s exit=1 success=False
+17/18 codex openshell-warm fix-offbyone #1 22.6s exit=1 success=False
+18/18 codex docker fix-offbyone #1 19.4s exit=0 success=True
+COMPLETE

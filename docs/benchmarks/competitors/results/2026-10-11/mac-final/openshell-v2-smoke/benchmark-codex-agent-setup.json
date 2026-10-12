@@ -1,0 +1,9 @@
+[
+  {
+    "exit": 1,
+    "timeout": false,
+    "elapsed_ms": 6.234083,
+    "stdout": "",
+    "stderr": "Provider profile diagnostics:\n  error /Users/monocursive/bench-ouro/results/openshell-v2-smoke/codex-profile.yaml profile=- field=file failed to parse provider profile YAML: YAML parse error: .: null is not an object\nError:   \u00d7 provider profile import failed\n\n"
+  }
+]

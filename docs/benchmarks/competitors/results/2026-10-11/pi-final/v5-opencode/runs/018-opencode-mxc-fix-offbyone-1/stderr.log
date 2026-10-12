@@ -1,0 +1,1 @@
+Bubblewrap: network.proxy requires 'iptables' on PATH to enforce proxy-only egress: No such file or directory (os error 2){"error":{"code":"backend_error","message":"Bubblewrap: network.proxy requires 'iptables' on PATH to enforce proxy-only egress: No such file or directory (os error 2)"}}

@@ -1,0 +1,58 @@
+{
+  "sequence": 4,
+  "agent": "opencode",
+  "mode": "docker",
+  "task": "add-multiply",
+  "repetition": 0,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 25268.002458,
+  "container_result": {
+    "agent": "opencode",
+    "task": "add-multiply",
+    "agent_exit": 0,
+    "success": true,
+    "work_ms": 24871.945447,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {},
+    "peak_child_rss_kib": 842496,
+    "guest_kernel": [
+      "Linux",
+      "280ab1b73615",
+      "6.15.11-orbstack-00539-g9885ebd8e3f4",
+      "#1 SMP PREEMPT Fri Aug 22 08:24:56 UTC 2025",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "memory.max": "max",
+      "memory.swap.max": "max",
+      "pids.max": "max",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "ANTHROPIC_API_KEY",
+    "ouro-comparison-agents-v2:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "opencode",
+    "add-multiply"
+  ],
+  "load": [
+    1.57373046875,
+    1.64599609375,
+    1.90576171875
+  ],
+  "artifact": "runs/004-opencode-docker-add-multiply-0"
+}

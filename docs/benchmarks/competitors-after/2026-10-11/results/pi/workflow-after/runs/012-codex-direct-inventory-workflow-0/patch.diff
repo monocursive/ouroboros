@@ -1,0 +1,124 @@
+diff --git a/README.md b/README.md
+index 06a1174..6b9f0d1 100644
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,18 @@
+ Run `python3 -m inventory.cli examples/stock.csv`.
+ Use `--min-quantity 3` to filter before reporting.
+ Prices are decimal strings. No third-party dependencies are required.
++
++Group by category (sorted by category), filtering individual items first:
++
++```sh
++python3 -m inventory.cli examples/stock.csv --group-by-category --min-quantity 3
++```
++
++Expected output:
++
++```json
++[{"category": "kitchen", "quantity": 3, "stock_value": "12.75"}, {"category": "office", "quantity": 10, "stock_value": "1.00"}]
++```
++
++Quantities and stock values are summed per category. Stock values use exact
++decimal arithmetic and are formatted as strings with two fractional digits.
+diff --git a/inventory/cli.py b/inventory/cli.py
+index 64a76c2..2816f8f 100644
+--- a/inventory/cli.py
++++ b/inventory/cli.py
+@@ -2,16 +2,18 @@ import argparse
+ import json
+ import sys
+ from .loader import load_items
+-from .report import item_report
++from .report import category_report, item_report
+ 
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description='Report inventory from CSV')
+     parser.add_argument('csv_file')
+     parser.add_argument('--min-quantity', type=int, default=0)
++    parser.add_argument('--group-by-category', action='store_true')
+     args = parser.parse_args(argv)
+     try:
+         items = load_items(args.csv_file)
+-        result = item_report(items, args.min_quantity)
++        report = category_report if args.group_by_category else item_report
++        result = report(items, args.min_quantity)
+     except (ValueError, OSError) as exc:
+         print(str(exc), file=sys.stderr)
+         return 2
+diff --git a/inventory/loader.py b/inventory/loader.py
+index 9a6bce7..d07556b 100644
+--- a/inventory/loader.py
++++ b/inventory/loader.py
+@@ -5,17 +5,26 @@ from .models import Item
+ def load_items(path):
+     items = []
+     with open(path, newline='', encoding='utf-8') as source:
+-        reader = csv.DictReader(source)
++        reader = csv.DictReader(source, strict=True)
+         required = {'sku', 'category', 'quantity', 'unit_price'}
+-        if not required.issubset(reader.fieldnames or []):
++        try:
++            fieldnames = reader.fieldnames or []
++        except csv.Error as exc:
++            raise ValueError(f'Invalid CSV header: {exc}') from exc
++        if not required.issubset(fieldnames):
+             raise ValueError('CSV requires sku, category, quantity and unit_price')
+-        for line, row in enumerate(reader, 2):
+-            try:
+-                quantity = int(row['quantity'])
+-                price = Decimal(row['unit_price'])
+-                if quantity < 0 or price < 0 or not price.is_finite():
+-                    raise ValueError('negative or non-finite value')
+-                items.append(Item(row['sku'], row['category'], quantity, price))
+-            except (ValueError, InvalidOperation, TypeError) as exc:
+-                raise ValueError(f'Invalid CSV row {line}: {exc}') from exc
++        try:
++            for line, row in enumerate(reader, 2):
++                try:
++                    if None in row or any(row[key] is None for key in required):
++                        raise ValueError('missing or extra fields')
++                    quantity = int(row['quantity'])
++                    price = Decimal(row['unit_price'])
++                    if quantity < 0 or not price.is_finite() or price < 0:
++                        raise ValueError('negative or non-finite value')
++                    items.append(Item(row['sku'], row['category'], quantity, price))
++                except (ValueError, InvalidOperation, TypeError) as exc:
++                    raise ValueError(f'Invalid CSV row {line}: {exc}') from exc
++        except csv.Error as exc:
++            raise ValueError(f'Invalid CSV near line {reader.line_num}: {exc}') from exc
+     return items
+diff --git a/inventory/report.py b/inventory/report.py
+index 080803f..405c3c5 100644
+--- a/inventory/report.py
++++ b/inventory/report.py
+@@ -1,4 +1,29 @@
++from decimal import Decimal, localcontext
++
++
+ def item_report(items, min_quantity=0):
+     return [{'sku': x.sku, 'category': x.category, 'quantity': x.quantity,
+              'unit_price': str(x.unit_price)}
+             for x in items if x.quantity >= min_quantity]
++
++
++def category_report(items, min_quantity=0):
++    items = [item for item in items if item.quantity >= min_quantity]
++    if not items:
++        return []
++
++    # Allow every product and sum to retain all digits, including prices
++    # with widely differing exponents, regardless of Decimal's default precision.
++    lowest_exponent = min(item.unit_price.as_tuple().exponent for item in items)
++    highest_digit = max(item.unit_price.adjusted() + len(str(item.quantity))
++                        for item in items)
++    with localcontext() as context:
++        context.prec = max(28, highest_digit - lowest_exponent + len(str(len(items))) + 2)
++        categories = {}
++        for item in items:
++            summary = categories.setdefault(item.category, [0, Decimal(0)])
++            summary[0] += item.quantity
++            summary[1] += item.quantity * item.unit_price
++        return [{'category': category, 'quantity': categories[category][0],
++                 'stock_value': format(categories[category][1], '.2f')}
++                for category in sorted(categories)]

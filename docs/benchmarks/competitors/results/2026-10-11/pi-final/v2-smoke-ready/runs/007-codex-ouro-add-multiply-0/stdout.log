@@ -1,0 +1,8 @@
+Blocked by the environment: shell commands fail with `bwrap: loopback: Failed to create NETLINK_ROUTE socket`, and the file edit also failed.
+
+No files were changed, and tests could not run. The intended addition to `src/calc.py` is:
+
+```python
+def multiply(a, b):
+    return a * b
+```

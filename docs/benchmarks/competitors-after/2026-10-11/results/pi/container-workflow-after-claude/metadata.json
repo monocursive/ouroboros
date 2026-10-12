@@ -1,0 +1,36 @@
+{
+  "schema": "container-agent-comparison/2",
+  "host": {
+    "system": "Linux",
+    "node": "raspberrypi",
+    "release": "6.18.50+rpt-rpi-v8",
+    "version": "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "machine": "aarch64",
+    "processor": ""
+  },
+  "started_utc": "2026-10-11T22:04:06Z",
+  "image_id": "sha256:996bbd125e5fafb01f5e676fa6824a5319a2726d8c9cf994d30062fca5088d93",
+  "schedule": [
+    [
+      "claude",
+      "inventory-workflow",
+      0,
+      "docker"
+    ],
+    [
+      "claude",
+      "inventory-workflow",
+      0,
+      "openshell-ephemeral"
+    ]
+  ],
+  "seed": 20261011,
+  "harness_sha256": "17157b7d2e52062f2917d0a7d7dc7525d6dd105f9ef15a2093869d3ea5b151ae",
+  "single_agent_image": false,
+  "container_bin_hashes": {
+    "claude": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+    "opencode": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df",
+    "codex": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3",
+    "codex-code-mode-host": "6979f2fea8cb1d5d72614abfe2f42b16727cdce2c356cc6af933157e732a7277"
+  }
+}

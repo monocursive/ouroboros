@@ -1,0 +1,23 @@
+[
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 181.860669,
+    "stdout": "Imported 1 provider profile.\n",
+    "stderr": ""
+  },
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 243.194945,
+    "stdout": "\u2713 Created provider benchmark-codex-v2\n",
+    "stderr": ""
+  },
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 193.118184,
+    "stdout": "\u2713 Configured refresh for benchmark-codex-v2 CODEX_AUTH_ACCESS_TOKEN\n",
+    "stderr": ""
+  }
+]

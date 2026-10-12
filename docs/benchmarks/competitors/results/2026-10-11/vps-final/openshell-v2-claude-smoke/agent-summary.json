@@ -1,0 +1,26 @@
+{
+  "claude/docker": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      19330.907958
+    ],
+    "median_ms": 19330.907958
+  },
+  "claude/openshell-warm": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      17482.032181
+    ],
+    "median_ms": 17482.032181
+  },
+  "claude/openshell-ephemeral": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      19645.054785
+    ],
+    "median_ms": 19645.054785
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 1109.922122,
+  "stdout": "\nCreated sandbox: bench-v2-codex\n\n  [0.0s] Requesting compute...\n",
+  "stderr": ""
+}

@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/Users/monocursive/bench-ouro/harness/openshell_agent_v2.py", line 227, in <module>
+    main()
+    ~~~~^^
+  File "/Users/monocursive/bench-ouro/harness/openshell_agent_v2.py", line 143, in main
+    provider_setup(args, env)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/monocursive/bench-ouro/harness/openshell_agent_v2.py", line 115, in provider_setup
+    raise RuntimeError("Provider setup failed (use a new provider name or inspect setup log)")
+RuntimeError: Provider setup failed (use a new provider name or inspect setup log)

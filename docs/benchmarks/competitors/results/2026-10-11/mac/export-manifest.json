@@ -1,0 +1,3047 @@
+[
+  {
+    "path": "mac-agents/agent-runs.ndjson",
+    "sha256": "1d691a0c05d1ea3dfc9bcfcf58de1d6f3667086ed6a5ef8af66e7595727f4477",
+    "bytes": 25744
+  },
+  {
+    "path": "mac-agents/agent-summary.json",
+    "sha256": "8a20c689ae800a51fd9a9fdec7fd5d00fa4734421fc6363090193f29a30f15cf",
+    "bytes": 272
+  },
+  {
+    "path": "mac-agents.log",
+    "sha256": "32348b926ce4a06b31c79d40e3d69cadc81e014e8ab922bc3164babcf3820e4c",
+    "bytes": 1089
+  },
+  {
+    "path": "mac-openshell-certs.log",
+    "sha256": "6603882568777a41c4312c187d331ae22dd2fee49c195c0ea7c4535eb0cf22bc",
+    "bytes": 177
+  },
+  {
+    "path": "mac-openshell-gateway.log",
+    "sha256": "4cc790ec7a349762003b1b00b19bb1e861d5514dad2e2f73f930b1e142b98c01",
+    "bytes": 7073
+  },
+  {
+    "path": "mac-ourovm/vm-launches.ndjson",
+    "sha256": "1cd7e5dd9697a979b1aec3dce157f5ea6ad14732e9bc523c8e9dd2da9348ae6d",
+    "bytes": 3777
+  },
+  {
+    "path": "mac-ourovm/vm-summary.json",
+    "sha256": "1b3006d36ef182a4707e583c0b87530034f35eb50110b7af62c7a74d722eb084",
+    "bytes": 578
+  },
+  {
+    "path": "mac-ourovm.log",
+    "sha256": "544a7c26950067bc069dccdd6d081c29aaea5b2e7f8e0acc6262a64b8074bd31",
+    "bytes": 811
+  },
+  {
+    "path": "mac-perf/launches.ndjson",
+    "sha256": "60ff346c75906ed1aeb26a577eeee9cfcee0515154f7ada742e08ea4f56343a6",
+    "bytes": 357350
+  },
+  {
+    "path": "mac-perf/metadata.json",
+    "sha256": "538f78f4d38df30d6891c79878e262e7718870b45871951a2a3d7c3dc796b9b5",
+    "bytes": 3104
+  },
+  {
+    "path": "mac-perf/summary.json",
+    "sha256": "6ce11c162604efa21c390dcdb98f9e85ff1c614949cd659ed382fa531dd9d2fc",
+    "bytes": 6166
+  },
+  {
+    "path": "mac-perf/table.json",
+    "sha256": "afaddada53ea57a040101508907956c1202bc50feb0da49e8a152fd37adfa443",
+    "bytes": 4729
+  },
+  {
+    "path": "mac-perf-table.txt",
+    "sha256": "c5ba750dd48163643591c04d1409887db47dfcf69adda024db56129dca1ec27a",
+    "bytes": 991
+  },
+  {
+    "path": "mac-perf.log",
+    "sha256": "1963799911b717d69ee5231e34cf4f44273318f3d8512367a9210f3c130d8f7c",
+    "bytes": 1812
+  },
+  {
+    "path": "v2-agents/agent-runs.ndjson",
+    "sha256": "143b553e9d7e65de3ce845c9604c6a6d818d24be4ecacc5820d583c190abd872",
+    "bytes": 87110
+  },
+  {
+    "path": "v2-agents/agent-summary.json",
+    "sha256": "6eff00f28b8de2cb99c066a18ed8c0d13b1da41a362610a8577cbd5402ebbaad",
+    "bytes": 1528
+  },
+  {
+    "path": "v2-agents/harness-snapshot.py",
+    "sha256": "c12621020d886164a73f87e34b871876151b47f63e0209dd716f6fc0b879f611",
+    "bytes": 18283
+  },
+  {
+    "path": "v2-agents/metadata.json",
+    "sha256": "26e5913690c9853446c7a30af3ccd757ead06fcacc86970cf492a552fd2f834a",
+    "bytes": 5561
+  },
+  {
+    "path": "v2-agents/proxy-health.json",
+    "sha256": "bc5b8d49daf019d205530cedb9586e7682ce5d03786e94940ed0104b9df1396c",
+    "bytes": 212
+  },
+  {
+    "path": "v2-agents/proxy-rules.json",
+    "sha256": "0b9a82af15cfa7643844031bf7401af930be9ac03ce02939399f83e852d60d1c",
+    "bytes": 4855
+  },
+  {
+    "path": "v2-agents/runs/001-claude-direct-add-multiply-0/patch.diff",
+    "sha256": "41fa9e2d9edc401a1207298ecb6bb3cf93f96b3f4510b7781488c0d706cbbd63",
+    "bytes": 196
+  },
+  {
+    "path": "v2-agents/runs/001-claude-direct-add-multiply-0/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/001-claude-direct-add-multiply-0/result.json",
+    "sha256": "132f4a7ea37cdfb529e6ab06357547a2aba247f01c2a54763d0e969be49cb552",
+    "bytes": 1126
+  },
+  {
+    "path": "v2-agents/runs/001-claude-direct-add-multiply-0/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/001-claude-direct-add-multiply-0/stdout.log",
+    "sha256": "6eb1218049fc3ab578835e7561bac549573f72ff1bed820ec76a0fe21e55a15b",
+    "bytes": 1819
+  },
+  {
+    "path": "v2-agents/runs/001-claude-direct-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/001-claude-direct-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "754afb968c01043d5a25322b0298d6570393bda86819011c5235e84644180d13",
+    "bytes": 70
+  },
+  {
+    "path": "v2-agents/runs/001-claude-direct-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/001-claude-direct-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/002-claude-greywall-add-multiply-0/config/greywall.json",
+    "sha256": "409d93926313165f9c49112d1410c2d81822320121e8c25f309fec312d136289",
+    "bytes": 603
+  },
+  {
+    "path": "v2-agents/runs/002-claude-greywall-add-multiply-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/002-claude-greywall-add-multiply-0/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/002-claude-greywall-add-multiply-0/result.json",
+    "sha256": "8ba3eb1dbcd60b549615092617a51dd05e5150214e586a4c69a9d8e28ad34c13",
+    "bytes": 2378
+  },
+  {
+    "path": "v2-agents/runs/002-claude-greywall-add-multiply-0/stderr.log",
+    "sha256": "8d6427b5e6c1ab95e4d6e0e13e50ef54257209295b6aa15ab31d636befc34cb2",
+    "bytes": 1751
+  },
+  {
+    "path": "v2-agents/runs/002-claude-greywall-add-multiply-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/002-claude-greywall-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/002-claude-greywall-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-agents/runs/002-claude-greywall-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/002-claude-greywall-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/003-claude-mxc-add-multiply-0/config/mxc.json",
+    "sha256": "09346ad81b2e2025ce073a4a7196fc1b0387202cb906b5c11f3b0ea0241ec67d",
+    "bytes": 2681
+  },
+  {
+    "path": "v2-agents/runs/003-claude-mxc-add-multiply-0/patch.diff",
+    "sha256": "41fa9e2d9edc401a1207298ecb6bb3cf93f96b3f4510b7781488c0d706cbbd63",
+    "bytes": 196
+  },
+  {
+    "path": "v2-agents/runs/003-claude-mxc-add-multiply-0/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/003-claude-mxc-add-multiply-0/result.json",
+    "sha256": "a0d05391a264ef37a0414d2c01ee70e17e3a52b6f425fce18a501fe281cad1dc",
+    "bytes": 857
+  },
+  {
+    "path": "v2-agents/runs/003-claude-mxc-add-multiply-0/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/003-claude-mxc-add-multiply-0/stdout.log",
+    "sha256": "8978856ace256790c588f26011e3d431a15c57ee6a6e5083aac181bfde2a4c6d",
+    "bytes": 1861
+  },
+  {
+    "path": "v2-agents/runs/003-claude-mxc-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/003-claude-mxc-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "754afb968c01043d5a25322b0298d6570393bda86819011c5235e84644180d13",
+    "bytes": 70
+  },
+  {
+    "path": "v2-agents/runs/003-claude-mxc-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/003-claude-mxc-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/004-claude-greywall-refactor-yaml-json-0/config/greywall.json",
+    "sha256": "68808a2a25b6f24c1449dc9b8a9d0fa7229c469763b818c0acdf6501d9a21f11",
+    "bytes": 627
+  },
+  {
+    "path": "v2-agents/runs/004-claude-greywall-refactor-yaml-json-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/004-claude-greywall-refactor-yaml-json-0/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/004-claude-greywall-refactor-yaml-json-0/result.json",
+    "sha256": "204dfbee0f6ef7238dbf5a5e5fb2e0a7e2bd993a418b3cf3c424a61975771f20",
+    "bytes": 2917
+  },
+  {
+    "path": "v2-agents/runs/004-claude-greywall-refactor-yaml-json-0/stderr.log",
+    "sha256": "8d6427b5e6c1ab95e4d6e0e13e50ef54257209295b6aa15ab31d636befc34cb2",
+    "bytes": 1751
+  },
+  {
+    "path": "v2-agents/runs/004-claude-greywall-refactor-yaml-json-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/004-claude-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/004-claude-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "41dcb5c26d3fd4c3d5a05d76dc58f35386572aa16aadcf055b2bc5245ddd9e8c",
+    "bytes": 272
+  },
+  {
+    "path": "v2-agents/runs/004-claude-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/004-claude-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/005-claude-direct-refactor-yaml-json-0/patch.diff",
+    "sha256": "adb9a7748853a24474598237dc3f6a328a8d6415423ffbdeeb18097283b66ae6",
+    "bytes": 491
+  },
+  {
+    "path": "v2-agents/runs/005-claude-direct-refactor-yaml-json-0/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/005-claude-direct-refactor-yaml-json-0/result.json",
+    "sha256": "b0e0b59c261db64b471f615a655f894c3c658c22c61f2ea469cadc1f2241c22b",
+    "bytes": 1077
+  },
+  {
+    "path": "v2-agents/runs/005-claude-direct-refactor-yaml-json-0/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/005-claude-direct-refactor-yaml-json-0/stdout.log",
+    "sha256": "5772c1a672fad53f43c4abbdd28769e2e0919f8e3048257b971c619273480bbd",
+    "bytes": 2049
+  },
+  {
+    "path": "v2-agents/runs/005-claude-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/005-claude-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "bytes": 267
+  },
+  {
+    "path": "v2-agents/runs/005-claude-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/005-claude-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/006-claude-mxc-refactor-yaml-json-0/config/mxc.json",
+    "sha256": "07a69474ee5bbbe3ae43484963e6485822afc5f2ff8d0757e4d12a903a968730",
+    "bytes": 2747
+  },
+  {
+    "path": "v2-agents/runs/006-claude-mxc-refactor-yaml-json-0/patch.diff",
+    "sha256": "adb9a7748853a24474598237dc3f6a328a8d6415423ffbdeeb18097283b66ae6",
+    "bytes": 491
+  },
+  {
+    "path": "v2-agents/runs/006-claude-mxc-refactor-yaml-json-0/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/006-claude-mxc-refactor-yaml-json-0/result.json",
+    "sha256": "d3563b08a7dd82e8806403fa46995ee2d5b2c83e7c032e5a1911b16f56c0cb5e",
+    "bytes": 833
+  },
+  {
+    "path": "v2-agents/runs/006-claude-mxc-refactor-yaml-json-0/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/006-claude-mxc-refactor-yaml-json-0/stdout.log",
+    "sha256": "f6bc8c8d060f4dba1db829238b86e1b4a0da687a20d119736a42099e6302d7e1",
+    "bytes": 2173
+  },
+  {
+    "path": "v2-agents/runs/006-claude-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/006-claude-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "bytes": 267
+  },
+  {
+    "path": "v2-agents/runs/006-claude-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/006-claude-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/007-claude-greywall-fix-offbyone-0/config/greywall.json",
+    "sha256": "073d4425fc4c0d867d2155f17169b3dca827469c334bb7d2bb91fb93b67a621e",
+    "bytes": 603
+  },
+  {
+    "path": "v2-agents/runs/007-claude-greywall-fix-offbyone-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/007-claude-greywall-fix-offbyone-0/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/007-claude-greywall-fix-offbyone-0/result.json",
+    "sha256": "5d254b1f7603d88bdf4b197225bea11957304a703b7a0d22310fb0c80609ea80",
+    "bytes": 2712
+  },
+  {
+    "path": "v2-agents/runs/007-claude-greywall-fix-offbyone-0/stderr.log",
+    "sha256": "8d6427b5e6c1ab95e4d6e0e13e50ef54257209295b6aa15ab31d636befc34cb2",
+    "bytes": 1751
+  },
+  {
+    "path": "v2-agents/runs/007-claude-greywall-fix-offbyone-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/007-claude-greywall-fix-offbyone-0/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/007-claude-greywall-fix-offbyone-0/workspace/fix-offbyone/src/parse.py",
+    "sha256": "446216aee1cb06ea69e4c3fa8700dfc9685534dd362fc380e90997b214e4a53c",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/007-claude-greywall-fix-offbyone-0/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/007-claude-greywall-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/008-claude-mxc-fix-offbyone-0/config/mxc.json",
+    "sha256": "bb2121d71d157f8c9ab920989737916a3516604f6fe4de1ef8876f532933ab08",
+    "bytes": 2618
+  },
+  {
+    "path": "v2-agents/runs/008-claude-mxc-fix-offbyone-0/patch.diff",
+    "sha256": "2db769afa920db8721b25b5b1a2c964ee1ee90e8bc713fe47f1eab9f6c21668a",
+    "bytes": 276
+  },
+  {
+    "path": "v2-agents/runs/008-claude-mxc-fix-offbyone-0/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/008-claude-mxc-fix-offbyone-0/result.json",
+    "sha256": "3f485e5a6b03fed13f8352027ddb2e653ac545a4cf5be1dabb3b8ee6d4f5fb1b",
+    "bytes": 855
+  },
+  {
+    "path": "v2-agents/runs/008-claude-mxc-fix-offbyone-0/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/008-claude-mxc-fix-offbyone-0/stdout.log",
+    "sha256": "40b2f8626be6c44fef38faa9090ae424817eb53128b439d8815c6a296a0271c8",
+    "bytes": 1838
+  },
+  {
+    "path": "v2-agents/runs/008-claude-mxc-fix-offbyone-0/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/008-claude-mxc-fix-offbyone-0/workspace/fix-offbyone/src/parse.py",
+    "sha256": "53e86ca3c3ee994c0cfe14c566e16e620d1e98c5c7f3599207e7ba76ec3c71cd",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/008-claude-mxc-fix-offbyone-0/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/008-claude-mxc-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/009-claude-direct-fix-offbyone-0/patch.diff",
+    "sha256": "2db769afa920db8721b25b5b1a2c964ee1ee90e8bc713fe47f1eab9f6c21668a",
+    "bytes": 276
+  },
+  {
+    "path": "v2-agents/runs/009-claude-direct-fix-offbyone-0/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/009-claude-direct-fix-offbyone-0/result.json",
+    "sha256": "fac6ced8902dee6fe0104f1b4d719b6a92d6da97c526ebbea3d8bc7eef00afcc",
+    "bytes": 1060
+  },
+  {
+    "path": "v2-agents/runs/009-claude-direct-fix-offbyone-0/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/009-claude-direct-fix-offbyone-0/stdout.log",
+    "sha256": "123274fa922960c9e779fd987a8bd728361dcbfc0035f6fb78eaa3a42bf8a1f0",
+    "bytes": 1799
+  },
+  {
+    "path": "v2-agents/runs/009-claude-direct-fix-offbyone-0/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/009-claude-direct-fix-offbyone-0/workspace/fix-offbyone/src/parse.py",
+    "sha256": "53e86ca3c3ee994c0cfe14c566e16e620d1e98c5c7f3599207e7ba76ec3c71cd",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/009-claude-direct-fix-offbyone-0/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/009-claude-direct-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/config/mxc.json",
+    "sha256": "04acf6af7b07ea4c58e078beb4471c68f9e13539b42f97c649c04eafc906ee77",
+    "bytes": 2747
+  },
+  {
+    "path": "v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/patch.diff",
+    "sha256": "adb9a7748853a24474598237dc3f6a328a8d6415423ffbdeeb18097283b66ae6",
+    "bytes": 491
+  },
+  {
+    "path": "v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/result.json",
+    "sha256": "534e3d4306d475a06d912cdcbc82551ceb66cbb5484a45d8970e7d38c045901f",
+    "bytes": 839
+  },
+  {
+    "path": "v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/stdout.log",
+    "sha256": "c50d0da4172d71a87a4c22ab90a221071ada198757981f110f793dafdfa6d370",
+    "bytes": 2089
+  },
+  {
+    "path": "v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "bytes": 267
+  },
+  {
+    "path": "v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/011-claude-direct-refactor-yaml-json-1/patch.diff",
+    "sha256": "adb9a7748853a24474598237dc3f6a328a8d6415423ffbdeeb18097283b66ae6",
+    "bytes": 491
+  },
+  {
+    "path": "v2-agents/runs/011-claude-direct-refactor-yaml-json-1/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/011-claude-direct-refactor-yaml-json-1/result.json",
+    "sha256": "a72c60ba5d36220feaf55afabcb142b041e12e2182697d151f53886fa5b4797f",
+    "bytes": 1083
+  },
+  {
+    "path": "v2-agents/runs/011-claude-direct-refactor-yaml-json-1/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/011-claude-direct-refactor-yaml-json-1/stdout.log",
+    "sha256": "7b43545f36bdfdcbab901b32ec3434bd044afd19996b43e66709f723b0db6f59",
+    "bytes": 1877
+  },
+  {
+    "path": "v2-agents/runs/011-claude-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/011-claude-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "bytes": 267
+  },
+  {
+    "path": "v2-agents/runs/011-claude-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/011-claude-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/012-claude-greywall-refactor-yaml-json-1/config/greywall.json",
+    "sha256": "b60443c33af0f6502d7419ea72ae3e7b29b5c2b56c2a5ff20912b9fccb82ba20",
+    "bytes": 627
+  },
+  {
+    "path": "v2-agents/runs/012-claude-greywall-refactor-yaml-json-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/012-claude-greywall-refactor-yaml-json-1/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/012-claude-greywall-refactor-yaml-json-1/result.json",
+    "sha256": "bca2c2e97fbf77ed49fd2454aadc7303d6456555244ab7e0c813806bfce98f34",
+    "bytes": 2916
+  },
+  {
+    "path": "v2-agents/runs/012-claude-greywall-refactor-yaml-json-1/stderr.log",
+    "sha256": "8d6427b5e6c1ab95e4d6e0e13e50ef54257209295b6aa15ab31d636befc34cb2",
+    "bytes": 1751
+  },
+  {
+    "path": "v2-agents/runs/012-claude-greywall-refactor-yaml-json-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/012-claude-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/012-claude-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "41dcb5c26d3fd4c3d5a05d76dc58f35386572aa16aadcf055b2bc5245ddd9e8c",
+    "bytes": 272
+  },
+  {
+    "path": "v2-agents/runs/012-claude-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/012-claude-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/013-claude-direct-add-multiply-1/patch.diff",
+    "sha256": "41fa9e2d9edc401a1207298ecb6bb3cf93f96b3f4510b7781488c0d706cbbd63",
+    "bytes": 196
+  },
+  {
+    "path": "v2-agents/runs/013-claude-direct-add-multiply-1/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/013-claude-direct-add-multiply-1/result.json",
+    "sha256": "c4e8efc7aab66ea7a0b91181c4e01157652e45b17ad7734952d49972d7a899ef",
+    "bytes": 1121
+  },
+  {
+    "path": "v2-agents/runs/013-claude-direct-add-multiply-1/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/013-claude-direct-add-multiply-1/stdout.log",
+    "sha256": "aac781c084eb28ab7c9a58b96f9e46091661ff2dd8f7d5f3f9cc94f9935467a9",
+    "bytes": 1823
+  },
+  {
+    "path": "v2-agents/runs/013-claude-direct-add-multiply-1/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/013-claude-direct-add-multiply-1/workspace/add-multiply/src/calc.py",
+    "sha256": "754afb968c01043d5a25322b0298d6570393bda86819011c5235e84644180d13",
+    "bytes": 70
+  },
+  {
+    "path": "v2-agents/runs/013-claude-direct-add-multiply-1/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/013-claude-direct-add-multiply-1/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/014-claude-mxc-add-multiply-1/config/mxc.json",
+    "sha256": "ed57d3104d07848152fe92484f9bb96f6825b64d88948dae3987c33dc0e5f8d0",
+    "bytes": 2681
+  },
+  {
+    "path": "v2-agents/runs/014-claude-mxc-add-multiply-1/patch.diff",
+    "sha256": "41fa9e2d9edc401a1207298ecb6bb3cf93f96b3f4510b7781488c0d706cbbd63",
+    "bytes": 196
+  },
+  {
+    "path": "v2-agents/runs/014-claude-mxc-add-multiply-1/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/014-claude-mxc-add-multiply-1/result.json",
+    "sha256": "c230f900047a1e0e7a6d495ef4fea103e819e35559e1f9732011502d7163744b",
+    "bytes": 856
+  },
+  {
+    "path": "v2-agents/runs/014-claude-mxc-add-multiply-1/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/014-claude-mxc-add-multiply-1/stdout.log",
+    "sha256": "a85133339d0fc8050bdc2fea3005dc145821941a760f7941ca238defbe2d6399",
+    "bytes": 1926
+  },
+  {
+    "path": "v2-agents/runs/014-claude-mxc-add-multiply-1/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/014-claude-mxc-add-multiply-1/workspace/add-multiply/src/calc.py",
+    "sha256": "754afb968c01043d5a25322b0298d6570393bda86819011c5235e84644180d13",
+    "bytes": 70
+  },
+  {
+    "path": "v2-agents/runs/014-claude-mxc-add-multiply-1/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/014-claude-mxc-add-multiply-1/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/015-claude-greywall-add-multiply-1/config/greywall.json",
+    "sha256": "a4923774317918fa050ce4c08229ea954b84eff407d6d8f5efacc39a27fa55a3",
+    "bytes": 603
+  },
+  {
+    "path": "v2-agents/runs/015-claude-greywall-add-multiply-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/015-claude-greywall-add-multiply-1/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/015-claude-greywall-add-multiply-1/result.json",
+    "sha256": "139e5c570ef4600dd6f8c6500c686bf19af1068d73415e3be3a66778ee0056f2",
+    "bytes": 2377
+  },
+  {
+    "path": "v2-agents/runs/015-claude-greywall-add-multiply-1/stderr.log",
+    "sha256": "8d6427b5e6c1ab95e4d6e0e13e50ef54257209295b6aa15ab31d636befc34cb2",
+    "bytes": 1751
+  },
+  {
+    "path": "v2-agents/runs/015-claude-greywall-add-multiply-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/015-claude-greywall-add-multiply-1/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/015-claude-greywall-add-multiply-1/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-agents/runs/015-claude-greywall-add-multiply-1/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/015-claude-greywall-add-multiply-1/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/016-claude-mxc-fix-offbyone-1/config/mxc.json",
+    "sha256": "086c7cb4ea5a18263c25ce47d4f6eb9a4a5b8e1087fd9d983adbcfb53c9ff58b",
+    "bytes": 2618
+  },
+  {
+    "path": "v2-agents/runs/016-claude-mxc-fix-offbyone-1/patch.diff",
+    "sha256": "2db769afa920db8721b25b5b1a2c964ee1ee90e8bc713fe47f1eab9f6c21668a",
+    "bytes": 276
+  },
+  {
+    "path": "v2-agents/runs/016-claude-mxc-fix-offbyone-1/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/016-claude-mxc-fix-offbyone-1/result.json",
+    "sha256": "68403aa627fca0df81b00100f705db7c83f1d8c4a6ba4d52f9c2caef7bd64e7b",
+    "bytes": 859
+  },
+  {
+    "path": "v2-agents/runs/016-claude-mxc-fix-offbyone-1/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/016-claude-mxc-fix-offbyone-1/stdout.log",
+    "sha256": "ef8baff503126add006bcf50052d2591446b0afaa37bdf56d56fa01bd8196d08",
+    "bytes": 1949
+  },
+  {
+    "path": "v2-agents/runs/016-claude-mxc-fix-offbyone-1/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/016-claude-mxc-fix-offbyone-1/workspace/fix-offbyone/src/parse.py",
+    "sha256": "53e86ca3c3ee994c0cfe14c566e16e620d1e98c5c7f3599207e7ba76ec3c71cd",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/016-claude-mxc-fix-offbyone-1/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/016-claude-mxc-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/017-claude-greywall-fix-offbyone-1/config/greywall.json",
+    "sha256": "a3633a79a80ff103f01d5d18c89fc0a5244f74949251cb3d2e16761d3d1dc406",
+    "bytes": 603
+  },
+  {
+    "path": "v2-agents/runs/017-claude-greywall-fix-offbyone-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/017-claude-greywall-fix-offbyone-1/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/017-claude-greywall-fix-offbyone-1/result.json",
+    "sha256": "fecf96789c621dd7b7610878b56eb27b1db9211dfe3856c75acd9b4fe2204a06",
+    "bytes": 2711
+  },
+  {
+    "path": "v2-agents/runs/017-claude-greywall-fix-offbyone-1/stderr.log",
+    "sha256": "8d6427b5e6c1ab95e4d6e0e13e50ef54257209295b6aa15ab31d636befc34cb2",
+    "bytes": 1751
+  },
+  {
+    "path": "v2-agents/runs/017-claude-greywall-fix-offbyone-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/017-claude-greywall-fix-offbyone-1/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/017-claude-greywall-fix-offbyone-1/workspace/fix-offbyone/src/parse.py",
+    "sha256": "446216aee1cb06ea69e4c3fa8700dfc9685534dd362fc380e90997b214e4a53c",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/017-claude-greywall-fix-offbyone-1/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/017-claude-greywall-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/018-claude-direct-fix-offbyone-1/patch.diff",
+    "sha256": "2db769afa920db8721b25b5b1a2c964ee1ee90e8bc713fe47f1eab9f6c21668a",
+    "bytes": 276
+  },
+  {
+    "path": "v2-agents/runs/018-claude-direct-fix-offbyone-1/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/018-claude-direct-fix-offbyone-1/result.json",
+    "sha256": "ace0e08301a2c97a90dc6d5379bc94504f18afeeabaf8aa9015827bd7784be7a",
+    "bytes": 1067
+  },
+  {
+    "path": "v2-agents/runs/018-claude-direct-fix-offbyone-1/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/018-claude-direct-fix-offbyone-1/stdout.log",
+    "sha256": "8486019c5c0e4f5c1135866104cc898bed8da31ac5aa0a5b9230afda29d2148d",
+    "bytes": 1951
+  },
+  {
+    "path": "v2-agents/runs/018-claude-direct-fix-offbyone-1/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/018-claude-direct-fix-offbyone-1/workspace/fix-offbyone/src/parse.py",
+    "sha256": "53e86ca3c3ee994c0cfe14c566e16e620d1e98c5c7f3599207e7ba76ec3c71cd",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/018-claude-direct-fix-offbyone-1/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/018-claude-direct-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/019-opencode-mxc-refactor-yaml-json-0/config/mxc.json",
+    "sha256": "639db43a2e341fff98f7472259c775e3bea398097664244f0d0ce4c4a03d7f93",
+    "bytes": 2717
+  },
+  {
+    "path": "v2-agents/runs/019-opencode-mxc-refactor-yaml-json-0/patch.diff",
+    "sha256": "adb9a7748853a24474598237dc3f6a328a8d6415423ffbdeeb18097283b66ae6",
+    "bytes": 491
+  },
+  {
+    "path": "v2-agents/runs/019-opencode-mxc-refactor-yaml-json-0/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/019-opencode-mxc-refactor-yaml-json-0/result.json",
+    "sha256": "785cc76b3a633566d388575c97a9d5a24ed9a79f447d3b63f846ae4e031922aa",
+    "bytes": 842
+  },
+  {
+    "path": "v2-agents/runs/019-opencode-mxc-refactor-yaml-json-0/stderr.log",
+    "sha256": "d396088ff3e15aed0acd42aebd5747ae032457e7256e1aa558c4f1fb1db51f55",
+    "bytes": 1753
+  },
+  {
+    "path": "v2-agents/runs/019-opencode-mxc-refactor-yaml-json-0/stdout.log",
+    "sha256": "5d3f49ff1526471294a25789ed02f64943d4645859d9403b6483c7df363c4025",
+    "bytes": 837
+  },
+  {
+    "path": "v2-agents/runs/019-opencode-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/019-opencode-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "bytes": 267
+  },
+  {
+    "path": "v2-agents/runs/019-opencode-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/019-opencode-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/020-opencode-greywall-refactor-yaml-json-0/config/greywall.json",
+    "sha256": "ab0f81333f427c9aecd94880ce22d26035a03831e5d6b57920156c2dd807793c",
+    "bytes": 633
+  },
+  {
+    "path": "v2-agents/runs/020-opencode-greywall-refactor-yaml-json-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/020-opencode-greywall-refactor-yaml-json-0/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/020-opencode-greywall-refactor-yaml-json-0/result.json",
+    "sha256": "9b1f27afd770752daf4d687e6a07b7fff45a5bcce6e2ba2ffffc7f9c90bcc78a",
+    "bytes": 2840
+  },
+  {
+    "path": "v2-agents/runs/020-opencode-greywall-refactor-yaml-json-0/stderr.log",
+    "sha256": "55beee859dcc2568acdd9cc14c95a307906afc7ae5c9396cc4a5b8c7efe6f867",
+    "bytes": 1329
+  },
+  {
+    "path": "v2-agents/runs/020-opencode-greywall-refactor-yaml-json-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/020-opencode-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/020-opencode-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "41dcb5c26d3fd4c3d5a05d76dc58f35386572aa16aadcf055b2bc5245ddd9e8c",
+    "bytes": 272
+  },
+  {
+    "path": "v2-agents/runs/020-opencode-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/020-opencode-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/021-opencode-direct-refactor-yaml-json-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/021-opencode-direct-refactor-yaml-json-0/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/021-opencode-direct-refactor-yaml-json-0/result.json",
+    "sha256": "fd31b4da962c477f69262fc66c66fa5ac0365a8a9fd5b17fb9edf7148e4d4090",
+    "bytes": 2462
+  },
+  {
+    "path": "v2-agents/runs/021-opencode-direct-refactor-yaml-json-0/stderr.log",
+    "sha256": "1f99b462dd3318cf7f66c63f268eb87a7e95bd30404c47ad973802acf7ed0bf2",
+    "bytes": 1844
+  },
+  {
+    "path": "v2-agents/runs/021-opencode-direct-refactor-yaml-json-0/stdout.log",
+    "sha256": "d75fb58a66d98ca72d9965d375b372ae1c524bcebdb1e07ff89408800f398759",
+    "bytes": 576
+  },
+  {
+    "path": "v2-agents/runs/021-opencode-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/021-opencode-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "41dcb5c26d3fd4c3d5a05d76dc58f35386572aa16aadcf055b2bc5245ddd9e8c",
+    "bytes": 272
+  },
+  {
+    "path": "v2-agents/runs/021-opencode-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/021-opencode-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/022-opencode-mxc-add-multiply-0/config/mxc.json",
+    "sha256": "a52ecf175d3338677fc5016a37e61c4effdc674aa50a2b47cd9f831d6c97e9da",
+    "bytes": 2651
+  },
+  {
+    "path": "v2-agents/runs/022-opencode-mxc-add-multiply-0/patch.diff",
+    "sha256": "41fa9e2d9edc401a1207298ecb6bb3cf93f96b3f4510b7781488c0d706cbbd63",
+    "bytes": 196
+  },
+  {
+    "path": "v2-agents/runs/022-opencode-mxc-add-multiply-0/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/022-opencode-mxc-add-multiply-0/result.json",
+    "sha256": "f766c3d4312e31caa766601baf7506e6192d7ac84d74fe228aee1d1ab1a28124",
+    "bytes": 859
+  },
+  {
+    "path": "v2-agents/runs/022-opencode-mxc-add-multiply-0/stderr.log",
+    "sha256": "952ed0d84dff9cad616d09cd61f8bc80c6e65a18c106aa72456e88e9a68a0440",
+    "bytes": 1925
+  },
+  {
+    "path": "v2-agents/runs/022-opencode-mxc-add-multiply-0/stdout.log",
+    "sha256": "622fb40960eaec79d4aa26e371b8311de97c322d8fd06201b7ccbc04c4554b8e",
+    "bytes": 750
+  },
+  {
+    "path": "v2-agents/runs/022-opencode-mxc-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/022-opencode-mxc-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "754afb968c01043d5a25322b0298d6570393bda86819011c5235e84644180d13",
+    "bytes": 70
+  },
+  {
+    "path": "v2-agents/runs/022-opencode-mxc-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/022-opencode-mxc-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/023-opencode-greywall-add-multiply-0/config/greywall.json",
+    "sha256": "d187896a6598f56994a064be3eaf0a511928396f254b40bcbc96cdb39935c80e",
+    "bytes": 609
+  },
+  {
+    "path": "v2-agents/runs/023-opencode-greywall-add-multiply-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/023-opencode-greywall-add-multiply-0/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/023-opencode-greywall-add-multiply-0/result.json",
+    "sha256": "b30b1b6a4049f183f0748559fd0ee622eb7d07410aebe0d51c885ad144d859fa",
+    "bytes": 2297
+  },
+  {
+    "path": "v2-agents/runs/023-opencode-greywall-add-multiply-0/stderr.log",
+    "sha256": "55beee859dcc2568acdd9cc14c95a307906afc7ae5c9396cc4a5b8c7efe6f867",
+    "bytes": 1329
+  },
+  {
+    "path": "v2-agents/runs/023-opencode-greywall-add-multiply-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/023-opencode-greywall-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/023-opencode-greywall-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-agents/runs/023-opencode-greywall-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/023-opencode-greywall-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/024-opencode-direct-add-multiply-0/patch.diff",
+    "sha256": "41fa9e2d9edc401a1207298ecb6bb3cf93f96b3f4510b7781488c0d706cbbd63",
+    "bytes": 196
+  },
+  {
+    "path": "v2-agents/runs/024-opencode-direct-add-multiply-0/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/024-opencode-direct-add-multiply-0/result.json",
+    "sha256": "20e8e44d32a204257905cca635ded5d0b35cd8ea451d96347003f3697a1c7a4f",
+    "bytes": 1039
+  },
+  {
+    "path": "v2-agents/runs/024-opencode-direct-add-multiply-0/stderr.log",
+    "sha256": "98c73cb898c94e3adeacae45724fdc99a9e86ca3dacf421a059c10e04aaf67f0",
+    "bytes": 17855
+  },
+  {
+    "path": "v2-agents/runs/024-opencode-direct-add-multiply-0/stdout.log",
+    "sha256": "50f77ac0cb0d0ae8e895bead2e5b4a52b85b6ff1856bc3baa6a58b1bf46610d2",
+    "bytes": 1579
+  },
+  {
+    "path": "v2-agents/runs/024-opencode-direct-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/024-opencode-direct-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "754afb968c01043d5a25322b0298d6570393bda86819011c5235e84644180d13",
+    "bytes": 70
+  },
+  {
+    "path": "v2-agents/runs/024-opencode-direct-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/024-opencode-direct-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/025-opencode-greywall-fix-offbyone-0/config/greywall.json",
+    "sha256": "511959e905a1df3b6cb846597c183c204c4db7e11216851cc2c8eb49cf3c8127",
+    "bytes": 609
+  },
+  {
+    "path": "v2-agents/runs/025-opencode-greywall-fix-offbyone-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/025-opencode-greywall-fix-offbyone-0/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/025-opencode-greywall-fix-offbyone-0/result.json",
+    "sha256": "68fa18c6bd849e9ef35d986b9d9f84751ef0794b45aa930e60305977c5a5efa4",
+    "bytes": 2635
+  },
+  {
+    "path": "v2-agents/runs/025-opencode-greywall-fix-offbyone-0/stderr.log",
+    "sha256": "55beee859dcc2568acdd9cc14c95a307906afc7ae5c9396cc4a5b8c7efe6f867",
+    "bytes": 1329
+  },
+  {
+    "path": "v2-agents/runs/025-opencode-greywall-fix-offbyone-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/025-opencode-greywall-fix-offbyone-0/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/025-opencode-greywall-fix-offbyone-0/workspace/fix-offbyone/src/parse.py",
+    "sha256": "446216aee1cb06ea69e4c3fa8700dfc9685534dd362fc380e90997b214e4a53c",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/025-opencode-greywall-fix-offbyone-0/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/025-opencode-greywall-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/026-opencode-mxc-fix-offbyone-0/config/mxc.json",
+    "sha256": "6108b4f48185fab23d8bb723b7f59e8e1f01babb2f7e0b8d080bfced55585383",
+    "bytes": 2588
+  },
+  {
+    "path": "v2-agents/runs/026-opencode-mxc-fix-offbyone-0/patch.diff",
+    "sha256": "2db769afa920db8721b25b5b1a2c964ee1ee90e8bc713fe47f1eab9f6c21668a",
+    "bytes": 276
+  },
+  {
+    "path": "v2-agents/runs/026-opencode-mxc-fix-offbyone-0/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/026-opencode-mxc-fix-offbyone-0/result.json",
+    "sha256": "c0bb5fdc433055f12d9d69b68a5ff60b07cd99cdcbf2c5d6ba434b8f422616b5",
+    "bytes": 864
+  },
+  {
+    "path": "v2-agents/runs/026-opencode-mxc-fix-offbyone-0/stderr.log",
+    "sha256": "3c359b01ffbc0ffda80ad79bbf99c99550e635696e9f5decf2bef865bc3e6391",
+    "bytes": 3290
+  },
+  {
+    "path": "v2-agents/runs/026-opencode-mxc-fix-offbyone-0/stdout.log",
+    "sha256": "774c408f52830b3ffec024967665454c9040d3523d8cf468462983f4788fe981",
+    "bytes": 1028
+  },
+  {
+    "path": "v2-agents/runs/026-opencode-mxc-fix-offbyone-0/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/026-opencode-mxc-fix-offbyone-0/workspace/fix-offbyone/src/parse.py",
+    "sha256": "53e86ca3c3ee994c0cfe14c566e16e620d1e98c5c7f3599207e7ba76ec3c71cd",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/026-opencode-mxc-fix-offbyone-0/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/026-opencode-mxc-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/027-opencode-direct-fix-offbyone-0/patch.diff",
+    "sha256": "2db769afa920db8721b25b5b1a2c964ee1ee90e8bc713fe47f1eab9f6c21668a",
+    "bytes": 276
+  },
+  {
+    "path": "v2-agents/runs/027-opencode-direct-fix-offbyone-0/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/027-opencode-direct-fix-offbyone-0/result.json",
+    "sha256": "99e1309ed86e5d8b9a28ab040f09a2d77106b10907dcb0f7881272858f5d3d8c",
+    "bytes": 982
+  },
+  {
+    "path": "v2-agents/runs/027-opencode-direct-fix-offbyone-0/stderr.log",
+    "sha256": "a392ded7e458a19f48aa8916cc523c1897ae672ead5d1d878eca2f363279231e",
+    "bytes": 27206
+  },
+  {
+    "path": "v2-agents/runs/027-opencode-direct-fix-offbyone-0/stdout.log",
+    "sha256": "c5e10d7bffd00727105719d41c16bf16bfd9fb3df181942562ddb69a3708adbe",
+    "bytes": 2374
+  },
+  {
+    "path": "v2-agents/runs/027-opencode-direct-fix-offbyone-0/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/027-opencode-direct-fix-offbyone-0/workspace/fix-offbyone/src/parse.py",
+    "sha256": "53e86ca3c3ee994c0cfe14c566e16e620d1e98c5c7f3599207e7ba76ec3c71cd",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/027-opencode-direct-fix-offbyone-0/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/027-opencode-direct-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/028-opencode-direct-add-multiply-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/028-opencode-direct-add-multiply-1/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/028-opencode-direct-add-multiply-1/result.json",
+    "sha256": "939e3faa2ecc06d48fd6f66e6181c1de64efa63f362fa5a5453a95f981346609",
+    "bytes": 1935
+  },
+  {
+    "path": "v2-agents/runs/028-opencode-direct-add-multiply-1/stderr.log",
+    "sha256": "66ad401b85ff0a9dce68c2fa557306712056f9cde44393bbef4cd991f0399474",
+    "bytes": 17643
+  },
+  {
+    "path": "v2-agents/runs/028-opencode-direct-add-multiply-1/stdout.log",
+    "sha256": "846e309889c01bf3d471c1b4269d9c6df26ab2ac88e548ae88c527d575b116ef",
+    "bytes": 1842
+  },
+  {
+    "path": "v2-agents/runs/028-opencode-direct-add-multiply-1/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/028-opencode-direct-add-multiply-1/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-agents/runs/028-opencode-direct-add-multiply-1/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/028-opencode-direct-add-multiply-1/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/029-opencode-mxc-add-multiply-1/config/mxc.json",
+    "sha256": "a8e06daadc66634fb83e2bd926578ec4157ffca4d7aae24de9542f96e9618208",
+    "bytes": 2651
+  },
+  {
+    "path": "v2-agents/runs/029-opencode-mxc-add-multiply-1/patch.diff",
+    "sha256": "41fa9e2d9edc401a1207298ecb6bb3cf93f96b3f4510b7781488c0d706cbbd63",
+    "bytes": 196
+  },
+  {
+    "path": "v2-agents/runs/029-opencode-mxc-add-multiply-1/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/029-opencode-mxc-add-multiply-1/result.json",
+    "sha256": "aaf144a8b499fa1f3a1ce7580d1f8222063579f34ff69de6b81176958236c641",
+    "bytes": 863
+  },
+  {
+    "path": "v2-agents/runs/029-opencode-mxc-add-multiply-1/stderr.log",
+    "sha256": "3a314d7328e85c24637b148ecc8621e8ad23fe31df965ea4d0bd49c768740ddc",
+    "bytes": 2060
+  },
+  {
+    "path": "v2-agents/runs/029-opencode-mxc-add-multiply-1/stdout.log",
+    "sha256": "18f3406874b987b3f9c5a0cbacb8e33bfc8baf1d831b8ba9513d25755838e58c",
+    "bytes": 763
+  },
+  {
+    "path": "v2-agents/runs/029-opencode-mxc-add-multiply-1/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/029-opencode-mxc-add-multiply-1/workspace/add-multiply/src/calc.py",
+    "sha256": "754afb968c01043d5a25322b0298d6570393bda86819011c5235e84644180d13",
+    "bytes": 70
+  },
+  {
+    "path": "v2-agents/runs/029-opencode-mxc-add-multiply-1/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/029-opencode-mxc-add-multiply-1/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/030-opencode-greywall-add-multiply-1/config/greywall.json",
+    "sha256": "b0fe15d560c9bae59fe28b560579fbc14ed2d041813d79abd9c7f01259d41f93",
+    "bytes": 609
+  },
+  {
+    "path": "v2-agents/runs/030-opencode-greywall-add-multiply-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/030-opencode-greywall-add-multiply-1/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/030-opencode-greywall-add-multiply-1/result.json",
+    "sha256": "c64d13a53e467ba36da1836ab2ad5bf701789cc1143c4d5d721ec642a22abef1",
+    "bytes": 2300
+  },
+  {
+    "path": "v2-agents/runs/030-opencode-greywall-add-multiply-1/stderr.log",
+    "sha256": "55beee859dcc2568acdd9cc14c95a307906afc7ae5c9396cc4a5b8c7efe6f867",
+    "bytes": 1329
+  },
+  {
+    "path": "v2-agents/runs/030-opencode-greywall-add-multiply-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/030-opencode-greywall-add-multiply-1/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/030-opencode-greywall-add-multiply-1/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-agents/runs/030-opencode-greywall-add-multiply-1/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/030-opencode-greywall-add-multiply-1/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/031-opencode-mxc-fix-offbyone-1/config/mxc.json",
+    "sha256": "3d3b226feba0078547c863c032bb47de6a85babd04090f2cdf97c963b9ae6959",
+    "bytes": 2588
+  },
+  {
+    "path": "v2-agents/runs/031-opencode-mxc-fix-offbyone-1/patch.diff",
+    "sha256": "2db769afa920db8721b25b5b1a2c964ee1ee90e8bc713fe47f1eab9f6c21668a",
+    "bytes": 276
+  },
+  {
+    "path": "v2-agents/runs/031-opencode-mxc-fix-offbyone-1/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/031-opencode-mxc-fix-offbyone-1/result.json",
+    "sha256": "5df337fa37cee9264101cdee9e1ee1ebd5dda5e19d4910b09e070d95701abb75",
+    "bytes": 864
+  },
+  {
+    "path": "v2-agents/runs/031-opencode-mxc-fix-offbyone-1/stderr.log",
+    "sha256": "ec5deb95d28e68f8ccd1dc5d27574e8d8381a95f18ac25cab63cd2d809bcf933",
+    "bytes": 3466
+  },
+  {
+    "path": "v2-agents/runs/031-opencode-mxc-fix-offbyone-1/stdout.log",
+    "sha256": "af511316ea4ea1e5355ff27f8d6aa18981dcdf78d6a7f96a682a12133687c9b8",
+    "bytes": 1035
+  },
+  {
+    "path": "v2-agents/runs/031-opencode-mxc-fix-offbyone-1/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/031-opencode-mxc-fix-offbyone-1/workspace/fix-offbyone/src/parse.py",
+    "sha256": "53e86ca3c3ee994c0cfe14c566e16e620d1e98c5c7f3599207e7ba76ec3c71cd",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/031-opencode-mxc-fix-offbyone-1/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/031-opencode-mxc-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/032-opencode-greywall-fix-offbyone-1/config/greywall.json",
+    "sha256": "de0f9d877a04fc7b9ddacc1d094b9ed78eb257d4f1664db73d8bc7accdbfd1ee",
+    "bytes": 609
+  },
+  {
+    "path": "v2-agents/runs/032-opencode-greywall-fix-offbyone-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/032-opencode-greywall-fix-offbyone-1/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/032-opencode-greywall-fix-offbyone-1/result.json",
+    "sha256": "018fae5b93560656b6c37592fd77f20b0078cacab29efc492343b85b129c2c2e",
+    "bytes": 2633
+  },
+  {
+    "path": "v2-agents/runs/032-opencode-greywall-fix-offbyone-1/stderr.log",
+    "sha256": "55beee859dcc2568acdd9cc14c95a307906afc7ae5c9396cc4a5b8c7efe6f867",
+    "bytes": 1329
+  },
+  {
+    "path": "v2-agents/runs/032-opencode-greywall-fix-offbyone-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/032-opencode-greywall-fix-offbyone-1/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/032-opencode-greywall-fix-offbyone-1/workspace/fix-offbyone/src/parse.py",
+    "sha256": "446216aee1cb06ea69e4c3fa8700dfc9685534dd362fc380e90997b214e4a53c",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/032-opencode-greywall-fix-offbyone-1/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/032-opencode-greywall-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/033-opencode-direct-fix-offbyone-1/patch.diff",
+    "sha256": "2db769afa920db8721b25b5b1a2c964ee1ee90e8bc713fe47f1eab9f6c21668a",
+    "bytes": 276
+  },
+  {
+    "path": "v2-agents/runs/033-opencode-direct-fix-offbyone-1/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/033-opencode-direct-fix-offbyone-1/result.json",
+    "sha256": "ba42b1d45a37f2a954edf19e2490d8348e4fa86b2a19f13be549f4e486cec519",
+    "bytes": 978
+  },
+  {
+    "path": "v2-agents/runs/033-opencode-direct-fix-offbyone-1/stderr.log",
+    "sha256": "87660eaa5bd5a3a5adb4102ab64f4f1c3500d1852ad50119a93b84917814d468",
+    "bytes": 23036
+  },
+  {
+    "path": "v2-agents/runs/033-opencode-direct-fix-offbyone-1/stdout.log",
+    "sha256": "f2e7ff34877a548dace69ea7d4d9ac1b6d3ddc3f0dd57df624889e455edf239a",
+    "bytes": 1920
+  },
+  {
+    "path": "v2-agents/runs/033-opencode-direct-fix-offbyone-1/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/033-opencode-direct-fix-offbyone-1/workspace/fix-offbyone/src/parse.py",
+    "sha256": "53e86ca3c3ee994c0cfe14c566e16e620d1e98c5c7f3599207e7ba76ec3c71cd",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/033-opencode-direct-fix-offbyone-1/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/033-opencode-direct-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/034-opencode-direct-refactor-yaml-json-1/patch.diff",
+    "sha256": "adb9a7748853a24474598237dc3f6a328a8d6415423ffbdeeb18097283b66ae6",
+    "bytes": 491
+  },
+  {
+    "path": "v2-agents/runs/034-opencode-direct-refactor-yaml-json-1/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/034-opencode-direct-refactor-yaml-json-1/result.json",
+    "sha256": "0922146508d76cbefbc66181aed59f330b4d774a69cfaed49585571cadd4768a",
+    "bytes": 996
+  },
+  {
+    "path": "v2-agents/runs/034-opencode-direct-refactor-yaml-json-1/stderr.log",
+    "sha256": "6aee3a00f32852cf90ea10c16632eb1e1e840d7378b69020ef129db01334c055",
+    "bytes": 2085
+  },
+  {
+    "path": "v2-agents/runs/034-opencode-direct-refactor-yaml-json-1/stdout.log",
+    "sha256": "dc1daabd06cd3ad8f1bcea5ed558f8ac761711683393379eae4639b760abe5ed",
+    "bytes": 1793
+  },
+  {
+    "path": "v2-agents/runs/034-opencode-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/034-opencode-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "bytes": 267
+  },
+  {
+    "path": "v2-agents/runs/034-opencode-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/034-opencode-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/035-opencode-greywall-refactor-yaml-json-1/config/greywall.json",
+    "sha256": "d08b7c7164dd2535897a359bddabd685d0c804bdcc9ed6f9503acec5e176ecc5",
+    "bytes": 633
+  },
+  {
+    "path": "v2-agents/runs/035-opencode-greywall-refactor-yaml-json-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/035-opencode-greywall-refactor-yaml-json-1/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/035-opencode-greywall-refactor-yaml-json-1/result.json",
+    "sha256": "9190a824351de0d3e1e4b8c84ce55acc6b674314f82b63d8759615bd177976ac",
+    "bytes": 2837
+  },
+  {
+    "path": "v2-agents/runs/035-opencode-greywall-refactor-yaml-json-1/stderr.log",
+    "sha256": "55beee859dcc2568acdd9cc14c95a307906afc7ae5c9396cc4a5b8c7efe6f867",
+    "bytes": 1329
+  },
+  {
+    "path": "v2-agents/runs/035-opencode-greywall-refactor-yaml-json-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/035-opencode-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/035-opencode-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "41dcb5c26d3fd4c3d5a05d76dc58f35386572aa16aadcf055b2bc5245ddd9e8c",
+    "bytes": 272
+  },
+  {
+    "path": "v2-agents/runs/035-opencode-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/035-opencode-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/036-opencode-mxc-refactor-yaml-json-1/config/mxc.json",
+    "sha256": "90b9fc7c166277318de990e5d237f3fe316a0d31bfea7cf8a8732d465f38bb8e",
+    "bytes": 2717
+  },
+  {
+    "path": "v2-agents/runs/036-opencode-mxc-refactor-yaml-json-1/patch.diff",
+    "sha256": "adb9a7748853a24474598237dc3f6a328a8d6415423ffbdeeb18097283b66ae6",
+    "bytes": 491
+  },
+  {
+    "path": "v2-agents/runs/036-opencode-mxc-refactor-yaml-json-1/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/036-opencode-mxc-refactor-yaml-json-1/result.json",
+    "sha256": "91da23fc125f62cf90e29e8535b9ea860a8f65933e2ea5071129da76bea023bb",
+    "bytes": 843
+  },
+  {
+    "path": "v2-agents/runs/036-opencode-mxc-refactor-yaml-json-1/stderr.log",
+    "sha256": "60310a5270ae91e383f57f18a9bfea967773f07108b97bd561b645d14760a7a4",
+    "bytes": 1766
+  },
+  {
+    "path": "v2-agents/runs/036-opencode-mxc-refactor-yaml-json-1/stdout.log",
+    "sha256": "9866b86b849d69a910afbedc14470a95ccecad62dd69f99930e084b8116be1c6",
+    "bytes": 946
+  },
+  {
+    "path": "v2-agents/runs/036-opencode-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/036-opencode-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "bytes": 267
+  },
+  {
+    "path": "v2-agents/runs/036-opencode-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/036-opencode-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/037-codex-mxc-add-multiply-0/config/mxc.json",
+    "sha256": "70f431e9bce435f05c2e1575b738886dc58e0779b8c0dec9d117df48847e6e39",
+    "bytes": 2851
+  },
+  {
+    "path": "v2-agents/runs/037-codex-mxc-add-multiply-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/037-codex-mxc-add-multiply-0/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/037-codex-mxc-add-multiply-0/result.json",
+    "sha256": "b490526bce440af05e2a0b18385fc3847af7d0ba9379c40368415a34c9105810",
+    "bytes": 1729
+  },
+  {
+    "path": "v2-agents/runs/037-codex-mxc-add-multiply-0/stderr.log",
+    "sha256": "ccb51f5464ca5d826a6b561f7a44920b7973dc358e57f44f8241056868caf28c",
+    "bytes": 167
+  },
+  {
+    "path": "v2-agents/runs/037-codex-mxc-add-multiply-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/037-codex-mxc-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/037-codex-mxc-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-agents/runs/037-codex-mxc-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/037-codex-mxc-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/038-codex-direct-add-multiply-0/patch.diff",
+    "sha256": "50825668f12d08d2e71290889259a9c7e59328044ab0e5668d02b8680707ef6a",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/038-codex-direct-add-multiply-0/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/038-codex-direct-add-multiply-0/result.json",
+    "sha256": "bdf9d0e50911b15377c4e361b96af3469ad90401e449afa90f4dfcc4fd20ae3e",
+    "bytes": 1274
+  },
+  {
+    "path": "v2-agents/runs/038-codex-direct-add-multiply-0/stderr.log",
+    "sha256": "9482868474a68df183bfe1869594f18b11511f76f0c8396207c8d69719596fd7",
+    "bytes": 3567
+  },
+  {
+    "path": "v2-agents/runs/038-codex-direct-add-multiply-0/stdout.log",
+    "sha256": "fe392bbcb2653c0cc16465f29af0651d1e5144a72894481a0d5711a50a5b7a29",
+    "bytes": 150
+  },
+  {
+    "path": "v2-agents/runs/038-codex-direct-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/038-codex-direct-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "e7f018d15cf4f7906638bfd1b52b2d18263b491ffd555320de3eb0b9cc970c3a",
+    "bytes": 71
+  },
+  {
+    "path": "v2-agents/runs/038-codex-direct-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/038-codex-direct-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/039-codex-greywall-add-multiply-0/config/greywall.json",
+    "sha256": "244c319b5b66750071fd8274f8d2d1c77b6b8212de5dd1be430cd6f596a180c2",
+    "bytes": 697
+  },
+  {
+    "path": "v2-agents/runs/039-codex-greywall-add-multiply-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/039-codex-greywall-add-multiply-0/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/039-codex-greywall-add-multiply-0/result.json",
+    "sha256": "ad8562d4b3dc0b99773aacfca431b4155aa7a3a83ef80b31d84746ae09557761",
+    "bytes": 2524
+  },
+  {
+    "path": "v2-agents/runs/039-codex-greywall-add-multiply-0/stderr.log",
+    "sha256": "02e576a5f0cf6aa946b18ea5d729715b1870630b1e81536dde1cbc05fea7fb3d",
+    "bytes": 1234
+  },
+  {
+    "path": "v2-agents/runs/039-codex-greywall-add-multiply-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/039-codex-greywall-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/039-codex-greywall-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-agents/runs/039-codex-greywall-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/039-codex-greywall-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/040-codex-greywall-fix-offbyone-0/config/greywall.json",
+    "sha256": "ff8657b2c8e49aeee5f569119824ccab1d4600c18f096c79b8148b796ac0ff13",
+    "bytes": 697
+  },
+  {
+    "path": "v2-agents/runs/040-codex-greywall-fix-offbyone-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/040-codex-greywall-fix-offbyone-0/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/040-codex-greywall-fix-offbyone-0/result.json",
+    "sha256": "f17a43a070c9954d5d9ccfce847e09b26c4bc7f588f65a63b0009d98461d5d05",
+    "bytes": 2859
+  },
+  {
+    "path": "v2-agents/runs/040-codex-greywall-fix-offbyone-0/stderr.log",
+    "sha256": "02e576a5f0cf6aa946b18ea5d729715b1870630b1e81536dde1cbc05fea7fb3d",
+    "bytes": 1234
+  },
+  {
+    "path": "v2-agents/runs/040-codex-greywall-fix-offbyone-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/040-codex-greywall-fix-offbyone-0/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/040-codex-greywall-fix-offbyone-0/workspace/fix-offbyone/src/parse.py",
+    "sha256": "446216aee1cb06ea69e4c3fa8700dfc9685534dd362fc380e90997b214e4a53c",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/040-codex-greywall-fix-offbyone-0/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/040-codex-greywall-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/041-codex-direct-fix-offbyone-0/patch.diff",
+    "sha256": "2db769afa920db8721b25b5b1a2c964ee1ee90e8bc713fe47f1eab9f6c21668a",
+    "bytes": 276
+  },
+  {
+    "path": "v2-agents/runs/041-codex-direct-fix-offbyone-0/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/041-codex-direct-fix-offbyone-0/result.json",
+    "sha256": "c51e7940f795996d36c69de616262f83e6181aa1aeac1ee3279bf36ab0a3b58e",
+    "bytes": 1217
+  },
+  {
+    "path": "v2-agents/runs/041-codex-direct-fix-offbyone-0/stderr.log",
+    "sha256": "edf2335e64a25860cee7beb270b6b9e834fb35471efb56f3f4d3e2b72c95faa6",
+    "bytes": 6046
+  },
+  {
+    "path": "v2-agents/runs/041-codex-direct-fix-offbyone-0/stdout.log",
+    "sha256": "071c16755fff36d0ad1ea9438bb23a81e864f810a771e32e11d37675dbefec04",
+    "bytes": 171
+  },
+  {
+    "path": "v2-agents/runs/041-codex-direct-fix-offbyone-0/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/041-codex-direct-fix-offbyone-0/workspace/fix-offbyone/src/parse.py",
+    "sha256": "53e86ca3c3ee994c0cfe14c566e16e620d1e98c5c7f3599207e7ba76ec3c71cd",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/041-codex-direct-fix-offbyone-0/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/041-codex-direct-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/042-codex-mxc-fix-offbyone-0/config/mxc.json",
+    "sha256": "d27ba91334b3d6557d5fc74104785d81c8265622ab0692b609e32d464014a81d",
+    "bytes": 2788
+  },
+  {
+    "path": "v2-agents/runs/042-codex-mxc-fix-offbyone-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/042-codex-mxc-fix-offbyone-0/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/042-codex-mxc-fix-offbyone-0/result.json",
+    "sha256": "dc4f450a072bc8b6c9dc2cf61a4ef703f3ca7fc49a80e0e41f3ebd4d9db89f52",
+    "bytes": 2126
+  },
+  {
+    "path": "v2-agents/runs/042-codex-mxc-fix-offbyone-0/stderr.log",
+    "sha256": "ccb51f5464ca5d826a6b561f7a44920b7973dc358e57f44f8241056868caf28c",
+    "bytes": 167
+  },
+  {
+    "path": "v2-agents/runs/042-codex-mxc-fix-offbyone-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/042-codex-mxc-fix-offbyone-0/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/042-codex-mxc-fix-offbyone-0/workspace/fix-offbyone/src/parse.py",
+    "sha256": "446216aee1cb06ea69e4c3fa8700dfc9685534dd362fc380e90997b214e4a53c",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/042-codex-mxc-fix-offbyone-0/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/042-codex-mxc-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/043-codex-greywall-refactor-yaml-json-0/config/greywall.json",
+    "sha256": "01b628566a10062580c1eec51482d965bb4422a866ac890487566123b03f00d2",
+    "bytes": 721
+  },
+  {
+    "path": "v2-agents/runs/043-codex-greywall-refactor-yaml-json-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/043-codex-greywall-refactor-yaml-json-0/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/043-codex-greywall-refactor-yaml-json-0/result.json",
+    "sha256": "6747730651d629a75e14d51145cc866ea84b91fbe132698699df926807060862",
+    "bytes": 3077
+  },
+  {
+    "path": "v2-agents/runs/043-codex-greywall-refactor-yaml-json-0/stderr.log",
+    "sha256": "02e576a5f0cf6aa946b18ea5d729715b1870630b1e81536dde1cbc05fea7fb3d",
+    "bytes": 1234
+  },
+  {
+    "path": "v2-agents/runs/043-codex-greywall-refactor-yaml-json-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/043-codex-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/043-codex-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "41dcb5c26d3fd4c3d5a05d76dc58f35386572aa16aadcf055b2bc5245ddd9e8c",
+    "bytes": 272
+  },
+  {
+    "path": "v2-agents/runs/043-codex-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/043-codex-greywall-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/044-codex-direct-refactor-yaml-json-0/patch.diff",
+    "sha256": "adb9a7748853a24474598237dc3f6a328a8d6415423ffbdeeb18097283b66ae6",
+    "bytes": 491
+  },
+  {
+    "path": "v2-agents/runs/044-codex-direct-refactor-yaml-json-0/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/044-codex-direct-refactor-yaml-json-0/result.json",
+    "sha256": "e48a8bc042b6937d9d33266809d0939c1847065de1a3b53b942aa68e279028df",
+    "bytes": 1245
+  },
+  {
+    "path": "v2-agents/runs/044-codex-direct-refactor-yaml-json-0/stderr.log",
+    "sha256": "3b67b6dba11d8abcc765485ae47d63c5e07ba3f555855feb6e150a0cce00f258",
+    "bytes": 4848
+  },
+  {
+    "path": "v2-agents/runs/044-codex-direct-refactor-yaml-json-0/stdout.log",
+    "sha256": "df82501cf4c597de975da6840bfe13f5d8313331be1a59062f7ddbc7cdb5284e",
+    "bytes": 188
+  },
+  {
+    "path": "v2-agents/runs/044-codex-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/044-codex-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "bytes": 267
+  },
+  {
+    "path": "v2-agents/runs/044-codex-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/044-codex-direct-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/045-codex-mxc-refactor-yaml-json-0/config/mxc.json",
+    "sha256": "bf920e98ea4c948625ae66b895ebcd7f8263588866a29eeef99b3a51562c233b",
+    "bytes": 2929
+  },
+  {
+    "path": "v2-agents/runs/045-codex-mxc-refactor-yaml-json-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/045-codex-mxc-refactor-yaml-json-0/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/045-codex-mxc-refactor-yaml-json-0/result.json",
+    "sha256": "d673e747556019ad5d5f9a7853aa21b1798b9484d64c721af189e4d805436e89",
+    "bytes": 2284
+  },
+  {
+    "path": "v2-agents/runs/045-codex-mxc-refactor-yaml-json-0/stderr.log",
+    "sha256": "ccb51f5464ca5d826a6b561f7a44920b7973dc358e57f44f8241056868caf28c",
+    "bytes": 167
+  },
+  {
+    "path": "v2-agents/runs/045-codex-mxc-refactor-yaml-json-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/045-codex-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/045-codex-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "41dcb5c26d3fd4c3d5a05d76dc58f35386572aa16aadcf055b2bc5245ddd9e8c",
+    "bytes": 272
+  },
+  {
+    "path": "v2-agents/runs/045-codex-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/045-codex-mxc-refactor-yaml-json-0/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/046-codex-direct-fix-offbyone-1/patch.diff",
+    "sha256": "2db769afa920db8721b25b5b1a2c964ee1ee90e8bc713fe47f1eab9f6c21668a",
+    "bytes": 276
+  },
+  {
+    "path": "v2-agents/runs/046-codex-direct-fix-offbyone-1/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/046-codex-direct-fix-offbyone-1/result.json",
+    "sha256": "470554d2a0a1f2bcdba98c20e29565ead1ef402bcdca7e67bf96fbd48a50517d",
+    "bytes": 1215
+  },
+  {
+    "path": "v2-agents/runs/046-codex-direct-fix-offbyone-1/stderr.log",
+    "sha256": "ae0522a8d9ace5fa41a831f41e5bb480a68b3a3ca4b2d37cb10d20cd64260a9f",
+    "bytes": 5808
+  },
+  {
+    "path": "v2-agents/runs/046-codex-direct-fix-offbyone-1/stdout.log",
+    "sha256": "5f5dc5a19d0b814b25555c4a6bf1515318bcd438672943348cc80fd6f202e0c2",
+    "bytes": 193
+  },
+  {
+    "path": "v2-agents/runs/046-codex-direct-fix-offbyone-1/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/046-codex-direct-fix-offbyone-1/workspace/fix-offbyone/src/parse.py",
+    "sha256": "53e86ca3c3ee994c0cfe14c566e16e620d1e98c5c7f3599207e7ba76ec3c71cd",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/046-codex-direct-fix-offbyone-1/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/046-codex-direct-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/047-codex-mxc-fix-offbyone-1/config/mxc.json",
+    "sha256": "f80b3262ca443ddcb9920c6cadb331ed9eb0341fb62f68193598aab60865cd6e",
+    "bytes": 2788
+  },
+  {
+    "path": "v2-agents/runs/047-codex-mxc-fix-offbyone-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/047-codex-mxc-fix-offbyone-1/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/047-codex-mxc-fix-offbyone-1/result.json",
+    "sha256": "2a303e98bcf2bb831cf7d60ceb9d16e873eb189b0c63945a09e3620150cbad43",
+    "bytes": 2124
+  },
+  {
+    "path": "v2-agents/runs/047-codex-mxc-fix-offbyone-1/stderr.log",
+    "sha256": "ccb51f5464ca5d826a6b561f7a44920b7973dc358e57f44f8241056868caf28c",
+    "bytes": 167
+  },
+  {
+    "path": "v2-agents/runs/047-codex-mxc-fix-offbyone-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/047-codex-mxc-fix-offbyone-1/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/047-codex-mxc-fix-offbyone-1/workspace/fix-offbyone/src/parse.py",
+    "sha256": "446216aee1cb06ea69e4c3fa8700dfc9685534dd362fc380e90997b214e4a53c",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/047-codex-mxc-fix-offbyone-1/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/047-codex-mxc-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/048-codex-greywall-fix-offbyone-1/config/greywall.json",
+    "sha256": "d0e0547e5a25774d463b8acdd5e50b4ab258c4b268fa0a551866be6d3e5eea2b",
+    "bytes": 697
+  },
+  {
+    "path": "v2-agents/runs/048-codex-greywall-fix-offbyone-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/048-codex-greywall-fix-offbyone-1/prompt.txt",
+    "sha256": "23b2065adf19c19e128a82bd5a5c07a2ef67fa1229da2ab83d59902e99888baf",
+    "bytes": 153
+  },
+  {
+    "path": "v2-agents/runs/048-codex-greywall-fix-offbyone-1/result.json",
+    "sha256": "3cfb6f71a3a1d5c29c472ba6ee1d5894c8ee209d0aec6472afb8b1aae33f1f26",
+    "bytes": 2859
+  },
+  {
+    "path": "v2-agents/runs/048-codex-greywall-fix-offbyone-1/stderr.log",
+    "sha256": "02e576a5f0cf6aa946b18ea5d729715b1870630b1e81536dde1cbc05fea7fb3d",
+    "bytes": 1234
+  },
+  {
+    "path": "v2-agents/runs/048-codex-greywall-fix-offbyone-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/048-codex-greywall-fix-offbyone-1/workspace/fix-offbyone/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/048-codex-greywall-fix-offbyone-1/workspace/fix-offbyone/src/parse.py",
+    "sha256": "446216aee1cb06ea69e4c3fa8700dfc9685534dd362fc380e90997b214e4a53c",
+    "bytes": 126
+  },
+  {
+    "path": "v2-agents/runs/048-codex-greywall-fix-offbyone-1/workspace/fix-offbyone/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/048-codex-greywall-fix-offbyone-1/workspace/fix-offbyone/tests/test_parse.py",
+    "sha256": "eeb06612bd36d5056d8168be3e61371d382a78286ec30c29ec195e5717cbd5a8",
+    "bytes": 253
+  },
+  {
+    "path": "v2-agents/runs/049-codex-greywall-add-multiply-1/config/greywall.json",
+    "sha256": "7c14ca622cbdd2dd35f11430e2c7e17d9ff3aca45de343e38dd91818c30f745f",
+    "bytes": 697
+  },
+  {
+    "path": "v2-agents/runs/049-codex-greywall-add-multiply-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/049-codex-greywall-add-multiply-1/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/049-codex-greywall-add-multiply-1/result.json",
+    "sha256": "5d857dba9f7ac55feddff12faa37c5edc81ce9c1ee9e5ea15b7310fc67b878c9",
+    "bytes": 2524
+  },
+  {
+    "path": "v2-agents/runs/049-codex-greywall-add-multiply-1/stderr.log",
+    "sha256": "02e576a5f0cf6aa946b18ea5d729715b1870630b1e81536dde1cbc05fea7fb3d",
+    "bytes": 1234
+  },
+  {
+    "path": "v2-agents/runs/049-codex-greywall-add-multiply-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/049-codex-greywall-add-multiply-1/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/049-codex-greywall-add-multiply-1/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-agents/runs/049-codex-greywall-add-multiply-1/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/049-codex-greywall-add-multiply-1/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/050-codex-mxc-add-multiply-1/config/mxc.json",
+    "sha256": "6c7168a097cad408d3a731789888b5387948e310629bc5cd5309d4395beda26d",
+    "bytes": 2851
+  },
+  {
+    "path": "v2-agents/runs/050-codex-mxc-add-multiply-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/050-codex-mxc-add-multiply-1/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/050-codex-mxc-add-multiply-1/result.json",
+    "sha256": "5f9cefd063941e5ed8bd63ac759a00248c289e036c7c25afecbf68dcda310d7d",
+    "bytes": 1726
+  },
+  {
+    "path": "v2-agents/runs/050-codex-mxc-add-multiply-1/stderr.log",
+    "sha256": "ccb51f5464ca5d826a6b561f7a44920b7973dc358e57f44f8241056868caf28c",
+    "bytes": 167
+  },
+  {
+    "path": "v2-agents/runs/050-codex-mxc-add-multiply-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-agents/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/051-codex-direct-add-multiply-1/patch.diff",
+    "sha256": "50825668f12d08d2e71290889259a9c7e59328044ab0e5668d02b8680707ef6a",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/051-codex-direct-add-multiply-1/prompt.txt",
+    "sha256": "196b0029bb57bed1820bfed101e69c49b93f9af6cf25d3fda7d317f97de23374",
+    "bytes": 216
+  },
+  {
+    "path": "v2-agents/runs/051-codex-direct-add-multiply-1/result.json",
+    "sha256": "435eeb2ec20b9f05b3c4c1655bed988077413e4cddc0be57ed4f3f0cd1f030b4",
+    "bytes": 1275
+  },
+  {
+    "path": "v2-agents/runs/051-codex-direct-add-multiply-1/stderr.log",
+    "sha256": "659711c5a0c67bbe83174fab69cf17032b7dbdc22df51031b2997fd6b7ab91ce",
+    "bytes": 3540
+  },
+  {
+    "path": "v2-agents/runs/051-codex-direct-add-multiply-1/stdout.log",
+    "sha256": "fe392bbcb2653c0cc16465f29af0651d1e5144a72894481a0d5711a50a5b7a29",
+    "bytes": 150
+  },
+  {
+    "path": "v2-agents/runs/051-codex-direct-add-multiply-1/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/051-codex-direct-add-multiply-1/workspace/add-multiply/src/calc.py",
+    "sha256": "e7f018d15cf4f7906638bfd1b52b2d18263b491ffd555320de3eb0b9cc970c3a",
+    "bytes": 71
+  },
+  {
+    "path": "v2-agents/runs/051-codex-direct-add-multiply-1/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/051-codex-direct-add-multiply-1/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-agents/runs/052-codex-direct-refactor-yaml-json-1/patch.diff",
+    "sha256": "adb9a7748853a24474598237dc3f6a328a8d6415423ffbdeeb18097283b66ae6",
+    "bytes": 491
+  },
+  {
+    "path": "v2-agents/runs/052-codex-direct-refactor-yaml-json-1/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/052-codex-direct-refactor-yaml-json-1/result.json",
+    "sha256": "858bce98070e888899b19d762b9bd41ebc837b27942cbab790a6097035cc0a3d",
+    "bytes": 1249
+  },
+  {
+    "path": "v2-agents/runs/052-codex-direct-refactor-yaml-json-1/stderr.log",
+    "sha256": "81ac3ff4644d58fe2a7b8ebcfa1d8a0cdcc04a8c347ced1d4451e6d33a43210f",
+    "bytes": 5580
+  },
+  {
+    "path": "v2-agents/runs/052-codex-direct-refactor-yaml-json-1/stdout.log",
+    "sha256": "6be4373b14d3515b2fb02c198391ec1ac549b4785564741a73a8fb5195ab1bb5",
+    "bytes": 194
+  },
+  {
+    "path": "v2-agents/runs/052-codex-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/052-codex-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "bytes": 267
+  },
+  {
+    "path": "v2-agents/runs/052-codex-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/052-codex-direct-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/053-codex-greywall-refactor-yaml-json-1/config/greywall.json",
+    "sha256": "5b88022141dcba66a4941aa23279e6fb1c5ae9af6a44a28490773179e077e203",
+    "bytes": 721
+  },
+  {
+    "path": "v2-agents/runs/053-codex-greywall-refactor-yaml-json-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/053-codex-greywall-refactor-yaml-json-1/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/053-codex-greywall-refactor-yaml-json-1/result.json",
+    "sha256": "17896c4df75e7ce73eb941dd6bda37818a6bf0cb22be17c0f628a5ad218a45c5",
+    "bytes": 3077
+  },
+  {
+    "path": "v2-agents/runs/053-codex-greywall-refactor-yaml-json-1/stderr.log",
+    "sha256": "02e576a5f0cf6aa946b18ea5d729715b1870630b1e81536dde1cbc05fea7fb3d",
+    "bytes": 1234
+  },
+  {
+    "path": "v2-agents/runs/053-codex-greywall-refactor-yaml-json-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/053-codex-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/053-codex-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "41dcb5c26d3fd4c3d5a05d76dc58f35386572aa16aadcf055b2bc5245ddd9e8c",
+    "bytes": 272
+  },
+  {
+    "path": "v2-agents/runs/053-codex-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/053-codex-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents/runs/054-codex-mxc-refactor-yaml-json-1/config/mxc.json",
+    "sha256": "1206fc854e22db9ccfa9140bad85615f102145c6181acd27155942984022bf03",
+    "bytes": 2929
+  },
+  {
+    "path": "v2-agents/runs/054-codex-mxc-refactor-yaml-json-1/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/054-codex-mxc-refactor-yaml-json-1/prompt.txt",
+    "sha256": "16bfdfdb1f161bac6010b3d77729bbc1036f221f4132c2b84f8e1fbf1791b17b",
+    "bytes": 198
+  },
+  {
+    "path": "v2-agents/runs/054-codex-mxc-refactor-yaml-json-1/result.json",
+    "sha256": "e2862a4f5a266d01529f5661ab39a76739f2d4126b955dd70661a4334eae4990",
+    "bytes": 2289
+  },
+  {
+    "path": "v2-agents/runs/054-codex-mxc-refactor-yaml-json-1/stderr.log",
+    "sha256": "ccb51f5464ca5d826a6b561f7a44920b7973dc358e57f44f8241056868caf28c",
+    "bytes": 167
+  },
+  {
+    "path": "v2-agents/runs/054-codex-mxc-refactor-yaml-json-1/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/054-codex-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/054-codex-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/src/store.py",
+    "sha256": "41dcb5c26d3fd4c3d5a05d76dc58f35386572aa16aadcf055b2bc5245ddd9e8c",
+    "bytes": 272
+  },
+  {
+    "path": "v2-agents/runs/054-codex-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-agents/runs/054-codex-mxc-refactor-yaml-json-1/workspace/refactor-yaml-json/tests/test_store.py",
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "bytes": 418
+  },
+  {
+    "path": "v2-agents.log",
+    "sha256": "5aedb0e67e9ed6abab2b6a1e2563b9c4a4ff2c5a4b3b976a0b1efec4662a2494",
+    "bytes": 3478
+  },
+  {
+    "path": "v2-smoke-mxc/agent-runs.ndjson",
+    "sha256": "95a10e8124ac31e49873bf6206e059c0663c17bfcc7f08e8d7442af4d5a8a73f",
+    "bytes": 3345
+  },
+  {
+    "path": "v2-smoke-mxc/agent-summary.json",
+    "sha256": "05ea3ea18eec551f9a832d73b13182897bb908444c23b0a3ff91b4a3bf9b4da4",
+    "bytes": 201
+  },
+  {
+    "path": "v2-smoke-mxc/metadata.json",
+    "sha256": "1ac8a80860c02b0da7c0576d294c4e788098689b6e8c0f54a931e9b72bdf9f0d",
+    "bytes": 1406
+  },
+  {
+    "path": "v2-smoke-mxc/proxy-health.json",
+    "sha256": "bc5b8d49daf019d205530cedb9586e7682ce5d03786e94940ed0104b9df1396c",
+    "bytes": 212
+  },
+  {
+    "path": "v2-smoke-mxc/proxy-rules.json",
+    "sha256": "c41c728eecb559578006d405aa9eb145b3d6ad1905c12b8d1a5da7343e47f7bc",
+    "bytes": 4801
+  },
+  {
+    "path": "v2-smoke-mxc/proxy-startup.log",
+    "sha256": "989406510dda46a4dbe21d50fb75187b7b51c11aff6292c9893400ddab2ea1a5",
+    "bytes": 85187
+  },
+  {
+    "path": "v2-smoke-mxc/runs/001-claude-mxc-add-multiply-0/config/mxc.json",
+    "sha256": "6a1ada1b547fe4627273782dbf2b928576b4050a66257cce8ea646db68553d0f",
+    "bytes": 2542
+  },
+  {
+    "path": "v2-smoke-mxc/runs/001-claude-mxc-add-multiply-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc/runs/001-claude-mxc-add-multiply-0/result.json",
+    "sha256": "038e84daca5e44422546a92ba9c817bd7f9bdd2b884592347ada5192fc2439be",
+    "bytes": 1749
+  },
+  {
+    "path": "v2-smoke-mxc/runs/001-claude-mxc-add-multiply-0/stderr.log",
+    "sha256": "e5523d120849f701cccd44de72e822abbc44c9666a9264b047a24a1c6c69147f",
+    "bytes": 55
+  },
+  {
+    "path": "v2-smoke-mxc/runs/001-claude-mxc-add-multiply-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc/runs/001-claude-mxc-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc/runs/001-claude-mxc-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-smoke-mxc/runs/001-claude-mxc-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc/runs/001-claude-mxc-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-smoke-mxc/runs/002-opencode-mxc-add-multiply-0/config/mxc.json",
+    "sha256": "2cc773c8f827956e9a36c884d92602bda4333eeb9c51f9290a4ddc873fc8eeeb",
+    "bytes": 2510
+  },
+  {
+    "path": "v2-smoke-mxc/runs/002-opencode-mxc-add-multiply-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc/runs/002-opencode-mxc-add-multiply-0/result.json",
+    "sha256": "8b2678272e0a127b3d7baa83321285b138edb192b0bfc58ec88840bb32177002",
+    "bytes": 1760
+  },
+  {
+    "path": "v2-smoke-mxc/runs/002-opencode-mxc-add-multiply-0/stderr.log",
+    "sha256": "25b9f619475d14b7a5d6afb9e48626fad726a33d17bf93a1c8eb4156bdf4f894",
+    "bytes": 160
+  },
+  {
+    "path": "v2-smoke-mxc/runs/002-opencode-mxc-add-multiply-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc/runs/002-opencode-mxc-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc/runs/002-opencode-mxc-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-smoke-mxc/runs/002-opencode-mxc-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc/runs/002-opencode-mxc-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-smoke-mxc2/agent-runs.ndjson",
+    "sha256": "6d2b59ec2ea889a064601afc4748201c18553bc33d420311e3f4d85fc5e255c1",
+    "bytes": 3218
+  },
+  {
+    "path": "v2-smoke-mxc2/agent-summary.json",
+    "sha256": "c8270c9ffad3b6bb3e8f9fdf5876d7f537c238864c694d5257f0faadf8c76c3e",
+    "bytes": 362
+  },
+  {
+    "path": "v2-smoke-mxc2/metadata.json",
+    "sha256": "52c2bf29f99fabf00e14f29d309c75a4b48826598e2af50187c73c5dc8f47413",
+    "bytes": 1620
+  },
+  {
+    "path": "v2-smoke-mxc2/proxy-health.json",
+    "sha256": "bc5b8d49daf019d205530cedb9586e7682ce5d03786e94940ed0104b9df1396c",
+    "bytes": 212
+  },
+  {
+    "path": "v2-smoke-mxc2/proxy-rules.json",
+    "sha256": "4a751d68edf743ca28323627b3ba4269e8e7b9a7a5da34adc86cd6d77224504a",
+    "bytes": 4819
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/001-claude-mxc-add-multiply-0/config/mxc.json",
+    "sha256": "31e731c1125a568edf37cc0f115f0e08705409e21f7175c6f09b73a306851325",
+    "bytes": 2729
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/001-claude-mxc-add-multiply-0/patch.diff",
+    "sha256": "41fa9e2d9edc401a1207298ecb6bb3cf93f96b3f4510b7781488c0d706cbbd63",
+    "bytes": 196
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/001-claude-mxc-add-multiply-0/result.json",
+    "sha256": "7c3169efb9da85e7aa1779883792b7b784f569b7cd680cd32344f25480015985",
+    "bytes": 857
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/001-claude-mxc-add-multiply-0/stderr.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/001-claude-mxc-add-multiply-0/stdout.log",
+    "sha256": "15119e1f67800f6a2011b512476b858c521a2fd4ebec4b45eaa661e0faa58943",
+    "bytes": 1980
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/001-claude-mxc-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/001-claude-mxc-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "754afb968c01043d5a25322b0298d6570393bda86819011c5235e84644180d13",
+    "bytes": 70
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/001-claude-mxc-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/001-claude-mxc-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/002-opencode-mxc-add-multiply-0/config/mxc.json",
+    "sha256": "77b25b9cb26daf11fcda6cd95ec9f784ee390738965967706fe14d311679faac",
+    "bytes": 2699
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/002-opencode-mxc-add-multiply-0/patch.diff",
+    "sha256": "41fa9e2d9edc401a1207298ecb6bb3cf93f96b3f4510b7781488c0d706cbbd63",
+    "bytes": 196
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/002-opencode-mxc-add-multiply-0/result.json",
+    "sha256": "d971332cd07e26e38e781fdc2d39505e1652791a75dda21add1120fcc12f2c14",
+    "bytes": 865
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/002-opencode-mxc-add-multiply-0/stderr.log",
+    "sha256": "a68cd334c17fc8bbbb57402f8450b76caa1902a346451c345b7c1cf8d826026b",
+    "bytes": 2072
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/002-opencode-mxc-add-multiply-0/stdout.log",
+    "sha256": "00723feb0594467aa41a912215d483a4d8062f872c20acb6aaf06dabad80a8c1",
+    "bytes": 792
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/002-opencode-mxc-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/002-opencode-mxc-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "754afb968c01043d5a25322b0298d6570393bda86819011c5235e84644180d13",
+    "bytes": 70
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/002-opencode-mxc-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/002-opencode-mxc-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/003-codex-mxc-add-multiply-0/config/mxc.json",
+    "sha256": "35d27da74a54103981ba7248b7e748834440e33f891fdcfb973842797e52bf90",
+    "bytes": 2903
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/003-codex-mxc-add-multiply-0/patch.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/003-codex-mxc-add-multiply-0/result.json",
+    "sha256": "7c744bc1d2d7eab7fb35081a027806a01d112ded51175151d65b37b0fb031f92",
+    "bytes": 1742
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/003-codex-mxc-add-multiply-0/stderr.log",
+    "sha256": "ccb51f5464ca5d826a6b561f7a44920b7973dc358e57f44f8241056868caf28c",
+    "bytes": 167
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/003-codex-mxc-add-multiply-0/stdout.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/003-codex-mxc-add-multiply-0/workspace/add-multiply/src/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/003-codex-mxc-add-multiply-0/workspace/add-multiply/src/calc.py",
+    "sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+    "bytes": 32
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/003-codex-mxc-add-multiply-0/workspace/add-multiply/tests/__init__.py",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "v2-smoke-mxc2/runs/003-codex-mxc-add-multiply-0/workspace/add-multiply/tests/test_calc.py",
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "bytes": 297
+  },
+  {
+    "path": "installed-harness/agentbench.py",
+    "sha256": "8bcdf08aea3a7d9fdc70577562dd68061f38abf0dbfcffde52c3d6612a8f14a1",
+    "bytes": 20239
+  },
+  {
+    "path": "installed-harness/agentbench_v2.py",
+    "sha256": "c12621020d886164a73f87e34b871876151b47f63e0209dd716f6fc0b879f611",
+    "bytes": 18283
+  },
+  {
+    "path": "installed-harness/export_results.py",
+    "sha256": "f3d995e985fd1f842c8ec961167f7c45f6a695cd021fc048168b4e3550f47e7e",
+    "bytes": 2822
+  },
+  {
+    "path": "installed-harness/greyproxy-v0.4.5.yml",
+    "sha256": "33734715cfa59a309c7be3fc571595a260748256a5b6111ea2ad83e384bc3929",
+    "bytes": 2649
+  },
+  {
+    "path": "installed-harness/ouro_vm_lane.py",
+    "sha256": "22af16f09344a3a523622d62eeef4fcdb000c642dbbf3fbda56fc4e2c8c65da4",
+    "bytes": 4014
+  },
+  {
+    "path": "installed-harness/payload.py",
+    "sha256": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+    "bytes": 2890
+  },
+  {
+    "path": "installed-harness/suite.py",
+    "sha256": "817d59f8dc5d9195d5b5a79a2bc70a537bddd7f3b1a35d5e8dc86bd4f2aa2e1b",
+    "bytes": 19889
+  },
+  {
+    "path": "installed-harness/summarize.py",
+    "sha256": "fa08d2448f50a4cd8071e807fcf45fb207fe6ef0e887f7b59cd17a5d4984d99b",
+    "bytes": 2447
+  },
+  {
+    "path": "installed-harness/syscalls.c",
+    "sha256": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+    "bytes": 1439
+  },
+  {
+    "path": "installed-harness/workload.c",
+    "sha256": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02",
+    "bytes": 2392
+  }
+]

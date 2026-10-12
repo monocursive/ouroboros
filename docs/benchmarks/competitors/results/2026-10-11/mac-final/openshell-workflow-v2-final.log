@@ -1,0 +1,10 @@
+1/9 claude docker inventory-workflow #0 72.4s exit=0 success=True
+2/9 claude openshell-warm inventory-workflow #0 70.4s exit=0 success=True
+3/9 claude openshell-ephemeral inventory-workflow #0 76.9s exit=0 success=True
+4/9 opencode docker inventory-workflow #0 121.3s exit=0 success=True
+5/9 opencode openshell-warm inventory-workflow #0 70.0s exit=0 success=True
+6/9 opencode openshell-ephemeral inventory-workflow #0 78.7s exit=0 success=True
+7/9 codex openshell-warm inventory-workflow #0 65.3s exit=0 success=True
+8/9 codex docker inventory-workflow #0 62.1s exit=0 success=True
+9/9 codex openshell-ephemeral inventory-workflow #0 63.8s exit=0 success=True
+COMPLETE

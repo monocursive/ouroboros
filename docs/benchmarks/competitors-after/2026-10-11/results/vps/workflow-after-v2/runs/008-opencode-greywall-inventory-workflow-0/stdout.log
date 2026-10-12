@@ -1,0 +1,51 @@
+I'll implement category summaries in the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the codebase structure. Let me plan and implement the required changes:
+Let me start by creating the category_summary function in report.py:
+Now let me update cli.py to add the flag and handle both grouped and ungrouped output:
+Now let me update the README with an example of the grouped output:
+Now let me run the tests to see if everything is working:
+Excellent! All tests pass. Let me verify the implementation works as expected with a manual test:
+Perfect! Let me also verify that invalid CSV produces the correct error behavior:
+Perfect! Let me verify the implementation one more time by reviewing the key files:
+Excellent! All implementation is complete and working correctly. Let me provide a summary:
+
+## Summary
+
+I've successfully implemented category summaries in the inventory CLI with the following changes:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_summary` function (inventory/report.py:8-30):
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category
+   - Calculates total quantity and stock_value (quantity × unit_price) for each category
+   - Returns JSON array sorted by category name
+   - Uses Decimal arithmetic for exact calculations
+   - Formats stock_value as string with exactly 2 decimal places
+
+2. **inventory/cli.py** - Updated to support `--group-by-category` flag (inventory/cli.py:11,15-18):
+   - Added `--group-by-category` argument to parser
+   - Routes to `category_summary()` when flag is present, otherwise uses existing `item_report()`
+   - Preserves ungrouped behavior when flag is not used
+   - Maintains exit code 2 for invalid CSV with useful stderr messages (no traceback)
+
+3. **README.md** - Added documentation with example:
+   - Included command example with `--group-by-category`
+   - Shows expected output for the examples/stock.csv file
+
+### Verification:
+
+All tests pass successfully:
+```
+Ran 10 tests in 0.275s
+OK
+```
+
+The implementation correctly:
+- Groups by category and sorts results alphabetically
+- Applies `--min-quantity` filter before grouping
+- Calculates exact stock values using Decimal arithmetic
+- Formats stock_value as strings with 2 decimal places
+- Preserves ungrouped output behavior
+- Returns exit code 2 for invalid CSV with helpful error messages
+- Keeps processing logic in report.py separate from argument parsing in cli.py

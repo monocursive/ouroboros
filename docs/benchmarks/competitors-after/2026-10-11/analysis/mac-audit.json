@@ -1,0 +1,1610 @@
+{
+  "schema": "benchmark-audit/1",
+  "p95_method": "nearest rank, ceil(.95*n)-1",
+  "note": "All datasets retained. Selection of valid final protocols is declared separately; pilots are not comparative results.",
+  "harness_sha256": "5b783cd495d86255b0320db00816442bd630550a05ce9b1cd33c620047e641da",
+  "datasets": {
+    "backing-after/launches.ndjson": {
+      "source_sha256": "9b013f6f1fbd978bad5d24d0b5e3c541bcda22bcace589912184177b847cbd06",
+      "rows": 4,
+      "table": {},
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "grey-rules-after/launches.ndjson": {
+      "source_sha256": "fb86f1edb9b7558d4d8ad2dd63a27acbfb17ab7e24c6cb36f0201d2f3189a9ce",
+      "rows": 6,
+      "table": {},
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "perf-after/launches.ndjson": {
+      "source_sha256": "08a01150a092aebffc8f011c6f05a4d71b92388690d5cbeaa55c4e669a6e1c8a",
+      "rows": 505,
+      "table": {
+        "direct/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 21.397875499999998,
+            "p95_nearest_rank": 23.411333,
+            "min": 20.703292,
+            "max": 23.458417
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 18.737000000000002,
+            "p95_nearest_rank": 20.133,
+            "min": 18.318,
+            "max": 20.219
+          }
+        },
+        "direct/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 44.2044165,
+            "p95_nearest_rank": 46.759416,
+            "min": 42.275,
+            "max": 47.799333
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 9.9633125,
+            "p95_nearest_rank": 10.383666,
+            "min": 9.634541,
+            "max": 11.575833
+          }
+        },
+        "direct/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 2.6753545,
+            "p95_nearest_rank": 3.520541,
+            "min": 2.350083,
+            "max": 4.293334
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0,
+            "p95_nearest_rank": 0.001,
+            "min": 0.0,
+            "max": 0.001
+          }
+        },
+        "direct/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 34.0828125,
+            "p95_nearest_rank": 37.393083,
+            "min": 32.391959,
+            "max": 40.581292
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000458,
+            "p95_nearest_rank": 0.000542,
+            "min": 0.000333,
+            "max": 0.000542
+          }
+        },
+        "direct/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 21.7466875,
+            "p95_nearest_rank": 24.10425,
+            "min": 13.355459,
+            "max": 24.532541
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 19.085,
+            "p95_nearest_rank": 20.812,
+            "min": 10.545,
+            "max": 21.269
+          }
+        },
+        "direct/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 146.311833,
+            "p95_nearest_rank": 150.918333,
+            "min": 142.892833,
+            "max": 151.467708
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 143.7475,
+            "p95_nearest_rank": 147.73,
+            "min": 140.396,
+            "max": 148.47
+          }
+        },
+        "direct/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 49.609,
+            "p95_nearest_rank": 54.32275,
+            "min": 41.856208,
+            "max": 54.87
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 47.048500000000004,
+            "p95_nearest_rank": 50.748,
+            "min": 39.149,
+            "max": 51.501
+          }
+        },
+        "mxc/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 58.917604499999996,
+            "p95_nearest_rank": 61.249833,
+            "min": 57.972959,
+            "max": 62.287583
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 18.618000000000002,
+            "p95_nearest_rank": 19.03,
+            "min": 18.313,
+            "max": 19.155
+          }
+        },
+        "mxc/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 3445.461125,
+            "p95_nearest_rank": 3549.533125,
+            "min": 3417.653292,
+            "max": 3568.856125
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 1692.1802085,
+            "p95_nearest_rank": 1737.66825,
+            "min": 1675.573625,
+            "max": 1783.611167
+          }
+        },
+        "mxc/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 16.731917,
+            "p95_nearest_rank": 23.574791,
+            "min": 16.162875,
+            "max": 24.053875
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0,
+            "p95_nearest_rank": 0.001,
+            "min": 0.0,
+            "max": 0.001
+          }
+        },
+        "mxc/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1769.699604,
+            "p95_nearest_rank": 1780.42,
+            "min": 1737.85175,
+            "max": 1780.997875
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000417,
+            "p95_nearest_rank": 0.000542,
+            "min": 0.000333,
+            "max": 0.000667
+          }
+        },
+        "mxc/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 57.935833,
+            "p95_nearest_rank": 59.284291,
+            "min": 33.998417,
+            "max": 61.295875
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 19.3335,
+            "p95_nearest_rank": 21.1,
+            "min": 10.739,
+            "max": 22.428
+          }
+        },
+        "mxc/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 198.3829375,
+            "p95_nearest_rank": 208.993459,
+            "min": 159.9455,
+            "max": 218.6905
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 142.7935,
+            "p95_nearest_rank": 150.824,
+            "min": 139.737,
+            "max": 151.477
+          }
+        },
+        "mxc/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 100.641354,
+            "p95_nearest_rank": 102.372,
+            "min": 58.197792,
+            "max": 103.325375
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 47.686,
+            "p95_nearest_rank": 52.494,
+            "min": 38.134,
+            "max": 55.19
+          }
+        }
+      },
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "resource-after/launches.ndjson": {
+      "source_sha256": "1c3db01e84bfa731c86e0304f61a08f1fd514cda14b0d3886735ef5e6d2992da",
+      "rows": 12,
+      "table": {},
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "container-perf-after/openshell-launches.ndjson": {
+      "source_sha256": "82924460daf56796b88f95f17d13079827ee215841d16b72a6129dcc8effc9f6",
+      "rows": 939,
+      "table": {
+        "docker-run/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 233.8195835,
+            "p95_nearest_rank": 265.49925,
+            "min": 198.447959,
+            "max": 283.098125
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.0958555,
+            "p95_nearest_rank": 24.596856,
+            "min": 23.409022,
+            "max": 24.606439
+          }
+        },
+        "docker-run/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 251.183583,
+            "p95_nearest_rank": 291.93375,
+            "min": 215.243542,
+            "max": 295.202
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 15.288909499999999,
+            "p95_nearest_rank": 16.63864,
+            "min": 13.991096,
+            "max": 16.647807
+          }
+        },
+        "docker-run/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 216.724333,
+            "p95_nearest_rank": 246.472125,
+            "min": 184.302,
+            "max": 269.5485
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0002085,
+            "p95_nearest_rank": 0.000333,
+            "min": 0.0,
+            "max": 0.000417
+          }
+        },
+        "docker-run/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 233.05700000000002,
+            "p95_nearest_rank": 267.340542,
+            "min": 204.826125,
+            "max": 274.512583
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000542,
+            "p95_nearest_rank": 0.00075,
+            "min": 0.000458,
+            "max": 0.000833
+          }
+        },
+        "docker-run/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 218.55572899999999,
+            "p95_nearest_rank": 251.122083,
+            "min": 188.544208,
+            "max": 274.720708
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 3.027691,
+            "p95_nearest_rank": 3.373378,
+            "min": 2.703502,
+            "max": 3.661045
+          }
+        },
+        "docker-run/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 224.381375,
+            "p95_nearest_rank": 251.577708,
+            "min": 205.575792,
+            "max": 286.408042
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 16.554515000000002,
+            "p95_nearest_rank": 17.688433,
+            "min": 12.79372,
+            "max": 18.582559
+          }
+        },
+        "docker-run/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 231.9596665,
+            "p95_nearest_rank": 279.752167,
+            "min": 206.767417,
+            "max": 293.506291
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 10.674821999999999,
+            "p95_nearest_rank": 12.230386,
+            "min": 8.844425,
+            "max": 12.495803
+          }
+        },
+        "docker-warm/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 53.702104000000006,
+            "p95_nearest_rank": 67.597708,
+            "min": 48.040708,
+            "max": 68.778916
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.171605999999997,
+            "p95_nearest_rank": 24.945773,
+            "min": 23.389272,
+            "max": 25.507857
+          }
+        },
+        "docker-warm/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 47.757125,
+            "p95_nearest_rank": 62.992166,
+            "min": 40.800167,
+            "max": 63.698958
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 1.494793,
+            "p95_nearest_rank": 1.829752,
+            "min": 1.230543,
+            "max": 1.886502
+          }
+        },
+        "docker-warm/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 27.532166500000002,
+            "p95_nearest_rank": 41.752292,
+            "min": 24.363125,
+            "max": 46.686917
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000209,
+            "p95_nearest_rank": 0.000334,
+            "min": 4.1e-05,
+            "max": 0.000458
+          }
+        },
+        "docker-warm/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 47.0569585,
+            "p95_nearest_rank": 59.513416,
+            "min": 42.069667,
+            "max": 59.761042
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0005625,
+            "p95_nearest_rank": 0.000792,
+            "min": 0.000375,
+            "max": 0.000875
+          }
+        },
+        "docker-warm/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 30.162708000000002,
+            "p95_nearest_rank": 43.856917,
+            "min": 26.461667,
+            "max": 44.876917
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 2.067502,
+            "p95_nearest_rank": 2.276919,
+            "min": 1.891335,
+            "max": 2.351502
+          }
+        },
+        "docker-warm/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 44.097708499999996,
+            "p95_nearest_rank": 57.790875,
+            "min": 39.408041,
+            "max": 59.597
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 15.5543265,
+            "p95_nearest_rank": 17.544975,
+            "min": 12.880012,
+            "max": 17.614183
+          }
+        },
+        "docker-warm/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 48.553583,
+            "p95_nearest_rank": 62.183167,
+            "min": 41.979459,
+            "max": 64.987667
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 19.540518,
+            "p95_nearest_rank": 23.047937,
+            "min": 16.10164,
+            "max": 30.81682
+          }
+        },
+        "openshell-ephemeral/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 674.575229,
+            "p95_nearest_rank": 702.778541,
+            "min": 637.498959,
+            "max": 707.650708
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.358564,
+            "p95_nearest_rank": 26.984858,
+            "min": 23.68898,
+            "max": 27.248816
+          }
+        },
+        "openshell-ephemeral/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 668.0192294999999,
+            "p95_nearest_rank": 711.918708,
+            "min": 616.81025,
+            "max": 758.889334
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 15.018076,
+            "p95_nearest_rank": 18.371934,
+            "min": 14.30518,
+            "max": 18.871225
+          }
+        },
+        "openshell-ephemeral/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 677.233792,
+            "p95_nearest_rank": 717.785125,
+            "min": 624.280625,
+            "max": 744.360625
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.00025,
+            "p95_nearest_rank": 0.000375,
+            "min": 4.2e-05,
+            "max": 0.000458
+          }
+        },
+        "openshell-ephemeral/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 677.421833,
+            "p95_nearest_rank": 714.842292,
+            "min": 649.611708,
+            "max": 829.427167
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0005415,
+            "p95_nearest_rank": 0.001917,
+            "min": 0.000458,
+            "max": 0.005208
+          }
+        },
+        "openshell-ephemeral/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 681.3780830000001,
+            "p95_nearest_rank": 706.434834,
+            "min": 655.877791,
+            "max": 718.92725
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 5.4636295,
+            "p95_nearest_rank": 7.239215,
+            "min": 4.94313,
+            "max": 7.641799
+          }
+        },
+        "openshell-ephemeral/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 678.1840835,
+            "p95_nearest_rank": 722.096083,
+            "min": 648.819833,
+            "max": 1327.712708
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 18.3990165,
+            "p95_nearest_rank": 19.769351,
+            "min": 16.449807,
+            "max": 20.317644
+          }
+        },
+        "openshell-ephemeral/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 685.3070005,
+            "p95_nearest_rank": 719.310625,
+            "min": 665.569416,
+            "max": 737.06575
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 11.820426999999999,
+            "p95_nearest_rank": 13.919138,
+            "min": 10.800843,
+            "max": 14.16393
+          }
+        },
+        "openshell-warm/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 87.6236665,
+            "p95_nearest_rank": 96.662958,
+            "min": 69.052667,
+            "max": 98.342792
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.853856,
+            "p95_nearest_rank": 28.073401,
+            "min": 23.776605,
+            "max": 28.761984
+          }
+        },
+        "openshell-warm/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 75.19010399999999,
+            "p95_nearest_rank": 95.3285,
+            "min": 64.240458,
+            "max": 96.314041
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 1.8852725000000001,
+            "p95_nearest_rank": 2.449044,
+            "min": 1.570751,
+            "max": 2.475003
+          }
+        },
+        "openshell-warm/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 54.0558335,
+            "p95_nearest_rank": 69.135541,
+            "min": 42.85,
+            "max": 73.940541
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 8.4e-05,
+            "p95_nearest_rank": 0.00025,
+            "min": 0.0,
+            "max": 0.002083
+          }
+        },
+        "openshell-warm/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 72.5876045,
+            "p95_nearest_rank": 90.398292,
+            "min": 64.413,
+            "max": 90.474708
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000625,
+            "p95_nearest_rank": 0.000792,
+            "min": 0.0005,
+            "max": 0.008667
+          }
+        },
+        "openshell-warm/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 76.919,
+            "p95_nearest_rank": 94.368792,
+            "min": 50.042417,
+            "max": 98.631417
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 22.0805615,
+            "p95_nearest_rank": 29.298652,
+            "min": 4.26092,
+            "max": 31.769029
+          }
+        },
+        "openshell-warm/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 80.6155835,
+            "p95_nearest_rank": 87.075083,
+            "min": 62.353833,
+            "max": 92.944458
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 18.4558085,
+            "p95_nearest_rank": 24.315397,
+            "min": 15.957598,
+            "max": 26.78515
+          }
+        },
+        "openshell-warm/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 93.515875,
+            "p95_nearest_rank": 114.054875,
+            "min": 70.597584,
+            "max": 114.4785
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 41.987434,
+            "p95_nearest_rank": 56.425677,
+            "min": 23.309897,
+            "max": 67.193187
+          }
+        }
+      },
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "container-after-v2/agent-runs.ndjson": {
+      "source_sha256": "7de9cc62b40fb76a12ff475b0af962d4224c1c24f28d0013c40eb46f7714a192",
+      "rows": 54,
+      "table": {
+        "claude/docker": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 20621.800083000002,
+            "p95_nearest_rank": 22594.358792,
+            "min": 17839.137458,
+            "max": 22594.358792
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "claude/openshell-ephemeral": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 21428.3254165,
+            "p95_nearest_rank": 24599.24425,
+            "min": 14099.304667,
+            "max": 24599.24425
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "claude/openshell-warm": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 18613.3912915,
+            "p95_nearest_rank": 21758.523,
+            "min": 17673.485916,
+            "max": 21758.523
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/docker": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 19178.0497915,
+            "p95_nearest_rank": 25510.877167,
+            "min": 16784.667458,
+            "max": 25510.877167
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/openshell-ephemeral": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 21805.6915835,
+            "p95_nearest_rank": 27608.795125,
+            "min": 17599.403542,
+            "max": 27608.795125
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/openshell-warm": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 19047.9761875,
+            "p95_nearest_rank": 20163.415542,
+            "min": 17037.194834,
+            "max": 20163.415542
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "opencode/docker": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 22107.159791500002,
+            "p95_nearest_rank": 26664.066667,
+            "min": 19732.232333,
+            "max": 26664.066667
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "opencode/openshell-ephemeral": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 23725.5217915,
+            "p95_nearest_rank": 28926.606417,
+            "min": 20709.319333,
+            "max": 28926.606417
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "opencode/openshell-warm": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 26662.0045005,
+            "p95_nearest_rank": 29308.600083,
+            "min": 17764.334667,
+            "max": 29308.600083
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "container-workflow-after/agent-runs.ndjson": {
+      "source_sha256": "674b0fe16a1e92324b30cadc5bf08aa28e57bacc9e539d204f1258990e1424ca",
+      "rows": 9,
+      "table": {
+        "claude/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 68053.459542,
+            "p95_nearest_rank": 68053.459542,
+            "min": 68053.459542,
+            "max": 68053.459542
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "claude/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 68075.167167,
+            "p95_nearest_rank": 68075.167167,
+            "min": 68075.167167,
+            "max": 68075.167167
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "claude/openshell-warm": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 68060.124292,
+            "p95_nearest_rank": 68060.124292,
+            "min": 68060.124292,
+            "max": 68060.124292
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 67726.71875,
+            "p95_nearest_rank": 67726.71875,
+            "min": 67726.71875,
+            "max": 67726.71875
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 50288.157334,
+            "p95_nearest_rank": 50288.157334,
+            "min": 50288.157334,
+            "max": 50288.157334
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/openshell-warm": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 68023.353583,
+            "p95_nearest_rank": 68023.353583,
+            "min": 68023.353583,
+            "max": 68023.353583
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 79265.650375,
+            "p95_nearest_rank": 79265.650375,
+            "min": 79265.650375,
+            "max": 79265.650375
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 66814.718125,
+            "p95_nearest_rank": 66814.718125,
+            "min": 66814.718125,
+            "max": 66814.718125
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/openshell-warm": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 128157.494083,
+            "p95_nearest_rank": 128157.494083,
+            "min": 128157.494083,
+            "max": 128157.494083
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "native-after/agent-runs.ndjson": {
+      "source_sha256": "f5db3019fbeab6c129ec3ee81c592697e5f7c46cfd4b2dd379212e33c075f805",
+      "rows": 54,
+      "table": {
+        "claude/direct": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 19568.850896,
+            "p95_nearest_rank": 25834.4965,
+            "min": 18638.584291,
+            "max": 25834.4965
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "claude/greywall": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        },
+        "claude/mxc": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 21079.053417,
+            "p95_nearest_rank": 28804.769542,
+            "min": 19743.2255,
+            "max": 28804.769542
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/direct": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 18898.6762915,
+            "p95_nearest_rank": 21831.706708,
+            "min": 15329.287667,
+            "max": 21831.706708
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/greywall": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        },
+        "codex/mxc": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        },
+        "opencode/direct": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 25509.184916500002,
+            "p95_nearest_rank": 31747.504458,
+            "min": 22515.045333,
+            "max": 31747.504458
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "opencode/greywall": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        },
+        "opencode/mxc": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 25050.0371245,
+            "p95_nearest_rank": 33437.299125,
+            "min": 23604.623167,
+            "max": 33437.299125
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "workflow-after/agent-runs.ndjson": {
+      "source_sha256": "5497dcd64e30e3a338339a23275fb433d290399736047f8ac79c76cb00b3d8b2",
+      "rows": 9,
+      "table": {
+        "claude/direct": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 75925.573042,
+            "p95_nearest_rank": 75925.573042,
+            "min": 75925.573042,
+            "max": 75925.573042
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "claude/greywall": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "claude/mxc": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 96399.0805,
+            "p95_nearest_rank": 96399.0805,
+            "min": 96399.0805,
+            "max": 96399.0805
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/direct": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 49570.53325,
+            "p95_nearest_rank": 49570.53325,
+            "min": 49570.53325,
+            "max": 49570.53325
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/greywall": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "codex/mxc": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "opencode/direct": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 84863.171625,
+            "p95_nearest_rank": 84863.171625,
+            "min": 84863.171625,
+            "max": 84863.171625
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/greywall": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "opencode/mxc": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 72666.112416,
+            "p95_nearest_rank": 72666.112416,
+            "min": 72666.112416,
+            "max": 72666.112416
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    }
+  }
+}

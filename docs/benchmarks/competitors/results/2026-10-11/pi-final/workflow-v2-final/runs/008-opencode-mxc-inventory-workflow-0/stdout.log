@@ -1,0 +1,42 @@
+I'll implement category summaries for the inventory CLI. Let me start by exploring the codebase structure and then planning the implementation.
+Now I understand the codebase. Let me plan and implement the category summary feature.
+Let me first create the category grouping function in report.py:
+Now let me update the CLI to add the argument and handle both grouped and ungrouped outputs:
+Now let me update the README with a grouped example:
+Now let me run the tests to see if everything works:
+Excellent! All tests pass. Let me verify the implementation by testing the CLI manually:
+Perfect! Let me verify the error handling for invalid CSV:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's a summary of what was done:
+
+## Implementation Summary
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_report()` function that:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category
+   - Calculates total quantity and stock_value (quantity * unit_price) per category
+   - Formats stock_value as a decimal string with exactly two fractional digits
+   - Returns a JSON array sorted alphabetically by category
+
+2. **inventory/cli.py** - Updated to:
+   - Import the new `category_report` function
+   - Add `--group-by-category` flag using `action='store_true'`
+   - Route to `category_report()` when flag is set, otherwise use `item_report()` (preserving existing behavior)
+   - Maintains exit code 2 for invalid CSV with useful stderr messages (no traceback)
+
+3. **README.md** - Added documentation showing:
+   - How to use `--group-by-category`
+   - Expected output format
+   - Note that `--min-quantity` filter applies before grouping
+
+### Verification:
+
+All tests pass (10/10):
+- Ungrouped output maintains current behavior
+- `--group-by-category` produces correct category summaries
+- `--min-quantity` filter works correctly before grouping
+- Invalid CSV returns exit code 2 with useful error message
+- No traceback shown on errors
+
+The implementation keeps processing logic in `report.py` and argument parsing in `cli.py` as separate modules, exactly as requested.

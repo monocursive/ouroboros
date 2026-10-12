@@ -1,0 +1,29 @@
+{
+  "sequence": 4,
+  "agent": "opencode",
+  "mode": "mxc",
+  "task": "add-multiply",
+  "repetition": 1,
+  "started_utc": "2026-10-11T18:09:41Z",
+  "elapsed_ms": 26943.205625,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/Users/monocursive/bench-ouro/bin/mxc-exec-mac",
+    "/Users/monocursive/bench-ouro/results/v6-opencode-mxc/runs/004-opencode-mxc-add-multiply-1/mxc-private.json"
+  ],
+  "load": [
+    1.64599609375,
+    1.60693359375,
+    1.779296875
+  ],
+  "artifact": "runs/004-opencode-mxc-add-multiply-1"
+}

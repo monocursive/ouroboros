@@ -1,0 +1,7 @@
+{
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 8766.421825,
+  "stdout": "\nCreated sandbox: bench-v2-claude\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image ouro-comparison-agents-v2:20261011\n[0.1s] Image already present\n[1.0s] Starting sandbox Container created\n",
+  "stderr": "Error:   \u00d7 sandbox entered error phase while provisioning:\n  \u2502 ControlSupervisorStartFailed: Docker sandbox exited before supervisor\n  \u2502 became ready\n\n"
+}

@@ -1,0 +1,28 @@
+host,agent,mode,attempted,passed,status,median_success_ms,median_inner_ms,source
+vps,claude,docker,6,6,,20388.25806,19914.8093895,vps/container-after-claude/agent-runs.ndjson
+vps,claude,openshell-ephemeral,6,6,,20336.5827455,19236.644902,vps/container-after-claude/agent-runs.ndjson
+vps,claude,openshell-warm,6,6,,19520.2345625,19248.5685915,vps/container-after-claude/agent-runs.ndjson
+vps,opencode,docker,6,6,,27106.0597075,26254.7951925,vps/container-after-opencode/agent-runs.ndjson
+vps,opencode,openshell-ephemeral,6,6,,27149.763279,25999.105946,vps/container-after-opencode/agent-runs.ndjson
+vps,opencode,openshell-warm,6,6,,25821.4480505,25561.3082605,vps/container-after-opencode/agent-runs.ndjson
+vps,codex,docker,6,6,,18541.980166499998,18013.748671499998,vps/container-after-codex/agent-runs.ndjson
+vps,codex,openshell-ephemeral,6,6,,16536.9552545,15324.963356,vps/container-after-codex/agent-runs.ndjson
+vps,codex,openshell-warm,6,6,,15450.458167,15134.213027,vps/container-after-codex/agent-runs.ndjson
+pi,claude,docker,6,6,,23652.848425,21918.150754000002,pi/container-after-claude/agent-runs.ndjson
+pi,claude,openshell-ephemeral,6,0,,,,pi/container-after-claude/agent-runs.ndjson
+pi,claude,openshell-warm,0,0,unavailable at startup,,,pi/container-warm-availability-v2/availability.json
+pi,opencode,docker,6,6,,53757.446018,45610.3640215,pi/container-after-opencode/agent-runs.ndjson
+pi,opencode,openshell-ephemeral,6,0,,,,pi/container-after-opencode/agent-runs.ndjson
+pi,opencode,openshell-warm,0,0,unavailable at startup,,,pi/container-warm-availability-v2/availability.json
+pi,codex,docker,6,6,,23048.740553,17667.60501,pi/container-after-codex/agent-runs.ndjson
+pi,codex,openshell-ephemeral,6,0,,,,pi/container-after-codex/agent-runs.ndjson
+pi,codex,openshell-warm,0,0,unavailable at startup,,,pi/container-warm-availability-v2/availability.json
+mac,claude,docker,6,6,,20621.800083000002,20006.206079,mac/container-after-v2/agent-runs.ndjson
+mac,claude,openshell-ephemeral,6,6,,21428.3254165,20776.338672500002,mac/container-after-v2/agent-runs.ndjson
+mac,claude,openshell-warm,6,6,,18613.3912915,18457.878372,mac/container-after-v2/agent-runs.ndjson
+mac,opencode,docker,6,6,,22107.159791500002,21464.9931095,mac/container-after-v2/agent-runs.ndjson
+mac,opencode,openshell-ephemeral,6,6,,23725.5217915,23031.7520025,mac/container-after-v2/agent-runs.ndjson
+mac,opencode,openshell-warm,6,6,,26662.0045005,26466.143633,mac/container-after-v2/agent-runs.ndjson
+mac,codex,docker,6,6,,19178.0497915,18709.663299,mac/container-after-v2/agent-runs.ndjson
+mac,codex,openshell-ephemeral,6,6,,21805.6915835,21077.850655000002,mac/container-after-v2/agent-runs.ndjson
+mac,codex,openshell-warm,6,6,,19047.9761875,18809.2119185,mac/container-after-v2/agent-runs.ndjson

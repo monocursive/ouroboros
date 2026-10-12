@@ -1,0 +1,530 @@
+{
+  "performance": {
+    "available": {
+      "direct": true,
+      "ouro-jail": true,
+      "ouro-obs-off": false,
+      "greywall": true,
+      "mxc": true
+    },
+    "invalid_sequences": [],
+    "reference": {
+      "noop": {
+        "workload": "noop",
+        "count": 1,
+        "checksum": 0
+      },
+      "python": {
+        "workload": "python",
+        "count": 1,
+        "checksum": 0
+      },
+      "git": {
+        "workload": "git",
+        "count": 1003,
+        "checksum": "c7daa5d1c7985955db91200781f171ab3a66a5a1ace3358a9fcdc54e513383aa"
+      },
+      "reads": {
+        "workload": "reads",
+        "count": 1000,
+        "checksum": 491520000
+      },
+      "writes": {
+        "workload": "writes",
+        "count": 1000,
+        "checksum": 1024000
+      },
+      "spawn": {
+        "workload": "spawn",
+        "count": 100,
+        "checksum": 0
+      },
+      "cpu": {
+        "workload": "cpu",
+        "count": 20000000,
+        "checksum": 15910230868747444993
+      }
+    }
+  },
+  "safety": [
+    {
+      "tool": "direct",
+      "probe": "private_read",
+      "sequence": 937,
+      "status": "allowed",
+      "detail": {
+        "probe": "read",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "private_write",
+      "sequence": 938,
+      "status": "allowed",
+      "detail": {
+        "probe": "write",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "readonly_write",
+      "sequence": 939,
+      "status": "allowed",
+      "detail": {
+        "probe": "write",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "symlink_read",
+      "sequence": 940,
+      "status": "allowed",
+      "detail": {
+        "probe": "read",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "symlink_write",
+      "sequence": 941,
+      "status": "allowed",
+      "detail": {
+        "probe": "write",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "hardlink_read",
+      "sequence": 942,
+      "status": "allowed",
+      "detail": {
+        "probe": "link",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "host_tcp",
+      "sequence": 943,
+      "status": "allowed",
+      "detail": {
+        "probe": "tcp",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "host_unix_socket",
+      "sequence": 944,
+      "status": "allowed",
+      "detail": {
+        "probe": "unix",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "host_signal",
+      "sequence": 945,
+      "status": "allowed",
+      "detail": {
+        "probe": "signal",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "detached_after_root_exit",
+      "sequence": 946,
+      "status": "survived",
+      "bytes_at_return": 17,
+      "bytes_after_300ms": 119
+    },
+    {
+      "tool": "direct",
+      "probe": "syscall_surface",
+      "sequence": 947,
+      "status": "inconclusive",
+      "records": []
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "private_read",
+      "sequence": 948,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 2,
+        "error": "[Errno 2] No such file or directory: '/home/ubuntu/bench-ouro/runs/vps-perf/private/read-canary'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "private_write",
+      "sequence": 949,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/ubuntu/bench-ouro/runs/vps-perf/private/write-canary'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "readonly_write",
+      "sequence": 950,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/ubuntu/bench-ouro/runs/vps-perf/private/read-only'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "symlink_read",
+      "sequence": 951,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 2,
+        "error": "[Errno 2] No such file or directory: '/home/ubuntu/bench-ouro/runs/vps-perf/work/read-link'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "symlink_write",
+      "sequence": 952,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/ubuntu/bench-ouro/runs/vps-perf/work/write-link'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "hardlink_read",
+      "sequence": 953,
+      "status": "denied",
+      "detail": {
+        "probe": "link",
+        "allowed": false,
+        "errno": 2,
+        "error": "[Errno 2] No such file or directory: '/home/ubuntu/bench-ouro/runs/vps-perf/private/read-canary' -> '/home/ubuntu/bench-ouro/runs/vps-perf/work/link-copy'"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "host_tcp",
+      "sequence": 954,
+      "status": "denied",
+      "detail": {
+        "probe": "tcp",
+        "allowed": false,
+        "errno": 111,
+        "error": "[Errno 111] Connection refused"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "host_unix_socket",
+      "sequence": 955,
+      "status": "denied",
+      "detail": {
+        "probe": "unix",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "host_signal",
+      "sequence": 956,
+      "status": "denied",
+      "detail": {
+        "probe": "signal",
+        "allowed": false,
+        "errno": 3,
+        "error": "[Errno 3] No such process"
+      }
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "detached_after_root_exit",
+      "sequence": 957,
+      "status": "stopped",
+      "bytes_at_return": 17,
+      "bytes_after_300ms": 17
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": "syscall_surface",
+      "sequence": 958,
+      "status": "inconclusive",
+      "records": []
+    },
+    {
+      "tool": "ouro-obs-off",
+      "status": "unavailable"
+    },
+    {
+      "tool": "greywall",
+      "probe": "private_read",
+      "sequence": 959,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 13,
+        "error": "[Errno 13] Permission denied: '/home/ubuntu/bench-ouro/runs/vps-perf/private/read-canary'"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "private_write",
+      "sequence": 960,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 13,
+        "error": "[Errno 13] Permission denied: '/home/ubuntu/bench-ouro/runs/vps-perf/private/write-canary'"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "readonly_write",
+      "sequence": 961,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/ubuntu/bench-ouro/runs/vps-perf/private/read-only'"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "symlink_read",
+      "sequence": 962,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 13,
+        "error": "[Errno 13] Permission denied: '/home/ubuntu/bench-ouro/runs/vps-perf/work/read-link'"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "symlink_write",
+      "sequence": 963,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 13,
+        "error": "[Errno 13] Permission denied: '/home/ubuntu/bench-ouro/runs/vps-perf/work/write-link'"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "hardlink_read",
+      "sequence": 964,
+      "status": "denied",
+      "detail": {
+        "probe": "link",
+        "allowed": false,
+        "errno": 18,
+        "error": "[Errno 18] Invalid cross-device link: '/home/ubuntu/bench-ouro/runs/vps-perf/private/read-canary' -> '/home/ubuntu/bench-ouro/runs/vps-perf/work/link-copy'"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "host_tcp",
+      "sequence": 965,
+      "status": "denied",
+      "detail": {
+        "probe": "tcp",
+        "allowed": false,
+        "errno": 111,
+        "error": "[Errno 111] Connection refused"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "host_unix_socket",
+      "sequence": 966,
+      "status": "denied",
+      "detail": {
+        "probe": "unix",
+        "allowed": false,
+        "errno": 2,
+        "error": "[Errno 2] No such file or directory"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "host_signal",
+      "sequence": 967,
+      "status": "denied",
+      "detail": {
+        "probe": "signal",
+        "allowed": false,
+        "errno": 3,
+        "error": "[Errno 3] No such process"
+      }
+    },
+    {
+      "tool": "greywall",
+      "probe": "detached_after_root_exit",
+      "sequence": 968,
+      "status": "stopped",
+      "bytes_at_return": 17,
+      "bytes_after_300ms": 17
+    },
+    {
+      "tool": "greywall",
+      "probe": "syscall_surface",
+      "sequence": 969,
+      "status": "inconclusive",
+      "records": []
+    },
+    {
+      "tool": "mxc",
+      "probe": "private_read",
+      "sequence": 970,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 13,
+        "error": "[Errno 13] Permission denied: '/home/ubuntu/bench-ouro/runs/vps-perf/private/read-canary'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "private_write",
+      "sequence": 971,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/ubuntu/bench-ouro/runs/vps-perf/private/write-canary'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "readonly_write",
+      "sequence": 972,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/ubuntu/bench-ouro/runs/vps-perf/private/read-only'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "symlink_read",
+      "sequence": 973,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 13,
+        "error": "[Errno 13] Permission denied: '/home/ubuntu/bench-ouro/runs/vps-perf/work/read-link'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "symlink_write",
+      "sequence": 974,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 30,
+        "error": "[Errno 30] Read-only file system: '/home/ubuntu/bench-ouro/runs/vps-perf/work/write-link'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "hardlink_read",
+      "sequence": 975,
+      "status": "denied",
+      "detail": {
+        "probe": "link",
+        "allowed": false,
+        "errno": 18,
+        "error": "[Errno 18] Invalid cross-device link: '/home/ubuntu/bench-ouro/runs/vps-perf/private/read-canary' -> '/home/ubuntu/bench-ouro/runs/vps-perf/work/link-copy'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_tcp",
+      "sequence": 976,
+      "status": "denied",
+      "detail": {
+        "probe": "tcp",
+        "allowed": false,
+        "errno": 111,
+        "error": "[Errno 111] Connection refused"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_unix_socket",
+      "sequence": 977,
+      "status": "allowed",
+      "detail": {
+        "probe": "unix",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_signal",
+      "sequence": 978,
+      "status": "denied",
+      "detail": {
+        "probe": "signal",
+        "allowed": false,
+        "errno": 3,
+        "error": "[Errno 3] No such process"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "detached_after_root_exit",
+      "sequence": 979,
+      "status": "stopped",
+      "bytes_at_return": 17,
+      "bytes_after_300ms": 17
+    },
+    {
+      "tool": "mxc",
+      "probe": "syscall_surface",
+      "sequence": 980,
+      "status": "inconclusive",
+      "records": []
+    }
+  ]
+}

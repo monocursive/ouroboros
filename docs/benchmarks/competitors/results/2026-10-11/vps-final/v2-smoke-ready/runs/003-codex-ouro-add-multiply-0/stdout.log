@@ -1,0 +1,8 @@
+Blocked by the environment: commands fail because `bwrap` cannot create a namespace, and the file edit also failed. No changes were made, and the tests could not run.
+
+The intended addition to `src/calc.py` is:
+
+```python
+def multiply(a, b):
+    return a * b
+```

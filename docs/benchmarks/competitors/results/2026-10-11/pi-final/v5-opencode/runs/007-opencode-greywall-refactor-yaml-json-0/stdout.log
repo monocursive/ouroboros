@@ -1,0 +1,24 @@
+I'll help you refactor `src/store.py` to use JSON instead of YAML while keeping the same class names and method signatures, and ensuring all tests pass.
+
+Let me start by exploring the codebase structure and understanding what needs to be changed.
+Perfect! I understand the code now. The `Store` class currently uses YAML for serialization, and I need to refactor it to use JSON instead. The test creates a file with `.json` suffix and tests a roundtrip save/load operation.
+Perfect! I've successfully refactored `src/store.py` to use the JSON module instead of YAML. Here's what I changed:
+
+**Changes made in src/store.py:**
+- Replaced `import yaml` with `import json` (line 1)
+- Replaced `yaml.dump(data, f)` with `json.dump(data, f)` (line 9)
+- Replaced `yaml.safe_load(f)` with `json.load(f)` (line 13)
+
+The `Store` class maintains the same:
+- Class name: `Store`
+- Method signatures: `__init__(self, path)`, `save(self, data)`, and `load(self)`
+- Functionality: saving and loading data to/from a file
+
+All tests pass successfully, as confirmed by the test output showing:
+```
+test_roundtrip (test_store.TestStore.test_roundtrip) ... ok
+----------------------------------------------------------------------
+Ran 1 test in 0.002s
+
+OK
+```

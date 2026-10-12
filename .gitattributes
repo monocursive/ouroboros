@@ -11,3 +11,11 @@ docs/specs/ledger-v1/evidence/**/*.log -whitespace
 docs/specs/ledger-v1/evidence/**/*.txt -whitespace
 docs/specs/fleet-v1/evidence/**/*.log -whitespace
 docs/specs/fleet-v1/evidence/**/*.txt -whitespace
+# Finalized benchmark snapshots retain terminal formatting, CSV CRLFs, fixture
+# output and patch context exactly as covered by their SHA256SUMS manifests.
+docs/benchmarks/competitors/results/** -whitespace
+docs/benchmarks/competitors-after/*/results/** -whitespace
+docs/benchmarks/competitors-after/*/analysis/**/*.csv -whitespace
+docs/benchmarks/competitors-after/*/*.patch -whitespace
+# This recorded before-run launcher has a final blank line; preserve its hash.
+docs/benchmarks/competitors/harness/next_openshell_linux.sh -whitespace

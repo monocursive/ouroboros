@@ -1,0 +1,71 @@
+{
+  "schema": "agent-comparison/2",
+  "host": {
+    "system": "Darwin",
+    "node": "muetdhiver2.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:20:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6020",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "started_utc": "2026-10-11T18:08:22Z",
+  "seed": 20261011,
+  "schedule": [
+    [
+      "opencode",
+      "add-multiply",
+      0,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      0,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      0,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      1,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      1,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      1,
+      "mxc"
+    ]
+  ],
+  "codex_model": "gpt-6.1-sol",
+  "anthropic_model": "claude-sonnet-4-5",
+  "wall_seconds": 240,
+  "bins": {
+    "opencode": {
+      "sha256": "476151a6c8b56e084d223d71a9312479e3b95547f8d8649b3489577059f9c5b4",
+      "version": "1.19.0"
+    },
+    "greywall": {
+      "sha256": "cd71b0a96a59458d922d192de10e24e986060faea22e5eb854e6198735056d0c"
+    },
+    "greyproxy": {
+      "sha256": "aadef1a38b71a36d2ad4fcd916ded9586f3d11b0c112fb6847f6d50e48001505"
+    },
+    "mxc-exec-mac": {
+      "sha256": "df1a01bff34eaaa76c8e047e3ac4c8ede5ca2d642c96f6086d4234190495425e"
+    }
+  },
+  "harness_sha256": "237117502197af54532be18c5084c2f9cfa8fbdebcd36532ba82a2eb68654358",
+  "fixtures_sha256": "8bcdf08aea3a7d9fdc70577562dd68061f38abf0dbfcffde52c3d6612a8f14a1"
+}

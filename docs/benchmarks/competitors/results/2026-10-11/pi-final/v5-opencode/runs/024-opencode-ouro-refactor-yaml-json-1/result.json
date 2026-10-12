@@ -1,0 +1,51 @@
+{
+  "sequence": 24,
+  "agent": "opencode",
+  "mode": "ouro",
+  "task": "refactor-yaml-json",
+  "repetition": 1,
+  "started_utc": "2026-10-11T17:05:19Z",
+  "elapsed_ms": 59315.126017,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_roundtrip (test_store.TestStore.test_roundtrip) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/monocursive/bench-ouro/bin/ouro-jail",
+    "run",
+    "--profile",
+    "agent",
+    "--launch",
+    "opencode",
+    "--workspace",
+    "/home/monocursive/bench-ouro/results/v5-opencode/runs/024-opencode-ouro-refactor-yaml-json-1/workspace/refactor-yaml-json",
+    "--ro",
+    "/home/monocursive/.opencode/bin",
+    "--ro",
+    "/home/monocursive/bench-ouro/bin",
+    "--limit",
+    "wall=180s",
+    "--receipt",
+    "/home/monocursive/bench-ouro/results/v5-opencode/runs/024-opencode-ouro-refactor-yaml-json-1/jail.json",
+    "--",
+    "/home/monocursive/bench-ouro/bin/opencode",
+    "run",
+    "--dir",
+    "/home/monocursive/bench-ouro/results/v5-opencode/runs/024-opencode-ouro-refactor-yaml-json-1/workspace/refactor-yaml-json",
+    "--model",
+    "anthropic/claude-sonnet-4-5",
+    "Refactor src/store.py to use the json module instead of yaml. Keep the same class names and method signatures. Make all tests pass: python3 -m unittest discover -s tests -v. Do not modify the tests."
+  ],
+  "load": [
+    1.0341796875,
+    1.10888671875,
+    1.09619140625
+  ],
+  "artifact": "runs/024-opencode-ouro-refactor-yaml-json-1"
+}

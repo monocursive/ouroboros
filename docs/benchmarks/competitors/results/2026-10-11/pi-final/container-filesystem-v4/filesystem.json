@@ -1,0 +1,42 @@
+[
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import pathlib,json\nfor name in ['/work/readonly-canary','/tmp/writable-canary']:\n try:\n  pathlib.Path(name).write_text('owned-fixture');print(json.dumps({'path':name,'wrote':True}))\n except OSError as e:print(json.dumps({'path':name,'wrote':False,'errno':e.errno}))"
+    ],
+    "elapsed_ms": 1124.705766,
+    "exit": 0,
+    "stdout": "{\"path\": \"/work/readonly-canary\", \"wrote\": true}\n{\"path\": \"/tmp/writable-canary\", \"wrote\": true}\n",
+    "stderr": "",
+    "tool": "docker"
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--policy",
+      "/home/monocursive/bench-ouro/results/container-filesystem-v4/policy.yaml",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import pathlib,json\nfor name in ['/work/readonly-canary','/tmp/writable-canary']:\n try:\n  pathlib.Path(name).write_text('owned-fixture');print(json.dumps({'path':name,'wrote':True}))\n except OSError as e:print(json.dumps({'path':name,'wrote':False,'errno':e.errno}))"
+    ],
+    "elapsed_ms": 8011.802092,
+    "exit": 1,
+    "stdout": "\nCreated sandbox: devout-diver\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.1s] Image already present\n[0.6s] Starting sandbox Container created\n\u2713 Sandbox devout-diver deletion accepted; cleanup is pending\n",
+    "stderr": "Error:   \u00d7 sandbox entered error phase while provisioning:\n  \u2502 ControlSupervisorStartFailed: Docker sandbox exited before supervisor\n  \u2502 became ready\n\n",
+    "tool": "openshell"
+  }
+]

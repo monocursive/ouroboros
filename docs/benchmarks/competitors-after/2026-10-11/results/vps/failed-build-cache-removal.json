@@ -1,0 +1,34 @@
+[
+  {
+    "argv": [
+      "docker",
+      "inspect",
+      "84eaa7223eaf"
+    ],
+    "exit": 1,
+    "stdout": "[]\n",
+    "stderr": "error: no such object: 84eaa7223eaf\n"
+  },
+  {
+    "argv": [
+      "docker",
+      "image",
+      "inspect",
+      "998149bf1ea8"
+    ],
+    "exit": 1,
+    "stdout": "[]\n",
+    "stderr": "Error response from daemon: No such image: 998149bf1ea8:latest\n"
+  },
+  {
+    "argv": [
+      "docker",
+      "image",
+      "inspect",
+      "3707554db23f"
+    ],
+    "exit": 1,
+    "stdout": "[]\n",
+    "stderr": "Error response from daemon: No such image: 3707554db23f:latest\n"
+  }
+]

@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/home/ubuntu/bench-ouro-after/harness/openshell_agent_after.py", line 254, in <module>
+    main()
+    ~~~~^^
+  File "/home/ubuntu/bench-ouro-after/harness/openshell_agent_after.py", line 166, in main
+    image_id = build(args) if not args.skip_build else subprocess.check_output(["docker", "image", "inspect", IMAGE, "--format", "{{.Id}}"], text=True).strip()
+               ~~~~~^^^^^^
+  File "/home/ubuntu/bench-ouro-after/harness/openshell_agent_after.py", line 85, in build
+    raise RuntimeError("Agent image build failed; see build.log")
+RuntimeError: Agent image build failed; see build.log

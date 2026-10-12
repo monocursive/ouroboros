@@ -1,0 +1,5222 @@
+{
+  "schema": "selected-benchmark/1",
+  "native_agents": [
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20676.769792500003,
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20154.8936865,
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21201.9992395,
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 36587.439147,
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26880.542735000003,
+      "source": "vps-final/v5-opencode/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 29689.051535,
+      "source": "vps-final/v5-opencode/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 27292.2588225,
+      "source": "vps-final/v5-opencode/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 52161.00123350001,
+      "source": "vps-final/v5-opencode/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 17360.735677,
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 17851.9893305,
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 28269.6667895,
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 64371.1903855,
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23062.4146845,
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26780.6498175,
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 22270.410233000002,
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 37257.183241,
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 46039.7357945,
+      "source": "pi-final/v5-opencode/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 51094.682946500005,
+      "source": "pi-final/v5-opencode/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 47978.6690975,
+      "source": "pi-final/v6-opencode-mxc/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 66813.7628695,
+      "source": "pi-final/v5-opencode/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 22518.414463,
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 22338.411650000002,
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 32809.991928,
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 67424.9262995,
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23291.396521,
+      "source": "mac-final/v2-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 25342.070667,
+      "source": "mac-final/v2-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "source": "mac-final/v2-agents/agent-runs.ndjson",
+      "exit_counts": {
+        "65": 6
+      }
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26778.9938335,
+      "source": "mac-final/v5-opencode/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26539.724708499998,
+      "source": "mac-final/v6-opencode-mxc/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "source": "mac-final/v5-opencode/agent-runs.ndjson",
+      "exit_counts": {
+        "65": 6
+      }
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20027.979187,
+      "source": "mac-final/v4-codex/agent-runs.ndjson",
+      "exit_counts": {
+        "0": 6
+      }
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "source": "mac-final/v4-codex/agent-runs.ndjson",
+      "exit_counts": {
+        "1": 6
+      }
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "source": "mac-final/v4-codex/agent-runs.ndjson",
+      "exit_counts": {
+        "65": 6
+      }
+    }
+  ],
+  "container_agents": [
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20413.5709765,
+      "median_inner_ms": 19934.127498,
+      "source": "vps-final/openshell-v2-claude-final/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20487.167201,
+      "median_inner_ms": 19235.354967,
+      "source": "vps-final/openshell-v2-claude-final/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19563.6514905,
+      "median_inner_ms": 19250.0823105,
+      "source": "vps-final/openshell-v2-claude-final/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 28692.6201915,
+      "median_inner_ms": 27894.6391095,
+      "source": "vps-final/openshell-v2-opencode-final/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 29053.848842,
+      "median_inner_ms": 27786.9382625,
+      "source": "vps-final/openshell-v2-opencode-final/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26737.9857365,
+      "median_inner_ms": 26442.949547999997,
+      "source": "vps-final/openshell-v2-opencode-final/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 18875.1467635,
+      "median_inner_ms": 18168.756825999997,
+      "source": "vps-final/openshell-v3-codex-final/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20431.145345999998,
+      "median_inner_ms": 19062.995968,
+      "source": "vps-final/openshell-v3-codex-final/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19020.268435500002,
+      "median_inner_ms": 18689.699993000002,
+      "source": "vps-final/openshell-v3-codex-final/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26295.599705499997,
+      "median_inner_ms": 24513.004316500002,
+      "source": "pi-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "median_inner_ms": null,
+      "source": "pi-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "attempted": 0,
+      "passed": 0,
+      "median_success_ms": null,
+      "median_inner_ms": null,
+      "source": "pi-final/openshell-warm-availability/availability.json",
+      "status": "unavailable at startup",
+      "startup_attempted": 1
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26420.126487,
+      "median_inner_ms": 20272.702386,
+      "source": "pi-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "median_inner_ms": null,
+      "source": "pi-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "attempted": 0,
+      "passed": 0,
+      "median_success_ms": null,
+      "median_inner_ms": null,
+      "source": "pi-final/openshell-warm-availability/availability.json",
+      "status": "unavailable at startup",
+      "startup_attempted": 1
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 57234.047022,
+      "median_inner_ms": 49775.8082585,
+      "source": "pi-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "median_inner_ms": null,
+      "source": "pi-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "attempted": 0,
+      "passed": 0,
+      "median_success_ms": null,
+      "median_inner_ms": null,
+      "source": "pi-final/openshell-warm-availability/availability.json",
+      "status": "unavailable at startup",
+      "startup_attempted": 1
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19951.277374999998,
+      "median_inner_ms": 19625.7636975,
+      "source": "mac-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20550.963979499997,
+      "median_inner_ms": 19841.2447585,
+      "source": "mac-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20310.5282295,
+      "median_inner_ms": 20143.116202,
+      "source": "mac-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21302.4957285,
+      "median_inner_ms": 20850.737841000002,
+      "source": "mac-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 25937.968729,
+      "median_inner_ms": 25152.8018705,
+      "source": "mac-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21467.694499999998,
+      "median_inner_ms": 21285.637267500002,
+      "source": "mac-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 24227.435292000002,
+      "median_inner_ms": 23715.900701500002,
+      "source": "mac-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 25625.641709,
+      "median_inner_ms": 24842.215721,
+      "source": "mac-final/openshell-v2-final/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 22920.644270999997,
+      "median_inner_ms": 22736.835243,
+      "source": "mac-final/openshell-v2-final/agent-runs.ndjson"
+    }
+  ],
+  "performance": [
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "cpu",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 25.869841,
+        "p95_nearest_rank": 31.239239,
+        "min": 24.980275,
+        "max": 32.899772
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.578764,
+        "p95_nearest_rank": 30.053524,
+        "min": 24.056113,
+        "max": 31.511963
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "git",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 47.2141815,
+        "p95_nearest_rank": 58.471205,
+        "min": 39.828654,
+        "max": 59.838973
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 4.2775265000000005,
+        "p95_nearest_rank": 5.725846,
+        "min": 3.808051,
+        "max": 6.544388
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "noop",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1.0912245,
+        "p95_nearest_rank": 2.093769,
+        "min": 0.892412,
+        "max": 2.653276
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000181,
+        "p95_nearest_rank": 0.00031,
+        "min": 0.00016,
+        "max": 0.00033
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "python",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 42.536193499999996,
+        "p95_nearest_rank": 50.967492,
+        "min": 35.24639,
+        "max": 52.1896
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0014655,
+        "p95_nearest_rank": 0.002179,
+        "min": 0.00088,
+        "max": 0.0022
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "reads",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 6.5863335,
+        "p95_nearest_rank": 9.511108,
+        "min": 5.129409,
+        "max": 10.993438
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.0701635,
+        "p95_nearest_rank": 7.193207,
+        "min": 4.231386,
+        "max": 7.872255
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "spawn",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 83.499786,
+        "p95_nearest_rank": 96.512574,
+        "min": 69.651832,
+        "max": 99.174609
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 82.03706700000001,
+        "p95_nearest_rank": 94.589268,
+        "min": 68.769184,
+        "max": 98.044144
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "writes",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 66.6303875,
+        "p95_nearest_rank": 81.786507,
+        "min": 59.154299,
+        "max": 83.681502
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 64.5251255,
+        "p95_nearest_rank": 80.5113,
+        "min": 57.970034,
+        "max": 82.577508
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "cpu",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1689.9104665,
+        "p95_nearest_rank": 1806.14534,
+        "min": 1611.349543,
+        "max": 1811.818537
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.667980999999997,
+        "p95_nearest_rank": 28.021976,
+        "min": 23.758079,
+        "max": 28.617643
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "git",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1741.1830355,
+        "p95_nearest_rank": 1818.228559,
+        "min": 1646.20097,
+        "max": 1845.174598
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 4.587841,
+        "p95_nearest_rank": 6.835692,
+        "min": 3.718299,
+        "max": 7.49207
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "noop",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1684.159505,
+        "p95_nearest_rank": 1760.550289,
+        "min": 1612.176664,
+        "max": 1781.325343
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000181,
+        "p95_nearest_rank": 0.00026,
+        "min": 0.00016,
+        "max": 0.00027
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "python",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1717.4316210000002,
+        "p95_nearest_rank": 1826.21056,
+        "min": 1616.847157,
+        "max": 1847.581936
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00151,
+        "p95_nearest_rank": 0.00202,
+        "min": 0.00101,
+        "max": 0.00275
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "reads",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1676.6199185,
+        "p95_nearest_rank": 1742.484982,
+        "min": 1617.269212,
+        "max": 1858.608484
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 6.0116455,
+        "p95_nearest_rank": 7.843164,
+        "min": 5.001947,
+        "max": 8.058729
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "spawn",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1754.468606,
+        "p95_nearest_rank": 1939.67283,
+        "min": 1653.796632,
+        "max": 1990.742411
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.7906405,
+        "p95_nearest_rank": 92.061093,
+        "min": 69.276029,
+        "max": 101.618946
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "writes",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1768.1747825,
+        "p95_nearest_rank": 1853.609513,
+        "min": 1696.13971,
+        "max": 1883.619734
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 69.9288575,
+        "p95_nearest_rank": 83.294707,
+        "min": 57.211588,
+        "max": 83.862174
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "cpu",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 69.028925,
+        "p95_nearest_rank": 74.245156,
+        "min": 67.539326,
+        "max": 74.400903
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 25.0937305,
+        "p95_nearest_rank": 28.319348,
+        "min": 23.794989,
+        "max": 30.885675
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "git",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 68.8273305,
+        "p95_nearest_rank": 119.486192,
+        "min": 67.368263,
+        "max": 119.659224
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 4.2158115,
+        "p95_nearest_rank": 8.016158,
+        "min": 3.710851,
+        "max": 12.444226
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "noop",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 20.951880000000003,
+        "p95_nearest_rank": 39.376138,
+        "min": 19.194597,
+        "max": 47.576288
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000205,
+        "p95_nearest_rank": 0.00031,
+        "min": 0.00016,
+        "max": 0.00037
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "python",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 68.969315,
+        "p95_nearest_rank": 118.496669,
+        "min": 67.256661,
+        "max": 121.509109
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0013955,
+        "p95_nearest_rank": 0.00172,
+        "min": 0.000929,
+        "max": 0.002381
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "reads",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 37.103707,
+        "p95_nearest_rank": 40.016537,
+        "min": 35.409014,
+        "max": 42.123305
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 4.875626499999999,
+        "p95_nearest_rank": 6.544498,
+        "min": 4.212957,
+        "max": 8.321582
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "spawn",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 119.270389,
+        "p95_nearest_rank": 170.308302,
+        "min": 117.490327,
+        "max": 172.548344
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.96643549999999,
+        "p95_nearest_rank": 98.540281,
+        "min": 71.92503,
+        "max": 100.963373
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "writes",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 119.272074,
+        "p95_nearest_rank": 125.17132,
+        "min": 117.783012,
+        "max": 125.443442
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 69.485164,
+        "p95_nearest_rank": 81.752006,
+        "min": 59.651306,
+        "max": 87.318871
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "cpu",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 192.6621225,
+        "p95_nearest_rank": 223.210943,
+        "min": 168.145104,
+        "max": 230.981292
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.6687205,
+        "p95_nearest_rank": 28.442551,
+        "min": 24.028542,
+        "max": 29.195571
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "git",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 217.9079815,
+        "p95_nearest_rank": 247.319176,
+        "min": 186.729233,
+        "max": 263.423332
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.753947,
+        "p95_nearest_rank": 9.215614,
+        "min": 4.552601,
+        "max": 10.013943
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "noop",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 170.8539705,
+        "p95_nearest_rank": 200.266924,
+        "min": 144.094584,
+        "max": 203.136483
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0002205,
+        "p95_nearest_rank": 0.00039,
+        "min": 0.00016,
+        "max": 0.0004
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "python",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 213.93569300000001,
+        "p95_nearest_rank": 235.940222,
+        "min": 190.41353,
+        "max": 242.800125
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00121,
+        "p95_nearest_rank": 0.00224,
+        "min": 0.000899,
+        "max": 0.002381
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "reads",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 183.055249,
+        "p95_nearest_rank": 201.968978,
+        "min": 156.951824,
+        "max": 238.126383
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.3299710000000005,
+        "p95_nearest_rank": 8.354382,
+        "min": 4.572222,
+        "max": 9.085313
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "spawn",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 292.0679105,
+        "p95_nearest_rank": 332.094061,
+        "min": 257.037117,
+        "max": 335.562828
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 119.4164455,
+        "p95_nearest_rank": 143.133129,
+        "min": 101.729313,
+        "max": 145.656602
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "writes",
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 325.2624945,
+        "p95_nearest_rank": 373.109131,
+        "min": 280.203417,
+        "max": 429.389456
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 156.8723525,
+        "p95_nearest_rank": 183.654592,
+        "min": 125.825948,
+        "max": 223.306944
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "cpu",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 311.44887800000004,
+        "p95_nearest_rank": 336.322893,
+        "min": 274.020894,
+        "max": 345.453655
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 26.846546500000002,
+        "p95_nearest_rank": 35.177838,
+        "min": 24.396475,
+        "max": 36.479175
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "git",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 373.611317,
+        "p95_nearest_rank": 416.966945,
+        "min": 322.904405,
+        "max": 431.240326
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 35.699391000000006,
+        "p95_nearest_rank": 47.026365,
+        "min": 27.426845,
+        "max": 53.115256
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "noop",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 285.00523150000004,
+        "p95_nearest_rank": 310.088924,
+        "min": 258.708754,
+        "max": 311.626274
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00167,
+        "p95_nearest_rank": 0.00312,
+        "min": 0.0015,
+        "max": 0.02511
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "python",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 340.30059700000004,
+        "p95_nearest_rank": 368.787385,
+        "min": 288.983694,
+        "max": 372.947117
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0011849999999999999,
+        "p95_nearest_rank": 0.0016,
+        "min": 0.00068,
+        "max": 0.00176
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "reads",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 301.2939695,
+        "p95_nearest_rank": 327.045949,
+        "min": 265.985178,
+        "max": 330.713254
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 14.047182,
+        "p95_nearest_rank": 19.916126,
+        "min": 12.599587,
+        "max": 21.02429
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "spawn",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 355.8652565,
+        "p95_nearest_rank": 433.607855,
+        "min": 321.771219,
+        "max": 436.330633
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 77.48555200000001,
+        "p95_nearest_rank": 90.868658,
+        "min": 65.802625,
+        "max": 91.72075
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "writes",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 414.751055,
+        "p95_nearest_rank": 476.429335,
+        "min": 383.658829,
+        "max": 478.511705
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 75.21019050000001,
+        "p95_nearest_rank": 85.869965,
+        "min": 60.83016,
+        "max": 93.99892
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "cpu",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 91.8376015,
+        "p95_nearest_rank": 103.158302,
+        "min": 78.996982,
+        "max": 105.90395
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 25.410919,
+        "p95_nearest_rank": 29.002215,
+        "min": 24.006679,
+        "max": 29.704335
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "git",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 118.42631549999999,
+        "p95_nearest_rank": 133.454698,
+        "min": 103.338875,
+        "max": 136.745808
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.593834,
+        "p95_nearest_rank": 8.589445,
+        "min": 4.551011,
+        "max": 8.737826
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "noop",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 66.79727399999999,
+        "p95_nearest_rank": 81.958562,
+        "min": 56.505092,
+        "max": 84.230229
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0018709999999999998,
+        "p95_nearest_rank": 0.00247,
+        "min": 0.00153,
+        "max": 0.00287
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "python",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 107.1200905,
+        "p95_nearest_rank": 129.759715,
+        "min": 94.311625,
+        "max": 135.931848
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00108,
+        "p95_nearest_rank": 0.00179,
+        "min": 0.0008,
+        "max": 0.00197
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "reads",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 77.7437085,
+        "p95_nearest_rank": 99.498784,
+        "min": 62.97962,
+        "max": 117.742186
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 9.523082500000001,
+        "p95_nearest_rank": 12.103342,
+        "min": 7.51474,
+        "max": 14.413861
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "spawn",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 145.29719799999998,
+        "p95_nearest_rank": 168.453992,
+        "min": 131.679724,
+        "max": 169.13048
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 76.96905000000001,
+        "p95_nearest_rank": 94.740979,
+        "min": 65.596633,
+        "max": 95.222427
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "writes",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 147.9662695,
+        "p95_nearest_rank": 166.718736,
+        "min": 126.581854,
+        "max": 168.859857
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 81.74486300000001,
+        "p95_nearest_rank": 94.369384,
+        "min": 69.82565,
+        "max": 100.077332
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "cpu",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1016.965776,
+        "p95_nearest_rank": 1352.921718,
+        "min": 926.945796,
+        "max": 1373.552933
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 37.2733855,
+        "p95_nearest_rank": 43.547259,
+        "min": 27.12672,
+        "max": 60.554824
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "git",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1070.2640805,
+        "p95_nearest_rank": 1319.559181,
+        "min": 980.798965,
+        "max": 1332.28613
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 82.099913,
+        "p95_nearest_rank": 106.623491,
+        "min": 60.024039,
+        "max": 116.183217
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "noop",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1023.9511165,
+        "p95_nearest_rank": 1351.184711,
+        "min": 931.650277,
+        "max": 1445.78717
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001935,
+        "p95_nearest_rank": 0.00249,
+        "min": 0.00154,
+        "max": 0.00275
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "python",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1045.081055,
+        "p95_nearest_rank": 1352.745906,
+        "min": 915.013016,
+        "max": 1370.694085
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0011250000000000001,
+        "p95_nearest_rank": 0.00152,
+        "min": 0.00069,
+        "max": 0.00176
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "reads",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1003.603378,
+        "p95_nearest_rank": 1330.519856,
+        "min": 933.359154,
+        "max": 1336.465055
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 59.45763650000001,
+        "p95_nearest_rank": 82.772731,
+        "min": 39.330295,
+        "max": 89.290437
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "spawn",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1034.2857915,
+        "p95_nearest_rank": 1346.284597,
+        "min": 926.154635,
+        "max": 1368.19197
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 114.580885,
+        "p95_nearest_rank": 144.160568,
+        "min": 92.739056,
+        "max": 149.042813
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "writes",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1106.2038235,
+        "p95_nearest_rank": 1428.647182,
+        "min": 1003.306752,
+        "max": 1448.294553
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 141.86425350000002,
+        "p95_nearest_rank": 169.744348,
+        "min": 104.089634,
+        "max": 186.298197
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "cpu",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 102.823174,
+        "p95_nearest_rank": 126.572333,
+        "min": 84.940291,
+        "max": 127.000262
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 25.3238525,
+        "p95_nearest_rank": 31.983766,
+        "min": 24.01941,
+        "max": 32.789437
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "git",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 131.4798115,
+        "p95_nearest_rank": 149.314548,
+        "min": 106.593629,
+        "max": 162.241978
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 6.178847,
+        "p95_nearest_rank": 8.123938,
+        "min": 4.672862,
+        "max": 9.198363
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "noop",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 71.9706185,
+        "p95_nearest_rank": 94.447237,
+        "min": 60.113248,
+        "max": 104.951548
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00143,
+        "p95_nearest_rank": 0.00187,
+        "min": 0.00138,
+        "max": 0.00211
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "python",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 121.2879145,
+        "p95_nearest_rank": 155.804675,
+        "min": 98.198416,
+        "max": 159.224352
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00113,
+        "p95_nearest_rank": 0.001661,
+        "min": 0.000729,
+        "max": 0.00196
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "reads",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 112.063503,
+        "p95_nearest_rank": 138.874035,
+        "min": 92.812065,
+        "max": 142.659907
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 31.7597375,
+        "p95_nearest_rank": 42.978991,
+        "min": 24.105091,
+        "max": 45.156941
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "spawn",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 165.249479,
+        "p95_nearest_rank": 191.583331,
+        "min": 141.726148,
+        "max": 235.915258
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 90.7200315,
+        "p95_nearest_rank": 103.907074,
+        "min": 77.710724,
+        "max": 136.260012
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "writes",
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 199.23664200000002,
+        "p95_nearest_rank": 225.692692,
+        "min": 168.658806,
+        "max": 244.660738
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 121.647504,
+        "p95_nearest_rank": 135.488333,
+        "min": 108.349493,
+        "max": 168.068898
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "cpu",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 82.20417,
+        "p95_nearest_rank": 97.777435,
+        "min": 82.008761,
+        "max": 109.247348
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.30040550000001,
+        "p95_nearest_rank": 95.456365,
+        "min": 80.161675,
+        "max": 106.817608
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "git",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 146.35956950000002,
+        "p95_nearest_rank": 180.260103,
+        "min": 145.099307,
+        "max": 181.044144
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 8.291378,
+        "p95_nearest_rank": 8.559159,
+        "min": 8.203757,
+        "max": 12.332784
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "noop",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1.8143345,
+        "p95_nearest_rank": 2.745053,
+        "min": 1.75044,
+        "max": 2.776607
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001574,
+        "p95_nearest_rank": 0.002167,
+        "min": 0.001388,
+        "max": 0.00226
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "python",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 138.171982,
+        "p95_nearest_rank": 180.928598,
+        "min": 136.464454,
+        "max": 181.018988
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0041665,
+        "p95_nearest_rank": 0.004666,
+        "min": 0.003649,
+        "max": 0.004777
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "reads",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 12.6704155,
+        "p95_nearest_rank": 14.482159,
+        "min": 12.424181,
+        "max": 17.714784
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 10.685406,
+        "p95_nearest_rank": 11.113982,
+        "min": 10.533971,
+        "max": 15.270101
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "spawn",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 135.1490865,
+        "p95_nearest_rank": 137.655618,
+        "min": 132.605835,
+        "max": 178.960292
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 133.3162605,
+        "p95_nearest_rank": 135.741992,
+        "min": 130.802768,
+        "max": 176.848997
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "writes",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 877.899267,
+        "p95_nearest_rank": 911.56772,
+        "min": 746.90163,
+        "max": 1026.172238
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 875.789102,
+        "p95_nearest_rank": 909.710868,
+        "min": 745.00345,
+        "max": 1024.027398
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "cpu",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1871.5374815,
+        "p95_nearest_rank": 1928.850978,
+        "min": 1854.7532,
+        "max": 1934.339104
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.160788,
+        "p95_nearest_rank": 118.956426,
+        "min": 80.129964,
+        "max": 120.133236
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "git",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1934.5251555,
+        "p95_nearest_rank": 1985.706368,
+        "min": 1906.263094,
+        "max": 2033.539079
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 8.458177,
+        "p95_nearest_rank": 8.530708,
+        "min": 8.378776,
+        "max": 12.600841
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "noop",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1793.904545,
+        "p95_nearest_rank": 1839.566572,
+        "min": 1770.169699,
+        "max": 1885.179614
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0015,
+        "p95_nearest_rank": 0.001907,
+        "min": 0.00124,
+        "max": 0.003019
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "python",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1933.482459,
+        "p95_nearest_rank": 1984.346967,
+        "min": 1917.50791,
+        "max": 2006.605687
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.004759,
+        "p95_nearest_rank": 0.005463,
+        "min": 0.004019,
+        "max": 0.006777
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "reads",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1806.909347,
+        "p95_nearest_rank": 1862.816027,
+        "min": 1789.650811,
+        "max": 1888.95704
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 10.94856,
+        "p95_nearest_rank": 17.577362,
+        "min": 10.831981,
+        "max": 25.803675
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "spawn",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1926.425225,
+        "p95_nearest_rank": 2034.104407,
+        "min": 1906.012089,
+        "max": 2053.511431
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 135.10208749999998,
+        "p95_nearest_rank": 226.053423,
+        "min": 133.593841,
+        "max": 227.546897
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "writes",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 2692.9373555,
+        "p95_nearest_rank": 2855.329096,
+        "min": 2495.020933,
+        "max": 3229.839003
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 881.685086,
+        "p95_nearest_rank": 1062.511969,
+        "min": 680.75778,
+        "max": 1433.928516
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "cpu",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 121.9281905,
+        "p95_nearest_rank": 173.558129,
+        "min": 121.741107,
+        "max": 173.891269
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.242931,
+        "p95_nearest_rank": 113.828687,
+        "min": 80.181052,
+        "max": 119.199893
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "git",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 172.0636495,
+        "p95_nearest_rank": 172.517263,
+        "min": 171.908118,
+        "max": 224.040975
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 8.502931,
+        "p95_nearest_rank": 8.678268,
+        "min": 8.410794,
+        "max": 8.731159
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "noop",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 23.6652725,
+        "p95_nearest_rank": 41.404728,
+        "min": 23.507823,
+        "max": 41.866526
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001537,
+        "p95_nearest_rank": 0.001926,
+        "min": 0.001241,
+        "max": 0.001963
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "python",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 172.0729435,
+        "p95_nearest_rank": 224.122703,
+        "min": 171.92489,
+        "max": 224.642019
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.004037,
+        "p95_nearest_rank": 0.004482,
+        "min": 0.003444,
+        "max": 0.004556
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "reads",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 39.7778495,
+        "p95_nearest_rank": 74.287784,
+        "min": 39.618504,
+        "max": 75.102294
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 10.646762500000001,
+        "p95_nearest_rank": 17.159484,
+        "min": 10.516052,
+        "max": 17.488523
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "spawn",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 172.063715,
+        "p95_nearest_rank": 224.271756,
+        "min": 171.926947,
+        "max": 224.603569
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 133.714068,
+        "p95_nearest_rank": 178.725648,
+        "min": 132.148423,
+        "max": 188.473367
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "writes",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 923.6744605,
+        "p95_nearest_rank": 1075.866627,
+        "min": 422.676464,
+        "max": 1624.131925
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 885.9610315,
+        "p95_nearest_rank": 1028.522206,
+        "min": 363.342603,
+        "max": 1559.931286
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "cpu",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 398.07124050000004,
+        "p95_nearest_rank": 489.49813,
+        "min": 347.321072,
+        "max": 494.989398
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.32285350000001,
+        "p95_nearest_rank": 114.218295,
+        "min": 80.156496,
+        "max": 118.102066
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "git",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 465.8895745,
+        "p95_nearest_rank": 512.476784,
+        "min": 442.945904,
+        "max": 689.605366
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 9.7751625,
+        "p95_nearest_rank": 10.009621,
+        "min": 9.687869,
+        "max": 14.677359
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "noop",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 310.383221,
+        "p95_nearest_rank": 350.573881,
+        "min": 293.108616,
+        "max": 397.633477
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001611,
+        "p95_nearest_rank": 0.002444,
+        "min": 0.001444,
+        "max": 0.003259
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "python",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 447.7608365,
+        "p95_nearest_rank": 540.411212,
+        "min": 430.167429,
+        "max": 553.702803
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0044075,
+        "p95_nearest_rank": 0.005074,
+        "min": 0.003648,
+        "max": 0.005555
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "reads",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 317.497472,
+        "p95_nearest_rank": 358.478248,
+        "min": 295.600412,
+        "max": 413.383144
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 11.463714,
+        "p95_nearest_rank": 18.351738,
+        "min": 11.300698,
+        "max": 20.950678
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "spawn",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 516.723749,
+        "p95_nearest_rank": 655.610555,
+        "min": 483.834003,
+        "max": 874.503015
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 197.79395449999998,
+        "p95_nearest_rank": 265.863812,
+        "min": 195.637274,
+        "max": 285.158816
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "writes",
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 790.9466170000001,
+        "p95_nearest_rank": 1249.104001,
+        "min": 531.189033,
+        "max": 1300.266183
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 319.2485905,
+        "p95_nearest_rank": 903.979659,
+        "min": 191.031441,
+        "max": 904.393663
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "cpu",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1097.2311825000002,
+        "p95_nearest_rank": 1197.985649,
+        "min": 999.013465,
+        "max": 1510.040956
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 81.35191950000001,
+        "p95_nearest_rank": 88.393566,
+        "min": 80.74217,
+        "max": 117.060194
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "git",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1263.7795575,
+        "p95_nearest_rank": 1422.893429,
+        "min": 1164.77319,
+        "max": 2294.89193
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 86.079609,
+        "p95_nearest_rank": 92.594025,
+        "min": 85.159028,
+        "max": 98.523992
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "noop",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1014.7029815000001,
+        "p95_nearest_rank": 1185.559234,
+        "min": 934.383052,
+        "max": 1386.988949
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000963,
+        "p95_nearest_rank": 0.001445,
+        "min": 0.000648,
+        "max": 0.001815
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "python",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1200.0784825,
+        "p95_nearest_rank": 1354.970944,
+        "min": 1014.503925,
+        "max": 1534.261537
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.004389,
+        "p95_nearest_rank": 0.005463,
+        "min": 0.0035,
+        "max": 0.008018
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "reads",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1055.1205934999998,
+        "p95_nearest_rank": 1252.28719,
+        "min": 994.597937,
+        "max": 1516.11585
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 28.035725499999998,
+        "p95_nearest_rank": 30.089962,
+        "min": 26.47287,
+        "max": 30.156317
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "spawn",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1176.8901555,
+        "p95_nearest_rank": 1507.894677,
+        "min": 1064.92933,
+        "max": 1653.535117
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 180.76428950000002,
+        "p95_nearest_rank": 198.60315,
+        "min": 176.899583,
+        "max": 202.188724
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "writes",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1424.4046174999999,
+        "p95_nearest_rank": 1625.441121,
+        "min": 1308.966851,
+        "max": 1854.590567
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 115.778244,
+        "p95_nearest_rank": 124.386916,
+        "min": 109.952712,
+        "max": 126.492646
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "cpu",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 228.727486,
+        "p95_nearest_rank": 246.437408,
+        "min": 195.954486,
+        "max": 251.614361
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.6503455,
+        "p95_nearest_rank": 83.800187,
+        "min": 80.219203,
+        "max": 113.779378
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "git",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 311.39269249999995,
+        "p95_nearest_rank": 364.929475,
+        "min": 262.826205,
+        "max": 378.72168
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 9.3389825,
+        "p95_nearest_rank": 11.928808,
+        "min": 9.258816,
+        "max": 12.811671
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "noop",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 155.821322,
+        "p95_nearest_rank": 191.425183,
+        "min": 117.690323,
+        "max": 195.366084
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0010645,
+        "p95_nearest_rank": 0.001982,
+        "min": 0.000704,
+        "max": 0.002074
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "python",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 287.257483,
+        "p95_nearest_rank": 359.805361,
+        "min": 253.095839,
+        "max": 360.326324
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0041385,
+        "p95_nearest_rank": 0.005056,
+        "min": 0.003426,
+        "max": 0.005148
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "reads",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 162.2928015,
+        "p95_nearest_rank": 189.268512,
+        "min": 133.645131,
+        "max": 197.624616
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 17.982795000000003,
+        "p95_nearest_rank": 21.951712,
+        "min": 15.881826,
+        "max": 21.954561
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "spawn",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 267.25185999999997,
+        "p95_nearest_rank": 336.463744,
+        "min": 237.122713,
+        "max": 338.441293
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 122.3379625,
+        "p95_nearest_rank": 179.697277,
+        "min": 119.565357,
+        "max": 185.252395
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "writes",
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1027.5978965,
+        "p95_nearest_rank": 1349.829212,
+        "min": 863.090485,
+        "max": 1451.176828
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 873.997746,
+        "p95_nearest_rank": 1182.847552,
+        "min": 739.815684,
+        "max": 1332.972261
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "cpu",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 21.429958499999998,
+        "p95_nearest_rank": 23.942667,
+        "min": 20.979917,
+        "max": 25.607292
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 18.7655,
+        "p95_nearest_rank": 20.526,
+        "min": 18.329,
+        "max": 21.908
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "git",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 43.9404375,
+        "p95_nearest_rank": 47.131958,
+        "min": 42.123375,
+        "max": 48.293666
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 9.882292,
+        "p95_nearest_rank": 10.779083,
+        "min": 9.4845,
+        "max": 11.175208
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "noop",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 2.8120624999999997,
+        "p95_nearest_rank": 3.59425,
+        "min": 2.357542,
+        "max": 3.613375
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0,
+        "p95_nearest_rank": 0.001,
+        "min": 0.0,
+        "max": 0.001
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "python",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 33.984583,
+        "p95_nearest_rank": 36.174875,
+        "min": 31.696834,
+        "max": 36.395708
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000417,
+        "p95_nearest_rank": 0.0005,
+        "min": 0.000291,
+        "max": 0.000583
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "reads",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 21.8783125,
+        "p95_nearest_rank": 24.677667,
+        "min": 14.114125,
+        "max": 25.626792
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 19.2515,
+        "p95_nearest_rank": 21.226,
+        "min": 11.173,
+        "max": 22.356
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "spawn",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 146.4131875,
+        "p95_nearest_rank": 151.89975,
+        "min": 142.170333,
+        "max": 154.208625
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 143.7695,
+        "p95_nearest_rank": 149.256,
+        "min": 139.472,
+        "max": 151.325
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "writes",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 49.5173125,
+        "p95_nearest_rank": 59.969834,
+        "min": 40.002083,
+        "max": 62.00775
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 46.9025,
+        "p95_nearest_rank": 57.592,
+        "min": 37.098,
+        "max": 58.636
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "cpu",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 58.765917,
+        "p95_nearest_rank": 60.708333,
+        "min": 53.0385,
+        "max": 61.018333
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 18.6405,
+        "p95_nearest_rank": 18.817,
+        "min": 18.343,
+        "max": 19.058
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "git",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 3439.809604,
+        "p95_nearest_rank": 3504.530041,
+        "min": 3416.431584,
+        "max": 3511.294625
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 1686.2321245,
+        "p95_nearest_rank": 1701.850708,
+        "min": 1671.047375,
+        "max": 1710.091541
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "noop",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 16.656937499999998,
+        "p95_nearest_rank": 24.631958,
+        "min": 16.153667,
+        "max": 25.909583
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0,
+        "p95_nearest_rank": 0.001,
+        "min": 0.0,
+        "max": 0.001
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "python",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1767.6050415,
+        "p95_nearest_rank": 1776.538542,
+        "min": 1719.772166,
+        "max": 1825.416125
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0004375,
+        "p95_nearest_rank": 0.000584,
+        "min": 0.000333,
+        "max": 0.000584
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "reads",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 58.0751875,
+        "p95_nearest_rank": 60.481833,
+        "min": 33.988,
+        "max": 60.519208
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 19.4835,
+        "p95_nearest_rank": 20.368,
+        "min": 10.768,
+        "max": 22.105
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "spawn",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 197.424354,
+        "p95_nearest_rank": 216.885709,
+        "min": 159.655375,
+        "max": 221.584125
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 143.2235,
+        "p95_nearest_rank": 149.184,
+        "min": 138.387,
+        "max": 149.658
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "writes",
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 100.456146,
+        "p95_nearest_rank": 102.311,
+        "min": 58.106958,
+        "max": 103.317042
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 47.6515,
+        "p95_nearest_rank": 50.343,
+        "min": 38.325,
+        "max": 51.918
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "cpu",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 236.1565415,
+        "p95_nearest_rank": 269.103333,
+        "min": 212.52675,
+        "max": 277.336791
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.138603,
+        "p95_nearest_rank": 24.546436,
+        "min": 23.51581,
+        "max": 24.547974
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "git",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 243.8851045,
+        "p95_nearest_rank": 279.178583,
+        "min": 225.840417,
+        "max": 309.614833
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 15.1537605,
+        "p95_nearest_rank": 16.71443,
+        "min": 13.721428,
+        "max": 17.505889
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "noop",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 224.31620800000002,
+        "p95_nearest_rank": 246.642875,
+        "min": 180.4935,
+        "max": 254.160417
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000209,
+        "p95_nearest_rank": 0.000333,
+        "min": 8.3e-05,
+        "max": 0.000333
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "python",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 239.953208,
+        "p95_nearest_rank": 270.039,
+        "min": 205.59525,
+        "max": 274.432875
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0005625,
+        "p95_nearest_rank": 0.000875,
+        "min": 0.000375,
+        "max": 0.000917
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "reads",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 218.05256250000002,
+        "p95_nearest_rank": 244.312459,
+        "min": 179.764458,
+        "max": 256.419375
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 3.0341275,
+        "p95_nearest_rank": 3.279961,
+        "min": 2.409668,
+        "max": 3.351336
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "spawn",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 230.292125,
+        "p95_nearest_rank": 254.209833,
+        "min": 200.70925,
+        "max": 260.9555
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 16.320470999999998,
+        "p95_nearest_rank": 18.115223,
+        "min": 12.889052,
+        "max": 20.102432
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "writes",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 250.5504375,
+        "p95_nearest_rank": 288.484166,
+        "min": 198.3225,
+        "max": 292.798125
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 10.726405,
+        "p95_nearest_rank": 13.388885,
+        "min": 9.239215,
+        "max": 13.820427
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "cpu",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 54.923312499999994,
+        "p95_nearest_rank": 66.294875,
+        "min": 47.322084,
+        "max": 68.02975
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.231581499999997,
+        "p95_nearest_rank": 25.687562,
+        "min": 23.159475,
+        "max": 25.836353
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "git",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 47.432625,
+        "p95_nearest_rank": 63.273667,
+        "min": 42.464292,
+        "max": 63.804667
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 1.4197929999999999,
+        "p95_nearest_rank": 1.688751,
+        "min": 1.249126,
+        "max": 1.706001
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "noop",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 27.606082999999998,
+        "p95_nearest_rank": 41.456,
+        "min": 24.311834,
+        "max": 41.654709
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000208,
+        "p95_nearest_rank": 0.000333,
+        "min": 4.1e-05,
+        "max": 0.000417
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "python",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 44.217375000000004,
+        "p95_nearest_rank": 61.479375,
+        "min": 40.307958,
+        "max": 61.676917
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000542,
+        "p95_nearest_rank": 0.000792,
+        "min": 0.000375,
+        "max": 0.003417
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "reads",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 29.9289795,
+        "p95_nearest_rank": 42.952875,
+        "min": 26.368959,
+        "max": 43.642583
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 2.066669,
+        "p95_nearest_rank": 2.402252,
+        "min": 1.699418,
+        "max": 2.40596
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "spawn",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 43.5922295,
+        "p95_nearest_rank": 59.65575,
+        "min": 37.936542,
+        "max": 66.925792
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 14.648823499999999,
+        "p95_nearest_rank": 16.366054,
+        "min": 11.951176,
+        "max": 16.495427
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "writes",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 46.244583500000005,
+        "p95_nearest_rank": 63.406833,
+        "min": 41.539208,
+        "max": 63.912042
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 19.0725755,
+        "p95_nearest_rank": 21.856934,
+        "min": 16.321846,
+        "max": 22.643809
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "cpu",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 694.655229,
+        "p95_nearest_rank": 720.278708,
+        "min": 670.51675,
+        "max": 725.464209
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.3725385,
+        "p95_nearest_rank": 26.116896,
+        "min": 23.75281,
+        "max": 27.815355
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "git",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 695.452708,
+        "p95_nearest_rank": 712.587208,
+        "min": 664.087167,
+        "max": 723.248666
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 14.846637,
+        "p95_nearest_rank": 19.872766,
+        "min": 14.128095,
+        "max": 28.696731
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "noop",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 708.3793539999999,
+        "p95_nearest_rank": 719.304292,
+        "min": 687.263458,
+        "max": 726.304416
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000209,
+        "p95_nearest_rank": 0.000375,
+        "min": 4.2e-05,
+        "max": 0.000458
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "python",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 708.3586045,
+        "p95_nearest_rank": 728.536375,
+        "min": 651.552792,
+        "max": 730.293417
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0005625,
+        "p95_nearest_rank": 0.001417,
+        "min": 0.000416,
+        "max": 0.00225
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "reads",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 704.152479,
+        "p95_nearest_rank": 743.485875,
+        "min": 677.357541,
+        "max": 750.281833
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.4049625,
+        "p95_nearest_rank": 8.236632,
+        "min": 4.819879,
+        "max": 9.331257
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "spawn",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 698.652167,
+        "p95_nearest_rank": 726.053584,
+        "min": 665.506541,
+        "max": 741.892875
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 19.0661395,
+        "p95_nearest_rank": 21.2821,
+        "min": 16.931513,
+        "max": 22.567185
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "writes",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 716.385,
+        "p95_nearest_rank": 740.482292,
+        "min": 672.738875,
+        "max": 761.975667
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 11.5208205,
+        "p95_nearest_rank": 12.702385,
+        "min": 10.663217,
+        "max": 13.577219
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "cpu",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 88.05614550000001,
+        "p95_nearest_rank": 101.355459,
+        "min": 71.914708,
+        "max": 102.829417
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 25.5888515,
+        "p95_nearest_rank": 29.09719,
+        "min": 23.633102,
+        "max": 29.907107
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "git",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 77.1704585,
+        "p95_nearest_rank": 89.244834,
+        "min": 69.935417,
+        "max": 91.668209
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 2.052356,
+        "p95_nearest_rank": 2.371169,
+        "min": 1.510542,
+        "max": 2.518794
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "noop",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 55.5846875,
+        "p95_nearest_rank": 73.760667,
+        "min": 45.90575,
+        "max": 73.809666
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000125,
+        "p95_nearest_rank": 0.000292,
+        "min": 0.0,
+        "max": 0.000333
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "python",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 76.116917,
+        "p95_nearest_rank": 94.069709,
+        "min": 64.774084,
+        "max": 101.882292
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000625,
+        "p95_nearest_rank": 0.000791,
+        "min": 0.000417,
+        "max": 0.000833
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "reads",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 74.6704585,
+        "p95_nearest_rank": 94.813917,
+        "min": 55.013625,
+        "max": 96.868208
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 17.796973,
+        "p95_nearest_rank": 28.224231,
+        "min": 4.609337,
+        "max": 29.766483
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "spawn",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 79.7929165,
+        "p95_nearest_rank": 89.899791,
+        "min": 65.459917,
+        "max": 90.926041
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 19.150472999999998,
+        "p95_nearest_rank": 22.045976,
+        "min": 14.44972,
+        "max": 24.870228
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "writes",
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 99.9492085,
+        "p95_nearest_rank": 117.476708,
+        "min": 73.588375,
+        "max": 130.364209
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 45.74387,
+        "p95_nearest_rank": 56.006502,
+        "min": 21.799226,
+        "max": 57.382462
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "claude",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 71029.112074,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.288s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/001-claude-direct-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "claude",
+      "mode": "mxc",
+      "success": false,
+      "exit": 1,
+      "elapsed_ms": 80035.562799,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.271s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/002-claude-mxc-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "claude",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 77046.482371,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.272s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/003-claude-ouro-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "claude",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 108627.670186,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.318s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/004-claude-greywall-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 141934.814677,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.318s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/005-opencode-greywall-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 80376.490126,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.267s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/006-opencode-direct-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 87293.023637,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.347s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/007-opencode-ouro-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 86307.892634,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.277s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/008-opencode-mxc-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "codex",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 104822.32765,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.282s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/009-codex-greywall-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "codex",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 62481.768103,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.257s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/010-codex-mxc-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "codex",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 79705.226818,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.359s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/011-codex-ouro-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "native",
+      "agent": "codex",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 48539.970122,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.287s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "vps-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/012-codex-direct-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "claude",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 66096.752033,
+      "source": "vps-final/openshell-workflow-v2-claude-final/agent-runs.ndjson",
+      "artifact": "runs/001-claude-docker-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 69332.03488,
+      "source": "vps-final/openshell-workflow-v2-claude-final/agent-runs.ndjson",
+      "artifact": "runs/002-claude-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 74634.785037,
+      "source": "vps-final/openshell-workflow-v2-claude-final/agent-runs.ndjson",
+      "artifact": "runs/003-claude-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 65774.293322,
+      "source": "vps-final/openshell-workflow-v2-opencode-final/agent-runs.ndjson",
+      "artifact": "runs/001-opencode-docker-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 82436.460911,
+      "source": "vps-final/openshell-workflow-v2-opencode-final/agent-runs.ndjson",
+      "artifact": "runs/002-opencode-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 96900.201452,
+      "source": "vps-final/openshell-workflow-v2-opencode-final/agent-runs.ndjson",
+      "artifact": "runs/003-opencode-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "codex",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 55182.670461,
+      "source": "vps-final/openshell-workflow-v3-codex-final/agent-runs.ndjson",
+      "artifact": "runs/001-codex-docker-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 37361.166605,
+      "source": "vps-final/openshell-workflow-v3-codex-final/agent-runs.ndjson",
+      "artifact": "runs/002-codex-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "class": "container",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 62729.47325,
+      "source": "vps-final/openshell-workflow-v3-codex-final/agent-runs.ndjson",
+      "artifact": "runs/003-codex-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "claude",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 80854.400875,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.832s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/001-claude-direct-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "claude",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 89486.45312,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.832s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/002-claude-mxc-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "claude",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 80293.560216,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.832s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/003-claude-ouro-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "claude",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 103107.29828,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.833s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/004-claude-greywall-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 179652.020588,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.834s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/005-opencode-greywall-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 102505.304299,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.862s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/006-opencode-direct-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 115836.594184,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.834s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/007-opencode-ouro-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 117634.653602,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.835s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/008-opencode-mxc-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "codex",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 119508.447133,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.835s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/009-codex-greywall-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "codex",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 79991.696637,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.833s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/010-codex-mxc-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "codex",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 67783.665584,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.833s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/011-codex-ouro-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "native",
+      "agent": "codex",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 57044.767586,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.835s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "pi-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/012-codex-direct-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "container",
+      "agent": "claude",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 81227.898237,
+      "source": "pi-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/001-claude-docker-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "container",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "success": false,
+      "exit": 1,
+      "elapsed_ms": 8040.272227,
+      "source": "pi-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/002-claude-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 113794.557111,
+      "source": "pi-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/003-opencode-docker-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "success": false,
+      "exit": 1,
+      "elapsed_ms": 8312.483276,
+      "source": "pi-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/004-opencode-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "container",
+      "agent": "codex",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 60854.356523,
+      "source": "pi-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/005-codex-docker-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "class": "container",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "success": false,
+      "exit": 1,
+      "elapsed_ms": 8680.780974,
+      "source": "pi-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/006-codex-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "claude",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 74450.841709,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.188s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "mac-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/001-claude-direct-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "claude",
+      "mode": "greywall",
+      "success": false,
+      "exit": 65,
+      "elapsed_ms": 33.553666,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": false,
+        "hidden_pass": false,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/workflow-v2-final/runs/002-claude-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/workflow-v2-final/runs/002-claude-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.188s\n\nFAILED (failures=2)\n",
+        "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+      },
+      "source": "mac-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/002-claude-greywall-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "claude",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 76976.273625,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.188s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "mac-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/003-claude-mxc-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 58357.410042,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.187s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "mac-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/004-opencode-direct-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "greywall",
+      "success": false,
+      "exit": 65,
+      "elapsed_ms": 48.61675,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": false,
+        "hidden_pass": false,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/workflow-v2-final/runs/005-opencode-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/workflow-v2-final/runs/005-opencode-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.187s\n\nFAILED (failures=2)\n",
+        "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+      },
+      "source": "mac-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/005-opencode-greywall-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "opencode",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 74560.461667,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.189s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "mac-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/006-opencode-mxc-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "codex",
+      "mode": "greywall",
+      "success": false,
+      "exit": 65,
+      "elapsed_ms": 45.717833,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": false,
+        "hidden_pass": false,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/workflow-v2-final/runs/007-codex-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/workflow-v2-final/runs/007-codex-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.187s\n\nFAILED (failures=2)\n",
+        "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+      },
+      "source": "mac-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/007-codex-greywall-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "codex",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 46727.675458,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.186s\n\nOK\n",
+        "hidden_output": ""
+      },
+      "source": "mac-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/008-codex-direct-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "native",
+      "agent": "codex",
+      "mode": "mxc",
+      "success": false,
+      "exit": 1,
+      "elapsed_ms": 100.497375,
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": false,
+        "hidden_pass": false,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/workflow-v2-final/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/workflow-v2-final/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.192s\n\nFAILED (failures=2)\n",
+        "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+      },
+      "source": "mac-final/workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/009-codex-mxc-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "claude",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 72449.812666,
+      "source": "mac-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/001-claude-docker-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 70441.57175,
+      "source": "mac-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/002-claude-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 76916.251959,
+      "source": "mac-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/003-claude-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 121325.375292,
+      "source": "mac-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/004-opencode-docker-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 70032.534583,
+      "source": "mac-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/005-opencode-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 78709.82525,
+      "source": "mac-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/006-opencode-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 65319.897292,
+      "source": "mac-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/007-codex-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "codex",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 62110.959125,
+      "source": "mac-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/008-codex-docker-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "class": "container",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 63796.539375,
+      "source": "mac-final/openshell-workflow-v2-final/agent-runs.ndjson",
+      "artifact": "runs/009-codex-openshell-ephemeral-inventory-workflow-0"
+    }
+  ],
+  "selection": [
+    {
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "direct"
+      },
+      "sha256": "6c5793d14169472b1e5d53c982edb574b7c044deb6d3875f87d2bc1c03312cfc"
+    },
+    {
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "ouro"
+      },
+      "sha256": "6c5793d14169472b1e5d53c982edb574b7c044deb6d3875f87d2bc1c03312cfc"
+    },
+    {
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "mxc"
+      },
+      "sha256": "6c5793d14169472b1e5d53c982edb574b7c044deb6d3875f87d2bc1c03312cfc"
+    },
+    {
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "greywall"
+      },
+      "sha256": "6c5793d14169472b1e5d53c982edb574b7c044deb6d3875f87d2bc1c03312cfc"
+    },
+    {
+      "source": "vps-final/v5-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "direct"
+      },
+      "sha256": "6e9f15bc9db3df20c97918e2df73e691c6877d6958a5c57982b03acdc9f3782c"
+    },
+    {
+      "source": "vps-final/v5-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "ouro"
+      },
+      "sha256": "6e9f15bc9db3df20c97918e2df73e691c6877d6958a5c57982b03acdc9f3782c"
+    },
+    {
+      "source": "vps-final/v5-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "mxc"
+      },
+      "sha256": "6e9f15bc9db3df20c97918e2df73e691c6877d6958a5c57982b03acdc9f3782c"
+    },
+    {
+      "source": "vps-final/v5-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "greywall"
+      },
+      "sha256": "6e9f15bc9db3df20c97918e2df73e691c6877d6958a5c57982b03acdc9f3782c"
+    },
+    {
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "direct"
+      },
+      "sha256": "6c5793d14169472b1e5d53c982edb574b7c044deb6d3875f87d2bc1c03312cfc"
+    },
+    {
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "ouro"
+      },
+      "sha256": "6c5793d14169472b1e5d53c982edb574b7c044deb6d3875f87d2bc1c03312cfc"
+    },
+    {
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "mxc"
+      },
+      "sha256": "6c5793d14169472b1e5d53c982edb574b7c044deb6d3875f87d2bc1c03312cfc"
+    },
+    {
+      "source": "vps-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "greywall"
+      },
+      "sha256": "6c5793d14169472b1e5d53c982edb574b7c044deb6d3875f87d2bc1c03312cfc"
+    },
+    {
+      "source": "vps-final/openshell-v2-claude-final/agent-runs.ndjson",
+      "filter": "all",
+      "sha256": "1b8e5ea34cf77105d6f4d8c4d0369d9d74ec9a257b3da7d88e59010af0c01967"
+    },
+    {
+      "source": "vps-final/openshell-v2-opencode-final/agent-runs.ndjson",
+      "filter": "all",
+      "sha256": "d0153b7f82b9b5666a9644dc8cbfa194384b23384dcf96038c8cb83c3cfe9f4a"
+    },
+    {
+      "source": "vps-final/openshell-v3-codex-final/agent-runs.ndjson",
+      "filter": "all",
+      "sha256": "f55d66ae01808bf9a1cee3066e58ddd899af89da905eee2695f6b84623783a8a"
+    },
+    {
+      "source": "vps-final/perf-v3-folder-deny/launches.ndjson",
+      "filter": "measurement; Ouro obs-off excluded from headline",
+      "sha256": "f3f022eb5ab771743f74c8f57b6510983ce68a6591722569e8e16a8e350ae247"
+    },
+    {
+      "source": "vps-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "filter": "measurement; Ouro obs-off excluded from headline",
+      "sha256": "f3ed40cdbf5c8de5562af4c338f3e5d0260283663f6d9ef2dac9e48fbc5dc195"
+    },
+    {
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "direct"
+      },
+      "sha256": "3794891cf1bf8b9b79d695e25403f0f36c4cf0561f234e3e5308f8e6aec1cb30"
+    },
+    {
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "ouro"
+      },
+      "sha256": "3794891cf1bf8b9b79d695e25403f0f36c4cf0561f234e3e5308f8e6aec1cb30"
+    },
+    {
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "mxc"
+      },
+      "sha256": "3794891cf1bf8b9b79d695e25403f0f36c4cf0561f234e3e5308f8e6aec1cb30"
+    },
+    {
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "greywall"
+      },
+      "sha256": "3794891cf1bf8b9b79d695e25403f0f36c4cf0561f234e3e5308f8e6aec1cb30"
+    },
+    {
+      "source": "pi-final/v5-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "direct"
+      },
+      "sha256": "705dfe68a5cf30d8776a37770cb83e8116305f2ad61ca72863ebc6911e14c38c"
+    },
+    {
+      "source": "pi-final/v5-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "ouro"
+      },
+      "sha256": "705dfe68a5cf30d8776a37770cb83e8116305f2ad61ca72863ebc6911e14c38c"
+    },
+    {
+      "source": "pi-final/v6-opencode-mxc/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "mxc"
+      },
+      "sha256": "0f4143bfdae59b42d15339824035472f1ee8d9847625695a084b30fcc389af4b"
+    },
+    {
+      "source": "pi-final/v5-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "greywall"
+      },
+      "sha256": "705dfe68a5cf30d8776a37770cb83e8116305f2ad61ca72863ebc6911e14c38c"
+    },
+    {
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "direct"
+      },
+      "sha256": "3794891cf1bf8b9b79d695e25403f0f36c4cf0561f234e3e5308f8e6aec1cb30"
+    },
+    {
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "ouro"
+      },
+      "sha256": "3794891cf1bf8b9b79d695e25403f0f36c4cf0561f234e3e5308f8e6aec1cb30"
+    },
+    {
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "mxc"
+      },
+      "sha256": "3794891cf1bf8b9b79d695e25403f0f36c4cf0561f234e3e5308f8e6aec1cb30"
+    },
+    {
+      "source": "pi-final/v4-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "greywall"
+      },
+      "sha256": "3794891cf1bf8b9b79d695e25403f0f36c4cf0561f234e3e5308f8e6aec1cb30"
+    },
+    {
+      "source": "pi-final/openshell-v2-final/agent-runs.ndjson",
+      "filter": "all",
+      "sha256": "67821c640052ed6607828837b2bb8dd3da24f9653997d16a0974080305d60fb9"
+    },
+    {
+      "source": "pi-final/perf-v3-folder-deny/launches.ndjson",
+      "filter": "measurement; Ouro obs-off excluded from headline",
+      "sha256": "4e6b99077fb3d8325d905b62b126f8793dba06460ce0262045b2bcc0a21a4d45"
+    },
+    {
+      "source": "pi-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "filter": "measurement; Ouro obs-off excluded from headline",
+      "sha256": "a4b2eb6af8eb4652fb122653c142fca7632fbda6c77a18bc97314c3e65049b5d"
+    },
+    {
+      "source": "mac-final/v2-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "direct"
+      },
+      "sha256": "143b553e9d7e65de3ce845c9604c6a6d818d24be4ecacc5820d583c190abd872"
+    },
+    {
+      "source": "mac-final/v2-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "mxc"
+      },
+      "sha256": "143b553e9d7e65de3ce845c9604c6a6d818d24be4ecacc5820d583c190abd872"
+    },
+    {
+      "source": "mac-final/v2-agents/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "greywall"
+      },
+      "sha256": "143b553e9d7e65de3ce845c9604c6a6d818d24be4ecacc5820d583c190abd872"
+    },
+    {
+      "source": "mac-final/v5-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "direct"
+      },
+      "sha256": "aff83da708e0f15f78021a336b1712c4378a7b765979a9a3832c2197064227a2"
+    },
+    {
+      "source": "mac-final/v6-opencode-mxc/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "mxc"
+      },
+      "sha256": "f87d75664c21d1e1b6cf9479f935e8509ab9898306d3964fdb7865ed160024b8"
+    },
+    {
+      "source": "mac-final/v5-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "greywall"
+      },
+      "sha256": "aff83da708e0f15f78021a336b1712c4378a7b765979a9a3832c2197064227a2"
+    },
+    {
+      "source": "mac-final/v4-codex/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "direct"
+      },
+      "sha256": "a95788b57b5e17202e1cfb9f84f0b890f59f4ad986c250f89adb4f4048f99845"
+    },
+    {
+      "source": "mac-final/v4-codex/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "mxc"
+      },
+      "sha256": "a95788b57b5e17202e1cfb9f84f0b890f59f4ad986c250f89adb4f4048f99845"
+    },
+    {
+      "source": "mac-final/v4-codex/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "greywall"
+      },
+      "sha256": "a95788b57b5e17202e1cfb9f84f0b890f59f4ad986c250f89adb4f4048f99845"
+    },
+    {
+      "source": "mac-final/openshell-v2-final/agent-runs.ndjson",
+      "filter": "all",
+      "sha256": "054b33bc7fc35e6cff8a0624c9b73ab25ca3454b8c03f0b4943dc3d46fd5489a"
+    },
+    {
+      "source": "mac-final/perf-v2-final/launches.ndjson",
+      "filter": "measurement; Ouro obs-off excluded from headline",
+      "sha256": "6eaebbd7bf1c1d11e9fc075e4ecaad562959d9f7121d79e80f892c5836304e59"
+    },
+    {
+      "source": "mac-final/openshell-perf-v2-final/openshell-launches.ndjson",
+      "filter": "measurement; Ouro obs-off excluded from headline",
+      "sha256": "e87122fe2970b96bb3ac3936a826f7f4abab09ece5d8bffb378628df2a2b7de1"
+    }
+  ]
+}

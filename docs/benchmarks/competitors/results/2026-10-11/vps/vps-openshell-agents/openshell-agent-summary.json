@@ -1,0 +1,7 @@
+{
+  "agent": "opencode",
+  "mode": "openshell-ephemeral",
+  "runs": 6,
+  "success": 6,
+  "elapsed_ms_median": 26854.0
+}

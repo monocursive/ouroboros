@@ -499,11 +499,12 @@ impl LinuxPlatform {
     /// plan's capabilities from them.
     fn measure(&self, plan: &PlanRequest, wanted: impl Fn(&str) -> bool) -> Vec<Capability> {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/proc/self/exe"));
-        let results: Vec<ProbeResult> = probe::PROBE_NAMES
+        let names: Vec<&str> = probe::PROBE_NAMES
             .iter()
             .filter(|name| wanted(name))
-            .map(|name| probe::run_one_backend(name, &exe, self.backend()))
+            .copied()
             .collect();
+        let results = probe::run_selected(&names, &exe, self.backend());
         derive(plan, &results, &rfc3339_utc(SystemTime::now()))
     }
 }
@@ -1011,7 +1012,7 @@ impl Boundary {
         // Operator grants are enforced, not merely recorded (I02, north-star
         // §4.2): read-only grants become additional ro-binds at their
         // resolved paths, host-rooted writable grants become binds, and
-        // denied subtrees are masked with a tmpfs over the path. Grants under
+        // denied paths are masked with a sealed directory or file. Grants under
         // the workspace or scratch are covered by the base binds and layered
         for reference in &snapshot.filesystem.read_write {
             if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
@@ -1078,7 +1079,25 @@ impl Boundary {
         }
         for reference in &snapshot.filesystem.deny_read {
             let destination = resolve_path_ref(reference, &plan.workspace)?;
-            bplan.masked.push(PathBuf::from(destination));
+            let path = PathBuf::from(destination);
+            // Classification changes only the overlay's type, never grants
+            // access to the denied object. A type swap before mounting fails
+            // setup rather than releasing an unmasked target.
+            let host = host_path_of(reference, &plan.workspace, &scratch)?;
+            let mask = match std::fs::metadata(&host) {
+                Ok(metadata) if !metadata.is_dir() => bwrap::Mask::File(path),
+                Ok(_) => bwrap::Mask::Directory(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    bwrap::Mask::Directory(path)
+                }
+                Err(error) => {
+                    return Err(preparing(
+                        ErrorCode::BackendUnavailable,
+                        format!("cannot classify denied path {}: {error}", host.display()),
+                    ));
+                }
+            };
+            bplan.masked.push(mask);
         }
 
         // J5-B1-w3: §9.1 — an operator grant may not expose host /proc, /sys
@@ -3637,6 +3656,16 @@ fn prepare_mounts(
         // alias of a protected source after applying its protection.
         let mut fds = Vec::new();
         for row in plan.mount_table() {
+            if row.kind == "file-mask" {
+                // EOF supplies an empty file to bubblewrap; no host content
+                // or writable source descriptor is exposed to the child.
+                let (reader, writer) = exec::pipe().map_err(failure)?;
+                drop(writer);
+                let target = PINNED_FD_BASE + fds.len() as RawFd;
+                fds.push((reader, target));
+                plan.mount_fds.push(Some(target));
+                continue;
+            }
             if !matches!(row.kind, "bind" | "ro-bind" | "ro-bind-fd" | "placeholder") {
                 plan.mount_fds.push(None);
                 continue;

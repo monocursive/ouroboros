@@ -1,0 +1,46 @@
+I'll implement category summaries in the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and planning the implementation.
+Now let me read the test files to understand the expected behavior:
+Now let me implement the solution. First, I'll create a new processing module to handle the category grouping logic:
+Excellent! All tests pass. Let me mark the tasks as completed and verify the implementation with a quick manual test:
+Perfect! Let me also verify the ungrouped behavior still works and test the --min-quantity filter with grouping:
+Perfect! All functionality works correctly. Let me create a test with invalid CSV to verify the error handling:
+Excellent! The implementation is complete and working correctly. Let me provide a summary:
+
+## Summary
+
+I've successfully implemented category summaries in the inventory CLI with the following changes:
+
+### Created Files:
+1. **inventory/processing.py** - New module containing the `group_by_category()` function that:
+   - Filters items by min_quantity before grouping
+   - Groups items by category and calculates quantity sums and stock values
+   - Returns results sorted alphabetically by category
+   - Formats stock_value as exact decimal strings with two fractional digits
+
+### Modified Files:
+1. **inventory/cli.py** - Updated to:
+   - Add `--group-by-category` argument
+   - Import and use the processing module
+   - Route to grouped or ungrouped output based on flag
+   - Maintain existing error handling (exit code 2, stderr messages, no tracebacks)
+
+2. **README.md** - Added documentation with:
+   - Grouped output example command
+   - Expected JSON output
+
+### Key Features:
+- `--min-quantity` filter applies **before** grouping (as required)
+- Stock values are exact decimal calculations formatted to 2 decimal places as JSON strings
+- Results are sorted alphabetically by category
+- Ungrouped output maintains original behavior
+- Invalid CSV produces exit code 2 with useful error messages (no tracebacks)
+- Processing and argument parsing are in separate modules
+
+### Test Results:
+All 10 tests pass, including:
+- `test_category_summaries` - Basic grouping functionality
+- `test_filter_before_group` - Min quantity filtering before grouping
+- `test_bad_csv` - Error handling with exit code 2
+- All existing ungrouped tests continue to work
+
+The implementation meets all requirements and maintains backward compatibility with existing functionality.

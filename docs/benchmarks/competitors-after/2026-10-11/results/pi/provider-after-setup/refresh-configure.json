@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "openshell",
+    "provider",
+    "refresh",
+    "configure",
+    "benchmark-codex-after",
+    "--credential-key",
+    "CODEX_AUTH_ACCESS_TOKEN",
+    "--strategy",
+    "oauth2-refresh-token",
+    "--material",
+    "client_id=app_EMoamEEZ73f0CkXaXp7hrann",
+    "--secret-material-env",
+    "refresh_token=CODEX_AUTH_REFRESH_TOKEN"
+  ],
+  "exit": 0,
+  "stdout": "\u2713 Configured refresh for benchmark-codex-after CODEX_AUTH_ACCESS_TOKEN\n",
+  "stderr": ""
+}

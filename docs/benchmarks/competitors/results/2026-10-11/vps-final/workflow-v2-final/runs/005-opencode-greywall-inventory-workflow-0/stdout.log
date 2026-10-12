@@ -1,0 +1,46 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Let me explore the directory structure more systematically:
+Now let me read the key files to understand the current structure:
+Now let me check the tests to understand the expected behavior:
+Now I understand the requirements. Let me create a task list and implement the feature:
+Let me start by adding the `--group-by-category` argument to the CLI and then create the grouping logic in report.py:
+Now I'll create the category_summary function in report.py. Based on the tests, I need to:
+1. Apply min_quantity filter first
+2. Group by category
+3. Sum quantities and calculate stock_value (quantity * unit_price)
+4. Format stock_value as a decimal string with two decimal places
+5. Sort by category name
+Now I'll update cli.py to use category_summary when the flag is set:
+Now let me update the README.md with the grouped example:
+Now let's run the tests to see if everything works correctly:
+Excellent! All tests pass. Let me verify the implementation by testing it manually with the example CSV:
+Perfect! Let me also verify the error handling for invalid CSV:
+Excellent! The error handling works correctly - it produces exit code 2, shows a useful error message without a traceback. Let me verify the final structure of the files to ensure everything is properly separated:
+Perfect! I have successfully implemented the category summaries feature for the inventory CLI. Here's a summary of what was done:
+
+## Implementation Summary
+
+**1. Added `--group-by-category` flag** (inventory/cli.py:11)
+   - New argument parser option using `action='store_true'`
+
+**2. Created `category_summary` function** (inventory/report.py:8-30)
+   - Applies `--min-quantity` filter before grouping (as required)
+   - Groups items by category
+   - Sums quantities and calculates stock_value (quantity × unit_price) using exact Decimal arithmetic
+   - Formats stock_value as a JSON string with exactly two decimal places
+   - Returns results sorted alphabetically by category
+
+**3. Updated CLI logic** (inventory/cli.py:15-18)
+   - Conditionally calls `category_summary` when `--group-by-category` is used
+   - Maintains existing behavior for ungrouped output
+   - Keeps argument parsing in cli.py and processing in report.py (separate modules)
+
+**4. Updated README.md**
+   - Added grouped example with expected JSON output
+
+**5. All tests pass** ✓
+   - All 10 tests pass including the new category summary tests
+   - Invalid CSV produces exit code 2 with useful error message (no traceback)
+   - Existing tests remain unchanged and working
+
+The implementation maintains clean separation of concerns with argument parsing in `cli.py` and processing logic in `report.py`.

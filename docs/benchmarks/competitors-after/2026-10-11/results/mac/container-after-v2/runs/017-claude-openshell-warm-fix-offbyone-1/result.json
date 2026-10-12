@@ -1,0 +1,72 @@
+{
+  "sequence": 17,
+  "agent": "claude",
+  "mode": "openshell-warm",
+  "task": "fix-offbyone",
+  "repetition": 1,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 19226.444167,
+  "container_result": {
+    "agent": "claude",
+    "task": "fix-offbyone",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 19072.798909,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {
+      "total_cost_usd": 0.07833705,
+      "num_turns": 5,
+      "duration_api_ms": 18407
+    },
+    "peak_child_rss_kib": 287908,
+    "guest_kernel": [
+      "Linux",
+      "8c0348bc3943",
+      "6.15.11-orbstack-00539-g9885ebd8e3f4",
+      "#1 SMP PREEMPT Fri Aug 22 08:24:56 UTC 2025",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "memory.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/memory.max'"
+      },
+      "memory.swap.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/memory.swap.max'"
+      },
+      "pids.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/pids.max'"
+      },
+      "cpu.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/cpu.max'"
+      }
+    }
+  },
+  "argv": [
+    "openshell",
+    "sandbox",
+    "exec",
+    "-n",
+    "bench-v2-claude",
+    "--no-tty",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "claude",
+    "fix-offbyone"
+  ],
+  "load": [
+    1.71728515625,
+    1.90869140625,
+    2.0712890625
+  ],
+  "artifact": "runs/017-claude-openshell-warm-fix-offbyone-1"
+}

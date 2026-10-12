@@ -1,0 +1,65 @@
+{
+  "sequence": 41,
+  "agent": "codex",
+  "mode": "docker",
+  "task": "fix-offbyone",
+  "repetition": 0,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 20579.691708,
+  "container_result": {
+    "agent": "codex",
+    "task": "fix-offbyone",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 20043.098738,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {},
+    "peak_child_rss_kib": 317676,
+    "guest_kernel": [
+      "Linux",
+      "d9ac45ac55f8",
+      "6.15.11-orbstack-00539-g9885ebd8e3f4",
+      "#1 SMP PREEMPT Fri Aug 22 08:24:56 UTC 2025",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "memory.max": "max",
+      "memory.swap.max": "max",
+      "pids.max": "max",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "CODEX_AUTH_ACCESS_TOKEN",
+    "-e",
+    "CODEX_AUTH_REFRESH_TOKEN",
+    "-e",
+    "CODEX_AUTH_ACCOUNT_ID",
+    "-e",
+    "CODEX_AUTH_ID_TOKEN",
+    "ouro-comparison-agents-after:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "fix-offbyone"
+  ],
+  "load": [
+    2.01513671875,
+    1.92138671875,
+    2.00537109375
+  ],
+  "artifact": "runs/041-codex-docker-fix-offbyone-0"
+}

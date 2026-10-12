@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, category sorting, and decimal totals formatted as two-digit JSON strings.
+
+Ungrouped behavior is preserved. Invalid CSV returns exit code 2 without a traceback. Processing remains separate from argument parsing, and README includes a verified example.
+
+All 10 supplied tests pass; tests were unchanged.

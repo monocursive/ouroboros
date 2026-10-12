@@ -1,0 +1,323 @@
+{
+  "performance": {
+    "available": {
+      "direct": true,
+      "mxc": true
+    },
+    "case_available": [
+      [
+        "direct",
+        "cpu"
+      ],
+      [
+        "direct",
+        "git"
+      ],
+      [
+        "direct",
+        "noop"
+      ],
+      [
+        "direct",
+        "python"
+      ],
+      [
+        "direct",
+        "reads"
+      ],
+      [
+        "direct",
+        "spawn"
+      ],
+      [
+        "direct",
+        "writes"
+      ],
+      [
+        "mxc",
+        "cpu"
+      ],
+      [
+        "mxc",
+        "git"
+      ],
+      [
+        "mxc",
+        "noop"
+      ],
+      [
+        "mxc",
+        "python"
+      ],
+      [
+        "mxc",
+        "reads"
+      ],
+      [
+        "mxc",
+        "spawn"
+      ],
+      [
+        "mxc",
+        "writes"
+      ]
+    ],
+    "invalid_sequences": [],
+    "reference": {
+      "noop": {
+        "workload": "noop",
+        "count": 1,
+        "checksum": 0
+      },
+      "python": {
+        "workload": "python",
+        "count": 1,
+        "checksum": 0
+      },
+      "git": {
+        "workload": "git",
+        "count": 1003,
+        "checksum": "c7daa5d1c7985955db91200781f171ab3a66a5a1ace3358a9fcdc54e513383aa"
+      },
+      "reads": {
+        "workload": "reads",
+        "count": 1000,
+        "checksum": 491520000
+      },
+      "writes": {
+        "workload": "writes",
+        "count": 1000,
+        "checksum": 1024000
+      },
+      "spawn": {
+        "workload": "spawn",
+        "count": 100,
+        "checksum": 0
+      },
+      "cpu": {
+        "workload": "cpu",
+        "count": 20000000,
+        "checksum": 15910230868747444993
+      }
+    }
+  },
+  "safety": [
+    {
+      "tool": "direct",
+      "probe": "private_read",
+      "sequence": 486,
+      "status": "allowed",
+      "detail": {
+        "probe": "read",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "private_write",
+      "sequence": 487,
+      "status": "allowed",
+      "detail": {
+        "probe": "write",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "readonly_write",
+      "sequence": 488,
+      "status": "allowed",
+      "detail": {
+        "probe": "write",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "symlink_read",
+      "sequence": 489,
+      "status": "allowed",
+      "detail": {
+        "probe": "read",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "symlink_write",
+      "sequence": 490,
+      "status": "allowed",
+      "detail": {
+        "probe": "write",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "hardlink_read",
+      "sequence": 491,
+      "status": "allowed",
+      "detail": {
+        "probe": "link",
+        "allowed": true,
+        "bytes": 20
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "host_tcp",
+      "sequence": 492,
+      "status": "allowed",
+      "detail": {
+        "probe": "tcp",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "host_unix_socket",
+      "sequence": 493,
+      "status": "allowed",
+      "detail": {
+        "probe": "unix",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "host_signal",
+      "sequence": 494,
+      "status": "allowed",
+      "detail": {
+        "probe": "signal",
+        "allowed": true
+      }
+    },
+    {
+      "tool": "direct",
+      "probe": "detached_after_root_exit",
+      "sequence": 495,
+      "status": "survived",
+      "bytes_at_return": 9,
+      "bytes_after_300ms": 68
+    },
+    {
+      "tool": "mxc",
+      "probe": "private_read",
+      "sequence": 496,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted: '/Users/monocursive/bench-ouro-after/runs/perf-after/private/denied/read-canary'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "private_write",
+      "sequence": 497,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted: '/Users/monocursive/bench-ouro-after/runs/perf-after/private/write-canary'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "readonly_write",
+      "sequence": 498,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted: '/Users/monocursive/bench-ouro-after/runs/perf-after/private/read-only'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "symlink_read",
+      "sequence": 499,
+      "status": "denied",
+      "detail": {
+        "probe": "read",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted: '/Users/monocursive/bench-ouro-after/runs/perf-after/work/read-link'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "symlink_write",
+      "sequence": 500,
+      "status": "denied",
+      "detail": {
+        "probe": "write",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted: '/Users/monocursive/bench-ouro-after/runs/perf-after/work/write-link'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "hardlink_read",
+      "sequence": 501,
+      "status": "denied",
+      "detail": {
+        "probe": "link",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted: '/Users/monocursive/bench-ouro-after/runs/perf-after/private/denied/read-canary' -> '/Users/monocursive/bench-ouro-after/runs/perf-after/work/link-copy'"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_tcp",
+      "sequence": 502,
+      "status": "denied",
+      "detail": {
+        "probe": "tcp",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_unix_socket",
+      "sequence": 503,
+      "status": "denied",
+      "detail": {
+        "probe": "unix",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_signal",
+      "sequence": 504,
+      "status": "denied",
+      "detail": {
+        "probe": "signal",
+        "allowed": false,
+        "errno": 1,
+        "error": "[Errno 1] Operation not permitted"
+      }
+    },
+    {
+      "tool": "mxc",
+      "probe": "detached_after_root_exit",
+      "sequence": 505,
+      "status": "survived",
+      "bytes_at_return": 9,
+      "bytes_after_300ms": 68
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "native_invocations": 198,
+  "container_invocations": 144,
+  "workflow_invocations": 57,
+  "valid_performance_samples": 4620,
+  "performance_buckets": 154
+}

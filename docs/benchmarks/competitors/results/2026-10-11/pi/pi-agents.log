@@ -1,0 +1,72 @@
+rule: {'id': 4, 'container_pattern': '*', 'destination_pattern': 'api.anthropic.com', 'port_pattern': '443', 'rule_type': 'permanent', 'action': 'allow', 'created_at': '2026-10-11T12:52:17Z', 'expires_at': None, 'last_used_at': None, 'created_by': 'admin', 'notes': 'agent-bench', 'is_active': True, 'source': 'global'}
+credential: {'created_at': '2026-10-11T12:52:17Z', 'id': 'cred_a54da097cc930a9d', 'label': 'ANTHROPIC_API_KEY', 'placeholder': 'greyproxy:credential:v1:global:c990e4e8493c22c534c4d4b2290b533f'}
+opencode direct add-multiply run0: 43762ms exit=0 tests=True content=True
+opencode direct add-multiply run1: 46623ms exit=0 tests=True content=True
+opencode direct fix-offbyone run0: 55477ms exit=0 tests=True content=True
+opencode direct fix-offbyone run1: 50215ms exit=0 tests=True content=True
+opencode direct refactor-yaml-json run0: 47692ms exit=0 tests=True content=True
+opencode direct refactor-yaml-json run1: 43806ms exit=0 tests=True content=True
+opencode ouro add-multiply run0: 47766ms exit=0 tests=True content=True
+opencode ouro add-multiply run1: 47565ms exit=0 tests=True content=True
+opencode ouro fix-offbyone run0: 56921ms exit=0 tests=True content=True
+opencode ouro fix-offbyone run1: 49380ms exit=0 tests=True content=True
+opencode ouro refactor-yaml-json run0: 46824ms exit=0 tests=True content=True
+opencode ouro refactor-yaml-json run1: 50012ms exit=0 tests=True content=True
+opencode greywall add-multiply run0: 115535ms exit=1 tests=False content=False
+opencode greywall add-multiply run1: 118133ms exit=1 tests=False content=False
+opencode greywall fix-offbyone run0: 115850ms exit=1 tests=False content=False
+opencode greywall fix-offbyone run1: 114860ms exit=1 tests=False content=False
+opencode greywall refactor-yaml-json run0: 115976ms exit=1 tests=True content=False
+opencode greywall refactor-yaml-json run1: 117411ms exit=1 tests=True content=False
+opencode mxc add-multiply run0: 40955ms exit=0 tests=True content=True
+opencode mxc add-multiply run1: 46798ms exit=0 tests=True content=True
+opencode mxc fix-offbyone run0: 48645ms exit=0 tests=True content=True
+opencode mxc fix-offbyone run1: 53461ms exit=0 tests=True content=True
+opencode mxc refactor-yaml-json run0: 182090ms exit=0 tests=True content=True
+opencode mxc refactor-yaml-json run1: 176579ms exit=0 tests=True content=True
+{
+ "opencode/direct": {
+  "runs": 6,
+  "success": 6,
+  "elapsed_ms": [
+   43762,
+   46623,
+   55477,
+   50215,
+   47692,
+   43806
+  ],
+  "elapsed_ms_median": 47692
+ },
+ "opencode/ouro": {
+  "runs": 6,
+  "success": 6,
+  "elapsed_ms": [
+   47766,
+   47565,
+   56921,
+   49380,
+   46824,
+   50012
+  ],
+  "elapsed_ms_median": 49380
+ },
+ "opencode/greywall": {
+  "runs": 6,
+  "success": 0,
+  "elapsed_ms": []
+ },
+ "opencode/mxc": {
+  "runs": 6,
+  "success": 6,
+  "elapsed_ms": [
+   40955,
+   46798,
+   48645,
+   53461,
+   182090,
+   176579
+  ],
+  "elapsed_ms_median": 53461
+ }
+}

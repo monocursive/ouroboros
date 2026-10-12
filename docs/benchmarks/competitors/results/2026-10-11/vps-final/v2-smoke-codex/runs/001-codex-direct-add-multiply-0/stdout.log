@@ -1,0 +1,10 @@
+I couldn’t edit files or run tests because the execution tool failed: `codex-code-mode-host` is missing.
+
+The intended addition to `src/calc.py` is:
+
+```python
+def multiply(a, b):
+    return a * b
+```
+
+No files were changed, and tests remain unverified.

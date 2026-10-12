@@ -1,0 +1,20 @@
+    Finished `release` profile [optimized] target(s) in 0.34s
+     Running tests/conformance_j1.rs (target/release/deps/conformance_j1-c3ec74f72f6db325)
+
+running 1 test
+test s11_wall_expiry_separate_run ... 
+thread 's11_wall_expiry_separate_run' (2660287) panicked at crates/ouro-jail/tests/conformance_j1.rs:598:5:
+assertion `left == right` failed
+  left: Bool(true)
+ right: false
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    s11_wall_expiry_separate_run
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.64s
+
+error: test failed, to rerun pass `-p ouro-jail --test conformance_j1`

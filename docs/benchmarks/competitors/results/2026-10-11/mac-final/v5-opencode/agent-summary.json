@@ -1,0 +1,29 @@
+{
+  "opencode/direct": {
+    "runs": 6,
+    "success": 6,
+    "times_ms": [
+      22772.305208,
+      24470.310042,
+      34043.471541,
+      27678.129583,
+      25879.858084,
+      30950.825667
+    ],
+    "median_ms": 26778.9938335
+  },
+  "opencode/greywall": {
+    "runs": 6,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "opencode/mxc": {
+    "runs": 6,
+    "success": 1,
+    "times_ms": [
+      153668.940542
+    ],
+    "median_ms": 153668.940542
+  }
+}

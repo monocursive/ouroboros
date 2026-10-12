@@ -1,0 +1,8 @@
+1/9 claude docker add-multiply #0 20.9s exit=0 success=True
+Traceback (most recent call last):
+  File "/Users/monocursive/bench-ouro/harness/openshell_agent_v2.py", line 229, in <module>
+    main()
+    ~~~~^^
+  File "/Users/monocursive/bench-ouro/harness/openshell_agent_v2.py", line 182, in main
+    raise RuntimeError("Warm sandbox creation failed")
+RuntimeError: Warm sandbox creation failed

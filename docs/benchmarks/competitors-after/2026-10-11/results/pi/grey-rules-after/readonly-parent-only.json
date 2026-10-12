@@ -1,0 +1,20 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/monocursive/bench-ouro-after/runs/grey-rules-after/private"
+    ],
+    "allowWrite": [
+      "/home/monocursive/bench-ouro-after/runs/grey-rules-after/work"
+    ],
+    "denyRead": [
+      "/home/monocursive/bench-ouro-after/runs/grey-rules-after/private/denied"
+    ],
+    "denyWrite": []
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:40131",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

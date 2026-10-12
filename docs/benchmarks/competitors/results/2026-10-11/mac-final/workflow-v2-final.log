@@ -1,0 +1,10 @@
+1/9 claude direct inventory-workflow #0 74.5s exit=0 success=True
+2/9 claude greywall inventory-workflow #0 0.0s exit=65 success=False
+3/9 claude mxc inventory-workflow #0 77.0s exit=0 success=True
+4/9 opencode direct inventory-workflow #0 58.4s exit=0 success=True
+5/9 opencode greywall inventory-workflow #0 0.0s exit=65 success=False
+6/9 opencode mxc inventory-workflow #0 74.6s exit=0 success=True
+7/9 codex greywall inventory-workflow #0 0.0s exit=65 success=False
+8/9 codex direct inventory-workflow #0 46.7s exit=0 success=True
+9/9 codex mxc inventory-workflow #0 0.1s exit=1 success=False
+COMPLETE

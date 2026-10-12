@@ -1,0 +1,16 @@
+[
+  {
+    "pid": 591742,
+    "kind": "proxy",
+    "signal": "SIGTERM",
+    "sent": true,
+    "exited_or_zombie": true
+  },
+  {
+    "pid": 3920147,
+    "kind": "gateway",
+    "signal": "SIGTERM",
+    "sent": true,
+    "exited_or_zombie": true
+  }
+]

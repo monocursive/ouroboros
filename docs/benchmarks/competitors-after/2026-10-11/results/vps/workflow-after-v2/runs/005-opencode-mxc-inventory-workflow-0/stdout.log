@@ -1,0 +1,47 @@
+I'll help you implement category summaries in the inventory CLI. Let me start by exploring the codebase to understand the current structure.
+Now I'll create a task list and implement the feature step by step.
+Let me first create the category grouping function in the report module:
+Now let me update the CLI to add the --group-by-category argument and call the appropriate report function:
+Now let me update the README with a grouped example:
+Now let's run the tests to see if everything works:
+Excellent! All tests pass. Let me verify the implementation works correctly by testing it manually:
+Perfect! Let me also test the error handling for invalid CSV:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's what was done:
+
+## Summary
+
+### Changes Made:
+
+1. **inventory/report.py:30** - Added `category_report()` function that:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category and sums quantities and stock values
+   - Returns a JSON array sorted by category name
+   - Each object has `category` (string), `quantity` (sum), and `stock_value` (formatted as a string with exactly 2 decimal places)
+
+2. **inventory/cli.py:5,10,15-17** - Updated CLI to:
+   - Import `category_report` function
+   - Add `--group-by-category` flag argument
+   - Call `category_report()` when the flag is set, otherwise maintain existing `item_report()` behavior
+
+3. **README.md:7-16** - Added documentation with:
+   - Example command using `--group-by-category`
+   - Expected JSON output showing the grouped format
+
+### Verification:
+
+✅ All 10 tests pass including:
+- `test_category_summaries` - Verifies grouped output is sorted by category with correct totals
+- `test_filter_before_group` - Confirms `--min-quantity` is applied before grouping
+- `test_bad_csv` - Validates exit code 2 with useful stderr message (no traceback)
+- `test_ungrouped` - Confirms ungrouped output maintains current behavior
+
+✅ Manual testing confirms:
+- Grouped output: `[{"category": "kitchen", "quantity": 3, "stock_value": "12.75"}, {"category": "office", "quantity": 12, "stock_value": "6.00"}]`
+- Ungrouped output unchanged
+- Filter before grouping works correctly
+- Invalid CSV produces exit code 2 with helpful error message
+
+✅ Architecture maintained:
+- Processing logic stays in `report.py` module
+- Argument parsing stays in `cli.py` module
+- No changes to existing tests

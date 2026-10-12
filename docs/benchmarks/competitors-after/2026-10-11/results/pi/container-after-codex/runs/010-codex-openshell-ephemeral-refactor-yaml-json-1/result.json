@@ -1,0 +1,38 @@
+{
+  "sequence": 10,
+  "agent": "codex",
+  "mode": "openshell-ephemeral",
+  "task": "refactor-yaml-json",
+  "repetition": 1,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 8362.085706,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "ouro-comparison-agents-after:20261011",
+    "--policy",
+    "/home/monocursive/bench-ouro-after/results/container-after-codex/policy.yaml",
+    "--provider",
+    "benchmark-codex-after",
+    "--env",
+    "BENCH_CODEX_ROUTING_ACCOUNT_ID=<CODEX_ACCOUNT_ID>",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "refactor-yaml-json"
+  ],
+  "load": [
+    1.248046875,
+    1.568359375,
+    1.458984375
+  ],
+  "artifact": "runs/010-codex-openshell-ephemeral-refactor-yaml-json-1"
+}

@@ -1,0 +1,7 @@
+{
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 176.78425,
+  "stdout": "",
+  "stderr": "Error:   \u00d7 sandbox 'bench-v2-claude' already exists\n  \u2502 \n  \u2502 hint: delete it first with: openshell sandbox delete <name>\n  \u2502       or use a different name\n\n"
+}

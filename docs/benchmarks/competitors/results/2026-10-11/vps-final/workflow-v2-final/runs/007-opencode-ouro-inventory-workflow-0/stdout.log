@@ -1,0 +1,45 @@
+I'll implement category summaries for the inventory CLI with the --group-by-category flag. Let me start by exploring the codebase structure and planning the implementation.
+Now let me check the tests to understand what behavior needs to be preserved:
+Perfect! Now I understand the requirements. Let me create a plan:
+Let me start implementing the changes:
+First, let me add the category_report function to report.py:
+Now let me update the CLI to add the --group-by-category flag and use the appropriate report function:
+Now let me update the README.md with a grouped example:
+Now let me run the tests to see if everything works correctly:
+Excellent! All tests pass. Let me verify the implementation manually to make sure everything works as expected:
+Perfect! Let me also test the error handling for invalid CSV:
+Perfect! Let me verify the final implementation by reading the updated files:
+Excellent! All implementation is complete and working correctly. Let me create a summary of what was implemented:
+
+## Summary
+
+I've successfully implemented category summaries for the inventory CLI with the following changes:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_report` function (lines 6-28):
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category and calculates totals
+   - Returns JSON array sorted alphabetically by category
+   - Each object contains: `category` (string), `quantity` (sum), and `stock_value` (formatted as "XX.XX" string)
+
+2. **inventory/cli.py** - Added `--group-by-category` flag (line 11):
+   - Imported `category_report` function (line 5)
+   - Added argument parser flag with `action='store_true'` (line 11)
+   - Conditionally uses `category_report` when flag is set (lines 15-18)
+
+3. **README.md** - Added documentation for grouped output:
+   - Included example command with `--group-by-category`
+   - Showed expected JSON output format
+
+### Verification:
+
+All 10 tests pass:
+- `test_ungrouped` - Ungrouped output preserves original behavior
+- `test_filter` - `--min-quantity` filtering works
+- `test_category_summaries` - Grouped output produces correct summaries
+- `test_filter_before_group` - Filtering applies before grouping
+- `test_bad_csv` - Invalid CSV returns exit code 2 with useful error message (no traceback)
+- All loader tests continue to pass
+
+The implementation maintains separation of concerns with processing logic in `report.py` and argument parsing in `cli.py`.

@@ -1,0 +1,16 @@
+I'll help you fix the failing tests. Let me start by creating a task plan and then running the tests to see what's failing.
+Now let me run the tests:
+I can see the issue! The tests show:
+1. **test_basic**: Expected 'hello' but got 'world' - this means it's returning the wrong word
+2. **test_single**: IndexError on `parts[1]` when there's only one word
+
+Let me read the source file and tests to understand the issue:
+Perfect! I found the bug. The issue is on line 4 in src/parse.py:4 - it's using `parts[1]` instead of `parts[0]`. This is a classic off-by-one error. Arrays are 0-indexed, so the first element is at index 0, not 1.
+
+Let me fix it:
+Now let me verify that all tests pass:
+Perfect! All tests now pass. The bug was an off-by-one error in src/parse.py:4. The function was using `parts[1]` to access the second element instead of `parts[0]` for the first element. This caused:
+- `test_basic` to return 'world' instead of 'hello'
+- `test_single` to crash with an IndexError when there was only one word
+
+The fix changed the index from 1 to 0, and now both tests pass successfully.

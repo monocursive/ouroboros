@@ -1,0 +1,19 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/ubuntu/bench-ouro/bin",
+      "/usr/lib/node_modules/@anthropic-ai/claude-code/bin"
+    ],
+    "allowWrite": [
+      "/home/ubuntu/bench-ouro/results/v3-agents/runs/021-claude-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json",
+      "/home/ubuntu/bench-ouro/results/v3-agents/runs/021-claude-greywall-refactor-yaml-json-1/home",
+      "/home/ubuntu/bench-ouro/results/v3-agents/runs/021-claude-greywall-refactor-yaml-json-1/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

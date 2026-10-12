@@ -1,0 +1,18 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/Users/monocursive/bench-ouro/bin"
+    ],
+    "allowWrite": [
+      "/Users/monocursive/bench-ouro/results/v5-opencode/runs/012-opencode-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json",
+      "/Users/monocursive/bench-ouro/results/v5-opencode/runs/012-opencode-greywall-refactor-yaml-json-1/home",
+      "/Users/monocursive/bench-ouro/results/v5-opencode/runs/012-opencode-greywall-refactor-yaml-json-1/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

@@ -1,0 +1,356 @@
+{
+  "reason": "Own completed test executables only; build needed disk space",
+  "removed": [
+    {
+      "path": "src/target/release/deps/command_rules_linux-85df47e19444c5be",
+      "bytes": 9639912,
+      "sha256": "e3c0d03d025b720fe4b48dd56552900f3f68e1df558bbe2c1ca84cdbeaa61e86"
+    },
+    {
+      "path": "src/target/release/deps/conformance_j1-c3ec74f72f6db325",
+      "bytes": 10623384,
+      "sha256": "06ff5da78541e69c9a14366dd9a81655abcde941c8b57ead9fbe314d159a288e"
+    },
+    {
+      "path": "src/target/release/deps/conformance_j2-79154405244dd4bc",
+      "bytes": 10438376,
+      "sha256": "016991dfc9e118ea617ef385a181bbac77f605c3ff54a12c7b5de9b04ed8d47c"
+    },
+    {
+      "path": "src/target/release/deps/conformance_j3_agent-b20a890839f1be3f",
+      "bytes": 10419464,
+      "sha256": "1fe8f296c74115e5851b04030f920906420847fd7882c6a285595ec4beeb9dd4"
+    },
+    {
+      "path": "src/target/release/deps/conformance_j3_credentials-be2e0165ab656af2",
+      "bytes": 11456696,
+      "sha256": "3e500bdbf9a1c70ec576cd9a250a2aee995e253d5801b4dc3a3aca1536f1615c"
+    },
+    {
+      "path": "src/target/release/deps/conformance_j3_none-46af1462ec7cb749",
+      "bytes": 12033704,
+      "sha256": "35c685142d758264e9718126de381fb8f0887b264ca9ad34c5f7c2f9e969745c"
+    },
+    {
+      "path": "src/target/release/deps/epoch_guard_linux-3dcb3808b8e354fe",
+      "bytes": 9593584,
+      "sha256": "9f976cd8899689b57d8c6abf2a98d30578e6323f114d09355e43999f6ff0e39c"
+    },
+    {
+      "path": "src/target/release/deps/j4_closed_set_linux-9f153851c23bd8af",
+      "bytes": 10697672,
+      "sha256": "cce5f100f2f0f2eee930fb981395ccab744cf815c24ce16b2438ce0cd6adb8fa"
+    },
+    {
+      "path": "src/target/release/deps/j4_gc_linux-78d6f58a5580fa9f",
+      "bytes": 11874488,
+      "sha256": "5e04e837781b9e7f319d88a7071fe02c79076d94f85b54303075192e418d6f52"
+    },
+    {
+      "path": "src/target/release/deps/j4_lifecycle_linux-83cc4a9d8b1309f7",
+      "bytes": 10319864,
+      "sha256": "69c212350aa1a11ccde061a6f76d724b6b724f211528867cc454822d725178f7"
+    },
+    {
+      "path": "src/target/release/deps/j4_loss_linux-d52229a340a96d00",
+      "bytes": 10612032,
+      "sha256": "2a034b7d1fb023568f05f02e2e2703a9c015e11f474458ea94c1fb4c1ca145e1"
+    },
+    {
+      "path": "src/target/release/deps/j4_records_linux-a1bcc6472ac32559",
+      "bytes": 9644912,
+      "sha256": "6f2cf33d5bf0781d0f18a18f0fbb098caee4be6589553fac6a1f4193f7932f13"
+    },
+    {
+      "path": "src/target/release/deps/j4_scope_linux-f56982e298f1d539",
+      "bytes": 10306752,
+      "sha256": "d84d7daa33445475681bf8bef1d86eba1694e611ea60f083f36474c3a6c57fc9"
+    },
+    {
+      "path": "src/target/release/deps/j4_trace_linux-827e060dae0b2fb7",
+      "bytes": 9626224,
+      "sha256": "d35e2536c83c6728891ad89f80a88a56ce880e2afe6bc262ceff5b9ec21faa3d"
+    },
+    {
+      "path": "src/target/release/deps/j4_tracer_precision_linux-60cd3cc3ac7127c5",
+      "bytes": 10588600,
+      "sha256": "0386bd71f1b04c0181cfc44dd080e8f4f81c71c0ea696b9330172d653fc60457"
+    },
+    {
+      "path": "src/target/release/deps/j5_arch_refusal_linux-ff2cbcdcc161acf7",
+      "bytes": 1846384,
+      "sha256": "e7e22f0ca00d80a183b6be14d629c4356f63a68b8c75a49c0148c9f8d26ca47c"
+    },
+    {
+      "path": "src/target/release/deps/j5_audit_gaps_linux-bf07fb1dd5cf0afd",
+      "bytes": 9611928,
+      "sha256": "0bf56a0425936ae2df4f380186695f2927c38c739f21324be78b3e7b5ead94dc"
+    },
+    {
+      "path": "src/target/release/deps/j5_boundary_linux-a8f7037653b9be46",
+      "bytes": 10603880,
+      "sha256": "7f511a965134e654ef230555647be41d6b58b4ddd6c8d3d7070c9f8e231c6bf6"
+    },
+    {
+      "path": "src/target/release/deps/j5_bwrap_resolution_linux-e036aa2ca574982b",
+      "bytes": 1875240,
+      "sha256": "184e5eb41997b089ea2a43965ac9cbe881d967b30f195328cbc88533598552d9"
+    },
+    {
+      "path": "src/target/release/deps/j5_lifetime_linux-2dce4091355e284f",
+      "bytes": 9838704,
+      "sha256": "3accacee1c9b2b09d720f15f116b87b641d7b220726faa7e2d9ec9966385c823"
+    },
+    {
+      "path": "src/target/release/deps/j5_process_linux-1836e3f478a7a12b",
+      "bytes": 9908680,
+      "sha256": "9ddbd736fbeac3059a36df6dd67c06879047751cba2eca73f8ab7d26a5617d89"
+    },
+    {
+      "path": "src/target/release/deps/j5_process_portable-25c773949c45f545",
+      "bytes": 5555368,
+      "sha256": "5f898e18671097ea35c311a7594a70c7422e5fdd05df2c9f43bed263a03dd7dd"
+    },
+    {
+      "path": "src/target/release/deps/j5_pseudofs_linux-c30bd10e591bb8dd",
+      "bytes": 2016216,
+      "sha256": "f0593d5bb21ce61d132ddb88a22b7e9c471664286ce649cd8dbdc9519a67cb8e"
+    },
+    {
+      "path": "src/target/release/deps/j5_records_crash_linux-cbff43225a71afce",
+      "bytes": 10501984,
+      "sha256": "5f33d263420819e687318dd90d60f21635d305f529acfe772b915fd185c8496d"
+    },
+    {
+      "path": "src/target/release/deps/j5_records_linux-8b99768cc9e57ca7",
+      "bytes": 10604464,
+      "sha256": "81e824f3d05411c9b6953574f439a6a859f4c71444a970be6f2da42c89750030"
+    },
+    {
+      "path": "src/target/release/deps/j5_tracer_foreign_child_linux-c87e59f5938e9b84",
+      "bytes": 10249520,
+      "sha256": "4be8886cbddca7037d373861e4fa9e9f9d7e02e2848b6b7f8234bac70e3ea709"
+    },
+    {
+      "path": "src/target/release/deps/linux_mechanisms-9c8ea2f2d40105f4",
+      "bytes": 2928088,
+      "sha256": "5d01441935c314d207157008cf760f266af1157e65e3261bd8bbbf20cb6da2bc"
+    },
+    {
+      "path": "src/target/release/deps/macos_refusal-dadf04bd7ffee3a8",
+      "bytes": 1078760,
+      "sha256": "c012a23e8c7ab40f970067abe1db5901490be8a27a876290ab8e9bf893dd238f"
+    },
+    {
+      "path": "src/target/release/deps/native_capabilities_linux-6836ff46b0f45587",
+      "bytes": 2092192,
+      "sha256": "834825b1e0928e1126803b0391150a6fd72b304385f3b58eb855dc7a1e423417"
+    },
+    {
+      "path": "src/target/release/deps/observer_j4_linux-09238339f75ee6a8",
+      "bytes": 10445888,
+      "sha256": "19b0c64bb4c562f9ab8cb04d7c33ebb07f539a4521065bca76aa88f870747de9"
+    },
+    {
+      "path": "src/target/release/deps/observer_linux-e6c2995b2e60ec3c",
+      "bytes": 2285768,
+      "sha256": "1f24b347bd9328920cac113a10e31abaa8cc01c630d2a6b75eba2e5107a734cf"
+    },
+    {
+      "path": "src/target/release/deps/observer_regression_linux-04936140cf76ff19",
+      "bytes": 2383704,
+      "sha256": "d4e63d1a5dfa31a6d2a81f02f6a43d576e5f0bd19e34acec4fe52f9c71856468"
+    },
+    {
+      "path": "src/target/release/deps/ouro_fixture-92436e429cd580de",
+      "bytes": 2281208,
+      "sha256": "20f129e7da366e44391561b8c39a36343bcddf1d26a455ba241c35087f49173d"
+    },
+    {
+      "path": "src/target/release/deps/ouro_jail-348963180199ee41",
+      "bytes": 10068072,
+      "sha256": "4b96af0723ef402ac61de025f0bf14b5c948344767c9acadab8e7e61769768d9"
+    },
+    {
+      "path": "src/target/release/deps/ouro_jail-873a4a65501dc155",
+      "bytes": 2694216,
+      "sha256": "fd4e554048ba99614317d5cb5b43a1a20870aa4602d6a700ca8141f88ff2b2b7"
+    },
+    {
+      "path": "src/target/release/deps/ouro_jail-c2d2d7d082657160",
+      "bytes": 9991776,
+      "sha256": "79986b744fad0ed5acce273869db1ca2259f1067f238cda225a7a5ecef21fd85"
+    },
+    {
+      "path": "src/target/release/deps/ouro_jail-e093a7e058062c41",
+      "bytes": 11260608,
+      "sha256": "fe70dd784945cdc097026560c973f2200c66fb6152b3252f80f5e11b7cb2c7ee"
+    },
+    {
+      "path": "src/target/release/deps/portable_canonical-0e5771418658b18b",
+      "bytes": 3333688,
+      "sha256": "3f797fe5318b28b09b40de5f168ee930cc89879026a6dec5c051bf88fb926a20"
+    },
+    {
+      "path": "src/target/release/deps/portable_doctor-f61e76bce0b61a02",
+      "bytes": 9803912,
+      "sha256": "f2b332c01fc4483752ff33962057a3bc0a908825241fa7e09090bec4714fec5c"
+    },
+    {
+      "path": "src/target/release/deps/portable_freeze-aa5b7adf8fa2075a",
+      "bytes": 3414912,
+      "sha256": "d0f9222a5ee9d644af3f2c5209a046539f65a258dde4b89a4015f409e70a9cbe"
+    },
+    {
+      "path": "src/target/release/deps/portable_gate-b251a923d526ea36",
+      "bytes": 1732720,
+      "sha256": "8992de15a67dd8a6a08dd0c27425feabfc722722211748bbd339cc3b8985e31f"
+    },
+    {
+      "path": "src/target/release/deps/portable_gc-ebe56a2c6a210761",
+      "bytes": 10397888,
+      "sha256": "44390aab24f1e96f5bb807e099f91ebeb92396227d5c6d3baa6eb01f4fe898b7"
+    },
+    {
+      "path": "src/target/release/deps/portable_j4_records-bf3c95ee7faf3bc9",
+      "bytes": 13802448,
+      "sha256": "c7c9b6d71ae54a984f3a6d65919a7e8a50ebccbeab2eb65e06fe4c1f5b7d2a13"
+    },
+    {
+      "path": "src/target/release/deps/portable_launch-0e1f13a835f832e0",
+      "bytes": 18215416,
+      "sha256": "4de2fa1eca1fa7bb89ca778b3259c8b6660c39be33d00ed87e9e7ec4d661429d"
+    },
+    {
+      "path": "src/target/release/deps/portable_learning-2e38bec25787625a",
+      "bytes": 8269296,
+      "sha256": "bb7a18a2a80f118896f3eb90971be421d490cd433b5104ce6b209b5cd5a2dacb"
+    },
+    {
+      "path": "src/target/release/deps/portable_lifetime-d6ce535fd162d484",
+      "bytes": 5660136,
+      "sha256": "f4866fc1e24cab5ada82c7bbbd8e9f8ab3a34d58bf7f868ddae11955d09ac642"
+    },
+    {
+      "path": "src/target/release/deps/portable_loss-6bb0b751625b0b81",
+      "bytes": 13180720,
+      "sha256": "8dbfcc08a97c9e1364fb3ec01533a7e900f2613be4a6f10d893de864284443eb"
+    },
+    {
+      "path": "src/target/release/deps/portable_mutations-738626dfd9f9e1b4",
+      "bytes": 3122936,
+      "sha256": "26d43d6589ac4b786bc7d1ba5c61cec82856e35e624c86e574b688082a623c4c"
+    },
+    {
+      "path": "src/target/release/deps/portable_network_rules-a35d15f3c1664cc5",
+      "bytes": 2685392,
+      "sha256": "7d61a0044b4a01f2006278ca407af44c7af6014ffcf1ecf0af14e0110e9ba646"
+    },
+    {
+      "path": "src/target/release/deps/portable_persistence-1007436fbbd5e64a",
+      "bytes": 14084552,
+      "sha256": "54d077d29a778f7f75203efe5531f52dc96ce55559d0860b016d7a5480fcaf50"
+    },
+    {
+      "path": "src/target/release/deps/portable_policy-460299397ce0072e",
+      "bytes": 4025880,
+      "sha256": "9924ce76db829414160f66110ae02e84973ddb440c09dfb922b7c64be492f091"
+    },
+    {
+      "path": "src/target/release/deps/portable_proxy-681be30e26f3bb91",
+      "bytes": 12735424,
+      "sha256": "fedc220932d472c00e93a455f8672696198fd7f966c7ffcb233ba70052f8bd59"
+    },
+    {
+      "path": "src/target/release/deps/portable_records-baed359f3e68edc5",
+      "bytes": 10139632,
+      "sha256": "a85edb775b956a0697ded3eb8738fc2436edc2d722e5eb6f78e529494b978f53"
+    },
+    {
+      "path": "src/target/release/deps/portable_release_evidence-dff35e1b605df935",
+      "bytes": 1087896,
+      "sha256": "6eee751aca97a3f50c00e35000fed876fe811780735cb226e129bd20d8eb5bf3"
+    },
+    {
+      "path": "src/target/release/deps/portable_signals-034e5c45b5361bff",
+      "bytes": 1541168,
+      "sha256": "2df6675a7ba2dacb28ca0e57a607f6d000fe897daec7d831e95294b347b00984"
+    },
+    {
+      "path": "src/target/release/deps/portable_state-e88ca26957c6f3dc",
+      "bytes": 1907608,
+      "sha256": "39e8fb79cc81a9120dc893a1bcf85a565861cad3c538d2321cd850e5f6a5fd50"
+    },
+    {
+      "path": "src/target/release/deps/portable_tail-121e71b570627216",
+      "bytes": 1626248,
+      "sha256": "254c9c90a3944745caf25007f275a4da6ac082b3820c67a1b8e8da033e1b997f"
+    },
+    {
+      "path": "src/target/release/deps/portable_trace-abc8ef50a80c291a",
+      "bytes": 2024792,
+      "sha256": "223fb77a537d5a078c25013a61284556217ed22fa70537c2b3520393fec5b983"
+    },
+    {
+      "path": "src/target/release/deps/portable_unsettled_phase-7ebfe3322006ced7",
+      "bytes": 13147760,
+      "sha256": "5bbc78d740474a09a4be6525a5b7618b37da928989f3ef4bc1865746662c5bc6"
+    },
+    {
+      "path": "src/target/release/deps/portable_version-f36fcdcd43a5ba24",
+      "bytes": 2272304,
+      "sha256": "a077f8e0c8d5b39f778210cb16ac286cbdb1382e5b0b83c45338fd617908c7df"
+    },
+    {
+      "path": "src/target/release/deps/portable_vocabulary-c8a58992a45c9220",
+      "bytes": 1370624,
+      "sha256": "bf8f317fe08dbb62a3dacf1254c82b5e18453000e65910d42df6068e80bf2ab7"
+    },
+    {
+      "path": "src/target/release/deps/portable_w2s_trace-1e406342120b27f9",
+      "bytes": 13663160,
+      "sha256": "2b044fad3a4670af9ee9be3812c68aab6e8bebd7698021cc8d76509572d41a06"
+    },
+    {
+      "path": "src/target/release/deps/release_preview_linux-7d4c88ef669f9033",
+      "bytes": 1654024,
+      "sha256": "6a3700f06e010d730c7334fa9dd0f74d23019d993c6822b4c66661b24dd53210"
+    },
+    {
+      "path": "src/target/release/deps/resource_ceilings_linux-cc2f03a2855c2660",
+      "bytes": 9539904,
+      "sha256": "edb3d28625c209c6d031f3d3f90f11535116a8c556efa1af35399e65b15e712b"
+    },
+    {
+      "path": "src/target/release/deps/review_core_regressions-c6575689422adffd",
+      "bytes": 2813200,
+      "sha256": "a478d7a88c60e10710e72f65a971b82695072ab7013d2da8f0ebb964445e9bc7"
+    },
+    {
+      "path": "src/target/release/deps/review_linux-4af7d038241e3fab",
+      "bytes": 10868232,
+      "sha256": "01adcf8473bf791ba0f049b14d3fc7b2d2e5197a383d22d249b9743c8bd05ab9"
+    },
+    {
+      "path": "src/target/release/deps/security_alias_linux-0deddbd01e6f7a79",
+      "bytes": 1706016,
+      "sha256": "3d18d4c9774ba1cf3d688e4f99e39bc58b28313b1bd3d00be1ef72cb03657a4a"
+    },
+    {
+      "path": "src/target/release/deps/stand_in_jail-b48f4a1d3533135e",
+      "bytes": 1512328,
+      "sha256": "38fac86e7a7db0b6e369b79fbb6fec61203b95f2f3161d58d795b487c3ce0c1c"
+    },
+    {
+      "path": "src/target/release/deps/tmp_matcher_probe-01581229dd61d8ee",
+      "bytes": 1555936,
+      "sha256": "244f7361bc79682a47dac91b1c9aceb7eb71b8b5fce85950b2c6e6abd6c63078"
+    },
+    {
+      "path": "src/target/release/deps/unix_peer_linux-c8f2066babc26c17",
+      "bytes": 1988152,
+      "sha256": "abf1ca5107e7158dd79b8bcd66f5ba5fad8b7994029bf257c8fe3dc115819c7a"
+    }
+  ],
+  "bytes": 502882616
+}

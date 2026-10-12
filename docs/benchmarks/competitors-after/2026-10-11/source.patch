@@ -1,0 +1,560 @@
+diff --git a/crates/ouro-jail/src/platform/linux/bwrap.rs b/crates/ouro-jail/src/platform/linux/bwrap.rs
+index 5f276164..21b06d3a 100644
+--- a/crates/ouro-jail/src/platform/linux/bwrap.rs
++++ b/crates/ouro-jail/src/platform/linux/bwrap.rs
+@@ -573,10 +573,10 @@ fn directory_is_empty(dir: &OwnedFd) -> Result<bool, i32> {
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct MountRow {
+     /// `ro-bind`, `bind`, `symlink`, `proc`, `dev`, `cwd`, `tmpfs-mask` or
+-    /// `placeholder`.
++    /// `file-mask` or `placeholder`.
+     pub kind: &'static str,
+     /// The host source, or the symlink target, or nothing for a mount with no
+-    /// source (`proc`, `dev`, `cwd`, `tmpfs-mask`).
++    /// source (`proc`, `dev`, `cwd`, `tmpfs-mask`, `file-mask`).
+     pub source: Option<OsString>,
+     /// The path inside the sandbox.
+     pub destination: OsString,
+@@ -593,6 +593,32 @@ pub struct ProtectedBind {
+     /// source object (`--ro-bind-fd`); `None` binds by path.
+     pub fd: Option<RawFd>,
+ }
++
++/// A denial overlays the destination after every grant. Files need a private
++/// empty, mode-000 regular file; a directory tmpfs cannot cover a file inode.
++#[derive(Clone, Debug)]
++pub enum Mask {
++    /// An empty, read-only directory.
++    Directory(PathBuf),
++    /// An unreadable, read-only regular file made from an empty data descriptor.
++    File(PathBuf),
++}
++
++impl Mask {
++    /// Destination in the sandbox, independent of the mask's object type.
++    #[must_use]
++    pub fn path(&self) -> &Path {
++        match self {
++            Self::Directory(path) | Self::File(path) => path,
++        }
++    }
++}
++
++impl From<&str> for Mask {
++    fn from(path: &str) -> Self {
++        Self::Directory(path.into())
++    }
++}
+ /// Everything needed to build a bubblewrap invocation.
+ #[derive(Clone, Debug)]
+ pub struct BwrapPlan {
+@@ -632,10 +658,9 @@ pub struct BwrapPlan {
+     /// NVIDIA nodes, bound individually with `--dev-bind` so a contained
+     /// profile can use a GPU without ever seeing devtmpfs.
+     pub extra_dev_binds: Vec<(PathBuf, PathBuf)>,
+-    /// Denied subtrees, masked with a `tmpfs` over the path after every
+-    /// other mount (north-star §4.3: denied subtrees inside visible parents
+-    /// are "absent or masked by the backend").
+-    pub masked: Vec<PathBuf>,
++    /// Denied paths, masked with a read-only directory tmpfs or an unreadable
++    /// read-only file after every other mount (north-star §4.3).
++    pub masked: Vec<Mask>,
+     /// Placeholders for absent root-level literals.
+     pub placeholders: Vec<PlaceholderMount>,
+     /// The jail binary to bind at [`JAIL_INSIDE_PATH`].
+@@ -990,13 +1015,28 @@ impl BwrapPlan {
+             destination: OsString::from(JAIL_INSIDE_PATH),
+         });
+         let mut masks = self.masked.clone();
+-        masks.sort_by_key(|path| path.components().count());
+-        for path in masks {
++        masks.sort_by_key(|mask| mask.path().components().count());
++        // An ancestor denial already hides everything beneath it. Rendering a
++        // nested file mask into that sealed empty directory is unnecessary.
++        let mut rendered_masks: Vec<PathBuf> = Vec::new();
++        for mask in masks {
++            let path = mask.path();
++            if rendered_masks
++                .iter()
++                .any(|ancestor| path.starts_with(ancestor))
++            {
++                continue;
++            }
+             rows.push(MountRow {
+-                kind: "tmpfs-mask",
++                kind: if matches!(mask, Mask::File(_)) {
++                    "file-mask"
++                } else {
++                    "tmpfs-mask"
++                },
+                 source: None,
+-                destination: path.into_os_string(),
++                destination: path.as_os_str().to_owned(),
+             });
++            rendered_masks.push(path.to_owned());
+         }
+         rows
+     }
+@@ -1038,9 +1078,10 @@ impl BwrapPlan {
+         // Audit 2026-09-25-2, S3: a mask is rendered last, over every other
+         // row, so one over the plumbing would unmount the jail's own binary,
+         // proxy socket or staged state for the whole attempt.
+-        for path in &self.masked {
++        for mask in &self.masked {
++            let path = mask.path();
+             if shadows_plumbing(path) {
+-                return Err(PlanError::MaskedBoundaryPlumbing(path.clone()));
++                return Err(PlanError::MaskedBoundaryPlumbing(path.to_owned()));
+             }
+         }
+         let mut tail: Vec<OsString> = Vec::new();
+@@ -1073,6 +1114,22 @@ impl BwrapPlan {
+                 push(&[OsStr::new("--setenv"), key, value]);
+             }
+             for (index, row) in self.mount_table().iter().enumerate() {
++                if row.kind == "file-mask" {
++                    let fd = self
++                        .mount_fds
++                        .get(index)
++                        .copied()
++                        .flatten()
++                        .ok_or(PlanError::StagedFdMissing("file denial"))?;
++                    push(&[
++                        OsStr::new("--perms"),
++                        OsStr::new("000"),
++                        OsStr::new("--ro-bind-data"),
++                        OsStr::new(&fd.to_string()),
++                        &row.destination,
++                    ]);
++                    continue;
++                }
+                 if row.kind == "tmpfs-mask" {
+                     // Audit 2026-09-25-2, S12: a denied path is absent or
+                     // masked, never writable scratch outside every quota
+@@ -1472,6 +1529,34 @@ mod tests {
+         assert!(position("/external/secrets") < position("/external/secrets/hidden"));
+     }
+ 
++    #[test]
++    fn a_file_mask_requires_an_empty_data_descriptor_and_renders_last() {
++        let mut plan = sample_plan();
++        plan.extra_ro_binds
++            .push(("/private".into(), "/private".into()));
++        plan.masked.push(Mask::File("/private/secret".into()));
++        assert!(matches!(
++            plan.render(),
++            Err(PlanError::StagedFdMissing("file denial"))
++        ));
++        plan.mount_fds = vec![None; plan.mount_table().len()];
++        *plan.mount_fds.last_mut().unwrap() = Some(42);
++        let text = argv_text(&plan);
++        assert!(text.contains("--perms 000 --ro-bind-data 42 /private/secret"));
++        assert!(
++            text.find("--ro-bind /private /private").unwrap()
++                < text.find("--ro-bind-data 42 /private/secret").unwrap()
++        );
++        plan.masked.push(Mask::File("/private/secret/child".into()));
++        assert_eq!(
++            plan.mount_table()
++                .iter()
++                .filter(|row| row.kind == "file-mask")
++                .count(),
++            1
++        );
++    }
++
+     fn argv_text(plan: &BwrapPlan) -> String {
+         let mut text = plan
+             .render()
+diff --git a/crates/ouro-jail/src/platform/linux/platform.rs b/crates/ouro-jail/src/platform/linux/platform.rs
+index c2184e4a..d244a0f4 100644
+--- a/crates/ouro-jail/src/platform/linux/platform.rs
++++ b/crates/ouro-jail/src/platform/linux/platform.rs
+@@ -499,11 +499,12 @@ impl LinuxPlatform {
+     /// plan's capabilities from them.
+     fn measure(&self, plan: &PlanRequest, wanted: impl Fn(&str) -> bool) -> Vec<Capability> {
+         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/proc/self/exe"));
+-        let results: Vec<ProbeResult> = probe::PROBE_NAMES
++        let names: Vec<&str> = probe::PROBE_NAMES
+             .iter()
+             .filter(|name| wanted(name))
+-            .map(|name| probe::run_one_backend(name, &exe, self.backend()))
++            .copied()
+             .collect();
++        let results = probe::run_selected(&names, &exe, self.backend());
+         derive(plan, &results, &rfc3339_utc(SystemTime::now()))
+     }
+ }
+@@ -1011,7 +1012,7 @@ impl Boundary {
+         // Operator grants are enforced, not merely recorded (I02, north-star
+         // §4.2): read-only grants become additional ro-binds at their
+         // resolved paths, host-rooted writable grants become binds, and
+-        // denied subtrees are masked with a tmpfs over the path. Grants under
++        // denied paths are masked with a sealed directory or file. Grants under
+         // the workspace or scratch are covered by the base binds and layered
+         for reference in &snapshot.filesystem.read_write {
+             if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
+@@ -1078,7 +1079,25 @@ impl Boundary {
+         }
+         for reference in &snapshot.filesystem.deny_read {
+             let destination = resolve_path_ref(reference, &plan.workspace)?;
+-            bplan.masked.push(PathBuf::from(destination));
++            let path = PathBuf::from(destination);
++            // Classification changes only the overlay's type, never grants
++            // access to the denied object. A type swap before mounting fails
++            // setup rather than releasing an unmasked target.
++            let host = host_path_of(reference, &plan.workspace, &scratch)?;
++            let mask = match std::fs::metadata(&host) {
++                Ok(metadata) if !metadata.is_dir() => bwrap::Mask::File(path),
++                Ok(_) => bwrap::Mask::Directory(path),
++                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
++                    bwrap::Mask::Directory(path)
++                }
++                Err(error) => {
++                    return Err(preparing(
++                        ErrorCode::BackendUnavailable,
++                        format!("cannot classify denied path {}: {error}", host.display()),
++                    ));
++                }
++            };
++            bplan.masked.push(mask);
+         }
+ 
+         // J5-B1-w3: §9.1 — an operator grant may not expose host /proc, /sys
+@@ -3637,6 +3656,16 @@ fn prepare_mounts(
+         // alias of a protected source after applying its protection.
+         let mut fds = Vec::new();
+         for row in plan.mount_table() {
++            if row.kind == "file-mask" {
++                // EOF supplies an empty file to bubblewrap; no host content
++                // or writable source descriptor is exposed to the child.
++                let (reader, writer) = exec::pipe().map_err(failure)?;
++                drop(writer);
++                let target = PINNED_FD_BASE + fds.len() as RawFd;
++                fds.push((reader, target));
++                plan.mount_fds.push(Some(target));
++                continue;
++            }
+             if !matches!(row.kind, "bind" | "ro-bind" | "ro-bind-fd" | "placeholder") {
+                 plan.mount_fds.push(None);
+                 continue;
+diff --git a/crates/ouro-jail/src/platform/linux/probe.rs b/crates/ouro-jail/src/platform/linux/probe.rs
+index 6221f05a..fc4348ab 100644
+--- a/crates/ouro-jail/src/platform/linux/probe.rs
++++ b/crates/ouro-jail/src/platform/linux/probe.rs
+@@ -183,6 +183,76 @@ pub fn run_one_backend(name: &str, jail_exe: &Path, bwrap: Backend<'_>) -> Probe
+     run_one_for(name, std::env::consts::ARCH, jail_exe, bwrap)
+ }
+ 
++/// Fresh probes for one preparation. The namespace probes consume the same
++/// status report, so one sandbox can provide it without changing any check.
++/// No result survives this call; refusals and deadlines still apply per run.
++#[must_use]
++pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<ProbeResult> {
++    let namespace = |name: &str| {
++        matches!(
++            name,
++            "user_namespace" | "pid_namespace" | "network_namespace"
++        )
++    };
++    let shared = if names.iter().filter(|name| namespace(name)).count() > 1 {
++        bwrap.ok().filter(|path| path.is_absolute()).map(|path| {
++            let outside = ns_ids(own_pid());
++            (
++                outside,
++                run_inside(jail_exe, path, &["status"], Vec::new(), false),
++            )
++        })
++    } else {
++        None
++    };
++    names
++        .iter()
++        .map(|name| {
++            if let Some((outside, run)) = &shared {
++                let result = match *name {
++                    "user_namespace" | "pid_namespace" => Some(match run {
++                        Ok(run) => namespace_result(
++                            name,
++                            if *name == "user_namespace" {
++                                outside.user
++                            } else {
++                                outside.pid
++                            },
++                            &run.captured,
++                        ),
++                        Err(error) => ProbeResult::error(
++                            if *name == "user_namespace" {
++                                "user_namespace"
++                            } else {
++                                "pid_namespace"
++                            },
++                            if *name == "user_namespace" {
++                                "user-namespace"
++                            } else {
++                                "pid-namespace"
++                            },
++                            error.to_string(),
++                        ),
++                    }),
++                    "network_namespace" => Some(match run {
++                        Ok(run) => network_namespace_result(&run.captured),
++                        Err(error) => ProbeResult::error(
++                            "network_namespace",
++                            "network-namespace",
++                            error.to_string(),
++                        ),
++                    }),
++                    _ => None,
++                };
++                if let Some(result) = result {
++                    return result;
++                }
++            }
++            run_one_backend(name, jail_exe, bwrap)
++        })
++        .collect()
++}
++
+ // J5-D begin: probes that execute bubblewrap (review F1)
+ /// The probes that execute bubblewrap, with the mechanism each names. With
+ /// no resolved backend they report `unavailable` with `backend_unavailable`
+@@ -491,18 +561,27 @@ fn probe_namespace(name: &'static str, jail_exe: &Path, bwrap: &Path) -> ProbeRe
+         Ok(run) => run,
+         Err(e) => return ProbeResult::error(name, mechanism, e.to_string()),
+     };
+-    if run.captured.timed_out {
++    namespace_result(name, outside_id, &run.captured)
++}
++
++fn namespace_result(name: &str, outside_id: Option<u64>, captured: &exec::Captured) -> ProbeResult {
++    let (name, kind, mechanism) = if name == "user_namespace" {
++        ("user_namespace", "user", "user-namespace")
++    } else {
++        ("pid_namespace", "pid", "pid-namespace")
++    };
++    if captured.timed_out {
+         return ProbeResult::error(name, mechanism, "probe exceeded its 5 second deadline");
+     }
+     let key = format!("ns_{kind}");
+-    let Some(inside_id) = run.captured.field(&key) else {
++    let Some(inside_id) = captured.field(&key) else {
+         return ProbeResult::error(
+             name,
+             mechanism,
+             format!(
+                 "sandbox reported no {key}: status {:?}, stderr {}",
+-                run.captured.code(),
+-                run.captured.stderr.trim()
++                captured.code(),
++                captured.stderr.trim()
+             ),
+         );
+     };
+@@ -518,10 +597,10 @@ fn probe_namespace(name: &'static str, jail_exe: &Path, bwrap: &Path) -> ProbeRe
+     }
+     let mut evidence = format!("outside {outside_text}, inside {inside_id}");
+     if kind == "pid" {
+-        if let Some(nspid) = run.captured.field("nspid") {
++        if let Some(nspid) = captured.field("nspid") {
+             evidence.push_str(&format!("; NSpid {nspid}"));
+         }
+-        if let Some(pids) = run.captured.field("proc_pids") {
++        if let Some(pids) = captured.field("proc_pids") {
+             evidence.push_str(&format!("; /proc shows {pids}"));
+         }
+     }
+@@ -535,11 +614,20 @@ fn probe_network_namespace(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
+         Ok(run) => run,
+         Err(e) => return ProbeResult::error(NAME, MECHANISM, e.to_string()),
+     };
+-    let Some(devices) = run.captured.field("netdev") else {
++    network_namespace_result(&run.captured)
++}
++
++fn network_namespace_result(captured: &exec::Captured) -> ProbeResult {
++    const NAME: &str = "network_namespace";
++    const MECHANISM: &str = "network-namespace";
++    if captured.timed_out {
++        return ProbeResult::error(NAME, MECHANISM, "probe exceeded its 5 second deadline");
++    }
++    let Some(devices) = captured.field("netdev") else {
+         return ProbeResult::error(
+             NAME,
+             MECHANISM,
+-            format!("sandbox reported no netdev: {}", run.captured.stderr.trim()),
++            format!("sandbox reported no netdev: {}", captured.stderr.trim()),
+         );
+     };
+     if devices == "lo" {
+@@ -1488,6 +1576,85 @@ fn check_socket_afunix() -> String {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn shared_namespace_results_keep_each_failure_independent() {
++        use std::os::unix::process::ExitStatusExt as _;
++        let mut captured = exec::Captured {
++            status: std::process::ExitStatus::from_raw(0),
++            stdout: "ns_user=11\nns_pid=22\nnetdev=lo\n".into(),
++            stderr: String::new(),
++            timed_out: false,
++        };
++        assert_eq!(
++            namespace_result("user_namespace", Some(10), &captured).status,
++            ProbeStatus::Available
++        );
++        assert_eq!(
++            namespace_result("pid_namespace", Some(22), &captured).status,
++            ProbeStatus::Unavailable
++        );
++        assert_eq!(
++            network_namespace_result(&captured).status,
++            ProbeStatus::Available
++        );
++        captured.stdout = "ns_user=11\nns_pid=22\nnetdev=eth0,lo\n".into();
++        assert_eq!(
++            network_namespace_result(&captured).status,
++            ProbeStatus::Unavailable
++        );
++        captured.timed_out = true;
++        assert_eq!(
++            namespace_result("user_namespace", Some(10), &captured).status,
++            ProbeStatus::Error
++        );
++        assert_eq!(
++            network_namespace_result(&captured).status,
++            ProbeStatus::Error
++        );
++        captured.timed_out = false;
++        captured.stdout.clear();
++        assert_eq!(
++            namespace_result("user_namespace", Some(10), &captured).status,
++            ProbeStatus::Error
++        );
++        assert_eq!(
++            network_namespace_result(&captured).status,
++            ProbeStatus::Error
++        );
++    }
++
++    #[test]
++    fn namespace_batch_uses_one_fresh_sandbox_on_every_call() {
++        use std::os::unix::fs::PermissionsExt as _;
++        let temp = OwnedTempDir::new("namespace-batch-test").unwrap();
++        let backend = temp.path.join("bwrap");
++        let calls = temp.path.join("calls");
++        std::fs::write(
++            &backend,
++            format!(
++                "#!/bin/sh\nprintf x >> '{}'\nprintf '%s\\n' ns_user=1 ns_pid=2 netdev=lo\n",
++                calls.display()
++            ),
++        )
++        .unwrap();
++        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
++        let names = ["user_namespace", "pid_namespace", "network_namespace"];
++        for expected in [1, 2] {
++            let results = run_selected(&names, Path::new("/unused-jail"), Ok(&backend));
++            assert_eq!(results.iter().map(|r| r.name).collect::<Vec<_>>(), names);
++            assert!(
++                results.iter().all(|r| r.status == ProbeStatus::Available),
++                "{results:?}"
++            );
++            assert_eq!(std::fs::read(&calls).unwrap().len(), expected);
++        }
++        let unavailable = run_selected(&names, Path::new("/unused-jail"), Err("missing backend"));
++        assert!(unavailable.iter().all(
++            |r| r.status == ProbeStatus::Unavailable && r.reason_code == "backend_unavailable"
++        ));
++        assert_eq!(std::fs::read(&calls).unwrap().len(), 2);
++    }
++
+     #[test]
+     fn every_name_has_a_probe() {
+         for name in PROBE_NAMES {
+diff --git a/crates/ouro-jail/tests/review_linux.rs b/crates/ouro-jail/tests/review_linux.rs
+index 1b569496..82759219 100644
+--- a/crates/ouro-jail/tests/review_linux.rs
++++ b/crates/ouro-jail/tests/review_linux.rs
+@@ -3213,6 +3213,80 @@ fn r9_deny_read_grants_are_enforced_as_masks() {
+     );
+ }
+ 
++/// Benchmark regression: a file denial within a visible read-only parent
++/// must mask content and refuse mutations, without aborting sandbox setup.
++#[test]
++fn a_file_denial_inside_a_visible_parent_is_unreadable_and_readonly() {
++    if !live() {
++        return;
++    }
++    for parent_writable in [false, true] {
++        let c = case();
++        let private = c.jail.root().join("private");
++        std::fs::create_dir(&private).unwrap();
++        let secret = private.join("secret");
++        let sibling = private.join("sibling");
++        std::fs::write(&secret, b"classified\n").unwrap();
++        std::fs::write(&sibling, b"ordinary\n").unwrap();
++        let link = c.workspace.join("secret-link");
++        std::os::unix::fs::symlink(&secret, &link).unwrap();
++        let check = r#"
++import errno, os, sys
++secret, sibling, link = sys.argv[1:]
++assert open(sibling).read() == 'ordinary\n'
++for path in [secret, link]:
++    for flags in [os.O_RDONLY, os.O_WRONLY, os.O_WRONLY | os.O_TRUNC]:
++        try:
++            fd = os.open(path, flags)
++        except OSError as error:
++            assert error.errno in (errno.EACCES, errno.EROFS), error
++        else:
++            os.close(fd)
++            raise AssertionError('denied file opened: ' + path)
++    try:
++        os.chmod(path, 0o600)
++    except OSError as error:
++        assert error.errno in (errno.EPERM, errno.EROFS), error
++    else:
++        raise AssertionError('mask chmod succeeded')
++"#;
++        let run = c
++            .jail
++            .arg(if parent_writable { "--rw" } else { "--ro" })
++            .arg(&private)
++            .arg("--deny-read")
++            .arg(&secret)
++            .target([
++                "/usr/bin/python3",
++                "-c",
++                check,
++                secret.to_str().unwrap(),
++                sibling.to_str().unwrap(),
++                link.to_str().unwrap(),
++            ])
++            .run()
++            .expect("run");
++        assert_eq!(
++            run.code(),
++            Some(0),
++            "file denial failed: {}",
++            run.stderr_text()
++        );
++        let receipt = settled(&run);
++        assert_eq!(receipt["lifetime"]["tree_empty"], true);
++        assert_eq!(std::fs::read(&secret).unwrap(), b"classified\n");
++        assert!(
++            receipt
++                .pointer("/applied/filesystem/mounts")
++                .unwrap()
++                .as_array()
++                .unwrap()
++                .iter()
++                .any(|mount| mount["path"] == secret.to_str().unwrap() && mount["mode"] == "ro")
++        );
++    }
++}
++
+ /// M-K/§6.4: an explicit pids ceiling is a required limit. It runs only when
+ /// the delegated pids controller enforces it (J2) and refuses otherwise,
+ /// never running unbounded.

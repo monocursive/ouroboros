@@ -1,0 +1,41 @@
+{
+  "schema": "benchmark-precommit-audit/1",
+  "date": "2026-10-12",
+  "scopes": [
+    "docs/benchmarks/competitors",
+    "docs/benchmarks/competitors-after",
+    "modified tracked source files"
+  ],
+  "counts": {
+    "regular_files": 17324,
+    "archive_members": 78288,
+    "archives": 20
+  },
+  "actual_credential_hits": [],
+  "pattern_candidates": [],
+  "credential_values_retained": false,
+  "before_after_manifest_checks": {
+    "docs/benchmarks/competitors": {
+      "files_verified": 10192,
+      "archive_sha256": "16b3f262b83b6d257b882fec39432147fb3615b433a5d1da6d45bf1b7a4e41b9"
+    },
+    "docs/benchmarks/competitors-after/2026-10-11": {
+      "files_verified": 7122,
+      "archive_sha256": "d9a9c94e18f7f725160892fe513aa7a527fbf8acfaf5310f0754d0455e2b21b3"
+    }
+  },
+  "cached_whitespace_check": {
+    "passed": true,
+    "source_and_authored_analysis_checked": true,
+    "captured_evidence_bytes_preserved": true,
+    "initial_snapshot_formatting_issues": 3694,
+    "attributes": ".gitattributes"
+  },
+  "largest_staged_files": [
+    {
+      "path": "docs/benchmarks/competitors-after/2026-10-11/benchmark-after-2026-10-11.tar.gz",
+      "bytes": 65670157
+    }
+  ],
+  "staged_path_count": 17327
+}

@@ -1,0 +1,9 @@
+
+Created sandbox: bold-fish
+
+  [0.0s] Requesting compute...
+[0.0s] Sandbox allocated
+[0.0s] Pulling image ouro-comparison-agents-v2:20261011
+[0.1s] Image already present
+[0.8s] Starting sandbox Container created
+✓ Sandbox bold-fish deletion accepted; cleanup is pending

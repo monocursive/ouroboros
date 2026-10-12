@@ -1,0 +1,432 @@
+{
+  "schema": "ouro.jail.receipt/1",
+  "attempt_id": "att_d220f822-792b-4ad7-b632-0a42fdf4a258",
+  "revision": 3,
+  "phase": "refused",
+  "platform": {
+    "os": "linux",
+    "arch": "aarch64",
+    "kernel": "Linux 6.18.50+rpt-rpi-v8"
+  },
+  "jail": {
+    "component": "ouro-jail",
+    "version": "0.1.0",
+    "backend": "bubblewrap",
+    "backend_version": "bubblewrap 0.12.0"
+  },
+  "policy": {
+    "name": "agent",
+    "digest": "sha256:0869ac72c704b979c2bd62993871f284655df9bac81f3d41f163fea11754b30a",
+    "observe": "on",
+    "evidence": "strict",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_proxy",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "grants": [
+      {
+        "kind": "allow_host",
+        "value": "api.anthropic.com:443",
+        "by": "operator"
+      },
+      {
+        "kind": "allow_host",
+        "value": "models.opencode.ai:443",
+        "by": "operator"
+      },
+      {
+        "kind": "allow_host",
+        "value": "opencode.ai:443",
+        "by": "operator"
+      },
+      {
+        "kind": "read_only",
+        "value": "/home/monocursive/.opencode/bin",
+        "by": "operator"
+      },
+      {
+        "kind": "read_only",
+        "value": "/home/monocursive/bench-ouro-after/bin",
+        "by": "operator"
+      }
+    ]
+  },
+  "containment": "enforced",
+  "child_protection": "enforced",
+  "exec_observed": false,
+  "argv_digest": "sha256:3e2b90749a03bf55242750087a66282005f45fd195990d452ca2ee04e066ade4",
+  "applied": {
+    "filesystem": {
+      "mechanism": "bubblewrap-binds",
+      "protected_coverage": "existing_and_root",
+      "mounts": [
+        {
+          "path": "/",
+          "mode": "ro"
+        },
+        {
+          "path": "/usr",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/ssl",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/resolv.conf",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/passwd",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/group",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/hosts",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/localtime",
+          "mode": "ro"
+        },
+        {
+          "path": "/etc/ld.so.cache",
+          "mode": "ro"
+        },
+        {
+          "path": "/proc",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/null",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/zero",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/full",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/random",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/urandom",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/tty",
+          "mode": "rw"
+        },
+        {
+          "path": "/dev/pts",
+          "mode": "rw"
+        },
+        {
+          "path": "/tmp",
+          "mode": "rw"
+        },
+        {
+          "path": "/home/monocursive/bench-ouro-after/results/native-after/runs/026-opencode-ouro-refactor-yaml-json-0/workspace/refactor-yaml-json",
+          "mode": "rw"
+        },
+        {
+          "path": "/home/monocursive/.opencode/bin",
+          "mode": "ro"
+        },
+        {
+          "path": "/home/monocursive/bench-ouro-after/bin",
+          "mode": "ro"
+        },
+        {
+          "path": "/home/monocursive/bench-ouro-after/results/native-after/runs/026-opencode-ouro-refactor-yaml-json-0/workspace/refactor-yaml-json/.git/config",
+          "mode": "ro"
+        },
+        {
+          "path": "/home/monocursive/bench-ouro-after/results/native-after/runs/026-opencode-ouro-refactor-yaml-json-0/workspace/refactor-yaml-json/.git/hooks",
+          "mode": "ro"
+        },
+        {
+          "path": "/run/ouro/state",
+          "mode": "rw"
+        },
+        {
+          "path": "/run/ouro/proxy",
+          "mode": "ro"
+        },
+        {
+          "path": "/run/ouro/jail",
+          "mode": "ro"
+        }
+      ]
+    },
+    "network": {
+      "mode": "proxy",
+      "mechanism": "network-namespace+outside-http-proxy+loopback-bridge+unix-peer-mediation",
+      "allowed_hosts": [
+        "api.anthropic.com:443",
+        "models.opencode.ai:443",
+        "opencode.ai:443"
+      ]
+    },
+    "syscalls": {
+      "mechanism": "seccomp-bpf+seccomp-user-notification",
+      "digest": "sha256:52a13e8ce62d615ad756e950382944442e000fb1609afd99de44c446d027de62"
+    },
+    "limits": [
+      {
+        "key": "wall",
+        "requested": "240000",
+        "required": true,
+        "applied": true,
+        "mechanism": "boottime-deadline",
+        "scope": "tree",
+        "hit": false
+      },
+      {
+        "key": "pids",
+        "requested": "512",
+        "required": false,
+        "applied": true,
+        "mechanism": "pids.max",
+        "scope": "tree",
+        "hit": false
+      }
+    ],
+    "environment_names": [
+      "ALL_PROXY",
+      "ANTHROPIC_API_KEY",
+      "HOME",
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "LANG",
+      "NO_PROXY",
+      "OPENCODE_DISABLE_AUTOUPDATE",
+      "PATH",
+      "PWD",
+      "TMPDIR",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_STATE_HOME",
+      "all_proxy",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy"
+    ],
+    "removed_environment_names": []
+  },
+  "observer": {
+    "backend": null,
+    "set": null,
+    "attached": false,
+    "sources": {
+      "wrapper": "supported",
+      "audit": "unsupported",
+      "proxy": "unsupported"
+    },
+    "gaps": []
+  },
+  "coverage": {
+    "exec": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.write": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.deny": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "limits": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "proxy.net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    }
+  },
+  "process": {
+    "pid": 329655,
+    "identity": {
+      "kind": "linux_boot_start",
+      "value": {
+        "boot_id": "a83f9417-5194-4752-b750-7876f48c2dfe",
+        "pid": 329655,
+        "start_time_ticks": 3647891
+      }
+    }
+  },
+  "lifetime": {
+    "boundary": "pid_namespace",
+    "native": {
+      "os": "linux",
+      "details": {
+        "agent": {
+          "allowed_setup_operations": [
+            "prctl(PR_SET_NO_NEW_PRIVS)",
+            "seccomp",
+            "landlock_create_ruleset",
+            "landlock_add_rule",
+            "landlock_restrict_self",
+            "mount",
+            "umount2",
+            "pivot_root",
+            "chroot",
+            "unshare",
+            "clone_namespace_flags"
+          ],
+          "baseline_filter_digest": "sha256:52a13e8ce62d615ad756e950382944442e000fb1609afd99de44c446d027de62",
+          "filter_variant": "namespace_inner",
+          "first_flight_bytes_max": 8192,
+          "first_flight_timeout_ms": 5000,
+          "mediation_filter_digest": "sha256:33063c21492671bcf0a73a39a2a51af680cb9482443fb5ab8be82ba019aa4136",
+          "mediation_record_queue": 4096,
+          "nested_user_namespace": "available",
+          "nested_user_namespace_evidence": "a nested bubblewrap ran a command; bare unshare(CLONE_NEWUSER) inside: ok",
+          "origin_verification": "http_host_and_tls_sni",
+          "proxy_socket": "/run/ouro/proxy/proxy.sock",
+          "socks5_listen": "127.0.0.1:3129",
+          "tls_application_authority_verified": false,
+          "udp_egress": false,
+          "unix_peer_mediation": "seccomp_user_notification"
+        },
+        "backend_exec_by": "descriptor",
+        "bwrap_pid": 329651,
+        "cgroup_namespace": 4026532594,
+        "command_rules": {
+          "deny": 0,
+          "forbid": 0
+        },
+        "execution_cgroup": {
+          "charged_helpers": [
+            {
+              "pid": 329651,
+              "role": "bubblewrap"
+            },
+            {
+              "pid": 329654,
+              "role": "namespace_init"
+            },
+            {
+              "pid": 329657,
+              "role": "bridge"
+            }
+          ],
+          "device": 25,
+          "inode": 127530,
+          "path": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/ouro-att_d220f822-792b-4ad7-b632-0a42fdf4a258.leaf",
+          "scope": "target_descendants_and_listed_helpers"
+        },
+        "helpers": [
+          {
+            "charged_to_attempt": true,
+            "kind": "bridge",
+            "listen": "127.0.0.1:3128",
+            "mediated_connects": 0,
+            "pid": 329657,
+            "rejected_at_capacity": 0,
+            "seccomp_filters": 2
+          }
+        ],
+        "launcher_pid": 329655,
+        "mnt_namespace": 4026532589,
+        "namespace_init_pid": 329654,
+        "narrowing_filter_digest": "sha256:f5353e3a8e29beeca5edb0e19952196e8c1b8b575c4d5aab1698a7017fefb56e",
+        "narrowing_filter_digest_installed": "sha256:2aad49542d6ba29fab6c972bcb4cf11b3dacdb9e7f372db8d52dbae9c24a5da7",
+        "net_namespace": 4026532595,
+        "observer_plan": {
+          "backend": "ptrace",
+          "event_bytes_max": 65536,
+          "in_flight_max": 16384,
+          "kernel_ring_bytes": null,
+          "path_snapshot_max": 4096,
+          "queue_bytes_max": 4194304,
+          "queue_events_max": 16384,
+          "queue_lifecycle_reserve_bytes": 65536,
+          "queue_result_bytes_max": 4128768,
+          "test_seams": {}
+        },
+        "pid_namespace": 4026532593,
+        "readonly_open_fast_path": true,
+        "resolv_sanitization": "nameservers_only",
+        "seccomp_filters": {
+          "expected": 3,
+          "observed": 3
+        },
+        "supervisor_scope": {
+          "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/ouro-jail-329620-ed891c75fd42405a.scope",
+          "reason": null,
+          "reason_code": null,
+          "state": "entered",
+          "unit": "ouro-jail-329620-ed891c75fd42405a.scope"
+        },
+        "user_namespace": 4026532585,
+        "watcher_pid": 329652
+      }
+    },
+    "tree_empty": true,
+    "verified_at": "2026-10-11T20:56:24Z",
+    "verification_scope": "attempt_tree",
+    "integrity": "verified"
+  },
+  "outcome": {
+    "kind": "exec_error",
+    "code": null,
+    "signal": null,
+    "cause": "ENOENT",
+    "error": {
+      "code": "exec_failed",
+      "stage": "released",
+      "message": "the target exec failed with ENOENT",
+      "remediation_category": "configuration"
+    }
+  },
+  "state_cleanup": "complete",
+  "cleanup_error": null,
+  "created_at": "2026-10-11T20:56:24Z",
+  "updated_at": "2026-10-11T20:56:24Z",
+  "errors": [
+    {
+      "code": "exec_failed",
+      "stage": "released",
+      "message": "the target exec failed with ENOENT",
+      "remediation_category": "configuration"
+    }
+  ],
+  "credentials": []
+}

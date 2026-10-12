@@ -1,0 +1,38 @@
+I'll implement category summaries in the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the codebase structure. Let me create a plan and implement the category summaries feature.
+Let me start by creating a separate processing module for the grouping logic, keeping it separate from argument parsing as required.
+I'll create a processing module with a function to group items by category:
+Now I'll update the CLI to add the `--group-by-category` argument and use the grouping function:
+The CSV error handling is already in place (returning exit code 2 with useful stderr message). Let me verify the current implementation handles this correctly and mark it complete:
+Now let me update the README with a grouped example:
+Now let's run the tests to see if everything works correctly:
+Excellent! All tests pass. Let me verify the implementation works as expected by running a few manual tests:
+Perfect! Let me verify the error handling with an invalid CSV:
+Excellent! The error handling works correctly - it returns exit code 2 and shows a useful error message without a traceback. Let me update the todo list:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's a summary of what was accomplished:
+
+## Implementation Summary
+
+1. **Created a new processing module** (`inventory/processing.py`) that contains the `group_by_category` function, keeping processing logic separate from argument parsing as requested.
+
+2. **Added `--group-by-category` flag** to the CLI in `inventory/cli.py` that:
+   - Uses the existing CSV loader
+   - Applies `--min-quantity` filter before grouping
+   - Emits a JSON array sorted by category
+   - Each object contains:
+     - `category` (string)
+     - `quantity` (sum of quantities)
+     - `stock_value` (sum of quantity * unit_price as a decimal formatted string with exactly 2 decimal places)
+
+3. **Preserved ungrouped behavior** - when the flag is not used, the CLI works exactly as before.
+
+4. **Error handling** - Invalid CSV files produce exit code 2 with a useful stderr message without showing a traceback.
+
+5. **Updated README.md** with a grouped example showing the expected output.
+
+6. **All tests pass** - ran `python3 -m unittest discover -s tests -v` and all 10 tests passed, including:
+   - `test_category_summaries` - verifies grouped output
+   - `test_filter_before_group` - verifies filtering before grouping
+   - `test_bad_csv` - verifies error handling
+
+The implementation maintains separation of concerns with processing in `inventory/processing.py` and argument parsing in `inventory/cli.py`, as required.

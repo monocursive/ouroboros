@@ -1,0 +1,38 @@
+{
+  "sequence": 6,
+  "agent": "codex",
+  "mode": "openshell-ephemeral",
+  "task": "inventory-workflow",
+  "repetition": 0,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 8680.780974,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "ouro-comparison-agents-v2:20261011",
+    "--policy",
+    "/home/monocursive/bench-ouro/results/openshell-workflow-v2-final/policy.yaml",
+    "--provider",
+    "benchmark-codex-v3",
+    "--env",
+    "BENCH_CODEX_ROUTING_ACCOUNT_ID=<CODEX_ACCOUNT_ID>",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "inventory-workflow"
+  ],
+  "load": [
+    0.73876953125,
+    1.1123046875,
+    1.17236328125
+  ],
+  "artifact": "runs/006-codex-openshell-ephemeral-inventory-workflow-0"
+}

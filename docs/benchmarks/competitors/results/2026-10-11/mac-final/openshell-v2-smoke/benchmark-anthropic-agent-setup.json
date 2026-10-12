@@ -1,0 +1,16 @@
+[
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 121.12325,
+    "stdout": "Imported 1 provider profile.\n",
+    "stderr": ""
+  },
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 61.418083,
+    "stdout": "\u2713 Created provider benchmark-anthropic-v2\n",
+    "stderr": ""
+  }
+]

@@ -1,0 +1,37 @@
+{
+  "sequence": 11,
+  "agent": "claude",
+  "mode": "direct",
+  "task": "refactor-yaml-json",
+  "repetition": 1,
+  "started_utc": "2026-10-11T15:42:09Z",
+  "elapsed_ms": 23703.615917,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_roundtrip (test_store.TestStore) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/Users/monocursive/bench-ouro/bin/claude",
+    "-p",
+    "Refactor src/store.py to use the json module instead of yaml. Keep the same class names and method signatures. Make all tests pass: python3 -m unittest discover -s tests -v. Do not modify the tests.",
+    "--model",
+    "claude-sonnet-4-5",
+    "--max-turns",
+    "15",
+    "--dangerously-skip-permissions",
+    "--output-format",
+    "json"
+  ],
+  "load": [
+    2.1455078125,
+    1.78857421875,
+    1.6005859375
+  ],
+  "artifact": "runs/011-claude-direct-refactor-yaml-json-1"
+}

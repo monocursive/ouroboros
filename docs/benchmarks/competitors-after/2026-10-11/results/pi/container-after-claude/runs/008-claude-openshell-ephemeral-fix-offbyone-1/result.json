@@ -1,0 +1,36 @@
+{
+  "sequence": 8,
+  "agent": "claude",
+  "mode": "openshell-ephemeral",
+  "task": "fix-offbyone",
+  "repetition": 1,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 8295.861605,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "ouro-comparison-agents-after:20261011",
+    "--policy",
+    "/home/monocursive/bench-ouro-after/results/container-after-claude/policy.yaml",
+    "--provider",
+    "benchmark-anthropic-v2",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "claude",
+    "fix-offbyone"
+  ],
+  "load": [
+    1.35595703125,
+    1.71484375,
+    1.36474609375
+  ],
+  "artifact": "runs/008-claude-openshell-ephemeral-fix-offbyone-1"
+}

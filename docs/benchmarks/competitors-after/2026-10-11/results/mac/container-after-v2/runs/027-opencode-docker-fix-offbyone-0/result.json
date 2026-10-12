@@ -1,0 +1,59 @@
+{
+  "sequence": 27,
+  "agent": "opencode",
+  "mode": "docker",
+  "task": "fix-offbyone",
+  "repetition": 0,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 26664.066667,
+  "container_result": {
+    "agent": "opencode",
+    "task": "fix-offbyone",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 26068.912934,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {},
+    "peak_child_rss_kib": 756048,
+    "guest_kernel": [
+      "Linux",
+      "f00925cbde76",
+      "6.15.11-orbstack-00539-g9885ebd8e3f4",
+      "#1 SMP PREEMPT Fri Aug 22 08:24:56 UTC 2025",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "memory.max": "max",
+      "memory.swap.max": "max",
+      "pids.max": "max",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "ANTHROPIC_API_KEY",
+    "ouro-comparison-agents-after:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "opencode",
+    "fix-offbyone"
+  ],
+  "load": [
+    1.89990234375,
+    1.9912109375,
+    2.0673828125
+  ],
+  "artifact": "runs/027-opencode-docker-fix-offbyone-0"
+}

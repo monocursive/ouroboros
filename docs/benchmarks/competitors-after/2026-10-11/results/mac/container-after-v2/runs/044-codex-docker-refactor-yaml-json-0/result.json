@@ -1,0 +1,65 @@
+{
+  "sequence": 44,
+  "agent": "codex",
+  "mode": "docker",
+  "task": "refactor-yaml-json",
+  "repetition": 0,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 25510.877167,
+  "container_result": {
+    "agent": "codex",
+    "task": "refactor-yaml-json",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 24999.622914,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_roundtrip (test_store.TestStore.test_roundtrip) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {},
+    "peak_child_rss_kib": 318184,
+    "guest_kernel": [
+      "Linux",
+      "af1b3c49fc04",
+      "6.15.11-orbstack-00539-g9885ebd8e3f4",
+      "#1 SMP PREEMPT Fri Aug 22 08:24:56 UTC 2025",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "memory.max": "max",
+      "memory.swap.max": "max",
+      "pids.max": "max",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "CODEX_AUTH_ACCESS_TOKEN",
+    "-e",
+    "CODEX_AUTH_REFRESH_TOKEN",
+    "-e",
+    "CODEX_AUTH_ACCOUNT_ID",
+    "-e",
+    "CODEX_AUTH_ID_TOKEN",
+    "ouro-comparison-agents-after:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "refactor-yaml-json"
+  ],
+  "load": [
+    1.8212890625,
+    1.875,
+    1.9814453125
+  ],
+  "artifact": "runs/044-codex-docker-refactor-yaml-json-0"
+}

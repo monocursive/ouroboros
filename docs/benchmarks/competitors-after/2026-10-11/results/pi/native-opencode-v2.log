@@ -1,0 +1,25 @@
+1/24 opencode direct add-multiply #0 47.2s exit=0 success=True
+2/24 opencode greywall add-multiply #0 58.0s exit=0 success=True
+3/24 opencode ouro add-multiply #0 43.2s exit=0 success=True
+4/24 opencode mxc add-multiply #0 39.9s exit=0 success=True
+5/24 opencode greywall refactor-yaml-json #0 79.0s exit=0 success=True
+6/24 opencode ouro refactor-yaml-json #0 37.4s exit=0 success=True
+7/24 opencode mxc refactor-yaml-json #0 46.8s exit=0 success=True
+8/24 opencode direct refactor-yaml-json #0 45.3s exit=0 success=True
+9/24 opencode ouro fix-offbyone #0 57.2s exit=0 success=True
+10/24 opencode greywall fix-offbyone #0 78.6s exit=0 success=True
+11/24 opencode direct fix-offbyone #0 47.1s exit=0 success=True
+12/24 opencode mxc fix-offbyone #0 46.4s exit=0 success=True
+13/24 opencode mxc add-multiply #1 43.3s exit=0 success=True
+14/24 opencode direct add-multiply #1 41.8s exit=0 success=True
+15/24 opencode greywall add-multiply #1 58.2s exit=0 success=True
+16/24 opencode ouro add-multiply #1 39.7s exit=0 success=True
+17/24 opencode ouro fix-offbyone #1 55.2s exit=0 success=True
+18/24 opencode greywall fix-offbyone #1 61.2s exit=0 success=True
+19/24 opencode direct fix-offbyone #1 54.5s exit=0 success=True
+20/24 opencode mxc fix-offbyone #1 55.6s exit=0 success=True
+21/24 opencode mxc refactor-yaml-json #1 43.0s exit=0 success=True
+22/24 opencode greywall refactor-yaml-json #1 61.3s exit=0 success=True
+23/24 opencode direct refactor-yaml-json #1 46.0s exit=0 success=True
+24/24 opencode ouro refactor-yaml-json #1 48.3s exit=0 success=True
+COMPLETE

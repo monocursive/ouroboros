@@ -1,0 +1,91 @@
+{
+  "claude/direct": {
+    "runs": 6,
+    "success": 6,
+    "times_ms": [
+      18822.175417,
+      25293.67575,
+      20315.526375,
+      25834.4965,
+      18653.906375,
+      18638.584291
+    ],
+    "median_ms": 19568.850896
+  },
+  "claude/greywall": {
+    "runs": 6,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "claude/mxc": {
+    "runs": 6,
+    "success": 6,
+    "times_ms": [
+      20136.559167,
+      26105.819667,
+      19866.689416,
+      28804.769542,
+      22021.547667,
+      19743.2255
+    ],
+    "median_ms": 21079.053417
+  },
+  "opencode/mxc": {
+    "runs": 6,
+    "success": 6,
+    "times_ms": [
+      24166.678958,
+      23964.0555,
+      25933.395291,
+      23604.623167,
+      33437.299125,
+      28342.391459
+    ],
+    "median_ms": 25050.0371245
+  },
+  "opencode/greywall": {
+    "runs": 6,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "opencode/direct": {
+    "runs": 6,
+    "success": 6,
+    "times_ms": [
+      22515.045333,
+      25523.480833,
+      30666.817291,
+      25494.889,
+      31747.504458,
+      22655.349084
+    ],
+    "median_ms": 25509.184916500002
+  },
+  "codex/mxc": {
+    "runs": 6,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "codex/direct": {
+    "runs": 6,
+    "success": 6,
+    "times_ms": [
+      17754.403708,
+      21831.706708,
+      20335.470084,
+      15329.287667,
+      16766.765708,
+      20042.948875
+    ],
+    "median_ms": 18898.6762915
+  },
+  "codex/greywall": {
+    "runs": 6,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  }
+}

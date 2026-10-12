@@ -1,0 +1,41 @@
+I'll implement category summaries for the inventory CLI with the --group-by-category flag. Let me start by exploring the codebase structure and then planning the implementation.
+Now I understand the codebase structure. Let me create a todo list and implement the feature.
+Let me start by creating a processing module to keep the business logic separate from argument parsing:
+Perfect! All tests are passing. Let me verify the implementation by running a few manual tests to ensure everything works as expected:
+Perfect! All the requirements have been successfully implemented. Let me provide a summary:
+
+## Summary
+
+I've successfully implemented category summaries for the inventory CLI with the following features:
+
+### Implementation Details:
+
+1. **New processing module** (`inventory/processing.py:1-38`):
+   - Created `group_by_category()` function that handles filtering and grouping logic
+   - Applies `--min-quantity` filter before grouping (as required)
+   - Returns a JSON array sorted by category name
+   - Each object contains: `category` (string), `quantity` (sum), and `stock_value` (formatted as exact decimal string with 2 fractional digits)
+
+2. **Updated CLI** (`inventory/cli.py:6,11,14-17`):
+   - Added `--group-by-category` flag
+   - Keeps ungrouped output behavior unchanged
+   - Processing and argument parsing remain in separate modules
+
+3. **Error handling**:
+   - Invalid CSV produces exit code 2 with useful stderr message
+   - No traceback shown to user
+
+4. **Updated README.md** (`README.md:7-19`):
+   - Added grouped output example with expected JSON output
+   - Documented that `--min-quantity` filter is applied before grouping
+
+### Test Results:
+All 10 tests pass successfully:
+- `test_ungrouped` - Ungrouped behavior unchanged
+- `test_filter` - Min quantity filter works
+- `test_category_summaries` - Grouped output correct
+- `test_filter_before_group` - Filter applied before grouping
+- `test_bad_csv` - Exit code 2, no traceback, useful error message
+- All loader tests continue to pass
+
+The implementation follows all requirements: separate modules for processing and argument parsing, exact decimal formatting, sorted output, and backward compatibility for ungrouped output.

@@ -1,0 +1,37 @@
+{
+  "sequence": 11,
+  "agent": "claude",
+  "mode": "direct",
+  "task": "fix-offbyone",
+  "repetition": 0,
+  "started_utc": "2026-10-11T15:50:03Z",
+  "elapsed_ms": 20806.633519,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/monocursive/bench-ouro/bin/claude",
+    "-p",
+    "The tests are failing. Run python3 -m unittest discover -s tests -v, find the bug in src/parse.py, and fix it so all tests pass. Do not modify the tests.",
+    "--model",
+    "claude-sonnet-4-5",
+    "--max-turns",
+    "15",
+    "--dangerously-skip-permissions",
+    "--output-format",
+    "json"
+  ],
+  "load": [
+    0.4169921875,
+    0.3046875,
+    0.22509765625
+  ],
+  "artifact": "runs/011-claude-direct-fix-offbyone-0"
+}

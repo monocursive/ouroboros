@@ -1,0 +1,75 @@
+{
+  "sequence": 50,
+  "agent": "codex",
+  "mode": "openshell-ephemeral",
+  "task": "add-multiply",
+  "repetition": 1,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 19536.113583,
+  "container_result": {
+    "agent": "codex",
+    "task": "add-multiply",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 18712.719346,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {},
+    "peak_child_rss_kib": 314884,
+    "guest_kernel": [
+      "Linux",
+      "34efec71c915",
+      "6.15.11-orbstack-00539-g9885ebd8e3f4",
+      "#1 SMP PREEMPT Fri Aug 22 08:24:56 UTC 2025",
+      "aarch64"
+    ],
+    "resource_limits": {
+      "memory.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/memory.max'"
+      },
+      "memory.swap.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/memory.swap.max'"
+      },
+      "pids.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/pids.max'"
+      },
+      "cpu.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/cpu.max'"
+      }
+    }
+  },
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "ouro-comparison-agents-v2:20261011",
+    "--policy",
+    "/Users/monocursive/bench-ouro/results/openshell-v2-final/policy.yaml",
+    "--provider",
+    "benchmark-codex-v2",
+    "--env",
+    "BENCH_CODEX_ROUTING_ACCOUNT_ID=<CODEX_ACCOUNT_ID>",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "add-multiply"
+  ],
+  "load": [
+    1.5849609375,
+    1.66748046875,
+    1.79150390625
+  ],
+  "artifact": "runs/050-codex-openshell-ephemeral-add-multiply-1"
+}

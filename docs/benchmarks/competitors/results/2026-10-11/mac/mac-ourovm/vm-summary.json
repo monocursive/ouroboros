@@ -1,0 +1,30 @@
+{
+  "schema": "ouro-vm-lane/1",
+  "samples": 3,
+  "table": {
+    "noop": {
+      "samples": 3,
+      "valid": 3,
+      "elapsed_ms_median": 34340.5,
+      "elapsed_ms_min": 34273.3
+    },
+    "writes": {
+      "samples": 3,
+      "valid": 3,
+      "elapsed_ms_median": 34368.9,
+      "elapsed_ms_min": 34357.8
+    },
+    "reads": {
+      "samples": 3,
+      "valid": 3,
+      "elapsed_ms_median": 34496.4,
+      "elapsed_ms_min": 34444.6
+    },
+    "spawn": {
+      "samples": 3,
+      "valid": 3,
+      "elapsed_ms_median": 34374.5,
+      "elapsed_ms_min": 34367.8
+    }
+  }
+}

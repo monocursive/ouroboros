@@ -1,0 +1,89 @@
+preflight direct available 0 
+preflight ouro-jail unavailable None 
+preflight greywall unavailable 65 sandbox-exec: unsupported syntax: kleene star
+
+preflight mxc available 0 
+round -3 complete
+round -2 complete
+round -1 complete
+round 0 complete
+round 1 complete
+round 2 complete
+round 3 complete
+round 4 complete
+round 5 complete
+round 6 complete
+round 7 complete
+round 8 complete
+round 9 complete
+round 10 complete
+round 11 complete
+round 12 complete
+round 13 complete
+round 14 complete
+round 15 complete
+round 16 complete
+round 17 complete
+round 18 complete
+round 19 complete
+round 20 complete
+round 21 complete
+round 22 complete
+round 23 complete
+round 24 complete
+round 25 complete
+round 26 complete
+round 27 complete
+round 28 complete
+round 29 complete
+safety direct complete
+safety mxc complete
+{
+  "performance": {
+    "available": {
+      "direct": true,
+      "ouro-jail": false,
+      "greywall": false,
+      "mxc": true
+    },
+    "invalid_sequences": [],
+    "reference": {
+      "noop": {
+        "workload": "noop",
+        "count": 1,
+        "checksum": 0
+      },
+      "python": {
+        "workload": "python",
+        "count": 1,
+        "checksum": 0
+      },
+      "git": {
+        "workload": "git",
+        "count": 1003,
+        "checksum": "c7daa5d1c7985955db91200781f171ab3a66a5a1ace3358a9fcdc54e513383aa"
+      },
+      "reads": {
+        "workload": "reads",
+        "count": 1000,
+        "checksum": 491520000
+      },
+      "writes": {
+        "workload": "writes",
+        "count": 1000,
+        "checksum": 1024000
+      },
+      "spawn": {
+        "workload": "spawn",
+        "count": 100,
+        "checksum": 0
+      },
+      "cpu": {
+        "workload": "cpu",
+        "count": 20000000,
+        "checksum": 15910230868747444993
+      }
+    }
+  },
+  "safety_counts": {}
+}

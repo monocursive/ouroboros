@@ -1,0 +1,182 @@
+{
+  "schema": "agent-comparison/2",
+  "host": {
+    "system": "Linux",
+    "node": "raspberrypi",
+    "release": "6.18.50+rpt-rpi-v8",
+    "version": "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "machine": "aarch64",
+    "processor": ""
+  },
+  "started_utc": "2026-10-11T16:49:31Z",
+  "seed": 20261011,
+  "schedule": [
+    [
+      "opencode",
+      "add-multiply",
+      0,
+      "direct"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      0,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      0,
+      "ouro"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      0,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      0,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      0,
+      "ouro"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      0,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      0,
+      "direct"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      0,
+      "ouro"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      0,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      0,
+      "direct"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      0,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      1,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      1,
+      "direct"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      1,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "add-multiply",
+      1,
+      "ouro"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      1,
+      "ouro"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      1,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      1,
+      "direct"
+    ],
+    [
+      "opencode",
+      "fix-offbyone",
+      1,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      1,
+      "greywall"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      1,
+      "mxc"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      1,
+      "direct"
+    ],
+    [
+      "opencode",
+      "refactor-yaml-json",
+      1,
+      "ouro"
+    ]
+  ],
+  "codex_model": "gpt-6.1-sol",
+  "anthropic_model": "claude-sonnet-4-5",
+  "wall_seconds": 180,
+  "bins": {
+    "opencode": {
+      "sha256": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df",
+      "version": "1.19.0"
+    },
+    "ouro-jail": {
+      "sha256": "25b85c8b2ed05c82263ae1931d38da4adccf18db71d190520629893b6f575e69"
+    },
+    "greywall": {
+      "sha256": "f307e14a8afafb69edb5cbda632c259e4af6a1359d41dd2d7818f40b136a30bc"
+    },
+    "greyproxy": {
+      "sha256": "61f97f1d049c1fe18cc4ab623466d24c71dac652fd87dcdfaf26f0026c212a85"
+    },
+    "lxc-exec": {
+      "sha256": "f1c8b9c6fc6450a75f5bf3adc6468da579a95ec6100dd85a50d390ac54c73d12"
+    }
+  },
+  "harness_sha256": "ada2f1197fceb1525e1dc008864553193e6aa53f953a3bce2c0490416539a865",
+  "fixtures_sha256": "8bcdf08aea3a7d9fdc70577562dd68061f38abf0dbfcffde52c3d6612a8f14a1"
+}

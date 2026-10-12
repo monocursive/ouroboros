@@ -1,0 +1,20 @@
+{
+  "codex/direct": {
+    "runs": 6,
+    "success": 6,
+    "elapsed_ms": [
+      23447,
+      25636,
+      27095,
+      30530,
+      30150,
+      30560
+    ],
+    "elapsed_ms_median": 30150
+  },
+  "codex/mxc": {
+    "runs": 6,
+    "success": 0,
+    "elapsed_ms": []
+  }
+}

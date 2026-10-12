@@ -1,0 +1,7 @@
+1/6 claude docker inventory-workflow #0 81.2s exit=0 success=True
+2/6 claude openshell-ephemeral inventory-workflow #0 8.0s exit=1 success=False
+3/6 opencode docker inventory-workflow #0 113.8s exit=0 success=True
+4/6 opencode openshell-ephemeral inventory-workflow #0 8.3s exit=1 success=False
+5/6 codex docker inventory-workflow #0 60.9s exit=0 success=True
+6/6 codex openshell-ephemeral inventory-workflow #0 8.7s exit=1 success=False
+COMPLETE

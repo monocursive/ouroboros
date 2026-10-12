@@ -1,0 +1,13 @@
+opencode openshell add-multiply run0 23896ms exit=0 tests=True
+opencode openshell add-multiply run1 28457ms exit=0 tests=True
+opencode openshell fix-offbyone run0 33113ms exit=0 tests=True
+opencode openshell fix-offbyone run1 26514ms exit=0 tests=True
+opencode openshell refactor-yaml-json run0 27194ms exit=0 tests=True
+opencode openshell refactor-yaml-json run1 17553ms exit=0 tests=True
+{
+ "agent": "opencode",
+ "mode": "openshell-ephemeral",
+ "runs": 6,
+ "success": 6,
+ "elapsed_ms_median": 26854.0
+}

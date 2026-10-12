@@ -1,0 +1,11 @@
+[greywall] Running codex in a sandbox.
+A built-in profile is available. Without it, only the current directory is accessible.
+
+Allow read:   ~/CLAUDE.md  ~/AGENTS.md  ~/.gitconfig  ~/.gitignore  ~/.config/git  ~/.ssh/config  ~/.ssh/known_hosts  ~/.ssh/allowed_signers  ~/.skills  ~/.agents  ~/.claude/agents  ~/.claude/skills  ~/.config/gh  ~/.config/glab-cli  ~/Library/Keychains  /Library/Keychains/System.keychain  ~/.CFUserTextEncoding  ~/Library/Preferences/.GlobalPreferences.plist  ~/.codex  ~/.cache/codex  ~/Library/Preferences/com.openai.codex.plist  /Library/Preferences/com.openai.codex.plist  /Library/Managed Preferences/com.openai.codex.plist  /etc/codex + working dir
+Allow write: ~/.skills  ~/.agents  ~/AGENTS.md  ~/.config/gh  ~/.cache/gh  ~/.local/share/gh  ~/.local/state/gh  ~/.ssh/known_hosts  ~/Library/Keychains  ~/.codex  ~/.cache/codex + working dir
+Deny read:   ~/.ssh/id_*  ~/.gnupg/**  .env  .env.*
+Deny write:  ~/.bashrc  ~/.bash_profile  ~/.zshrc  ~/.zprofile  ~/.profile  ~/.ssh  ~/.gnupg
+Allow net:   api.openai.com:443  chatgpt.com:443  ab.chatgpt.com:443
+
+[Y] Use profile (recommended)   [e] Edit first   [s] Skip (restrictive)   [n] Don't ask again
+> sandbox-exec: unsupported syntax: kleene star

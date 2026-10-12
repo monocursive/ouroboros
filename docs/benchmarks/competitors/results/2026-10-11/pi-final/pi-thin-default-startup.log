@@ -1,0 +1,14 @@
+
+Created sandbox: swaying-shark
+
+  [0.0s] Requesting compute...
+[0.0s] Sandbox allocated
+[0.0s] Pulling image bench-openshell:latest
+[0.1s] Image already present
+[0.7s] Starting sandbox Container created
+✓ Sandbox swaying-shark deletion accepted; cleanup is pending
+Error:   × sandbox entered error phase while provisioning:
+  │ ControlSupervisorStartFailed: Docker sandbox exited before supervisor
+  │ became ready
+
+exit=1

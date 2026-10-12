@@ -1,0 +1,29 @@
+{
+  "sequence": 50,
+  "agent": "codex",
+  "mode": "mxc",
+  "task": "add-multiply",
+  "repetition": 1,
+  "started_utc": "2026-10-11T15:57:08Z",
+  "elapsed_ms": 99.853625,
+  "exit": 1,
+  "timeout": false,
+  "success": false,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": false,
+    "hidden_pass": false,
+    "test_output": "test_add (test_calc.TestCalc) ... ok\ntest_multiply (test_calc.TestCalc) ... ERROR\n\n======================================================================\nERROR: test_multiply (test_calc.TestCalc)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/v2-agents/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply/tests/test_calc.py\", line 8, in test_multiply\n    from src.calc import multiply\nImportError: cannot import name 'multiply' from 'src.calc' (/Users/monocursive/bench-ouro/results/v2-agents/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply/src/calc.py)\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nFAILED (errors=1)\n",
+    "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nImportError: cannot import name 'multiply' from 'src.calc' (/Users/monocursive/bench-ouro/results/v2-agents/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply/src/calc.py)\n"
+  },
+  "argv": [
+    "/Users/monocursive/bench-ouro/bin/mxc-exec-mac",
+    "/Users/monocursive/bench-ouro/results/v2-agents/runs/050-codex-mxc-add-multiply-1/mxc-private.json"
+  ],
+  "load": [
+    2.2001953125,
+    3.13916015625,
+    2.8828125
+  ],
+  "artifact": "runs/050-codex-mxc-add-multiply-1"
+}

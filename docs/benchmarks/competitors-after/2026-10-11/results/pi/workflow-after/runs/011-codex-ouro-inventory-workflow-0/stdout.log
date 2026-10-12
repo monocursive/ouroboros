@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, sorted categories, and exact decimal totals formatted as two-digit strings. Ungrouped behavior is preserved, and invalid CSV exits with code 2 without a traceback.
+
+Updated README with an example and expected output. Processing remains separate from argument parsing; supplied tests are unchanged.
+
+All 10 tests pass, plus additional precision and malformed-CSV checks.

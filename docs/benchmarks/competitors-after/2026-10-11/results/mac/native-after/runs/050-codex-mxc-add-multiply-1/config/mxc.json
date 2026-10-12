@@ -1,0 +1,57 @@
+{
+  "version": "1.0.0",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "/Users/monocursive/bench-ouro-after/bin/codex exec --ephemeral --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox --model gpt-6.1-sol -c 'model_reasoning_effort=\"low\"' -C /Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply 'Add a function multiply(a, b) to src/calc.py that returns the product of two numbers. Then run the tests with: python3 -m unittest discover -s tests -v. Fix any failures until all tests pass. Do not modify the tests.'",
+    "cwd": "/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply",
+    "timeout": 240000,
+    "inheritDefaultEnv": true,
+    "env": [
+      "HOME=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home",
+      "PATH=/Users/monocursive/bench-ouro-after/bin:/Users/monocursive/bench-ouro-after/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      "TMPDIR=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home/tmp",
+      "CODEX_HOME=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/state",
+      "CLAUDE_CONFIG_DIR=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home/.claude",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+      "DISABLE_TELEMETRY=1",
+      "OPENCODE_DISABLE_AUTOUPDATE=true",
+      "XDG_CONFIG_HOME=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home/.config",
+      "XDG_DATA_HOME=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home/.local/share",
+      "XDG_STATE_HOME=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home/.local/state",
+      "XDG_CACHE_HOME=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home/.cache",
+      "NODE_EXTRA_CA_CERTS=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home/proxy-ca.pem",
+      "SSL_CERT_FILE=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home/proxy-ca.pem",
+      "REQUESTS_CA_BUNDLE=/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home/proxy-ca.pem",
+      "GIT_CONFIG_NOSYSTEM=1",
+      "GIT_CONFIG_GLOBAL=/dev/null"
+    ]
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "/Users/monocursive/.codex/packages/standalone/releases/0.159.2-aarch64-apple-darwin/bin",
+      "/Users/monocursive/bench-ouro-after/bin",
+      "/opt/homebrew"
+    ],
+    "readwritePaths": [
+      "/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/workspace/add-multiply",
+      "/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/home",
+      "/Users/monocursive/bench-ouro-after/results/native-after/runs/050-codex-mxc-add-multiply-1/state",
+      "/private/tmp/claude-501",
+      "/private/tmp/opencode"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:43051"
+  },
+  "seatbelt": {
+    "extraMachLookups": [
+      "com.apple.cfprefsd.agent",
+      "com.apple.cfprefsd.daemon"
+    ]
+  }
+}

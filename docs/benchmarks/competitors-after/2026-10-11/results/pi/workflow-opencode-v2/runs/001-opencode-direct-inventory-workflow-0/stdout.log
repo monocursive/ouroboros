@@ -1,0 +1,61 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by planning this task.
+Let me explore the codebase structure to understand the current implementation:
+Now let me look at the tests to understand what needs to be preserved:
+Perfect! I understand the structure. Now let me implement the changes:
+
+1. First, I'll add the `--group-by-category` flag to the CLI
+2. Create a processing module with the grouping logic
+3. Ensure CSV error handling uses exit code 2 (already in place)
+4. Format stock_value correctly
+
+Let me start by updating the CLI to add the flag:
+Now let me create the processor module with the category_summary function:
+The CSV error handling is already in place (exit code 2 without traceback), so let me verify this is working properly by checking the test expectations. Looking at test_bad_csv in test_cli.py:35-39, it expects exit code 2, no traceback, and "row" in stderr. The current cli.py:15-17 already handles this correctly.
+Now let me update the README.md with a grouped example:
+Now let me run the tests to check if everything works:
+Excellent! All tests pass. Let me verify the implementation works correctly by testing it manually:
+Perfect! Let me also test the error handling:
+Let me verify all requirements have been met:
+
+1. ✅ Added `--group-by-category` flag to `python3 -m inventory.cli`
+2. ✅ Uses existing CSV loader from `inventory/loader.py`
+3. ✅ Applies `--min-quantity` filter before grouping (verified in test_filter_before_group)
+4. ✅ Emits JSON array sorted by category (alphabetically)
+5. ✅ Each object has:
+   - `category` (string)
+   - `quantity` (sum of quantities as integer)
+   - `stock_value` (sum of quantity * unit_price as exact decimal formatted with two fractional digits as JSON string)
+6. ✅ Ungrouped output keeps current behavior (test_ungrouped passes)
+7. ✅ Invalid CSV produces exit code 2 and useful stderr message without traceback (test_bad_csv passes)
+8. ✅ Updated README.md with grouped example and expected output
+9. ✅ All tests pass (`python3 -m unittest discover -s tests -v`)
+10. ✅ Supplied tests were not changed
+11. ✅ Processing logic in separate module (`inventory/processor.py`)
+12. ✅ Argument parsing in CLI module (`inventory/cli.py`)
+Perfect! I've successfully implemented category summaries for the inventory CLI. Here's what was done:
+
+## Summary
+
+**Files Modified:**
+- `inventory/cli.py:5,10-14` - Added `--group-by-category` flag and conditional logic to use category_summary
+- `README.md:7-18` - Added grouped example with expected output
+
+**Files Created:**
+- `inventory/processor.py` - New module with `category_summary()` function for grouping logic
+
+## Key Features Implemented:
+
+1. **--group-by-category flag**: Aggregates items by category and outputs JSON array sorted alphabetically
+2. **Filtering before grouping**: The `--min-quantity` filter is applied to individual items before grouping
+3. **Exact decimal formatting**: `stock_value` is formatted as a string with exactly 2 decimal places (e.g., "12.75", "1.00")
+4. **Error handling**: Invalid CSV returns exit code 2 with useful error message, no traceback
+5. **Separation of concerns**: Processing logic in `processor.py`, argument parsing in `cli.py`
+6. **Backward compatibility**: Ungrouped output behavior unchanged
+
+## Test Results:
+All 10 tests pass, including:
+- Ungrouped output test
+- Filter test
+- Category summaries test
+- Filter before group test
+- Bad CSV error handling test

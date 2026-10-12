@@ -1,0 +1,24 @@
+{
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 245.463124,
+  "stdout": "",
+  "stderr": "Error:   \u00d7 code: 'Client specified an invalid argument', message: \"name exceeds\n  \u2502 maximum length (21 > 19)\"\n\n",
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--name",
+    "bench-pi-after-claude",
+    "--detach",
+    "--from",
+    "ouro-comparison-agents-after:20261011",
+    "--policy",
+    "/home/monocursive/bench-ouro-after/results/container-warm-availability/policy.yaml",
+    "--provider",
+    "benchmark-anthropic-v2",
+    "--",
+    "/bin/sleep",
+    "300"
+  ]
+}

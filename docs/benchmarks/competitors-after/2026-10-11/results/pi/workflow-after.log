@@ -1,0 +1,13 @@
+1/12 claude direct inventory-workflow #0 83.3s exit=0 success=True
+2/12 claude greywall inventory-workflow #0 113.9s exit=1 success=False
+3/12 claude ouro inventory-workflow #0 82.6s exit=0 success=True
+4/12 claude mxc inventory-workflow #0 92.8s exit=0 success=True
+5/12 opencode mxc inventory-workflow #0 0.2s exit=127 success=False
+6/12 opencode direct inventory-workflow #0 95.3s exit=0 success=True
+7/12 opencode ouro inventory-workflow #0 0.5s exit=125 success=False
+8/12 opencode greywall inventory-workflow #0 1.8s exit=127 success=False
+9/12 codex mxc inventory-workflow #0 77.4s exit=0 success=True
+10/12 codex greywall inventory-workflow #0 101.5s exit=0 success=True
+11/12 codex ouro inventory-workflow #0 43.6s exit=0 success=True
+12/12 codex direct inventory-workflow #0 61.3s exit=0 success=True
+COMPLETE

@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "/home/ubuntu/bench-ouro-after/bin/openshell-gateway",
+    "--compute-driver",
+    "docker",
+    "--tls-cert",
+    "/home/ubuntu/bench-ouro-after/openshell/tls/server/tls.crt",
+    "--tls-key",
+    "/home/ubuntu/bench-ouro-after/openshell/tls/server/tls.key",
+    "--tls-client-ca",
+    "/home/ubuntu/bench-ouro-after/openshell/tls/ca.crt",
+    "--enable-mtls-auth",
+    "true"
+  ],
+  "pid": 2804022,
+  "exit_at_ready_check": null,
+  "status_exit": 0,
+  "status_stdout": "Server Status\n\n  Gateway: openshell\n  Server: https://127.0.0.1:17670\n  Status: Connected\n  Authentication: Authenticated (mTLS transport)\n  Version: 0.1.3\n",
+  "status_stderr": ""
+}

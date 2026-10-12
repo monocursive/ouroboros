@@ -1,0 +1,13 @@
+{
+  "reason": "New bin symlinks take an extra hop through the ungranted before bin directory; ENOENT is setup failure",
+  "stopped": [
+    {
+      "pid": 2773936,
+      "kind": "owned isolated child group"
+    },
+    {
+      "pid": 2768609,
+      "kind": "native pilot runner"
+    }
+  ]
+}

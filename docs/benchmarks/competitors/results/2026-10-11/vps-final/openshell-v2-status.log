@@ -1,0 +1,7 @@
+Server Status
+
+  Gateway: openshell
+  Server: https://127.0.0.1:17670
+  Status: Connected
+  Authentication: Authenticated (mTLS transport)
+  Version: 0.1.3

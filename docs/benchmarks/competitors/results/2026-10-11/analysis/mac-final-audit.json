@@ -1,0 +1,2651 @@
+{
+  "schema": "benchmark-audit/1",
+  "p95_method": "nearest rank, ceil(.95*n)-1",
+  "note": "All datasets retained. Selection of valid final protocols is declared separately; pilots are not comparative results.",
+  "harness_sha256": "1e85643be9400ec655e835ebddbcfac942a2899657772d2bd2d31b5e81cab07b",
+  "datasets": {
+    "backing-v3/launches.ndjson": {
+      "source_sha256": "f6b9e58069122ac3a50e653fa245d5feeb6bd33288787cba2899ee1faf952c1e",
+      "rows": 4,
+      "table": {},
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "mac-perf/launches.ndjson": {
+      "source_sha256": "60ff346c75906ed1aeb26a577eeee9cfcee0515154f7ada742e08ea4f56343a6",
+      "rows": 493,
+      "table": {
+        "direct/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 21.1019375,
+            "p95_nearest_rank": 22.754084,
+            "min": 20.398,
+            "max": 24.703292
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 18.664,
+            "p95_nearest_rank": 20.17,
+            "min": 18.272,
+            "max": 21.954
+          }
+        },
+        "direct/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 44.6113335,
+            "p95_nearest_rank": 48.25875,
+            "min": 42.14325,
+            "max": 49.856209
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 10.005792,
+            "p95_nearest_rank": 11.029333,
+            "min": 9.589625,
+            "max": 12.152875
+          }
+        },
+        "direct/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 2.5379370000000003,
+            "p95_nearest_rank": 3.470917,
+            "min": 2.212541,
+            "max": 3.766917
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0,
+            "p95_nearest_rank": 0.001,
+            "min": 0.0,
+            "max": 0.001
+          }
+        },
+        "direct/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 34.0918125,
+            "p95_nearest_rank": 36.232542,
+            "min": 32.712,
+            "max": 38.173166
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000458,
+            "p95_nearest_rank": 0.000583,
+            "min": 0.000333,
+            "max": 0.000584
+          }
+        },
+        "direct/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 22.138937,
+            "p95_nearest_rank": 25.387167,
+            "min": 13.560416,
+            "max": 26.752083
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 19.602,
+            "p95_nearest_rank": 22.527,
+            "min": 11.236,
+            "max": 23.665
+          }
+        },
+        "direct/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 145.712229,
+            "p95_nearest_rank": 150.485292,
+            "min": 143.246917,
+            "max": 154.09775
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 143.247,
+            "p95_nearest_rank": 147.543,
+            "min": 140.691,
+            "max": 151.332
+          }
+        },
+        "direct/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 47.473625,
+            "p95_nearest_rank": 51.86825,
+            "min": 38.618292,
+            "max": 51.974
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 45.1405,
+            "p95_nearest_rank": 48.453,
+            "min": 36.205,
+            "max": 48.725
+          }
+        },
+        "mxc/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 58.628125,
+            "p95_nearest_rank": 61.014583,
+            "min": 35.51625,
+            "max": 61.589959
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 18.627499999999998,
+            "p95_nearest_rank": 18.969,
+            "min": 18.321,
+            "max": 19.187
+          }
+        },
+        "mxc/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 3442.8994789999997,
+            "p95_nearest_rank": 3495.588375,
+            "min": 3420.264,
+            "max": 3661.2165
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 1689.7151045,
+            "p95_nearest_rank": 1732.679959,
+            "min": 1681.3915,
+            "max": 1791.239333
+          }
+        },
+        "mxc/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 16.698625,
+            "p95_nearest_rank": 23.127375,
+            "min": 16.239542,
+            "max": 23.992083
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0,
+            "p95_nearest_rank": 0.001,
+            "min": 0.0,
+            "max": 0.001
+          }
+        },
+        "mxc/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1769.137292,
+            "p95_nearest_rank": 1776.881042,
+            "min": 1721.322542,
+            "max": 1780.299417
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0004375,
+            "p95_nearest_rank": 0.000542,
+            "min": 0.000333,
+            "max": 0.000666
+          }
+        },
+        "mxc/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 58.0425415,
+            "p95_nearest_rank": 59.961833,
+            "min": 33.699292,
+            "max": 61.114916
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 19.8295,
+            "p95_nearest_rank": 20.374,
+            "min": 11.064,
+            "max": 20.834
+          }
+        },
+        "mxc/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 202.642437,
+            "p95_nearest_rank": 219.758667,
+            "min": 158.515708,
+            "max": 220.607709
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 142.75799999999998,
+            "p95_nearest_rank": 147.807,
+            "min": 138.518,
+            "max": 149.972
+          }
+        },
+        "mxc/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 100.227375,
+            "p95_nearest_rank": 103.148042,
+            "min": 58.033125,
+            "max": 104.17675
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 45.8535,
+            "p95_nearest_rank": 48.247,
+            "min": 35.618,
+            "max": 51.887
+          }
+        }
+      },
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "perf-v2-final/launches.ndjson": {
+      "source_sha256": "6eaebbd7bf1c1d11e9fc075e4ecaad562959d9f7121d79e80f892c5836304e59",
+      "rows": 529,
+      "table": {
+        "direct/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 21.429958499999998,
+            "p95_nearest_rank": 23.942667,
+            "min": 20.979917,
+            "max": 25.607292
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 18.7655,
+            "p95_nearest_rank": 20.526,
+            "min": 18.329,
+            "max": 21.908
+          }
+        },
+        "direct/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 43.9404375,
+            "p95_nearest_rank": 47.131958,
+            "min": 42.123375,
+            "max": 48.293666
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 9.882292,
+            "p95_nearest_rank": 10.779083,
+            "min": 9.4845,
+            "max": 11.175208
+          }
+        },
+        "direct/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 2.8120624999999997,
+            "p95_nearest_rank": 3.59425,
+            "min": 2.357542,
+            "max": 3.613375
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0,
+            "p95_nearest_rank": 0.001,
+            "min": 0.0,
+            "max": 0.001
+          }
+        },
+        "direct/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 33.984583,
+            "p95_nearest_rank": 36.174875,
+            "min": 31.696834,
+            "max": 36.395708
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000417,
+            "p95_nearest_rank": 0.0005,
+            "min": 0.000291,
+            "max": 0.000583
+          }
+        },
+        "direct/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 21.8783125,
+            "p95_nearest_rank": 24.677667,
+            "min": 14.114125,
+            "max": 25.626792
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 19.2515,
+            "p95_nearest_rank": 21.226,
+            "min": 11.173,
+            "max": 22.356
+          }
+        },
+        "direct/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 146.4131875,
+            "p95_nearest_rank": 151.89975,
+            "min": 142.170333,
+            "max": 154.208625
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 143.7695,
+            "p95_nearest_rank": 149.256,
+            "min": 139.472,
+            "max": 151.325
+          }
+        },
+        "direct/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 49.5173125,
+            "p95_nearest_rank": 59.969834,
+            "min": 40.002083,
+            "max": 62.00775
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 46.9025,
+            "p95_nearest_rank": 57.592,
+            "min": 37.098,
+            "max": 58.636
+          }
+        },
+        "mxc/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 58.765917,
+            "p95_nearest_rank": 60.708333,
+            "min": 53.0385,
+            "max": 61.018333
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 18.6405,
+            "p95_nearest_rank": 18.817,
+            "min": 18.343,
+            "max": 19.058
+          }
+        },
+        "mxc/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 3439.809604,
+            "p95_nearest_rank": 3504.530041,
+            "min": 3416.431584,
+            "max": 3511.294625
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 1686.2321245,
+            "p95_nearest_rank": 1701.850708,
+            "min": 1671.047375,
+            "max": 1710.091541
+          }
+        },
+        "mxc/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 16.656937499999998,
+            "p95_nearest_rank": 24.631958,
+            "min": 16.153667,
+            "max": 25.909583
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0,
+            "p95_nearest_rank": 0.001,
+            "min": 0.0,
+            "max": 0.001
+          }
+        },
+        "mxc/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 1767.6050415,
+            "p95_nearest_rank": 1776.538542,
+            "min": 1719.772166,
+            "max": 1825.416125
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0004375,
+            "p95_nearest_rank": 0.000584,
+            "min": 0.000333,
+            "max": 0.000584
+          }
+        },
+        "mxc/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 58.0751875,
+            "p95_nearest_rank": 60.481833,
+            "min": 33.988,
+            "max": 60.519208
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 19.4835,
+            "p95_nearest_rank": 20.368,
+            "min": 10.768,
+            "max": 22.105
+          }
+        },
+        "mxc/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 197.424354,
+            "p95_nearest_rank": 216.885709,
+            "min": 159.655375,
+            "max": 221.584125
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 143.2235,
+            "p95_nearest_rank": 149.184,
+            "min": 138.387,
+            "max": 149.658
+          }
+        },
+        "mxc/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 100.456146,
+            "p95_nearest_rank": 102.311,
+            "min": 58.106958,
+            "max": 103.317042
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 47.6515,
+            "p95_nearest_rank": 50.343,
+            "min": 38.325,
+            "max": 51.918
+          }
+        }
+      },
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "resource-v2-final/launches.ndjson": {
+      "source_sha256": "bd56152026aee631c8850151575cb167c8704668153a28055343bb33731c5b62",
+      "rows": 12,
+      "table": {},
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "openshell-perf-v2-final/openshell-launches.ndjson": {
+      "source_sha256": "e87122fe2970b96bb3ac3936a826f7f4abab09ece5d8bffb378628df2a2b7de1",
+      "rows": 939,
+      "table": {
+        "docker-run/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 236.1565415,
+            "p95_nearest_rank": 269.103333,
+            "min": 212.52675,
+            "max": 277.336791
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.138603,
+            "p95_nearest_rank": 24.546436,
+            "min": 23.51581,
+            "max": 24.547974
+          }
+        },
+        "docker-run/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 243.8851045,
+            "p95_nearest_rank": 279.178583,
+            "min": 225.840417,
+            "max": 309.614833
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 15.1537605,
+            "p95_nearest_rank": 16.71443,
+            "min": 13.721428,
+            "max": 17.505889
+          }
+        },
+        "docker-run/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 224.31620800000002,
+            "p95_nearest_rank": 246.642875,
+            "min": 180.4935,
+            "max": 254.160417
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000209,
+            "p95_nearest_rank": 0.000333,
+            "min": 8.3e-05,
+            "max": 0.000333
+          }
+        },
+        "docker-run/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 239.953208,
+            "p95_nearest_rank": 270.039,
+            "min": 205.59525,
+            "max": 274.432875
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0005625,
+            "p95_nearest_rank": 0.000875,
+            "min": 0.000375,
+            "max": 0.000917
+          }
+        },
+        "docker-run/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 218.05256250000002,
+            "p95_nearest_rank": 244.312459,
+            "min": 179.764458,
+            "max": 256.419375
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 3.0341275,
+            "p95_nearest_rank": 3.279961,
+            "min": 2.409668,
+            "max": 3.351336
+          }
+        },
+        "docker-run/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 230.292125,
+            "p95_nearest_rank": 254.209833,
+            "min": 200.70925,
+            "max": 260.9555
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 16.320470999999998,
+            "p95_nearest_rank": 18.115223,
+            "min": 12.889052,
+            "max": 20.102432
+          }
+        },
+        "docker-run/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 250.5504375,
+            "p95_nearest_rank": 288.484166,
+            "min": 198.3225,
+            "max": 292.798125
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 10.726405,
+            "p95_nearest_rank": 13.388885,
+            "min": 9.239215,
+            "max": 13.820427
+          }
+        },
+        "docker-warm/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 54.923312499999994,
+            "p95_nearest_rank": 66.294875,
+            "min": 47.322084,
+            "max": 68.02975
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.231581499999997,
+            "p95_nearest_rank": 25.687562,
+            "min": 23.159475,
+            "max": 25.836353
+          }
+        },
+        "docker-warm/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 47.432625,
+            "p95_nearest_rank": 63.273667,
+            "min": 42.464292,
+            "max": 63.804667
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 1.4197929999999999,
+            "p95_nearest_rank": 1.688751,
+            "min": 1.249126,
+            "max": 1.706001
+          }
+        },
+        "docker-warm/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 27.606082999999998,
+            "p95_nearest_rank": 41.456,
+            "min": 24.311834,
+            "max": 41.654709
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000208,
+            "p95_nearest_rank": 0.000333,
+            "min": 4.1e-05,
+            "max": 0.000417
+          }
+        },
+        "docker-warm/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 44.217375000000004,
+            "p95_nearest_rank": 61.479375,
+            "min": 40.307958,
+            "max": 61.676917
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000542,
+            "p95_nearest_rank": 0.000792,
+            "min": 0.000375,
+            "max": 0.003417
+          }
+        },
+        "docker-warm/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 29.9289795,
+            "p95_nearest_rank": 42.952875,
+            "min": 26.368959,
+            "max": 43.642583
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 2.066669,
+            "p95_nearest_rank": 2.402252,
+            "min": 1.699418,
+            "max": 2.40596
+          }
+        },
+        "docker-warm/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 43.5922295,
+            "p95_nearest_rank": 59.65575,
+            "min": 37.936542,
+            "max": 66.925792
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 14.648823499999999,
+            "p95_nearest_rank": 16.366054,
+            "min": 11.951176,
+            "max": 16.495427
+          }
+        },
+        "docker-warm/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 46.244583500000005,
+            "p95_nearest_rank": 63.406833,
+            "min": 41.539208,
+            "max": 63.912042
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 19.0725755,
+            "p95_nearest_rank": 21.856934,
+            "min": 16.321846,
+            "max": 22.643809
+          }
+        },
+        "openshell-ephemeral/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 694.655229,
+            "p95_nearest_rank": 720.278708,
+            "min": 670.51675,
+            "max": 725.464209
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 24.3725385,
+            "p95_nearest_rank": 26.116896,
+            "min": 23.75281,
+            "max": 27.815355
+          }
+        },
+        "openshell-ephemeral/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 695.452708,
+            "p95_nearest_rank": 712.587208,
+            "min": 664.087167,
+            "max": 723.248666
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 14.846637,
+            "p95_nearest_rank": 19.872766,
+            "min": 14.128095,
+            "max": 28.696731
+          }
+        },
+        "openshell-ephemeral/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 708.3793539999999,
+            "p95_nearest_rank": 719.304292,
+            "min": 687.263458,
+            "max": 726.304416
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000209,
+            "p95_nearest_rank": 0.000375,
+            "min": 4.2e-05,
+            "max": 0.000458
+          }
+        },
+        "openshell-ephemeral/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 708.3586045,
+            "p95_nearest_rank": 728.536375,
+            "min": 651.552792,
+            "max": 730.293417
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.0005625,
+            "p95_nearest_rank": 0.001417,
+            "min": 0.000416,
+            "max": 0.00225
+          }
+        },
+        "openshell-ephemeral/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 704.152479,
+            "p95_nearest_rank": 743.485875,
+            "min": 677.357541,
+            "max": 750.281833
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 5.4049625,
+            "p95_nearest_rank": 8.236632,
+            "min": 4.819879,
+            "max": 9.331257
+          }
+        },
+        "openshell-ephemeral/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 698.652167,
+            "p95_nearest_rank": 726.053584,
+            "min": 665.506541,
+            "max": 741.892875
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 19.0661395,
+            "p95_nearest_rank": 21.2821,
+            "min": 16.931513,
+            "max": 22.567185
+          }
+        },
+        "openshell-ephemeral/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 716.385,
+            "p95_nearest_rank": 740.482292,
+            "min": 672.738875,
+            "max": 761.975667
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 11.5208205,
+            "p95_nearest_rank": 12.702385,
+            "min": 10.663217,
+            "max": 13.577219
+          }
+        },
+        "openshell-warm/cpu": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 88.05614550000001,
+            "p95_nearest_rank": 101.355459,
+            "min": 71.914708,
+            "max": 102.829417
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 25.5888515,
+            "p95_nearest_rank": 29.09719,
+            "min": 23.633102,
+            "max": 29.907107
+          }
+        },
+        "openshell-warm/git": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 77.1704585,
+            "p95_nearest_rank": 89.244834,
+            "min": 69.935417,
+            "max": 91.668209
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 2.052356,
+            "p95_nearest_rank": 2.371169,
+            "min": 1.510542,
+            "max": 2.518794
+          }
+        },
+        "openshell-warm/noop": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 55.5846875,
+            "p95_nearest_rank": 73.760667,
+            "min": 45.90575,
+            "max": 73.809666
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000125,
+            "p95_nearest_rank": 0.000292,
+            "min": 0.0,
+            "max": 0.000333
+          }
+        },
+        "openshell-warm/python": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 76.116917,
+            "p95_nearest_rank": 94.069709,
+            "min": 64.774084,
+            "max": 101.882292
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 0.000625,
+            "p95_nearest_rank": 0.000791,
+            "min": 0.000417,
+            "max": 0.000833
+          }
+        },
+        "openshell-warm/reads": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 74.6704585,
+            "p95_nearest_rank": 94.813917,
+            "min": 55.013625,
+            "max": 96.868208
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 17.796973,
+            "p95_nearest_rank": 28.224231,
+            "min": 4.609337,
+            "max": 29.766483
+          }
+        },
+        "openshell-warm/spawn": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 79.7929165,
+            "p95_nearest_rank": 89.899791,
+            "min": 65.459917,
+            "max": 90.926041
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 19.150472999999998,
+            "p95_nearest_rank": 22.045976,
+            "min": 14.44972,
+            "max": 24.870228
+          }
+        },
+        "openshell-warm/writes": {
+          "attempted": 30,
+          "valid": 30,
+          "invalid_sequences": [],
+          "elapsed_ms": {
+            "n": 30,
+            "median": 99.9492085,
+            "p95_nearest_rank": 117.476708,
+            "min": 73.588375,
+            "max": 130.364209
+          },
+          "work_ms": {
+            "n": 30,
+            "median": 45.74387,
+            "p95_nearest_rank": 56.006502,
+            "min": 21.799226,
+            "max": 57.382462
+          }
+        }
+      },
+      "validation": "exit, no timeout, reference count/checksum, invalid-sequence exclusions, Ouro lifetime/outcome/coverage"
+    },
+    "mac-agents/agent-runs.ndjson": {
+      "source_sha256": "1d691a0c05d1ea3dfc9bcfcf58de1d6f3667086ed6a5ef8af66e7595727f4477",
+      "rows": 12,
+      "table": {
+        "codex/direct": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": false,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 28622.5,
+            "p95_nearest_rank": 30560,
+            "min": 23447,
+            "max": 30560
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/mxc": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": false,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        }
+      },
+      "validation": "legacy checker; not equal to final independent protocol"
+    },
+    "openshell-v2-codex-bootstrap-smoke/agent-runs.ndjson": {
+      "source_sha256": "9c6fd06573c24e4965c60a29858f6bbc106a7f753d92f3de54a127c7448e8c91",
+      "rows": 3,
+      "table": {
+        "codex/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 17498.438458,
+            "p95_nearest_rank": 17498.438458,
+            "min": 17498.438458,
+            "max": 17498.438458
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "codex/openshell-warm": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "openshell-v2-codex-routing-smoke/agent-runs.ndjson": {
+      "source_sha256": "cb8f4a9471d0929fe0fa2e4f9b8bb36407dae2eaa71a3806db07aca3865470ad",
+      "rows": 3,
+      "table": {
+        "codex/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 17196.501167,
+            "p95_nearest_rank": 17196.501167,
+            "min": 17196.501167,
+            "max": 17196.501167
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 33846.33675,
+            "p95_nearest_rank": 33846.33675,
+            "min": 33846.33675,
+            "max": 33846.33675
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/openshell-warm": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 18377.2805,
+            "p95_nearest_rank": 18377.2805,
+            "min": 18377.2805,
+            "max": 18377.2805
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "openshell-v2-final/agent-runs.ndjson": {
+      "source_sha256": "054b33bc7fc35e6cff8a0624c9b73ab25ca3454b8c03f0b4943dc3d46fd5489a",
+      "rows": 54,
+      "table": {
+        "claude/docker": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 19951.277374999998,
+            "p95_nearest_rank": 24008.411292,
+            "min": 17175.288291,
+            "max": 24008.411292
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "claude/openshell-ephemeral": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 20550.963979499997,
+            "p95_nearest_rank": 25532.058625,
+            "min": 19027.223666,
+            "max": 25532.058625
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "claude/openshell-warm": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 20310.5282295,
+            "p95_nearest_rank": 23282.478708,
+            "min": 17215.655458,
+            "max": 23282.478708
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/docker": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 21302.4957285,
+            "p95_nearest_rank": 26667.318208,
+            "min": 17850.082916,
+            "max": 26667.318208
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/openshell-ephemeral": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 25937.968729,
+            "p95_nearest_rank": 31992.732958,
+            "min": 19536.113583,
+            "max": 31992.732958
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/openshell-warm": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 21467.694499999998,
+            "p95_nearest_rank": 30923.474041,
+            "min": 18680.766959,
+            "max": 30923.474041
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "opencode/docker": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 24227.435292000002,
+            "p95_nearest_rank": 30357.278667,
+            "min": 18408.663167,
+            "max": 30357.278667
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "opencode/openshell-ephemeral": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 25625.641709,
+            "p95_nearest_rank": 34412.0205,
+            "min": 22485.293583,
+            "max": 34412.0205
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "opencode/openshell-warm": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 22920.644270999997,
+            "p95_nearest_rank": 31005.24225,
+            "min": 19387.380625,
+            "max": 31005.24225
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "openshell-v2-smoke-checked/agent-runs.ndjson": {
+      "source_sha256": "b14ebb6fa7ce935900caedbc6cb797032c111310c028ec51445ffcafcebf5109",
+      "rows": 1,
+      "table": {
+        "claude/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 18729.583333,
+            "p95_nearest_rank": 18729.583333,
+            "min": 18729.583333,
+            "max": 18729.583333
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "openshell-v2-smoke-final/agent-runs.ndjson": {
+      "source_sha256": "76dd1917375774e64c846fcf1eef35e8e40c00a530993aead9e648fa1296b99b",
+      "rows": 9,
+      "table": {
+        "claude/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 18164.752,
+            "p95_nearest_rank": 18164.752,
+            "min": 18164.752,
+            "max": 18164.752
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "claude/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 20335.48275,
+            "p95_nearest_rank": 20335.48275,
+            "min": 20335.48275,
+            "max": 20335.48275
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "claude/openshell-warm": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 20376.113667,
+            "p95_nearest_rank": 20376.113667,
+            "min": 20376.113667,
+            "max": 20376.113667
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 18780.604792,
+            "p95_nearest_rank": 18780.604792,
+            "min": 18780.604792,
+            "max": 18780.604792
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "codex/openshell-warm": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "opencode/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 21809.931833,
+            "p95_nearest_rank": 21809.931833,
+            "min": 21809.931833,
+            "max": 21809.931833
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 21848.841041,
+            "p95_nearest_rank": 21848.841041,
+            "min": 21848.841041,
+            "max": 21848.841041
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/openshell-warm": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 21177.900667,
+            "p95_nearest_rank": 21177.900667,
+            "min": 21177.900667,
+            "max": 21177.900667
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "openshell-v2-smoke-ready2/agent-runs.ndjson": {
+      "source_sha256": "fc5a68faacf06d3b4b044a79c23acd22acde05606f08337156c6d53a5407249e",
+      "rows": 1,
+      "table": {
+        "claude/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 20928.987875,
+            "p95_nearest_rank": 20928.987875,
+            "min": 20928.987875,
+            "max": 20928.987875
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "openshell-v2-smoke-ready3/agent-runs.ndjson": {
+      "source_sha256": "5da020afc599f57cc7fc0b02b39bf069d4153835baadab09908a42e3a569b07a",
+      "rows": 9,
+      "table": {
+        "claude/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 17969.11275,
+            "p95_nearest_rank": 17969.11275,
+            "min": 17969.11275,
+            "max": 17969.11275
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "claude/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "claude/openshell-warm": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "codex/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 18850.253125,
+            "p95_nearest_rank": 18850.253125,
+            "min": 18850.253125,
+            "max": 18850.253125
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "codex/openshell-warm": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "opencode/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 25268.002458,
+            "p95_nearest_rank": 25268.002458,
+            "min": 25268.002458,
+            "max": 25268.002458
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "opencode/openshell-warm": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "openshell-workflow-v2-final/agent-runs.ndjson": {
+      "source_sha256": "e40c3a219564e78de9f42b5080f886d0c6760d0a50303d4ae441a7c8630cf0d5",
+      "rows": 9,
+      "table": {
+        "claude/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 72449.812666,
+            "p95_nearest_rank": 72449.812666,
+            "min": 72449.812666,
+            "max": 72449.812666
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "claude/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 76916.251959,
+            "p95_nearest_rank": 76916.251959,
+            "min": 76916.251959,
+            "max": 76916.251959
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "claude/openshell-warm": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 70441.57175,
+            "p95_nearest_rank": 70441.57175,
+            "min": 70441.57175,
+            "max": 70441.57175
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 62110.959125,
+            "p95_nearest_rank": 62110.959125,
+            "min": 62110.959125,
+            "max": 62110.959125
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 63796.539375,
+            "p95_nearest_rank": 63796.539375,
+            "min": 63796.539375,
+            "max": 63796.539375
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/openshell-warm": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 65319.897292,
+            "p95_nearest_rank": 65319.897292,
+            "min": 65319.897292,
+            "max": 65319.897292
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/docker": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 121325.375292,
+            "p95_nearest_rank": 121325.375292,
+            "min": 121325.375292,
+            "max": 121325.375292
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/openshell-ephemeral": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 78709.82525,
+            "p95_nearest_rank": 78709.82525,
+            "min": 78709.82525,
+            "max": 78709.82525
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/openshell-warm": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 70032.534583,
+            "p95_nearest_rank": 70032.534583,
+            "min": 70032.534583,
+            "max": 70032.534583
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "v2-agents/agent-runs.ndjson": {
+      "source_sha256": "143b553e9d7e65de3ce845c9604c6a6d818d24be4ecacc5820d583c190abd872",
+      "rows": 54,
+      "table": {
+        "claude/direct": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 23291.396521,
+            "p95_nearest_rank": 25818.376417,
+            "min": 19114.104083,
+            "max": 25818.376417
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "claude/greywall": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        },
+        "claude/mxc": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 25342.070667,
+            "p95_nearest_rank": 36105.860042,
+            "min": 22774.231291,
+            "max": 36105.860042
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/direct": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 22565.989854,
+            "p95_nearest_rank": 23761.011459,
+            "min": 20140.027417,
+            "max": 23761.011459
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/greywall": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        },
+        "codex/mxc": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        },
+        "opencode/direct": {
+          "attempted": 6,
+          "success": 4,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 4,
+            "median": 58428.940833,
+            "p95_nearest_rank": 71770.714625,
+            "min": 50966.43275,
+            "max": 71770.714625
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 1
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 1
+            }
+          }
+        },
+        "opencode/greywall": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        },
+        "opencode/mxc": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 29151.0071875,
+            "p95_nearest_rank": 32480.866292,
+            "min": 25030.264625,
+            "max": 32480.866292
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "v2-smoke-mxc/agent-runs.ndjson": {
+      "source_sha256": "95a10e8124ac31e49873bf6206e059c0663c17bfcc7f08e8d7442af4d5a8a73f",
+      "rows": 2,
+      "table": {
+        "claude/mxc": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "opencode/mxc": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "v2-smoke-mxc2/agent-runs.ndjson": {
+      "source_sha256": "6d2b59ec2ea889a064601afc4748201c18553bc33d420311e3f4d85fc5e255c1",
+      "rows": 3,
+      "table": {
+        "claude/mxc": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 25547.867083,
+            "p95_nearest_rank": 25547.867083,
+            "min": 25547.867083,
+            "max": 25547.867083
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/mxc": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "opencode/mxc": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 26200.171333,
+            "p95_nearest_rank": 26200.171333,
+            "min": 26200.171333,
+            "max": 26200.171333
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "v4-codex/agent-runs.ndjson": {
+      "source_sha256": "a95788b57b5e17202e1cfb9f84f0b890f59f4ad986c250f89adb4f4048f99845",
+      "rows": 18,
+      "table": {
+        "codex/direct": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 20027.979187,
+            "p95_nearest_rank": 21488.869458,
+            "min": 16027.285625,
+            "max": 21488.869458
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "codex/greywall": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        },
+        "codex/mxc": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "v5-opencode/agent-runs.ndjson": {
+      "source_sha256": "aff83da708e0f15f78021a336b1712c4378a7b765979a9a3832c2197064227a2",
+      "rows": 18,
+      "table": {
+        "opencode/direct": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 26778.9938335,
+            "p95_nearest_rank": 34043.471541,
+            "min": 22772.305208,
+            "max": 34043.471541
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        },
+        "opencode/greywall": {
+          "attempted": 6,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 0
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        },
+        "opencode/mxc": {
+          "attempted": 6,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 153668.940542,
+            "p95_nearest_rank": 153668.940542,
+            "min": 153668.940542,
+            "max": 153668.940542
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 1
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 0
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 0
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "v6-opencode-mxc/agent-runs.ndjson": {
+      "source_sha256": "f87d75664c21d1e1b6cf9479f935e8509ab9898306d3964fdb7865ed160024b8",
+      "rows": 6,
+      "table": {
+        "opencode/mxc": {
+          "attempted": 6,
+          "success": 6,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 6,
+            "median": 26539.724708499998,
+            "p95_nearest_rank": 32968.407875,
+            "min": 25049.579708,
+            "max": 32968.407875
+          },
+          "tasks": {
+            "add-multiply": {
+              "attempted": 2,
+              "success": 2
+            },
+            "fix-offbyone": {
+              "attempted": 2,
+              "success": 2
+            },
+            "refactor-yaml-json": {
+              "attempted": 2,
+              "success": 2
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    },
+    "workflow-v2-final/agent-runs.ndjson": {
+      "source_sha256": "f5fb2288ffb8f6e158cc9030d3d063576b2e509dc070398524f355cd757e3f20",
+      "rows": 9,
+      "table": {
+        "claude/direct": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 74450.841709,
+            "p95_nearest_rank": 74450.841709,
+            "min": 74450.841709,
+            "max": 74450.841709
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "claude/greywall": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "claude/mxc": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 76976.273625,
+            "p95_nearest_rank": 76976.273625,
+            "min": 76976.273625,
+            "max": 76976.273625
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/direct": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 46727.675458,
+            "p95_nearest_rank": 46727.675458,
+            "min": 46727.675458,
+            "max": 46727.675458
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "codex/greywall": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "codex/mxc": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "opencode/direct": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 58357.410042,
+            "p95_nearest_rank": 58357.410042,
+            "min": 58357.410042,
+            "max": 58357.410042
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        },
+        "opencode/greywall": {
+          "attempted": 1,
+          "success": 0,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": null,
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 0
+            }
+          }
+        },
+        "opencode/mxc": {
+          "attempted": 1,
+          "success": 1,
+          "explicit_independent_verdict": true,
+          "elapsed_ms_successful": {
+            "n": 1,
+            "median": 74560.461667,
+            "p95_nearest_rank": 74560.461667,
+            "min": 74560.461667,
+            "max": 74560.461667
+          },
+          "tasks": {
+            "inventory-workflow": {
+              "attempted": 1,
+              "success": 1
+            }
+          }
+        }
+      },
+      "validation": "recorded independent verdict"
+    }
+  }
+}

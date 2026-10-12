@@ -1,0 +1,18 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/monocursive/bench-ouro/bin"
+    ],
+    "allowWrite": [
+      "/home/monocursive/bench-ouro/results/v2-smoke-ready/runs/004-claude-greywall-add-multiply-0/workspace/add-multiply",
+      "/home/monocursive/bench-ouro/results/v2-smoke-ready/runs/004-claude-greywall-add-multiply-0/home",
+      "/home/monocursive/bench-ouro/results/v2-smoke-ready/runs/004-claude-greywall-add-multiply-0/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43152",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

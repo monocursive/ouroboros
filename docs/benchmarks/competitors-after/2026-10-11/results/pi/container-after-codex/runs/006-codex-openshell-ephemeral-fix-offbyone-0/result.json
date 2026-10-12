@@ -1,0 +1,38 @@
+{
+  "sequence": 6,
+  "agent": "codex",
+  "mode": "openshell-ephemeral",
+  "task": "fix-offbyone",
+  "repetition": 0,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 8287.024037,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "ouro-comparison-agents-after:20261011",
+    "--policy",
+    "/home/monocursive/bench-ouro-after/results/container-after-codex/policy.yaml",
+    "--provider",
+    "benchmark-codex-after",
+    "--env",
+    "BENCH_CODEX_ROUTING_ACCOUNT_ID=<CODEX_ACCOUNT_ID>",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "fix-offbyone"
+  ],
+  "load": [
+    1.673828125,
+    1.6484375,
+    1.474609375
+  ],
+  "artifact": "runs/006-codex-openshell-ephemeral-fix-offbyone-0"
+}

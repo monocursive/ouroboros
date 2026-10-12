@@ -1,0 +1,10 @@
+{
+  "claude/docker": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      20928.987875
+    ],
+    "median_ms": 20928.987875
+  }
+}

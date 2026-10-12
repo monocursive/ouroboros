@@ -1,0 +1,59 @@
+{
+  "sequence": 1,
+  "agent": "opencode",
+  "mode": "docker",
+  "task": "inventory-workflow",
+  "repetition": 0,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 65774.293322,
+  "container_result": {
+    "agent": "opencode",
+    "task": "inventory-workflow",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 64514.381818,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.238s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {},
+    "peak_child_rss_kib": 738060,
+    "guest_kernel": [
+      "Linux",
+      "cc6b8f324857",
+      "7.0.0-31-generic",
+      "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+      "x86_64"
+    ],
+    "resource_limits": {
+      "memory.max": "max",
+      "memory.swap.max": "max",
+      "pids.max": "3548",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "ANTHROPIC_API_KEY",
+    "ouro-comparison-opencode-v2:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "opencode",
+    "inventory-workflow"
+  ],
+  "load": [
+    2.28466796875,
+    2.29248046875,
+    1.92822265625
+  ],
+  "artifact": "runs/001-opencode-docker-inventory-workflow-0"
+}

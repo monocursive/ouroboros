@@ -1,0 +1,32 @@
+codex direct add-multiply run0: 23447ms exit=0 tests=True content=True
+codex direct add-multiply run1: 25636ms exit=0 tests=True content=True
+codex direct fix-offbyone run0: 27095ms exit=0 tests=True content=True
+codex direct fix-offbyone run1: 30530ms exit=0 tests=True content=True
+codex direct refactor-yaml-json run0: 30150ms exit=0 tests=True content=True
+codex direct refactor-yaml-json run1: 30560ms exit=0 tests=True content=True
+codex mxc add-multiply run0: 328ms exit=1 tests=False content=False
+codex mxc add-multiply run1: 99ms exit=1 tests=False content=False
+codex mxc fix-offbyone run0: 99ms exit=1 tests=False content=False
+codex mxc fix-offbyone run1: 100ms exit=1 tests=False content=False
+codex mxc refactor-yaml-json run0: 100ms exit=1 tests=False content=False
+codex mxc refactor-yaml-json run1: 99ms exit=1 tests=False content=False
+{
+ "codex/direct": {
+  "runs": 6,
+  "success": 6,
+  "elapsed_ms": [
+   23447,
+   25636,
+   27095,
+   30530,
+   30150,
+   30560
+  ],
+  "elapsed_ms_median": 30150
+ },
+ "codex/mxc": {
+  "runs": 6,
+  "success": 0,
+  "elapsed_ms": []
+ }
+}

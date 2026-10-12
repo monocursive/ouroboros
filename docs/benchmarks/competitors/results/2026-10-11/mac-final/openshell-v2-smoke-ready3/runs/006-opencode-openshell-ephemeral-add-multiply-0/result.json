@@ -1,0 +1,36 @@
+{
+  "sequence": 6,
+  "agent": "opencode",
+  "mode": "openshell-ephemeral",
+  "task": "add-multiply",
+  "repetition": 0,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 25768.618042,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "ouro-comparison-agents-v2:20261011",
+    "--policy",
+    "/Users/monocursive/bench-ouro/results/openshell-v2-smoke-ready3/policy.yaml",
+    "--provider",
+    "benchmark-anthropic-v2",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "opencode",
+    "add-multiply"
+  ],
+  "load": [
+    5.2841796875,
+    4.66796875,
+    3.28369140625
+  ],
+  "artifact": "runs/006-opencode-openshell-ephemeral-add-multiply-0"
+}

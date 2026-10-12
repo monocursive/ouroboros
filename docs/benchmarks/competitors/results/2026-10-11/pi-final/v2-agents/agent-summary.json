@@ -1,0 +1,36 @@
+{
+  "claude/direct": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      23537.792145
+    ],
+    "median_ms": 23537.792145
+  },
+  "claude/mxc": {
+    "runs": 2,
+    "success": 2,
+    "times_ms": [
+      22116.768652,
+      23214.274257
+    ],
+    "median_ms": 22665.521454499998
+  },
+  "claude/ouro": {
+    "runs": 2,
+    "success": 2,
+    "times_ms": [
+      23433.734333,
+      28670.899276
+    ],
+    "median_ms": 26052.3168045
+  },
+  "claude/greywall": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      26698.704561
+    ],
+    "median_ms": 26698.704561
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "claude/greywall": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      35720.714192
+    ],
+    "median_ms": 35720.714192
+  }
+}

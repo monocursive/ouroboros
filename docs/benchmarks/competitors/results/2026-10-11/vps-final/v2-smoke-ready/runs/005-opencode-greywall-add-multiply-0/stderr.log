@@ -1,0 +1,11 @@
+[greywall] Running opencode in a sandbox.
+A built-in profile is available. Without it, only the current directory is accessible.
+
+Allow read:   ~/CLAUDE.md  ~/AGENTS.md  ~/.gitconfig  ~/.gitignore  ~/.config/git  ~/.ssh/config  ~/.ssh/known_hosts  ~/.ssh/allowed_signers  ~/.skills  ~/.agents  ~/.claude/agents  ~/.claude/skills  ~/.config/gh  ~/.config/glab-cli  ~/.opencode  ~/.opencode.json  ~/.config/opencode  ~/.cache/opencode  ~/.local/share/opencode  ~/.local/share/opentui  ~/.local/state/opencode  ~/.config/github-copilot + working dir
+Allow write: ~/.skills  ~/.agents  ~/AGENTS.md  ~/.config/gh  ~/.cache/gh  ~/.local/share/gh  ~/.local/state/gh  ~/.ssh/known_hosts  ~/.opencode  ~/.opencode.json  ~/.config/opencode  ~/.cache/opencode  ~/.local/share/opencode  ~/.local/share/opentui  ~/.local/state/opencode + working dir
+Deny read:   ~/.ssh/id_*  ~/.gnupg/**  .env  .env.*
+Deny write:  ~/.bashrc  ~/.bash_profile  ~/.zshrc  ~/.zprofile  ~/.profile  ~/.ssh  ~/.gnupg
+Allow net:   api.openai.com:443  api.anthropic.com:443
+
+[Y] Use profile (recommended)   [e] Edit first   [s] Skip (restrictive)   [n] Don't ask again
+> Error: failed to initialize sandbox: failed to initialize proxy bridge: timeout waiting for proxy bridge socket to be created

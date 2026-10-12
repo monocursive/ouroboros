@@ -1,0 +1,41 @@
+{
+  "schema": "container-agent-comparison/2",
+  "host": {
+    "system": "Darwin",
+    "node": "muetdhiver2.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:20:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6020",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "started_utc": "2026-10-11T16:38:20Z",
+  "image_id": "sha256:5aaef662689d169d6a3d8777746f27d58dcafd9260a20d4ae0f080baee941c0e",
+  "schedule": [
+    [
+      "codex",
+      "add-multiply",
+      0,
+      "docker"
+    ],
+    [
+      "codex",
+      "add-multiply",
+      0,
+      "openshell-warm"
+    ],
+    [
+      "codex",
+      "add-multiply",
+      0,
+      "openshell-ephemeral"
+    ]
+  ],
+  "seed": 20261011,
+  "harness_sha256": "535ba92123e2ca40a77b37c1bea08753bfc6c65b6eea86b41f2f901727247edd",
+  "container_bin_hashes": {
+    "claude": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+    "opencode": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df",
+    "codex": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3",
+    "codex-code-mode-host": "6979f2fea8cb1d5d72614abfe2f42b16727cdce2c356cc6af933157e732a7277"
+  }
+}

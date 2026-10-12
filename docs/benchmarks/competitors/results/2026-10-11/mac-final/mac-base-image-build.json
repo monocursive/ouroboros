@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "docker",
+    "build",
+    "-t",
+    "bench-openshell:latest",
+    "/Users/monocursive/bench-ouro/image"
+  ],
+  "elapsed_ms": 2527.992167,
+  "exit": 1,
+  "stdout": "",
+  "stderr": "#0 building with \"default\" instance using docker driver\n\n#1 [internal] load build definition from Dockerfile\n#1 transferring dockerfile: 705B done\n#1 DONE 0.0s\n\n#2 [internal] load metadata for docker.io/library/ubuntu:24.04\n#2 ERROR: error getting credentials - err: exit status 1, out: `keychain cannot be accessed because the current session does not allow user interaction. The keychain may be locked; unlock it by running \"security -v unlock-keychain ~/Library/Keychains/login.keychain-db\" and try again`\n------\n > [internal] load metadata for docker.io/library/ubuntu:24.04:\n------\nDockerfile:1\n--------------------\n   1 | >>> FROM ubuntu:24.04\n   2 |     RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev python3 git && rm -rf /var/lib/apt/lists/*\n   3 |     WORKDIR /work\n--------------------\nERROR: failed to build: failed to solve: error getting credentials - err: exit status 1, out: `keychain cannot be accessed because the current session does not allow user interaction. The keychain may be locked; unlock it by running \"security -v unlock-keychain ~/Library/Keychains/login.keychain-db\" and try again`\n"
+}

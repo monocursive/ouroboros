@@ -1,0 +1,29 @@
+{
+  "sequence": 8,
+  "agent": "claude",
+  "mode": "mxc",
+  "task": "fix-offbyone",
+  "repetition": 0,
+  "started_utc": "2026-10-11T15:40:47Z",
+  "elapsed_ms": 27495.530625,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_basic (test_parse.TestParse) ... ok\ntest_single (test_parse.TestParse) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/Users/monocursive/bench-ouro/bin/mxc-exec-mac",
+    "/Users/monocursive/bench-ouro/results/v2-agents/runs/008-claude-mxc-fix-offbyone-0/mxc-private.json"
+  ],
+  "load": [
+    1.15625,
+    1.55712890625,
+    1.51123046875
+  ],
+  "artifact": "runs/008-claude-mxc-fix-offbyone-0"
+}

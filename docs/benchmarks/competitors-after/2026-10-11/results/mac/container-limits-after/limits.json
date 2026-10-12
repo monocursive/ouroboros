@@ -1,0 +1,178 @@
+[
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(320*1024*1024);[b.__setitem__(i,1) for i in range(0,len(b),4096)];print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 270.9515,
+    "exit": 0,
+    "stdout": "{\"started\": true}\n{\"allocated\": 335544320}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "memory",
+    "limited": false
+  },
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--memory",
+      "128m",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(320*1024*1024);[b.__setitem__(i,1) for i in range(0,len(b),4096)];print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 283.722208,
+    "exit": 137,
+    "stdout": "{\"started\": true}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "memory",
+    "limited": true
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(320*1024*1024);[b.__setitem__(i,1) for i in range(0,len(b),4096)];print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 681.618625,
+    "exit": 0,
+    "stdout": "\nCreated sandbox: choice-basilisk\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n{\"started\": true}\n{\"allocated\": 335544320}\n\u2713 Deleted sandbox choice-basilisk\n",
+    "stderr": "",
+    "tool": "openshell",
+    "resource": "memory",
+    "limited": false
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--memory",
+      "128Mi",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(320*1024*1024);[b.__setitem__(i,1) for i in range(0,len(b),4096)];print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 643.229708,
+    "exit": 137,
+    "stdout": "\nCreated sandbox: moved-cuttlefish\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n{\"started\": true}\n\u2713 Sandbox moved-cuttlefish deletion accepted; cleanup is pending\n",
+    "stderr": "",
+    "tool": "openshell",
+    "resource": "memory",
+    "limited": true
+  },
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 510.2355,
+    "exit": 0,
+    "stdout": "{\"cpu_s\": 0.30017074899999996, \"wall_s\": 0.3002073999996355}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "cpu",
+    "limited": false
+  },
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--cpus",
+      "0.5",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 776.797708,
+    "exit": 0,
+    "stdout": "{\"cpu_s\": 0.30036424899999997, \"wall_s\": 0.5588224679995619}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "cpu",
+    "limited": true
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 828.286792,
+    "exit": 0,
+    "stdout": "\nCreated sandbox: exuberant-harrier\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n{\"cpu_s\": 0.300243957, \"wall_s\": 0.3002851080018445}\n\u2713 Deleted sandbox exuberant-harrier\n",
+    "stderr": "",
+    "tool": "openshell",
+    "resource": "cpu",
+    "limited": false
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--cpu",
+      "500m",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 1167.330583,
+    "exit": 0,
+    "stdout": "\nCreated sandbox: proper-oldwife\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n{\"cpu_s\": 0.30001153999999997, \"wall_s\": 0.609979431003012}\n\u2713 Deleted sandbox proper-oldwife\n",
+    "stderr": "",
+    "tool": "openshell",
+    "resource": "cpu",
+    "limited": true
+  }
+]

@@ -1,0 +1,13 @@
+1/12 claude docker add-multiply #0 19.3s exit=0 success=True
+2/12 claude openshell-ephemeral add-multiply #0 8.4s exit=1 success=False
+3/12 claude docker refactor-yaml-json #0 26.2s exit=0 success=True
+4/12 claude openshell-ephemeral refactor-yaml-json #0 8.2s exit=1 success=False
+5/12 claude docker fix-offbyone #0 24.2s exit=0 success=True
+6/12 claude openshell-ephemeral fix-offbyone #0 8.4s exit=1 success=False
+7/12 claude docker fix-offbyone #1 23.1s exit=0 success=True
+8/12 claude openshell-ephemeral fix-offbyone #1 8.3s exit=1 success=False
+9/12 claude docker refactor-yaml-json #1 28.6s exit=0 success=True
+10/12 claude openshell-ephemeral refactor-yaml-json #1 8.4s exit=1 success=False
+11/12 claude openshell-ephemeral add-multiply #1 8.1s exit=1 success=False
+12/12 claude docker add-multiply #1 21.1s exit=0 success=True
+COMPLETE

@@ -1,0 +1,59 @@
+{
+  "sequence": 9,
+  "agent": "opencode",
+  "mode": "docker",
+  "task": "fix-offbyone",
+  "repetition": 0,
+  "success": true,
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 33622.725378,
+  "container_result": {
+    "agent": "opencode",
+    "task": "fix-offbyone",
+    "agent_exit": 0,
+    "timeout": false,
+    "success": true,
+    "work_ms": 32942.54422,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+      "hidden_output": ""
+    },
+    "usage": {},
+    "peak_child_rss_kib": 791872,
+    "guest_kernel": [
+      "Linux",
+      "83b42c755e5a",
+      "7.0.0-31-generic",
+      "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+      "x86_64"
+    ],
+    "resource_limits": {
+      "memory.max": "max",
+      "memory.swap.max": "max",
+      "pids.max": "3548",
+      "cpu.max": "max 100000"
+    }
+  },
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "-e",
+    "ANTHROPIC_API_KEY",
+    "ouro-comparison-opencode-v2:20261011",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "opencode",
+    "fix-offbyone"
+  ],
+  "load": [
+    2.32275390625,
+    2.06640625,
+    1.68896484375
+  ],
+  "artifact": "runs/009-opencode-docker-fix-offbyone-0"
+}

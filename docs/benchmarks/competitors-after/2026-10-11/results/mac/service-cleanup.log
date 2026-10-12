@@ -1,0 +1,1 @@
+[{"pid": 26690, "kind": "proxy", "signal": "SIGTERM", "sent": true, "exited_or_zombie": true}, {"pid": 34412, "kind": "gateway", "signal": "SIGTERM", "sent": true, "exited_or_zombie": true}]

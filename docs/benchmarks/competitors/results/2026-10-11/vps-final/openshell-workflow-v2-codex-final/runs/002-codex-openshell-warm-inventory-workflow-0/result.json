@@ -1,0 +1,68 @@
+{
+  "sequence": 2,
+  "agent": "codex",
+  "mode": "openshell-warm",
+  "task": "inventory-workflow",
+  "repetition": 0,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 20068.307044,
+  "container_result": {
+    "agent": "codex",
+    "task": "inventory-workflow",
+    "agent_exit": 1,
+    "timeout": false,
+    "success": false,
+    "work_ms": 19305.070919,
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": false,
+      "hidden_pass": false,
+      "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/work/codex-1791743994593553773/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\nAssertionError: 2 != 0 : usage: cli.py [-h] [--min-quantity MIN_QUANTITY] csv_file\ncli.py: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/work/codex-1791743994593553773/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\nAssertionError: 2 != 0 : usage: cli.py [-h] [--min-quantity MIN_QUANTITY] csv_file\ncli.py: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.280s\n\nFAILED (failures=2)\n",
+      "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\nAssertionError: usage: cli.py [-h] [--min-quantity MIN_QUANTITY] csv_file\ncli.py: error: unrecognized arguments: --group-by-category\n\n"
+    },
+    "usage": {},
+    "peak_child_rss_kib": 159352,
+    "guest_kernel": [
+      "Linux",
+      "093d93510038",
+      "7.0.0-31-generic",
+      "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+      "x86_64"
+    ],
+    "resource_limits": {
+      "memory.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/memory.max'"
+      },
+      "memory.swap.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/memory.swap.max'"
+      },
+      "pids.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/pids.max'"
+      },
+      "cpu.max": {
+        "unreadable": "[Errno 13] Permission denied: '/sys/fs/cgroup/cpu.max'"
+      }
+    }
+  },
+  "argv": [
+    "openshell",
+    "sandbox",
+    "exec",
+    "-n",
+    "bench-v2-codex",
+    "--no-tty",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "inventory-workflow"
+  ],
+  "load": [
+    1.4228515625,
+    1.8369140625,
+    1.88134765625
+  ],
+  "artifact": "runs/002-codex-openshell-warm-inventory-workflow-0"
+}

@@ -1,0 +1,38 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then planning the implementation.
+Now let me implement the changes. First, I'll create the category_summary function in report.py:
+Perfect! All tests pass. Let me verify the implementation works as expected with a manual test:
+Excellent! Let me also verify the error handling works correctly:
+Perfect! Now let me verify the combined flag behavior:
+Perfect! All functionality is working correctly. Let me create a summary of what was implemented:
+
+## Summary
+
+I've successfully implemented category summaries for the inventory CLI with the `--group-by-category` flag. Here's what was done:
+
+### Changes Made:
+
+1. **inventory/report.py:5-28** - Added `category_summary()` function that:
+   - Applies `--min-quantity` filtering before grouping
+   - Groups items by category
+   - Calculates total quantity and stock_value (sum of quantity * unit_price)
+   - Returns JSON array sorted alphabetically by category
+   - Formats stock_value as a string with exactly two decimal places
+
+2. **inventory/cli.py:5,10,14-18** - Updated CLI to:
+   - Import `category_summary` from report module
+   - Add `--group-by-category` argument parser flag
+   - Route to `category_summary()` when flag is set, otherwise use existing `item_report()`
+   - Maintain existing error handling (exit code 2 for invalid CSV with stderr message, no traceback)
+
+3. **README.md:7-16** - Added documentation with:
+   - Usage example of `--group-by-category` flag
+   - Expected JSON output format
+
+### Verified Functionality:
+
+- All 10 tests pass, including the new `test_category_summaries` and `test_filter_before_group`
+- Ungrouped output maintains current behavior
+- Grouped output produces correct JSON with exact decimal formatting
+- `--min-quantity` filtering works before grouping
+- Invalid CSV produces exit code 2 with useful error message (no traceback)
+- Processing and argument parsing remain in separate modules (report.py and cli.py)

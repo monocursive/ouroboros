@@ -1,0 +1,74 @@
+[
+  {
+    "tool": "direct",
+    "exit": 0,
+    "host_nonce_matches": true,
+    "same_inode": true,
+    "child": {
+      "probe": "backing",
+      "dev": 45826,
+      "ino": 566412,
+      "bytes": 32
+    },
+    "host": {
+      "dev": 45826,
+      "ino": 566412,
+      "bytes": 32
+    },
+    "sequence": 1
+  },
+  {
+    "tool": "ouro-jail",
+    "exit": 0,
+    "host_nonce_matches": true,
+    "same_inode": true,
+    "child": {
+      "probe": "backing",
+      "dev": 45826,
+      "ino": 566416,
+      "bytes": 32
+    },
+    "host": {
+      "dev": 45826,
+      "ino": 566416,
+      "bytes": 32
+    },
+    "sequence": 2
+  },
+  {
+    "tool": "greywall",
+    "exit": 0,
+    "host_nonce_matches": true,
+    "same_inode": true,
+    "child": {
+      "probe": "backing",
+      "dev": 45826,
+      "ino": 566419,
+      "bytes": 32
+    },
+    "host": {
+      "dev": 45826,
+      "ino": 566419,
+      "bytes": 32
+    },
+    "sequence": 3
+  },
+  {
+    "tool": "mxc",
+    "exit": 0,
+    "host_nonce_matches": true,
+    "same_inode": true,
+    "child": {
+      "probe": "backing",
+      "dev": 45826,
+      "ino": 566423,
+      "bytes": 32
+    },
+    "host": {
+      "dev": 45826,
+      "ino": 566423,
+      "bytes": 32
+    },
+    "sequence": 4
+  }
+]

@@ -1,0 +1,10 @@
+diff --git a/src/calc.py b/src/calc.py
+index 4693ad3..8666aa5 100644
+--- a/src/calc.py
++++ b/src/calc.py
+@@ -1,2 +1,5 @@
+ def add(a, b):
+     return a + b
++
++def multiply(a, b):
++    return a * b

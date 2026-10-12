@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import openshell_lane,json,pathlib; r=openshell_lane.build_image(pathlib.Path.home()/"bench-ouro"); (pathlib.Path.home()/"bench-ouro/results/container-base-build.json").write_text(json.dumps(r,indent=2)); assert r["exit"]==0
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ModuleNotFoundError: No module named 'openshell_lane'

@@ -1,0 +1,36 @@
+{
+  "sequence": 3,
+  "agent": "claude",
+  "mode": "openshell-ephemeral",
+  "task": "add-multiply",
+  "repetition": 0,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 18721.025125,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "ouro-comparison-agents-v2:20261011",
+    "--policy",
+    "/Users/monocursive/bench-ouro/results/openshell-v2-smoke-ready3/policy.yaml",
+    "--provider",
+    "benchmark-anthropic-v2",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "claude",
+    "add-multiply"
+  ],
+  "load": [
+    1.4990234375,
+    1.63525390625,
+    1.90966796875
+  ],
+  "artifact": "runs/003-claude-openshell-ephemeral-add-multiply-0"
+}

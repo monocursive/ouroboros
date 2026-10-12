@@ -1,0 +1,49 @@
+I'll implement category summaries in the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the structure. Let me create a plan and implement the category summaries feature.
+Now let me implement the changes. First, I'll create the category_summary function in report.py:
+Now let me update cli.py to add the --group-by-category argument and use the category_summary function:
+Now let me update the README.md with a grouped example:
+Now let me run the tests to see if everything is working correctly:
+Excellent! All tests pass. Let me mark the tasks as completed and verify the implementation with a manual test:
+Let me verify the implementation by testing the actual CLI commands:
+Perfect! Let me also test the error handling for invalid CSV:
+Excellent! The implementation is complete and working correctly. Let me provide a summary of what was implemented:
+
+## Summary
+
+I've successfully implemented category summaries in the inventory CLI. Here's what was done:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_summary()` function:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category using `defaultdict`
+   - Sums quantities and calculates stock values (quantity × unit_price)
+   - Formats stock_value as a decimal string with exactly 2 fractional digits
+   - Returns JSON array sorted by category
+
+2. **inventory/cli.py** - Updated main function:
+   - Added `--group-by-category` argument parser flag
+   - Imported `category_summary` from report module
+   - Routes to `category_summary()` when flag is present, otherwise uses `item_report()`
+   - Maintains separation between argument parsing and processing logic
+
+3. **README.md** - Added documentation:
+   - Example command: `python3 -m inventory.cli examples/stock.csv --group-by-category`
+   - Expected output showing grouped JSON format
+   - Note that `--min-quantity` filter is applied before grouping
+
+### Verification:
+
+All 10 tests pass including:
+- `test_category_summaries` - Verifies grouped output format and calculations
+- `test_filter_before_group` - Confirms min-quantity filtering happens before grouping
+- `test_ungrouped` - Ensures ungrouped output keeps its original behavior
+- `test_bad_csv` - Confirms exit code 2 with useful stderr message, no traceback
+
+The implementation correctly:
+- Uses existing CSV loader (inventory/loader.py:5)
+- Applies `--min-quantity` filter before grouping
+- Emits sorted JSON array with exact decimal formatting
+- Handles invalid CSV with exit code 2 and useful error messages
+- Keeps processing (report.py) and argument parsing (cli.py) in separate modules

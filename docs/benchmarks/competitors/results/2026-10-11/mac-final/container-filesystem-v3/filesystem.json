@@ -1,0 +1,42 @@
+[
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import pathlib,json\nfor name in ['/work/readonly-canary','/tmp/writable-canary']:\n try:\n  pathlib.Path(name).write_text('owned-fixture');print(json.dumps({'path':name,'wrote':True}))\n except OSError as e:print(json.dumps({'path':name,'wrote':False,'errno':e.errno}))"
+    ],
+    "elapsed_ms": 284.519416,
+    "exit": 0,
+    "stdout": "{\"path\": \"/work/readonly-canary\", \"wrote\": true}\n{\"path\": \"/tmp/writable-canary\", \"wrote\": true}\n",
+    "stderr": "",
+    "tool": "docker"
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--policy",
+      "/Users/monocursive/bench-ouro/results/container-filesystem-v3/policy.yaml",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import pathlib,json\nfor name in ['/work/readonly-canary','/tmp/writable-canary']:\n try:\n  pathlib.Path(name).write_text('owned-fixture');print(json.dumps({'path':name,'wrote':True}))\n except OSError as e:print(json.dumps({'path':name,'wrote':False,'errno':e.errno}))"
+    ],
+    "elapsed_ms": 652.725833,
+    "exit": 1,
+    "stdout": "\nCreated sandbox: touching-ladybeetle\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n\u2713 Sandbox touching-ladybeetle deletion accepted; cleanup is pending\n",
+    "stderr": "Error:   \u00d7 sandbox entered error phase while provisioning:\n  \u2502 ControlSupervisorStartFailed: Docker supervisor exited before becoming\n  \u2502 ready; log tail: [truncated] ry identity mode\n  \u2502 2026-10-11T18:28:57.050Z OCSF CONFIG:CONFIGURED [INFO] OPA runtime binary\n  \u2502 identity mode configured [source:proto require_binary_identity:true]\n  \u2502 [source:proto]\n  \u2502 2026-10-11T18:28:57.065Z INFO openshell_supervisor: Isolation boundary\n  \u2502 attached\n  \u2502 2026-10-11T18:28:57.066Z INFO openshell_supervisor: Isolation boundary\n  \u2502 enforcement confirmed\n  \u2502 2026-10-11T18:28:57.067Z OCSF CONFIG:ENABLED [INFO] TLS termination\n  \u2502 enabled: ephemeral CA generated\n  \u2502 2026-10-11T18:28:57.067Z OCSF CONFIG:READY [INFO] Policy DNS connected to\n  \u2502 isolation boundary\n  \u2502 2026-10-11T18:28:57.067Z OCSF NET:LISTEN [INFO] 127.0.0.1:3128\n  \u2502 2026-10-11T18:28:57.067Z WARN openshell_supervisor_network::proxy:\n  \u2502 host.openshell.internal maps to a non-link-local IP; trusted-gateway SSRF\n  \u2502 exemption disabled\n  \u2502 Error:   \u00d7 process error: boundary process leaf: start process supervisor\n  \u2502 leaf:   \u00d7\n  \u2502   \u2502 spawn delegated workload process\n  \u2502   \u2502   \u251c\u2500\u25b6 failed to spawn sandbox entrypoint process '/usr/bin/python3'\n  \u2502   \u2502   \u2570\u2500\u25b6 Permission denied (os error 13)\n  \u2502   \u2502\n\n",
+    "tool": "openshell"
+  }
+]

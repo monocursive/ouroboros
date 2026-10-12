@@ -1,0 +1,31 @@
+{
+  "sequence": 7,
+  "agent": "codex",
+  "mode": "openshell-warm",
+  "task": "add-multiply",
+  "repetition": 0,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 17690.583042,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "exec",
+    "-n",
+    "bench-v2-codex",
+    "--no-tty",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "codex",
+    "add-multiply"
+  ],
+  "load": [
+    4.19091796875,
+    4.4609375,
+    3.24072265625
+  ],
+  "artifact": "runs/007-codex-openshell-warm-add-multiply-0"
+}

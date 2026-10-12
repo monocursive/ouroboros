@@ -1,0 +1,20 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/Users/monocursive/.codex/packages/standalone/releases/0.159.2-aarch64-apple-darwin/bin",
+      "/Users/monocursive/bench-ouro-after/bin",
+      "/opt/homebrew"
+    ],
+    "allowWrite": [
+      "/Users/monocursive/bench-ouro-after/results/native-after/runs/049-codex-greywall-add-multiply-1/workspace/add-multiply",
+      "/Users/monocursive/bench-ouro-after/results/native-after/runs/049-codex-greywall-add-multiply-1/home",
+      "/Users/monocursive/bench-ouro-after/results/native-after/runs/049-codex-greywall-add-multiply-1/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

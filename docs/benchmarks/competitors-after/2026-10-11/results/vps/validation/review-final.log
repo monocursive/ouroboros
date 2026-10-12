@@ -1,0 +1,54 @@
+   Compiling ouro-jail v0.1.0 (/home/ubuntu/bench-ouro-after/src/crates/ouro-jail)
+    Finished `release` profile [optimized] target(s) in 36.75s
+     Running tests/review_linux.rs (target/release/deps/review_linux-4af7d038241e3fab)
+
+running 46 tests
+test a_file_denial_inside_a_visible_parent_is_unreadable_and_readonly ... ok
+test r1_a_placeholder_the_run_filled_is_kept_not_removed ... ok
+test r1_protected_segments_are_read_only_and_the_workspace_is_writable ... ok
+test r1_the_baseline_filter_denies_what_the_spec_lists ... ok
+test r1_the_child_cannot_reach_the_supervisors_state ... ok
+test r1_the_contained_child_sees_only_the_declared_roots ... ok
+test r2_a_proved_exec_failure_is_an_exec_error_outcome ... ok
+test r2_an_unrecognised_executable_is_not_handed_to_a_shell ... ok
+test r2_exec_failures_are_distinguishable_and_exit_125_is_an_exit ... ok
+test r2_observe_off_keeps_an_ambiguous_exit_unknown ... ok
+test r3_a_closed_stdin_is_not_silently_accepted ... ok
+test r3_a_shebang_target_confirms_and_runs_under_strict_evidence ... ok
+test r3_failed_regular_file_output_is_a_tool_error ... ok
+test r3_fd_and_environment_hygiene ... ok
+test r3_io_uring_as_stdio_refuses_before_exec ... ok
+test r3_regular_file_stdio_is_relayed_and_cannot_reopen_outside_the_plan ... ok
+test r3_script_replaced_by_fifo_does_not_block_the_next_exec ... ok
+test r3_stdio_into_the_state_root_outside_this_attempt ... ok
+test r3_stdio_kinds_are_validated ... ok
+test r3_tabbed_shebangs_confirm_under_strict_evidence ... ok
+test r4_a_fork_burst_is_fully_reaped ... ok
+test r4_a_sigterm_ignoring_descendant_dies_at_settlement ... ok
+test r4_killing_the_backend_leaves_an_honest_receipt ... ok
+test r4_killing_the_supervisor_takes_the_tree_down ... ok
+test r4_receipt_revisions_advance_and_phases_carry_their_tuples ... ok
+test r4_wall_expiry_records_its_hit_and_verifies_the_tree ... ok
+test r5_a_second_release_starts_no_second_child ... ok
+test r5_control_ordering_and_sequence ... ok
+test r5_malformed_gate_frames_refuse_without_running_the_target ... ok
+test r5_the_launcher_holds_no_supervisor_descriptor_at_the_block_point ... ok
+test r6_a_denied_connect_counts_under_fs_deny_only ... ok
+test r6_a_foreign_dirfd_is_not_resolved_against_a_cwd ... ok
+test r6_audit_mapping_matches_the_spec_table ... ok
+test r6_coverage_counts_equal_the_results_per_class ... ok
+test r6_observe_off_marks_every_audit_class_unsupported ... ok
+test r6_path_reporting_by_class ... ok
+test r7_doctor_is_read_only_and_its_exit_code_follows_readiness ... ok
+test r7_doctor_leaves_no_orphaned_fixture_process ... ok
+test r8_a_second_run_with_the_same_attempt_id_refuses ... ok
+test r8_scratch_and_workspace_after_a_normal_run ... ok
+test r9_a_large_option_tail_does_not_deadlock_the_supervisor ... ok
+test r9_a_mid_run_policy_edit_cannot_widen_the_attempt ... ok
+test r9_a_symlinked_root_git_refuses_rather_than_downgrade ... ok
+test r9_all_descendants_coverage_refuses_on_linux ... ok
+test r9_an_explicit_pids_ceiling_runs_only_when_enforced ... ok
+test r9_deny_read_grants_are_enforced_as_masks ... ok
+
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.63s
+

@@ -1,0 +1,29 @@
+{
+  "sequence": 36,
+  "agent": "opencode",
+  "mode": "mxc",
+  "task": "add-multiply",
+  "repetition": 0,
+  "started_utc": "2026-10-11T20:58:16Z",
+  "elapsed_ms": 186.701657,
+  "exit": 127,
+  "timeout": false,
+  "success": false,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": false,
+    "hidden_pass": false,
+    "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ERROR\n\n======================================================================\nERROR: test_multiply (test_calc.TestCalc.test_multiply)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/monocursive/bench-ouro-after/results/native-after/runs/036-opencode-mxc-add-multiply-0/workspace/add-multiply/tests/test_calc.py\", line 8, in test_multiply\n    from src.calc import multiply\nImportError: cannot import name 'multiply' from 'src.calc' (/home/monocursive/bench-ouro-after/results/native-after/runs/036-opencode-mxc-add-multiply-0/workspace/add-multiply/src/calc.py)\n\n----------------------------------------------------------------------\nRan 2 tests in 0.002s\n\nFAILED (errors=1)\n",
+    "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import sys;sys.path.insert(0,sys.argv[1]);from src.calc import add,multiply; assert add(3,4)==7; assert multiply(0,9)==0; assert multiply(-3,-7)==21; assert multiply(2.5,4)==10\n                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nImportError: cannot import name 'multiply' from 'src.calc' (/home/monocursive/bench-ouro-after/results/native-after/runs/036-opencode-mxc-add-multiply-0/workspace/add-multiply/src/calc.py)\n"
+  },
+  "argv": [
+    "/home/monocursive/bench-ouro-after/bin/lxc-exec",
+    "/home/monocursive/bench-ouro-after/results/native-after/runs/036-opencode-mxc-add-multiply-0/mxc-private.json"
+  ],
+  "load": [
+    1.6259765625,
+    0.94287109375,
+    1.08935546875
+  ],
+  "artifact": "runs/036-opencode-mxc-add-multiply-0"
+}

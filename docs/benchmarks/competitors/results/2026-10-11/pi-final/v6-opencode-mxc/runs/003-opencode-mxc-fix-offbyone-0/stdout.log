@@ -1,0 +1,11 @@
+I'll help you run the tests, find the bug in src/parse.py, and fix it. Let me start by creating a task plan and running the tests.
+Now let me read the source file and the test file to understand what's expected:
+Perfect! I found the bug. The issue is in src/parse.py:4 - it's using `parts[1]` which is an off-by-one error. It should be `parts[0]` to get the first element of the list.
+
+The bug causes:
+1. For 'hello world' → it returns 'world' (index 1) instead of 'hello' (index 0)
+2. For 'solo' → it crashes with IndexError because there's only one element at index 0
+
+Let me fix it:
+Now let me run the tests again to verify the fix:
+Perfect! All tests are now passing. The bug was a classic off-by-one error in src/parse.py:4. The function was using `parts[1]` to access the second element instead of `parts[0]` to access the first element. This caused it to return 'world' instead of 'hello' for the string 'hello world', and crash with an IndexError for single-word inputs like 'solo'.

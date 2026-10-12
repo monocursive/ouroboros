@@ -1,0 +1,5845 @@
+{
+  "schema": "selected-after-benchmark/1",
+  "selection": [
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "direct"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "ouro"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "greywall"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "mxc"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude"
+      },
+      "sha256": "afc99b7a52ff5cb3e7264cfeaae7a61b32ac0d3d287c72127c445d11392ab6a2"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "direct"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "ouro"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "greywall"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "mxc"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode"
+      },
+      "sha256": "afc99b7a52ff5cb3e7264cfeaae7a61b32ac0d3d287c72127c445d11392ab6a2"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "direct"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "ouro"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "greywall"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/native-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "mxc"
+      },
+      "sha256": "81c8c9e08b38718186d84e836bd903095ce0dd291cf62012794640db1212484d"
+    },
+    {
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex"
+      },
+      "sha256": "afc99b7a52ff5cb3e7264cfeaae7a61b32ac0d3d287c72127c445d11392ab6a2"
+    },
+    {
+      "source": "vps/container-after-claude/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "docker"
+      },
+      "sha256": "bed97f86c1c28e8b707b4fff07a26a7978068cad5f83be281451209a20d49860"
+    },
+    {
+      "source": "vps/container-after-claude/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "openshell-ephemeral"
+      },
+      "sha256": "bed97f86c1c28e8b707b4fff07a26a7978068cad5f83be281451209a20d49860"
+    },
+    {
+      "source": "vps/container-after-claude/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "openshell-warm"
+      },
+      "sha256": "bed97f86c1c28e8b707b4fff07a26a7978068cad5f83be281451209a20d49860"
+    },
+    {
+      "source": "vps/container-workflow-after-claude/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude"
+      },
+      "sha256": "695ed295338bccadbb3f186085c01abcab790d82d9020c47c53df299c8bd02d8"
+    },
+    {
+      "source": "vps/container-after-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "docker"
+      },
+      "sha256": "c077552c253cff5f935376f644f6909c504d555f666daa6ae397399f5b7d130d"
+    },
+    {
+      "source": "vps/container-after-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "openshell-ephemeral"
+      },
+      "sha256": "c077552c253cff5f935376f644f6909c504d555f666daa6ae397399f5b7d130d"
+    },
+    {
+      "source": "vps/container-after-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "openshell-warm"
+      },
+      "sha256": "c077552c253cff5f935376f644f6909c504d555f666daa6ae397399f5b7d130d"
+    },
+    {
+      "source": "vps/container-workflow-after-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode"
+      },
+      "sha256": "54e69778d56142125e53e115723d1645d3e5f7a2deeda41a9f28424464765f65"
+    },
+    {
+      "source": "vps/container-after-codex/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "docker"
+      },
+      "sha256": "112cc05e3b0b7ec43f130be52b619d992742a4c632ee364be779393159876132"
+    },
+    {
+      "source": "vps/container-after-codex/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "openshell-ephemeral"
+      },
+      "sha256": "112cc05e3b0b7ec43f130be52b619d992742a4c632ee364be779393159876132"
+    },
+    {
+      "source": "vps/container-after-codex/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "openshell-warm"
+      },
+      "sha256": "112cc05e3b0b7ec43f130be52b619d992742a4c632ee364be779393159876132"
+    },
+    {
+      "source": "vps/container-workflow-after-codex/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex"
+      },
+      "sha256": "50b9bf622ca51fe74e05c8bdcde6122e1fe7fa7271758cf07a5cd425ce1d742e"
+    },
+    {
+      "source": "vps/perf-after/launches.ndjson",
+      "filter": "measurement; observation-off diagnostics excluded",
+      "sha256": "52f52b2231fbcb7e20eaf3e4e410b86cbc11556218c943c82eadb1f13728ed4f"
+    },
+    {
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "filter": "measurement; observation-off diagnostics excluded",
+      "sha256": "6641731bdd140f9ee6d975e1b56946d894cfedf282327bb44624466714de7d23"
+    },
+    {
+      "source": "pi/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "direct"
+      },
+      "sha256": "ccef040e29e0d6c03d306e5568061f5306480ef4bf8f7950ee62af4d7f9bda7c"
+    },
+    {
+      "source": "pi/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "ouro"
+      },
+      "sha256": "ccef040e29e0d6c03d306e5568061f5306480ef4bf8f7950ee62af4d7f9bda7c"
+    },
+    {
+      "source": "pi/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "greywall"
+      },
+      "sha256": "ccef040e29e0d6c03d306e5568061f5306480ef4bf8f7950ee62af4d7f9bda7c"
+    },
+    {
+      "source": "pi/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "mxc"
+      },
+      "sha256": "ccef040e29e0d6c03d306e5568061f5306480ef4bf8f7950ee62af4d7f9bda7c"
+    },
+    {
+      "source": "pi/workflow-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude"
+      },
+      "sha256": "d7307df064a20f8c6e47b2695132bb3dcfc560ebd86a7bebfd0af676f0d97691"
+    },
+    {
+      "source": "pi/native-opencode-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "direct"
+      },
+      "sha256": "49cf11144c2125a8f6d57a2edc70a58d77654a25e2961db8785e29ffd7e85504"
+    },
+    {
+      "source": "pi/native-opencode-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "ouro"
+      },
+      "sha256": "49cf11144c2125a8f6d57a2edc70a58d77654a25e2961db8785e29ffd7e85504"
+    },
+    {
+      "source": "pi/native-opencode-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "greywall"
+      },
+      "sha256": "49cf11144c2125a8f6d57a2edc70a58d77654a25e2961db8785e29ffd7e85504"
+    },
+    {
+      "source": "pi/native-opencode-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "mxc"
+      },
+      "sha256": "49cf11144c2125a8f6d57a2edc70a58d77654a25e2961db8785e29ffd7e85504"
+    },
+    {
+      "source": "pi/workflow-opencode-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode"
+      },
+      "sha256": "20b4a4c6cb6bb6b9b81d4c40690e214df9cade09635f26c8a4a022610f0c36fa"
+    },
+    {
+      "source": "pi/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "direct"
+      },
+      "sha256": "ccef040e29e0d6c03d306e5568061f5306480ef4bf8f7950ee62af4d7f9bda7c"
+    },
+    {
+      "source": "pi/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "ouro"
+      },
+      "sha256": "ccef040e29e0d6c03d306e5568061f5306480ef4bf8f7950ee62af4d7f9bda7c"
+    },
+    {
+      "source": "pi/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "greywall"
+      },
+      "sha256": "ccef040e29e0d6c03d306e5568061f5306480ef4bf8f7950ee62af4d7f9bda7c"
+    },
+    {
+      "source": "pi/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "mxc"
+      },
+      "sha256": "ccef040e29e0d6c03d306e5568061f5306480ef4bf8f7950ee62af4d7f9bda7c"
+    },
+    {
+      "source": "pi/workflow-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex"
+      },
+      "sha256": "d7307df064a20f8c6e47b2695132bb3dcfc560ebd86a7bebfd0af676f0d97691"
+    },
+    {
+      "source": "pi/container-after-claude/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "docker"
+      },
+      "sha256": "232d15eae5114a84d479bf71c99e9e0d916661f82025148752d52caa78dcbdc3"
+    },
+    {
+      "source": "pi/container-after-claude/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "openshell-ephemeral"
+      },
+      "sha256": "232d15eae5114a84d479bf71c99e9e0d916661f82025148752d52caa78dcbdc3"
+    },
+    {
+      "source": "pi/container-workflow-after-claude/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude"
+      },
+      "sha256": "cf9f15ab35c0d81f308424ac111982ece538691a920bbc743ef9759948018deb"
+    },
+    {
+      "source": "pi/container-after-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "docker"
+      },
+      "sha256": "deffbb5c68d6bdc96882867f7ed07c961a3355bb5e60f9541802317bc2979ddd"
+    },
+    {
+      "source": "pi/container-after-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "openshell-ephemeral"
+      },
+      "sha256": "deffbb5c68d6bdc96882867f7ed07c961a3355bb5e60f9541802317bc2979ddd"
+    },
+    {
+      "source": "pi/container-workflow-after-opencode/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode"
+      },
+      "sha256": "8c1d92a4512b7f694e5b396c06bb4c207cc3da53d3380844748c995c830347be"
+    },
+    {
+      "source": "pi/container-after-codex/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "docker"
+      },
+      "sha256": "4688e3e1b7cf7fbaac640d97f143e37c6cebe81d0a687ce46e9450a84ceb3930"
+    },
+    {
+      "source": "pi/container-after-codex/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "openshell-ephemeral"
+      },
+      "sha256": "4688e3e1b7cf7fbaac640d97f143e37c6cebe81d0a687ce46e9450a84ceb3930"
+    },
+    {
+      "source": "pi/container-workflow-after-codex/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex"
+      },
+      "sha256": "5fda1c9b99e899c13450907aea560eb7f5be66329c8978d73365011b8792ce32"
+    },
+    {
+      "source": "pi/perf-after/launches.ndjson",
+      "filter": "measurement; observation-off diagnostics excluded",
+      "sha256": "668f040192343cc39c54f1b614de8a4ce4947d2f9be4a7956f96b206e82f447c"
+    },
+    {
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "filter": "measurement; observation-off diagnostics excluded",
+      "sha256": "4365e89a004b0f676f57a6bb6fecb0fcb0e5ccea00e76d8f6b1311afaa1c0f92"
+    },
+    {
+      "source": "mac/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "direct"
+      },
+      "sha256": "f5db3019fbeab6c129ec3ee81c592697e5f7c46cfd4b2dd379212e33c075f805"
+    },
+    {
+      "source": "mac/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "greywall"
+      },
+      "sha256": "f5db3019fbeab6c129ec3ee81c592697e5f7c46cfd4b2dd379212e33c075f805"
+    },
+    {
+      "source": "mac/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "mxc"
+      },
+      "sha256": "f5db3019fbeab6c129ec3ee81c592697e5f7c46cfd4b2dd379212e33c075f805"
+    },
+    {
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude"
+      },
+      "sha256": "5497dcd64e30e3a338339a23275fb433d290399736047f8ac79c76cb00b3d8b2"
+    },
+    {
+      "source": "mac/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "direct"
+      },
+      "sha256": "f5db3019fbeab6c129ec3ee81c592697e5f7c46cfd4b2dd379212e33c075f805"
+    },
+    {
+      "source": "mac/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "greywall"
+      },
+      "sha256": "f5db3019fbeab6c129ec3ee81c592697e5f7c46cfd4b2dd379212e33c075f805"
+    },
+    {
+      "source": "mac/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "mxc"
+      },
+      "sha256": "f5db3019fbeab6c129ec3ee81c592697e5f7c46cfd4b2dd379212e33c075f805"
+    },
+    {
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode"
+      },
+      "sha256": "5497dcd64e30e3a338339a23275fb433d290399736047f8ac79c76cb00b3d8b2"
+    },
+    {
+      "source": "mac/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "direct"
+      },
+      "sha256": "f5db3019fbeab6c129ec3ee81c592697e5f7c46cfd4b2dd379212e33c075f805"
+    },
+    {
+      "source": "mac/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "greywall"
+      },
+      "sha256": "f5db3019fbeab6c129ec3ee81c592697e5f7c46cfd4b2dd379212e33c075f805"
+    },
+    {
+      "source": "mac/native-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "mxc"
+      },
+      "sha256": "f5db3019fbeab6c129ec3ee81c592697e5f7c46cfd4b2dd379212e33c075f805"
+    },
+    {
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex"
+      },
+      "sha256": "5497dcd64e30e3a338339a23275fb433d290399736047f8ac79c76cb00b3d8b2"
+    },
+    {
+      "source": "mac/container-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "docker"
+      },
+      "sha256": "7de9cc62b40fb76a12ff475b0af962d4224c1c24f28d0013c40eb46f7714a192"
+    },
+    {
+      "source": "mac/container-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "openshell-ephemeral"
+      },
+      "sha256": "7de9cc62b40fb76a12ff475b0af962d4224c1c24f28d0013c40eb46f7714a192"
+    },
+    {
+      "source": "mac/container-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude",
+        "mode": "openshell-warm"
+      },
+      "sha256": "7de9cc62b40fb76a12ff475b0af962d4224c1c24f28d0013c40eb46f7714a192"
+    },
+    {
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "claude"
+      },
+      "sha256": "674b0fe16a1e92324b30cadc5bf08aa28e57bacc9e539d204f1258990e1424ca"
+    },
+    {
+      "source": "mac/container-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "docker"
+      },
+      "sha256": "7de9cc62b40fb76a12ff475b0af962d4224c1c24f28d0013c40eb46f7714a192"
+    },
+    {
+      "source": "mac/container-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "openshell-ephemeral"
+      },
+      "sha256": "7de9cc62b40fb76a12ff475b0af962d4224c1c24f28d0013c40eb46f7714a192"
+    },
+    {
+      "source": "mac/container-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode",
+        "mode": "openshell-warm"
+      },
+      "sha256": "7de9cc62b40fb76a12ff475b0af962d4224c1c24f28d0013c40eb46f7714a192"
+    },
+    {
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "opencode"
+      },
+      "sha256": "674b0fe16a1e92324b30cadc5bf08aa28e57bacc9e539d204f1258990e1424ca"
+    },
+    {
+      "source": "mac/container-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "docker"
+      },
+      "sha256": "7de9cc62b40fb76a12ff475b0af962d4224c1c24f28d0013c40eb46f7714a192"
+    },
+    {
+      "source": "mac/container-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "openshell-ephemeral"
+      },
+      "sha256": "7de9cc62b40fb76a12ff475b0af962d4224c1c24f28d0013c40eb46f7714a192"
+    },
+    {
+      "source": "mac/container-after-v2/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex",
+        "mode": "openshell-warm"
+      },
+      "sha256": "7de9cc62b40fb76a12ff475b0af962d4224c1c24f28d0013c40eb46f7714a192"
+    },
+    {
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "filter": {
+        "agent": "codex"
+      },
+      "sha256": "674b0fe16a1e92324b30cadc5bf08aa28e57bacc9e539d204f1258990e1424ca"
+    },
+    {
+      "source": "mac/perf-after/launches.ndjson",
+      "filter": "measurement; observation-off diagnostics excluded",
+      "sha256": "08a01150a092aebffc8f011c6f05a4d71b92388690d5cbeaa55c4e669a6e1c8a"
+    },
+    {
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "filter": "measurement; observation-off diagnostics excluded",
+      "sha256": "82924460daf56796b88f95f17d13079827ee215841d16b72a6129dcc8effc9f6"
+    }
+  ],
+  "native_agents": [
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20039.002811500002,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 22058.941122,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 35672.354082499995,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21220.225454500003,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26306.8684385,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 24409.310726,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 49242.533594,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 29819.6211405,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 15863.539076500001,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 16052.826649999999,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 62944.2621525,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 24520.7143355,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "vps/native-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 22078.998611000003,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23888.9355005,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 42616.165691,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 24524.5681215,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 46553.610178,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-opencode-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 45754.893230500005,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-opencode-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 61223.6461195,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-opencode-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 44844.489229,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-opencode-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21564.820259,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "ouro",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20309.3731125,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 64733.014605000004,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 27329.4209205,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "pi/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19568.850896,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "mac/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "exit_counts": {
+        "65": 6
+      },
+      "source": "mac/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21079.053417,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "mac/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 25509.184916500002,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "mac/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "exit_counts": {
+        "65": 6
+      },
+      "source": "mac/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 25050.0371245,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "mac/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "direct",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 18898.6762915,
+      "exit_counts": {
+        "0": 6
+      },
+      "source": "mac/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "greywall",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "exit_counts": {
+        "65": 6
+      },
+      "source": "mac/native-after/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "mxc",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "exit_counts": {
+        "1": 6
+      },
+      "source": "mac/native-after/agent-runs.ndjson"
+    }
+  ],
+  "container_agents": [
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20388.25806,
+      "median_inner_ms": 19914.8093895,
+      "source": "vps/container-after-claude/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20336.5827455,
+      "median_inner_ms": 19236.644902,
+      "source": "vps/container-after-claude/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19520.2345625,
+      "median_inner_ms": 19248.5685915,
+      "source": "vps/container-after-claude/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 27106.0597075,
+      "median_inner_ms": 26254.7951925,
+      "source": "vps/container-after-opencode/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 27149.763279,
+      "median_inner_ms": 25999.105946,
+      "source": "vps/container-after-opencode/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 25821.4480505,
+      "median_inner_ms": 25561.3082605,
+      "source": "vps/container-after-opencode/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 18541.980166499998,
+      "median_inner_ms": 18013.748671499998,
+      "source": "vps/container-after-codex/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 16536.9552545,
+      "median_inner_ms": 15324.963356,
+      "source": "vps/container-after-codex/agent-runs.ndjson"
+    },
+    {
+      "host": "vps",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 15450.458167,
+      "median_inner_ms": 15134.213027,
+      "source": "vps/container-after-codex/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23652.848425,
+      "median_inner_ms": 21918.150754000002,
+      "source": "pi/container-after-claude/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "median_inner_ms": null,
+      "source": "pi/container-after-claude/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "attempted": 0,
+      "passed": 0,
+      "status": "unavailable at startup",
+      "startup_attempted": 1,
+      "source": "pi/container-warm-availability-v2/availability.json"
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 53757.446018,
+      "median_inner_ms": 45610.3640215,
+      "source": "pi/container-after-opencode/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "median_inner_ms": null,
+      "source": "pi/container-after-opencode/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "attempted": 0,
+      "passed": 0,
+      "status": "unavailable at startup",
+      "startup_attempted": 1,
+      "source": "pi/container-warm-availability-v2/availability.json"
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23048.740553,
+      "median_inner_ms": 17667.60501,
+      "source": "pi/container-after-codex/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 0,
+      "median_success_ms": null,
+      "median_inner_ms": null,
+      "source": "pi/container-after-codex/agent-runs.ndjson"
+    },
+    {
+      "host": "pi",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "attempted": 0,
+      "passed": 0,
+      "status": "unavailable at startup",
+      "startup_attempted": 1,
+      "source": "pi/container-warm-availability-v2/availability.json"
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 20621.800083000002,
+      "median_inner_ms": 20006.206079,
+      "source": "mac/container-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21428.3254165,
+      "median_inner_ms": 20776.338672500002,
+      "source": "mac/container-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 18613.3912915,
+      "median_inner_ms": 18457.878372,
+      "source": "mac/container-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 22107.159791500002,
+      "median_inner_ms": 21464.9931095,
+      "source": "mac/container-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 23725.5217915,
+      "median_inner_ms": 23031.7520025,
+      "source": "mac/container-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 26662.0045005,
+      "median_inner_ms": 26466.143633,
+      "source": "mac/container-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "docker",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19178.0497915,
+      "median_inner_ms": 18709.663299,
+      "source": "mac/container-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 21805.6915835,
+      "median_inner_ms": 21077.850655000002,
+      "source": "mac/container-after-v2/agent-runs.ndjson"
+    },
+    {
+      "host": "mac",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "attempted": 6,
+      "passed": 6,
+      "median_success_ms": 19047.9761875,
+      "median_inner_ms": 18809.2119185,
+      "source": "mac/container-after-v2/agent-runs.ndjson"
+    }
+  ],
+  "workflows": [
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 70148.784353,
+      "artifact": "runs/001-claude-direct-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.264s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 110852.123472,
+      "artifact": "runs/002-claude-greywall-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.255s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 71323.313115,
+      "artifact": "runs/003-claude-ouro-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.233s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 70561.641506,
+      "artifact": "runs/004-claude-mxc-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.284s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 84529.629926,
+      "artifact": "runs/005-opencode-mxc-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.269s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 146106.754699,
+      "artifact": "runs/006-opencode-direct-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.253s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 80797.217965,
+      "artifact": "runs/007-opencode-ouro-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.256s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 124325.948778,
+      "artifact": "runs/008-opencode-greywall-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.287s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 60326.013972,
+      "artifact": "runs/009-codex-mxc-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.278s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 96737.944254,
+      "artifact": "runs/010-codex-greywall-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.249s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 44818.702475,
+      "artifact": "runs/011-codex-ouro-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.242s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "source": "vps/workflow-after-v2/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 47573.803896,
+      "artifact": "runs/012-codex-direct-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.269s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "source": "vps/container-workflow-after-claude/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 69497.493043,
+      "artifact": "runs/001-claude-docker-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "source": "vps/container-workflow-after-claude/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 75217.344429,
+      "artifact": "runs/002-claude-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "source": "vps/container-workflow-after-claude/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 80079.397272,
+      "artifact": "runs/003-claude-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "source": "vps/container-workflow-after-opencode/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 98059.154995,
+      "artifact": "runs/001-opencode-docker-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "source": "vps/container-workflow-after-opencode/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 76441.773761,
+      "artifact": "runs/002-opencode-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "source": "vps/container-workflow-after-opencode/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 76772.89265,
+      "artifact": "runs/003-opencode-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "source": "vps/container-workflow-after-codex/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 44636.533522,
+      "artifact": "runs/001-codex-docker-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "source": "vps/container-workflow-after-codex/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 58181.587928,
+      "artifact": "runs/002-codex-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "source": "vps/container-workflow-after-codex/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 53119.816629,
+      "artifact": "runs/003-codex-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-after/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 83295.369715,
+      "artifact": "runs/001-claude-direct-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.842s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-after/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "greywall",
+      "success": false,
+      "exit": 1,
+      "elapsed_ms": 113900.61466,
+      "artifact": "runs/002-claude-greywall-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.862s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-after/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 82636.740388,
+      "artifact": "runs/003-claude-ouro-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.841s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-after/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 92846.08742,
+      "artifact": "runs/004-claude-mxc-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.877s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-opencode-v2/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 127981.940644,
+      "artifact": "runs/001-opencode-direct-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.843s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-opencode-v2/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 138101.937713,
+      "artifact": "runs/002-opencode-greywall-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.845s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-opencode-v2/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 124070.182528,
+      "artifact": "runs/003-opencode-ouro-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.843s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-opencode-v2/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 115624.075579,
+      "artifact": "runs/004-opencode-mxc-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.844s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-after/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 77411.127609,
+      "artifact": "runs/009-codex-mxc-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.845s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-after/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "greywall",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 101461.513649,
+      "artifact": "runs/010-codex-greywall-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.845s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-after/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "ouro",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 43619.226268,
+      "artifact": "runs/011-codex-ouro-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.843s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "source": "pi/workflow-after/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 61271.104044,
+      "artifact": "runs/012-codex-direct-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.850s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "source": "pi/container-workflow-after-claude/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 77509.093754,
+      "artifact": "runs/001-claude-docker-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "source": "pi/container-workflow-after-claude/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "success": false,
+      "exit": 1,
+      "elapsed_ms": 8112.483036,
+      "artifact": "runs/002-claude-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "source": "pi/container-workflow-after-opencode/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 112134.315104,
+      "artifact": "runs/001-opencode-docker-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "source": "pi/container-workflow-after-opencode/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "success": false,
+      "exit": 1,
+      "elapsed_ms": 8327.206272,
+      "artifact": "runs/002-opencode-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "source": "pi/container-workflow-after-codex/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 48733.662571,
+      "artifact": "runs/001-codex-docker-inventory-workflow-0"
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "source": "pi/container-workflow-after-codex/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "success": false,
+      "exit": 1,
+      "elapsed_ms": 8708.669349,
+      "artifact": "runs/002-codex-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 75925.573042,
+      "artifact": "runs/001-claude-direct-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.188s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "greywall",
+      "success": false,
+      "exit": 65,
+      "elapsed_ms": 31.473334,
+      "artifact": "runs/002-claude-greywall-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": false,
+        "hidden_pass": false,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/002-claude-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/002-claude-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.188s\n\nFAILED (failures=2)\n",
+        "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 96399.0805,
+      "artifact": "runs/003-claude-mxc-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.192s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 84863.171625,
+      "artifact": "runs/004-opencode-direct-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.188s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "greywall",
+      "success": false,
+      "exit": 65,
+      "elapsed_ms": 50.747917,
+      "artifact": "runs/005-opencode-greywall-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": false,
+        "hidden_pass": false,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/005-opencode-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/005-opencode-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.188s\n\nFAILED (failures=2)\n",
+        "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "mxc",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 72666.112416,
+      "artifact": "runs/006-opencode-mxc-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.188s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "greywall",
+      "success": false,
+      "exit": 65,
+      "elapsed_ms": 31.182625,
+      "artifact": "runs/007-codex-greywall-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": false,
+        "hidden_pass": false,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/007-codex-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/007-codex-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.189s\n\nFAILED (failures=2)\n",
+        "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "direct",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 49570.53325,
+      "artifact": "runs/008-codex-direct-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": true,
+        "hidden_pass": true,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.197s\n\nOK\n",
+        "hidden_output": ""
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "source": "mac/workflow-after/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "mxc",
+      "success": false,
+      "exit": 1,
+      "elapsed_ms": 100.596583,
+      "artifact": "runs/009-codex-mxc-inventory-workflow-0",
+      "checker": {
+        "tests_unchanged": true,
+        "tests_pass": false,
+        "hidden_pass": false,
+        "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.190s\n\nFAILED (failures=2)\n",
+        "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 68053.459542,
+      "artifact": "runs/001-claude-docker-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 68060.124292,
+      "artifact": "runs/002-claude-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "agent": "claude",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 68075.167167,
+      "artifact": "runs/003-claude-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 79265.650375,
+      "artifact": "runs/004-opencode-docker-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 128157.494083,
+      "artifact": "runs/005-opencode-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "agent": "opencode",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 66814.718125,
+      "artifact": "runs/006-opencode-openshell-ephemeral-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "openshell-warm",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 68023.353583,
+      "artifact": "runs/007-codex-openshell-warm-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "docker",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 67726.71875,
+      "artifact": "runs/008-codex-docker-inventory-workflow-0"
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "source": "mac/container-workflow-after/agent-runs.ndjson",
+      "agent": "codex",
+      "mode": "openshell-ephemeral",
+      "success": true,
+      "exit": 0,
+      "elapsed_ms": 50288.157334,
+      "artifact": "runs/009-codex-openshell-ephemeral-inventory-workflow-0"
+    }
+  ],
+  "performance": [
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "cpu",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 25.919818,
+        "p95_nearest_rank": 28.653827,
+        "min": 25.067252,
+        "max": 38.94093
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.636304000000003,
+        "p95_nearest_rank": 27.117327,
+        "min": 23.984616,
+        "max": 37.245336
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "git",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 45.745595,
+        "p95_nearest_rank": 56.619615,
+        "min": 38.286591,
+        "max": 60.439353
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 4.292073,
+        "p95_nearest_rank": 5.219152,
+        "min": 3.381477,
+        "max": 5.73487
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "noop",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1.1450805000000002,
+        "p95_nearest_rank": 2.287292,
+        "min": 0.911483,
+        "max": 4.235888
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00019950000000000002,
+        "p95_nearest_rank": 0.00031,
+        "min": 0.00017,
+        "max": 0.00045
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "python",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 41.035424,
+        "p95_nearest_rank": 53.229474,
+        "min": 33.433106,
+        "max": 64.767813
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001345,
+        "p95_nearest_rank": 0.00184,
+        "min": 0.00097,
+        "max": 0.001951
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "reads",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 6.2342675,
+        "p95_nearest_rank": 7.356402,
+        "min": 4.928429,
+        "max": 7.403411
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 4.976641000000001,
+        "p95_nearest_rank": 6.108306,
+        "min": 4.031907,
+        "max": 6.138984
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "spawn",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 79.651556,
+        "p95_nearest_rank": 86.352556,
+        "min": 70.679939,
+        "max": 88.817921
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 78.3944425,
+        "p95_nearest_rank": 84.980318,
+        "min": 69.809216,
+        "max": 87.439933
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "direct",
+      "case": "writes",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 71.97422399999999,
+        "p95_nearest_rank": 96.883644,
+        "min": 59.343864,
+        "max": 99.463464
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 70.08981700000001,
+        "p95_nearest_rank": 95.445644,
+        "min": 58.39778,
+        "max": 98.172006
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "cpu",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1656.2408045,
+        "p95_nearest_rank": 1756.629376,
+        "min": 1576.052949,
+        "max": 1785.90057
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.301292,
+        "p95_nearest_rank": 26.051845,
+        "min": 23.858434,
+        "max": 26.191734
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "git",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1680.766055,
+        "p95_nearest_rank": 1790.195126,
+        "min": 1574.388292,
+        "max": 1793.937374
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 4.5760345000000004,
+        "p95_nearest_rank": 6.263812,
+        "min": 3.750372,
+        "max": 7.338342
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "noop",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1659.631798,
+        "p95_nearest_rank": 1757.431577,
+        "min": 1591.513551,
+        "max": 1869.160521
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000185,
+        "p95_nearest_rank": 0.000339,
+        "min": 0.00016,
+        "max": 0.000419
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "python",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1692.780155,
+        "p95_nearest_rank": 1762.387227,
+        "min": 1577.953675,
+        "max": 1781.256016
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001405,
+        "p95_nearest_rank": 0.001969,
+        "min": 0.000979,
+        "max": 0.002061
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "reads",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1651.5562535,
+        "p95_nearest_rank": 1782.977351,
+        "min": 1550.618758,
+        "max": 1822.47282
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.7355345,
+        "p95_nearest_rank": 7.212408,
+        "min": 4.97988,
+        "max": 7.88557
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "spawn",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1739.7356614999999,
+        "p95_nearest_rank": 1858.063153,
+        "min": 1635.687425,
+        "max": 1876.237828
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 79.4417065,
+        "p95_nearest_rank": 92.744404,
+        "min": 70.629849,
+        "max": 100.797913
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "writes",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1708.379117,
+        "p95_nearest_rank": 1873.749275,
+        "min": 1636.455087,
+        "max": 1879.295381
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 71.55546100000001,
+        "p95_nearest_rank": 90.136376,
+        "min": 56.054694,
+        "max": 91.161735
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "cpu",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 68.548648,
+        "p95_nearest_rank": 71.899958,
+        "min": 36.193677,
+        "max": 73.719645
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.469465999999997,
+        "p95_nearest_rank": 25.842243,
+        "min": 23.868188,
+        "max": 28.197724
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "git",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 68.76881850000001,
+        "p95_nearest_rank": 71.036504,
+        "min": 67.522213,
+        "max": 71.255126
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 4.295816,
+        "p95_nearest_rank": 6.627671,
+        "min": 3.776102,
+        "max": 7.619346
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "noop",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 20.079666000000003,
+        "p95_nearest_rank": 21.871395,
+        "min": 12.327879,
+        "max": 22.341434
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0001805,
+        "p95_nearest_rank": 0.00032,
+        "min": 0.00015,
+        "max": 0.00048
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "python",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 68.86256,
+        "p95_nearest_rank": 70.417698,
+        "min": 67.473819,
+        "max": 72.795299
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00138,
+        "p95_nearest_rank": 0.00179,
+        "min": 0.00092,
+        "max": 0.00212
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "reads",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 20.586154999999998,
+        "p95_nearest_rank": 36.474665,
+        "min": 19.317541,
+        "max": 36.586028
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 4.8585305,
+        "p95_nearest_rank": 5.960756,
+        "min": 4.11272,
+        "max": 8.935585
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "spawn",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 118.960699,
+        "p95_nearest_rank": 121.627287,
+        "min": 117.46278,
+        "max": 124.311595
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 76.905693,
+        "p95_nearest_rank": 87.220538,
+        "min": 66.598318,
+        "max": 95.983051
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "writes",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 118.83146249999999,
+        "p95_nearest_rank": 120.444199,
+        "min": 117.54312,
+        "max": 120.623692
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 69.7356235,
+        "p95_nearest_rank": 81.362278,
+        "min": 57.502197,
+        "max": 85.031138
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "cpu",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 162.1104375,
+        "p95_nearest_rank": 184.892285,
+        "min": 141.604979,
+        "max": 187.894467
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.459263,
+        "p95_nearest_rank": 27.029665,
+        "min": 23.867205,
+        "max": 33.493493
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "git",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 191.05055099999998,
+        "p95_nearest_rank": 207.099283,
+        "min": 161.047613,
+        "max": 216.741956
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.805924,
+        "p95_nearest_rank": 8.675528,
+        "min": 4.788219,
+        "max": 12.747224
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "noop",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 138.62178949999998,
+        "p95_nearest_rank": 154.826967,
+        "min": 117.227825,
+        "max": 166.171875
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00025,
+        "p95_nearest_rank": 0.00037,
+        "min": 0.00016,
+        "max": 0.00048
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "python",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 177.1758205,
+        "p95_nearest_rank": 200.562947,
+        "min": 148.281097,
+        "max": 215.02258
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0013455,
+        "p95_nearest_rank": 0.00181,
+        "min": 0.001049,
+        "max": 0.002221
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "reads",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 143.461781,
+        "p95_nearest_rank": 159.32301,
+        "min": 127.467997,
+        "max": 170.354723
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.375356,
+        "p95_nearest_rank": 7.824599,
+        "min": 4.308528,
+        "max": 9.780524
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "spawn",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 259.3862555,
+        "p95_nearest_rank": 296.567273,
+        "min": 231.068101,
+        "max": 297.849047
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 119.61189350000001,
+        "p95_nearest_rank": 140.562715,
+        "min": 105.86004,
+        "max": 144.909051
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "writes",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 288.134293,
+        "p95_nearest_rank": 334.193924,
+        "min": 267.442569,
+        "max": 349.276525
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 146.796612,
+        "p95_nearest_rank": 181.052186,
+        "min": 137.22064,
+        "max": 212.823821
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "cpu",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 146.1864645,
+        "p95_nearest_rank": 158.681321,
+        "min": 135.070469,
+        "max": 165.244333
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.559156,
+        "p95_nearest_rank": 25.48215,
+        "min": 23.939046,
+        "max": 27.694174
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "git",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 168.056208,
+        "p95_nearest_rank": 189.572793,
+        "min": 139.988946,
+        "max": 199.053989
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.7151325,
+        "p95_nearest_rank": 7.475254,
+        "min": 4.36556,
+        "max": 9.204485
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "noop",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 115.725281,
+        "p95_nearest_rank": 134.921341,
+        "min": 106.585401,
+        "max": 135.290512
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000265,
+        "p95_nearest_rank": 0.000379,
+        "min": 0.00016,
+        "max": 0.000589
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "python",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 156.944737,
+        "p95_nearest_rank": 180.57143,
+        "min": 138.706007,
+        "max": 181.755026
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00151,
+        "p95_nearest_rank": 0.00189,
+        "min": 0.00105,
+        "max": 0.00318
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "reads",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 125.896738,
+        "p95_nearest_rank": 147.268923,
+        "min": 108.780322,
+        "max": 149.467527
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.223803,
+        "p95_nearest_rank": 6.716173,
+        "min": 4.596707,
+        "max": 6.988796
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "spawn",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 239.07399900000001,
+        "p95_nearest_rank": 266.508451,
+        "min": 203.769574,
+        "max": 295.814975
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 122.071893,
+        "p95_nearest_rank": 140.304912,
+        "min": 104.590061,
+        "max": 146.394722
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "writes",
+      "source": "vps/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 276.5756725,
+        "p95_nearest_rank": 297.758572,
+        "min": 234.969777,
+        "max": 297.892153
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 149.3599325,
+        "p95_nearest_rank": 165.716258,
+        "min": 130.298245,
+        "max": 166.603907
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "cpu",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 288.7964485,
+        "p95_nearest_rank": 329.58067,
+        "min": 262.761893,
+        "max": 348.242203
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 25.853152,
+        "p95_nearest_rank": 32.640799,
+        "min": 24.084924,
+        "max": 32.653079
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "git",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 339.575446,
+        "p95_nearest_rank": 367.34404,
+        "min": 323.329914,
+        "max": 372.519389
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 32.8703465,
+        "p95_nearest_rank": 45.083066,
+        "min": 27.480799,
+        "max": 46.579068
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "noop",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 267.63268800000003,
+        "p95_nearest_rank": 294.668372,
+        "min": 243.853189,
+        "max": 295.140402
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00184,
+        "p95_nearest_rank": 0.00247,
+        "min": 0.001511,
+        "max": 0.00274
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "python",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 306.116221,
+        "p95_nearest_rank": 336.205481,
+        "min": 273.67139,
+        "max": 343.801953
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001005,
+        "p95_nearest_rank": 0.00159,
+        "min": 0.000709,
+        "max": 0.00165
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "reads",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 277.96930199999997,
+        "p95_nearest_rank": 305.229342,
+        "min": 255.483706,
+        "max": 321.26563
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 14.1054905,
+        "p95_nearest_rank": 16.885123,
+        "min": 11.470575,
+        "max": 19.892597
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "spawn",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 331.2330935,
+        "p95_nearest_rank": 363.71344,
+        "min": 305.403456,
+        "max": 364.010605
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 72.16445,
+        "p95_nearest_rank": 82.460809,
+        "min": 62.136816,
+        "max": 86.946308
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "writes",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 375.18521899999996,
+        "p95_nearest_rank": 402.999829,
+        "min": 344.243566,
+        "max": 413.542811
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 69.65175450000001,
+        "p95_nearest_rank": 79.914974,
+        "min": 60.29159,
+        "max": 80.920789
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "cpu",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 86.420282,
+        "p95_nearest_rank": 96.990744,
+        "min": 77.081717,
+        "max": 97.147566
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 25.226888,
+        "p95_nearest_rank": 30.410118,
+        "min": 23.85092,
+        "max": 30.739344
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "git",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 105.48084750000001,
+        "p95_nearest_rank": 119.151181,
+        "min": 93.989828,
+        "max": 119.691259
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 4.9551165,
+        "p95_nearest_rank": 6.800362,
+        "min": 4.322378,
+        "max": 8.279254
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "noop",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 60.255245,
+        "p95_nearest_rank": 70.62519,
+        "min": 52.311053,
+        "max": 75.653777
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0018545,
+        "p95_nearest_rank": 0.00239,
+        "min": 0.00147,
+        "max": 0.00241
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "python",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 101.93745799999999,
+        "p95_nearest_rank": 114.443219,
+        "min": 91.901586,
+        "max": 125.131033
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0009105000000000001,
+        "p95_nearest_rank": 0.00179,
+        "min": 0.000651,
+        "max": 0.00194
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "reads",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 69.348998,
+        "p95_nearest_rank": 76.817963,
+        "min": 59.827813,
+        "max": 77.39219
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 8.1944655,
+        "p95_nearest_rank": 9.739701,
+        "min": 7.323549,
+        "max": 10.656579
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "spawn",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 132.858591,
+        "p95_nearest_rank": 144.518404,
+        "min": 121.961714,
+        "max": 151.984225
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 72.90390049999999,
+        "p95_nearest_rank": 81.254362,
+        "min": 63.8901,
+        "max": 81.78873
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "writes",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 138.668887,
+        "p95_nearest_rank": 165.139612,
+        "min": 121.426861,
+        "max": 165.995031
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 77.485872,
+        "p95_nearest_rank": 93.020141,
+        "min": 65.681485,
+        "max": 97.296558
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "cpu",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 908.6388075,
+        "p95_nearest_rank": 1302.250421,
+        "min": 860.732034,
+        "max": 1308.657835
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 32.733855500000004,
+        "p95_nearest_rank": 39.505523,
+        "min": 26.862153,
+        "max": 44.035311
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "git",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 959.0651755,
+        "p95_nearest_rank": 1319.974567,
+        "min": 901.558983,
+        "max": 1363.415113
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 67.0944375,
+        "p95_nearest_rank": 85.140474,
+        "min": 45.063015,
+        "max": 89.189039
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "noop",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 913.269457,
+        "p95_nearest_rank": 1309.428806,
+        "min": 846.917418,
+        "max": 1343.446284
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00183,
+        "p95_nearest_rank": 0.002741,
+        "min": 0.001509,
+        "max": 0.033652
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "python",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 926.235319,
+        "p95_nearest_rank": 1327.240506,
+        "min": 857.257496,
+        "max": 1352.07869
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0010899999999999998,
+        "p95_nearest_rank": 0.0129,
+        "min": 0.00074,
+        "max": 0.02114
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "reads",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 951.26005,
+        "p95_nearest_rank": 1300.03868,
+        "min": 841.303467,
+        "max": 1309.85246
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 51.721805,
+        "p95_nearest_rank": 62.702457,
+        "min": 31.654836,
+        "max": 64.437116
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "spawn",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 949.8561065,
+        "p95_nearest_rank": 1308.89195,
+        "min": 854.732508,
+        "max": 1331.161159
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 101.3785645,
+        "p95_nearest_rank": 117.909758,
+        "min": 79.218445,
+        "max": 123.976357
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "writes",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1013.357221,
+        "p95_nearest_rank": 1372.794499,
+        "min": 936.129136,
+        "max": 1389.780587
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 126.6151975,
+        "p95_nearest_rank": 150.824308,
+        "min": 96.656699,
+        "max": 165.1186
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "cpu",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 95.5294245,
+        "p95_nearest_rank": 110.030888,
+        "min": 86.054097,
+        "max": 110.897812
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 25.277904499999998,
+        "p95_nearest_rank": 30.693193,
+        "min": 23.9109,
+        "max": 32.549787
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "git",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 120.0695625,
+        "p95_nearest_rank": 134.747242,
+        "min": 107.388623,
+        "max": 135.539902
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.701202,
+        "p95_nearest_rank": 7.985348,
+        "min": 4.923606,
+        "max": 10.573312
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "noop",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 69.1993375,
+        "p95_nearest_rank": 85.027703,
+        "min": 60.385373,
+        "max": 91.285257
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0015095,
+        "p95_nearest_rank": 0.00208,
+        "min": 0.00135,
+        "max": 0.060171
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "python",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 114.257323,
+        "p95_nearest_rank": 140.695179,
+        "min": 102.812601,
+        "max": 155.836276
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001,
+        "p95_nearest_rank": 0.00165,
+        "min": 0.000671,
+        "max": 0.00229
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "reads",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 101.8814095,
+        "p95_nearest_rank": 120.403389,
+        "min": 89.015475,
+        "max": 122.134646
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 29.996558999999998,
+        "p95_nearest_rank": 44.66099,
+        "min": 24.172546,
+        "max": 45.637013
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "spawn",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 150.30689999999998,
+        "p95_nearest_rank": 168.102181,
+        "min": 131.678518,
+        "max": 168.892501
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.01987650000001,
+        "p95_nearest_rank": 92.222692,
+        "min": 67.007292,
+        "max": 95.634816
+      }
+    },
+    {
+      "host": "vps",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "writes",
+      "source": "vps/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 186.4267115,
+        "p95_nearest_rank": 198.393479,
+        "min": 165.895691,
+        "max": 202.435623
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 116.338275,
+        "p95_nearest_rank": 130.094149,
+        "min": 102.917193,
+        "max": 130.701247
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "cpu",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 82.240116,
+        "p95_nearest_rank": 93.116798,
+        "min": 82.027275,
+        "max": 110.866346
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.3139595,
+        "p95_nearest_rank": 90.640667,
+        "min": 80.135356,
+        "max": 108.738045
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "git",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 146.2853235,
+        "p95_nearest_rank": 165.041836,
+        "min": 144.919357,
+        "max": 176.141611
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 8.2674715,
+        "p95_nearest_rank": 8.410588,
+        "min": 8.200536,
+        "max": 8.41304
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "noop",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1.8361640000000001,
+        "p95_nearest_rank": 2.897115,
+        "min": 1.789674,
+        "max": 2.909441
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001556,
+        "p95_nearest_rank": 0.00237,
+        "min": 0.001259,
+        "max": 0.002537
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "python",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 138.2505065,
+        "p95_nearest_rank": 144.429496,
+        "min": 136.364636,
+        "max": 149.273195
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.004176,
+        "p95_nearest_rank": 0.004963,
+        "min": 0.003574,
+        "max": 0.006445
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "reads",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 12.793976,
+        "p95_nearest_rank": 21.966498,
+        "min": 12.634146,
+        "max": 22.030766
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 10.857959999999999,
+        "p95_nearest_rank": 18.978063,
+        "min": 10.633075,
+        "max": 19.085243
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "spawn",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 135.6583755,
+        "p95_nearest_rank": 188.679853,
+        "min": 133.797909,
+        "max": 190.865168
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 133.77444250000002,
+        "p95_nearest_rank": 186.027428,
+        "min": 131.908146,
+        "max": 188.402162
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "direct",
+      "case": "writes",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 868.3586104999999,
+        "p95_nearest_rank": 1025.807323,
+        "min": 844.214766,
+        "max": 1043.695095
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 865.777056,
+        "p95_nearest_rank": 1023.840733,
+        "min": 842.293299,
+        "max": 1041.807104
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "cpu",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1880.6622834999998,
+        "p95_nearest_rank": 1931.092212,
+        "min": 1852.497548,
+        "max": 1938.856986
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.15865099999999,
+        "p95_nearest_rank": 101.419885,
+        "min": 80.124942,
+        "max": 142.619101
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "git",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1965.8619245,
+        "p95_nearest_rank": 1985.748854,
+        "min": 1928.083101,
+        "max": 1987.26164
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 8.448106,
+        "p95_nearest_rank": 8.581514,
+        "min": 8.354565,
+        "max": 10.864228
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "noop",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1795.4777295,
+        "p95_nearest_rank": 1841.704869,
+        "min": 1786.301092,
+        "max": 1858.621906
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001509,
+        "p95_nearest_rank": 0.001944,
+        "min": 0.001259,
+        "max": 0.003148
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "python",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1928.289844,
+        "p95_nearest_rank": 1978.988482,
+        "min": 1920.226731,
+        "max": 2013.703976
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.004704,
+        "p95_nearest_rank": 0.005278,
+        "min": 0.004333,
+        "max": 0.005537
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "reads",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1803.651558,
+        "p95_nearest_rank": 1847.632306,
+        "min": 1794.138562,
+        "max": 1849.722421
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 11.163691499999999,
+        "p95_nearest_rank": 11.370112,
+        "min": 10.975137,
+        "max": 11.663488
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "spawn",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1933.78944,
+        "p95_nearest_rank": 2045.661165,
+        "min": 1907.018656,
+        "max": 2052.04753
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 135.539025,
+        "p95_nearest_rank": 216.175645,
+        "min": 132.857591,
+        "max": 216.642859
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "greywall",
+      "case": "writes",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 2684.2928705,
+        "p95_nearest_rank": 2807.570519,
+        "min": 2039.758674,
+        "max": 2830.780131
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 878.607193,
+        "p95_nearest_rank": 1013.895497,
+        "min": 244.021689,
+        "max": 1021.879419
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "cpu",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 121.88706400000001,
+        "p95_nearest_rank": 173.770057,
+        "min": 121.687573,
+        "max": 174.011178
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.271526,
+        "p95_nearest_rank": 123.12659,
+        "min": 80.14087,
+        "max": 123.415922
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "git",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 172.039333,
+        "p95_nearest_rank": 224.640234,
+        "min": 171.913089,
+        "max": 224.670265
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 8.522745,
+        "p95_nearest_rank": 8.59958,
+        "min": 8.421681,
+        "max": 8.615769
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "noop",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 23.6613275,
+        "p95_nearest_rank": 42.106537,
+        "min": 23.499301,
+        "max": 42.296722
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001537,
+        "p95_nearest_rank": 0.002148,
+        "min": 0.001241,
+        "max": 0.002148
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "python",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 172.0977345,
+        "p95_nearest_rank": 223.752232,
+        "min": 171.923025,
+        "max": 224.465663
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.003981500000000001,
+        "p95_nearest_rank": 0.004463,
+        "min": 0.003149,
+        "max": 0.004555
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "reads",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 39.761687,
+        "p95_nearest_rank": 74.048596,
+        "min": 39.603523,
+        "max": 74.434573
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 10.878716,
+        "p95_nearest_rank": 15.592229,
+        "min": 10.683752,
+        "max": 17.232033
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "spawn",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 172.01374900000002,
+        "p95_nearest_rank": 223.846153,
+        "min": 171.88431,
+        "max": 224.789694
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 134.0296695,
+        "p95_nearest_rank": 178.866546,
+        "min": 132.404295,
+        "max": 182.428604
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "writes",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 923.296421,
+        "p95_nearest_rank": 1073.310579,
+        "min": 622.95586,
+        "max": 1073.811338
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 855.9117745000001,
+        "p95_nearest_rank": 1020.689647,
+        "min": 564.374574,
+        "max": 1042.19992
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "cpu",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 396.013275,
+        "p95_nearest_rank": 416.053516,
+        "min": 378.854569,
+        "max": 420.538203
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.198073,
+        "p95_nearest_rank": 82.493549,
+        "min": 80.152019,
+        "max": 102.487871
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "git",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 462.145373,
+        "p95_nearest_rank": 492.131389,
+        "min": 428.105422,
+        "max": 529.075348
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 9.737959,
+        "p95_nearest_rank": 9.836578,
+        "min": 9.640555,
+        "max": 9.881396
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "noop",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 321.69383400000004,
+        "p95_nearest_rank": 372.633245,
+        "min": 293.751413,
+        "max": 379.638688
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0017404999999999999,
+        "p95_nearest_rank": 0.001982,
+        "min": 0.001241,
+        "max": 0.00237
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "python",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 457.6334005,
+        "p95_nearest_rank": 566.673246,
+        "min": 425.366551,
+        "max": 627.020297
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0043335000000000005,
+        "p95_nearest_rank": 0.006389,
+        "min": 0.003722,
+        "max": 0.034055
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "reads",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 327.973586,
+        "p95_nearest_rank": 404.669794,
+        "min": 295.76556,
+        "max": 441.565532
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 11.6924895,
+        "p95_nearest_rank": 12.253071,
+        "min": 11.417618,
+        "max": 16.8403
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "spawn",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 516.330397,
+        "p95_nearest_rank": 662.31691,
+        "min": 483.628436,
+        "max": 700.811534
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 197.48850399999998,
+        "p95_nearest_rank": 262.113965,
+        "min": 195.588082,
+        "max": 277.280955
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-before",
+      "case": "writes",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 672.0222575,
+        "p95_nearest_rank": 1247.584145,
+        "min": 531.647114,
+        "max": 1309.564845
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 265.8359835,
+        "p95_nearest_rank": 921.446479,
+        "min": 183.297002,
+        "max": 954.683154
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "cpu",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 363.12916700000005,
+        "p95_nearest_rank": 429.686792,
+        "min": 319.011399,
+        "max": 431.629214
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.249862,
+        "p95_nearest_rank": 106.650439,
+        "min": 80.162575,
+        "max": 109.757498
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "git",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 429.17484449999995,
+        "p95_nearest_rank": 544.162756,
+        "min": 395.623595,
+        "max": 580.409735
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 9.785941999999999,
+        "p95_nearest_rank": 9.913082,
+        "min": 9.575526,
+        "max": 10.303791
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "noop",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 288.558925,
+        "p95_nearest_rank": 369.002384,
+        "min": 266.334491,
+        "max": 374.547883
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.001667,
+        "p95_nearest_rank": 0.002204,
+        "min": 0.001444,
+        "max": 0.002278
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "python",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 421.089331,
+        "p95_nearest_rank": 542.957538,
+        "min": 392.814981,
+        "max": 575.804659
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00437,
+        "p95_nearest_rank": 0.006055,
+        "min": 0.00374,
+        "max": 0.006185
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "reads",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 291.905326,
+        "p95_nearest_rank": 353.30728,
+        "min": 265.687851,
+        "max": 397.211987
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 11.656718000000001,
+        "p95_nearest_rank": 16.866482,
+        "min": 11.454512,
+        "max": 17.452184
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "spawn",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 481.9047355,
+        "p95_nearest_rank": 582.161654,
+        "min": 445.445265,
+        "max": 637.829563
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 196.8711005,
+        "p95_nearest_rank": 246.527249,
+        "min": 193.880904,
+        "max": 248.729288
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "native",
+      "tool": "ouro-jail",
+      "case": "writes",
+      "source": "pi/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 773.202544,
+        "p95_nearest_rank": 1317.320696,
+        "min": 515.276621,
+        "max": 1366.525004
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 405.629168,
+        "p95_nearest_rank": 993.557557,
+        "min": 195.823383,
+        "max": 1060.252062
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "cpu",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1082.619724,
+        "p95_nearest_rank": 1215.491127,
+        "min": 977.621187,
+        "max": 1307.351701
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 81.229748,
+        "p95_nearest_rank": 82.912071,
+        "min": 80.679512,
+        "max": 84.033741
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "git",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1256.214581,
+        "p95_nearest_rank": 1391.052758,
+        "min": 1183.101361,
+        "max": 1646.434364
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 86.12017399999999,
+        "p95_nearest_rank": 92.506207,
+        "min": 85.265484,
+        "max": 93.933469
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "noop",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1033.49069,
+        "p95_nearest_rank": 1174.136112,
+        "min": 918.349162,
+        "max": 1376.804127
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000954,
+        "p95_nearest_rank": 0.001444,
+        "min": 0.000648,
+        "max": 0.001871
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "python",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1184.9878315,
+        "p95_nearest_rank": 1440.293422,
+        "min": 1107.977667,
+        "max": 1445.697277
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0045000000000000005,
+        "p95_nearest_rank": 0.006963,
+        "min": 0.0035,
+        "max": 0.00713
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "reads",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1041.1082645,
+        "p95_nearest_rank": 1172.530394,
+        "min": 934.016488,
+        "max": 1247.722872
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 27.9372345,
+        "p95_nearest_rank": 30.935072,
+        "min": 27.377848,
+        "max": 33.71377
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "spawn",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1171.141296,
+        "p95_nearest_rank": 1258.633775,
+        "min": 1057.174481,
+        "max": 1314.031135
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 181.185972,
+        "p95_nearest_rank": 195.523976,
+        "min": 176.576919,
+        "max": 197.279851
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "writes",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1439.992095,
+        "p95_nearest_rank": 1574.782333,
+        "min": 1324.187849,
+        "max": 1632.656212
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 116.297677,
+        "p95_nearest_rank": 141.467128,
+        "min": 107.3422,
+        "max": 141.692648
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "cpu",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 224.5615825,
+        "p95_nearest_rank": 246.382313,
+        "min": 197.20991,
+        "max": 246.919317
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 80.591962,
+        "p95_nearest_rank": 81.246545,
+        "min": 80.217658,
+        "max": 81.489582
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "git",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 289.399089,
+        "p95_nearest_rank": 364.677491,
+        "min": 261.482854,
+        "max": 367.052533
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 9.3302695,
+        "p95_nearest_rank": 10.424574,
+        "min": 9.205234,
+        "max": 10.999401
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "noop",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 156.4788795,
+        "p95_nearest_rank": 179.34277,
+        "min": 116.915877,
+        "max": 183.192535
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0011755,
+        "p95_nearest_rank": 0.002203,
+        "min": 0.000648,
+        "max": 0.002796
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "python",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 285.781888,
+        "p95_nearest_rank": 364.782059,
+        "min": 252.341649,
+        "max": 366.625301
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0039725,
+        "p95_nearest_rank": 0.006445,
+        "min": 0.003241,
+        "max": 0.006926
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "reads",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 155.1311925,
+        "p95_nearest_rank": 191.90511,
+        "min": 132.839783,
+        "max": 196.057933
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 17.08318,
+        "p95_nearest_rank": 21.81588,
+        "min": 15.967953,
+        "max": 25.038089
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "spawn",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 276.65016,
+        "p95_nearest_rank": 345.811871,
+        "min": 235.902481,
+        "max": 347.623774
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 123.998249,
+        "p95_nearest_rank": 184.634793,
+        "min": 119.667246,
+        "max": 184.692978
+      }
+    },
+    {
+      "host": "pi",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "writes",
+      "source": "pi/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1024.847195,
+        "p95_nearest_rank": 1449.826433,
+        "min": 926.917007,
+        "max": 1698.257228
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 867.872078,
+        "p95_nearest_rank": 1299.103586,
+        "min": 770.61058,
+        "max": 1541.272867
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "cpu",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 21.397875499999998,
+        "p95_nearest_rank": 23.411333,
+        "min": 20.703292,
+        "max": 23.458417
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 18.737000000000002,
+        "p95_nearest_rank": 20.133,
+        "min": 18.318,
+        "max": 20.219
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "git",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 44.2044165,
+        "p95_nearest_rank": 46.759416,
+        "min": 42.275,
+        "max": 47.799333
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 9.9633125,
+        "p95_nearest_rank": 10.383666,
+        "min": 9.634541,
+        "max": 11.575833
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "noop",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 2.6753545,
+        "p95_nearest_rank": 3.520541,
+        "min": 2.350083,
+        "max": 4.293334
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0,
+        "p95_nearest_rank": 0.001,
+        "min": 0.0,
+        "max": 0.001
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "python",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 34.0828125,
+        "p95_nearest_rank": 37.393083,
+        "min": 32.391959,
+        "max": 40.581292
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000458,
+        "p95_nearest_rank": 0.000542,
+        "min": 0.000333,
+        "max": 0.000542
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "reads",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 21.7466875,
+        "p95_nearest_rank": 24.10425,
+        "min": 13.355459,
+        "max": 24.532541
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 19.085,
+        "p95_nearest_rank": 20.812,
+        "min": 10.545,
+        "max": 21.269
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "spawn",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 146.311833,
+        "p95_nearest_rank": 150.918333,
+        "min": 142.892833,
+        "max": 151.467708
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 143.7475,
+        "p95_nearest_rank": 147.73,
+        "min": 140.396,
+        "max": 148.47
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "direct",
+      "case": "writes",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 49.609,
+        "p95_nearest_rank": 54.32275,
+        "min": 41.856208,
+        "max": 54.87
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 47.048500000000004,
+        "p95_nearest_rank": 50.748,
+        "min": 39.149,
+        "max": 51.501
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "cpu",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 58.917604499999996,
+        "p95_nearest_rank": 61.249833,
+        "min": 57.972959,
+        "max": 62.287583
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 18.618000000000002,
+        "p95_nearest_rank": 19.03,
+        "min": 18.313,
+        "max": 19.155
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "git",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 3445.461125,
+        "p95_nearest_rank": 3549.533125,
+        "min": 3417.653292,
+        "max": 3568.856125
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 1692.1802085,
+        "p95_nearest_rank": 1737.66825,
+        "min": 1675.573625,
+        "max": 1783.611167
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "noop",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 16.731917,
+        "p95_nearest_rank": 23.574791,
+        "min": 16.162875,
+        "max": 24.053875
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0,
+        "p95_nearest_rank": 0.001,
+        "min": 0.0,
+        "max": 0.001
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "python",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 1769.699604,
+        "p95_nearest_rank": 1780.42,
+        "min": 1737.85175,
+        "max": 1780.997875
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000417,
+        "p95_nearest_rank": 0.000542,
+        "min": 0.000333,
+        "max": 0.000667
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "reads",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 57.935833,
+        "p95_nearest_rank": 59.284291,
+        "min": 33.998417,
+        "max": 61.295875
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 19.3335,
+        "p95_nearest_rank": 21.1,
+        "min": 10.739,
+        "max": 22.428
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "spawn",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 198.3829375,
+        "p95_nearest_rank": 208.993459,
+        "min": 159.9455,
+        "max": 218.6905
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 142.7935,
+        "p95_nearest_rank": 150.824,
+        "min": 139.737,
+        "max": 151.477
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "native",
+      "tool": "mxc",
+      "case": "writes",
+      "source": "mac/perf-after/launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 100.641354,
+        "p95_nearest_rank": 102.372,
+        "min": 58.197792,
+        "max": 103.325375
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 47.686,
+        "p95_nearest_rank": 52.494,
+        "min": 38.134,
+        "max": 55.19
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "cpu",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 233.8195835,
+        "p95_nearest_rank": 265.49925,
+        "min": 198.447959,
+        "max": 283.098125
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.0958555,
+        "p95_nearest_rank": 24.596856,
+        "min": 23.409022,
+        "max": 24.606439
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "git",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 251.183583,
+        "p95_nearest_rank": 291.93375,
+        "min": 215.243542,
+        "max": 295.202
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 15.288909499999999,
+        "p95_nearest_rank": 16.63864,
+        "min": 13.991096,
+        "max": 16.647807
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "noop",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 216.724333,
+        "p95_nearest_rank": 246.472125,
+        "min": 184.302,
+        "max": 269.5485
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0002085,
+        "p95_nearest_rank": 0.000333,
+        "min": 0.0,
+        "max": 0.000417
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "python",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 233.05700000000002,
+        "p95_nearest_rank": 267.340542,
+        "min": 204.826125,
+        "max": 274.512583
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000542,
+        "p95_nearest_rank": 0.00075,
+        "min": 0.000458,
+        "max": 0.000833
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "reads",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 218.55572899999999,
+        "p95_nearest_rank": 251.122083,
+        "min": 188.544208,
+        "max": 274.720708
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 3.027691,
+        "p95_nearest_rank": 3.373378,
+        "min": 2.703502,
+        "max": 3.661045
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "spawn",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 224.381375,
+        "p95_nearest_rank": 251.577708,
+        "min": 205.575792,
+        "max": 286.408042
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 16.554515000000002,
+        "p95_nearest_rank": 17.688433,
+        "min": 12.79372,
+        "max": 18.582559
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-run",
+      "case": "writes",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 231.9596665,
+        "p95_nearest_rank": 279.752167,
+        "min": 206.767417,
+        "max": 293.506291
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 10.674821999999999,
+        "p95_nearest_rank": 12.230386,
+        "min": 8.844425,
+        "max": 12.495803
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "cpu",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 53.702104000000006,
+        "p95_nearest_rank": 67.597708,
+        "min": 48.040708,
+        "max": 68.778916
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.171605999999997,
+        "p95_nearest_rank": 24.945773,
+        "min": 23.389272,
+        "max": 25.507857
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "git",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 47.757125,
+        "p95_nearest_rank": 62.992166,
+        "min": 40.800167,
+        "max": 63.698958
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 1.494793,
+        "p95_nearest_rank": 1.829752,
+        "min": 1.230543,
+        "max": 1.886502
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "noop",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 27.532166500000002,
+        "p95_nearest_rank": 41.752292,
+        "min": 24.363125,
+        "max": 46.686917
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000209,
+        "p95_nearest_rank": 0.000334,
+        "min": 4.1e-05,
+        "max": 0.000458
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "python",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 47.0569585,
+        "p95_nearest_rank": 59.513416,
+        "min": 42.069667,
+        "max": 59.761042
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0005625,
+        "p95_nearest_rank": 0.000792,
+        "min": 0.000375,
+        "max": 0.000875
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "reads",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 30.162708000000002,
+        "p95_nearest_rank": 43.856917,
+        "min": 26.461667,
+        "max": 44.876917
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 2.067502,
+        "p95_nearest_rank": 2.276919,
+        "min": 1.891335,
+        "max": 2.351502
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "spawn",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 44.097708499999996,
+        "p95_nearest_rank": 57.790875,
+        "min": 39.408041,
+        "max": 59.597
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 15.5543265,
+        "p95_nearest_rank": 17.544975,
+        "min": 12.880012,
+        "max": 17.614183
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "docker-warm",
+      "case": "writes",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 48.553583,
+        "p95_nearest_rank": 62.183167,
+        "min": 41.979459,
+        "max": 64.987667
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 19.540518,
+        "p95_nearest_rank": 23.047937,
+        "min": 16.10164,
+        "max": 30.81682
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "cpu",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 674.575229,
+        "p95_nearest_rank": 702.778541,
+        "min": 637.498959,
+        "max": 707.650708
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.358564,
+        "p95_nearest_rank": 26.984858,
+        "min": 23.68898,
+        "max": 27.248816
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "git",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 668.0192294999999,
+        "p95_nearest_rank": 711.918708,
+        "min": 616.81025,
+        "max": 758.889334
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 15.018076,
+        "p95_nearest_rank": 18.371934,
+        "min": 14.30518,
+        "max": 18.871225
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "noop",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 677.233792,
+        "p95_nearest_rank": 717.785125,
+        "min": 624.280625,
+        "max": 744.360625
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.00025,
+        "p95_nearest_rank": 0.000375,
+        "min": 4.2e-05,
+        "max": 0.000458
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "python",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 677.421833,
+        "p95_nearest_rank": 714.842292,
+        "min": 649.611708,
+        "max": 829.427167
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.0005415,
+        "p95_nearest_rank": 0.001917,
+        "min": 0.000458,
+        "max": 0.005208
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "reads",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 681.3780830000001,
+        "p95_nearest_rank": 706.434834,
+        "min": 655.877791,
+        "max": 718.92725
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 5.4636295,
+        "p95_nearest_rank": 7.239215,
+        "min": 4.94313,
+        "max": 7.641799
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "spawn",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 678.1840835,
+        "p95_nearest_rank": 722.096083,
+        "min": 648.819833,
+        "max": 1327.712708
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 18.3990165,
+        "p95_nearest_rank": 19.769351,
+        "min": 16.449807,
+        "max": 20.317644
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-ephemeral",
+      "case": "writes",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 685.3070005,
+        "p95_nearest_rank": 719.310625,
+        "min": 665.569416,
+        "max": 737.06575
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 11.820426999999999,
+        "p95_nearest_rank": 13.919138,
+        "min": 10.800843,
+        "max": 14.16393
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "cpu",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 87.6236665,
+        "p95_nearest_rank": 96.662958,
+        "min": 69.052667,
+        "max": 98.342792
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 24.853856,
+        "p95_nearest_rank": 28.073401,
+        "min": 23.776605,
+        "max": 28.761984
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "git",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 75.19010399999999,
+        "p95_nearest_rank": 95.3285,
+        "min": 64.240458,
+        "max": 96.314041
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 1.8852725000000001,
+        "p95_nearest_rank": 2.449044,
+        "min": 1.570751,
+        "max": 2.475003
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "noop",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 54.0558335,
+        "p95_nearest_rank": 69.135541,
+        "min": 42.85,
+        "max": 73.940541
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 8.4e-05,
+        "p95_nearest_rank": 0.00025,
+        "min": 0.0,
+        "max": 0.002083
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "python",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 72.5876045,
+        "p95_nearest_rank": 90.398292,
+        "min": 64.413,
+        "max": 90.474708
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 0.000625,
+        "p95_nearest_rank": 0.000792,
+        "min": 0.0005,
+        "max": 0.008667
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "reads",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 76.919,
+        "p95_nearest_rank": 94.368792,
+        "min": 50.042417,
+        "max": 98.631417
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 22.0805615,
+        "p95_nearest_rank": 29.298652,
+        "min": 4.26092,
+        "max": 31.769029
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "spawn",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 80.6155835,
+        "p95_nearest_rank": 87.075083,
+        "min": 62.353833,
+        "max": 92.944458
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 18.4558085,
+        "p95_nearest_rank": 24.315397,
+        "min": 15.957598,
+        "max": 26.78515
+      }
+    },
+    {
+      "host": "mac",
+      "kind": "container",
+      "tool": "openshell-warm",
+      "case": "writes",
+      "source": "mac/container-perf-after/openshell-launches.ndjson",
+      "attempted": 30,
+      "valid": 30,
+      "invalid_sequences": [],
+      "elapsed_ms": {
+        "n": 30,
+        "median": 93.515875,
+        "p95_nearest_rank": 114.054875,
+        "min": 70.597584,
+        "max": 114.4785
+      },
+      "work_ms": {
+        "n": 30,
+        "median": 41.987434,
+        "p95_nearest_rank": 56.425677,
+        "min": 23.309897,
+        "max": 67.193187
+      }
+    }
+  ]
+}

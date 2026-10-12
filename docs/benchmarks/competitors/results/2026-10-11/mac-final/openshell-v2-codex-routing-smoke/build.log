@@ -1,0 +1,41 @@
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            BuildKit is currently disabled; enable it by removing the DOCKER_BUILDKIT=0
+            environment-variable.
+
+Sending build context to Docker daemon  755.3MB
+
+Step 1/10 : FROM bench-openshell:latest
+ ---> 2a51b4b95408
+Step 2/10 : RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*
+ ---> Using cache
+ ---> 8dd19a22ecdc
+Step 3/10 : RUN mkdir -p /opt/agents/bin /opt/bench /home/agent /work && chown 1000:1000 /home/agent /work
+ ---> Using cache
+ ---> f8cf254199cc
+Step 4/10 : COPY bin/ /opt/agents/bin/
+ ---> Using cache
+ ---> f4de74973fc7
+Step 5/10 : COPY harness/ /opt/bench/
+ ---> 10cf0f0d0eaf
+Step 6/10 : RUN chmod -R a+rX /opt/agents /opt/bench
+ ---> Running in fd0fe4e9c2d0
+ ---> Removed intermediate container fd0fe4e9c2d0
+ ---> d078a28e1308
+Step 7/10 : ENV HOME=/home/agent PATH=/opt/agents/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ ---> Running in 91059caae905
+ ---> Removed intermediate container 91059caae905
+ ---> d34b7a60f937
+Step 8/10 : USER 1000:1000
+ ---> Running in dd9cd4783291
+ ---> Removed intermediate container dd9cd4783291
+ ---> 4552bd067316
+Step 9/10 : WORKDIR /work
+ ---> Running in 1b161994b1db
+ ---> Removed intermediate container 1b161994b1db
+ ---> 046b2b66677d
+Step 10/10 : CMD ["/bin/sleep", "infinity"]
+ ---> Running in 633f10e1e350
+ ---> Removed intermediate container 633f10e1e350
+ ---> c08ac0c06e00
+Successfully built c08ac0c06e00
+Successfully tagged ouro-comparison-agents-v2:20261011

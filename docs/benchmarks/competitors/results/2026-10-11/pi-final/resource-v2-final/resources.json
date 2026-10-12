@@ -1,0 +1,239 @@
+[
+  {
+    "tool": "direct",
+    "resource": "wall",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 2,
+    "exit": 0,
+    "elapsed_ms": 3082.530629,
+    "records": [
+      {
+        "probe": "wall",
+        "started": true
+      },
+      {
+        "probe": "wall",
+        "completed": true
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "memory",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 3,
+    "exit": 0,
+    "elapsed_ms": 454.147396,
+    "records": [
+      {
+        "probe": "memory",
+        "started": true
+      },
+      {
+        "probe": "memory",
+        "allocated_bytes": 100663296
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "pids",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 4,
+    "exit": 0,
+    "elapsed_ms": 905.522857,
+    "records": [
+      {
+        "probe": "pids",
+        "forks": 32,
+        "errno": null
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "direct",
+    "resource": "cpu",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 5,
+    "exit": 0,
+    "elapsed_ms": 285.262776,
+    "records": [
+      {
+        "probe": "cpu",
+        "cpu_s": 0.20336807299999998,
+        "wall_s": 0.20337528200252564
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "ouro-jail",
+    "status": "unavailable",
+    "preflight_sequence": 6
+  },
+  {
+    "tool": "greywall",
+    "resource": "wall",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 8,
+    "exit": 0,
+    "elapsed_ms": 4966.118273,
+    "records": [
+      {
+        "probe": "wall",
+        "started": true
+      },
+      {
+        "probe": "wall",
+        "completed": true
+      }
+    ],
+    "stderr": "[greywall] Running python3 in a sandbox.\nA built-in profile is available. Without it, only the current directory is accessible.\n\nAllow read:   ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/.condarc  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\nAllow write: ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\n\n[Y] Use profile (recommended)   [e] Edit first   [s] Skip (restrictive)   [n] Don't ask again\n> ",
+    "receipt": null
+  },
+  {
+    "tool": "greywall",
+    "resource": "memory",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 9,
+    "exit": 0,
+    "elapsed_ms": 2249.686555,
+    "records": [
+      {
+        "probe": "memory",
+        "started": true
+      },
+      {
+        "probe": "memory",
+        "allocated_bytes": 100663296
+      }
+    ],
+    "stderr": "[greywall] Running python3 in a sandbox.\nA built-in profile is available. Without it, only the current directory is accessible.\n\nAllow read:   ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/.condarc  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\nAllow write: ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\n\n[Y] Use profile (recommended)   [e] Edit first   [s] Skip (restrictive)   [n] Don't ask again\n> ",
+    "receipt": null
+  },
+  {
+    "tool": "greywall",
+    "resource": "pids",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 10,
+    "exit": 0,
+    "elapsed_ms": 2691.461329,
+    "records": [
+      {
+        "probe": "pids",
+        "forks": 32,
+        "errno": null
+      }
+    ],
+    "stderr": "[greywall] Running python3 in a sandbox.\nA built-in profile is available. Without it, only the current directory is accessible.\n\nAllow read:   ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/.condarc  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\nAllow write: ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\n\n[Y] Use profile (recommended)   [e] Edit first   [s] Skip (restrictive)   [n] Don't ask again\n> ",
+    "receipt": null
+  },
+  {
+    "tool": "greywall",
+    "resource": "cpu",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 11,
+    "exit": 0,
+    "elapsed_ms": 2057.349903,
+    "records": [
+      {
+        "probe": "cpu",
+        "cpu_s": 0.20229711,
+        "wall_s": 0.20234692099984386
+      }
+    ],
+    "stderr": "[greywall] Running python3 in a sandbox.\nA built-in profile is available. Without it, only the current directory is accessible.\n\nAllow read:   ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/.condarc  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\nAllow write: ~/.cache/pip  ~/.config/pip  ~/.cache/uv  ~/.config/uv  ~/.local/share/uv  ~/.local/state/uv  ~/.local/pipx  ~/.pyenv  ~/.virtualenvs  ~/.cache/pypoetry  ~/.config/pypoetry  ~/.local/share/pypoetry  ~/.cache/pdm  ~/.config/pdm  ~/.local/share/pdm  ~/.cache/pre-commit  ~/.cache/mypy  ~/.cache/ruff  ~/.conda  ~/miniconda3  ~/miniforge3  ~/.cache/hatch  ~/.config/hatch  ~/.local/share/hatch  ~/.ipython  ~/.jupyter  ~/.python_history\n\n[Y] Use profile (recommended)   [e] Edit first   [s] Skip (restrictive)   [n] Don't ask again\n> ",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "wall",
+    "requested_ceiling": [
+      "timeout=1000ms"
+    ],
+    "ceiling_supported": true,
+    "sequence": 13,
+    "exit": 255,
+    "elapsed_ms": 1012.292991,
+    "records": [
+      {
+        "probe": "wall",
+        "started": true
+      }
+    ],
+    "stderr": "{\"error\":{\"code\":\"backend_error\",\"message\":\"script timed out after 1000ms\"}}\n",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "memory",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 14,
+    "exit": 0,
+    "elapsed_ms": 526.954921,
+    "records": [
+      {
+        "probe": "memory",
+        "started": true
+      },
+      {
+        "probe": "memory",
+        "allocated_bytes": 100663296
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "pids",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 15,
+    "exit": 0,
+    "elapsed_ms": 973.139801,
+    "records": [
+      {
+        "probe": "pids",
+        "forks": 32,
+        "errno": null
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  },
+  {
+    "tool": "mxc",
+    "resource": "cpu",
+    "requested_ceiling": [],
+    "ceiling_supported": false,
+    "sequence": 16,
+    "exit": 0,
+    "elapsed_ms": 322.331837,
+    "records": [
+      {
+        "probe": "cpu",
+        "cpu_s": 0.201539517,
+        "wall_s": 0.20154594799896586
+      }
+    ],
+    "stderr": "",
+    "receipt": null
+  }
+]

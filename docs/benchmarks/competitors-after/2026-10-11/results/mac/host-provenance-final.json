@@ -1,0 +1,59 @@
+{
+  "date_utc": "2026-10-11T21:21:09Z",
+  "host": {
+    "system": "Darwin",
+    "node": "muetdhiver2.home",
+    "release": "27.0.0",
+    "version": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:20:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6020",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "cpu_count": 10,
+  "bin_hashes": {
+    "bin/LICENSE": "4326f1b06bfe45be486cf117bd14630629eb5d3329fdf21f52194c221ebee90a",
+    "bin/README.md": "7db9af5c2234e7d08f58da92509305e73400cc14b857ba0e0afeb220c6b112b4",
+    "bin/claude": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "bin/codex": "16593cc2f422d5f398a8e40f550ebbaf1245392528957be342c295920a300704",
+    "bin/codex-code-mode-host": "ed79fbc9e1683feb29d73fb421f3e16932d178a459f63741754014c6c7ea6107",
+    "bin/greyproxy": "aadef1a38b71a36d2ad4fcd916ded9586f3d11b0c112fb6847f6d50e48001505",
+    "bin/greywall": "cd71b0a96a59458d922d192de10e24e986060faea22e5eb854e6198735056d0c",
+    "bin/mxc-exec-mac": "df1a01bff34eaaa76c8e047e3ac4c8ede5ca2d642c96f6086d4234190495425e",
+    "bin/opencode": "476151a6c8b56e084d223d71a9312479e3b95547f8d8649b3489577059f9c5b4",
+    "bin/openshell": "18263d5083bfcac277d79074984b0a3218ba05f3d96d58acfdf2311edd7f9fcb",
+    "bin/openshell-gateway": "c1836ce4f16ae4088eba17809e1ba6b8f0c08614702aa42486b1701f6fc9d328",
+    "linux-bin/claude": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+    "linux-bin/codex": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3",
+    "linux-bin/codex-code-mode-host": "6979f2fea8cb1d5d72614abfe2f42b16727cdce2c356cc6af933157e732a7277",
+    "linux-bin/opencode": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df"
+  },
+  "commands": {
+    "disk": {
+      "exit": 0,
+      "output": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   460Gi   387Gi    45Gi    90%    3.7M  476M    1%   /System/Volumes/Data\n"
+    },
+    "identity": {
+      "exit": 0,
+      "output": "uid=501(monocursive) gid=20(staff) groups=20(staff),12(everyone),61(localaccounts),79(_appserverusr),80(admin),81(_appserveradm),98(_lpadmin),701(com.apple.sharepoint.group.1),33(_appstore),100(_lpoperator),204(_developer),250(_analyticsusers),395(com.apple.access_ftp),398(com.apple.access_screensharing),399(com.apple.access_ssh),400(com.apple.access_remote_ae)\n"
+    },
+    "python": {
+      "exit": 0,
+      "output": "Python 3.14.3\n"
+    },
+    "docker-info": {
+      "exit": 1,
+      "output": "{\"version\":\"28.3.3\",\"cpu\":10,\"memory\":8384393216,\"kernel\":\"6.15.11-orbstack-00539-g9885ebd8e3f4\",\"memory_limit\":\ntemplate: :1:139: executing \"\" at <.MemLimit>: can't evaluate field MemLimit in type system.dockerInfo\n"
+    },
+    "openshell-status": {
+      "exit": 0,
+      "output": "Server Status\n\n  Gateway: benchmark-mac\n  Server: https://localhost:17670\n  Status: Connected\n  Authentication: Authenticated (mTLS transport)\n  Version: 0.1.3\n"
+    },
+    "os": {
+      "exit": 0,
+      "output": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434\n"
+    },
+    "hardware": {
+      "exit": 0,
+      "output": "hw.model: Mac14,9\nhw.memsize: 17179869184\nhw.ncpu: 10\nmachdep.cpu.brand_string: Apple M2 Pro\n"
+    }
+  }
+}

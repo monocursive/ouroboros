@@ -1,0 +1,17 @@
+{
+  "schema": "openshell-perf/2",
+  "host": {
+    "system": "Linux",
+    "node": "vps-450b3fe8",
+    "release": "7.0.0-31-generic",
+    "version": "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "image_id": "sha256:bd448e738213cb8a07a854a553b7c99ef20f5f56ddded1aa15c8dbed52d2c22e",
+  "started_utc": "2026-10-11T18:40:35Z",
+  "harness_sha256": "bfbef534e80490b5f882f392640895def0b6216e50354235d95b64a8e5d745a0",
+  "samples": 30,
+  "warmup": 3,
+  "seed": 20261011
+}

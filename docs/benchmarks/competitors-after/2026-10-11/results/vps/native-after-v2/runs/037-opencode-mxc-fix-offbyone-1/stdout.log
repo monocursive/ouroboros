@@ -1,0 +1,22 @@
+I'll help you run the tests, find the bug, and fix it. Let me start by creating a task plan and running the tests.
+Now let me examine the source file and tests to understand the issue:
+Perfect! I found the bug. The issue is an **off-by-one error** in src/parse.py:4. The function is returning `parts[1]` (the second element) instead of `parts[0]` (the first element).
+
+This causes:
+- `test_basic` to fail: 'hello world' splits into ['hello', 'world'], and it returns 'world' instead of 'hello'
+- `test_single` to error: 'solo' splits into ['solo'], and trying to access index 1 causes an IndexError
+
+Let me fix this:
+Now let me verify that all tests pass:
+Perfect! All tests are now passing. 
+
+## Summary
+
+I found and fixed the bug in src/parse.py:4. The issue was an **off-by-one error** where the function was returning `parts[1]` instead of `parts[0]`. Since Python lists are 0-indexed, the first element is at index 0, not index 1.
+
+The fix changed:
+- `return parts[1]` → `return parts[0]`
+
+Both tests now pass successfully:
+- `test_basic`: 'hello world' correctly returns 'hello'
+- `test_single`: 'solo' correctly returns 'solo' (and no longer throws an IndexError)

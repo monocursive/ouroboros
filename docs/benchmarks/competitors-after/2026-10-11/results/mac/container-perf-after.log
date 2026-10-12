@@ -1,0 +1,213 @@
+container reference established
+round -3 complete
+round -2 complete
+round -1 complete
+round 0 complete
+round 1 complete
+round 2 complete
+round 3 complete
+round 4 complete
+round 5 complete
+round 6 complete
+round 7 complete
+round 8 complete
+round 9 complete
+round 10 complete
+round 11 complete
+round 12 complete
+round 13 complete
+round 14 complete
+round 15 complete
+round 16 complete
+round 17 complete
+round 18 complete
+round 19 complete
+round 20 complete
+round 21 complete
+round 22 complete
+round 23 complete
+round 24 complete
+round 25 complete
+round 26 complete
+round 27 complete
+round 28 complete
+round 29 complete
+{
+ "docker-run": {
+  "noop": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 216.72,
+   "work_ms_median": 0.0
+  },
+  "python": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 233.06,
+   "work_ms_median": 0.0
+  },
+  "git": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 251.18,
+   "work_ms_median": 15.29
+  },
+  "reads": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 218.56,
+   "work_ms_median": 3.03
+  },
+  "writes": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 231.96,
+   "work_ms_median": 10.67
+  },
+  "spawn": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 224.38,
+   "work_ms_median": 16.55
+  },
+  "cpu": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 233.82,
+   "work_ms_median": 24.1
+  }
+ },
+ "docker-warm": {
+  "noop": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 27.53,
+   "work_ms_median": 0.0
+  },
+  "python": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 47.06,
+   "work_ms_median": 0.0
+  },
+  "git": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 47.76,
+   "work_ms_median": 1.49
+  },
+  "reads": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 30.16,
+   "work_ms_median": 2.07
+  },
+  "writes": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 48.55,
+   "work_ms_median": 19.54
+  },
+  "spawn": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 44.1,
+   "work_ms_median": 15.55
+  },
+  "cpu": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 53.7,
+   "work_ms_median": 24.17
+  }
+ },
+ "openshell-ephemeral": {
+  "noop": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 677.23,
+   "work_ms_median": 0.0
+  },
+  "python": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 677.42,
+   "work_ms_median": 0.0
+  },
+  "git": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 668.02,
+   "work_ms_median": 15.02
+  },
+  "reads": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 681.38,
+   "work_ms_median": 5.46
+  },
+  "writes": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 685.31,
+   "work_ms_median": 11.82
+  },
+  "spawn": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 678.18,
+   "work_ms_median": 18.4
+  },
+  "cpu": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 674.58,
+   "work_ms_median": 24.36
+  }
+ },
+ "openshell-warm": {
+  "noop": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 54.06,
+   "work_ms_median": 0.0
+  },
+  "python": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 72.59,
+   "work_ms_median": 0.0
+  },
+  "git": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 75.19,
+   "work_ms_median": 1.89
+  },
+  "reads": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 76.92,
+   "work_ms_median": 22.08
+  },
+  "writes": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 93.52,
+   "work_ms_median": 41.99
+  },
+  "spawn": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 80.62,
+   "work_ms_median": 18.46
+  },
+  "cpu": {
+   "samples": 30,
+   "successful": 30,
+   "elapsed_ms_median": 87.62,
+   "work_ms_median": 24.85
+  }
+ }
+}
+egress: [{"tool": "docker-run", "host_accepts_during_probe": 1}, {"tool": "docker-warm", "host_accepts_during_probe": 1}, {"tool": "openshell-ephemeral", "host_accepts_during_probe": 0}, {"tool": "openshell-warm", "host_accepts_during_probe": 0}]

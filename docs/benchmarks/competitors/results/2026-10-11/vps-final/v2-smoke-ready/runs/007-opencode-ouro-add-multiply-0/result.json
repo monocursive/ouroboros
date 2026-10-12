@@ -1,0 +1,49 @@
+{
+  "sequence": 7,
+  "agent": "opencode",
+  "mode": "ouro",
+  "task": "add-multiply",
+  "repetition": 0,
+  "started_utc": "2026-10-11T15:42:01Z",
+  "elapsed_ms": 24330.975204,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/ubuntu/bench-ouro/bin/ouro-jail",
+    "run",
+    "--profile",
+    "agent",
+    "--launch",
+    "opencode",
+    "--workspace",
+    "/home/ubuntu/bench-ouro/results/v2-smoke-ready/runs/007-opencode-ouro-add-multiply-0/workspace/add-multiply",
+    "--ro",
+    "/home/ubuntu/.opencode/bin",
+    "--ro",
+    "/home/ubuntu/bench-ouro/bin",
+    "--limit",
+    "wall=120s",
+    "--receipt",
+    "/home/ubuntu/bench-ouro/results/v2-smoke-ready/runs/007-opencode-ouro-add-multiply-0/jail.json",
+    "--",
+    "/home/ubuntu/bench-ouro/bin/opencode",
+    "run",
+    "--model",
+    "anthropic/claude-sonnet-4-5",
+    "Add a function multiply(a, b) to src/calc.py that returns the product of two numbers. Then run the tests with: python3 -m unittest discover -s tests -v. Fix any failures until all tests pass. Do not modify the tests."
+  ],
+  "load": [
+    2.396484375,
+    1.64111328125,
+    1.11279296875
+  ],
+  "artifact": "runs/007-opencode-ouro-add-multiply-0"
+}

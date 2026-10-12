@@ -1,0 +1,124 @@
+rule: {'id': 4, 'container_pattern': '*', 'destination_pattern': 'api.anthropic.com', 'port_pattern': '443', 'rule_type': 'permanent', 'action': 'allow', 'created_at': '2026-10-11T11:59:26Z', 'expires_at': None, 'last_used_at': None, 'created_by': 'admin', 'notes': 'agent-bench', 'is_active': True, 'source': 'global'}
+credential: {'error': 'HTTP Error 500: Internal Server Error'}
+claude direct add-multiply run0: 20608ms exit=0 tests=True content=True
+claude direct add-multiply run1: 17154ms exit=0 tests=True content=True
+claude direct fix-offbyone run0: 19823ms exit=0 tests=True content=True
+claude direct fix-offbyone run1: 19468ms exit=0 tests=True content=True
+claude direct refactor-yaml-json run0: 24003ms exit=0 tests=True content=True
+claude direct refactor-yaml-json run1: 23016ms exit=0 tests=True content=True
+claude ouro add-multiply run0: 18766ms exit=0 tests=True content=True
+claude ouro add-multiply run1: 18077ms exit=0 tests=True content=True
+claude ouro fix-offbyone run0: 19260ms exit=0 tests=True content=True
+claude ouro fix-offbyone run1: 19082ms exit=0 tests=True content=True
+claude ouro refactor-yaml-json run0: 22404ms exit=0 tests=True content=True
+claude ouro refactor-yaml-json run1: 25243ms exit=0 tests=True content=True
+claude greywall add-multiply run0: 194916ms exit=1 tests=False content=False
+claude greywall add-multiply run1: 198169ms exit=1 tests=False content=False
+claude greywall fix-offbyone run0: 198659ms exit=1 tests=False content=False
+claude greywall fix-offbyone run1: 190354ms exit=1 tests=False content=False
+claude greywall refactor-yaml-json run0: 207770ms exit=1 tests=True content=False
+claude greywall refactor-yaml-json run1: 202078ms exit=1 tests=True content=False
+claude mxc add-multiply run0: 12ms exit=255 tests=False content=False
+claude mxc add-multiply run1: 9ms exit=255 tests=False content=False
+claude mxc fix-offbyone run0: 10ms exit=255 tests=False content=False
+claude mxc fix-offbyone run1: 10ms exit=255 tests=False content=False
+claude mxc refactor-yaml-json run0: 8ms exit=255 tests=True content=False
+claude mxc refactor-yaml-json run1: 10ms exit=255 tests=True content=False
+opencode direct add-multiply run0: 32150ms exit=0 tests=True content=True
+opencode direct add-multiply run1: 34079ms exit=0 tests=True content=True
+opencode direct fix-offbyone run0: 42829ms exit=0 tests=True content=True
+opencode direct fix-offbyone run1: 41934ms exit=0 tests=True content=True
+opencode direct refactor-yaml-json run0: 30137ms exit=0 tests=True content=True
+opencode direct refactor-yaml-json run1: 31238ms exit=0 tests=True content=True
+opencode ouro add-multiply run0: 22546ms exit=0 tests=True content=True
+opencode ouro add-multiply run1: 24835ms exit=0 tests=True content=True
+opencode ouro fix-offbyone run0: 32816ms exit=0 tests=True content=True
+opencode ouro fix-offbyone run1: 32430ms exit=0 tests=True content=True
+opencode ouro refactor-yaml-json run0: 28787ms exit=0 tests=True content=True
+opencode ouro refactor-yaml-json run1: 27598ms exit=0 tests=True content=True
+opencode greywall add-multiply run0: 69560ms exit=1 tests=False content=False
+opencode greywall add-multiply run1: 69780ms exit=1 tests=False content=False
+opencode greywall fix-offbyone run0: 69327ms exit=1 tests=False content=False
+opencode greywall fix-offbyone run1: 71386ms exit=1 tests=False content=False
+opencode greywall refactor-yaml-json run0: 70897ms exit=1 tests=True content=False
+opencode greywall refactor-yaml-json run1: 67207ms exit=1 tests=True content=False
+opencode mxc add-multiply run0: 16ms exit=255 tests=False content=False
+opencode mxc add-multiply run1: 11ms exit=255 tests=False content=False
+opencode mxc fix-offbyone run0: 8ms exit=255 tests=False content=False
+opencode mxc fix-offbyone run1: 9ms exit=255 tests=False content=False
+opencode mxc refactor-yaml-json run0: 11ms exit=255 tests=True content=False
+opencode mxc refactor-yaml-json run1: 9ms exit=255 tests=True content=False
+{
+ "claude/direct": {
+  "runs": 6,
+  "success": 6,
+  "elapsed_ms": [
+   20608,
+   17154,
+   19823,
+   19468,
+   24003,
+   23016
+  ],
+  "elapsed_ms_median": 20608
+ },
+ "claude/ouro": {
+  "runs": 6,
+  "success": 6,
+  "elapsed_ms": [
+   18766,
+   18077,
+   19260,
+   19082,
+   22404,
+   25243
+  ],
+  "elapsed_ms_median": 19260
+ },
+ "claude/greywall": {
+  "runs": 6,
+  "success": 0,
+  "elapsed_ms": []
+ },
+ "claude/mxc": {
+  "runs": 6,
+  "success": 0,
+  "elapsed_ms": []
+ },
+ "opencode/direct": {
+  "runs": 6,
+  "success": 6,
+  "elapsed_ms": [
+   32150,
+   34079,
+   42829,
+   41934,
+   30137,
+   31238
+  ],
+  "elapsed_ms_median": 34079
+ },
+ "opencode/ouro": {
+  "runs": 6,
+  "success": 6,
+  "elapsed_ms": [
+   22546,
+   24835,
+   32816,
+   32430,
+   28787,
+   27598
+  ],
+  "elapsed_ms_median": 28787
+ },
+ "opencode/greywall": {
+  "runs": 6,
+  "success": 0,
+  "elapsed_ms": []
+ },
+ "opencode/mxc": {
+  "runs": 6,
+  "success": 0,
+  "elapsed_ms": []
+ }
+}

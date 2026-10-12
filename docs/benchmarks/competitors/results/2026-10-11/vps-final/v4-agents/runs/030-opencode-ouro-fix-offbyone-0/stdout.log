@@ -1,0 +1,10 @@
+I'll help you fix the failing tests. Let me start by running the tests to see what's failing, then find and fix the bug in src/parse.py.
+Now let me read the source file and test file to understand the issue:
+Perfect! I can see the bug now. The issue is in src/parse.py:4 - it's returning `parts[1]` when it should return `parts[0]`. This is a classic off-by-one error. Arrays are 0-indexed, so the first element is at index 0, not index 1.
+Now let me verify that all tests pass:
+Perfect! I found and fixed the bug. The issue was an off-by-one error in src/parse.py:4. The function was returning `parts[1]` (the second element) instead of `parts[0]` (the first element). This caused:
+
+1. `test_basic` to fail - it returned 'world' instead of 'hello'
+2. `test_single` to error - it tried to access index 1 in a list with only 1 element
+
+All tests now pass successfully.

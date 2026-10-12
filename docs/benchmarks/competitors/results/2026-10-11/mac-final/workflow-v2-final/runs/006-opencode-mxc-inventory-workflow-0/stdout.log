@@ -1,0 +1,41 @@
+I'll implement category summaries for the inventory CLI with the specified requirements. Let me start by exploring the codebase structure and planning the work.
+Now let me implement the category summary functionality. I'll start by creating the grouping logic in report.py.
+Excellent! All tests pass. Now let me update the README with the grouped example.
+Perfect! Let me verify the implementation by running the actual CLI command to confirm it works as expected:
+Excellent! All functionality is working correctly. Let me run the tests one more time to ensure everything passes:
+Perfect! Let me verify the error handling for invalid CSV:
+Perfect! The implementation is complete and all requirements have been met:
+
+## Summary
+
+I've successfully implemented category summaries in the inventory CLI with the following changes:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_summary` function that:
+   - Filters items by min_quantity before grouping
+   - Groups items by category
+   - Sums quantities and calculates stock_value (quantity * unit_price) 
+   - Formats stock_value as a string with exactly 2 decimal places
+   - Returns results sorted by category name
+
+2. **inventory/cli.py** - Updated to:
+   - Add `--group-by-category` argument
+   - Route to `category_summary` when flag is present, otherwise use `item_report`
+   - Maintain existing error handling (exit code 2 for invalid CSV, no traceback)
+
+3. **README.md** - Added documentation showing:
+   - How to use `--group-by-category`
+   - Example command and expected JSON output
+   - Explanation of stock_value calculation
+
+### Verification:
+
+All 10 tests pass:
+- Ungrouped output works as before
+- Grouped output produces correct category summaries
+- `--min-quantity` filters before grouping
+- Invalid CSV returns exit code 2 with useful error message (no traceback)
+- Processing and argument parsing remain in separate modules (report.py and cli.py)
+
+The implementation correctly handles decimal precision, sorting by category, and maintains all existing functionality.

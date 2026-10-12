@@ -3213,6 +3213,80 @@ fn r9_deny_read_grants_are_enforced_as_masks() {
     );
 }
 
+/// Benchmark regression: a file denial within a visible read-only parent
+/// must mask content and refuse mutations, without aborting sandbox setup.
+#[test]
+fn a_file_denial_inside_a_visible_parent_is_unreadable_and_readonly() {
+    if !live() {
+        return;
+    }
+    for parent_writable in [false, true] {
+        let c = case();
+        let private = c.jail.root().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let secret = private.join("secret");
+        let sibling = private.join("sibling");
+        std::fs::write(&secret, b"classified\n").unwrap();
+        std::fs::write(&sibling, b"ordinary\n").unwrap();
+        let link = c.workspace.join("secret-link");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        let check = r#"
+import errno, os, sys
+secret, sibling, link = sys.argv[1:]
+assert open(sibling).read() == 'ordinary\n'
+for path in [secret, link]:
+    for flags in [os.O_RDONLY, os.O_WRONLY, os.O_WRONLY | os.O_TRUNC]:
+        try:
+            fd = os.open(path, flags)
+        except OSError as error:
+            assert error.errno in (errno.EACCES, errno.EROFS), error
+        else:
+            os.close(fd)
+            raise AssertionError('denied file opened: ' + path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError as error:
+        assert error.errno in (errno.EPERM, errno.EROFS), error
+    else:
+        raise AssertionError('mask chmod succeeded')
+"#;
+        let run = c
+            .jail
+            .arg(if parent_writable { "--rw" } else { "--ro" })
+            .arg(&private)
+            .arg("--deny-read")
+            .arg(&secret)
+            .target([
+                "/usr/bin/python3",
+                "-c",
+                check,
+                secret.to_str().unwrap(),
+                sibling.to_str().unwrap(),
+                link.to_str().unwrap(),
+            ])
+            .run()
+            .expect("run");
+        assert_eq!(
+            run.code(),
+            Some(0),
+            "file denial failed: {}",
+            run.stderr_text()
+        );
+        let receipt = settled(&run);
+        assert_eq!(receipt["lifetime"]["tree_empty"], true);
+        assert_eq!(std::fs::read(&secret).unwrap(), b"classified\n");
+        assert!(
+            receipt
+                .pointer("/applied/filesystem/mounts")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|mount| mount["path"] == secret.to_str().unwrap() && mount["mode"] == "ro")
+        );
+    }
+}
+
 /// M-K/§6.4: an explicit pids ceiling is a required limit. It runs only when
 /// the delegated pids controller enforces it (J2) and refuses otherwise,
 /// never running unbounded.

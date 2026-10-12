@@ -1,0 +1,13 @@
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling hashbrown v0.17.1
+   Compiling ouro-jail v0.1.0 (/home/monocursive/bench-ouro-after/src/crates/ouro-jail)
+   Compiling indexmap v2.14.2
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling toml_edit v0.22.27
+   Compiling ouro-fixture v0.1.0 (/home/monocursive/bench-ouro-after/src/crates/ouro-fixture)
+   Compiling ouro-records v0.1.0 (/home/monocursive/bench-ouro-after/src/crates/ouro-records)
+   Compiling toml v0.8.23
+    Finished `release` profile [optimized] target(s) in 3m 50s

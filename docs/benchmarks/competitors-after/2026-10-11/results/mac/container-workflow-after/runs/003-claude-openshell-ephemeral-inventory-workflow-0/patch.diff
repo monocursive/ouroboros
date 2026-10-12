@@ -1,0 +1,99 @@
+diff --git a/README.md b/README.md
+index 06a1174..f38eef7 100644
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,39 @@
+ Run `python3 -m inventory.cli examples/stock.csv`.
+ Use `--min-quantity 3` to filter before reporting.
+ Prices are decimal strings. No third-party dependencies are required.
++
++## Examples
++
++Ungrouped output:
++```bash
++python3 -m inventory.cli examples/stock.csv
++```
++```json
++[
++  {"sku": "pen", "category": "office", "quantity": 10, "unit_price": "0.10"},
++  {"sku": "notebook", "category": "office", "quantity": 2, "unit_price": "2.50"},
++  {"sku": "mug", "category": "kitchen", "quantity": 3, "unit_price": "4.25"}
++]
++```
++
++Grouped by category:
++```bash
++python3 -m inventory.cli examples/stock.csv --group-by-category
++```
++```json
++[
++  {"category": "kitchen", "quantity": 3, "stock_value": "12.75"},
++  {"category": "office", "quantity": 12, "stock_value": "6.00"}
++]
++```
++
++Filter then group:
++```bash
++python3 -m inventory.cli examples/stock.csv --group-by-category --min-quantity 3
++```
++```json
++[
++  {"category": "kitchen", "quantity": 3, "stock_value": "12.75"},
++  {"category": "office", "quantity": 10, "stock_value": "1.00"}
++]
++```
+diff --git a/inventory/cli.py b/inventory/cli.py
+index 64a76c2..254b5aa 100644
+--- a/inventory/cli.py
++++ b/inventory/cli.py
+@@ -2,16 +2,20 @@ import argparse
+ import json
+ import sys
+ from .loader import load_items
+-from .report import item_report
++from .report import item_report, category_summary
+ 
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description='Report inventory from CSV')
+     parser.add_argument('csv_file')
+     parser.add_argument('--min-quantity', type=int, default=0)
++    parser.add_argument('--group-by-category', action='store_true')
+     args = parser.parse_args(argv)
+     try:
+         items = load_items(args.csv_file)
+-        result = item_report(items, args.min_quantity)
++        if args.group_by_category:
++            result = category_summary(items, args.min_quantity)
++        else:
++            result = item_report(items, args.min_quantity)
+     except (ValueError, OSError) as exc:
+         print(str(exc), file=sys.stderr)
+         return 2
+diff --git a/inventory/report.py b/inventory/report.py
+index 080803f..456699d 100644
+--- a/inventory/report.py
++++ b/inventory/report.py
+@@ -1,4 +1,23 @@
++from decimal import Decimal
++
+ def item_report(items, min_quantity=0):
+     return [{'sku': x.sku, 'category': x.category, 'quantity': x.quantity,
+              'unit_price': str(x.unit_price)}
+             for x in items if x.quantity >= min_quantity]
++
++def category_summary(items, min_quantity=0):
++    filtered = [x for x in items if x.quantity >= min_quantity]
++    groups = {}
++    for item in filtered:
++        if item.category not in groups:
++            groups[item.category] = {'quantity': 0, 'stock_value': Decimal('0')}
++        groups[item.category]['quantity'] += item.quantity
++        groups[item.category]['stock_value'] += item.quantity * item.unit_price
++    result = []
++    for category in sorted(groups.keys()):
++        result.append({
++            'category': category,
++            'quantity': groups[category]['quantity'],
++            'stock_value': f"{groups[category]['stock_value']:.2f}"
++        })
++    return result

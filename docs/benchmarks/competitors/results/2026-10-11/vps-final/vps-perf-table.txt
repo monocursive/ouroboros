@@ -1,0 +1,32 @@
+direct
+  cpu      n=30 ok=30  wall    25.69 /    29.59 ms   work    24.48 ms
+  git      n=30 ok=30  wall    43.62 /    55.27 ms   work     3.97 ms
+  noop     n=30 ok=30  wall     1.05 /     2.17 ms   work    -1.00 ms
+  python   n=30 ok=30  wall    38.05 /    47.15 ms   work    -1.00 ms
+  reads    n=30 ok=30  wall     5.73 /     7.38 ms   work     4.60 ms
+  spawn    n=30 ok=30  wall    75.75 /    80.93 ms   work    74.58 ms
+  writes   n=30 ok=30  wall    63.37 /    75.23 ms   work    62.07 ms
+greywall
+  cpu      n=30 ok=30  wall  1614.98 /  1727.91 ms   work    24.27 ms
+  git      n=30 ok=30  wall  1645.16 /  1732.73 ms   work     6.02 ms
+  noop     n=30 ok=30  wall  1597.11 /  1683.03 ms   work    -1.00 ms
+  python   n=30 ok=30  wall  1638.43 /  1718.63 ms   work    -1.00 ms
+  reads    n=30 ok=30  wall  1614.71 /  1755.86 ms   work     7.04 ms
+  spawn    n=30 ok=30  wall  1674.86 /  1750.28 ms   work    79.94 ms
+  writes   n=30 ok=30  wall  1670.13 /  1756.33 ms   work    70.21 ms
+mxc
+  cpu      n=30 ok=30  wall    68.45 /    70.25 ms   work    24.24 ms
+  git      n=30 ok=30  wall    68.12 /   117.48 ms   work     5.97 ms
+  noop     n=30 ok=30  wall    19.51 /    22.58 ms   work    -1.00 ms
+  python   n=30 ok=30  wall    68.06 /    76.07 ms   work    -1.00 ms
+  reads    n=30 ok=30  wall    20.91 /    37.94 ms   work     6.16 ms
+  spawn    n=30 ok=30  wall   118.43 /   119.54 ms   work    76.76 ms
+  writes   n=30 ok=30  wall   118.13 /   120.66 ms   work    67.64 ms
+ouro-jail
+  cpu      n=30 ok=30  wall   157.40 /   173.76 ms   work    24.42 ms
+  git      n=30 ok=30  wall   183.11 /   217.09 ms   work     7.17 ms
+  noop     n=30 ok=30  wall   131.06 /   147.52 ms   work    -1.00 ms
+  python   n=30 ok=30  wall   171.93 /   200.83 ms   work    -1.00 ms
+  reads    n=30 ok=30  wall   136.30 /   148.30 ms   work     6.75 ms
+  spawn    n=30 ok=30  wall   252.51 /   279.76 ms   work   115.05 ms
+  writes   n=30 ok=30  wall   270.27 /   320.72 ms   work   141.61 ms

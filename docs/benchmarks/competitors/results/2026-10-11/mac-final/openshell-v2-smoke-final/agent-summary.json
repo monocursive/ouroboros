@@ -1,0 +1,70 @@
+{
+  "claude/docker": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      18164.752
+    ],
+    "median_ms": 18164.752
+  },
+  "claude/openshell-warm": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      20376.113667
+    ],
+    "median_ms": 20376.113667
+  },
+  "claude/openshell-ephemeral": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      20335.48275
+    ],
+    "median_ms": 20335.48275
+  },
+  "opencode/docker": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      21809.931833
+    ],
+    "median_ms": 21809.931833
+  },
+  "opencode/openshell-warm": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      21177.900667
+    ],
+    "median_ms": 21177.900667
+  },
+  "opencode/openshell-ephemeral": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      21848.841041
+    ],
+    "median_ms": 21848.841041
+  },
+  "codex/openshell-warm": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  },
+  "codex/docker": {
+    "runs": 1,
+    "success": 1,
+    "times_ms": [
+      18780.604792
+    ],
+    "median_ms": 18780.604792
+  },
+  "codex/openshell-ephemeral": {
+    "runs": 1,
+    "success": 0,
+    "times_ms": [],
+    "median_ms": null
+  }
+}

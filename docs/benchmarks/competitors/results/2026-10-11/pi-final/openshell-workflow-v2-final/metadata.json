@@ -1,0 +1,60 @@
+{
+  "schema": "container-agent-comparison/2",
+  "host": {
+    "system": "Linux",
+    "node": "raspberrypi",
+    "release": "6.18.50+rpt-rpi-v8",
+    "version": "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "machine": "aarch64",
+    "processor": ""
+  },
+  "started_utc": "2026-10-11T19:00:50Z",
+  "image_id": "sha256:e904ab56ca3f1c895ad3ffa182570d926982edc108a3d7efd97bdeab2aa6aeef",
+  "schedule": [
+    [
+      "claude",
+      "inventory-workflow",
+      0,
+      "docker"
+    ],
+    [
+      "claude",
+      "inventory-workflow",
+      0,
+      "openshell-ephemeral"
+    ],
+    [
+      "opencode",
+      "inventory-workflow",
+      0,
+      "docker"
+    ],
+    [
+      "opencode",
+      "inventory-workflow",
+      0,
+      "openshell-ephemeral"
+    ],
+    [
+      "codex",
+      "inventory-workflow",
+      0,
+      "docker"
+    ],
+    [
+      "codex",
+      "inventory-workflow",
+      0,
+      "openshell-ephemeral"
+    ]
+  ],
+  "seed": 20261011,
+  "harness_sha256": "f19e177e14205d7cdf391f04709c95b50e7361fe16958949fdf47874d2e86b24",
+  "single_agent_image": false,
+  "container_bin_hashes": {
+    "claude": "cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b",
+    "opencode": "1e392db1d558a9eebaef618d4da3927f8b61fbcbd9a19513ed77f911142415df",
+    "codex": "113aa5d5952a6fd3950a88323219747d0c91978ebee948509a540c8a460e59a3",
+    "codex-code-mode-host": "6979f2fea8cb1d5d72614abfe2f42b16727cdce2c356cc6af933157e732a7277"
+  }
+}

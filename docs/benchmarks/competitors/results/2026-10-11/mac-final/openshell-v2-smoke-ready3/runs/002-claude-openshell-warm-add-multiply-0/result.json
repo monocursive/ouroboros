@@ -1,0 +1,31 @@
+{
+  "sequence": 2,
+  "agent": "claude",
+  "mode": "openshell-warm",
+  "task": "add-multiply",
+  "repetition": 0,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 18896.695625,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "exec",
+    "-n",
+    "bench-v2-claude",
+    "--no-tty",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "claude",
+    "add-multiply"
+  ],
+  "load": [
+    1.57763671875,
+    1.66259765625,
+    1.92626953125
+  ],
+  "artifact": "runs/002-claude-openshell-warm-add-multiply-0"
+}

@@ -1,0 +1,29 @@
+{
+  "sequence": 22,
+  "agent": "opencode",
+  "mode": "mxc",
+  "task": "refactor-yaml-json",
+  "repetition": 1,
+  "started_utc": "2026-10-11T17:04:30Z",
+  "elapsed_ms": 19.162044,
+  "exit": 255,
+  "timeout": false,
+  "success": false,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": false,
+    "test_output": "test_roundtrip (test_store.TestStore.test_roundtrip) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.005s\n\nOK\n",
+    "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import sys;sys.path.insert(0,sys.argv[1]);from src.store import Store; import tempfile,json,pathlib; p=pathlib.Path(tempfile.mktemp()); s=Store(str(p)); value={'text':'caf\u00e9','n':None,'b':True,'nested':[1,{'x':2}]}; s.save(value); assert json.loads(p.read_text())==value; assert s.load()==value; p.unlink()\n                                                                                                                                                                                                                                                 ~~~~~~~~~~^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.13/json/__init__.py\", line 346, in loads\n    return _default_decoder.decode(s)\n           ~~~~~~~~~~~~~~~~~~~~~~~^^^\n  File \"/usr/lib/python3.13/json/decoder.py\", line 345, in decode\n    obj, end = self.raw_decode(s, idx=_w(s, 0).end())\n               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.13/json/decoder.py\", line 363, in raw_decode\n    raise JSONDecodeError(\"Expecting value\", s, err.value) from None\njson.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)\n"
+  },
+  "argv": [
+    "/home/monocursive/bench-ouro/bin/lxc-exec",
+    "/home/monocursive/bench-ouro/results/v5-opencode/runs/022-opencode-mxc-refactor-yaml-json-1/mxc-private.json"
+  ],
+  "load": [
+    0.76220703125,
+    1.08984375,
+    1.091796875
+  ],
+  "artifact": "runs/022-opencode-mxc-refactor-yaml-json-1"
+}

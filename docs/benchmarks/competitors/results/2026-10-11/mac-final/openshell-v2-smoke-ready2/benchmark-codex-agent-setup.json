@@ -1,0 +1,16 @@
+[
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 34.040583,
+    "stdout": "Imported 1 provider profile.\n",
+    "stderr": ""
+  },
+  {
+    "exit": 0,
+    "timeout": false,
+    "elapsed_ms": 47.087209,
+    "stdout": "\u2713 Created provider benchmark-codex-v2\n",
+    "stderr": ""
+  }
+]

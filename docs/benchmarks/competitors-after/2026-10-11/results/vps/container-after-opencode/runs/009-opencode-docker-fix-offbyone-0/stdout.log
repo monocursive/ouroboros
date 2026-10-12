@@ -1,0 +1,19 @@
+I'll help you run the tests, find the bug, and fix it. Let me start by creating a task plan and then running the tests.
+Now let me run the tests:
+I can see the issue! The tests show:
+1. `test_basic` expects `first_word('hello world')` to return `'hello'`, but it's returning `'world'`
+2. `test_single` expects `first_word('solo')` to return `'solo'`, but it's getting an IndexError
+
+The bug is an off-by-one error - the code is accessing `parts[1]` when it should be accessing `parts[0]`. Let me read the source code to confirm:
+Perfect! The bug is clear - the code is using `parts[1]` (the second element) when it should be using `parts[0]` (the first element). This is a classic off-by-one error since list indices start at 0 in Python. Let me fix it:
+Now let me verify that all tests pass:
+Perfect! All tests are now passing. 
+
+**Summary:**
+
+The bug was an off-by-one error in `src/parse.py:4`. The `first_word()` function was returning `parts[1]` (the second element) instead of `parts[0]` (the first element). This caused:
+- `first_word('hello world')` to return `'world'` instead of `'hello'`
+- `first_word('solo')` to raise an IndexError because there's only one element at index 0
+
+The fix was simple: change `return parts[1]` to `return parts[0]`, and now both tests pass successfully.
+CONTAINER-AGENT-RESULT={"agent": "opencode", "task": "fix-offbyone", "agent_exit": 0, "timeout": false, "success": true, "work_ms": 31615.267791, "checker": {"tests_unchanged": true, "tests_pass": true, "hidden_pass": true, "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n", "hidden_output": ""}, "patch": "diff --git a/src/parse.py b/src/parse.py\nindex 05a3724..5db236c 100644\n--- a/src/parse.py\n+++ b/src/parse.py\n@@ -1,4 +1,4 @@\n def first_word(text):\n     # Return the first word of a space-separated string\n     parts = text.split(' ')\n-    return parts[1]\n+    return parts[0]\n", "files": {"tests/__init__.py": "", "tests/test_parse.py": "import unittest\nfrom src.parse import first_word\n\nclass TestParse(unittest.TestCase):\n    def test_basic(self):\n        self.assertEqual(first_word('hello world'), 'hello')\n    def test_single(self):\n        self.assertEqual(first_word('solo'), 'solo')\n", "src/__init__.py": "", "src/parse.py": "def first_word(text):\n    # Return the first word of a space-separated string\n    parts = text.split(' ')\n    return parts[0]\n"}, "usage": {}, "peak_child_rss_kib": 757140, "guest_kernel": ["Linux", "d742497be93f", "7.0.0-31-generic", "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026", "x86_64"], "resource_limits": {"memory.max": "max", "memory.swap.max": "max", "pids.max": "3548", "cpu.max": "max 100000"}}

@@ -1,0 +1,22 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/ubuntu/bench-ouro/runs/grey-rules-v3/private"
+    ],
+    "allowWrite": [
+      "/home/ubuntu/bench-ouro/runs/grey-rules-v3/work"
+    ],
+    "denyRead": [
+      "/home/ubuntu/bench-ouro/runs/grey-rules-v3/private/denied"
+    ],
+    "denyWrite": [
+      "/home/ubuntu/bench-ouro/runs/grey-rules-v3/private"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:35699",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

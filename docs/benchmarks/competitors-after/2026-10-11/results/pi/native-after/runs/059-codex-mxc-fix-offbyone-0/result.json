@@ -1,0 +1,29 @@
+{
+  "sequence": 59,
+  "agent": "codex",
+  "mode": "mxc",
+  "task": "fix-offbyone",
+  "repetition": 0,
+  "started_utc": "2026-10-11T21:07:16Z",
+  "elapsed_ms": 26511.920568,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_basic (test_parse.TestParse.test_basic) ... ok\ntest_single (test_parse.TestParse.test_single) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/monocursive/bench-ouro-after/bin/lxc-exec",
+    "/home/monocursive/bench-ouro-after/results/native-after/runs/059-codex-mxc-fix-offbyone-0/mxc-private.json"
+  ],
+  "load": [
+    0.42333984375,
+    0.8037109375,
+    0.984375
+  ],
+  "artifact": "runs/059-codex-mxc-fix-offbyone-0"
+}

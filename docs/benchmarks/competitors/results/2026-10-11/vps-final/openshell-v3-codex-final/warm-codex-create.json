@@ -1,0 +1,7 @@
+{
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 729.055165,
+  "stdout": "\nCreated sandbox: bench-v2-codex\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image ouro-comparison-codex-v2:20261011\n[0.0s] Image already present\n[0.1s] Starting sandbox Container created\n",
+  "stderr": ""
+}

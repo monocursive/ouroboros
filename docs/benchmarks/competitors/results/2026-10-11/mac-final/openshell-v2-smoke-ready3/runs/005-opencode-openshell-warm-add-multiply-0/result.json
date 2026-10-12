@@ -1,0 +1,31 @@
+{
+  "sequence": 5,
+  "agent": "opencode",
+  "mode": "openshell-warm",
+  "task": "add-multiply",
+  "repetition": 0,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 240184.895209,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "exec",
+    "-n",
+    "bench-v2-opencode",
+    "--no-tty",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "opencode",
+    "add-multiply"
+  ],
+  "load": [
+    6.54931640625,
+    4.8173828125,
+    3.29345703125
+  ],
+  "artifact": "runs/005-opencode-openshell-warm-add-multiply-0"
+}

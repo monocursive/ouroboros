@@ -1,0 +1,125 @@
+[
+  {
+    "host": "pi",
+    "kind": "native",
+    "source": "pi/workflow-after/agent-runs.ndjson",
+    "agent": "claude",
+    "mode": "greywall",
+    "success": false,
+    "exit": 1,
+    "elapsed_ms": 113900.61466,
+    "artifact": "runs/002-claude-greywall-inventory-workflow-0",
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": true,
+      "hidden_pass": true,
+      "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... ok\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... ok\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.862s\n\nOK\n",
+      "hidden_output": ""
+    }
+  },
+  {
+    "host": "pi",
+    "kind": "container",
+    "source": "pi/container-workflow-after-claude/agent-runs.ndjson",
+    "agent": "claude",
+    "mode": "openshell-ephemeral",
+    "success": false,
+    "exit": 1,
+    "elapsed_ms": 8112.483036,
+    "artifact": "runs/002-claude-openshell-ephemeral-inventory-workflow-0"
+  },
+  {
+    "host": "pi",
+    "kind": "container",
+    "source": "pi/container-workflow-after-opencode/agent-runs.ndjson",
+    "agent": "opencode",
+    "mode": "openshell-ephemeral",
+    "success": false,
+    "exit": 1,
+    "elapsed_ms": 8327.206272,
+    "artifact": "runs/002-opencode-openshell-ephemeral-inventory-workflow-0"
+  },
+  {
+    "host": "pi",
+    "kind": "container",
+    "source": "pi/container-workflow-after-codex/agent-runs.ndjson",
+    "agent": "codex",
+    "mode": "openshell-ephemeral",
+    "success": false,
+    "exit": 1,
+    "elapsed_ms": 8708.669349,
+    "artifact": "runs/002-codex-openshell-ephemeral-inventory-workflow-0"
+  },
+  {
+    "host": "mac",
+    "kind": "native",
+    "source": "mac/workflow-after/agent-runs.ndjson",
+    "agent": "claude",
+    "mode": "greywall",
+    "success": false,
+    "exit": 65,
+    "elapsed_ms": 31.473334,
+    "artifact": "runs/002-claude-greywall-inventory-workflow-0",
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": false,
+      "hidden_pass": false,
+      "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/002-claude-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/002-claude-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.188s\n\nFAILED (failures=2)\n",
+      "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+    }
+  },
+  {
+    "host": "mac",
+    "kind": "native",
+    "source": "mac/workflow-after/agent-runs.ndjson",
+    "agent": "opencode",
+    "mode": "greywall",
+    "success": false,
+    "exit": 65,
+    "elapsed_ms": 50.747917,
+    "artifact": "runs/005-opencode-greywall-inventory-workflow-0",
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": false,
+      "hidden_pass": false,
+      "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/005-opencode-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/005-opencode-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.188s\n\nFAILED (failures=2)\n",
+      "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+    }
+  },
+  {
+    "host": "mac",
+    "kind": "native",
+    "source": "mac/workflow-after/agent-runs.ndjson",
+    "agent": "codex",
+    "mode": "greywall",
+    "success": false,
+    "exit": 65,
+    "elapsed_ms": 31.182625,
+    "artifact": "runs/007-codex-greywall-inventory-workflow-0",
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": false,
+      "hidden_pass": false,
+      "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/007-codex-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/007-codex-greywall-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.189s\n\nFAILED (failures=2)\n",
+      "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+    }
+  },
+  {
+    "host": "mac",
+    "kind": "native",
+    "source": "mac/workflow-after/agent-runs.ndjson",
+    "agent": "codex",
+    "mode": "mxc",
+    "success": false,
+    "exit": 1,
+    "elapsed_ms": 100.596583,
+    "artifact": "runs/009-codex-mxc-inventory-workflow-0",
+    "checker": {
+      "tests_unchanged": true,
+      "tests_pass": false,
+      "hidden_pass": false,
+      "test_output": "test_bad_csv (test_cli.CliTests.test_bad_csv) ... ok\ntest_category_summaries (test_cli.CliTests.test_category_summaries) ... FAIL\ntest_filter (test_cli.CliTests.test_filter) ... ok\ntest_filter_before_group (test_cli.CliTests.test_filter_before_group) ... FAIL\ntest_ungrouped (test_cli.CliTests.test_ungrouped) ... ok\ntest_exact_prices (test_loader.LoaderTests.test_exact_prices) ... ok\ntest_invalid_quantity (test_loader.LoaderTests.test_invalid_quantity) ... ok\ntest_missing_header (test_loader.LoaderTests.test_missing_header) ... ok\ntest_negative_quantity (test_loader.LoaderTests.test_negative_quantity) ... ok\ntest_nonfinite_price (test_loader.LoaderTests.test_nonfinite_price) ... ok\n\n======================================================================\nFAIL: test_category_summaries (test_cli.CliTests.test_category_summaries)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 27, in test_category_summaries\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n======================================================================\nFAIL: test_filter_before_group (test_cli.CliTests.test_filter_before_group)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro-after/results/workflow-after/runs/009-codex-mxc-inventory-workflow-0/workspace/inventory-workflow/tests/test_cli.py\", line 33, in test_filter_before_group\n    self.assertEqual(r.returncode, 0, r.stderr)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2 != 0 : usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n\n----------------------------------------------------------------------\nRan 10 tests in 0.190s\n\nFAILED (failures=2)\n",
+      "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 10, in <module>\n    assert r.returncode==0,r.stderr\n           ^^^^^^^^^^^^^^^\nAssertionError: usage: python3.14 -m inventory.cli [-h] [--min-quantity MIN_QUANTITY] csv_file\npython3.14 -m inventory.cli: error: unrecognized arguments: --group-by-category\n\n"
+    }
+  }
+]

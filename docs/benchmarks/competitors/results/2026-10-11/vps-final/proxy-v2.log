@@ -1,0 +1,14 @@
+{"level":"info","msg":"dns forwarder: upstream = 127.0.0.53:53","time":"2026-10-11T15:29:26.479Z"}
+{"handler":"http","kind":"service","level":"info","listener":"tcp","msg":"listening on 127.0.0.1:43151/tcp","service":"http-proxy","time":"2026-10-11T15:29:26.480Z"}
+{"handler":"socks5","kind":"service","level":"info","listener":"tcp","msg":"listening on 127.0.0.1:43152/tcp","service":"socks5-proxy","time":"2026-10-11T15:29:26.481Z"}
+{"handler":"dns","kind":"service","level":"info","listener":"dns","msg":"listening on 127.0.0.1:43153/udp","service":"dns-proxy-udp","time":"2026-10-11T15:29:26.481Z"}
+{"handler":"dns","kind":"service","level":"info","listener":"tcp","msg":"listening on 127.0.0.1:43153/tcp","service":"dns-proxy-tcp","time":"2026-10-11T15:29:26.481Z"}
+{"kind":"service","level":"info","msg":"database opened: /home/ubuntu/.local/share/greyproxy/greyproxy.db","service":"@greyproxy","time":"2026-10-11T15:29:26.485Z"}
+{"kind":"service","level":"info","msg":"credential store loaded: 0 mappings from 0 sessions","service":"@greyproxy","time":"2026-10-11T15:29:26.504Z"}
+{"kind":"service","level":"info","msg":"dns resolver: upstream connections will resolve via 127.0.0.53:53","service":"@greyproxy","time":"2026-10-11T15:29:26.512Z"}
+{"kind":"service","level":"info","msg":"plugins registered: auther=auther-0 admission=admission-0 bypass=bypass-0 resolver=resolver-0","service":"@greyproxy","time":"2026-10-11T15:29:26.512Z"}
+{"kind":"notifier","level":"info","msg":"notifier started (enabled=true, backend=notify-send, actions=true)","time":"2026-10-11T15:29:26.512Z"}
+2026/10/11 15:29:26.512220 conversation_assembler.go:47: INFO assembler: conversation tracking enabled
+{"kind":"service","level":"info","msg":"listening on 127.0.0.1:43180","service":"@greyproxy","time":"2026-10-11T15:29:26.512Z"}
+2026/10/11 15:29:26.512551 conversation_assembler.go:325: INFO assembler: starting scan transactions_to_scan=0
+{"handler":"dns","kind":"service","level":"error","listener":"dns","msg":"accept: accpet on closed listener","service":"dns-proxy-udp","time":"2026-10-11T15:33:00.288Z"}

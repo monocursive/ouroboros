@@ -1,0 +1,29 @@
+{
+  "sequence": 42,
+  "agent": "codex",
+  "mode": "mxc",
+  "task": "fix-offbyone",
+  "repetition": 0,
+  "started_utc": "2026-10-11T15:56:23Z",
+  "elapsed_ms": 98.820333,
+  "exit": 1,
+  "timeout": false,
+  "success": false,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": false,
+    "hidden_pass": false,
+    "test_output": "test_basic (test_parse.TestParse) ... FAIL\ntest_single (test_parse.TestParse) ... ERROR\n\n======================================================================\nERROR: test_single (test_parse.TestParse)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/v2-agents/runs/042-codex-mxc-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py\", line 8, in test_single\n    self.assertEqual(first_word('solo'), 'solo')\n  File \"/Users/monocursive/bench-ouro/results/v2-agents/runs/042-codex-mxc-fix-offbyone-0/workspace/fix-offbyone/src/parse.py\", line 4, in first_word\n    return parts[1]\nIndexError: list index out of range\n\n======================================================================\nFAIL: test_basic (test_parse.TestParse)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/Users/monocursive/bench-ouro/results/v2-agents/runs/042-codex-mxc-fix-offbyone-0/workspace/fix-offbyone/tests/test_parse.py\", line 6, in test_basic\n    self.assertEqual(first_word('hello world'), 'hello')\nAssertionError: 'world' != 'hello'\n- world\n+ hello\n\n\n----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nFAILED (failures=1, errors=1)\n",
+    "hidden_output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nAssertionError\n"
+  },
+  "argv": [
+    "/Users/monocursive/bench-ouro/bin/mxc-exec-mac",
+    "/Users/monocursive/bench-ouro/results/v2-agents/runs/042-codex-mxc-fix-offbyone-0/mxc-private.json"
+  ],
+  "load": [
+    2.8447265625,
+    3.3681640625,
+    2.9462890625
+  ],
+  "artifact": "runs/042-codex-mxc-fix-offbyone-0"
+}

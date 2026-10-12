@@ -1,0 +1,143 @@
+{
+  "schema": "ouro.jail.receipt/1",
+  "attempt_id": "att_44971192-f276-4c77-a33e-519886fb0c45",
+  "revision": 1,
+  "phase": "refused",
+  "platform": {
+    "os": "linux",
+    "arch": "aarch64",
+    "kernel": "Linux 6.18.50+rpt-rpi-v8"
+  },
+  "jail": {
+    "component": "ouro-jail",
+    "version": "0.1.0",
+    "backend": null,
+    "backend_version": null
+  },
+  "policy": {
+    "name": "tool",
+    "digest": "sha256:b2e582d260cd075c8332d7e67408cd1f6adbac864354755bc71a057ace735400",
+    "observe": "on",
+    "evidence": "strict",
+    "requirements": [
+      "tree_termination",
+      "closed_set_observation",
+      "filesystem_containment",
+      "syscall_filter",
+      "network_none",
+      "protected_coverage:existing_and_root",
+      "limit:wall"
+    ],
+    "grants": [
+      {
+        "kind": "read_only",
+        "value": "/home/monocursive/bench-ouro/runs/perf-v2-final/private",
+        "by": "operator"
+      },
+      {
+        "kind": "deny_read",
+        "value": "/home/monocursive/bench-ouro/runs/perf-v2-final/private/read-canary",
+        "by": "operator"
+      }
+    ]
+  },
+  "containment": "pending",
+  "child_protection": "pending",
+  "exec_observed": false,
+  "argv_digest": "sha256:fcd07e4b33275a362be4033c7a41e7b2661e2d3d47d6ae706a5d2957f0d83558",
+  "applied": {
+    "filesystem": null,
+    "network": {
+      "mode": "pending",
+      "mechanism": null,
+      "allowed_hosts": []
+    },
+    "syscalls": null,
+    "limits": [],
+    "environment_names": [],
+    "removed_environment_names": []
+  },
+  "observer": {
+    "backend": null,
+    "set": null,
+    "attached": false,
+    "sources": {
+      "wrapper": "supported",
+      "audit": "unsupported",
+      "proxy": "unsupported"
+    },
+    "gaps": []
+  },
+  "coverage": {
+    "exec": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.write": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "fs.deny": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "limits": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    },
+    "proxy.net": {
+      "status": "unsupported",
+      "sources": [],
+      "observed_count": null,
+      "gaps": []
+    }
+  },
+  "process": null,
+  "lifetime": {
+    "boundary": "pending",
+    "native": null,
+    "tree_empty": null,
+    "verified_at": null,
+    "verification_scope": null,
+    "integrity": "pending"
+  },
+  "outcome": {
+    "kind": "refused",
+    "code": null,
+    "signal": null,
+    "cause": null,
+    "error": {
+      "code": "backend_unavailable",
+      "stage": "preparing",
+      "message": "bubblewrap exited before the launcher blocked: { \"child-pid\": 137254, \"cgroup-namespace\": 4026532591, \"ipc-namespace\": 4026532587, \"mnt-namespace\": 4026532585, \"net-namespace\": 4026532592, \"pid-namespace\": 4026532590, \"uts-namespace\": 4026532586 }",
+      "remediation_category": "host_setup"
+    }
+  },
+  "state_cleanup": "not_needed",
+  "cleanup_error": null,
+  "created_at": "2026-10-11T17:06:23Z",
+  "updated_at": "2026-10-11T17:06:23Z",
+  "errors": [
+    {
+      "code": "backend_unavailable",
+      "stage": "preparing",
+      "message": "bubblewrap exited before the launcher blocked: { \"child-pid\": 137254, \"cgroup-namespace\": 4026532591, \"ipc-namespace\": 4026532587, \"mnt-namespace\": 4026532585, \"net-namespace\": 4026532592, \"pid-namespace\": 4026532590, \"uts-namespace\": 4026532586 }",
+      "remediation_category": "host_setup"
+    }
+  ],
+  "credentials": []
+}

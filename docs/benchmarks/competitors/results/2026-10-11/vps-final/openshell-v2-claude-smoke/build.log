@@ -1,0 +1,40 @@
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  256.2MB
+
+Step 1/10 : FROM bench-openshell:latest
+ ---> bd448e738213
+Step 2/10 : RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*
+ ---> Using cache
+ ---> 2927e346e8c3
+Step 3/10 : RUN mkdir -p /opt/agents/bin /opt/bench /home/agent /work && chown 1000:1000 /home/agent /work
+ ---> Using cache
+ ---> 4b0a66ef0d68
+Step 4/10 : COPY bin/ /opt/agents/bin/
+ ---> 7851c9e9fc37
+Step 5/10 : COPY harness/ /opt/bench/
+ ---> b70c0f81ebf7
+Step 6/10 : RUN chmod -R a+rX /opt/agents /opt/bench
+ ---> Running in 9db2a2c8c3e9
+ ---> Removed intermediate container 9db2a2c8c3e9
+ ---> 7f621f2e2866
+Step 7/10 : ENV HOME=/home/agent PATH=/opt/agents/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ ---> Running in 57a6759355fa
+ ---> Removed intermediate container 57a6759355fa
+ ---> dfea599d0063
+Step 8/10 : USER 1000:1000
+ ---> Running in 612da7aa59f1
+ ---> Removed intermediate container 612da7aa59f1
+ ---> d5966e2c4272
+Step 9/10 : WORKDIR /work
+ ---> Running in 5e047381b737
+ ---> Removed intermediate container 5e047381b737
+ ---> 3154d4eb7060
+Step 10/10 : CMD ["/bin/sleep", "infinity"]
+ ---> Running in d345eb32f503
+ ---> Removed intermediate container d345eb32f503
+ ---> 2c12ddfce80a
+Successfully built 2c12ddfce80a
+Successfully tagged ouro-comparison-claude-v2:20261011

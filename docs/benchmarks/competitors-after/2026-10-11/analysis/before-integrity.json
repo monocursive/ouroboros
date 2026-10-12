@@ -1,0 +1,7 @@
+{
+  "schema": "before-evidence-integrity/1",
+  "manifest_files_verified": 10192,
+  "archive": "../../competitors/benchmark-2026-10-11.tar.gz",
+  "archive_sha256": "16b3f262b83b6d257b882fec39432147fb3615b433a5d1da6d45bf1b7a4e41b9",
+  "all_original_manifest_hashes_match": true
+}

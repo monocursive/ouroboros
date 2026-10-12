@@ -1,0 +1,25 @@
+I'll help you fix the failing tests. Let me start by running the tests to see what's failing, then locate and fix the bug in src/parse.py.
+Let me check the current directory structure:
+Let me search for the project with tests and src/parse.py:
+I can see there are multiple copies of this project. Let me check the most recent one based on the path structure. Let me look for a tests directory in one of these locations:
+Let me check for Python tests in the fix-offbyone directories:
+The most relevant one appears to be `/home/monocursive/bench-ouro/results/v4-agents/runs/032-opencode-direct-fix-offbyone-0/workspace/fix-offbyone`. Let me navigate there and run the tests:
+Perfect! I can see the issue. Let me update the todo and examine the source code:
+Perfect! I found the bug. The issue is an off-by-one error in src/parse.py:4. The function is returning `parts[1]` (the second element) instead of `parts[0]` (the first element).
+
+This explains both test failures:
+1. `test_basic`: When given 'hello world', it returns 'world' instead of 'hello'
+2. `test_single`: When given 'solo', it tries to access index 1 which doesn't exist (IndexError)
+Now let me fix the bug by changing `parts[1]` to `parts[0]`:
+Now let me verify that all tests pass:
+Perfect! All tests are now passing. 
+
+## Summary
+
+I found and fixed the bug in src/parse.py:4. The issue was an off-by-one error where the function was returning `parts[1]` instead of `parts[0]`, causing it to return the second word instead of the first word.
+
+**The fix:** Changed `return parts[1]` to `return parts[0]`
+
+Both tests now pass:
+- `test_basic`: Correctly returns 'hello' from 'hello world'
+- `test_single`: Correctly returns 'solo' from 'solo' (no longer throws IndexError)

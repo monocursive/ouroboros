@@ -1,0 +1,127 @@
+Hit:1 http://deb.debian.org/debian trixie InRelease
+Get:2 http://deb.debian.org/debian trixie-updates InRelease [47.3 kB]
+Hit:3 http://archive.raspberrypi.com/debian trixie InRelease
+Get:4 http://deb.debian.org/debian-security trixie-security InRelease [43.4 kB]
+Get:5 http://deb.debian.org/debian-security trixie-security/main arm64 Packages [267 kB]
+Get:6 https://pkgs.tailscale.com/stable/debian trixie InRelease
+Get:7 http://deb.debian.org/debian-security trixie-security/main armhf Packages [246 kB]
+Get:8 http://deb.debian.org/debian-security trixie-security/main Translation-en [163 kB]
+Fetched 773 kB in 0s (1575 kB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+ca-certificates is already the newest version (20250419).
+curl is already the newest version (8.14.1-2+deb13u5).
+0 upgraded, 0 newly installed, 0 to remove and 97 not upgraded.
+Hit:1 http://deb.debian.org/debian trixie InRelease
+Hit:2 http://archive.raspberrypi.com/debian trixie InRelease
+Hit:3 http://deb.debian.org/debian trixie-updates InRelease
+Hit:4 http://deb.debian.org/debian-security trixie-security InRelease
+Get:5 https://download.docker.com/linux/debian trixie InRelease [32.5 kB]
+Get:6 https://download.docker.com/linux/debian trixie/stable arm64 Packages [48.5 kB]
+Get:7 https://pkgs.tailscale.com/stable/debian trixie InRelease
+Fetched 87.7 kB in 0s (276 kB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Suggested packages:
+  cgroupfs-mount | cgroup-lite docker-model-plugin
+Recommended packages:
+  docker-ce-rootless-extras pigz docker-compose-plugin
+The following NEW packages will be installed:
+  containerd.io docker-buildx-plugin docker-ce docker-ce-cli
+0 upgraded, 4 newly installed, 0 to remove and 97 not upgraded.
+Need to get 67.6 MB of archives.
+After this operation, 289 MB of additional disk space will be used.
+Get:1 https://download.docker.com/linux/debian trixie/stable arm64 containerd.io arm64 2.4.1-2~debian.13~trixie [19.6 MB]
+Get:2 https://download.docker.com/linux/debian trixie/stable arm64 docker-ce-cli arm64 5:29.1.3-1~debian.13~trixie [14.7 MB]
+Get:3 https://download.docker.com/linux/debian trixie/stable arm64 docker-ce arm64 5:29.1.3-1~debian.13~trixie [18.1 MB]
+Get:4 https://download.docker.com/linux/debian trixie/stable arm64 docker-buildx-plugin arm64 0.38.0-1~debian.13~trixie [15.3 MB]
+Fetched 67.6 MB in 7s (9482 kB/s)
+Selecting previously unselected package containerd.io.
+(Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 122820 files and directories currently installed.)
+Preparing to unpack .../containerd.io_2.4.1-2~debian.13~trixie_arm64.deb ...
+Unpacking containerd.io (2.4.1-2~debian.13~trixie) ...
+Selecting previously unselected package docker-ce-cli.
+Preparing to unpack .../docker-ce-cli_5%3a29.1.3-1~debian.13~trixie_arm64.deb ...
+Unpacking docker-ce-cli (5:29.1.3-1~debian.13~trixie) ...
+Selecting previously unselected package docker-ce.
+Preparing to unpack .../docker-ce_5%3a29.1.3-1~debian.13~trixie_arm64.deb ...
+Unpacking docker-ce (5:29.1.3-1~debian.13~trixie) ...
+Selecting previously unselected package docker-buildx-plugin.
+Preparing to unpack .../docker-buildx-plugin_0.38.0-1~debian.13~trixie_arm64.deb ...
+Unpacking docker-buildx-plugin (0.38.0-1~debian.13~trixie) ...
+Setting up docker-buildx-plugin (0.38.0-1~debian.13~trixie) ...
+Setting up containerd.io (2.4.1-2~debian.13~trixie) ...
+Created symlink '/etc/systemd/system/multi-user.target.wants/containerd.service' → '/usr/lib/systemd/system/containerd.service'.
+
+Setting up docker-ce-cli (5:29.1.3-1~debian.13~trixie) ...
+Setting up docker-ce (5:29.1.3-1~debian.13~trixie) ...
+Created symlink '/etc/systemd/system/multi-user.target.wants/docker.service' → '/usr/lib/systemd/system/docker.service'.
+
+Created symlink '/etc/systemd/system/sockets.target.wants/docker.socket' → '/usr/lib/systemd/system/docker.socket'.
+
+Processing triggers for man-db (2.13.1-1) ...
+Synchronizing state of docker.service with SysV service script with /usr/lib/systemd/systemd-sysv-install.
+Executing: /usr/lib/systemd/systemd-sysv-install enable docker
+/home/monocursive/bench-ouro/downloads/openshell_0.1.3-1_arm64.deb: OK
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following NEW packages will be installed:
+  openshell
+0 upgraded, 1 newly installed, 0 to remove and 99 not upgraded.
+Need to get 0 B/73.6 MB of archives.
+After this operation, 0 B of additional disk space will be used.
+Get:1 /home/monocursive/bench-ouro/downloads/openshell_0.1.3-1_arm64.deb openshell arm64 0.1.3-1 [73.6 MB]
+Selecting previously unselected package openshell.
+(Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 123039 files and directories currently installed.)
+Preparing to unpack .../openshell_0.1.3-1_arm64.deb ...
+Unpacking openshell (0.1.3-1) ...
+Setting up openshell (0.1.3-1) ...
+Docker version 29.1.3, build f52814d
+openshell 0.1.3

@@ -1,0 +1,5 @@
+⚠ Gateway is not reachable at https://localhost:17670. Verify the gateway is running.
+✓ Gateway 'benchmark-pi' added and set as active
+  Endpoint: https://localhost:17670
+  Type: local
+✓ TLS certificates present

@@ -1,0 +1,47 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then plan the implementation.
+Now I understand the structure. Let me create a plan and implement the changes:
+First, I'll create a new processing module for the category grouping logic to keep processing separate from argument parsing:
+Now I'll update the CLI to add the argument and use the grouping function:
+The CSV error handling is already in place - the loader raises ValueError for invalid CSV which gets caught and returns exit code 2. Let me verify this is working correctly by running the tests:
+Excellent! All tests pass. Now let me update the README with a grouped example:
+Let me first run a quick test to see what the actual output looks like:
+Perfect! Now let me update the README:
+Perfect! Let me run the tests one more time to ensure everything still works:
+Excellent! Let me verify the implementation meets all requirements by testing a few scenarios manually:
+Perfect! Now let's test error handling with an invalid CSV:
+Perfect! The error handling works correctly - it exits with code 2, shows a useful error message without a traceback, and mentions the row number.
+
+Let me verify the module structure to ensure processing and argument parsing are in separate modules:
+Excellent! Let me create a quick summary of the implementation:
+
+## Summary
+
+I've successfully implemented category summaries for the inventory CLI. Here's what was done:
+
+### Changes Made:
+
+1. **Created `inventory/processing.py`** - A new module containing the `group_by_category()` function that:
+   - Groups items by category using a dictionary
+   - Calculates total quantity and stock value for each category
+   - Returns a JSON array sorted by category name
+   - Formats stock_value as a decimal string with exactly 2 fractional digits
+
+2. **Updated `inventory/cli.py`** to:
+   - Add `--group-by-category` argument (inventory/cli.py:11)
+   - Apply `--min-quantity` filter before grouping (inventory/cli.py:17)
+   - Call `group_by_category()` when flag is set, otherwise use existing `item_report()` (inventory/cli.py:19-22)
+   - Maintain existing error handling (exit code 2 with useful stderr message, no traceback)
+
+3. **Updated `README.md`** with:
+   - Example command for grouped output
+   - Expected JSON output showing category summaries
+   - Example showing filter applied before grouping
+
+### Key Features:
+- Processing logic is in separate module (`processing.py`) from argument parsing (`cli.py`)
+- Ungrouped output maintains current behavior
+- Invalid CSV produces exit code 2 with helpful error message (no traceback)
+- All 10 tests pass successfully
+- Stock values are exact decimals formatted to 2 decimal places as JSON strings
+
+The implementation is complete and all requirements have been met!

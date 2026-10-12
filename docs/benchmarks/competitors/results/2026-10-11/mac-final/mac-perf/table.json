@@ -1,0 +1,225 @@
+{
+  "table": {
+    "direct": {
+      "cpu": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 21.1,
+        "elapsed_ms_p95": 22.75,
+        "work_ms_median": 18.66
+      },
+      "git": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 44.61,
+        "elapsed_ms_p95": 48.26,
+        "work_ms_median": 10.01
+      },
+      "noop": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 2.54,
+        "elapsed_ms_p95": 3.47,
+        "work_ms_median": 0.0
+      },
+      "python": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 34.09,
+        "elapsed_ms_p95": 36.23,
+        "work_ms_median": 0.0
+      },
+      "reads": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 22.14,
+        "elapsed_ms_p95": 25.39,
+        "work_ms_median": 19.6
+      },
+      "spawn": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 145.71,
+        "elapsed_ms_p95": 150.49,
+        "work_ms_median": 143.25
+      },
+      "writes": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 47.47,
+        "elapsed_ms_p95": 51.87,
+        "work_ms_median": 45.14
+      }
+    },
+    "mxc": {
+      "cpu": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 58.63,
+        "elapsed_ms_p95": 61.01,
+        "work_ms_median": 18.63
+      },
+      "git": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 3442.9,
+        "elapsed_ms_p95": 3495.59,
+        "work_ms_median": 1689.72
+      },
+      "noop": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 16.7,
+        "elapsed_ms_p95": 23.13,
+        "work_ms_median": 0.0
+      },
+      "python": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 1769.14,
+        "elapsed_ms_p95": 1776.88,
+        "work_ms_median": 0.0
+      },
+      "reads": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 58.04,
+        "elapsed_ms_p95": 59.96,
+        "work_ms_median": 19.83
+      },
+      "spawn": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 202.64,
+        "elapsed_ms_p95": 219.76,
+        "work_ms_median": 142.76
+      },
+      "writes": {
+        "samples": 30,
+        "successful": 30,
+        "elapsed_ms_median": 100.23,
+        "elapsed_ms_p95": 103.15,
+        "work_ms_median": 45.85
+      }
+    }
+  },
+  "available": {
+    "direct": true,
+    "ouro-jail": false,
+    "greywall": false,
+    "mxc": true
+  },
+  "invalid_sequences": [],
+  "safety": [
+    {
+      "tool": "direct",
+      "probe": "private_read",
+      "status": "allowed"
+    },
+    {
+      "tool": "direct",
+      "probe": "private_write",
+      "status": "allowed"
+    },
+    {
+      "tool": "direct",
+      "probe": "readonly_write",
+      "status": "allowed"
+    },
+    {
+      "tool": "direct",
+      "probe": "symlink_read",
+      "status": "allowed"
+    },
+    {
+      "tool": "direct",
+      "probe": "symlink_write",
+      "status": "allowed"
+    },
+    {
+      "tool": "direct",
+      "probe": "hardlink_read",
+      "status": "allowed"
+    },
+    {
+      "tool": "direct",
+      "probe": "host_tcp",
+      "status": "allowed"
+    },
+    {
+      "tool": "direct",
+      "probe": "host_unix_socket",
+      "status": "allowed"
+    },
+    {
+      "tool": "direct",
+      "probe": "host_signal",
+      "status": "allowed"
+    },
+    {
+      "tool": "direct",
+      "probe": "detached_after_root_exit",
+      "status": "survived"
+    },
+    {
+      "tool": "ouro-jail",
+      "probe": null,
+      "status": "unavailable"
+    },
+    {
+      "tool": "greywall",
+      "probe": null,
+      "status": "unavailable"
+    },
+    {
+      "tool": "mxc",
+      "probe": "private_read",
+      "status": "denied"
+    },
+    {
+      "tool": "mxc",
+      "probe": "private_write",
+      "status": "denied"
+    },
+    {
+      "tool": "mxc",
+      "probe": "readonly_write",
+      "status": "denied"
+    },
+    {
+      "tool": "mxc",
+      "probe": "symlink_read",
+      "status": "denied"
+    },
+    {
+      "tool": "mxc",
+      "probe": "symlink_write",
+      "status": "denied"
+    },
+    {
+      "tool": "mxc",
+      "probe": "hardlink_read",
+      "status": "denied"
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_tcp",
+      "status": "denied"
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_unix_socket",
+      "status": "denied"
+    },
+    {
+      "tool": "mxc",
+      "probe": "host_signal",
+      "status": "denied"
+    },
+    {
+      "tool": "mxc",
+      "probe": "detached_after_root_exit",
+      "status": "survived"
+    }
+  ]
+}

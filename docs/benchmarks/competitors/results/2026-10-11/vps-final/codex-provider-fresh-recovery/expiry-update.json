@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "openshell",
+    "provider",
+    "update",
+    "benchmark-codex-v3",
+    "--credential-expires-at",
+    "CODEX_AUTH_ACCESS_TOKEN=2026-10-20T08:02:05+00:00",
+    "-o",
+    "json"
+  ],
+  "exit": 0,
+  "stdout": "{\n  \"mutation_id\": \"e3e78916-f39d-4ec1-ba52-d572b571750c\",\n  \"targets\": []\n}\n",
+  "stderr": ""
+}

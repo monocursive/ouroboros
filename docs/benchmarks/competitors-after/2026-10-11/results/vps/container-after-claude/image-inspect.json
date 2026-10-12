@@ -1,0 +1,57 @@
+[
+    {
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": [
+                "/bin/sleep",
+                "infinity"
+            ],
+            "Env": [
+                "PATH=/opt/agents/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "HOME=/home/agent"
+            ],
+            "Labels": {
+                "org.opencontainers.image.version": "24.04"
+            },
+            "User": "1000:1000",
+            "WorkingDir": "/work"
+        },
+        "Created": "2026-10-11T21:42:37.517404543Z",
+        "Descriptor": {
+            "digest": "sha256:f895da93b75e90731341f78e53c9fa79a8a45aa90170df208b3a1332a7f954b2",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 3143
+        },
+        "Id": "sha256:f895da93b75e90731341f78e53c9fa79a8a45aa90170df208b3a1332a7f954b2",
+        "Metadata": {
+            "LastTagTime": "2026-10-11T21:42:37.575289111Z"
+        },
+        "Os": "linux",
+        "Parent": "sha256:cb39d6542860ac0e5a57958fdbcb6ac342d353db8974cfd9094bbc00d991fdc5",
+        "RepoDigests": [
+            "ouro-comparison-claude-after@sha256:f895da93b75e90731341f78e53c9fa79a8a45aa90170df208b3a1332a7f954b2"
+        ],
+        "RepoTags": [
+            "ouro-comparison-claude-after:20261011"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:d81fb2a7c6ee3be05fdefaa7fd223be219c1ab172083ec1b994c3ecda33ac0a8",
+                "sha256:26cec2ae79daedfd6c9a06e435403a04ec25bc8c469c84c7d43e57b962b086b5",
+                "sha256:e2e0cca81fc79c4637017923b47b1a02bc95ef6ee1d904ba410acfdbdfb171c3",
+                "sha256:9e80b40998bc65075e0334af0c2ab03d3c7dc0baef43d5a5a1d7f7696f9ea5e0",
+                "sha256:5edc45ffdd19e2b5c2e0ccfa904151b0c060cf08bd9bd5f4c183a16d86b81843",
+                "sha256:0a880dae75192d4d3b4ada68fbebc607b921372bcdaca8d76febf511571c83c7",
+                "sha256:0f7c3aae8082e5b429361c2a2455085ef15c3f648630c2a5fed33112c17f7947",
+                "sha256:8557a48daef956639ebaf384c0b8456e17a149dd403d1f30252df9db3eef68f9",
+                "sha256:9a78c0656971fe918dd010b51784dcb18a4c05866c5a03d88893736a3246c4d5",
+                "sha256:daa6e84bfd319ca4b8dfcc7815183f25038ae0fcc9e5af864e1c47c6062c16e9",
+                "sha256:bd3ac15e40ed8cde8d4bf2581a208997e56db017d7c45e65e81b59605c257215",
+                "sha256:a51d5765af8ad5d5bb232c602f277ddae4367f0e23b5790ae82d3aca4c9c34d3",
+                "sha256:1a9308ed5213c96f35c48775db26b7dbba04aca12918c761751eddeaeb13c471"
+            ],
+            "Type": "layers"
+        },
+        "Size": 257350294
+    }
+]

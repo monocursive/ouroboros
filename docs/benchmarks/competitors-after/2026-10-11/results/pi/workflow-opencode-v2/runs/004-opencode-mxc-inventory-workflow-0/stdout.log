@@ -1,0 +1,41 @@
+I'll implement category summaries for the inventory CLI with the `--group-by-category` flag. Let me start by exploring the codebase structure and then planning the implementation.
+Now I understand the codebase. Let me create a plan and implement the category summaries feature:
+Let me first create the category grouping function in report.py, then update the CLI:
+Now let me update the CLI to add the argument and use the category_report function:
+Now let me update the README with a grouped example:
+Now let's run the tests:
+Excellent! All tests pass. Let me verify the implementation works correctly with a manual test:
+Perfect! Let me also verify the error handling:
+Perfect! I've successfully implemented the category summaries feature for the inventory CLI. Here's a summary of the changes:
+
+## Implementation Summary
+
+**Changes made:**
+
+1. **inventory/report.py** - Added `category_report()` function that:
+   - Filters items by `min_quantity` before grouping (as specified)
+   - Groups items by category and calculates totals
+   - Computes `stock_value` as sum of (quantity * unit_price) using exact Decimal arithmetic
+   - Formats `stock_value` as a string with exactly 2 decimal places
+   - Returns results sorted by category name
+
+2. **inventory/cli.py** - Updated to:
+   - Add `--group-by-category` argument (boolean flag)
+   - Import and call `category_report()` when the flag is set
+   - Maintain existing behavior when flag is not present
+
+3. **README.md** - Added documentation showing:
+   - How to use the `--group-by-category` flag
+   - Example output with expected JSON format
+   - Note that `--min-quantity` is applied before grouping
+
+**Verification:**
+
+All tests pass (10/10):
+- Ungrouped output maintains current behavior (inventory/cli.py:14)
+- Category grouping works correctly with proper stock_value calculation
+- `--min-quantity` filter is applied before grouping
+- Invalid CSV produces exit code 2 with useful error message (no traceback)
+- Processing logic stays in report.py, argument parsing stays in cli.py (separate modules as required)
+
+The implementation uses exact Decimal arithmetic throughout, ensuring precise financial calculations, and formats the stock_value as a JSON string with exactly two decimal places as specified.

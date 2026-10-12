@@ -1,0 +1,10 @@
+1/9 claude docker add-multiply #0 18.2s exit=0 success=True
+2/9 claude openshell-warm add-multiply #0 20.4s exit=0 success=True
+3/9 claude openshell-ephemeral add-multiply #0 20.3s exit=0 success=True
+4/9 opencode docker add-multiply #0 21.8s exit=0 success=True
+5/9 opencode openshell-warm add-multiply #0 21.2s exit=0 success=True
+6/9 opencode openshell-ephemeral add-multiply #0 21.8s exit=0 success=True
+7/9 codex openshell-warm add-multiply #0 16.8s exit=1 success=False
+8/9 codex docker add-multiply #0 18.8s exit=0 success=True
+9/9 codex openshell-ephemeral add-multiply #0 16.5s exit=1 success=False
+COMPLETE

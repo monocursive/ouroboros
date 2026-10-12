@@ -1,0 +1,46 @@
+{
+  "opencode/direct": {
+    "runs": 6,
+    "success": 6,
+    "elapsed_ms": [
+      43762,
+      46623,
+      55477,
+      50215,
+      47692,
+      43806
+    ],
+    "elapsed_ms_median": 47692
+  },
+  "opencode/ouro": {
+    "runs": 6,
+    "success": 6,
+    "elapsed_ms": [
+      47766,
+      47565,
+      56921,
+      49380,
+      46824,
+      50012
+    ],
+    "elapsed_ms_median": 49380
+  },
+  "opencode/greywall": {
+    "runs": 6,
+    "success": 0,
+    "elapsed_ms": []
+  },
+  "opencode/mxc": {
+    "runs": 6,
+    "success": 6,
+    "elapsed_ms": [
+      40955,
+      46798,
+      48645,
+      53461,
+      182090,
+      176579
+    ],
+    "elapsed_ms_median": 53461
+  }
+}

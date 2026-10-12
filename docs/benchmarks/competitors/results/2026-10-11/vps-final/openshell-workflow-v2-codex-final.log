@@ -1,0 +1,4 @@
+1/3 codex docker inventory-workflow #0 45.6s exit=0 success=True
+2/3 codex openshell-warm inventory-workflow #0 20.1s exit=1 success=False
+3/3 codex openshell-ephemeral inventory-workflow #0 20.5s exit=1 success=False
+COMPLETE

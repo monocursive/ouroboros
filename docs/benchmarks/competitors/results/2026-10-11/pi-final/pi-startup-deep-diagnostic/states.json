@@ -1,0 +1,192 @@
+[
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"created\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"0001-01-01T00:00:00Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:13.119796412+01:00\",\"End\":\"2026-10-11T20:17:13.221167337+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:13.119796412+01:00\",\"End\":\"2026-10-11T20:17:13.221167337+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:13.474667268+01:00\",\"End\":\"2026-10-11T20:17:13.567028561+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:13.119796412+01:00\",\"End\":\"2026-10-11T20:17:13.221167337+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:13.474667268+01:00\",\"End\":\"2026-10-11T20:17:13.567028561+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:13.819285301+01:00\",\"End\":\"2026-10-11T20:17:13.910709159+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:13.119796412+01:00\",\"End\":\"2026-10-11T20:17:13.221167337+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:13.474667268+01:00\",\"End\":\"2026-10-11T20:17:13.567028561+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:13.819285301+01:00\",\"End\":\"2026-10-11T20:17:13.910709159+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.16188952+01:00\",\"End\":\"2026-10-11T20:17:14.259087598+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:13.119796412+01:00\",\"End\":\"2026-10-11T20:17:13.221167337+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:13.474667268+01:00\",\"End\":\"2026-10-11T20:17:13.567028561+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:13.819285301+01:00\",\"End\":\"2026-10-11T20:17:13.910709159+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.16188952+01:00\",\"End\":\"2026-10-11T20:17:14.259087598+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.512185033+01:00\",\"End\":\"2026-10-11T20:17:14.61402262+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:13.474667268+01:00\",\"End\":\"2026-10-11T20:17:13.567028561+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:13.819285301+01:00\",\"End\":\"2026-10-11T20:17:13.910709159+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.16188952+01:00\",\"End\":\"2026-10-11T20:17:14.259087598+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.512185033+01:00\",\"End\":\"2026-10-11T20:17:14.61402262+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.865886345+01:00\",\"End\":\"2026-10-11T20:17:14.967501989+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:13.819285301+01:00\",\"End\":\"2026-10-11T20:17:13.910709159+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.16188952+01:00\",\"End\":\"2026-10-11T20:17:14.259087598+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.512185033+01:00\",\"End\":\"2026-10-11T20:17:14.61402262+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.865886345+01:00\",\"End\":\"2026-10-11T20:17:14.967501989+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.220214613+01:00\",\"End\":\"2026-10-11T20:17:15.315804114+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:14.16188952+01:00\",\"End\":\"2026-10-11T20:17:14.259087598+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.512185033+01:00\",\"End\":\"2026-10-11T20:17:14.61402262+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.865886345+01:00\",\"End\":\"2026-10-11T20:17:14.967501989+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.220214613+01:00\",\"End\":\"2026-10-11T20:17:15.315804114+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.567680802+01:00\",\"End\":\"2026-10-11T20:17:15.662563459+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:14.512185033+01:00\",\"End\":\"2026-10-11T20:17:14.61402262+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:14.865886345+01:00\",\"End\":\"2026-10-11T20:17:14.967501989+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.220214613+01:00\",\"End\":\"2026-10-11T20:17:15.315804114+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.567680802+01:00\",\"End\":\"2026-10-11T20:17:15.662563459+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.915219269+01:00\",\"End\":\"2026-10-11T20:17:16.011968629+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:14.865886345+01:00\",\"End\":\"2026-10-11T20:17:14.967501989+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.220214613+01:00\",\"End\":\"2026-10-11T20:17:15.315804114+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.567680802+01:00\",\"End\":\"2026-10-11T20:17:15.662563459+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.915219269+01:00\",\"End\":\"2026-10-11T20:17:16.011968629+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.263338618+01:00\",\"End\":\"2026-10-11T20:17:16.356468125+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:15.220214613+01:00\",\"End\":\"2026-10-11T20:17:15.315804114+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.567680802+01:00\",\"End\":\"2026-10-11T20:17:15.662563459+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.915219269+01:00\",\"End\":\"2026-10-11T20:17:16.011968629+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.263338618+01:00\",\"End\":\"2026-10-11T20:17:16.356468125+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.607762226+01:00\",\"End\":\"2026-10-11T20:17:16.692707205+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:15.567680802+01:00\",\"End\":\"2026-10-11T20:17:15.662563459+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:15.915219269+01:00\",\"End\":\"2026-10-11T20:17:16.011968629+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.263338618+01:00\",\"End\":\"2026-10-11T20:17:16.356468125+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.607762226+01:00\",\"End\":\"2026-10-11T20:17:16.692707205+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.944609559+01:00\",\"End\":\"2026-10-11T20:17:17.022261871+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:15.915219269+01:00\",\"End\":\"2026-10-11T20:17:16.011968629+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.263338618+01:00\",\"End\":\"2026-10-11T20:17:16.356468125+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.607762226+01:00\",\"End\":\"2026-10-11T20:17:16.692707205+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.944609559+01:00\",\"End\":\"2026-10-11T20:17:17.022261871+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:17.274074411+01:00\",\"End\":\"2026-10-11T20:17:17.354720933+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":269036,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"Health\":{\"Status\":\"starting\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:16.263338618+01:00\",\"End\":\"2026-10-11T20:17:16.356468125+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.607762226+01:00\",\"End\":\"2026-10-11T20:17:16.692707205+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.944609559+01:00\",\"End\":\"2026-10-11T20:17:17.022261871+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:17.274074411+01:00\",\"End\":\"2026-10-11T20:17:17.354720933+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:17.606897673+01:00\",\"End\":\"2026-10-11T20:17:17.697578094+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  },
+  {
+    "cid": "646c64ac0b3b",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":137,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:12.636438942Z\",\"FinishedAt\":\"2026-10-11T19:17:17.959832641Z\",\"Health\":{\"Status\":\"unhealthy\",\"FailingStreak\":0,\"Log\":[{\"Start\":\"2026-10-11T20:17:16.263338618+01:00\",\"End\":\"2026-10-11T20:17:16.356468125+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.607762226+01:00\",\"End\":\"2026-10-11T20:17:16.692707205+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:16.944609559+01:00\",\"End\":\"2026-10-11T20:17:17.022261871+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:17.274074411+01:00\",\"End\":\"2026-10-11T20:17:17.354720933+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"},{\"Start\":\"2026-10-11T20:17:17.606897673+01:00\",\"End\":\"2026-10-11T20:17:17.697578094+01:00\",\"ExitCode\":1,\"Output\":\"Error:   \u00d7 connect supervisor readiness socket /run/openshell/health.sock\\n  \u2570\u2500\u25b6 No such file or directory (os error 2)\\n\\n\"}]}}\n",
+    "error": ""
+  },
+  {
+    "cid": "9616d3d27284",
+    "state": "{\"Status\":\"exited\",\"Running\":false,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":0,\"ExitCode\":1,\"Error\":\"\",\"StartedAt\":\"2026-10-11T19:17:11.527204823Z\",\"FinishedAt\":\"2026-10-11T19:17:11.729986431Z\"}\n",
+    "error": ""
+  }
+]

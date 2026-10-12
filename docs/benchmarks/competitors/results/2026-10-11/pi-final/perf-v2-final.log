@@ -1,0 +1,200 @@
+preflight direct available 0 
+preflight ouro-jail unavailable 125 rror backend_unavailable at preparing [host_setup]: bubblewrap exited before the launcher blocked: { "child-pid": 137254, "cgroup-namespace": 4026532591, "ipc-namespace": 4026532587, "mnt-namespace": 4026532585, "net-namespace": 4026532592, "pid-namespace": 4026532590, "uts-namespace": 4026532586 }
+
+preflight ouro-obs-off unavailable 125 rror backend_unavailable at preparing [host_setup]: bubblewrap exited before the launcher blocked: { "child-pid": 137278, "cgroup-namespace": 4026532594, "ipc-namespace": 4026532592, "mnt-namespace": 4026532587, "net-namespace": 4026532595, "pid-namespace": 4026532593, "uts-namespace": 4026532590 }
+
+preflight greywall available 0 
+preflight mxc available 0 
+case-preflight ouro-jail noop unavailable 125  "child-pid": 137463, "cgroup-namespace": 4026532590, "ipc-namespace": 4026532587, "mnt-namespace": 4026532585, "net-namespace": 4026532591, "pid-namespace": 4026532588, "uts-namespace": 4026532586 }
+
+case-preflight ouro-jail python unavailable 125  "child-pid": 137489, "cgroup-namespace": 4026532590, "ipc-namespace": 4026532587, "mnt-namespace": 4026532585, "net-namespace": 4026532591, "pid-namespace": 4026532588, "uts-namespace": 4026532586 }
+
+case-preflight ouro-jail git unavailable 125  "child-pid": 137515, "cgroup-namespace": 4026532589, "ipc-namespace": 4026532587, "mnt-namespace": 4026532585, "net-namespace": 4026532591, "pid-namespace": 4026532588, "uts-namespace": 4026532586 }
+
+case-preflight ouro-jail reads unavailable 125  "child-pid": 137542, "cgroup-namespace": 4026532590, "ipc-namespace": 4026532587, "mnt-namespace": 4026532585, "net-namespace": 4026532591, "pid-namespace": 4026532589, "uts-namespace": 4026532586 }
+
+case-preflight ouro-jail writes unavailable 125  "child-pid": 137569, "cgroup-namespace": 4026532589, "ipc-namespace": 4026532587, "mnt-namespace": 4026532585, "net-namespace": 4026532592, "pid-namespace": 4026532588, "uts-namespace": 4026532586 }
+
+case-preflight ouro-jail spawn unavailable 125  "child-pid": 137595, "cgroup-namespace": 4026532590, "ipc-namespace": 4026532587, "mnt-namespace": 4026532585, "net-namespace": 4026532591, "pid-namespace": 4026532589, "uts-namespace": 4026532586 }
+
+case-preflight ouro-jail cpu unavailable 125  "child-pid": 137621, "cgroup-namespace": 4026532590, "ipc-namespace": 4026532588, "mnt-namespace": 4026532586, "net-namespace": 4026532591, "pid-namespace": 4026532589, "uts-namespace": 4026532587 }
+
+case-preflight ouro-obs-off noop unavailable 125  "child-pid": 137644, "cgroup-namespace": 4026532593, "ipc-namespace": 4026532591, "mnt-namespace": 4026532589, "net-namespace": 4026532594, "pid-namespace": 4026532592, "uts-namespace": 4026532590 }
+
+case-preflight ouro-obs-off python unavailable 125  "child-pid": 137667, "cgroup-namespace": 4026532594, "ipc-namespace": 4026532591, "mnt-namespace": 4026532585, "net-namespace": 4026532595, "pid-namespace": 4026532593, "uts-namespace": 4026532588 }
+
+case-preflight ouro-obs-off git unavailable 125  "child-pid": 137690, "cgroup-namespace": 4026532591, "ipc-namespace": 4026532589, "mnt-namespace": 4026532585, "net-namespace": 4026532592, "pid-namespace": 4026532590, "uts-namespace": 4026532586 }
+
+case-preflight ouro-obs-off reads unavailable 125  "child-pid": 137713, "cgroup-namespace": 4026532590, "ipc-namespace": 4026532588, "mnt-namespace": 4026532586, "net-namespace": 4026532591, "pid-namespace": 4026532589, "uts-namespace": 4026532587 }
+
+case-preflight ouro-obs-off writes unavailable 125  "child-pid": 137736, "cgroup-namespace": 4026532593, "ipc-namespace": 4026532591, "mnt-namespace": 4026532589, "net-namespace": 4026532594, "pid-namespace": 4026532592, "uts-namespace": 4026532590 }
+
+case-preflight ouro-obs-off spawn unavailable 125  "child-pid": 137759, "cgroup-namespace": 4026532590, "ipc-namespace": 4026532587, "mnt-namespace": 4026532585, "net-namespace": 4026532591, "pid-namespace": 4026532588, "uts-namespace": 4026532586 }
+
+case-preflight ouro-obs-off cpu unavailable 125  "child-pid": 137782, "cgroup-namespace": 4026532591, "ipc-namespace": 4026532588, "mnt-namespace": 4026532586, "net-namespace": 4026532592, "pid-namespace": 4026532590, "uts-namespace": 4026532587 }
+
+round -3 complete
+round -2 complete
+round -1 complete
+round 0 complete
+round 1 complete
+round 2 complete
+round 3 complete
+round 4 complete
+round 5 complete
+round 6 complete
+round 7 complete
+round 8 complete
+round 9 complete
+round 10 complete
+round 11 complete
+round 12 complete
+round 13 complete
+round 14 complete
+round 15 complete
+round 16 complete
+round 17 complete
+round 18 complete
+round 19 complete
+round 20 complete
+round 21 complete
+round 22 complete
+round 23 complete
+round 24 complete
+round 25 complete
+round 26 complete
+round 27 complete
+round 28 complete
+round 29 complete
+safety direct complete
+safety greywall complete
+safety mxc complete
+{
+  "performance": {
+    "available": {
+      "direct": true,
+      "ouro-jail": false,
+      "ouro-obs-off": false,
+      "greywall": true,
+      "mxc": true
+    },
+    "case_available": [
+      [
+        "direct",
+        "cpu"
+      ],
+      [
+        "direct",
+        "git"
+      ],
+      [
+        "direct",
+        "noop"
+      ],
+      [
+        "direct",
+        "python"
+      ],
+      [
+        "direct",
+        "reads"
+      ],
+      [
+        "direct",
+        "spawn"
+      ],
+      [
+        "direct",
+        "writes"
+      ],
+      [
+        "greywall",
+        "cpu"
+      ],
+      [
+        "greywall",
+        "git"
+      ],
+      [
+        "greywall",
+        "noop"
+      ],
+      [
+        "greywall",
+        "python"
+      ],
+      [
+        "greywall",
+        "reads"
+      ],
+      [
+        "greywall",
+        "spawn"
+      ],
+      [
+        "greywall",
+        "writes"
+      ],
+      [
+        "mxc",
+        "cpu"
+      ],
+      [
+        "mxc",
+        "git"
+      ],
+      [
+        "mxc",
+        "noop"
+      ],
+      [
+        "mxc",
+        "python"
+      ],
+      [
+        "mxc",
+        "reads"
+      ],
+      [
+        "mxc",
+        "spawn"
+      ],
+      [
+        "mxc",
+        "writes"
+      ]
+    ],
+    "invalid_sequences": [],
+    "reference": {
+      "noop": {
+        "workload": "noop",
+        "count": 1,
+        "checksum": 0
+      },
+      "python": {
+        "workload": "python",
+        "count": 1,
+        "checksum": 0
+      },
+      "git": {
+        "workload": "git",
+        "count": 1003,
+        "checksum": "c7daa5d1c7985955db91200781f171ab3a66a5a1ace3358a9fcdc54e513383aa"
+      },
+      "reads": {
+        "workload": "reads",
+        "count": 1000,
+        "checksum": 491520000
+      },
+      "writes": {
+        "workload": "writes",
+        "count": 1000,
+        "checksum": 1024000
+      },
+      "spawn": {
+        "workload": "spawn",
+        "count": 100,
+        "checksum": 0
+      },
+      "cpu": {
+        "workloa

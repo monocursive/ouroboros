@@ -1,0 +1,4 @@
+1/3 opencode docker inventory-workflow #0 98.1s exit=0 success=True
+2/3 opencode openshell-warm inventory-workflow #0 76.4s exit=0 success=True
+3/3 opencode openshell-ephemeral inventory-workflow #0 76.8s exit=0 success=True
+COMPLETE

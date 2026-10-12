@@ -573,10 +573,10 @@ fn directory_is_empty(dir: &OwnedFd) -> Result<bool, i32> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MountRow {
     /// `ro-bind`, `bind`, `symlink`, `proc`, `dev`, `cwd`, `tmpfs-mask` or
-    /// `placeholder`.
+    /// `file-mask` or `placeholder`.
     pub kind: &'static str,
     /// The host source, or the symlink target, or nothing for a mount with no
-    /// source (`proc`, `dev`, `cwd`, `tmpfs-mask`).
+    /// source (`proc`, `dev`, `cwd`, `tmpfs-mask`, `file-mask`).
     pub source: Option<OsString>,
     /// The path inside the sandbox.
     pub destination: OsString,
@@ -592,6 +592,32 @@ pub struct ProtectedBind {
     /// Descriptor number, valid in the bubblewrap process, holding the pinned
     /// source object (`--ro-bind-fd`); `None` binds by path.
     pub fd: Option<RawFd>,
+}
+
+/// A denial overlays the destination after every grant. Files need a private
+/// empty, mode-000 regular file; a directory tmpfs cannot cover a file inode.
+#[derive(Clone, Debug)]
+pub enum Mask {
+    /// An empty, read-only directory.
+    Directory(PathBuf),
+    /// An unreadable, read-only regular file made from an empty data descriptor.
+    File(PathBuf),
+}
+
+impl Mask {
+    /// Destination in the sandbox, independent of the mask's object type.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Directory(path) | Self::File(path) => path,
+        }
+    }
+}
+
+impl From<&str> for Mask {
+    fn from(path: &str) -> Self {
+        Self::Directory(path.into())
+    }
 }
 /// Everything needed to build a bubblewrap invocation.
 #[derive(Clone, Debug)]
@@ -632,10 +658,9 @@ pub struct BwrapPlan {
     /// NVIDIA nodes, bound individually with `--dev-bind` so a contained
     /// profile can use a GPU without ever seeing devtmpfs.
     pub extra_dev_binds: Vec<(PathBuf, PathBuf)>,
-    /// Denied subtrees, masked with a `tmpfs` over the path after every
-    /// other mount (north-star §4.3: denied subtrees inside visible parents
-    /// are "absent or masked by the backend").
-    pub masked: Vec<PathBuf>,
+    /// Denied paths, masked with a read-only directory tmpfs or an unreadable
+    /// read-only file after every other mount (north-star §4.3).
+    pub masked: Vec<Mask>,
     /// Placeholders for absent root-level literals.
     pub placeholders: Vec<PlaceholderMount>,
     /// The jail binary to bind at [`JAIL_INSIDE_PATH`].
@@ -990,13 +1015,28 @@ impl BwrapPlan {
             destination: OsString::from(JAIL_INSIDE_PATH),
         });
         let mut masks = self.masked.clone();
-        masks.sort_by_key(|path| path.components().count());
-        for path in masks {
+        masks.sort_by_key(|mask| mask.path().components().count());
+        // An ancestor denial already hides everything beneath it. Rendering a
+        // nested file mask into that sealed empty directory is unnecessary.
+        let mut rendered_masks: Vec<PathBuf> = Vec::new();
+        for mask in masks {
+            let path = mask.path();
+            if rendered_masks
+                .iter()
+                .any(|ancestor| path.starts_with(ancestor))
+            {
+                continue;
+            }
             rows.push(MountRow {
-                kind: "tmpfs-mask",
+                kind: if matches!(mask, Mask::File(_)) {
+                    "file-mask"
+                } else {
+                    "tmpfs-mask"
+                },
                 source: None,
-                destination: path.into_os_string(),
+                destination: path.as_os_str().to_owned(),
             });
+            rendered_masks.push(path.to_owned());
         }
         rows
     }
@@ -1038,9 +1078,10 @@ impl BwrapPlan {
         // Audit 2026-09-25-2, S3: a mask is rendered last, over every other
         // row, so one over the plumbing would unmount the jail's own binary,
         // proxy socket or staged state for the whole attempt.
-        for path in &self.masked {
+        for mask in &self.masked {
+            let path = mask.path();
             if shadows_plumbing(path) {
-                return Err(PlanError::MaskedBoundaryPlumbing(path.clone()));
+                return Err(PlanError::MaskedBoundaryPlumbing(path.to_owned()));
             }
         }
         let mut tail: Vec<OsString> = Vec::new();
@@ -1073,6 +1114,22 @@ impl BwrapPlan {
                 push(&[OsStr::new("--setenv"), key, value]);
             }
             for (index, row) in self.mount_table().iter().enumerate() {
+                if row.kind == "file-mask" {
+                    let fd = self
+                        .mount_fds
+                        .get(index)
+                        .copied()
+                        .flatten()
+                        .ok_or(PlanError::StagedFdMissing("file denial"))?;
+                    push(&[
+                        OsStr::new("--perms"),
+                        OsStr::new("000"),
+                        OsStr::new("--ro-bind-data"),
+                        OsStr::new(&fd.to_string()),
+                        &row.destination,
+                    ]);
+                    continue;
+                }
                 if row.kind == "tmpfs-mask" {
                     // Audit 2026-09-25-2, S12: a denied path is absent or
                     // masked, never writable scratch outside every quota
@@ -1470,6 +1527,34 @@ mod tests {
         let position = |path: &str| rendered.argv.iter().position(|arg| arg == path).unwrap();
         assert!(position("/external") < position("/external/secrets"));
         assert!(position("/external/secrets") < position("/external/secrets/hidden"));
+    }
+
+    #[test]
+    fn a_file_mask_requires_an_empty_data_descriptor_and_renders_last() {
+        let mut plan = sample_plan();
+        plan.extra_ro_binds
+            .push(("/private".into(), "/private".into()));
+        plan.masked.push(Mask::File("/private/secret".into()));
+        assert!(matches!(
+            plan.render(),
+            Err(PlanError::StagedFdMissing("file denial"))
+        ));
+        plan.mount_fds = vec![None; plan.mount_table().len()];
+        *plan.mount_fds.last_mut().unwrap() = Some(42);
+        let text = argv_text(&plan);
+        assert!(text.contains("--perms 000 --ro-bind-data 42 /private/secret"));
+        assert!(
+            text.find("--ro-bind /private /private").unwrap()
+                < text.find("--ro-bind-data 42 /private/secret").unwrap()
+        );
+        plan.masked.push(Mask::File("/private/secret/child".into()));
+        assert_eq!(
+            plan.mount_table()
+                .iter()
+                .filter(|row| row.kind == "file-mask")
+                .count(),
+            1
+        );
     }
 
     fn argv_text(plan: &BwrapPlan) -> String {

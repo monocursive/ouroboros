@@ -1,0 +1,68 @@
+{
+  "schema": "competitor-comparison/1",
+  "host": {
+    "system": "Linux",
+    "node": "raspberrypi",
+    "release": "6.18.50+rpt-rpi-v8",
+    "version": "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "machine": "aarch64",
+    "processor": ""
+  },
+  "cpu_count": 4,
+  "started_utc": "2026-10-11T18:09:03Z",
+  "samples": 30,
+  "warmup": 3,
+  "seed": 20261011,
+  "hashes": {
+    "bin/ouro-jail": "25b85c8b2ed05c82263ae1931d38da4adccf18db71d190520629893b6f575e69",
+    "bin/greywall": "f307e14a8afafb69edb5cbda632c259e4af6a1359d41dd2d7818f40b136a30bc",
+    "bin/lxc-exec": "f1c8b9c6fc6450a75f5bf3adc6468da579a95ec6100dd85a50d390ac54c73d12",
+    "work/workload": "34b6b63dfca1d8aad21c7cfd80dd5833c7f853deb24632a040e9cf066fcab75b",
+    "work/payload.py": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+    "greywall.json": "2d13e7c1e24dbcbdddb9eca34c9bb799e15afebb8af0fddc3834c9e4a5f1c29e",
+    "harness/agentbench.py": "8bcdf08aea3a7d9fdc70577562dd68061f38abf0dbfcffde52c3d6612a8f14a1",
+    "harness/agentbench_v2.py": "57d8812d998a837dc9cc30ae2432a5f79aac962402f13b30827f01541a7ab944",
+    "harness/agentbench_workflow.py": "6c28a1123d737a1dc67189baf6f1d0fd911fde4cd27807dad3e8fa056999ce50",
+    "harness/container_agent_runner.py": "11581ddbd122abfd1a07ecc8770d8ccda83226c2ed4fae9ddf8029a0dcd2eb11",
+    "harness/export_results.py": "6ff74f95d621878310aebb637a6f1824a9f280523310c844ca591ea017f3e51f",
+    "harness/final_pi.sh": "6236949c56273c7e8675bb6ee08286346342bfa8d5a6f777ccd5c80646b11434",
+    "harness/greyproxy-v0.4.5.yml": "33734715cfa59a309c7be3fc571595a260748256a5b6111ea2ad83e384bc3929",
+    "harness/install_pi_container_tools.sh": "ce730f9cb72b0de2f88cf1beec2ff51f7b1b2d791eca87c320323fe487f8f2cb",
+    "harness/next_native.sh": "805cd43e2f6afdbc65b16a0b690425a0d5e25a80b00c0a7d3932cd93afa4eec0",
+    "harness/next_openshell_linux.sh": "382b02164e6d5ff450f205f0cc781a665aff16cb3b6b0f57f3825d7bd5e16b96",
+    "harness/openshell-provider-codex.yaml": "ea13f3d42e8c0d906e651eebab552e37e8cdca66b213f786bcf0b070cd4be255",
+    "harness/openshell_agent_v2.py": "05ce9898db1eca605613e2bc68a7d7658367ce70c9f59b7c41a6e902c3f68db4",
+    "harness/openshell_perf_v2.py": "bfbef534e80490b5f882f392640895def0b6216e50354235d95b64a8e5d745a0",
+    "harness/ouro_vm_lane.py": "22af16f09344a3a523622d62eeef4fcdb000c642dbbf3fbda56fc4e2c8c65da4",
+    "harness/payload.py": "d0fdbe64ea3e3edc3cf7ab4aa7269df40fbf9eed81f275b444ae2049b63ab597",
+    "harness/resource_probes.py": "d59035cda40aa964f0fb996205e255bb6d0e48b0bdcb4f940e5ff73742e5d39a",
+    "harness/suite.py": "6fa737f2d4242dec2424e740ce7b1b6a423ad6923197bcc072d3daa8e156960e",
+    "harness/summarize.py": "fa08d2448f50a4cd8071e807fcf45fb207fe6ef0e887f7b59cd17a5d4984d99b",
+    "harness/syscalls.c": "a088d73f4411927b4cb173a64a3dd59d9d4aa12598dd2f7ee20d3ec5107a5476",
+    "harness/tidy_stray_fixture.py": "ee69303c3c99b44228a214271c74bacb835af02449bc4033df3881060561e94a",
+    "harness/workflow_fixture.py": "c5e6e543326fd8cb71eb4596f0ea90834b6e4b644c849f9102e731decb001ea7",
+    "harness/workload.c": "9065f7b6f76f7a1eb8b61b3e1d44b9cb48b9939f1b68d4075cdfccc02a72ed02"
+  },
+  "versions": {
+    "ouro_version": {
+      "exit": 0,
+      "output": "{\n  \"build\": {\n    \"debug_assertions\": false,\n    \"dirty\": null,\n    \"inputs\": \"sha256:2989fb4983dedf8e8c4ea75744cce9eb8ac64c5dacf5985e366ce13a5279c225\",\n    \"opt_level\": \"3\",\n    \"revision\": null,\n    \"rustc\": \"rustc 1.98.1 (48a229cea 2026-09-01)\",\n    \"target\": \"aarch64-unknown-linux-gnu\"\n  },\n  \"component\": \"ouro-jail\",\n  \"frozen\": true,\n  \"observation\": {\n    \"closed_set\": \"linux-closed-v1\"\n  },\n  \"platform\": {\n    \"arch\": \"aarch64\",\n    \"kernel\": \"Linux 6.18.50+rpt-rpi-v8\",\n    \"os\": \"linux\"\n  },\n  \"schemas\": {\n    \"control\": \"ouro.jail.control/1\",\n    \"doctor\": \"ouro.jail.doctor/1\",\n    \"event\": \"ouro.event/1\",\n    \"gate\": \"ouro.jail.gate/1\",\n    \"learned_policy\": \"ouro.jail.learned-policy/1\",\n    \"network\": \"ouro.jail.network/1\",\n    \"policy\": \"ouro.jail.policy/1\",\n    \"policy_file\": \"ouro.jail.policy-file/1\",\n    \"policy_snapshot\": \"ouro.jail.policy-snapshot/1\",\n    \"receipt\": \"ouro.jail.receipt/1\"\n  },\n  \"version\": \"0.1.0\"\n}\n"
+    },
+    "greywall_version": {
+      "exit": 0,
+      "output": "greywall - lightweight, container-free sandbox for running untrusted commands\n  Version: 0.3.7\n  Built:   2026-06-01T15:01:40Z\n  Commit:  5581056d0523bfa244d8061008744ed9f72a0361\nPlatform: linux (kernel 6.18)\n\nChecking system capabilities:\n  \u2713 bubblewrap\n  \u2713 socat\n  \u2713 seccomp\n  \u2717 landlock\n  \u2713 D-Bus isolated (notify-send will not work)\n  \u2717 xdg-dbus-proxy \u2014 optional, enables notify-send inside sandbox\n  \u2717 secret-tool \u2014 optional, injects keyring credentials (gh, glab) into sandbox\n  \u2713 network isolation\n"
+    },
+    "python_version": {
+      "exit": 0,
+      "output": "Python 3.13.5\n"
+    },
+    "mxc_help": {
+      "exit": 0,
+      "output": "Linux Container Executor\n\nUsage: lxc-exec [OPTIONS] [CONFIG_PATH]\n\nArguments:\n  [CONFIG_PATH]  Path to config JSON file (positional)\n\nOptions:\n      --config <CONFIG>                Path to config JSON file\n      --config-base64 <CONFIG_BASE64>  Base64-encoded JSON config\n      --debug                          Enable debug/console output\n      --delete                         Delete container mode\n      --containername <CONTAINERNAME>  Container name (required with --delete)\n      --experimental                   Enable experimental features\n      --allow-testing-features         Allow testing-only features that must never run in production, currently `network.proxy.builtinTestServer` (a bundled, deliberately-permissive test HTTP proxy). Distinct from --experimental\n      --available-backends             Report host backend availability as JSON and exit\n      --dry-run                        Parse and validate config then exit without executing\n      --log-file <LOG_FILE>            Path to diagnostic log file (appends, creates if missing)\n      --setup-hyperlight[=<RUNTIMES>]  Install the warmed Hyperlight snapshot and exit, for the default runtime (`agent`) or the comma-separated runtimes given with `=`: `--setup-hyperlight=python,node`. Names are `agent`, `python`, `python-shell`, `node`, `bash` and `dotnet-jit`. For each, pulls the published rootfs from GHCR unless the image home already holds it, boots it once, and writes the snapshot into the default user data dir (~/.local/share/mxc-hyperlight on Linux, %LOCALAPPDATA%\\mxc-hyperlight on Windows). $MXC_HYPERLIGHT_HOME overrides the destination if set. Intended for tool install hooks so first-run has zero warmup cost\n      --force                          Rebuild the snapshot even if one already exists. Use after replacing `initrd.cpio` so the warm state matches the new bits. Requires --setup-hyperlight\n  -h, --help                           Print help\n"
+    },
+    "greywall_features": {
+      "exit": 0,
+      "output": "Linux Sandbox Features:\n  Kernel: 6.18\n  Bubblewrap (bwrap): true\n  Socat: true\n  Network namespace (--unshare-net): true\n  Seccomp: true (log level: 2)\n  Landlock: false (ABI v0)\n  eBPF: false (CAP_BPF: false, root: false)\n  ip (iproute2): true\n  /dev/net/tun: true\n  tun2socks: true (embedded)\n\nFeature Status:\n  \u2713 Minimum requirements met (bwrap + socat)\n  \u2713 Network namespace isolation available\n  \u2713 Transparent proxy available (tun2socks + TUN device)\n  \u25cb Landlock not available (kernel 5.13+ required)\n  \u2713 Violation monitoring available\n  \u25cb eBPF monitoring not available (needs CAP_BPF or root)\n"
+    }
+  }
+}

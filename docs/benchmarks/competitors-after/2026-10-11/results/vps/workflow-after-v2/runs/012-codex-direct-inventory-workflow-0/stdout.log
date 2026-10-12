@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, category-sorted JSON, and exact decimal stock totals formatted as strings with two fractional digits.
+
+Processing remains separate from argument parsing. Ungrouped output is preserved, malformed CSV returns exit code 2 without a traceback, and README includes a grouped example and expected output.
+
+All 10 supplied tests pass. Additional precision and malformed-CSV checks pass. Supplied tests were unchanged.

@@ -1,0 +1,29 @@
+{
+  "sequence": 36,
+  "agent": "opencode",
+  "mode": "mxc",
+  "task": "add-multiply",
+  "repetition": 0,
+  "started_utc": "2026-10-11T21:03:12Z",
+  "elapsed_ms": 28408.630729,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_add (test_calc.TestCalc.test_add) ... ok\ntest_multiply (test_calc.TestCalc.test_multiply) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/ubuntu/bench-ouro-after/bin/lxc-exec",
+    "/home/ubuntu/bench-ouro-after/results/native-after-v2/runs/036-opencode-mxc-add-multiply-0/mxc-private.json"
+  ],
+  "load": [
+    0.71337890625,
+    0.638671875,
+    0.6044921875
+  ],
+  "artifact": "runs/036-opencode-mxc-add-multiply-0"
+}

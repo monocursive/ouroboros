@@ -1,0 +1,5 @@
+Implemented `--group-by-category` with filtering before grouping, sorted categories, summed quantities, and exact decimal stock values formatted as two-digit JSON strings.
+
+Processing remains separate from argument parsing. Ungrouped output is preserved, invalid CSV returns exit code 2 without a traceback, and README includes the grouped example and expected output.
+
+All 10 tests passed with `python3 -m unittest discover -s tests -v`. Supplied tests were unchanged.

@@ -1,0 +1,8 @@
+EPERM: operation not permitted, mkdir '/tmp/opencode'
+    path: "/tmp/opencode",
+ syscall: "mkdir",
+   errno: -1,
+    code: "EPERM"
+
+
+Bun v1.3.14 (macOS arm64)

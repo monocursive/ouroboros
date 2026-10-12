@@ -1,0 +1,178 @@
+[
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(320*1024*1024);[b.__setitem__(i,1) for i in range(0,len(b),4096)];print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 1665.591734,
+    "exit": 0,
+    "stdout": "{\"started\": true}\n{\"allocated\": 335544320}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "memory",
+    "limited": false
+  },
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--memory",
+      "128m",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(320*1024*1024);[b.__setitem__(i,1) for i in range(0,len(b),4096)];print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 1540.251413,
+    "exit": 0,
+    "stdout": "{\"started\": true}\n{\"allocated\": 335544320}\n",
+    "stderr": "WARNING: Your kernel does not support memory limit capabilities or the cgroup is not mounted. Limitation discarded.\n",
+    "tool": "docker",
+    "resource": "memory",
+    "limited": true
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(320*1024*1024);[b.__setitem__(i,1) for i in range(0,len(b),4096)];print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 8040.401913,
+    "exit": 1,
+    "stdout": "\nCreated sandbox: literary-moorhen\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.1s] Image already present\n[0.7s] Starting sandbox Container created\n\u2713 Sandbox literary-moorhen deletion accepted; cleanup is pending\n",
+    "stderr": "Error:   \u00d7 sandbox entered error phase while provisioning:\n  \u2502 ControlSupervisorStartFailed: Docker sandbox exited before supervisor\n  \u2502 became ready\n\n",
+    "tool": "openshell",
+    "resource": "memory",
+    "limited": false
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--memory",
+      "128Mi",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import json;print(json.dumps({'started':True}),flush=True);b=bytearray(320*1024*1024);[b.__setitem__(i,1) for i in range(0,len(b),4096)];print(json.dumps({'allocated':len(b)}),flush=True)"
+    ],
+    "elapsed_ms": 8176.350883,
+    "exit": 1,
+    "stdout": "\nCreated sandbox: delicious-hake\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.1s] Image already present\n[0.6s] Starting sandbox Container created\n\u2713 Sandbox delicious-hake deletion accepted; cleanup is pending\n",
+    "stderr": "Error:   \u00d7 sandbox entered error phase while provisioning:\n  \u2502 ControlSupervisorStartFailed: Docker sandbox exited before supervisor\n  \u2502 became ready\n\n",
+    "tool": "openshell",
+    "resource": "memory",
+    "limited": true
+  },
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 1299.84466,
+    "exit": 0,
+    "stdout": "{\"cpu_s\": 0.30035198, \"wall_s\": 0.30091730199637823}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "cpu",
+    "limited": false
+  },
+  {
+    "argv": [
+      "docker",
+      "run",
+      "--rm",
+      "--user",
+      "1000:1000",
+      "--cpus",
+      "0.5",
+      "bench-openshell:latest",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 1778.983718,
+    "exit": 0,
+    "stdout": "{\"cpu_s\": 0.30005896099999996, \"wall_s\": 0.5978244360012468}\n",
+    "stderr": "",
+    "tool": "docker",
+    "resource": "cpu",
+    "limited": true
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 7987.47795,
+    "exit": 1,
+    "stdout": "\nCreated sandbox: evocative-puffin\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.1s] Image already present\n[0.6s] Starting sandbox Container created\n\u2713 Sandbox evocative-puffin deletion accepted; cleanup is pending\n",
+    "stderr": "Error:   \u00d7 sandbox entered error phase while provisioning:\n  \u2502 ControlSupervisorStartFailed: Docker sandbox exited before supervisor\n  \u2502 became ready\n\n",
+    "tool": "openshell",
+    "resource": "cpu",
+    "limited": false
+  },
+  {
+    "argv": [
+      "openshell",
+      "sandbox",
+      "create",
+      "--no-keep",
+      "--no-tty",
+      "--from",
+      "bench-openshell:latest",
+      "--cpu",
+      "500m",
+      "--",
+      "/usr/bin/python3",
+      "-c",
+      "import time,json;s=time.process_time();w=time.monotonic()\nwhile time.process_time()-s<.3:\n for i in range(10000):v=i*i\nprint(json.dumps({'cpu_s':time.process_time()-s,'wall_s':time.monotonic()-w}))"
+    ],
+    "elapsed_ms": 7944.011326,
+    "exit": 1,
+    "stdout": "\nCreated sandbox: delectable-treefrog\n\n  [0.0s] Requesting compute...\n[0.0s] Sandbox allocated\n[0.0s] Pulling image bench-openshell:latest\n[0.1s] Image already present\n[0.6s] Starting sandbox Container created\n\u2713 Sandbox delectable-treefrog deletion accepted; cleanup is pending\n",
+    "stderr": "Error:   \u00d7 sandbox entered error phase while provisioning:\n  \u2502 ControlSupervisorStartFailed: Docker sandbox exited before supervisor\n  \u2502 became ready\n\n",
+    "tool": "openshell",
+    "resource": "cpu",
+    "limited": true
+  }
+]

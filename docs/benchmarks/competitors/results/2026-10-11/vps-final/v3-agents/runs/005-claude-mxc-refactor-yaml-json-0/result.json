@@ -1,0 +1,29 @@
+{
+  "sequence": 5,
+  "agent": "claude",
+  "mode": "mxc",
+  "task": "refactor-yaml-json",
+  "repetition": 0,
+  "started_utc": "2026-10-11T15:47:31Z",
+  "elapsed_ms": 24656.738584,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_roundtrip (test_store.TestStore.test_roundtrip) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/home/ubuntu/bench-ouro/bin/lxc-exec",
+    "/home/ubuntu/bench-ouro/results/v3-agents/runs/005-claude-mxc-refactor-yaml-json-0/mxc-private.json"
+  ],
+  "load": [
+    1.51025390625,
+    1.3076171875,
+    1.11181640625
+  ],
+  "artifact": "runs/005-claude-mxc-refactor-yaml-json-0"
+}

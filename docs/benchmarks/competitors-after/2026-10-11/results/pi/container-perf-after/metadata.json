@@ -1,0 +1,18 @@
+{
+  "schema": "openshell-perf/2",
+  "host": {
+    "system": "Linux",
+    "node": "raspberrypi",
+    "release": "6.18.50+rpt-rpi-v8",
+    "version": "#1 SMP PREEMPT Debian 1:6.18.50-1+rpt1 (2026-09-11)",
+    "machine": "aarch64",
+    "processor": ""
+  },
+  "image_id": "sha256:d3026742d657cbfa45f3b72f70735b360cb8a456d096d7a889f5b04c8c71541e",
+  "started_utc": "2026-10-11T22:19:02Z",
+  "harness_sha256": "4dad0b376e4fc0e57b9b5a38f674a2544361e9564e48c22d446beacd1a96fda2",
+  "samples": 30,
+  "warmup": 3,
+  "seed": 20261011,
+  "docker_only": true
+}

@@ -1,0 +1,56 @@
+[
+  {
+    "path": "/home/monocursive/src/calc.py",
+    "artifact": "files/src/calc.py",
+    "birth_epoch": 1791735398,
+    "mtime_epoch": 1791736137.5859096,
+    "sha256": "f3310f57ebc2b372b56211d3ab0d19c821c8d2623747f50458c185396e719bbd",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  },
+  {
+    "path": "/home/monocursive/tests/test_calc.py",
+    "artifact": "files/tests/test_calc.py",
+    "birth_epoch": 1791736132,
+    "mtime_epoch": 1791736132.6038728,
+    "sha256": "dec835e13e306807c532b67962c8fb52b002de79ad4ee92e5643232408cc6c77",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  },
+  {
+    "path": "/home/monocursive/src/store.py",
+    "artifact": "files/src/store.py",
+    "birth_epoch": 1791736353,
+    "mtime_epoch": 1791736353.1726885,
+    "sha256": "9489e5ca7277b45983f48f3ea05de2451c3ff85e89f40006a02e55f848128e91",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  },
+  {
+    "path": "/home/monocursive/tests/test_store.py",
+    "artifact": "files/tests/test_store.py",
+    "birth_epoch": 1791736359,
+    "mtime_epoch": 1791736359.5206597,
+    "sha256": "87a96aed25e7595beebf6e1b51561e134188cc62b1f9dcfc4d38fd80eb6edf53",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  },
+  {
+    "path": "/home/monocursive/src/__init__.py",
+    "artifact": "files/src/__init__.py",
+    "birth_epoch": 1791736064,
+    "mtime_epoch": 1791736064.9147487,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  },
+  {
+    "path": "/home/monocursive/tests/__init__.py",
+    "artifact": "files/tests/__init__.py",
+    "birth_epoch": 1791736061,
+    "mtime_epoch": 1791736061.2147913,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "removed_exact_copy": true,
+    "proof": "new during goal; known fixture path and matching tests or source definitions; backup verified before unlink"
+  }
+]

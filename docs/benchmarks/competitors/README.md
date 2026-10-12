@@ -1,0 +1,125 @@
+# Ouro Jail, Greywall, OpenShell and MXC benchmark
+
+Measured on the supplied VPS, Raspberry Pi and Mac on 2026-10-11. All final runs, setup pilots, corrected configurations, prompts, outputs, patches, source, receipts and available journals are retained. The comparison covers headless coding and fixed local workloads; it is not a release-readiness or security certification.
+
+MXC has the lowest native command startup cost in these configurations. Ouro adds observation, receipts and tested finite resource/lifetime controls at a higher local cost. Greywall works with all three clients on Linux but has a much larger per-command startup cost and two observed policy/platform limitations. OpenShell works with all three clients on the VPS and Mac; fresh creation and warm execution have distinct costs. Its normal runtime fails before workload execution on this Pi.
+
+## Versions and hosts
+
+| Item | Tested version / environment |
+|---|---|
+| Ouro Jail | CLI 0.1.0, clean source c364e3cb3678eb9120901f71bf3881d85e3c4911, Rust 1.98.1 release build; source build, not a claim about the published release archive |
+| Greywall / Greyproxy | 0.3.7 / 0.4.5 |
+| OpenShell | 0.1.3; Docker 29.1.3 on VPS/Pi, Docker 28.3.3 through OrbStack on Mac |
+| MXC | SDK/executors 1.0.0; bubblewrap on Linux, Seatbelt on Mac |
+| Clients | Claude Code 2.1.295; OpenCode 1.19.0; Codex 0.159.2 and matching Code Mode helper |
+| Models | Claude/OpenCode: claude-sonnet-4-5; Codex: gpt-6.1-sol, low reasoning effort |
+| VPS | Ubuntu 26.04.1 / kernel 7.0.0-31, x86_64, four EPYC vCPUs, 3.7 GiB RAM; nearly full disk |
+| Pi | Debian 13 / kernel 6.18.50+rpt-rpi-v8, ARM64, four cores, 3.7 GiB RAM, SD storage; memory controller/Landlock unavailable |
+| Mac | macOS 27.0.1, M2 Pro, ten host CPU cores, 16 GiB RAM; Docker uses a Linux VM |
+
+Exact executable hashes, host facts, image IDs, package lists and source snapshots are in each host export. Native Ouro execution is unsupported on Mac. Its offline disposable VM preview is reported separately below.
+
+## Fixed local work
+
+Median full-command wall time in milliseconds for a no-op, 30 measured samples after three discarded warmups. Each row has its own same-host control. These classes have different operating-system and lifecycle boundaries.
+
+| Host | Native direct | MXC | Ouro observed | Greywall |
+|---|---:|---:|---:|---:|
+| vps | 1.1 | 21.0 | 170.9 | 1684.2 |
+| pi | 1.8 | 23.7 | 310.4 | 1793.9 |
+| mac | 2.8 | 16.7 | unavailable | unavailable |
+
+Container lifecycle controls:
+
+| Host | Docker fresh | Docker warm | OpenShell fresh | OpenShell warm |
+|---|---:|---:|---:|---:|
+| vps | 285.0 | 66.8 | 1024.0 | 72.0 |
+| pi | 1014.7 | 155.8 | unavailable | unavailable |
+| mac | 224.3 | 27.6 | 708.4 | 55.6 |
+
+The [full seven-workload tables](results/2026-10-11/analysis/performance-tables.md) show median/p95 wall time; [CSV](results/2026-10-11/analysis/performance.csv) and [validated JSON](results/2026-10-11/analysis/selected-results.json) also retain work time and counts. Every headline workload bucket has 30/30 valid completion records. Failed or unconfirmed launches contribute no successful timing. Observation-off Ouro is retained as a diagnostic because very short executions can be unconfirmed.
+
+Buffered reads/writes, process launches and integer work are synthetic local probes. Writes do not call fsync. Native nonce/device/inode checks verify shared host backing files on Linux and for MXC on Mac; Pi write variation is not evidence of a faster backing store or a demonstrated sandbox speedup. Mac system Python/Git have unusually high startup cost under the tested MXC Seatbelt profile; the coding lanes use the granted Homebrew installation. See individual workloads rather than extending one interpreter result to every tool.
+
+## Coding compatibility
+
+Small tasks: add multiplication, repair a parser boundary case, replace YAML storage with JSON. Each table cell covers the same three tasks twice, with shuffled order, fresh repositories/state, unchanged supplied tests and independent hidden behavioral checks. A pass requires client/wrapper exit 0, no timeout and all checks. There is no native Ouro Mac lane.
+
+| Host / client | Direct | Ouro | MXC | Greywall | OpenShell fresh | OpenShell warm |
+|---|---:|---:|---:|---:|---:|---:|
+| vps / claude | 6/6 | 6/6 | 6/6 | 6/6 | 6/6 | 6/6 |
+| vps / opencode | 6/6 | 6/6 | 6/6 | 6/6 | 6/6 | 6/6 |
+| vps / codex | 6/6 | 6/6 | 6/6 | 6/6 | 6/6 | 6/6 |
+| pi / claude | 6/6 | 6/6 | 6/6 | 6/6 | 0/6 | unavailable |
+| pi / opencode | 6/6 | 6/6 | 6/6 | 6/6 | 0/6 | unavailable |
+| pi / codex | 6/6 | 6/6 | 6/6 | 6/6 | 0/6 | unavailable |
+| mac / claude | 6/6 | unsupported | 6/6 | 0/6 | 6/6 | 6/6 |
+| mac / opencode | 6/6 | unsupported | 6/6 | 0/6 | 6/6 | 6/6 |
+| mac / codex | 6/6 | unsupported | 0/6 | 0/6 | 6/6 | 6/6 |
+
+Plain Docker controls pass 6/6 per client on each host. Pi OpenShell cold attempts fail before the agent starts; its warm result is unavailable after one explicit startup attempt per client, rather than six invented agent runs. A default thin-image `/bin/true` sandbox also fails there. The gateway is connected and the shipped supervisor `--version` executes, but runtime provisioning ends with ControlSupervisorStartFailed. The deeper startup cause remains unconfirmed; missing Landlock is not claimed as the proven cause.
+
+Mac Greywall 0.3.7 exits 65 with unsupported Seatbelt kleene-star syntax. Mac MXC Codex exits during managed-preferences/CFPreferences synchronization; its direct control works. Extra documented Mach lookups and a separate Keychain opt-in diagnostic did not resolve it. These are results for this headless configuration and OS version.
+
+A larger inventory CLI workflow exercises CSV validation, Decimal arithmetic, category/filter flags, sorted JSON, errors and a documentation example. Ten visible tests plus hidden CLI checks validate the result. Each client/arm performs it once; the table below groups those three distinct client runs.
+
+| Host / class | Mode | Completed / attempted |
+|---|---|---:|
+| vps / native | direct | 3/3 |
+| vps / native | greywall | 3/3 |
+| vps / native | mxc | 2/3 |
+| vps / native | ouro | 3/3 |
+| vps / container | docker | 3/3 |
+| vps / container | openshell-ephemeral | 3/3 |
+| vps / container | openshell-warm | 3/3 |
+| pi / native | direct | 3/3 |
+| pi / native | greywall | 3/3 |
+| pi / native | mxc | 3/3 |
+| pi / native | ouro | 3/3 |
+| pi / container | docker | 3/3 |
+| pi / container | openshell-ephemeral | 0/3 |
+| mac / native | direct | 3/3 |
+| mac / native | greywall | 0/3 |
+| mac / native | mxc | 2/3 |
+| mac / container | docker | 3/3 |
+| mac / container | openshell-ephemeral | 3/3 |
+| mac / container | openshell-warm | 3/3 |
+
+VPS Claude/MXC reached the shared 15-turn cap with a nonzero exit after its patch passed both visible and hidden checks; it remains a strict failure, with no selective retry. Mac MXC workflow failures are Codex initialization; Mac Greywall and Pi OpenShell failures are startup failures. [Raw selected sources and per-run artifacts](results/2026-10-11/analysis/selected-results.json) preserve that distinction.
+
+The [native client CSV](results/2026-10-11/analysis/native-agents.csv) and [container client CSV](results/2026-10-11/analysis/container-agents.csv) contain descriptive median latencies. Model/network variability, different tool plans and n=6 prevent a general productivity ranking. Compare the same client/host/class. Native timings enclose client+wrapper; container total also includes fixture/checking, with inner client time saved separately.
+
+## Features demonstrated and limits
+
+- Ouro on the VPS enforces requested wall 1 s, memory 64 MiB / swap 0, PIDs 16 and CPU 25%. The bounded child probe reaches 13 forks before EAGAIN because the cgroup limit includes other tasks. Pi enforces wall/PIDs/CPU and explicitly refuses memory without the controller. Storage/inode requests refuse the unbounded disk workspace. These requested limits are separate from default timings; default agent mode has no automatic memory/CPU/storage/inode caps.
+
+- MXC enforces its configured 1,000 ms process timeout. Shared memory/CPU/PID/storage limits are not exposed by the two tested native backends. Docker/OpenShell on VPS/Mac enforce the matched requested CPU 500m and memory 128 MiB with runtime-default swap. A touched 320 MiB allocation is killed; unbounded controls complete it. OpenShell memory limits apply to the workload container; its separate supervisor is not included in that RAM ceiling. On Pi, Docker warns and ignores its memory request because the controller is absent; the same allocation completes. Pi OpenShell resource probes never reach their payload, so their limits are unavailable rather than failed enforcement tests.
+
+- Ouro and MXC deny the private directory canaries on Linux. Greywall denyRead(child)+denyWrite(parent) allows private and symlink reads: the later parent mount re-exposes the denied child. Removing the redundant parent denyWrite restores the child denial and keeps the parent read-only on both Linux hosts. Both variants are preserved. Ouro separately fails setup when denying a file within an RO-granted parent; the normal denied-directory variant works.
+
+- Linux native wrappers block the host TCP/signal canaries and stop the bounded detached heartbeat. Explicitly visible Unix sockets remain reachable in the Linux Greywall/MXC configurations; this is not an ungranted path escape. Ouro blocks that fixture. Mac MXC denies its file/network/signal canaries but its detached heartbeat continues after wrapper return, still subject to Seatbelt.
+
+- Docker positive controls reach the host egress canary; OpenShell fresh/warm block it on VPS/Mac. Mac uses host.docker.internal, with three positive/negative repetitions; the initial bridge-IP probe had invalid Docker controls and is excluded. Separate RO-workspace policy probes execute normally and deny writes while allowing scratch writes on VPS/Mac.
+
+- Ouro retains successful receipts with empty-tree settlement and coverage checks, plus full exported journals. Greywall proxy/API-key substitution and OpenShell providers are enabled in coding runs. Ouro vaulting, privileged Greywall eBPF monitoring, optional formal/learning facilities, Windows and other backends are documentation-derived or untested, not claimed as benchmark passes.
+
+See the [audited feature matrix](feature-matrix.md) for documented vs tested scope. No global strongest-security claim follows from this bounded canary set.
+
+## Deployment and protocol reliability
+
+The VPS needed recorded AppArmor changes: unprivileged user namespaces were allowed and a byte-identical bubblewrap copy avoided a pathname profile denying network capabilities. Every native arm had that copy available. Pi Ouro networking required the previously provisioned exact-kernel Unix diagnostics module. These are provisioned-host results. VPS disk was nearly full; only the approved old Rust build cache was cleared, and a combined-client OCI image still hit ENOSPC. Final single-client images preserve the same image for each Docker/OpenShell pair, with task-owned image caches removed after recording provenance.
+
+OpenShell Codex uses NVIDIA's versioned non-secret identity bootstrap plus an ordinary account-routing hint for CLI 0.159.2; provider access tokens remain handles inside the sandbox. The first VPS Codex provider token expired and gateway refresh failed 401. A fresh provider using the still-valid authorized Mac cache, its actual expiry metadata, and the same profile restored 3/3 smoke, 18/18 small and 3/3 workflow runs. The failed expired-provider batch remains a credential-lifecycle diagnostic. No new user login was needed. The reusable setup records cache expiry explicitly before timed work.
+
+Ouro's Mac offline VM preview 0.1.0-preview.1 completed three samples of each shell fixture at about 34.3–34.5 seconds per fresh VM. It has no online agent lane here. That diagnostic uses different shell work and a disposable VM lifecycle; it is not pooled into native or warm-container rankings.
+
+The [methods](METHODS.md) define configurations, workload checks, limits, statistics and reproduction. The [exclusion register](EXCLUSIONS.md) explains every superseded pilot. Product sources were not changed for competitor success, and failed launches were never scored as fast execution. Client setups and host capabilities differ materially; those differences are part of the recorded result.
+
+## Reusable evidence
+
+Final host exports: [VPS](results/2026-10-11/vps-final/), [Pi](results/2026-10-11/pi-final/), [Mac](results/2026-10-11/mac-final/). Their immutable sanitized archives are under [evidence-archives](results/2026-10-11/evidence-archives/). Each has a file manifest with SHA256, original-vs-sanitized hashes and a redaction flag; journal coverage is recorded separately. Credentials, private provider databases and temporary auth homes are excluded.
+
+Raw JSON/NDJSON, full outputs, prompts, configs, patches, resulting files, exact image checker sources and installed harness snapshots remain available. [Selected analysis](results/2026-10-11/analysis/selected-results.json) pins source hashes and filters. [All-dataset audit](results/2026-10-11/analysis/all-datasets-audit.json) includes retained pilots for inspection, not pooling. `SHA256SUMS` verifies the delivered tree. Temporary benchmark services were stopped after capture; binaries and configurations remain on the hosts. No commit or push was performed.
+
+Primary sources: [Greywall v0.3.7 configuration](https://github.com/GreyhavenHQ/greywall/blob/v0.3.7/docs/configuration.md), [OpenShell architecture](https://docs.nvidia.com/openshell/latest/about/architecture), [v0.1.3 Codex bootstrap](https://github.com/NVIDIA/OpenShell/blob/v0.1.3/examples/codex-app-server/start-codex-app-server), [MXC bubblewrap](https://github.com/microsoft/mxc/blob/main/docs/backends/bwrap/bubblewrap-backend.md), [MXC Seatbelt](https://github.com/microsoft/mxc/blob/main/docs/backends/seatbelt/seatbelt-backend.md), [Ouro operating rules](../../specs/jail-v1/operating.md). Documentation for untested features is not execution proof.

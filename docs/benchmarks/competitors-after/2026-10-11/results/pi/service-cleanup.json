@@ -1,0 +1,9 @@
+[
+  {
+    "pid": 402128,
+    "kind": "gateway",
+    "signal": "SIGTERM",
+    "sent": true,
+    "exited_or_zombie": true
+  }
+]

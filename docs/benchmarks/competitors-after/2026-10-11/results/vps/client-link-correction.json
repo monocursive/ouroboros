@@ -1,0 +1,26 @@
+[
+  {
+    "name": "claude",
+    "before_link": "/home/ubuntu/bench-ouro/bin/claude",
+    "after_link": "/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+    "bytes_unchanged": true
+  },
+  {
+    "name": "opencode",
+    "before_link": "/home/ubuntu/bench-ouro/bin/opencode",
+    "after_link": "/home/ubuntu/.opencode/bin/opencode",
+    "bytes_unchanged": true
+  },
+  {
+    "name": "codex",
+    "before_link": "/home/ubuntu/bench-ouro/bin/codex",
+    "after_link": "/home/ubuntu/bench-ouro/bin/codex",
+    "bytes_unchanged": true
+  },
+  {
+    "name": "codex-code-mode-host",
+    "before_link": "/home/ubuntu/bench-ouro/bin/codex-code-mode-host",
+    "after_link": "/home/ubuntu/bench-ouro/bin/codex-code-mode-host",
+    "bytes_unchanged": true
+  }
+]

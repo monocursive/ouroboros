@@ -1,0 +1,36 @@
+{
+  "sequence": 10,
+  "agent": "claude",
+  "mode": "openshell-ephemeral",
+  "task": "refactor-yaml-json",
+  "repetition": 1,
+  "success": false,
+  "exit": 1,
+  "timeout": false,
+  "elapsed_ms": 8414.039214,
+  "container_result": null,
+  "argv": [
+    "openshell",
+    "sandbox",
+    "create",
+    "--no-keep",
+    "--no-tty",
+    "--from",
+    "ouro-comparison-agents-after:20261011",
+    "--policy",
+    "/home/monocursive/bench-ouro-after/results/container-after-claude/policy.yaml",
+    "--provider",
+    "benchmark-anthropic-v2",
+    "--",
+    "/usr/bin/python3",
+    "/opt/bench/container_agent_runner.py",
+    "claude",
+    "refactor-yaml-json"
+  ],
+  "load": [
+    1.42138671875,
+    1.6845703125,
+    1.3671875
+  ],
+  "artifact": "runs/010-claude-openshell-ephemeral-refactor-yaml-json-1"
+}

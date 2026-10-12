@@ -1,0 +1,29 @@
+{
+  "sequence": 10,
+  "agent": "claude",
+  "mode": "mxc",
+  "task": "refactor-yaml-json",
+  "repetition": 1,
+  "started_utc": "2026-10-11T15:41:41Z",
+  "elapsed_ms": 28077.170792,
+  "exit": 0,
+  "timeout": false,
+  "success": true,
+  "checker": {
+    "tests_unchanged": true,
+    "tests_pass": true,
+    "hidden_pass": true,
+    "test_output": "test_roundtrip (test_store.TestStore) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n",
+    "hidden_output": ""
+  },
+  "argv": [
+    "/Users/monocursive/bench-ouro/bin/mxc-exec-mac",
+    "/Users/monocursive/bench-ouro/results/v2-agents/runs/010-claude-mxc-refactor-yaml-json-1/mxc-private.json"
+  ],
+  "load": [
+    2.25634765625,
+    1.77294921875,
+    1.5908203125
+  ],
+  "artifact": "runs/010-claude-mxc-refactor-yaml-json-1"
+}

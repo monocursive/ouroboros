@@ -1,0 +1,55 @@
+I'll implement the category summaries feature for the inventory CLI. Let me start by exploring the codebase structure and then break down the work into manageable tasks.
+Now let me read the key files to understand the current implementation:
+Perfect! Now I understand the codebase. Let me create a task plan:
+Now let me start implementing. First, I'll add the category grouping logic to report.py:
+Now let me update the CLI to add the --group-by-category flag and use the appropriate report function:
+Now let me run the tests to see if everything works:
+Excellent! All tests pass. Now let me update the README with a grouped example:
+Perfect! Let me verify the implementation with a quick manual test to confirm everything works as expected:
+Excellent! Let me also verify that invalid CSV still produces the correct error handling:
+Perfect! Let me run the tests one more time to ensure everything is working correctly:
+Perfect! All tests pass. Let me provide a summary of what was implemented:
+
+## Summary
+
+I've successfully implemented the category summaries feature for the inventory CLI. Here's what was done:
+
+### Changes Made:
+
+1. **inventory/report.py** - Added `category_report()` function:
+   - Filters items by `min_quantity` before grouping
+   - Groups items by category
+   - Sums quantities per category
+   - Calculates `stock_value` as the sum of `quantity * unit_price` using Decimal for precision
+   - Returns JSON array sorted by category name
+   - Formats `stock_value` as a string with exactly two decimal places
+
+2. **inventory/cli.py** - Added `--group-by-category` flag:
+   - Added the boolean flag to the argument parser
+   - Routes to `category_report()` when flag is present
+   - Routes to `item_report()` (existing behavior) when flag is absent
+   - Maintains existing error handling (exit code 2 for invalid CSV, no traceback)
+
+3. **README.md** - Added documentation:
+   - Example command with `--group-by-category`
+   - Expected JSON output showing the grouped format
+   - Explanation of the `stock_value` calculation
+
+### Key Implementation Details:
+
+- **Separation of concerns**: Processing logic in `report.py`, argument parsing in `cli.py`
+- **Filter then group**: `--min-quantity` is applied before grouping, as required
+- **Decimal precision**: Uses `Decimal` type for accurate monetary calculations
+- **Format compliance**: `stock_value` formatted as string with `.2f` precision
+- **Sorted output**: Categories sorted alphabetically
+- **Backward compatibility**: Ungrouped output unchanged
+
+### Test Results:
+
+All 10 tests pass, including:
+- `test_category_summaries` - Basic grouping functionality
+- `test_filter_before_group` - Filtering before grouping
+- `test_ungrouped` - Original behavior preserved
+- `test_bad_csv` - Error handling with exit code 2, no traceback
+
+The implementation is complete and ready for use!

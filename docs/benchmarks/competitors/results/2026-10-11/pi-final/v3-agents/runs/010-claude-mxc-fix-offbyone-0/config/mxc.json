@@ -1,0 +1,45 @@
+{
+  "version": "1.0.0",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "/home/monocursive/bench-ouro/bin/claude -p 'The tests are failing. Run python3 -m unittest discover -s tests -v, find the bug in src/parse.py, and fix it so all tests pass. Do not modify the tests.' --model claude-sonnet-4-5 --max-turns 15 --dangerously-skip-permissions --output-format json",
+    "cwd": "/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/workspace/fix-offbyone",
+    "timeout": 180000,
+    "inheritDefaultEnv": true,
+    "env": [
+      "HOME=/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/home",
+      "PATH=/home/monocursive/bench-ouro/bin:/home/monocursive/bench-ouro/bin:/usr/sbin:/sbin:/usr/bin:/bin",
+      "TMPDIR=/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/home/tmp",
+      "ANTHROPIC_API_KEY=<ANTHROPIC_API_KEY>",
+      "CODEX_HOME=/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/state",
+      "CLAUDE_CONFIG_DIR=/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/home/.claude",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+      "DISABLE_TELEMETRY=1",
+      "OPENCODE_DISABLE_AUTOUPDATE=true",
+      "XDG_CONFIG_HOME=/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/home/.config",
+      "XDG_DATA_HOME=/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/home/.local/share",
+      "XDG_STATE_HOME=/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/home/.local/state",
+      "XDG_CACHE_HOME=/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/home/.cache",
+      "GIT_CONFIG_NOSYSTEM=1",
+      "GIT_CONFIG_GLOBAL=/dev/null"
+    ]
+  },
+  "filesystem": {
+    "readonlyPaths": [
+      "/home/monocursive/bench-ouro/bin"
+    ],
+    "readwritePaths": [
+      "/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/workspace/fix-offbyone",
+      "/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/home",
+      "/home/monocursive/bench-ouro/results/v3-agents/runs/010-claude-mxc-fix-offbyone-0/state"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:43051"
+  }
+}

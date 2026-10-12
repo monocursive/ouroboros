@@ -1,0 +1,16 @@
+direct
+  cpu      n=30 ok=30  wall    21.10 /    22.75 ms   work    18.66 ms
+  git      n=30 ok=30  wall    44.61 /    48.26 ms   work    10.01 ms
+  noop     n=30 ok=30  wall     2.54 /     3.47 ms   work    -1.00 ms
+  python   n=30 ok=30  wall    34.09 /    36.23 ms   work    -1.00 ms
+  reads    n=30 ok=30  wall    22.14 /    25.39 ms   work    19.60 ms
+  spawn    n=30 ok=30  wall   145.71 /   150.49 ms   work   143.25 ms
+  writes   n=30 ok=30  wall    47.47 /    51.87 ms   work    45.14 ms
+mxc
+  cpu      n=30 ok=30  wall    58.63 /    61.01 ms   work    18.63 ms
+  git      n=30 ok=30  wall  3442.90 /  3495.59 ms   work  1689.72 ms
+  noop     n=30 ok=30  wall    16.70 /    23.13 ms   work    -1.00 ms
+  python   n=30 ok=30  wall  1769.14 /  1776.88 ms   work    -1.00 ms
+  reads    n=30 ok=30  wall    58.04 /    59.96 ms   work    19.83 ms
+  spawn    n=30 ok=30  wall   202.64 /   219.76 ms   work   142.76 ms
+  writes   n=30 ok=30  wall   100.23 /   103.15 ms   work    45.85 ms

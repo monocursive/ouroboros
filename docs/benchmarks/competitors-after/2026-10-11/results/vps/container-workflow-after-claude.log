@@ -1,0 +1,4 @@
+1/3 claude docker inventory-workflow #0 69.5s exit=0 success=True
+2/3 claude openshell-warm inventory-workflow #0 75.2s exit=0 success=True
+3/3 claude openshell-ephemeral inventory-workflow #0 80.1s exit=0 success=True
+COMPLETE

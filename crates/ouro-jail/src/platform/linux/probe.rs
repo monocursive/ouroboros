@@ -183,6 +183,76 @@ pub fn run_one_backend(name: &str, jail_exe: &Path, bwrap: Backend<'_>) -> Probe
     run_one_for(name, std::env::consts::ARCH, jail_exe, bwrap)
 }
 
+/// Fresh probes for one preparation. The namespace probes consume the same
+/// status report, so one sandbox can provide it without changing any check.
+/// No result survives this call; refusals and deadlines still apply per run.
+#[must_use]
+pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<ProbeResult> {
+    let namespace = |name: &str| {
+        matches!(
+            name,
+            "user_namespace" | "pid_namespace" | "network_namespace"
+        )
+    };
+    let shared = if names.iter().filter(|name| namespace(name)).count() > 1 {
+        bwrap.ok().filter(|path| path.is_absolute()).map(|path| {
+            let outside = ns_ids(own_pid());
+            (
+                outside,
+                run_inside(jail_exe, path, &["status"], Vec::new(), false),
+            )
+        })
+    } else {
+        None
+    };
+    names
+        .iter()
+        .map(|name| {
+            if let Some((outside, run)) = &shared {
+                let result = match *name {
+                    "user_namespace" | "pid_namespace" => Some(match run {
+                        Ok(run) => namespace_result(
+                            name,
+                            if *name == "user_namespace" {
+                                outside.user
+                            } else {
+                                outside.pid
+                            },
+                            &run.captured,
+                        ),
+                        Err(error) => ProbeResult::error(
+                            if *name == "user_namespace" {
+                                "user_namespace"
+                            } else {
+                                "pid_namespace"
+                            },
+                            if *name == "user_namespace" {
+                                "user-namespace"
+                            } else {
+                                "pid-namespace"
+                            },
+                            error.to_string(),
+                        ),
+                    }),
+                    "network_namespace" => Some(match run {
+                        Ok(run) => network_namespace_result(&run.captured),
+                        Err(error) => ProbeResult::error(
+                            "network_namespace",
+                            "network-namespace",
+                            error.to_string(),
+                        ),
+                    }),
+                    _ => None,
+                };
+                if let Some(result) = result {
+                    return result;
+                }
+            }
+            run_one_backend(name, jail_exe, bwrap)
+        })
+        .collect()
+}
+
 // J5-D begin: probes that execute bubblewrap (review F1)
 /// The probes that execute bubblewrap, with the mechanism each names. With
 /// no resolved backend they report `unavailable` with `backend_unavailable`
@@ -491,18 +561,27 @@ fn probe_namespace(name: &'static str, jail_exe: &Path, bwrap: &Path) -> ProbeRe
         Ok(run) => run,
         Err(e) => return ProbeResult::error(name, mechanism, e.to_string()),
     };
-    if run.captured.timed_out {
+    namespace_result(name, outside_id, &run.captured)
+}
+
+fn namespace_result(name: &str, outside_id: Option<u64>, captured: &exec::Captured) -> ProbeResult {
+    let (name, kind, mechanism) = if name == "user_namespace" {
+        ("user_namespace", "user", "user-namespace")
+    } else {
+        ("pid_namespace", "pid", "pid-namespace")
+    };
+    if captured.timed_out {
         return ProbeResult::error(name, mechanism, "probe exceeded its 5 second deadline");
     }
     let key = format!("ns_{kind}");
-    let Some(inside_id) = run.captured.field(&key) else {
+    let Some(inside_id) = captured.field(&key) else {
         return ProbeResult::error(
             name,
             mechanism,
             format!(
                 "sandbox reported no {key}: status {:?}, stderr {}",
-                run.captured.code(),
-                run.captured.stderr.trim()
+                captured.code(),
+                captured.stderr.trim()
             ),
         );
     };
@@ -518,10 +597,10 @@ fn probe_namespace(name: &'static str, jail_exe: &Path, bwrap: &Path) -> ProbeRe
     }
     let mut evidence = format!("outside {outside_text}, inside {inside_id}");
     if kind == "pid" {
-        if let Some(nspid) = run.captured.field("nspid") {
+        if let Some(nspid) = captured.field("nspid") {
             evidence.push_str(&format!("; NSpid {nspid}"));
         }
-        if let Some(pids) = run.captured.field("proc_pids") {
+        if let Some(pids) = captured.field("proc_pids") {
             evidence.push_str(&format!("; /proc shows {pids}"));
         }
     }
@@ -535,11 +614,20 @@ fn probe_network_namespace(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
         Ok(run) => run,
         Err(e) => return ProbeResult::error(NAME, MECHANISM, e.to_string()),
     };
-    let Some(devices) = run.captured.field("netdev") else {
+    network_namespace_result(&run.captured)
+}
+
+fn network_namespace_result(captured: &exec::Captured) -> ProbeResult {
+    const NAME: &str = "network_namespace";
+    const MECHANISM: &str = "network-namespace";
+    if captured.timed_out {
+        return ProbeResult::error(NAME, MECHANISM, "probe exceeded its 5 second deadline");
+    }
+    let Some(devices) = captured.field("netdev") else {
         return ProbeResult::error(
             NAME,
             MECHANISM,
-            format!("sandbox reported no netdev: {}", run.captured.stderr.trim()),
+            format!("sandbox reported no netdev: {}", captured.stderr.trim()),
         );
     };
     if devices == "lo" {
@@ -1487,6 +1575,85 @@ fn check_socket_afunix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_namespace_results_keep_each_failure_independent() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let mut captured = exec::Captured {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: "ns_user=11\nns_pid=22\nnetdev=lo\n".into(),
+            stderr: String::new(),
+            timed_out: false,
+        };
+        assert_eq!(
+            namespace_result("user_namespace", Some(10), &captured).status,
+            ProbeStatus::Available
+        );
+        assert_eq!(
+            namespace_result("pid_namespace", Some(22), &captured).status,
+            ProbeStatus::Unavailable
+        );
+        assert_eq!(
+            network_namespace_result(&captured).status,
+            ProbeStatus::Available
+        );
+        captured.stdout = "ns_user=11\nns_pid=22\nnetdev=eth0,lo\n".into();
+        assert_eq!(
+            network_namespace_result(&captured).status,
+            ProbeStatus::Unavailable
+        );
+        captured.timed_out = true;
+        assert_eq!(
+            namespace_result("user_namespace", Some(10), &captured).status,
+            ProbeStatus::Error
+        );
+        assert_eq!(
+            network_namespace_result(&captured).status,
+            ProbeStatus::Error
+        );
+        captured.timed_out = false;
+        captured.stdout.clear();
+        assert_eq!(
+            namespace_result("user_namespace", Some(10), &captured).status,
+            ProbeStatus::Error
+        );
+        assert_eq!(
+            network_namespace_result(&captured).status,
+            ProbeStatus::Error
+        );
+    }
+
+    #[test]
+    fn namespace_batch_uses_one_fresh_sandbox_on_every_call() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = OwnedTempDir::new("namespace-batch-test").unwrap();
+        let backend = temp.path.join("bwrap");
+        let calls = temp.path.join("calls");
+        std::fs::write(
+            &backend,
+            format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf '%s\\n' ns_user=1 ns_pid=2 netdev=lo\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let names = ["user_namespace", "pid_namespace", "network_namespace"];
+        for expected in [1, 2] {
+            let results = run_selected(&names, Path::new("/unused-jail"), Ok(&backend));
+            assert_eq!(results.iter().map(|r| r.name).collect::<Vec<_>>(), names);
+            assert!(
+                results.iter().all(|r| r.status == ProbeStatus::Available),
+                "{results:?}"
+            );
+            assert_eq!(std::fs::read(&calls).unwrap().len(), expected);
+        }
+        let unavailable = run_selected(&names, Path::new("/unused-jail"), Err("missing backend"));
+        assert!(unavailable.iter().all(
+            |r| r.status == ProbeStatus::Unavailable && r.reason_code == "backend_unavailable"
+        ));
+        assert_eq!(std::fs::read(&calls).unwrap().len(), 2);
+    }
 
     #[test]
     fn every_name_has_a_probe() {

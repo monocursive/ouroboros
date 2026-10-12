@@ -1,0 +1,4 @@
+{
+  "exit": 0,
+  "stderr": "DEPRECATED: The legacy builder is deprecated and will be removed in a future release.\n            Install the buildx component to build images with BuildKit:\n            https://docs.docker.com/go/buildx/\n\n"
+}

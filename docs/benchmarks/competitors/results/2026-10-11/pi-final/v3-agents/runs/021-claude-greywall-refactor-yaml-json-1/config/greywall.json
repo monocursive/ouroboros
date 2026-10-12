@@ -1,0 +1,18 @@
+{
+  "filesystem": {
+    "defaultDenyRead": true,
+    "allowRead": [
+      "/home/monocursive/bench-ouro/bin"
+    ],
+    "allowWrite": [
+      "/home/monocursive/bench-ouro/results/v3-agents/runs/021-claude-greywall-refactor-yaml-json-1/workspace/refactor-yaml-json",
+      "/home/monocursive/bench-ouro/results/v3-agents/runs/021-claude-greywall-refactor-yaml-json-1/home",
+      "/home/monocursive/bench-ouro/results/v3-agents/runs/021-claude-greywall-refactor-yaml-json-1/state"
+    ]
+  },
+  "network": {
+    "proxyUrl": "socks5://127.0.0.1:43052",
+    "allowLocalOutbound": false,
+    "allowAllUnixSockets": false
+  }
+}

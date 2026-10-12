@@ -1,0 +1,6 @@
+1/72 claude direct add-multiply #0 23.5s exit=0 success=True
+2/72 claude mxc add-multiply #0 22.1s exit=0 success=True
+3/72 claude ouro add-multiply #0 23.4s exit=0 success=True
+4/72 claude greywall add-multiply #0 26.7s exit=0 success=True
+5/72 claude mxc refactor-yaml-json #0 23.2s exit=0 success=True
+6/72 claude ouro refactor-yaml-json #0 28.7s exit=0 success=True

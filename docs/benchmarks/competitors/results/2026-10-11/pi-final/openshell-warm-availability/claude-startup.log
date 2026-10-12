@@ -1,0 +1,7 @@
+{
+  "exit": 0,
+  "timeout": false,
+  "elapsed_ms": 168.685301,
+  "stdout": "[1791744399.199] [gateway] [INFO ] [openshell_server::grpc::sandbox] CreateSandbox request completed successfully\n[1791744402.537] [sandbox] [INFO ] [openshell_supervisor] Starting sandbox supervision command=[\"/bin/sleep\", \"300\"]\n[1791744407.988] [gateway] [INFO ] [openshell_server::compute] Sandbox phase changed\n[1791744407.988] [gateway] [WARN ] [openshell_server::compute] Docker sandbox exited before supervisor became ready\n",
+  "stderr": ""
+}

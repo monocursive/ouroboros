@@ -1,0 +1,77 @@
+[1791735751.072] [gateway] [INFO ] [openshell_server::grpc::sandbox] CreateSandbox request completed successfully
+[1791735751.397] [sandbox] [INFO ] [openshell_supervisor] Starting sandbox supervision command=["/bin/sleep", "infinity"]
+[1791735751.461] [gateway] [INFO ] [openshell_server::grpc::policy] GetSandboxConfig served from spec (backfilled version 1)
+[1791735751.479] [gateway] [INFO ] [openshell_server::grpc::policy] GetSandboxProviderEnvironment request completed successfully
+[1791735751.513] [gateway] [INFO ] [openshell_server::supervisor_session] supervisor session: accepted
+[1791735751.519] [gateway] [INFO ] [openshell_server::grpc::policy] ReportPolicyStatus: sandbox reported policy load result
+[1791735751.578] [gateway] [INFO ] [openshell_server::supervisor_session] supervisor session: relay opened successfully
+[1791735751.579] [gateway] [INFO ] [openshell_server::supervisor_session] relay stream: claimed pending relay, bridging
+[1791735751.579] [gateway] [INFO ] [openshell_server::grpc::sandbox] ExecSandbox (relay): command started
+[1791735751.456] [sandbox] [INFO ] [openshell_supervisor] Fetching sandbox policy via gRPC endpoint=https://127.0.0.1:17670 sandbox=bench-v2-opencode sandbox_id=35dce5dd-c34c-462b-b298-2f545730ae94
+[1791735751.467] [sandbox] [OCSF ] [ocsf] CONFIG:ENRICHED [INFO] Enriched policy with baseline filesystem paths for proxy mode
+[1791735751.479] [sandbox] [INFO ] [openshell_supervisor_network::opa] Configured OPA runtime binary identity mode require_binary_identity=true source=proto
+[1791735751.479] [sandbox] [OCSF ] [ocsf] CONFIG:CONFIGURED [INFO] OPA runtime binary identity mode configured [source:proto require_binary_identity:true] [source:proto]
+[1791735751.494] [sandbox] [INFO ] [openshell_supervisor] Isolation boundary attached backend=openshell-sandbox
+[1791735751.495] [sandbox] [INFO ] [openshell_supervisor] Isolation boundary enforcement confirmed backend=openshell-sandbox
+[1791735751.496] [sandbox] [OCSF ] [ocsf] CONFIG:ENABLED [INFO] TLS termination enabled: ephemeral CA generated
+[1791735751.496] [sandbox] [OCSF ] [ocsf] CONFIG:READY [INFO] Policy DNS connected to isolation boundary
+[1791735751.496] [sandbox] [OCSF ] [ocsf] NET:LISTEN [INFO] 127.0.0.1:3128
+[1791735751.496] [sandbox] [WARN ] [openshell_supervisor_network::proxy] host.openshell.internal maps to a non-link-local IP; trusted-gateway SSRF exemption disabled ip=127.0.0.1
+[1791735751.509] [sandbox] [INFO ] [openshell_supervisor] Isolation boundary agent started backend=openshell-sandbox
+[1791735751.510] [sandbox] [OCSF ] [ocsf] SSH:LISTEN [INFO]
+[1791735751.510] [sandbox] [INFO ] [openshell_supervisor] Control-mode access plane started backend=openshell-sandbox
+[1791735751.516] [sandbox] [OCSF ] [ocsf] NET:OPEN [INFO] 127.0.0.1:17670
+[1791735751.519] [sandbox] [OCSF ] [ocsf] CONFIG:LOADED [INFO] Acknowledged initial policy revision as loaded [version:2] [hash:2313055aaa4b9d2a1cc22b4a1251c1c7bf24eb0e68690c0749285b2d508797a3]
+[1791735751.578] [sandbox] [OCSF ] [ocsf] EVENT [INFO] ssh relay open (channel_id=b95e1170-8702-4d35-aeac-507ccc1ef7f3, target=unix:/run/openshell/ssh.sock)
+[1791735751.578] [sandbox] [OCSF ] [ocsf] SSH:OPEN [INFO] ALLOWED
+[1791735752.125] [sandbox] [OCSF ] [ocsf] NET:REFUSE [MED] DENIED models.opencode.ai [reason:policy_dns_ineligible]
+[1791735752.125] [sandbox] [OCSF ] [ocsf] CONFIG:OBSERVATION [INFO] Policy DNS staged unapproved name models.opencode.ai synthetic=198.18.0.2 for TCP policy review
+[1791735752.662] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.2:443 reason=endpoint models.opencode.ai:443 is not allowed by any policy
+[1791735752.662] [sandbox] [OCSF ] [ocsf] NET:OPEN [MED] DENIED /opt/agents/bin/opencode(0) -> models.opencode.ai:443 [reason:transparent_tcp_policy_denied]
+[1791735752.896] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.2:443 reason=endpoint models.opencode.ai:443 is not allowed by any policy
+[1791735752.896] [sandbox] [OCSF ] [ocsf] NET:OPEN [MED] DENIED /opt/agents/bin/opencode(0) -> models.opencode.ai:443 [reason:transparent_tcp_policy_denied]
+[1791735752.944] [sandbox] [OCSF ] [ocsf] NET:REFUSE [MED] DENIED registry.npmjs.org [reason:policy_dns_ineligible]
+[1791735752.944] [sandbox] [OCSF ] [ocsf] CONFIG:OBSERVATION [INFO] Policy DNS staged unapproved name registry.npmjs.org synthetic=198.18.0.3 for TCP policy review
+[1791735752.945] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.3:443 reason=endpoint registry.npmjs.org:443 is not allowed by any policy
+[1791735752.945] [sandbox] [OCSF ] [ocsf] NET:OPEN [MED] DENIED /opt/agents/bin/opencode(0) -> registry.npmjs.org:443 [reason:transparent_tcp_policy_denied]
+[1791735753.282] [sandbox] [OCSF ] [ocsf] CONFIG:PUBLISHED [INFO] Policy DNS mapped api.anthropic.com resolved=160.79.104.10 synthetic=198.18.0.4 ports=443 mapping_id=0fe6fcc9-3ce8-492d-a3a1-c30ee793e4dc
+[1791735753.301] [sandbox] [OCSF ] [ocsf] NET:OPEN [INFO] ALLOWED /opt/agents/bin/opencode(0) -> api.anthropic.com:443 [policy:_provider_benchmark_anthropic_v2 engine:opa]
+[1791735753.306] [sandbox] [OCSF ] [ocsf] NET:REFUSE [MED] DENIED models.opencode.ai [reason:policy_dns_ineligible]
+[1791735753.306] [sandbox] [OCSF ] [ocsf] CONFIG:OBSERVATION [INFO] Policy DNS staged unapproved name models.opencode.ai synthetic=198.18.0.2 for TCP policy review
+[1791735753.307] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.2:443 reason=endpoint models.opencode.ai:443 is not allowed by any policy
+[1791735753.307] [sandbox] [OCSF ] [ocsf] NET:OPEN [MED] DENIED /opt/agents/bin/opencode(0) -> models.opencode.ai:443 [reason:transparent_tcp_policy_denied]
+[1791735753.340] [sandbox] [OCSF ] [ocsf] HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages [policy:_provider_benchmark_anthropic_v2 engine:l7]
+[1791735753.612] [sandbox] [OCSF ] [ocsf] NET:OPEN [INFO] ALLOWED /opt/agents/bin/opencode(0) -> api.anthropic.com:443 [policy:_provider_benchmark_anthropic_v2 engine:opa]
+[1791735753.632] [sandbox] [OCSF ] [ocsf] HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages [policy:_provider_benchmark_anthropic_v2 engine:l7]
+[1791735756.805] [sandbox] [OCSF ] [ocsf] HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages [policy:_provider_benchmark_anthropic_v2 engine:l7]
+[1791735758.961] [sandbox] [OCSF ] [ocsf] HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages [policy:_provider_benchmark_anthropic_v2 engine:l7]
+[1791735761.547] [gateway] [INFO ] [openshell_server::grpc::policy] SubmitPolicyAnalysis: persisted draft chunks
+[1791735761.499] [sandbox] [INFO ] [openshell_supervisor] Flushed denial analysis to gateway proposals=2 sandbox_name=bench-v2-opencode summaries=2
+[1791735761.656] [sandbox] [OCSF ] [ocsf] HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages [policy:_provider_benchmark_anthropic_v2 engine:l7]
+[1791735762.951] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.3:443 reason=endpoint registry.npmjs.org:443 is not allowed by any policy
+[1791735762.951] [sandbox] [OCSF ] [ocsf] NET:OPEN [MED] DENIED /opt/agents/bin/opencode(0) -> registry.npmjs.org:443 [reason:transparent_tcp_policy_denied]
+[1791735765.093] [sandbox] [OCSF ] [ocsf] HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages [policy:_provider_benchmark_anthropic_v2 engine:l7]
+[1791735767.143] [sandbox] [OCSF ] [ocsf] NET:REFUSE [MED] DENIED github.com [reason:policy_dns_ineligible]
+[1791735767.143] [sandbox] [OCSF ] [ocsf] CONFIG:OBSERVATION [INFO] Policy DNS staged unapproved name github.com synthetic=198.18.0.5 for TCP policy review
+[1791735767.144] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.5:443 reason=endpoint github.com:443 is not allowed by any policy
+[1791735767.144] [sandbox] [OCSF ] [ocsf] NET:OPEN [MED] DENIED /opt/agents/bin/opencode(0) -> github.com:443 [reason:transparent_tcp_policy_denied]
+[1791735771.159] [sandbox] [OCSF ] [ocsf] HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages [policy:_provider_benchmark_anthropic_v2 engine:l7]
+[1791735771.511] [gateway] [INFO ] [openshell_server::grpc::policy] SubmitPolicyAnalysis: persisted draft chunks
+[1791735771.499] [sandbox] [INFO ] [openshell_supervisor] Flushed denial analysis to gateway proposals=2 sandbox_name=bench-v2-opencode summaries=2
+[1791735779.928] [sandbox] [OCSF ] [ocsf] HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages [policy:_provider_benchmark_anthropic_v2 engine:l7]
+[1791735794.007] [sandbox] [OCSF ] [ocsf] HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages [policy:_provider_benchmark_anthropic_v2 engine:l7]
+[1791735814.417] [sandbox] [OCSF ] [ocsf] NET:REFUSE [MED] DENIED registry.npmjs.org [reason:policy_dns_ineligible]
+[1791735814.417] [sandbox] [OCSF ] [ocsf] CONFIG:OBSERVATION [INFO] Policy DNS staged unapproved name registry.npmjs.org synthetic=198.18.0.3 for TCP policy review
+[1791735814.421] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.3:443 reason=endpoint registry.npmjs.org:443 is not allowed by any policy
+[1791735814.421] [sandbox] [OCSF ] [ocsf] NET:OPEN [MED] DENIED /opt/agents/bin/opencode(0) -> registry.npmjs.org:443 [reason:transparent_tcp_policy_denied]
+[1791735814.981] [sandbox] [OCSF ] [ocsf] HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages [policy:_provider_benchmark_anthropic_v2 engine:l7]
+[1791735821.503] [gateway] [INFO ] [openshell_server::grpc::policy] SubmitPolicyAnalysis: persisted draft chunks
+[1791735821.499] [sandbox] [INFO ] [openshell_supervisor] Flushed denial analysis to gateway proposals=1 sandbox_name=bench-v2-opencode summaries=1
+[1791735822.960] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.3:443 reason=endpoint registry.npmjs.org:443 is not allowed by any policy
+[1791735822.960] [sandbox] [OCSF ] [ocsf] NET:OPEN [MED] DENIED /opt/agents/bin/opencode(0) -> registry.npmjs.org:443 [reason:transparent_tcp_policy_denied]
+[1791735824.424] [sandbox] [OCSF ] [ocsf] NET:REFUSE [MED] DENIED registry.npmjs.org [reason:policy_dns_ineligible]
+[1791735824.424] [sandbox] [OCSF ] [ocsf] CONFIG:OBSERVATION [INFO] Policy DNS staged unapproved name registry.npmjs.org synthetic=198.18.0.3 for TCP policy review
+[1791735824.425] [sandbox] [WARN ] [openshell_supervisor_network::proxy] Denied staged transparent connection destination=198.18.0.3:443 reason=endpoint registry.npmjs.org:443 is not allowed by any policy
+[1791735824.425] [sandbox] [OCSF ] [ocsf] NET:OPEN [MED] DENIED /opt/agents/bin/opencode(0) -> registry.npmjs.org:443 [reason:transparent_tcp_policy_denied]
+[1791735831.509] [gateway] [INFO ] [openshell_server::grpc::policy] SubmitPolicyAnalysis: persisted draft chunks
+[1791735831.502] [sandbox] [INFO ] [openshell_supervisor] Flushed denial analysis to gateway proposals=1 sandbox_name=bench-v2-opencode summaries=1

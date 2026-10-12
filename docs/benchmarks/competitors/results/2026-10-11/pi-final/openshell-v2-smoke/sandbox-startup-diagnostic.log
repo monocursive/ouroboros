@@ -1,0 +1,4 @@
+[1791743812.766] [gateway] [INFO ] [openshell_server::grpc::sandbox] CreateSandbox request completed successfully
+[1791743816.066] [sandbox] [INFO ] [openshell_supervisor] Starting sandbox supervision command=["/bin/sleep", "infinity"]
+[1791743821.073] [gateway] [INFO ] [openshell_server::compute] Sandbox phase changed
+[1791743821.073] [gateway] [WARN ] [openshell_server::compute] Docker sandbox exited before supervisor became ready

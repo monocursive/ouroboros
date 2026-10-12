@@ -1,0 +1,32 @@
+[
+  {
+    "file": "mac-before-service-cleanup-evidence.tar.gz",
+    "bytes": 1054204,
+    "sha256": "71353b518de41f8086f316c3ecf42e672ebb4186812c90b304ef35a233575a99",
+    "snapshot": "retained before service cleanup"
+  },
+  {
+    "file": "mac-final-evidence.tar.gz",
+    "bytes": 1054960,
+    "sha256": "d3184b0c428b3be19184d0edbe73d115f24d682135d06c572f359c79a6fadc53",
+    "snapshot": "final"
+  },
+  {
+    "file": "pi-final-evidence.tar.gz",
+    "bytes": 3524970,
+    "sha256": "bb3c0901c418e0a7c8c3204f987e897ff54e61a24f67af7af461b5556cf4b1dd",
+    "snapshot": "final"
+  },
+  {
+    "file": "vps-before-service-cleanup-evidence.tar.gz",
+    "bytes": 4385874,
+    "sha256": "de8b5234cee98aa7d1caae3583fde5f69bf25e04a1ad6d68ca81c81ecd9641a9",
+    "snapshot": "retained before service cleanup"
+  },
+  {
+    "file": "vps-final-evidence.tar.gz",
+    "bytes": 4385538,
+    "sha256": "2a2628c5ef6e5571fbd8babb4d7d15b1cc1817f6c26eb547f5cbcf6c9b8ac94a",
+    "snapshot": "final"
+  }
+]

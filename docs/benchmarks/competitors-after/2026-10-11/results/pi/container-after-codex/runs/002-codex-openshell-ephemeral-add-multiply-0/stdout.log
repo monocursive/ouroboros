@@ -1,0 +1,9 @@
+
+Created sandbox: causal-bongo
+
+  [0.0s] Requesting compute...
+[0.0s] Sandbox allocated
+[0.0s] Pulling image ouro-comparison-agents-after:20261011
+[0.1s] Image already present
+[1.3s] Starting sandbox Container created
+✓ Sandbox causal-bongo deletion accepted; cleanup is pending
