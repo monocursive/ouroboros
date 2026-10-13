@@ -122,9 +122,9 @@ pub fn bridge_main(args: &[OsString]) -> ! {
     // same-uid peer: until it lands, the bridge parks here and serves no
     // one. A peer that closes the pair (the supervisor dying) fails the
     // wait rather than parking the bridge forever.
-    if !await_seal() {
+    let Some(credential_origin) = await_seal() else {
         std::process::exit(EXIT_UNSEALED);
-    }
+    };
     // SAFETY: `prctl(PR_SET_DUMPABLE, 0, ...)` takes scalars only and cannot
     // fail. From here `/proc/<bridge>` belongs to root: a same-uid target
     // gets `EACCES` on its `mem`, `environ` and `fd` at every Yama scope,
@@ -137,6 +137,7 @@ pub fn bridge_main(args: &[OsString]) -> ! {
         &[&listener, &socks],
         &|| UnixStream::connect(PROXY_PATH),
         &report_rejection,
+        credential_origin,
     );
     // `serve` only returns when polling itself fails, which leaves nothing
     // to relay with; the attempt's clients then see connections refused.
@@ -148,7 +149,7 @@ pub fn bridge_main(args: &[OsString]) -> ! {
 /// `SOCK_SEQPACKET` socket, so one datagram is one seal; `poll` reports the
 /// peer's death as `POLLHUP`, which fails the wait rather than parking the
 /// bridge forever.
-fn await_seal() -> bool {
+fn await_seal() -> Option<bool> {
     let mut fds = [libc::pollfd {
         fd: libc::STDERR_FILENO,
         events: libc::POLLIN,
@@ -158,13 +159,13 @@ fn await_seal() -> bool {
     // timeout is fine because the peer's death wakes the poll.
     let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
     if ready != 1 || fds[0].revents & libc::POLLIN == 0 {
-        return false;
+        return None;
     }
     let mut byte = [0u8; 1];
     // SAFETY: the descriptor is a socket this process owns; `byte` is
     // writable and its length matches the count.
     let received = unsafe { libc::recv(libc::STDERR_FILENO, byte.as_mut_ptr().cast(), 1, 0) };
-    received == 1
+    (received == 1 && matches!(byte[0], b's' | b'v')).then_some(byte[0] == b'v')
 }
 
 /// One byte on stderr, the report `SOCK_SEQPACKET` socket the supervisor
@@ -285,13 +286,14 @@ pub fn serve(
     connect: &dyn Fn() -> io::Result<UnixStream>,
     rejected: &dyn Fn(),
 ) {
-    serve_many(&[listener], connect, rejected);
+    serve_many(&[listener], connect, rejected, false);
 }
 
 fn serve_many(
     listeners: &[&TcpListener],
     connect: &dyn Fn() -> io::Result<UnixStream>,
     rejected: &dyn Fn(),
+    credential_origin: bool,
 ) {
     let mut relays: Vec<Relay> = Vec::new();
     loop {
@@ -364,7 +366,9 @@ fn serve_many(
         relays.retain(|relay| !relay.finished());
 
         for (index, listener) in listeners.iter().enumerate() {
-            if fds[index].revents != 0 && accept_all(listener, connect, rejected, &mut relays) {
+            if fds[index].revents != 0
+                && accept_all(listener, connect, rejected, &mut relays, credential_origin)
+            {
                 // Security 2026-09-27 (audit 3 A7b): the accept failed on
                 // process-wide resource exhaustion while the listener stayed
                 // readable; poll once less often rather than spin a core.
@@ -408,6 +412,7 @@ fn accept_all(
     connect: &dyn Fn() -> io::Result<UnixStream>,
     rejected: &dyn Fn(),
     relays: &mut Vec<Relay>,
+    credential_origin: bool,
 ) -> bool {
     loop {
         let client = match listener.accept() {
@@ -441,10 +446,19 @@ fn accept_all(
         if client.set_nonblocking(true).is_err() || upstream.set_nonblocking(true).is_err() {
             continue;
         }
+        let mut up = Pipe::new();
+        if credential_origin {
+            let Ok(prefix) = crate::vault::origin::preamble(&client) else {
+                rejected();
+                continue;
+            };
+            up.buffer[..prefix.len()].copy_from_slice(&prefix);
+            up.end = prefix.len();
+        }
         relays.push(Relay {
             client,
             upstream,
-            up: Pipe::new(),
+            up,
             down: Pipe::new(),
         });
     }

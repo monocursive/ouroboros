@@ -182,6 +182,12 @@ struct CredentialEntry {
     /// `header = { name = "authorization", prefix = "Bearer " }`.
     #[serde(default)]
     header: Option<CredentialHeaderEntry>,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    binaries: Vec<String>,
+    #[serde(default)]
+    refresh: Option<crate::vault::RefreshPolicy>,
     mode: String,
 }
 
@@ -545,6 +551,9 @@ pub fn parse(
             }
             let policy = crate::vault::Policy {
                 hosts: entry.hosts.clone(),
+                paths: entry.paths.clone(),
+                binaries: entry.binaries.clone(),
+                refresh: entry.refresh.clone(),
                 allow_plaintext: entry.allow_plaintext,
                 header: entry.header.as_ref().map(|header| crate::vault::Header {
                     name: header
@@ -557,7 +566,13 @@ pub fn parse(
             policy.validate().map_err(|e| invalid(&key, e))?;
             Some(policy)
         } else {
-            if !entry.hosts.is_empty() || entry.allow_plaintext || entry.header.is_some() {
+            if !entry.hosts.is_empty()
+                || entry.allow_plaintext
+                || entry.header.is_some()
+                || !entry.paths.is_empty()
+                || !entry.binaries.is_empty()
+                || entry.refresh.is_some()
+            {
                 return Err(invalid(
                     &key,
                     "hosts/allow_plaintext/header require vault mode",
@@ -1101,6 +1116,31 @@ mod tests {
 
     /// The audit: no test parsed `mode = "vault"`. A valid vault credential
     /// parses to the expected declaration; every invalid shape refuses.
+    #[test]
+    fn vault_refresh_and_bindings_parse_and_refuse_invalid_shapes() {
+        let valid = r#"name="demo"
+jail="agent"
+[credentials.api]
+source="/private/token"
+mode="vault"
+hosts=["https://api.example.com"]
+paths=["/v1/"]
+binaries=["/usr/bin/curl"]
+refresh={token_url="https://issuer.example.com/token",client_id="public-client"}
+"#;
+        let profile = parse_ok(valid);
+        let policy = profile.credentials[0].vault.as_ref().unwrap();
+        assert_eq!(policy.paths, ["/v1/"]);
+        assert_eq!(policy.refresh.as_ref().unwrap().refresh_before_seconds, 300);
+        for bad in [
+            valid.replace("/v1/", "/v1/../other"),
+            valid.replace("/usr/bin/curl", "curl"),
+            valid.replace("https://issuer", "http://issuer"),
+            valid.replace("mode=\"vault\"", "mode=\"copy_rw\"\ndest=\"token\""),
+        ] {
+            let _ = parse_err(&bad);
+        }
+    }
     #[test]
     fn vault_credentials_parse_and_invalid_shapes_refuse() {
         let profile = parse_ok(

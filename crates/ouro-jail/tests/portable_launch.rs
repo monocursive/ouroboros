@@ -586,7 +586,9 @@ fn i02_the_bundled_profiles_are_valid_experimental_data_for_the_agent_jail() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    assert_eq!(names.len(), 14);
+    assert_eq!(names.len(), 16);
+    assert!(names.iter().any(|name| name == "claude-vault.toml"));
+    assert!(names.iter().any(|name| name == "opencode-vault.toml"));
     for name in &names {
         let text = std::fs::read_to_string(directory.join(name)).unwrap();
         assert!(

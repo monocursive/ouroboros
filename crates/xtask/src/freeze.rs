@@ -425,6 +425,12 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
                     let value = credential
                         .get(key)
                         .and_then(toml::Value::as_str)
+                        .or_else(|| {
+                            (key == "dest"
+                                && credential.get("mode").and_then(toml::Value::as_str)
+                                    == Some("vault"))
+                            .then_some("")
+                        })
                         .ok_or_else(|| format!("{file}: credential {id} has no {key}"))?;
                     let _ = writeln!(w, "{key} = {}", quote(value));
                 }
@@ -1162,7 +1168,7 @@ mod tests {
         let value: toml::Value = toml::from_str(&text).expect("TOML");
         assert_eq!(value["schema"].as_str(), Some(SCHEMA));
         let count = |key: &str| value.get(key).and_then(toml::Value::as_array).map(Vec::len);
-        assert_eq!(count("launch_profile"), Some(14), "{text}");
+        assert_eq!(count("launch_profile"), Some(16), "{text}");
         assert_eq!(count("baseline"), Some(4), "{text}");
         assert_eq!(count("manifest"), Some(7), "{text}");
         assert_eq!(count("backend_plan"), Some(3), "{text}");

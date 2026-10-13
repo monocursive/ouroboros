@@ -515,7 +515,28 @@ fn service_one(w: &Workers) -> io::Result<()> {
     facts.address_complete = ualen <= 256 && sockaddr.len() == ualen;
     facts.peer = peer_of(&sockaddr);
 
+    let origin = if facts
+        .family
+        .is_some_and(|family| family == libc::AF_INET as u16 || family == libc::AF_INET6 as u16)
+    {
+        match (facts.tgid, facts.tgid_start) {
+            (Some(pid), Some(start)) => sink.connecting(pid, start),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    // Another thread's exec can cancel the notifying task during executable
+    // capture. Never attach the successor's identity to a stale notification.
+    if !notif_id_valid(listener, id) {
+        return Ok(());
+    }
     let (verdict, reason) = decide(w, &facts, &dup, &sockaddr, ualen);
+    if verdict.is_ok()
+        && let Some(origin) = origin
+    {
+        origin.connected(dup.as_raw_fd());
+    }
     let verdict = match verdict {
         Ok(()) => Verdict::Allowed,
         Err(errno) => Verdict::Denied(errno),
@@ -539,10 +560,8 @@ fn decide(
         // socket keeps the child's netns, so this cannot escape it; it does run
         // in the mediator's LSM context (see NON_UNIX_NOTE).
         let _ = NON_UNIX_NOTE;
-        return (
-            bounded_connect(dup.as_raw_fd(), sockaddr, ualen, w.stop_r),
-            "non_unix",
-        );
+        let result = bounded_connect(dup.as_raw_fd(), sockaddr, ualen, w.stop_r);
+        return (result, "non_unix");
     }
     // Security 2026-09-27 (audit 4 B9): an address longer than the
     // `sockaddr_un` layout is one the kernel itself would refuse at

@@ -768,6 +768,53 @@
                           "name"
                         ],
                         "additionalProperties": false
+                      },
+                      "paths": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                          "type": "string",
+                          "maxLength": 4096
+                        }
+                      },
+                      "binaries": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                          "type": "string",
+                          "maxLength": 4096
+                        }
+                      },
+                      "refresh": {
+                        "type": "object",
+                        "properties": {
+                          "token_url": {
+                            "type": "string"
+                          },
+                          "client_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512
+                          },
+                          "refresh_before_seconds": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 3600
+                          },
+                          "encoding": {
+                            "type": "string",
+                            "enum": [
+                              "form",
+                              "json"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "token_url",
+                          "client_id",
+                          "refresh_before_seconds"
+                        ],
+                        "additionalProperties": false
                       }
                     },
                     "required": [

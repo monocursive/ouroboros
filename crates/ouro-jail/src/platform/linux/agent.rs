@@ -184,11 +184,36 @@ impl ProxySink for ProxyTraceSink {
 /// Hands mediation records from the mediator's threads to the supervision
 /// loop without ever blocking a mediation.
 struct RecordQueue {
+    origins: Mutex<Option<Arc<crate::vault::origin::Origins>>>,
     tx: Mutex<SyncSender<MediationRecord>>,
     dropped: AtomicU64,
 }
 
+struct PreparedOrigin {
+    origins: Arc<crate::vault::origin::Origins>,
+    process: crate::vault::origin::Process,
+}
+impl super::unixpeer::ConnectionOrigin for PreparedOrigin {
+    fn connected(self: Box<Self>, fd: std::os::fd::RawFd) {
+        self.origins.connected(self.process, fd);
+    }
+}
+
 impl MediationSink for RecordQueue {
+    fn connecting(
+        &self,
+        pid: libc::pid_t,
+        start: u64,
+    ) -> Option<Box<dyn super::unixpeer::ConnectionOrigin>> {
+        let origins = self
+            .origins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()?
+            .clone();
+        let process = origins.prepare(pid, start)?;
+        Some(Box::new(PreparedOrigin { origins, process }))
+    }
     fn record(&self, record: MediationRecord) {
         let tx = self.tx.lock().unwrap_or_else(PoisonError::into_inner);
         match tx.try_send(record) {
@@ -344,6 +369,7 @@ impl AgentNet {
             mediator: None,
             records,
             queue: Arc::new(RecordQueue {
+                origins: Mutex::new(None),
                 tx: Mutex::new(tx),
                 dropped: AtomicU64::new(0),
             }),
@@ -387,10 +413,43 @@ impl AgentNet {
     /// A refusal naming the proxy when it cannot start (its descriptor
     /// budget does not fit, a thread cannot be created).
     pub fn configure_vault(&mut self, vault: Arc<crate::vault::Vault>) {
+        *self
+            .queue
+            .origins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(vault.origins.clone());
         self.vault = Some(vault);
     }
 
     pub fn start_proxy(&mut self) -> Result<(), JailError> {
+        if let Some(vault) = &self.vault {
+            let trace = self.trace.clone();
+            let attempt = self.attempt_id.clone();
+            vault
+                .start_monitor(Arc::new(move |id, generation, transition| {
+                    let Some(trace) = &trace else {
+                        return true;
+                    };
+                    let mut event = Event::lifecycle_note(
+                        &attempt,
+                        0,
+                        SystemTime::now(),
+                        crate::platform::elapsed_since_start_ns(),
+                        transition,
+                    );
+                    event
+                        .fields
+                        .insert("kind".into(), Value::from("credential"));
+                    event.fields.insert("credential_id".into(), Value::from(id));
+                    event
+                        .fields
+                        .insert("generation".into(), Value::from(generation));
+                    trace.lock().is_ok_and(|mut writer| {
+                        writer.write_event(&event, Priority::Normal).is_ok()
+                    })
+                }))
+                .map_err(|e| refusal("vault", e))?;
+        }
         let Some(listener) = self.listener.take() else {
             return Err(refusal("proxy", "it was already started"));
         };
@@ -508,6 +567,9 @@ impl AgentNet {
         if super::watch::readable(fd.as_raw_fd()) {
             return Err(refusal("bridge", "it exited during discovery"));
         }
+        if let Some(vault) = &self.vault {
+            vault.origins.set_bridge(pid);
+        }
         self.bridge = Some(Bridge {
             pid,
             start_ticks,
@@ -532,7 +594,11 @@ impl AgentNet {
             unsafe {
                 libc::send(
                     report.as_raw_fd(),
-                    b"s".as_ptr().cast(),
+                    if self.vault.is_some() {
+                        b"v".as_ptr().cast()
+                    } else {
+                        b"s".as_ptr().cast()
+                    },
                     1,
                     libc::MSG_NOSIGNAL,
                 )
@@ -840,6 +906,9 @@ impl AgentNet {
             "allowed_setup_operations".to_owned(),
             Value::from(self.variant.allowed_setup_operations()),
         );
+        if let Some(vault) = &self.vault {
+            agent.insert("vault_authority".into(), vault.details());
+        }
         agent.insert(
             "nested_user_namespace".to_owned(),
             Value::from(self.nested.0.to_string()),

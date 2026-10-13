@@ -379,38 +379,17 @@ fn stage_one(
     };
 
     if mode == "vault" {
-        if source.stat.size > 8192 {
-            return Err(refusal(
-                id,
-                Remediation::Configuration,
-                "vault value exceeds 8192 bytes",
-            ));
-        }
-        let mut reader = source
-            .reader()
-            .map_err(|e| refusal(id, Remediation::Retry, e))?;
-        // Sized for the bound up front: `read_to_end` growing the buffer
-        // would free each outgrown copy of the secret unzeroed.
-        let mut value = zeroize::Zeroizing::new(Vec::with_capacity(8193));
-        (&mut reader)
-            .take(8193)
-            .read_to_end(&mut value)
-            .map_err(|_| refusal(id, Remediation::Retry, "vault source read failed"))?;
-        let after =
-            anchored::fstat(reader.as_fd()).map_err(|e| refusal(id, Remediation::Retry, e))?;
-        if !read_was_stable(source.stat.size, value.len() as u64, &source.stat, &after) {
-            return Err(refusal(
-                id,
-                Remediation::Retry,
-                "vault source changed while read",
-            ));
-        }
         let policy = declaration
             .vault
             .clone()
             .ok_or_else(|| refusal(id, Remediation::Configuration, "vault policy absent"))?;
-        let secret = crate::vault::Secret::new(id.to_owned(), policy, std::mem::take(&mut *value))
-            .map_err(|e| refusal(id, Remediation::Configuration, e))?;
+        let secret = crate::vault::Secret::from_source(
+            id.to_owned(),
+            policy,
+            declaration.source.as_bytes().to_vec(),
+            forbidden.to_vec(),
+        )
+        .map_err(|e| refusal(id, Remediation::Configuration, e))?;
         return Ok(StagedCredential {
             vault: Some(Arc::new(secret)),
             record: CredentialRecord {
@@ -484,6 +463,118 @@ fn stage_one(
         bind: Some((source.handle, declaration.dest.clone())),
         source: identity,
     })
+}
+
+/// Stable, bounded no-follow re-read for a live vault source. Errors carry
+/// only safe reason codes; source paths and credential bytes never escape.
+pub(crate) fn read_vault_source(
+    path: &[u8],
+    forbidden: &[(u64, u64)],
+    max: usize,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, &'static str> {
+    read_vault_source_version(path, forbidden, max).map(|(bytes, _)| bytes)
+}
+
+pub(crate) fn read_vault_source_version(
+    path: &[u8],
+    forbidden: &[(u64, u64)],
+    max: usize,
+) -> Result<(zeroize::Zeroizing<Vec<u8>>, Stat), &'static str> {
+    let source = open_source(path, forbidden).map_err(|_| "source_unavailable")?;
+    check_mode(&source.stat).map_err(|_| "source_unsafe")?;
+    if source.stat.mode & 0o077 != 0 {
+        return Err("source_not_private");
+    }
+    if source.stat.size > max as u64 {
+        return Err("source_oversized");
+    }
+    let mut reader = source.reader().map_err(|_| "source_unavailable")?;
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(max + 1));
+    (&mut reader)
+        .take((max + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "source_unavailable")?;
+    let after = anchored::fstat(reader.as_fd()).map_err(|_| "source_unavailable")?;
+    if !read_was_stable(source.stat.size, bytes.len() as u64, &source.stat, &after) {
+        return Err("source_changed");
+    }
+    Ok((bytes, after))
+}
+
+/// Serialize a private source update across attempts, without recreating a
+/// deleted/replaced source. The held descriptor pins the checked inode; the
+/// final path and complete expected content are revalidated under the lock.
+#[cfg(target_os = "linux")]
+pub(crate) fn update_vault_source(
+    path: &[u8],
+    forbidden: &[(u64, u64)],
+    expected: &[u8],
+    expected_identity: (u64, u64),
+    replacement: &[u8],
+) -> Result<(), &'static str> {
+    use std::io::{Seek as _, SeekFrom};
+    let source = open_source(path, forbidden).map_err(|_| "source_unavailable")?;
+    check_mode(&source.stat).map_err(|_| "source_unsafe")?;
+    if source.stat.identity() != expected_identity {
+        return Err("source_changed");
+    }
+    if source.stat.uid != crate::state::effective_uid() || source.stat.mode & 0o077 != 0 {
+        return Err("refresh_source_not_private");
+    }
+    let walked = walk_to_source(path).map_err(|_| "source_unavailable")?;
+    let mut file = anchored::reopen_write_checked(source.handle.as_fd(), &source.stat)
+        .map_err(|_| "source_unavailable")?;
+    let stat = anchored::fstat(file.as_fd()).map_err(|_| "source_unavailable")?;
+    if stat.identity() != source.stat.identity() {
+        return Err("source_changed");
+    }
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: file is a live, exclusively owned descriptor; LOCK_NB never
+    // lets an operator or another attempt stall this request indefinitely.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("refresh_busy");
+    }
+    let mut current = zeroize::Zeroizing::new(Vec::with_capacity(65537));
+    (&mut file)
+        .take(65537)
+        .read_to_end(&mut current)
+        .map_err(|_| "source_unavailable")?;
+    if current.as_slice() != expected || replacement.len() > 65536 {
+        return Err("source_changed");
+    }
+    let now = walked
+        .directory
+        .stat_at(&walked.name)
+        .map_err(|_| "source_changed")?;
+    if now.identity() != stat.identity() {
+        return Err("source_changed");
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| "source_update_failed")?;
+    file.write_all(replacement)
+        .map_err(|_| "source_update_failed")?;
+    file.set_len(replacement.len() as u64)
+        .map_err(|_| "source_update_failed")?;
+    file.sync_all().map_err(|_| "source_update_failed")?;
+    let final_stat = walked
+        .directory
+        .stat_at(&walked.name)
+        .map_err(|_| "source_changed")?;
+    if final_stat.identity() != stat.identity() {
+        return Err("source_changed");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn update_vault_source(
+    _path: &[u8],
+    _forbidden: &[(u64, u64)],
+    _expected: &[u8],
+    _expected_identity: (u64, u64),
+    _replacement: &[u8],
+) -> Result<(), &'static str> {
+    Err("refresh_requires_linux")
 }
 
 /// Mode-specific source rules: a source must have exactly one link.

@@ -291,8 +291,18 @@ pub struct MediationRecord {
     pub verdict: Verdict,
 }
 
+/// A pinned connection origin, prepared while the notification is valid.
+pub trait ConnectionOrigin: Send {
+    /// Publish the connected socket before the parked caller is released.
+    fn connected(self: Box<Self>, fd: std::os::fd::RawFd);
+}
+
 /// Where the mediator delivers each decision.
 pub trait MediationSink: Send + Sync {
+    /// Trusted connection origin, published before releasing the parked caller.
+    fn connecting(&self, _pid: libc::pid_t, _start: u64) -> Option<Box<dyn ConnectionOrigin>> {
+        None
+    }
     /// Record one decision. Must not block the mediation thread for long.
     fn record(&self, record: MediationRecord);
 }

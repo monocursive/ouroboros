@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub(crate) mod lifecycle;
+pub(crate) mod origin;
+pub use lifecycle::{RefreshPolicy, TokenEncoding};
+
+#[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     pub hosts: Vec<String>,
@@ -16,6 +20,15 @@ pub struct Policy {
     /// is eligible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<Header>,
+    /// Exact paths or segment prefixes ending in `/`; empty permits any path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Absolute executable paths, checked against kernel connection origins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub binaries: Vec<String>,
+    /// Optional supervisor-owned OAuth2 refresh; source becomes a token document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<RefreshPolicy>,
 }
 
 /// A declared placement for a vault placeholder: the header name and the
@@ -45,6 +58,20 @@ impl Policy {
         if let Some(header) = &self.header {
             header.validate()?;
         }
+        if self.paths.len() > 64 || self.binaries.len() > 64 {
+            return Err("vault path/binary binding has at most 64 entries".into());
+        }
+        for path in &self.paths {
+            validate_path(path)?;
+        }
+        for binary in &self.binaries {
+            if !binary.starts_with('/') || binary.contains('\0') || binary.len() > 4096 {
+                return Err("vault binaries must be absolute executable paths".into());
+            }
+        }
+        if let Some(refresh) = &self.refresh {
+            refresh.validate(self.allow_plaintext)?;
+        }
         Ok(())
     }
     fn permits(&self, scheme: &str, destination: &Destination) -> bool {
@@ -52,6 +79,20 @@ impl Policy {
             .iter()
             .any(|h| origin(h).is_ok_and(|(s, d)| s == scheme && d == *destination))
     }
+}
+
+fn validate_path(path: &str) -> Result<(), String> {
+    if !path.starts_with('/')
+        || path.contains("//")
+        || path.len() > 4096
+        || !path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/-._~".contains(&b))
+        || path.split('/').any(|s| s == "." || s == "..")
+    {
+        return Err("vault paths need unescaped absolute paths without dot segments".into());
+    }
+    Ok(())
 }
 impl Header {
     /// An RFC 9110 token name and a printable, line-ending-free prefix.
@@ -98,7 +139,8 @@ fn origin(value: &str) -> Result<(&str, Destination), String> {
 pub struct Secret {
     pub id: String,
     pub policy: Policy,
-    pub value: Zeroizing<Vec<u8>>,
+    runtime: lifecycle::Runtime,
+    executables: Vec<origin::Executable>,
 }
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,7 +159,42 @@ impl Secret {
             );
         }
         policy.validate()?;
-        Ok(Self { id, policy, value })
+        if policy.refresh.is_some() {
+            return Err("refresh requires a source-backed secret".into());
+        }
+        let runtime = lifecycle::Runtime::static_value(value);
+        let executables = policy
+            .binaries
+            .iter()
+            .map(|p| origin::Executable::pin(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            id,
+            policy,
+            runtime,
+            executables,
+        })
+    }
+
+    pub(crate) fn from_source(
+        id: String,
+        policy: Policy,
+        path: Vec<u8>,
+        forbidden: Vec<(u64, u64)>,
+    ) -> Result<Self, String> {
+        policy.validate()?;
+        let executables = policy
+            .binaries
+            .iter()
+            .map(|p| origin::Executable::pin(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        let runtime = lifecycle::Runtime::source(path, forbidden, policy.refresh.clone())?;
+        Ok(Self {
+            id,
+            policy,
+            runtime,
+            executables,
+        })
     }
 }
 
@@ -126,6 +203,9 @@ pub struct Vault {
     secrets: Vec<Arc<Secret>>,
     ca: rcgen::CertifiedIssuer<'static, rcgen::KeyPair>,
     client: Arc<rustls::ClientConfig>,
+    pub(crate) origins: Arc<origin::Origins>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    monitor: lifecycle::Monitor,
 }
 impl Vault {
     pub fn new(attempt: &str, secrets: Vec<Arc<Secret>>) -> Result<Self, String> {
@@ -153,11 +233,39 @@ impl Vault {
             .with_root_certificates(roots)
             .with_no_client_auth();
         client.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let monitor = lifecycle::Monitor::new(secrets.clone());
         Ok(Self {
             attempt: attempt.into(),
             secrets,
             ca,
             client: Arc::new(client),
+            origins: Arc::new(origin::Origins::default()),
+            monitor,
+        })
+    }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn start_monitor(&self, audit: lifecycle::Audit) -> Result<(), String> {
+        self.monitor.start(audit)
+    }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn has_process_bindings(&self) -> bool {
+        self.secrets
+            .iter()
+            .any(|secret| !secret.policy.binaries.is_empty())
+    }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn details(&self) -> serde_json::Value {
+        serde_json::json!({
+            "source_lifecycle":"private_nofollow_live_file",
+            "lease_poll_ms":100,
+            "process_binding":"kernel_connection_initiator_executable",
+            "peer_authority":"mediator_connect_for_pinned_sealed_bridge",
+            "path_binding":"exact_or_unescaped_segment_prefix",
+            "tls_websocket":"verified_rfc6455_upgrade",
+            "refresh":"bounded_oauth2_persist_before_publish_no_uncertain_retry",
+            "refresh_credentials":self.secrets.iter().filter(|s|s.policy.refresh.is_some()).count(),
+            "process_bound_credentials":self.secrets.iter().filter(|s|!s.policy.binaries.is_empty()).count(),
+            "path_bound_credentials":self.secrets.iter().filter(|s|!s.policy.paths.is_empty()).count(),
         })
     }
     pub fn ca_pem(&self) -> String {
@@ -190,9 +298,20 @@ impl Vault {
         &self,
         scheme: &str,
         request: &mut crate::proxy::http::Request,
-    ) -> Result<(), crate::proxy::Reason> {
+    ) -> Result<lifecycle::Lease, crate::proxy::Reason> {
+        self.inject_bound(scheme, request, None)
+    }
+
+    pub(crate) fn inject_bound(
+        &self,
+        scheme: &str,
+        request: &mut crate::proxy::http::Request,
+        process: Option<&origin::Process>,
+    ) -> Result<lifecycle::Lease, crate::proxy::Reason> {
         use crate::proxy::Reason;
         let mut out = Zeroizing::new(Vec::with_capacity(request.forward_head.len() + 8192));
+        let mut lease = lifecycle::Lease::default();
+        lease.bind(process);
         for line in request.forward_head.split_inclusive(|b| *b == b'\n') {
             if !line.windows(6).any(|s| s == b"vault:") {
                 out.extend_from_slice(line);
@@ -235,6 +354,22 @@ impl Vault {
             if !secret.policy.permits(scheme, &request.destination) {
                 return Err(Reason::OriginMismatch);
             }
+            if !secret.policy.paths.is_empty() {
+                let path = request.path().ok_or(Reason::OriginUnverified)?;
+                validate_path(path).map_err(|_| Reason::OriginUnverified)?;
+                if !secret.policy.paths.iter().any(|allowed| {
+                    path == allowed || allowed.ends_with('/') && path.starts_with(allowed)
+                }) {
+                    return Err(Reason::CredentialPathDenied);
+                }
+            }
+            if !secret.policy.binaries.is_empty()
+                && !process.is_some_and(|p| p.permits(&secret.executables))
+            {
+                return Err(Reason::CredentialProcessDenied);
+            }
+            let (value, generation) = secret.runtime.current()?;
+            lease.add(Arc::clone(secret), generation);
             out.extend_from_slice(&emitted_name);
             out.extend_from_slice(b": ");
             if let Some(prefix) = secret
@@ -245,11 +380,12 @@ impl Vault {
             {
                 out.extend_from_slice(prefix.as_bytes());
             }
-            out.extend_from_slice(&secret.value);
+            out.extend_from_slice(&value);
             out.extend_from_slice(b"\r\n");
         }
+        lease.check()?;
         request.forward_head = out.to_vec();
-        Ok(())
+        Ok(lease)
     }
     pub(crate) fn server(
         &self,
@@ -371,9 +507,24 @@ mod tests {
             );
             let bytes = head(&mut stream).unwrap_or_default();
             if !bytes.is_empty() {
-                stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK")
-                    .unwrap();
+                if bytes
+                    .windows(b"Upgrade: websocket".len())
+                    .any(|v| v == b"Upgrade: websocket")
+                {
+                    stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").unwrap();
+                    stream.flush().unwrap();
+                    let mut frame = [0u8; 8];
+                    stream.read_exact(&mut frame).unwrap();
+                    assert_eq!(frame, [0x81, 0x82, b'a', b'b', b'c', b'd', 9, 11]);
+                    stream.write_all(&[0x81, 2, b'h', b'i']).unwrap();
+                } else {
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK")
+                        .unwrap();
+                    if bytes.windows(6).any(|v| v == b"/large") {
+                        stream.write_all(&vec![b'x'; 70000]).unwrap();
+                    }
+                }
                 stream.conn.send_close_notify();
                 stream.flush().unwrap();
             }
@@ -392,6 +543,7 @@ mod tests {
                 )],
                 allow_plaintext: false,
                 header: None,
+                ..Policy::default()
             },
             b"Bearer fixture-secret".to_vec(),
         )
@@ -498,6 +650,50 @@ mod tests {
         }
     }
     #[test]
+    fn tls_vault_relays_a_verified_websocket_in_both_directions() {
+        let (event, upstream, response) = run_tls(
+            true,
+            true,
+            true,
+            |port| {
+                format!(
+                    "GET /ws HTTP/1.1\r\nHost: fixture.test:{port}\r\nAuthorization: vault:test-attempt:api\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+                )
+            },
+            &[0x81, 0x82, b'a', b'b', b'c', b'd', 9, 11],
+            true,
+        );
+        assert_eq!(event.reason, Reason::Relayed);
+        assert_eq!(event.discarded_bytes, 0);
+        assert!(response.starts_with(b"HTTP/1.1 101 "));
+        assert!(response.ends_with(&[0x81, 2, b'h', b'i']));
+        assert!(upstream.windows(14).any(|v| v == b"fixture-secret"));
+    }
+    #[test]
+    fn tls_vault_drains_large_plaintext_before_the_upstream_close_notify() {
+        let (event, _, response) = run_tls(
+            true,
+            true,
+            true,
+            |port| {
+                format!(
+                    "GET /large HTTP/1.1\r\nHost: fixture.test:{port}\r\nAuthorization: vault:test-attempt:api\r\n\r\n"
+                )
+            },
+            b"",
+            true,
+        );
+        assert_eq!(event.reason, Reason::Relayed);
+        assert!(
+            response.ends_with(&vec![b'x'; 70000]),
+            "bytes={} event_in={} end={:?}",
+            response.len(),
+            event.bytes_in,
+            event.end
+        );
+        assert_eq!(event.bytes_in, response.len() as u64);
+    }
+    #[test]
     fn tls_vault_closes_the_response_and_counts_discarded_pipeline_bytes() {
         let pipeline = b"GET /second HTTP/1.1\r\nHost: fixture.test\r\n\r\n";
         let (event, upstream, response) =
@@ -520,6 +716,7 @@ mod tests {
                     hosts: vec!["https://fixture.test".into()],
                     allow_plaintext: false,
                     header: None,
+                    ..Policy::default()
                 },
                 b"Bearer fixture-secret".to_vec(),
             )
@@ -554,6 +751,7 @@ mod tests {
                     hosts: vec!["http://fixture.test".into()],
                     allow_plaintext: true,
                     header: None,
+                    ..Policy::default()
                 },
                 b"Bearer fixture-secret".to_vec(),
             )
@@ -577,6 +775,7 @@ mod tests {
                     hosts: vec!["http://fixture.test".into()],
                     allow_plaintext: true,
                     header: None,
+                    ..Policy::default()
                 },
                 b"Bearer fixture-secret".to_vec(),
             )
@@ -698,7 +897,8 @@ mod tests {
             Policy {
                 hosts: vec!["http://fixture.test".into()],
                 allow_plaintext: false,
-                header: None
+                header: None,
+                ..Policy::default()
             }
             .validate()
             .is_err()
@@ -710,6 +910,7 @@ mod tests {
                     hosts: vec!["http://fixture.test".into()],
                     allow_plaintext: true,
                     header: None,
+                    ..Policy::default()
                 },
                 b"Bearer fixture-secret".to_vec(),
             )
@@ -733,7 +934,8 @@ mod tests {
                 Policy {
                     hosts: vec!["https://fixture.test".into()],
                     allow_plaintext: false,
-                    header: None
+                    header: None,
+                    ..Policy::default()
                 },
                 b"secret\n".to_vec()
             )
@@ -754,6 +956,7 @@ mod tests {
                         hosts: vec!["https://fixture.test".into()],
                         allow_plaintext: false,
                         header,
+                        ..Policy::default()
                     },
                     b"fixture-secret".to_vec(),
                 )
@@ -827,6 +1030,7 @@ mod tests {
             hosts: vec!["https://fixture.test".into()],
             allow_plaintext: false,
             header: Some(header),
+            ..Policy::default()
         };
         assert!(
             policy(Header {

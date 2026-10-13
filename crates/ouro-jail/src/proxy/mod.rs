@@ -175,6 +175,14 @@ pub enum ProxyDecision {
 /// A safe reason code. Never contains request data.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reason {
+    /// Credential path was not granted.
+    CredentialPathDenied,
+    /// Connection initiator was not granted.
+    CredentialProcessDenied,
+    /// The credential source is missing, revoked or changed.
+    CredentialRevoked,
+    /// The credential is expired or awaiting a safe refresh.
+    CredentialUnavailable,
     /// The first flight names a different destination.
     OriginMismatch,
     /// The first flight cannot establish a supported routing name.
@@ -230,6 +238,10 @@ impl Reason {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Reason::CredentialPathDenied => "credential_path_denied",
+            Reason::CredentialProcessDenied => "credential_process_denied",
+            Reason::CredentialRevoked => "credential_revoked",
+            Reason::CredentialUnavailable => "credential_unavailable",
             Reason::OriginMismatch => "origin_mismatch",
             Reason::OriginUnverified => "origin_unverified",
             Reason::OriginTimeout => "origin_timeout",
@@ -259,7 +271,11 @@ impl Reason {
 
     fn status(self) -> (u16, &'static str) {
         match self {
-            Reason::OriginMismatch
+            Reason::CredentialPathDenied
+            | Reason::CredentialProcessDenied
+            | Reason::CredentialRevoked
+            | Reason::CredentialUnavailable
+            | Reason::OriginMismatch
             | Reason::OriginUnverified
             | Reason::OriginTimeout
             | Reason::HostNotAllowed
@@ -289,6 +305,8 @@ impl Reason {
 /// How an allowed, connected, relayed request ended.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EndReason {
+    /// A live credential lease was revoked or its initiating process changed.
+    CredentialRevoked,
     /// The upstream closed its side first.
     UpstreamClosed,
     /// The client closed its side first.
@@ -309,6 +327,7 @@ impl EndReason {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            EndReason::CredentialRevoked => "credential_revoked",
             EndReason::UpstreamClosed => "upstream_closed",
             EndReason::ClientClosed => "client_closed",
             EndReason::UpstreamError => "upstream_error",
@@ -621,6 +640,22 @@ pub fn start_with_vault(
         ));
     }
     check_descriptors(&budgets)?;
+    if let Some(vault) = &vault {
+        let bound = vault.has_process_bindings();
+        vault.origins.configure(bound, budgets.max_connections);
+        if bound {
+            let open = sys::open_descriptor_count()?;
+            let (soft, _) = sys::nofile_limits()?;
+            let needed = budgets
+                .descriptors_needed()
+                .saturating_add(budgets.max_connections.min(128).saturating_mul(2));
+            if soft.saturating_sub(open as u64) < needed as u64 {
+                return Err(invalid(
+                    "the proxy descriptor budget cannot reserve pinned process authority".into(),
+                ));
+            }
+        }
+    }
     // Accept only when poll says a connection is pending; a nonblocking
     // listener keeps a vanished connection from blocking the loop.
     listener.set_nonblocking(true)?;
@@ -896,6 +931,7 @@ fn denial(
 /// rely on the slot being free.
 struct ResultSlot<'a> {
     shared: &'a Shared,
+    process: Option<crate::vault::origin::Process>,
     id: u64,
     accepted_at: Instant,
     kind: RequestKind,
@@ -989,6 +1025,7 @@ fn respond(client: &UnixStream, reason: Reason, budget: Duration) {
 fn handle_connection(shared: &Shared, client: &Arc<UnixStream>, id: u64, accepted_at: Instant) {
     let mut slot = ResultSlot {
         shared,
+        process: None,
         id,
         accepted_at,
         kind: RequestKind::Unknown,
@@ -1034,6 +1071,9 @@ fn serve(
     accepted_at: Instant,
 ) -> Result<(), Reason> {
     let budgets = shared.budgets;
+    if let Some(vault) = &shared.vault {
+        slot.process = vault.origins.receive(client)?;
+    }
     let Some(is_socks) = socks::detect(client, accepted_at + budgets.header_deadline)? else {
         slot.no_request();
         return Ok(());
@@ -1198,12 +1238,13 @@ fn connect_and_relay(
         None
     };
     let mut forwarded = request.clone();
+    let mut lease = crate::vault::lifecycle::Lease::default();
     if let Some(vault) = &shared.vault {
         if forwarded.framing != http::Framing::Tunnel {
-            vault.inject("http", &mut forwarded)?;
+            lease.extend(vault.inject_bound("http", &mut forwarded, slot.process.as_ref())?);
         }
         if let Some(inner) = flight.as_mut().and_then(|f| f.http.as_mut()) {
-            vault.inject("http", inner)?;
+            lease.extend(vault.inject_bound("http", inner, slot.process.as_ref())?);
         }
     }
     let request = &forwarded;
@@ -1274,6 +1315,7 @@ fn connect_and_relay(
             &request.destination,
             &flight.bytes,
             chunk,
+            slot.process.as_ref(),
         );
         let mut event = match result {
             Ok(outcome) => {
@@ -1285,15 +1327,21 @@ fn connect_and_relay(
                 event.end = Some(outcome.end);
                 event
             }
-            Err(reason) => {
+            Err(failure) => {
                 let mut event = denial(
                     slot.id,
                     slot.destination.clone(),
                     slot.kind,
-                    reason,
+                    failure.reason,
                     slot.accepted_at,
                 );
                 event.connected = Some(connected);
+                event.bytes_in = failure.progress.bytes_in;
+                event.bytes_out = failure.progress.bytes_out;
+                event.discarded_bytes = failure.progress.discarded;
+                if event.bytes_in != 0 || event.bytes_out != 0 {
+                    event.end = Some(failure.progress.end);
+                }
                 event.transport = slot.transport.clone();
                 event
             }
@@ -1304,6 +1352,8 @@ fn connect_and_relay(
         slot.emit(event);
         return Ok(());
     }
+    let watch =
+        crate::vault::lifecycle::Watch::start(Arc::new(lease), client.clone(), upstream.clone())?;
     let relayed = match request.framing {
         http::Framing::Tunnel => {
             let flight = flight.as_ref().expect("tunnel inspected before connecting");
@@ -1351,7 +1401,9 @@ fn connect_and_relay(
         slot.emit(slot.allowed(Reason::ResourceExhausted, Some(connected)));
         return Ok(());
     };
-    let end = if shared.is_stopping() {
+    let end = if watch.revoked() {
+        EndReason::CredentialRevoked
+    } else if shared.is_stopping() {
         EndReason::Stopped
     } else {
         outcome.end

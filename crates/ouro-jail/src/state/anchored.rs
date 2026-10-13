@@ -817,6 +817,27 @@ pub fn reopen_checked(fd: BorrowedFd<'_>, expected: &Stat) -> io::Result<File> {
     Ok(file)
 }
 
+/// Reopens the kernel link to a previously checked regular file for refresh.
+/// No mutable pathname is opened for I/O.
+#[cfg(target_os = "linux")]
+pub(crate) fn reopen_write_checked(fd: BorrowedFd<'_>, expected: &Stat) -> io::Result<File> {
+    if expected.kind != Kind::Regular {
+        return Err(io::Error::other("not regular"));
+    }
+    let path = CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+        .map_err(|_| io::Error::other("descriptor"))?;
+    // SAFETY: this kernel magic link refers to the held, checked regular inode.
+    let raw = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    let file = File::from(owned(raw)?);
+    verify(&fstat(file.as_fd())?, Some(expected))?;
+    Ok(file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

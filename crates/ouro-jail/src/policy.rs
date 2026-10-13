@@ -408,6 +408,18 @@ impl PolicySnapshot {
         ] {
             sort_set_at(&mut value, path)?;
         }
+        if let Some(credentials) = value
+            .pointer_mut("/launch/credentials")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for credential in credentials {
+                if let Some(vault) = credential.get_mut("vault") {
+                    for field in ["paths", "binaries"] {
+                        sort_set_at(vault, &[field])?;
+                    }
+                }
+            }
+        }
         // J4-D7 begin: keyed collections follow the same byte order
         for path in [
             &["environment", "bindings"][..],

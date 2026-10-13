@@ -218,6 +218,23 @@ const HOP_BY_HOP: &[&str] = &[
     "host",
 ];
 
+impl Request {
+    pub(crate) fn websocket_key(&self) -> Option<&[u8]> {
+        self.forward_head
+            .split_inclusive(|b| *b == b'\n')
+            .find_map(|line| {
+                let (name, value) = line.split_at(line.iter().position(|b| *b == b':')?);
+                name.eq_ignore_ascii_case(b"sec-websocket-key")
+                    .then_some(value[1..].trim_ascii())
+            })
+    }
+    pub(crate) fn path(&self) -> Option<&str> {
+        let line = self.forward_head.split(|b| *b == b'\n').next()?;
+        let path = line.split(|b| *b == b' ').nth(1)?;
+        std::str::from_utf8(path.split(|b| *b == b'?').next()?).ok()
+    }
+}
+
 struct Field<'a> {
     name: &'a [u8],
     lower: String,
@@ -409,6 +426,38 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
         None => {}
     }
 
+    let upgrades = named("upgrade");
+    let websocket =
+        !named("sec-websocket-key").is_empty() || !named("sec-websocket-version").is_empty();
+    if websocket {
+        use base64::Engine as _;
+        let keys = named("sec-websocket-key");
+        let versions = named("sec-websocket-version");
+        if method != b"GET"
+            || !http11
+            || framing != Framing::Empty
+            || upgrades.len() != 1
+            || !upgrades[0].value.eq_ignore_ascii_case(b"websocket")
+            || !listed.contains("upgrade")
+            || keys.len() != 1
+            || versions.len() != 1
+            || versions[0].value != b"13"
+            || !base64::engine::general_purpose::STANDARD
+                .decode(keys[0].value)
+                .is_ok_and(|key| key.len() == 16)
+            || listed.iter().any(|name| name.starts_with("sec-websocket-"))
+        {
+            return Err(Reason::UnsupportedRequest);
+        }
+        for name in ["sec-websocket-protocol", "sec-websocket-extensions"] {
+            if named(name).len() > 1 {
+                return Err(Reason::MalformedRequest);
+            }
+        }
+    }
+    // An unrelated hop-by-hop Upgrade hint keeps the ordinary HTTP lane's
+    // existing semantics: strip it and close after the framed request.
+
     let mut forward = Vec::with_capacity(head.len() + 64);
     forward.extend_from_slice(method);
     forward.push(b' ');
@@ -438,7 +487,11 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
     if framing == Framing::Chunked {
         forward.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
     }
-    forward.extend_from_slice(b"Connection: close\r\n\r\n");
+    if websocket {
+        forward.extend_from_slice(b"Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
+    } else {
+        forward.extend_from_slice(b"Connection: close\r\n\r\n");
+    }
     Ok(Request {
         destination,
         framing,
@@ -468,6 +521,31 @@ mod tests {
         parse_request(text.as_bytes())
     }
 
+    #[test]
+    fn websocket_request_requires_an_unambiguous_rfc6455_handshake() {
+        let valid = "GET http://fixture.test/v1/ws HTTP/1.1\r\nHost: fixture.test\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        let request = parse(valid).unwrap();
+        assert!(
+            request
+                .forward_head
+                .windows(18)
+                .any(|b| b == b"Upgrade: websocket")
+        );
+        assert_eq!(request.path(), Some("/v1/ws"));
+        for bad in [
+            valid.replace("GET ", "POST "),
+            valid.replace("Version: 13", "Version: 12"),
+            valid.replace("Upgrade: websocket", "Upgrade: h2c"),
+            valid.replace("dGhlIHNhbXBsZSBub25jZQ==", "bad"),
+            valid.replace(
+                "Connection: keep-alive, Upgrade",
+                "Connection: sec-websocket-key, Upgrade",
+            ),
+            valid.replace("\r\n\r\n", "\r\nContent-Length: 1\r\n\r\n"),
+        ] {
+            assert!(parse(&bad).is_err());
+        }
+    }
     #[test]
     fn scan_refuses_bare_line_endings_and_nul() {
         assert_eq!(scan(b"GET / HTTP/1.1\n", 0), Err(Reason::MalformedRequest));

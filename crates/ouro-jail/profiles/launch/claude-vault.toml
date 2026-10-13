@@ -1,3 +1,4 @@
+# EXPERIMENTAL: review local credential sources and binary/library grants.
 # Operator-owned starter; copy to <config-dir>/launch/claude-vault.toml,
 # mode 0600. The raw key source must be private, contain no trailing newline,
 # and stay outside all child grants. Grant your client and libraries read-only.

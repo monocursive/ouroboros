@@ -59,7 +59,7 @@ and records only explicit overrides; the inherited ambient environment is not
 a consistency guarantee. Launch credentials are `{id, source, dest, mode}`:
 source is an absolute native path and dest is a relative native path under
 vendor state. Modes are copy_rw, bind_ro and vault; a vault credential
-additionally carries `vault: {hosts, allow_plaintext}` — `hosts` is one to 64
+additionally carries `vault: {hosts, allow_plaintext}` with optional `header`, `paths`, `binaries` and `refresh` — `hosts` is one to 64
 host names the credential may be sent to, `allow_plaintext` a boolean. The
 `vault` member is present only for mode vault. Ids are unique. Launch name,
 vendor version and the input file's identity are provenance, not semantic
@@ -161,3 +161,7 @@ changing provenance must preserve the hash; changing a limit, grant, environment
 value or argv order must change the appropriate digest. The documentation
 validator checks fixture coherence and hashes; only the future runtime suite
 can prove the real resolver matches these expected outputs on both platforms.
+
+Optional vault `paths` and `binaries` are set arrays: canonical sorting and
+deduplication apply before credentials are sorted. Absent optional fields are
+omitted so previous policy digests remain unchanged.

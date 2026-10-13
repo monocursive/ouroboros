@@ -331,18 +331,78 @@ records `mode: "vault"`, `never_staged: true`, no digest, and the
 `never_staged` digest-unavailability reason. Plaintext origins require an
 explicit `allow_plaintext = true`.
 
-The vault snapshots each credential at preparation. Replacing the source
-affects subsequent attempts; running attempts retain their snapshot. There
-is no gateway-managed OAuth refresh, expiry schedule, live revocation, or
-path-specific credential binding. The TLS lane is HTTP/1.1, one request per
-connection, with content-length bodies; chunked uploads, `Expect`, HTTP/2,
-WebSocket upgrades, and certificate-pinning clients need separate compatibility
-evaluation. The measured Codex version passed through HTTPS fallback after
-WebSocket retries; see the saved benchmark diagnostics.
-Codex OAuth access placeholders require the client's external-token adapter;
-they do not provide refresh. See the
-[credential benchmark](../../benchmarks/credentials/2026-10-12/README.md)
-for the exact tested versions, adapters, outcomes, and measurement limits.
+Vault source files are private (mode 0600), outside every child-visible grant,
+and reread through a checked no-follow walk. Changing or deleting the source
+revokes existing credential leases; blocked requests and streams are interrupted
+on the next 100 ms lease poll. This is a polling bound under responsive local
+filesystem/scheduler conditions, not a hard real-time guarantee. Token rotation
+closes connections carrying the previous token. Safe lifecycle transitions
+(`loaded`, `refreshed`, `revoked`, `refresh_failed`) enter the existing trace;
+trace delivery failure refuses further credential publication.
+
+Optional `paths = ["/v1/"]` permits an exact path or a segment prefix ending
+in `/`. Query strings do not change the path binding; escaped paths, dot
+segments and duplicate slashes refuse when a credential is bound.
+`binaries = ["/absolute/host/path/to/native-client"]` pins executable inode
+and content metadata at preparation. The seccomp mediator captures the kernel
+identity of the connection initiator before releasing its connect call. The
+sealed bridge transfers only kernel socket metadata; HTTP headers and argv
+cannot assert identity. The executable is pinned before connecting, with the seccomp notification
+revalidated after capture so a concurrent exec cannot substitute a successor.
+A shared capacity limit covers pending and active process pins; descriptor
+preflight reserves their extra handles. TLS relay buffers retain the proxy's
+configured per-direction share. The proxy rechecks executable identity and liveness
+when releasing a credential and throughout the lease. Scripts bind their native
+interpreter. This authorizes the connection initiator; subsequent deliberate
+socket delegation by an authorized program is not per-byte process attribution.
+
+For OAuth2, declare an operator-controlled endpoint and public client id:
+
+```toml
+[credentials.codex]
+mode = "vault"
+source = "~/.config/ouro/credentials/codex-token.json"
+hosts = ["https://chatgpt.com"]
+paths = ["/backend-api/"]
+binaries = ["/absolute/path/to/codex"]
+header = {name = "authorization", prefix = "Bearer "}
+refresh = {token_url = "https://auth.openai.com/oauth/token", client_id = "app_EMoamEEZ73f0CkXaXp7hrann", refresh_before_seconds = 300, encoding = "json"}
+```
+
+The source is a private JSON object with `access_token`, `refresh_token`,
+`expires_at` (Unix seconds), optional private `id_token`, `revoked` and `refresh_pending`.
+Codex's original login document must be imported into this minimal supervisor
+document; it is never staged inside the jail. The existing external-token
+adapter gives the client an attempt placeholder and non-secret routing identity.
+The supervisor refreshes before expiry, including while the client is idle.
+OAuth2 uses form encoding by default; OpenAI uses `encoding = "json"`, matching
+[Codex 0.159.2's provider implementation](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/login/src/auth/manager.rs#L1523).
+If the response omits `expires_in`, an access JWT's `exp` supplies the schedule;
+when both exist the earlier expiry wins. These are expiry metadata from the
+TLS-authenticated issuer response, not a local authorization claim.
+It validates issuer TLS normally, bypasses environment proxies, follows no
+redirects, bounds the exchange to eight seconds and the response to 64 KiB,
+and persists the rotated grant before publication. Refresh sources must be
+operator-owned. `refresh_pending: true` is persisted before a grant is sent.
+An uncertain/failed exchange stays pending and refuses until the operator
+reauthorizes or supplies a fresh document; concurrent attempts cannot blindly
+reuse a rotating token. Deletion/replacement during refresh is never recreated.
+Setting `revoked: true` also revokes leases. Only the attempt owning the exact
+checked pending document may keep using its still-valid access token during an
+in-progress proactive refresh. Other attempts cannot consume that grant. Failed
+refresh, expiry, deletion or source mutation refuses it. Optional provider ID
+tokens stay in the private supervisor document for host login synchronization;
+they are never injected into requests.
+
+The TLS lane supports HTTP/1.1 content-length requests and verified RFC6455
+WebSocket upgrades. Only a GET/HTTP1.1 handshake with a valid nonce, version
+and upstream accept response enables the bounded full-duplex TLS relay.
+Credential origin, path, process and live lease checks still apply. Bodies,
+headers and WebSocket messages are not logged. Ordinary HTTP remains one
+request per connection: pipelined bytes are counted and discarded. Chunked
+uploads, `Expect`, HTTP/2 and certificate-pinning clients remain unsupported.
+The [before/after credential benchmark](../../benchmarks/credentials/2026-10-13/README.md)
+retains the previous transport limitations as historical evidence.
 
 ## doctor
 

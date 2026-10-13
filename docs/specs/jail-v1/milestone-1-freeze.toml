@@ -13,8 +13,8 @@ rust_version = "1.98.1"
 
 # Cargo.lock, byte for byte
 [cargo_lock]
-sha256 = "e8e6d6457a4bfc1270c0b109ff9f8a83541985a03bd2773ec09a4cac5c04a3bc"
-packages = 186
+sha256 = "a826264258b381e16a1b2f3f9aca7f1aed4c87efe387ec416ba57ce26e5703b9"
+packages = 194
 
 # The seccomp programs' digests, from docs/specs/jail-v1/evidence/seccomp-table-*.txt
 [filters]
@@ -98,6 +98,21 @@ network_allow = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 
 [[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/claude-vault.toml"
+name = "claude-vault"
+jail = "agent"
+state_var = "CLAUDE_CONFIG_DIR"
+home_is_state = false
+state_subdirs = []
+network_allow = ["api.anthropic.com:443"]
+environment = "{\"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC\":\"1\"}"
+[[launch_profile.credential]]
+id = "anthropic"
+source = "~/.config/ouro/credentials/anthropic"
+dest = ""
+mode = "vault"
+
+[[launch_profile]]
 file = "crates/ouro-jail/profiles/launch/claude.toml"
 name = "claude"
 jail = "agent"
@@ -179,6 +194,20 @@ home_is_state = true
 state_subdirs = ["config", "data", "cache", "state"]
 network_allow = []
 environment = "{\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+
+[[launch_profile]]
+file = "crates/ouro-jail/profiles/launch/opencode-vault.toml"
+name = "opencode-vault"
+jail = "agent"
+home_is_state = true
+state_subdirs = ["config/opencode", "data/opencode", "cache/opencode", "state/opencode"]
+network_allow = ["api.anthropic.com:443", "models.opencode.ai:443", "opencode.ai:443"]
+environment = "{\"OPENCODE_DISABLE_AUTOUPDATE\":\"true\",\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
+[[launch_profile.credential]]
+id = "anthropic"
+source = "~/.config/ouro/credentials/anthropic"
+dest = ""
+mode = "vault"
 
 [[launch_profile]]
 file = "crates/ouro-jail/profiles/launch/opencode.toml"
@@ -950,9 +979,17 @@ sections = '''
       "version": "1.0.229"
     },
     "serde_json": "1.0.151",
+    "sha1": "0.10.6",
     "sha2": "0.10.9",
     "toml": "0.8.23",
     "toml_edit": "0.22.27",
+    "ureq": {
+      "default-features": false,
+      "features": [
+        "rustls"
+      ],
+      "version": "3.4.2"
+    },
     "uuid": {
       "features": [
         "v4"
@@ -1113,7 +1150,7 @@ sha256 = "2bb04b1823574a188fd8fdced61148c3d9a10554a4a7441a06b0e9458c5520b9"
 file = "policy-snapshot.schema.json"
 id = "urn:ouro:schema:jail-policy-snapshot:1"
 identifier = "ouro.jail.policy-snapshot/1"
-sha256 = "6851d3950208da2c041a45f7d00af15a8e0163a7278a243b8b11b21bb979d752"
+sha256 = "b73cd5eca9710f0b5e576937f8bf876836e52b1c8217d3c0dde4f3fd4f550157"
 [[frozen_schemas.entry]]
 file = "jail-gate.schema.json"
 id = "urn:ouro:schema:jail-gate:1"
@@ -1135,64 +1172,6 @@ id = "urn:ouro:schema:learned-policy:1"
 identifier = "ouro.jail.learned-policy/1"
 sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"
 
-# --- the tested run (cargo xtask freeze --doctor); everything above is the tree ---
-[tested]
-debug_assertions = false
-dirty = false
-inputs = "sha256:2989fb4983dedf8e8c4ea75744cce9eb8ac64c5dacf5985e366ce13a5279c225"
-opt_level = "3"
-ouro_jail_sha256 = "6c8de33a43742a31d2fb4da5618096b0b8fe6940e22ee31fac483f09b3af4512"
-platform_arch = "x86_64"
-platform_kernel = "Linux 7.0.0-31-generic"
-platform_os = "linux"
-ready = true
-revision = "5441e6c96be6fca9d60384d87383ab17a251c74d"
-rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
-target = "x86_64-unknown-linux-gnu"
-unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code", "supervisor_scope.unit"]
-verification = ["inputs_match_tree", "revision_is_ancestor_of_head", "inputs_match_revision", "frozen_inputs_unchanged_since_revision"]
-
-[tested.backend]
-path = "/usr/bin/bwrap"
-sha256 = "523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6"
-version = "bubblewrap 0.11.1"
-
-[tested.host]
-apparmor_enabled = true
-cpus_online = 4
-distribution = "Ubuntu 26.04.1 LTS"
-kernel_release = "7.0.0-31-generic"
-kernel_version = "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026"
-linger = true
-operator_identity = "unprivileged"
-privileged_groups = []
-systemd_version = "systemd 259 (259.5-0ubuntu3.4)"
-virtualization = "kvm"
-
-[tested.host.apparmor_userns_restriction]
-local_files = ["README"]
-profile_files = ["bwrap-userns-restrict", "glycin.bwrap", "lxc-usernsexec", "unprivileged_userns"]
-state = "on"
-unpackaged_files = []
-
-[tested.host.cgroup]
-controllers = ["cpu", "memory", "pids"]
-delegated_root = "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service"
-root_controllers = ["cpuset", "cpu", "io", "memory", "hugetlb", "pids", "rdma", "misc", "dmem"]
-subtree_control = ["cpu", "memory", "pids"]
-
-[tested.host.memory]
-mem_total_kib = 3905584
-swap_total_kib = 8388604
-
-[tested.host.sysctls]
-"kernel.apparmor_restrict_unprivileged_userns" = "1"
-"kernel.io_uring_disabled" = "0"
-"kernel.perf_event_paranoid" = "4"
-"kernel.unprivileged_bpf_disabled" = "2"
-"kernel.yama.ptrace_scope" = "1"
-"user.max_user_namespaces" = "11829"
-
-[tested.supervisor_scope]
-cgroup = "/user.slice/user-1001.slice/user@1001.service/app.slice/run-p3337999-i15914788.scope"
-state = "already_delegated"
+# No tested run is recorded: `cargo xtask freeze --doctor <run>/doctor.json`
+# records the milestone conformance run, and `cargo xtask freeze --check`
+# fails until it is.

@@ -1,3 +1,4 @@
+# EXPERIMENTAL: review local credential sources and binary/library grants.
 # Operator-owned starter; copy to <config-dir>/launch/opencode-vault.toml,
 # mode 0600. Use a private raw key file with no trailing newline; keep it
 # outside all child grants. Grant your client and libraries read-only.
