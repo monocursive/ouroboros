@@ -852,7 +852,12 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let raw = fs::read(std::ffi::OsStr::from_bytes(&path)).unwrap();
-            if raw.windows(11).any(|v| v == b"new-refresh") {
+            // File commit precedes the mandatory audit callback. Observing
+            // the replacement bytes alone is not completion of the worker;
+            // wait for both facts without relaxing the deadline or assertions.
+            if raw.windows(11).any(|v| v == b"new-refresh")
+                && notes.lock().unwrap().contains(&"refreshed")
+            {
                 break;
             }
             assert!(std::time::Instant::now() < deadline);
