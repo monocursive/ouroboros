@@ -1385,6 +1385,10 @@ impl Boundary {
         let mut child =
             exec::spawn_bootstrap(&exe, &arguments, &fds, spawn_cgroup.as_ref(), deadline)
                 .map_err(|err| {
+                    // The exec handshake spends the same preparation budget.
+                    if err.kind() == std::io::ErrorKind::TimedOut {
+                        return io(err);
+                    }
                     preparing(
                         ErrorCode::BackendUnavailable,
                         format!(

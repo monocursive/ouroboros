@@ -6,10 +6,12 @@ and their scored results are preserved.
 Latest checkpoint: all four hosted workflows pass at `ca0bba09`; the completed
 four-arm Pi HTTP lifecycle fixture and the OpenShell VPS extension are saved
 below. A direct-cgroup bootstrap candidate and its matched Pi pilot are saved.
-The candidate now has a fresh independently verified clean-VM record. Its broader
-Pi run reached reference-specific host/architecture failures, with all library
-tests passing; the remaining targets are running separately. Fresh hosted,
-reference and freeze proof is still pending. Natural expiry, the
+The pre-fix candidate has an independently verified clean-VM record. The broader
+Pi run exposed one confirmed preparation-timeout classification regression,
+alongside host/architecture fixture limits and missing test assets. The regression
+is fixed, its unchanged existing test and strict Clippy pass, and a new matched
+132-attempt pilot passes. Fresh clean-build VM, hosted, reference and freeze proof
+for the fixed source is still pending. Natural expiry, the
 remaining lifecycle/observation fixtures and final performance reruns remain open.
 
 1. CI: repair vault-aware freeze validation and freeze the entire credential
@@ -484,3 +486,71 @@ it is saved as `validation/natural-expiry-kernel-witness-b02.json`. The same
 matched pilot still needs a clean final-source Pi rebuild and rerun after the
 native jobs finish. Full Ubuntu reference proof, validated doctor/freeze and
 exact-head hosted workflows remain required.
+
+## Preparation-timeout regression fixed and pilot rerun
+
+The remaining Pi job completed all 33 selected targets with `--no-fail-fast`:
+416 passed, 54 failed and nine ignored, with 42 explicit skip messages. Its
+entire log, terminal exit 101 and source hashes are retained in
+`validation/pi-clone3-native-05-completed/`; the per-target results are in
+`analysis/clone3-native-05-results.json`. This is not a passing conformance claim.
+Some tests need stock Ubuntu memory/swap/Yama/Landlock capabilities, some use
+x86 syscall constants/headers or i386 assembly, and the narrow Pi source copy
+omitted release-preview helpers. Other failures require baseline comparison
+before attribution; they are retained rather than being counted as passes.
+
+One failure is a confirmed candidate regression. The existing unchanged
+`l04_the_preparation_budget_follows_the_boot_clock` test passes with the saved
+clean baseline binary, but the candidate's new bounded exec handshake reports
+`backend_unavailable`/`host_setup` when its preparation budget expires. The fix
+uses the existing preparation-timeout classifier, restoring
+`prepare_timeout`/`retry`. It changes no policy, guard, observer, lifetime or
+durability requirement. The same byte-identical test executable now passes
+against the fixed binary for both tool and none profiles, verifies refusal before
+preparation and checks that the leaf is removed. All before/failure/after evidence
+is retained in `validation/pi-clone3-clock-regression/`. The clock advance is an
+existing isolated LD_PRELOAD fault-injection test; no kernel or provider clock
+is modified.
+
+The fixed optimized build honestly records dirty source based on `70324b97`, with
+inputs `sha256:083501cb1907d1f50684f40044fcaa429f0a3a970e06f6ca6764a5569fe5a9ce`.
+The exact source hashes, build, binary/version and passing strict all-target
+Clippy are saved in `validation/pi-clone3-fixed-build-01/` and
+`validation/pi-clone3-fixed-clippy-01/`. The earlier clean b02 VM evidence remains
+unchanged and is not proof for this new digest; new clean-source VM/reference
+proof is required again.
+
+The same shuffled 132-attempt pilot was rerun after compilation ended, at about
+44 degrees C and no active cargo/rustc processes. Both arms use the same original
+C workload, 1,000 files, limits, environment and fresh strict probes. Every attempt
+passes strict containment, required observer coverage with no gaps, and verified
+empty-tree settlement; all 66 candidate attempts record direct cgroup creation.
+The complete record is `validation/pi-clone3-pilot-fixed-02/`, independently
+rechecked in `analysis/clone3-fixed-candidate-pilot.json`.
+
+| Profile | Before median | Fixed candidate median | Median paired difference | Paired bootstrap 95% interval |
+|---|---:|---:|---:|---:|
+| Tool | 278.79 ms | 263.25 ms | -14.34 ms | -26.51 to -3.62 ms |
+| Static vault | 426.29 ms | 405.96 ms | -14.92 ms | -30.02 to -0.87 ms |
+
+Both intervals are below zero in this cohort. Its baselines differ from the
+earlier pilots, so no numbers are mixed across cohorts. These remain candidate
+diagnostics, excluded from final competitor scores; they do not establish a
+closed startup gap with MXC. A clean final-source original workload and
+three-agent/competitor rerun remains required.
+
+Full Ubuntu reference conformance at pre-fix `70324b97` initially stops at the
+four-GiB disk prerequisite. That failed attempt remains in
+`validation/reference-clone3-current/`. Only the completed, verified-inactive
+463-MiB owned benchmark build cache was removed after its binary and evidence
+were retained, reclaiming 484,618,240 bytes; sources and unrelated caches remain.
+The reclaim readback is saved in `validation/clone3-b02-cache-reclaim.json`.
+The new pre-fix reference run completed in
+`validation/reference-clone3-after-cache-reclaim/`: 2,113 passed, one failed and
+17 ignored across 90 test summaries. Its only failing test is the confirmed
+preparation-timeout classification regression. Both L04 and the derived suite
+cleanliness gate refuse that failure. The full record and independent summary
+in `analysis/clone3-reference-before-timeout-fix.json` are retained as pre-fix
+evidence and cannot establish conformance for the fixed source. The goal remains
+active for final-source proof, fair common lifecycle/observation fixtures,
+original performance/agent reruns and the real issuer's natural expiry.
