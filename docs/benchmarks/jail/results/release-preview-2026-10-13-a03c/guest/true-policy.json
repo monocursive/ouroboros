@@ -1,0 +1,123 @@
+{
+  "policy_digest": "sha256:22f86a5a49c95f4a2869df91c2b021e6e97ed62a50bccf1f7c2cbf4df74c83b5",
+  "provenance": [
+    {
+      "detail": null,
+      "key": "profile",
+      "origin": "builtin-profile:tool"
+    }
+  ],
+  "schema": "ouro.jail.policy-file/1",
+  "snapshot": {
+    "environment": {
+      "bindings": [
+        {
+          "name": "PATH",
+          "value": "/usr/local/bin:/usr/bin:/bin"
+        },
+        {
+          "name": "TMPDIR",
+          "value": {
+            "path": "",
+            "root": "scratch"
+          }
+        }
+      ],
+      "inherit_host": false
+    },
+    "filesystem": {
+      "deny_read": [],
+      "protected_coverage": "existing_and_root",
+      "protected_segments": [
+        ".git",
+        ".ouroboros"
+      ],
+      "read_only": [
+        {
+          "path": "/bin",
+          "root": "host"
+        },
+        {
+          "path": "/etc/group",
+          "root": "host"
+        },
+        {
+          "path": "/etc/hosts",
+          "root": "host"
+        },
+        {
+          "path": "/etc/localtime",
+          "root": "host"
+        },
+        {
+          "path": "/etc/passwd",
+          "root": "host"
+        },
+        {
+          "path": "/etc/resolv.conf",
+          "root": "host"
+        },
+        {
+          "path": "/etc/ssl",
+          "root": "host"
+        },
+        {
+          "path": "/lib",
+          "root": "host"
+        },
+        {
+          "path": "/lib64",
+          "root": "host"
+        },
+        {
+          "path": "/usr",
+          "root": "host"
+        }
+      ],
+      "read_write": [
+        {
+          "path": "",
+          "root": "scratch"
+        },
+        {
+          "path": "",
+          "root": "workspace"
+        }
+      ]
+    },
+    "launch": null,
+    "limits": {
+      "cpu": null,
+      "mem": null,
+      "pids": {
+        "required": false,
+        "value": "256"
+      },
+      "wall": {
+        "required": true,
+        "value": "1800000"
+      }
+    },
+    "network": {
+      "allow": [],
+      "mode": "none",
+      "ruleset": null,
+      "translation_prefixes": []
+    },
+    "observation": {
+      "evidence": "strict",
+      "mode": "on"
+    },
+    "platform": "linux",
+    "profile": "tool",
+    "profile_version": 1,
+    "roots": {
+      "scratch": {
+        "kind": "managed"
+      },
+      "vendor_state": null,
+      "workspace": "/home/ubuntu/onboarding-project"
+    },
+    "schema": "ouro.jail.policy-snapshot/1"
+  }
+}

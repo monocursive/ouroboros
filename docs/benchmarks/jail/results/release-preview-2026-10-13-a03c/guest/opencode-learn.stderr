@@ -1,0 +1,7 @@
+[0m
+> build · big-pickle
+[0m
+[0m$ [0mcat /home/ubuntu/learning-needed.txt; cp task.txt learned-greeting.txt
+cat: /home/ubuntu/learning-needed.txt: No such file or directory
+[0m
+candidate policy: /home/ubuntu/onboarding-results/opencode-learned.toml (1 exact paths, 0 destinations)

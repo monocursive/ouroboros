@@ -28,9 +28,10 @@ requires exact-value, encoded-value and token-pattern audits, including archives
 ## Current verified progress
 
 The CI freeze repair is committed at `28e7c0a8528874dba0ddd10830a95006e8fc002e`.
-The reference job passed the disk prerequisite and is building. Hosted tests now
-reach further: Ubuntu exposed an audit-note synchronization race in a test;
-Mac reaches two stale VM onboarding-evidence gates. The test keeps the five-second
+The reference job passed the disk prerequisite and completed with failures
+retained below. Hosted tests reached further: Ubuntu exposed an audit-note
+synchronization race in a test; Mac reached two stale VM onboarding-evidence
+gates. The test keeps the five-second
 deadline and requires both committed token bytes and the mandatory refreshed note.
 The VM gates remain strict and require new real-vendor evidence for current inputs.
 
@@ -60,9 +61,31 @@ The preview gate now reads an explicit repository index under `results/` so new
 records can be selected while historical records remain unchanged. It still
 requires the compiled current input digest, clean optimized provenance, real
 vendor workflow, signed/corrupted install controls, and complete receipt-bound
-learning evidence. The current index intentionally still points to the historical
-record and must remain failing until new evidence is captured.
+learning evidence. The index now selects the fresh a03c record after both
+independent verifiers pass. The historical record remains unchanged.
 
 The pinned [official Ubuntu image checksum](https://cloud-images.ubuntu.com/resolute/20260927/SHA256SUMS)
 was checked before preparing a fresh disposable x86_64 VM. Its image and all test
 signing keys remain outside Git. No production release or signing is performed.
+
+The first full reference run at 28e7 is retained as failed. Besides stale preview
+inputs, two tests require the stock AppArmor user-namespace restriction, which
+had been disabled during the original shared competitor setup. The restriction
+was restored from 0 to 1. Both exact failing host-manifest/probe tests then pass
+in the delegated reference user scope; no assertion was weakened. Native timing
+cohorts must explicitly record their host-policy setting and keep both arms
+identical, rather than mixing settings or reusing old numbers as new scores.
+
+A kernel witness confirms the natural-expiry target remains traced under enforced
+containment. The on-disk running receipt is an initial phase record, not the final
+observer/settlement report.
+
+Fresh VM onboarding completed using the clean a03c x86_64 release build with
+current inputs `sha256:669a9b9bdfa076c70ac4cbd29b31e719a59033cfeb20e91774c92ea24f40d063`.
+The main workflow took 68.705 seconds, including signed installation, contained
+`true`, a real OpenCode task and upgrade. Corrupted archive and signature controls
+were rejected. Both independent onboarding and receipt-bound learning checks pass,
+and the disposable VM was destroyed. The deliberate learning fixture was not
+proposed; the verifier checks every actual proposed grant against exact journal
+events and leaves unresolved reads ungranted. This emulated VM is onboarding and
+compatibility evidence, not a native Mac containment or performance score.
