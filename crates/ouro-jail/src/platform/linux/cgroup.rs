@@ -730,6 +730,14 @@ impl ExecutionCgroup {
         self.verify_member(pid)
     }
 
+    /// The registered, configured leaf for atomic child creation. The kernel
+    /// takes this pinned directory descriptor, never a re-resolved pathname.
+    /// Parent membership readback remains mandatory before watcher/release.
+    pub(crate) fn spawn_handle(&self) -> io::Result<std::os::fd::OwnedFd> {
+        self.verify()?;
+        Ok(self.dir.try_clone()?.into())
+    }
+
     pub fn verify_member(&self, pid: libc::pid_t) -> io::Result<()> {
         let members = self.read("cgroup.procs")?;
         if !members.lines().any(|line| line == pid.to_string()) {

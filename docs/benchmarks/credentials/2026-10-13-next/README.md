@@ -3,10 +3,12 @@
 The complete five-part goal remains active. Previously sealed benchmark roots
 and their scored results are preserved.
 
-Latest checkpoint: all four hosted workflows pass at `efe7957a`; the completed
+Latest checkpoint: all four hosted workflows pass at `ca0bba09`; the completed
 four-arm Pi HTTP lifecycle fixture and the OpenShell VPS extension are saved
-below. Natural expiry, the remaining lifecycle/observation fixtures and a
-demonstrated production startup reduction remain open.
+below. A direct-cgroup bootstrap candidate and its matched Pi pilot are saved.
+The candidate's broader native suite is still running at this commit checkpoint;
+it has no fresh hosted, reference, freeze or VM proof. Natural expiry, the
+remaining lifecycle/observation fixtures and final performance reruns remain open.
 
 1. CI: repair vault-aware freeze validation and freeze the entire credential
    definition, preserving the absence of file staging for vaults. Local portable
@@ -378,3 +380,65 @@ are not completed lifecycle scores. The last pilot's successful path controls,
 ancestry admission and old-static-reference observations remain inspectable.
 The completed record changes only the supported setup/revocation workflow, with
 the actor, resource payload and deadlines preserved.
+
+## Direct-cgroup bootstrap candidate checkpoint
+
+The Linux candidate creates the trusted, blocked bootstrap directly in its
+registered and configured execution leaf with `clone3(CLONE_INTO_CGROUP)`.
+It uses a separate address space and descriptor table, a kernel pidfd, cleared
+inherited signal handlers, the existing parent-death guard, and a pinned ELF
+descriptor for exec. Arguments, environment and descriptor moves are prepared
+before child creation. The child still waits for START; parent membership
+readback and outside-watcher readiness precede release. Existing fresh probes,
+namespace checks, tracer attachment, durability and verified tree settlement
+remain in place. The receipt records the actual spawn mechanism and any
+compatibility errno. Only unavailable-kernel/permission compatibility refusals
+before child creation can fall back to the existing guarded Command path;
+resource failures and failures after creation cannot retry that way.
+
+The first optimized, honestly dirty candidate build and its exact source patch
+are retained in `validation/pi-clone3-build-01/`. The uninstrumented pilot uses
+the original C no-op and 1,000 input files, the same workspace/environment/limits,
+three discarded warmup pairs and 30 shuffled measured pairs for each profile.
+All 132 attempts pass the independent strict receipt, observer coverage and
+empty-tree checks; all 66 candidate attempts record direct cgroup creation.
+Policies, receipts, journals, commands and outputs are saved in
+`validation/pi-clone3-pilot-01/`. Recomputing
+`analysis/clone3-candidate-pilot.json` from these files reproduces it exactly.
+
+| Profile | Before median | Candidate median | Median paired difference | Paired bootstrap 95% interval |
+|---|---:|---:|---:|---:|
+| Tool | 316.32 ms | 292.40 ms | -18.88 ms | -26.87 to -13.53 ms |
+| Static vault | 486.23 ms | 478.85 ms | -15.94 ms | -25.29 to +1.97 ms |
+
+This cohort demonstrates a tool-profile improvement. The vault interval includes
+zero, so no vault improvement is established. These medians are from this matched
+cohort only; they are not mixed with the earlier rejected pre-exec pilot and do
+not constitute new competitor scores or a proven closed gap with MXC.
+
+Four focused native guard tests pass under `OURO_CONFORMANCE=1` on the delegated
+Pi: actual leaf and parent-death readback with the exact surviving descriptor
+layout, failed-exec errno plus child reaping, partial/deadline handshake refusal,
+and resource-failure fallback refusal. Their exact source and output are saved
+in `validation/pi-clone3-unit-02/`. After the pilot, failure cleanup received its
+own fresh tree budget and executable pinning uses O_PATH to preserve execute-only
+ELF compatibility. The pilot therefore proves its saved source snapshot, not the
+later final-source performance. The four tests precede the O_PATH adjustment.
+
+Strict all-target native Clippy passes on the current four source files in
+`validation/pi-clone3-clippy-04/`; the earlier missing-schema setup failure is
+preserved in `validation/pi-clone3-clippy-03/`. Repository formatting, whitespace
+and harness syntax checks also pass. The broader serialized Pi native regression
+job is still compiling at the retained
+`validation/pi-clone3-native-04-running-checkpoint/`; no completed result is
+claimed. Its source hashes match this tree. Pi reference-only skips remain
+explicit and cannot replace Ubuntu reference conformance.
+
+Next, complete those regressions, rebuild and rerun this same pilot from the final
+source, then obtain fresh clean Ubuntu/reference, validated doctor/freeze,
+VM onboarding and exact-commit hosted CI proof. Run the original workload and
+OpenCode, Claude Code and Codex comparison with matched current host policies.
+The common automatic-refresh/concurrency, TLS/WebSocket revocation and broader
+credential/file/process/limit observation fixtures remain open. Real provider
+expiry and repeated rotations remain pending on the actual issuer clock,
+23 October 2026 at 09:22:33 UTC for the original grant.

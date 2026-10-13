@@ -18,7 +18,6 @@ use std::ffi::{OsStr, OsString};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Map, Value};
@@ -48,7 +47,7 @@ use super::audit::AuditWriter;
 use super::bwrap::{self, BwrapPlan, Placeholder, PlaceholderOutcome};
 use super::cgroup::ExecutionCgroup;
 use super::clock::{self, boottime_ns};
-use super::exec::{self, FdMap, reap_until};
+use super::exec::{self, BootstrapChild, BootstrapSpawn, FdMap};
 use super::fs as jfs;
 use super::identity;
 use super::probe::{self, ProbeResult, ProbeStatus};
@@ -693,7 +692,8 @@ impl StatusReader {
 struct Boundary {
     snapshot: PolicySnapshot,
     workspace: PathBuf,
-    child: Option<Child>,
+    child: Option<BootstrapChild>,
+    bootstrap_spawn: BootstrapSpawn,
     bwrap_pid: libc::pid_t,
     /// A descriptor for bubblewrap, taken while it was known to be itself. A
     /// pid number can come to mean another process; a pidfd cannot (§9.3).
@@ -1332,8 +1332,9 @@ impl Boundary {
         set_nonblocking(error_r.as_raw_fd()).map_err(io)?;
         set_nonblocking(status_r.as_raw_fd()).map_err(io)?;
 
-        let mut command = Command::new(&exe);
-        command.arg("__backend").args(&rendered.argv);
+        let arguments: Vec<OsString> = std::iter::once(OsString::from("__backend"))
+            .chain(rendered.argv.iter().cloned())
+            .collect();
         // J5-B2 seam: give a test a deterministic window between pinning and
         // the mount-handoff verification below to replace a pinned source, so
         // the source-identity-swap refusal (F04) can be proved through the CLI.
@@ -1372,31 +1373,43 @@ impl Boundary {
                     i32::try_from(fd).unwrap_or(-1),
                     fd == 0,
                     socket,
-                    &mut command,
+                    &mut fds,
                 )?);
             }
         }
-        fds.apply(&mut command);
-        let mut child = command.spawn().map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!(
-                    "the backend bootstrap ({}) could not be started: {err}",
-                    exe.display()
-                ),
-            )
-        })?;
+        let spawn_cgroup = cgroup
+            .as_ref()
+            .map(ExecutionCgroup::spawn_handle)
+            .transpose()
+            .map_err(io)?;
+        let mut child =
+            exec::spawn_bootstrap(&exe, &arguments, &fds, spawn_cgroup.as_ref(), deadline)
+                .map_err(|err| {
+                    preparing(
+                        ErrorCode::BackendUnavailable,
+                        format!(
+                            "the backend bootstrap ({}) could not be started: {err}",
+                            exe.display()
+                        ),
+                    )
+                })?;
+        let bootstrap_spawn = child.spawn();
         // In particular close our duplicate of ARGS_FD before streaming: if
         // the backend exits there must be no reader left to suppress EPIPE.
         drop(fds);
         // Root the cgroup namespace in this attempt's leaf. Moving only the
         // target after bubblewrap unshares exposes a /../../host-leaf path in
-        // /proc/self/cgroup. The blocked bootstrap cannot fork or exec yet.
+        // /proc/self/cgroup. Direct creation still requires the same parent
+        // readback; the compatibility path moves the blocked bootstrap first.
         if let Some(leaf) = &cgroup
-            && let Err(err) = leaf.place(child.id() as i32)
+            && let Err(err) = if child.created_in_cgroup() {
+                leaf.verify_member(child.id() as i32)
+            } else {
+                leaf.place(child.id() as i32)
+            }
         {
             let _ = child.kill();
-            reap_until(&mut child, deadline);
+            child.reap_until(deadline);
             return Err(io(err));
         }
         let cgroup_kill = match cgroup
@@ -1407,7 +1420,7 @@ impl Boundary {
             Ok(kill) => kill,
             Err(err) => {
                 let _ = child.kill();
-                reap_until(&mut child, deadline);
+                child.reap_until(deadline);
                 return Err(io(err));
             }
         };
@@ -1416,13 +1429,13 @@ impl Boundary {
                 Ok(watcher) => watcher,
                 Err(err) => {
                     let _ = child.kill();
-                    reap_until(&mut child, deadline);
+                    child.reap_until(deadline);
                     return Err(io(err));
                 }
             };
         if let Err(err) = write_all(start_w.as_raw_fd(), &[1]) {
             let _ = child.kill();
-            reap_until(&mut child, deadline);
+            child.reap_until(deadline);
             return Err(io(err));
         }
         drop(start_w);
@@ -1435,7 +1448,7 @@ impl Boundary {
             && let Err(err) = write_until(args_w.as_raw_fd(), payload, deadline)
         {
             let _ = child.kill();
-            reap_until(&mut child, clock::Deadline::after(TREE_BUDGET));
+            child.reap_until(clock::Deadline::after(TREE_BUDGET));
             return Err(io(err));
         }
         drop(args_writer);
@@ -1454,6 +1467,7 @@ impl Boundary {
             snapshot,
             workspace: workspace_path,
             child: Some(child),
+            bootstrap_spawn,
             bwrap_pid,
             bwrap_fd: identity::pidfd_open(bwrap_pid).ok(),
             init_pid: -1,
@@ -1999,7 +2013,7 @@ impl Boundary {
         self.kill_boundary();
         self.stop_observer(deadline.remaining());
         if let Some(mut child) = self.child.take() {
-            reap_until(&mut child, deadline);
+            child.reap_until(deadline);
         }
         while !self.watcher.ended() && !deadline.expired() {
             self.release_watcher_after_backend();
@@ -2131,7 +2145,7 @@ impl Boundary {
         // J3-agent end
         let backend_reaped = match self.child.take() {
             Some(mut child) => {
-                reap_until(&mut child, deadline);
+                child.reap_until(deadline);
                 match child.try_wait() {
                     Ok(Some(_)) => true,
                     // The tracer's `waitpid(-1)` reaped it before it was
@@ -2257,6 +2271,10 @@ impl Boundary {
         // J4 autoscope: §9.3 — where the supervisor stood when the leaf was
         // made: already delegated, entered a scope of its own, or why not.
         details.insert("supervisor_scope".to_owned(), super::scope::details());
+        details.insert(
+            "bootstrap_spawn".to_owned(),
+            self.bootstrap_spawn.evidence(),
+        );
         details.insert(
             "execution_cgroup".to_owned(),
             match &self.cgroup {
@@ -2741,14 +2759,14 @@ const RELAY_BUFFER: usize = 1 << 16;
 
 impl StdioRelay {
     /// Create the pipe for one stream and hand the child its end through the
-    /// command's stdio configuration. The operator's descriptor is
+    /// fixed descriptor map. The operator's descriptor is
     /// duplicated immediately, before the supervisor redirects its own
     /// copies (§8.3, revision 19).
     fn attach(
         fd: RawFd,
         to_child: bool,
         socket: bool,
-        command: &mut Command,
+        descriptors: &mut FdMap,
     ) -> Result<Self, JailError> {
         let (read_end, write_end) = exec::pipe().map_err(|err| {
             error(
@@ -2776,11 +2794,14 @@ impl StdioRelay {
         }
         // SAFETY: `duped` was just created and is owned here.
         let origin = unsafe { OwnedFd::from_raw_fd(duped) };
-        match fd {
-            0 => command.stdin(std::process::Stdio::from(child_end)),
-            1 => command.stdout(std::process::Stdio::from(child_end)),
-            _ => command.stderr(std::process::Stdio::from(child_end)),
-        };
+        descriptors.add(child_end, fd).map_err(|err| {
+            error(
+                ErrorCode::InvalidFd,
+                ErrorStage::Preparing,
+                Remediation::Configuration,
+                format!("a stdio relay descriptor could not be mapped: {err}"),
+            )
+        })?;
         set_nonblocking(ours.as_raw_fd()).map_err(|err| {
             error(
                 ErrorCode::InvalidFd,

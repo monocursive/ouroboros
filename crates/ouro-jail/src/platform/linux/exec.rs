@@ -14,6 +14,9 @@ use std::time::Duration;
 use super::clock::Deadline;
 use super::identity::{pidfd_open, pidfd_send_signal};
 
+mod bootstrap;
+pub(crate) use bootstrap::{BootstrapChild, BootstrapSpawn, spawn_bootstrap};
+
 /// Default start of the source-descriptor range. Large mount plans raise it
 /// above their last target, so the child's `dup2` calls cannot overwrite a
 /// source, including when there are more than 256 pinned mounts.
@@ -94,6 +97,14 @@ impl FdMap {
             !self.moves.iter().any(|(_, t)| *t == target),
             "fd {target} assigned twice"
         );
+        let high = self.reserve(fd)?;
+        self.moves.push((high, target));
+        Ok(())
+    }
+
+    /// Keep an internal spawn descriptor above every mapped target. It stays
+    /// close-on-exec and is never added to the child's surviving layout.
+    fn reserve(&self, fd: OwnedFd) -> io::Result<OwnedFd> {
         let raw = fd.as_raw_fd();
         let high = if raw >= self.reserve_base {
             fd
@@ -108,8 +119,7 @@ impl FdMap {
             // SAFETY: `dup` was just created by fcntl and is owned here.
             unsafe { OwnedFd::from_raw_fd(dup) }
         };
-        self.moves.push((high, target));
-        Ok(())
+        Ok(high)
     }
 
     /// Whether the map is empty.
