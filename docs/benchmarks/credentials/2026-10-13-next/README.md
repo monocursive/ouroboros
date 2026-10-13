@@ -160,3 +160,62 @@ it does not establish the result of deleting a scoped network rule. Synthetic
 broker fixtures also do not prove failure of a client's own OAuth refresh in an
 environment/staged-file configuration; that end-to-end workflow must be assessed
 separately from the product's managed-credential capabilities.
+
+## Pre-exec placement candidate: measured and rejected
+
+All four workflows now also pass at `898c8558abb495639df9fe2abf954a333b39bf9f`.
+The complete reference artifacts are retained in `validation/reference-898-passed/`.
+Its fresh optimized, clean doctor is recorded in the milestone freeze, and
+`freeze --check` passes with the current production input digest unchanged.
+
+A candidate moved the bootstrap into its registered cgroup from the existing
+async-signal-safe pre-exec hook, after parent-death protection. It preserved
+parent membership readback, descriptor isolation, watcher readiness, fresh
+capability probes, durability, observer attachment and verified settlement.
+The exact patch, source hashes, honest dirty-candidate build provenance, and two
+passing placement/failure-before-exec tests are retained in
+`validation/pi-preexec-build/`. An incomplete-transfer setup failure is retained
+separately from the subsequent successful build.
+
+The uninstrumented Pi pilot uses the original C no-op workload, a shared small
+repository with 1,000 input files, unchanged limits and the same environment.
+It shuffles both arms across tool and static-vault profiles for three discarded
+warmup rounds and 30 measured rounds. Every one of the 132 attempts passes strict
+containment, attached ptrace observation, required active coverage without gaps,
+and verified empty-tree settlement. Policies, receipts, journals, commands and
+outputs are retained in `validation/pi-preexec-pilot-01/`.
+
+| Profile | Before median | Candidate median | Median paired difference | Paired bootstrap 95% interval |
+|---|---:|---:|---:|---:|
+| Tool | 272.07 ms | 272.84 ms | +2.05 ms | -7.54 to +14.83 ms |
+| Static vault | 430.78 ms | 438.72 ms | +6.05 ms | -9.46 to +24.50 ms |
+
+Neither profile demonstrates an improvement. The production change was removed;
+the candidate and every result remain saved. These are candidate pilots, excluded
+from final competitor scores, and do not replace earlier benchmark cohorts.
+The full decision and per-attempt verification are in
+`analysis/preexec-candidate-decision.json`.
+
+A new control explains why the earlier back-to-back libc medians were misleading
+as a prediction. With the same binary, 30 fresh leaves per arm and a 300 ms idle
+gap before each arm, spawn-plus-migrate takes median 18.05 ms and direct cgroup
+creation 0.57 ms. At zero requested gap they take 0.41 ms and 0.31 ms. All 120
+owned children are reaped and all their leaves removed. No host setting is
+changed. Sources, raw outputs and controls are retained in
+`validation/pi-cgroup-spawn-cadence/`.
+
+The result is consistent with Linux's global migration semaphore calling
+[RCU synchronization](https://raw.githubusercontent.com/torvalds/linux/v6.18/kernel/rcu/sync.c),
+whose isolated calls can wait for a grace period while closely spaced calls can
+avoid it. The [cgroup migration path](https://raw.githubusercontent.com/torvalds/linux/v6.18/kernel/cgroup/cgroup.c)
+and [semaphore implementation](https://raw.githubusercontent.com/torvalds/linux/v6.18/kernel/locking/percpu-rwsem.c)
+support this mechanism. This is an inference, not exact downstream-kernel
+stack/ftrace attribution. The next implementation investigation is direct creation
+in the registered cgroup with every existing lifetime, descriptor, observation
+and durability safeguard intact. The generic control is not proof of that change.
+
+The real-clock OAuth soak remains alive, with the original supervisor birth and
+traced waiter verified, original expiry unchanged, no pending refresh and no
+terminal result. The 23 October natural-expiry proof, repeated rotation,
+remaining matched competitor lifecycle fixtures, and a proved production startup
+improvement remain outstanding. The complete five-part goal is still active.

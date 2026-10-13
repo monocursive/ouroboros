@@ -1180,12 +1180,12 @@ debug_assertions = false
 dirty = false
 inputs = "sha256:669a9b9bdfa076c70ac4cbd29b31e719a59033cfeb20e91774c92ea24f40d063"
 opt_level = "3"
-ouro_jail_sha256 = "f9388d3d40603b88fd2a27fde40a61f06415df412f09bb6be6f3bb6093e07d84"
+ouro_jail_sha256 = "3eec22f0ce72cf1709c15a23f418afa1b90f0960d35742b0011ac3b5eb9f8b79"
 platform_arch = "x86_64"
 platform_kernel = "Linux 7.0.0-31-generic"
 platform_os = "linux"
 ready = true
-revision = "d9f4741197bf0f350d55369b18f3d3459538df95"
+revision = "898c8558abb495639df9fe2abf954a333b39bf9f"
 rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
 target = "x86_64-unknown-linux-gnu"
 unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code", "supervisor_scope.unit"]
@@ -1233,5 +1233,5 @@ swap_total_kib = 8388604
 "user.max_user_namespaces" = "11829"
 
 [tested.supervisor_scope]
-cgroup = "/user.slice/user-1001.slice/user@1001.service/app.slice/run-p696121-i21672002.scope"
+cgroup = "/user.slice/user-1001.slice/user@1001.service/app.slice/run-p771812-i21745727.scope"
 state = "already_delegated"
