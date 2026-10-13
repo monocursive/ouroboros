@@ -3936,6 +3936,11 @@ Unrelated prose.
             // Shared HTTP vault transport and in-memory CA, no vendor protocol.
             "rcgen",
             "rustls",
+            // Generic supervisor HTTP transport for operator-configured OAuth refresh;
+            // no vendor client, provider SDK, or protocol-specific dependency.
+            "ureq",
+            // RFC 6455's mandated upgrade challenge, not credential hashing.
+            "sha1",
             "webpki-roots",
             "zeroize",
             // Explicit operator-reviewed proposal adoption preserves TOML comments.

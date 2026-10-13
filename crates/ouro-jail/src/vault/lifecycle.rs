@@ -913,7 +913,7 @@ mod tests {
         }
         assert!(
             RefreshPolicy {
-                token_url: "https://auth.openai.com/oauth/token".into(),
+                token_url: "https://issuer.fixture.test/oauth/token".into(),
                 client_id: "test".into(),
                 refresh_before_seconds: 300,
                 encoding: TokenEncoding::Form,
