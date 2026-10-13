@@ -111,6 +111,7 @@ id = "anthropic"
 source = "~/.config/ouro/credentials/anthropic"
 dest = ""
 mode = "vault"
+definition = "{\"header\":{\"name\":\"x-api-key\"},\"hosts\":[\"https://api.anthropic.com\"],\"mode\":\"vault\",\"source\":\"~/.config/ouro/credentials/anthropic\"}"
 
 [[launch_profile]]
 file = "crates/ouro-jail/profiles/launch/claude.toml"
@@ -208,6 +209,7 @@ id = "anthropic"
 source = "~/.config/ouro/credentials/anthropic"
 dest = ""
 mode = "vault"
+definition = "{\"header\":{\"name\":\"x-api-key\"},\"hosts\":[\"https://api.anthropic.com\"],\"mode\":\"vault\",\"source\":\"~/.config/ouro/credentials/anthropic\"}"
 
 [[launch_profile]]
 file = "crates/ouro-jail/profiles/launch/opencode.toml"

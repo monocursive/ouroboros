@@ -373,8 +373,17 @@ fn the_bundled_launch_profiles_are_the_frozen_ones() {
                 table
                     .iter()
                     .map(|(id, credential)| {
-                        let field =
-                            |key: &str| credential[key].as_str().expect("a string").to_owned();
+                        let field = |key: &str| {
+                            credential
+                                .get(key)
+                                .and_then(toml::Value::as_str)
+                                .or_else(|| {
+                                    (key == "dest" && text(credential.get("mode")) == Some("vault"))
+                                        .then_some("")
+                                })
+                                .expect("a credential string; only vault may omit dest")
+                                .to_owned()
+                        };
                         (id.clone(), field("source"), field("dest"), field("mode"))
                     })
                     .collect()
@@ -397,6 +406,38 @@ fn the_bundled_launch_profiles_are_the_frozen_ones() {
         assert_eq!(
             credentials, frozen_credentials,
             "{file} credentials: {REGENERATE}"
+        );
+        let definitions: Vec<(String, serde_json::Value)> = profile
+            .get("credentials")
+            .and_then(toml::Value::as_table)
+            .map(|table| {
+                table
+                    .iter()
+                    .map(|(id, credential)| (id.clone(), json(credential)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let frozen_definitions: Vec<(String, serde_json::Value)> = entry
+            .get("credential")
+            .and_then(toml::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|credential| {
+                        (
+                            credential["id"].as_str().expect("an id").to_owned(),
+                            serde_json::from_str(
+                                credential["definition"].as_str().expect("a definition"),
+                            )
+                            .expect("a complete frozen credential definition"),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            definitions, frozen_definitions,
+            "{file} complete credential authority: {REGENERATE}"
         );
     }
 }

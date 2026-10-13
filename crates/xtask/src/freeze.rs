@@ -434,6 +434,14 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
                         .ok_or_else(|| format!("{file}: credential {id} has no {key}"))?;
                     let _ = writeln!(w, "{key} = {}", quote(value));
                 }
+                // Vault release authority includes more than a staged file:
+                // pin origins, headers, paths, executable bindings and refresh
+                // policy (including future fields), not just source/mode.
+                let definition = ouro_jail::platform::linux::freeze::canonical_json(
+                    &json_of_toml(credential),
+                    false,
+                );
+                let _ = writeln!(w, "definition = {}", quote(&definition));
             }
         }
     }
