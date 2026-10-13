@@ -64,7 +64,7 @@ def main():
     controls = []
     process = None
     profile_created = provider_created = sandbox_created = False
-    name = 'matched-oauth-' + nonce[:12]
+    name = 'oauth-' + nonce[:12]
     setup = env = prefix = None
     status = 'incomplete'
     blocker = None
@@ -175,6 +175,20 @@ def main():
             sandbox_created = True
             cli('actor-upload', ['sandbox', 'upload', name, str(actor), '/work/actor.py',
                                   '--no-git-ignore'])
+            container_ids = subprocess.check_output(['docker', 'ps', '-q', '--filter',
+                'label=openshell.ai/sandbox-name=' + name], text=True).split()
+            assert len(container_ids) == 2, 'expected owned workload and supervisor containers'
+            containers = json.loads(subprocess.check_output(['docker', 'inspect', *container_ids]))
+            save(output / 'container-fences.json', [{
+                'id': c['Id'], 'name': c['Name'], 'running': c['State']['Running'],
+                'user': c['Config'].get('User'), 'image': c['Image'],
+                'sandbox_name_label': c['Config']['Labels'].get('openshell.ai/sandbox-name'),
+                'host_config': {k: c['HostConfig'].get(k) for k in
+                    ['NetworkMode', 'CapDrop', 'CapAdd', 'SecurityOpt', 'PidsLimit',
+                     'ReadonlyRootfs', 'Memory', 'NanoCpus']},
+                'mount_destinations': [m['Destination'] for m in c['Mounts']],
+                'environment_or_private_material_exported': False,
+            } for c in containers])
             actor_argv = prefix + ['sandbox', 'exec', name, '--workdir', '/work', '--no-tty',
                 '--no-login-shell', '--timeout', str(a.seconds + 120), '--',
                 '/usr/bin/python3', '/work/actor.py', '--origin', origin, '--nonce', nonce,
@@ -191,6 +205,7 @@ def main():
             'lost_response_generation': a.lose_generation, 'manual_rotation_calls': 0,
             'real_clock_modified': False, 'forced_expiry_metadata': False,
             'product_version': product_version,
+            'authorized_executable': python if a.mode == 'ouro' else '/usr/bin/python3.12',
             'image_id': image_info['Id'] if image_info else None,
             'gateway_tls_verification_disabled': False,
             'token_transport': 'loopback HTTP, supported synthetic issuer fixture',

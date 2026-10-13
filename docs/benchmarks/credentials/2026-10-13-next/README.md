@@ -627,3 +627,53 @@ grant. This is harness preparation, not yet product feature or performance proof
 Native product runs and independent verification remain required, as do TLS/WSS,
 common observation fixtures and the final original-workload/agent reruns. The
 separate real-provider natural expiry soak remains due on 23 October.
+
+## Native automatic refresh: common fixture exposes a refusal race
+
+The completed nine-minute VPS fixtures use identical actor and issuer bytes,
+180-second synthetic access-token lifetimes, a 75-second renewal margin, four
+bursts of 12 concurrent requests, real clock/expiry and each product's native
+managed refresh. Neither the client nor an external broker refreshes tokens;
+no manual rotation or forced expiry metadata is used. These accelerated
+synthetic feature probes are excluded from performance scores and real-provider
+natural expiry proof. The two products use the same host and ordinary installed
+Python/container runtimes, with their exact configuration and version retained.
+
+| Product | Native grant rotations | Client calls | Common fixture verdict |
+|---|---:|---:|---|
+| Ouro, clean corrected input `083501cb` | 5 | 225 HTTP 200; 3 HTTP 403 | Failed: local process-binding refusals |
+| OpenShell 0.1.3 | 4 | 228 HTTP 200 | All current fixture checks pass |
+
+Rotation count reflects native worker cadence; it is not a speed ranking.
+Both fixed client handles survive multiple actual access-token expiry boundaries
+and remain opaque. Ouro records all five refresh starts and completions, all
+228 proxy decisions, strict containment, six active coverage classes without
+gaps, correlated policy/trace and verified empty-tree settlement. Its three
+local denials are explicitly `credential_process_denied`; none reaches the
+resource oracle. All 225 requests that reach the oracle authenticate. The
+independent analyser correctly rejects Ouro's overall fixture, even though its
+refresh cycles succeed. OpenShell's nonroot identities, disconnected workload
+network, dropped capabilities, no-new-privileges and gateway TLS verification
+are read back; all owned profile/provider/sandbox cleanup commands pass.
+
+Full results and their exact source snapshots are in
+`validation/oauth-auto-ouro-01/` and `validation/oauth-auto-openshell-02/`.
+Independent hashes/checks are in `analysis/matched-oauth-refresh-before.json`.
+OpenShell's native log snapshots retain safe enum/numeric projections and their
+collector source hashes; raw diagnostics and opaque handles remain private.
+The later snapshot includes 220 native HTTP GET events and four completed
+refresh log events, captured before cleanup. These partial log snapshots are
+not proof of equivalent six-class observation. The earlier OpenShell setup
+failure, caused solely by an overlong generated sandbox name, is retained in
+`validation/oauth-auto-openshell-01-failed/`; it launched no client and made no
+issuer request. Only that fixture name is corrected in the next attempt.
+
+`analysis/oauth-process-binding-investigation.json` records the confirmed
+refusals and source-backed ordering hypothesis: the sealed bridge may deliver
+its preamble before the connect mediator publishes the pinned initiator.
+`Origins.receive` currently consumes the table once without waiting. A bounded
+exact-key rendezvous needs a deterministic protocol-order regression before it
+can be adopted. Kernel-pinned executable identity, descriptor budgets,
+single-use authority, missing-authority refusal, isolation and audit coverage
+must remain intact. The identical fixture must then be rerun with both records
+retained, followed by fresh final-source release proof if runtime changes.
