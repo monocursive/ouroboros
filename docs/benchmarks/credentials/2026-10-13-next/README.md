@@ -6,8 +6,10 @@ and their scored results are preserved.
 Latest checkpoint: all four hosted workflows pass at `ca0bba09`; the completed
 four-arm Pi HTTP lifecycle fixture and the OpenShell VPS extension are saved
 below. A direct-cgroup bootstrap candidate and its matched Pi pilot are saved.
-The candidate's broader native suite is still running at this commit checkpoint;
-it has no fresh hosted, reference, freeze or VM proof. Natural expiry, the
+The candidate now has a fresh independently verified clean-VM record. Its broader
+Pi run reached reference-specific host/architecture failures, with all library
+tests passing; the remaining targets are running separately. Fresh hosted,
+reference and freeze proof is still pending. Natural expiry, the
 remaining lifecycle/observation fixtures and final performance reruns remain open.
 
 1. CI: repair vault-aware freeze validation and freeze the entire credential
@@ -442,3 +444,43 @@ The common automatic-refresh/concurrency, TLS/WebSocket revocation and broader
 credential/file/process/limit observation fixtures remain open. Real provider
 expiry and repeated rotations remain pending on the actual issuer clock,
 23 October 2026 at 09:22:33 UTC for the original grant.
+
+## Clean x86 build, VM proof and native validation follow-up
+
+The clean optimized x86 build from committed `b02a5dbc` passes and records inputs
+`sha256:60cf97d5ab79f722f33e861fdad777bc9249c127f5db62d9bdf3917127e22581`.
+The verified source-archive, build command/log, version and binary hash are saved
+in `validation/vps-clone3-build-b02/`. All four bootstrap guards also pass on the
+Ubuntu x86 host with `OURO_CONFORMANCE=1`, zero skips or ignored tests, as saved
+in `validation/vps-clone3-guard-b02/`.
+
+The fresh disposable VM run is retained at
+`../../jail/results/release-preview-2026-10-13-b02/`. Signed install, contained
+`true`, real OpenCode 1.18.32 execution, upgrade and corrupted archive/signature
+refusal controls pass. The guest has no Rust before or after the workflow and
+the VM was destroyed. The main workflow takes 92.713 seconds, after 220.844
+seconds of untimed prerequisite boot/setup. Both independent onboarding and receipt-bound learning
+verifiers pass against the new exact input digest; their commands/logs are in
+`validation/preview-b02-verifiers/`. The index now selects this new record while
+all prior records remain unchanged. This is emulated Linux VM compatibility and
+onboarding proof, not native Mac containment or a comparative performance score.
+
+The first broader Pi job terminated with exit 101 after the library suite passed
+583 tests with two declared ignores, and command rules passed all five tests.
+All four bootstrap guards pass on the current O_PATH source, with no skips.
+The subsequent reference-specific J1 target passed 16 and failed six: three
+fixtures read x86-only syscall headers, one hardcodes x86 openat number 257, one
+compares the ARM seccomp table to x86 evidence, and the Ubuntu manifest pins the
+memory controller that this stock Pi kernel does not expose. The exact failed
+job and source hashes remain in `validation/pi-clone3-native-04-failed/`, with
+the per-failure scope assessment in `analysis/clone3-native-04-scope.json`.
+No fixture or assertion was weakened. All targets not reached by that job are
+running serially with `--no-fail-fast` so their results and any further failures
+remain visible. A complete passing native regression claim is still unproven.
+
+The latest real-expiry kernel witness again verifies the original supervisor
+birth, traced child and unchanged issuer expiry, with no terminal result;
+it is saved as `validation/natural-expiry-kernel-witness-b02.json`. The same
+matched pilot still needs a clean final-source Pi rebuild and rerun after the
+native jobs finish. Full Ubuntu reference proof, validated doctor/freeze and
+exact-head hosted workflows remain required.
