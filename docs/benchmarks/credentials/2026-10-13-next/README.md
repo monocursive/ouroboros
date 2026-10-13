@@ -4,9 +4,9 @@ The complete five-part goal remains active. Previously sealed benchmark roots
 and their scored results are preserved.
 
 Latest checkpoint: all four hosted workflows pass at `efe7957a`; the completed
-four-arm HTTP lifecycle fixture is saved below. OpenShell's verified mTLS gateway
-is ready, but its provider fixture has not run. Natural expiry, the remaining
-lifecycle fixtures and a demonstrated production startup reduction remain open.
+four-arm Pi HTTP lifecycle fixture and the OpenShell VPS extension are saved
+below. Natural expiry, the remaining lifecycle/observation fixtures and a
+demonstrated production startup reduction remain open.
 
 1. CI: repair vault-aware freeze validation and freeze the entire credential
    definition, preserving the absence of file staging for vaults. Local portable
@@ -274,8 +274,10 @@ establish failure of native client OAuth refresh.
 
 Each stream was verified live before revocation and the resource remained alive
 through the late check. The actor has a uniform 60-second SSE read timeout, the
-controller allows 70 seconds for first-event readiness, and all wrapper walls
-are 240 seconds. First-event latencies were 55.08 ms for Ouro, about 29.02 seconds
+controller allows 70 seconds for first-event readiness. Ouro and MXC have
+240-second walls; Greywall has the same actor barriers and controller cleanup,
+without a configured native wall limit. First-event latencies were 55.08 ms for
+Ouro, about 29.02 seconds
 for both Greywall arms and 26.99 seconds for MXC through the same Greyproxy
 transport. These are single feature diagnostics, excluded from scored performance;
 they cannot establish an intrinsic MXC network slowdown. The handle check is
@@ -308,3 +310,71 @@ with existing lifetime/descriptor/observer/durability safeguards. Any startup
 candidate needs full validation and a matched original workload/agent rerun;
 the rejected pre-exec pilot remains rejected. Natural expiry and repeated real
 rotations remain pending on the actual issuer clock.
+
+## OpenShell persistent-client extension
+
+OpenShell 0.1.3 completed the same actor and byte-identical resource handler on
+VPS. The full record is `validation/openshell-http-vps/completed-04/`, with
+independent checks and interpretation in `analysis/matched-openshell-http.json`.
+The physical host and Python runtime differ from the Pi cohort, so these are
+logical feature observations, excluded from comparative performance scores.
+
+The cached agent image was missing `/usr/bin/curl`, which the unchanged actor
+requires for the separate-executable control. A derived ordinary Ubuntu image
+adds curl, selects the existing UID/GID 1000 user and preserves `/work`. The
+Dockerfile, base/final image IDs, versions and successful inventory are retained
+under `image-01/`. The imported provider and actual effective policy both retain
+`/v1/**` and the exact `/usr/bin/python3.12` executable. Workload network mode
+`none`, non-root identities, dropped capabilities and no-new-privileges are
+verified from the two running containers. No trusted runtime image, gateway TLS,
+default Docker isolation or Landlock compatibility setting was weakened.
+
+Eight of the ten desired contract checks hold: valid substitution, both path
+restrictions, active-stream closure, immediate and late request denial,
+persistent client identity and absence of the raw key from its credential
+variable. Two differences are deliberate product semantics:
+
+- The curl child of authorized Python receives v1. OpenShell's
+  [binary policy admits authorized ancestors](https://github.com/NVIDIA/OpenShell/blob/e1f3c82caa3ed3b65de22889ae7ef32a774878ef/crates/openshell-supervisor-network/data/sandbox-policy.rego#L145-L173).
+  The narrower own-executable-only credential contract is not available in this
+  configuration. This is not a claim that OpenShell ignored its effective policy.
+- `provider update --wait` reports readiness, but the existing client's captured
+  static reference continues using v1. Its
+  [readiness fixture preserves existing static references](https://github.com/NVIDIA/OpenShell/blob/e1f3c82caa3ed3b65de22889ae7ef32a774878ef/e2e/rust/tests/provider_readiness.rs).
+  Updating the environment for new processes and refresh-managed stable handles
+  are separate workflows. This result does not establish failure of OpenShell's
+  automatic OAuth refresh, which remains to be tested with the common issuer.
+
+The raw controller initially marks all operator-backed checks `supported`.
+Those booleans are not proof that strict own-executable binding or mutable
+existing static references are offered. The analysis records the actual policy
+semantics separately; it does not manufacture a supported-capability score by
+changing historical flags.
+
+Revocation uses supported `sandbox provider detach --wait`; deleting a provider
+while attached is refused. Detach withdraws the provider network policy as well
+as its credential authority. The SSE stream closes 9.490 seconds after detach
+initiation, about 51 ms before the operator command returns. Both new requests
+receive no upstream credential, including the same actor's request 70.195 seconds
+after completion. The fixed observation window ends three seconds after operator
+completion and counts a closure during the verified-live detach operation. A
+passing window does not mean revocation took less than three seconds end to end.
+Update/detach commands take 9.33/9.54 seconds in this single diagnostic; these
+are not scored throughput/latency measurements. The first SSE event arrives in
+53.33 ms. The actor and owned resource survive through the late check; stream
+termination is followed by the oracle's observed client disconnect, rather than
+forced resource cleanup. The actor exits normally and all owned sandbox/provider/
+profile cleanup commands pass. The host subsequently has no running containers.
+
+Standard OCSF network decisions, provider readiness and actual fences are saved.
+They are not claimed equivalent to Ouro's closed-set six-class receipt; common
+file/process/limit observation fixtures and broader environment/file credential
+visibility checks remain required.
+
+All earlier OpenShell attempts remain retained: `pilot-01/` is the upload/command
+CLI conflict, `pilot-02/` is the symbolic-user policy rejection, and `pilot-03/`
+reaches the real client but stops on the attached-provider delete refusal. These
+are not completed lifecycle scores. The last pilot's successful path controls,
+ancestry admission and old-static-reference observations remain inspectable.
+The completed record changes only the supported setup/revocation workflow, with
+the actor, resource payload and deadlines preserved.
