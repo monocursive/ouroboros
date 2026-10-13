@@ -10,8 +10,9 @@ The pre-fix candidate has an independently verified clean-VM record. The broader
 Pi run exposed one confirmed preparation-timeout classification regression,
 alongside host/architecture fixture limits and missing test assets. The regression
 is fixed, its unchanged existing test and strict Clippy pass, and a new matched
-132-attempt pilot passes. Fresh clean-build VM, hosted, reference and freeze proof
-for the fixed source is still pending. Natural expiry, the
+132-attempt pilot passes. Clean Pi/x86 builds, fresh independently verified VM
+evidence and a second clean-build 132-attempt pilot now pass for the fixed source.
+Fresh hosted, reference and freeze proof is still pending. Natural expiry, the
 remaining lifecycle/observation fixtures and final performance reruns remain open.
 
 1. CI: repair vault-aware freeze validation and freeze the entire credential
@@ -554,3 +555,43 @@ in `analysis/clone3-reference-before-timeout-fix.json` are retained as pre-fix
 evidence and cannot establish conformance for the fixed source. The goal remains
 active for final-source proof, fair common lifecycle/observation fixtures,
 original performance/agent reruns and the real issuer's natural expiry.
+
+## Corrected clean-build pilot and fresh VM proof
+
+Both optimized clean builds of committed `8aa31b99` pass with exact inputs
+`sha256:083501cb1907d1f50684f40044fcaa429f0a3a970e06f6ca6764a5569fe5a9ce`;
+their verified archive manifests, commands, logs, versions and binary hashes are
+retained in `validation/pi-clone3-clean-8aa-build/` and
+`validation/vps-clone3-clean-8aa-build/`. The Pi's same 132-attempt pilot is rerun
+with both binaries clean, after compilation ended, without host setting changes.
+All attempts pass independent strict containment, required observation without
+gaps and empty-tree settlement checks. All 66 after attempts use direct cgroup
+creation. The full record is `validation/pi-clone3-pilot-clean-8aa/`, with
+independent analysis in `analysis/clone3-clean-pilot.json`.
+
+| Profile | Before median | Clean fixed median | Median paired difference | Paired bootstrap 95% interval |
+|---|---:|---:|---:|---:|
+| Tool | 309.98 ms | 285.75 ms | -20.80 ms | -30.28 to -15.01 ms |
+| Static vault | 489.75 ms | 471.65 ms | -17.07 ms | -29.34 to -1.33 ms |
+
+Both intervals are below zero in this clean-build cohort. All earlier cohorts,
+including the initial inconclusive vault result, stay separate and retained.
+This is still a startup candidate diagnostic, not the final original-workload
+and three-agent competitor rerun. No closed gap with MXC is claimed.
+
+The corrected clean x86 binary also passes a new disposable VM workflow in
+66.760 seconds. Signed install, contained true, real OpenCode 1.18.32, upgrade,
+corrupted archive/signature refusal and receipt-bound learning checks pass.
+The guest never has Rust and the VM is destroyed. Independent verifiers pass
+against the corrected exact digest and are retained in
+`validation/preview-8aa-verifiers/`. The new record at
+`../../jail/results/release-preview-2026-10-13-8aa/` is selected by the index;
+all previous records remain unchanged. This is emulated Linux compatibility and
+onboarding evidence, not native Mac containment or comparative performance.
+
+After the pre-fix reference suite completed, its inactive target cache was
+reclaimed, preserving all source/evidence and a private copy of its exact binary.
+`validation/reference-703-cache-reclaim.json` records the terminal checks,
+absence of process references and 1,115,795,456 reclaimed bytes. No unrelated
+cache is removed. Full corrected-source reference conformance, validated
+doctor/freeze and exact-head hosted checks remain the next release-proof steps.
