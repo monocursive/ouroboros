@@ -595,3 +595,35 @@ reclaimed, preserving all source/evidence and a private copy of its exact binary
 absence of process references and 1,115,795,456 reclaimed bytes. No unrelated
 cache is removed. Full corrected-source reference conformance, validated
 doctor/freeze and exact-head hosted checks remain the next release-proof steps.
+
+## Corrected full reference proof
+
+The optimized clean Ubuntu reference run at `7ea94a09` now passes: 2,114 passed,
+zero failed and 17 ignored across 90 test summaries. Its exact input digest is
+`sha256:083501cb1907d1f50684f40044fcaa429f0a3a970e06f6ca6764a5569fe5a9ce`.
+All source, build, doctor, smoke, contract and acceptance-gate evidence is retained
+in `validation/reference-clone3-corrected/`; independent counts and file hashes
+are in `analysis/clone3-reference-corrected.json`. The tested freeze is regenerated
+from that run's validated doctor and `freeze --check` passes, with its log retained
+in `validation/clone3-freeze-check.log`. This establishes the Linux preview's full
+reference run, while credential, macOS, unsupported and elsewhere specification
+lanes remain separately scoped. The failed pre-fix reference run remains intact.
+
+Readback of the five older cache folders subsequently authorized for deletion
+finds every folder already absent. No further deletion or reclaimed-byte claim
+is made; `validation/approved-five-cache-absence.json` records this check.
+
+The next common fixture is native automatic OAuth refresh through an identical
+persistent client and rotating synthetic issuer. Its source is retained in
+`harness/oauth_actor.py`, `oauth_fixture.py` and `matched_oauth_refresh.py`.
+The issuer uses the real clock, single-use refresh grants and each access token's
+actual expiry. The client captures its handle once and never performs refresh.
+Stock native product refresh owns substitution and rotation; no manual rotation
+or forced expiry metadata is used. The default 180-second token lifetime and
+75-second renewal margin accommodate OpenShell's stock one-minute worker.
+`validation/oauth-oracle-smoke.json` verifies the fixture's actual expiry,
+single-use replay rejection, malformed-form rejection and consumed lost-response
+grant. This is harness preparation, not yet product feature or performance proof.
+Native product runs and independent verification remain required, as do TLS/WSS,
+common observation fixtures and the final original-workload/agent reruns. The
+separate real-provider natural expiry soak remains due on 23 October.
