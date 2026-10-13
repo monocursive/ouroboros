@@ -3,6 +3,11 @@
 The complete five-part goal remains active. Previously sealed benchmark roots
 and their scored results are preserved.
 
+Latest checkpoint: all four hosted workflows pass at `efe7957a`; the completed
+four-arm HTTP lifecycle fixture is saved below. OpenShell's verified mTLS gateway
+is ready, but its provider fixture has not run. Natural expiry, the remaining
+lifecycle fixtures and a demonstrated production startup reduction remain open.
+
 1. CI: repair vault-aware freeze validation and freeze the entire credential
    definition, preserving the absence of file staging for vaults. Local portable
    freeze 12/12 and xtask 206/206 pass; a changed frozen origin is mutation-tested
@@ -219,3 +224,87 @@ traced waiter verified, original expiry unchanged, no pending refresh and no
 terminal result. The 23 October natural-expiry proof, repeated rotation,
 remaining matched competitor lifecycle fixtures, and a proved production startup
 improvement remain outstanding. The complete five-part goal is still active.
+
+## Matched persistent-client HTTP lifecycle checkpoint
+
+All four workflows pass at `efe7957aa9dc92032d07fb3e418220fb6ff61282`.
+The fresh reference artifacts are saved in `validation/reference-efe-passed/`:
+2,110 tests passed, zero failed and 17 were ignored across 90 summaries. The
+production input digest remains unchanged. These are Linux developer-release
+results; native macOS requirements remain explicitly unsupported. The workflow
+IDs and log digest are saved in `analysis/reference-efe-summary.json`.
+
+The completed common HTTP fixture is in `validation/matched-http-pi/all-04/`,
+with analysis in `analysis/matched-http-pi.json`. Ouro, Greywall with global
+network rules, Greywall with session-scoped rules, and MXC use the byte-identical
+Python actor and resource-server oracle on the same Pi. The application process
+stays alive across rotation, revocation and the late check. Product versions,
+binary hashes, commands, configurations and raw observations are retained.
+
+The resource always returns HTTP 200 when reached and records whether the
+synthetic v1/v2 credential arrived. This measures credential release, not a real
+provider's authentication. Negative cases may stop upstream forwarding or
+forward without the key. Ouro uses its vault; Greywall uses supported session
+upsert/delete operations; MXC uses ordinary environment credentials without an
+invented external credential broker. Unsupported managed capabilities are kept
+distinct from a client's own OAuth workflow.
+
+| Case | Ouro vault | Greywall, both rule scopes | MXC environment workflow |
+|---|---|---|---|
+| Valid credential, persistent application | Pass | Pass | Pass |
+| Same live client's next request uses rotated key | Pass | Pass | No managed rotation configured |
+| Wrong/escaped path receives no key | Pass | No credential path binding available in tested configuration | No managed binding configured |
+| Another executable with the same handle receives no key | Pass | No credential executable binding available in tested configuration | No managed binding configured |
+| New request after revoke receives no key | Pass | Pass immediately after session deletion | No managed revocation configured |
+| Established SSE stream closes within 3 seconds | Pass | Observed failure | No managed revocation configured |
+| Revocation remains effective at 70 seconds | Pass | Observed failure: original v1 key returns after heartbeat | No managed revocation configured |
+| Raw key absent from the actor's credential handle | Pass | Pass | Raw key is the environment credential |
+
+Ouro satisfies all ten desired checks, including strict evidence, attached
+ptrace observation, all six active coverage classes without gaps and verified
+empty-tree settlement. Both Greywall configurations satisfy five of their seven
+supported checks; path/process binding is recorded separately as unavailable.
+Deleting the session stops substitution immediately, but does not close the
+existing stream within the three-second window. The 70-second request receives
+the original v1 credential after the client's 60-second heartbeat re-registers
+its cached mapping. Scoped network rules do not prevent either observed result.
+MXC's valid request and persistent-process checks pass; the remaining contract
+is outside its configured client-owned environment workflow. This does not
+establish failure of native client OAuth refresh.
+
+Each stream was verified live before revocation and the resource remained alive
+through the late check. The actor has a uniform 60-second SSE read timeout, the
+controller allows 70 seconds for first-event readiness, and all wrapper walls
+are 240 seconds. First-event latencies were 55.08 ms for Ouro, about 29.02 seconds
+for both Greywall arms and 26.99 seconds for MXC through the same Greyproxy
+transport. These are single feature diagnostics, excluded from scored performance;
+they cannot establish an intrinsic MXC network slowdown. The handle check is
+limited to the actor's credential variable, not every readable file/environment.
+
+Earlier pilots remain saved: `ouro-01/` used shorter stream deadlines;
+`lease-failed-02/` stopped before mutation on an executable-path guard;
+`pilot-others-03/` retained the first-event timeouts and an absent ARM `/lib64`
+configuration failure. They are not completed comparison scores. The final
+deadline/runtime-path changes apply uniformly to the complete cohort, with
+unchanged resource event payloads. The previous proxy's exact argv, UID and
+executable inode were checked, its private environment/store preserved, and its
+fixed listener restored after the successful fixture. Private backups are not
+published.
+
+OpenShell 0.1.3 now has an owned native Docker gateway with vendor-generated
+certificates, a separate HOME/XDG store, verified TLS and authenticated mTLS
+status. The ready report and executed script are in
+`validation/openshell-setup-vps/ready-02/`. The first setup pilot is retained:
+it omitted the required client-CA flag and stopped before starting the gateway.
+That is a harness setup error, not a product capability failure. Keys, signing
+material, client state and raw setup logs remain private. Gateway readiness is
+not evidence of a completed provider lifecycle fixture.
+
+The new natural-expiry witness verifies the original supervisor birth, traced
+waiter and unchanged expiry, with no terminal result. Next work is OpenShell's
+same fixture, TLS/WebSocket duplex revocation, automatic refresh and rotating-grant
+concurrency, broader credential visibility checks, and direct cgroup creation
+with existing lifetime/descriptor/observer/durability safeguards. Any startup
+candidate needs full validation and a matched original workload/agent rerun;
+the rejected pre-exec pilot remains rejected. Natural expiry and repeated real
+rotations remain pending on the actual issuer clock.
