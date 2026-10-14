@@ -4125,26 +4125,92 @@ mod tests {
     }
 
     #[test]
-    fn none_verify_retains_unprotected_even_if_receipt_claims_enforced() {
+    fn none_cannot_claim_enforced_protection_on_admission_or_in_its_projection() {
         let temp = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let data = temp.path().join("data");
+        let mut store = Store::open(&data).unwrap();
         let mut plan = payload();
         plan["profile"] = json!("none");
         let run = store.prepare("none", &plan, &peer()).unwrap();
         store.claim_owner(&run.run_id, &peer()).unwrap();
-        assert!(
-            note(
-                &mut store,
-                &run,
-                "cannot-upgrade",
-                json!({"receipt":{"child_protection":"enforced"}})
+        let receipt = prepared(&run);
+        assert_eq!(receipt["child_protection"], "enforced");
+        let refused = store
+            .append_owner(
+                &run.run_id,
+                "admit",
+                "admitted",
+                None,
+                &json!({"receipt":receipt}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
-            .is_err()
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("none cannot claim enforced child protection"),
+            "{refused}"
+        );
+        // An unresolved outcome may still carry the jail's receipt; its label
+        // never upgrades a none run's projection.
+        store
+            .append_owner(
+                &run.run_id,
+                "unknown",
+                "outcome_unknown",
+                None,
+                &json!({"receipt":receipt}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        assert_eq!(
+            store.show(&run.run_id).unwrap().child_protection,
+            "unprotected"
         );
         assert_eq!(
             store.verify(None).unwrap()[0].child_protection,
             "unprotected"
         );
+        drop(store);
+        let store = Store::open(&data).unwrap();
+        assert_eq!(
+            store.show(&run.run_id).unwrap().child_protection,
+            "unprotected"
+        );
+    }
+
+    #[test]
+    fn recovery_poisons_an_enforced_admission_of_a_none_run() {
+        let (temp, mut store, run) = create();
+        store
+            .append_owner(
+                &run.run_id,
+                "admit",
+                "admitted",
+                None,
+                &json!({"receipt":prepared(&run)}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        // Re-chain the history as a none preparation: only recovery's own
+        // intent check can refuse the enforced admission that follows it.
+        rewrite_without_manifest(&store, &run, |records| {
+            records[0]["body"]["payload"]["profile"] = json!("none");
+            for index in 1..records.len() {
+                let prev = sha256_prefixed(&canonical(&records[index - 1]).unwrap());
+                records[index]["prev"] = json!(prev);
+            }
+        });
+        drop(store);
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        assert_eq!(
+            store.verify(None).unwrap()[0].problems,
+            ["none cannot claim enforced child protection"]
+        );
+        assert_eq!(store.show(&run.run_id).unwrap().state, "outcome_unknown");
     }
 
     #[test]
