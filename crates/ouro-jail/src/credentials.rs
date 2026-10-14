@@ -169,13 +169,7 @@ pub fn stage(
     vendor_state: BorrowedFd<'_>,
     forbidden: &[(u64, u64)],
 ) -> Result<Vec<StagedCredential>, StagingRefusal> {
-    stage_reporting(
-        launch,
-        vendor_state,
-        forbidden,
-        &|_| {},
-        &AtomicBool::new(false),
-    )
+    stage_reporting(launch, vendor_state, forbidden, &|_| {}, &|| false)
 }
 
 /// The longest single wait for the staging worker between two reads of the
@@ -186,18 +180,21 @@ const STAGING_WAIT_STEP: Duration = Duration::from_millis(250);
 /// `remaining` reads (§6.4: the preparation budget runs on the continuous
 /// clock, `CLOCK_BOOTTIME` on Linux).
 ///
-/// A source on a hung filesystem (FUSE, NFS) can block `read(2)`
-/// indefinitely. The worker is left behind on expiry, holding only its own
-/// descriptors until it ends with the process. It is told it was abandoned
-/// and checks before every further state directory and credential, and the
-/// refusal carries exactly the credentials it reported staged before then,
-/// without their bind descriptors (nothing is bound after a refusal). A copy
-/// it was already writing at expiry may still complete; it is never reported
-/// staged, and its target file is in vendor state, which the refusal's
-/// cleanup removes, after which the worker writes only to the removed file.
-/// An entry the worker creates in the instant between its check and the
-/// create is removed the same way, or, if it appears while cleanup walks
-/// the directory, leaves the cleanup `pending` for `gc`.
+/// A source on a hung filesystem (FUSE, NFS) can block `open(2)` or
+/// `read(2)` indefinitely. The worker is left behind on expiry, holding only
+/// its own descriptors until it ends with the process. It is told it was
+/// abandoned and checks before every further state directory and
+/// credential, and again once a credential's source is open, so the only
+/// work between its last check and a create is in vendor state itself (the
+/// target's parent directories and the empty target), never on the source.
+/// The refusal carries exactly the credentials it reported staged before
+/// then, without their bind descriptors (nothing is bound after a refusal).
+/// A copy it was already writing at expiry may still complete; it is never
+/// reported staged, and its target file is in vendor state, which the
+/// refusal's cleanup removes, after which the worker writes only to the
+/// removed file. An entry the worker creates after its last check is removed
+/// the same way, or, if it appears while cleanup walks the directory, leaves
+/// the cleanup `pending` for `gc`.
 ///
 /// # Errors
 /// As [`stage`], plus [`ErrorCode::CredentialUnavailable`] with remediation
@@ -215,24 +212,15 @@ pub fn stage_within(
         .map_err(|error| StagingRefusal::bare(state_failure("*", "descriptor", &error)))?;
     let launch = launch.clone();
     let forbidden = forbidden.to_vec();
-    let progress: Arc<Mutex<Vec<(CredentialRecord, SourceIdentity)>>> = Arc::default();
-    let abandoned = Arc::new(AtomicBool::new(false));
-    let report = Arc::clone(&progress);
-    let stop = Arc::clone(&abandoned);
+    let progress = Arc::new(Progress::default());
+    let worker = Arc::clone(&progress);
     let result = within(remaining, move || {
         stage_reporting(
             &launch,
             vendor.as_fd(),
             &forbidden,
-            &|credential| {
-                // Checked under the lock the refusal reads the list under, so
-                // a credential is either in the refusal or never reported.
-                let mut staged = report.lock().unwrap_or_else(PoisonError::into_inner);
-                if !stop.load(Ordering::SeqCst) {
-                    staged.push((credential.record.clone(), credential.source));
-                }
-            },
-            &stop,
+            &|credential| worker.report(credential),
+            &|| worker.abandoned(),
         )
     });
     let error = match result {
@@ -259,14 +247,10 @@ pub fn stage_within(
         ),
     }
     .with_key_path("launch.credentials");
-    let staged = {
-        let staged = progress.lock().unwrap_or_else(PoisonError::into_inner);
-        abandoned.store(true, Ordering::SeqCst);
-        staged.clone()
-    };
     Err(StagingRefusal {
         error,
-        staged: staged
+        staged: progress
+            .abandon()
             .into_iter()
             .map(|(record, source)| StagedCredential {
                 vault: None,
@@ -276,6 +260,38 @@ pub fn stage_within(
             })
             .collect(),
     })
+}
+
+/// What a staging worker has reported staged, and whether its caller has
+/// given up on it. One lock orders the two: a credential is either in the
+/// list [`Progress::abandon`] returns or never recorded at all.
+#[derive(Default)]
+struct Progress {
+    staged: Mutex<Vec<(CredentialRecord, SourceIdentity)>>,
+    abandoned: AtomicBool,
+}
+
+impl Progress {
+    /// Records a staged credential, unless the caller has given up.
+    fn report(&self, credential: &StagedCredential) {
+        let mut staged = self.staged.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.abandoned.load(Ordering::SeqCst) {
+            staged.push((credential.record.clone(), credential.source));
+        }
+    }
+
+    /// Whether the caller has given up on the worker.
+    fn abandoned(&self) -> bool {
+        self.abandoned.load(Ordering::SeqCst)
+    }
+
+    /// Gives up on the worker and returns what it reported before then;
+    /// nothing it reports afterwards is recorded.
+    fn abandon(&self) -> Vec<(CredentialRecord, SourceIdentity)> {
+        let staged = self.staged.lock().unwrap_or_else(PoisonError::into_inner);
+        self.abandoned.store(true, Ordering::SeqCst);
+        staged.clone()
+    }
 }
 
 /// Why [`within`] has no result.
@@ -322,27 +338,28 @@ fn within<T: Send + 'static>(
     }
 }
 
+/// The refusal of a worker that finds it was abandoned.
+fn abandoned_error() -> JailError {
+    JailError::new(
+        ErrorCode::CredentialUnavailable,
+        ErrorStage::Preparing,
+        Remediation::Retry,
+        "credential staging was abandoned at its deadline".to_owned(),
+    )
+    .with_key_path("launch.credentials")
+}
+
 /// Stages `launch` in id order, reporting each credential once it is staged,
-/// and stops before the next state directory or credential once `abandoned`
-/// is set (by [`stage_within`] at its deadline).
+/// and stops before the next state directory or credential, or before
+/// creating a credential's target, once `abandoned` says so (as
+/// [`stage_within`] does at its deadline).
 fn stage_reporting(
     launch: &LaunchSnapshot,
     vendor_state: BorrowedFd<'_>,
     forbidden: &[(u64, u64)],
     staged_one: &dyn Fn(&StagedCredential),
-    abandoned: &AtomicBool,
+    abandoned: &dyn Fn() -> bool,
 ) -> Result<Vec<StagedCredential>, StagingRefusal> {
-    let abandoned_refusal = || {
-        StagingRefusal::bare(
-            JailError::new(
-                ErrorCode::CredentialUnavailable,
-                ErrorStage::Preparing,
-                Remediation::Retry,
-                "credential staging was abandoned at its deadline".to_owned(),
-            )
-            .with_key_path("launch.credentials"),
-        )
-    };
     let vendor = vendor_state
         .try_clone_to_owned()
         .map(Dir::from_owned)
@@ -351,8 +368,8 @@ fn stage_reporting(
     let mut subdirs: Vec<&NativeString> = launch.state_subdirs.iter().collect();
     subdirs.sort();
     for subdir in subdirs {
-        if abandoned.load(Ordering::SeqCst) {
-            return Err(abandoned_refusal());
+        if abandoned() {
+            return Err(StagingRefusal::bare(abandoned_error()));
         }
         let components = anchored::split_relative(subdir.as_bytes()).map_err(|error| {
             StagingRefusal::bare(
@@ -375,13 +392,13 @@ fn stage_reporting(
     let mut staged: Vec<StagedCredential> = Vec::new();
     let mut copied: u64 = 0;
     for declaration in declarations {
-        if abandoned.load(Ordering::SeqCst) {
+        if abandoned() {
             return Err(StagingRefusal {
+                error: abandoned_error(),
                 staged,
-                ..abandoned_refusal()
             });
         }
-        match stage_one(&vendor, declaration, forbidden, &mut copied) {
+        match stage_one(&vendor, declaration, forbidden, &mut copied, abandoned) {
             Ok(credential) => {
                 staged_one(&credential);
                 staged.push(credential);
@@ -430,11 +447,15 @@ pub fn fits_copy_budget(copied: u64, size: u64) -> bool {
         .is_some_and(|total| total <= COPY_BUDGET)
 }
 
+/// Stages one credential. `abandoned` is asked again once the source is
+/// open, just before the target's directories and file are created: opening
+/// a source on a hung filesystem can outlast the caller's deadline.
 fn stage_one(
     vendor: &Dir,
     declaration: &CredentialDecl,
     forbidden: &[(u64, u64)],
     copied: &mut u64,
+    abandoned: &dyn Fn() -> bool,
 ) -> Result<StagedCredential, JailError> {
     let id = declaration.id.as_str();
     let mode = declaration.mode.as_str();
@@ -507,6 +528,9 @@ fn stage_one(
         ));
     }
 
+    if abandoned() {
+        return Err(abandoned_error());
+    }
     let parent = ensure_directories(vendor, parents)
         .map_err(|error| state_failure(id, "create directory", &error))?;
     let mut target = parent.create_file_at(file_name, 0o600).map_err(|error| {
@@ -1565,7 +1589,7 @@ mod tests {
             let id = declaration.id.as_str();
             assert_eq!((check.id.as_str(), check.reason_code), (id, *reason));
             assert_eq!(check.available, *reason == REASON_VALUE_UNREAD, "{id}");
-            let staged = stage_one(&handle, declaration, &[], &mut 0);
+            let staged = stage_one(&handle, declaration, &[], &mut 0, &|| false);
             assert_eq!(
                 staged.is_ok(),
                 check.available,
@@ -1606,12 +1630,141 @@ mod tests {
             vendor.as_fd(),
             &[],
             &|_| *reported.lock().unwrap() += 1,
-            &AtomicBool::new(true),
+            &|| true,
         )
         .expect_err("an abandoned worker stops");
         assert!(refused.staged.is_empty());
         assert_eq!(*reported.lock().unwrap(), 0);
         assert!(std::fs::read_dir(path.join("vs")).unwrap().next().is_none());
+    }
+
+    /// One `copy_rw` credential per id, each sourced from a private file of
+    /// that name, and no state subdirectory: the per-credential checks are
+    /// the first an abandoned worker meets.
+    fn copies(path: &std::path::Path, ids: &[&str]) -> LaunchSnapshot {
+        use std::os::unix::fs::PermissionsExt as _;
+        LaunchSnapshot {
+            state_var: None,
+            home_is_state: false,
+            state_subdirs: Vec::new(),
+            credentials: ids
+                .iter()
+                .map(|id| {
+                    let source = path.join(id);
+                    if std::fs::write(&source, id.as_bytes()).is_ok() {
+                        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))
+                            .unwrap();
+                    }
+                    CredentialDecl {
+                        vault: None,
+                        id: (*id).to_owned(),
+                        source: NativeString::from_bytes(
+                            source.as_os_str().as_encoded_bytes().to_vec(),
+                        )
+                        .unwrap(),
+                        dest: NativeString::Text((*id).to_owned()),
+                        mode: MODE_COPY_RW.to_owned(),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// The names a vendor-state directory holds.
+    fn entries(path: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The check before each credential, apart from the one before the state
+    /// directories: an abandoned worker with no state directory to make
+    /// refuses before it touches the next source, so even a missing one
+    /// refuses as abandoned rather than as missing; and a worker abandoned
+    /// after its first credential stages no second one, the refusal listing
+    /// exactly the first.
+    #[test]
+    fn an_abandoned_worker_opens_no_further_source() {
+        let (_dir, path, handle) = directory();
+        let vendor = handle.mkdir_at(&Name::new(b"vs").unwrap(), 0o700).unwrap();
+        let missing = copies(&path, &["gone"]);
+        std::fs::remove_file(path.join("gone")).unwrap();
+        let refused = stage_reporting(&missing, vendor.as_fd(), &[], &|_| {}, &|| true)
+            .expect_err("an abandoned worker stops");
+        assert_eq!(refused.error.code, ErrorCode::CredentialUnavailable);
+        assert!(
+            refused.error.message.contains("abandoned"),
+            "{}",
+            refused.error.message
+        );
+
+        let launch = copies(&path, &["a", "b"]);
+        let abandoned = AtomicBool::new(false);
+        let refused = stage_reporting(
+            &launch,
+            vendor.as_fd(),
+            &[],
+            &|_| abandoned.store(true, Ordering::SeqCst),
+            &|| abandoned.load(Ordering::SeqCst),
+        )
+        .expect_err("abandoned after the first credential");
+        assert!(refused.error.message.contains("abandoned"));
+        let staged: Vec<&str> = refused
+            .staged
+            .iter()
+            .map(|credential| credential.record.id.as_str())
+            .collect();
+        assert_eq!(staged, ["a"]);
+        assert_eq!(entries(&path.join("vs")), ["a"]);
+    }
+
+    /// The check once a source is open: opening a source on a hung
+    /// filesystem can outlast the deadline, so a worker abandoned while it
+    /// opened one creates no target for it. Here the first question (before
+    /// the credential) says "go on" and every later one says "abandoned".
+    #[test]
+    fn a_worker_abandoned_while_opening_a_source_creates_no_target() {
+        let (_dir, path, handle) = directory();
+        let vendor = handle.mkdir_at(&Name::new(b"vs").unwrap(), 0o700).unwrap();
+        let launch = copies(&path, &["a"]);
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let refused = stage_reporting(&launch, vendor.as_fd(), &[], &|_| {}, &|| {
+            asked.fetch_add(1, Ordering::SeqCst) > 0
+        })
+        .expect_err("abandoned once the source was open");
+        assert!(refused.error.message.contains("abandoned"));
+        assert!(refused.staged.is_empty());
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            2,
+            "asked before and after the open"
+        );
+        assert!(entries(&path.join("vs")).is_empty());
+    }
+
+    /// What `stage_within`'s refusal lists is what was reported before it
+    /// gave up: a report after `abandon` is not recorded, however late the
+    /// worker makes it.
+    #[test]
+    fn progress_records_nothing_after_it_is_abandoned() {
+        let (_dir, path, handle) = directory();
+        let vendor = handle.mkdir_at(&Name::new(b"vs").unwrap(), 0o700).unwrap();
+        let staged = stage(&copies(&path, &["a", "b"]), vendor.as_fd(), &[]).unwrap();
+        let progress = Progress::default();
+        assert!(!progress.abandoned());
+        progress.report(&staged[0]);
+        let ids = |list: Vec<(CredentialRecord, SourceIdentity)>| {
+            list.into_iter()
+                .map(|(record, _)| record.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(progress.abandon()), ["a"]);
+        assert!(progress.abandoned());
+        progress.report(&staged[1]);
+        assert_eq!(ids(progress.abandon()), ["a"], "the late report is dropped");
     }
 
     /// A deadline on the monotonic clock, as the time left on it.
