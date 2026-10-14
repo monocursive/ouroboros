@@ -29,14 +29,6 @@ impl Integrity {
         }
     }
 
-    /// The value `text` spells, or `None` for any other text.
-    #[must_use]
-    pub fn parse(text: &str) -> Option<Integrity> {
-        [Integrity::Pending, Integrity::Verified, Integrity::Lost]
-            .into_iter()
-            .find(|value| value.as_str() == text)
-    }
-
     /// Whether `text` spells this value.
     #[must_use]
     pub fn is(self, text: &str) -> bool {
@@ -85,13 +77,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_integrity_parses_back_from_its_spelling_and_nothing_else_does() {
-        for value in [Integrity::Pending, Integrity::Verified, Integrity::Lost] {
-            assert_eq!(Integrity::parse(value.as_str()), Some(value));
-            assert!(value.is(value.as_str()));
-        }
-        for text in ["", "Lost", "lost ", "unknown"] {
-            assert_eq!(Integrity::parse(text), None, "{text:?}");
+    fn each_integrity_is_its_own_spelling_and_nothing_else() {
+        let all = [Integrity::Pending, Integrity::Verified, Integrity::Lost];
+        for value in all {
+            for other in all {
+                assert_eq!(
+                    value.is(other.as_str()),
+                    value == other,
+                    "{value:?} {other:?}"
+                );
+            }
+            for text in ["", "Lost", "lost ", "unknown"] {
+                assert!(!value.is(text), "{value:?} {text:?}");
+            }
         }
     }
 
