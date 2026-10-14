@@ -118,8 +118,9 @@ def main():
     summaries = re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed;', text)
     native_tests_ran = bool(summaries and sum(int(v[1]) + int(v[2]) for v in summaries) > 0)
     # A filter can match only the portable module and still "run" tests.
-    linux_tests_ran = len(re.findall(r'^test vault::origin::linux_tests::\S+ \.\.\. (?:ok|FAILED)$',
-                                     text, re.M))
+    # Counted where each test starts: under --nocapture a failing test's
+    # panic output splits its name from its verdict.
+    linux_tests_ran = len(re.findall(r'^test vault::origin::linux_tests::\S+ \.\.\. ', text, re.M))
     expected = run.returncode == a.expected_exit and (
         native_tests_ran if a.operation == 'test' else 'Finished `release` profile' in text)
     record.update({'exit': run.returncode, 'finished_unix': time.time(),
