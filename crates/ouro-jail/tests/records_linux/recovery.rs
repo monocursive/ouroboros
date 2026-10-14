@@ -260,8 +260,7 @@ struct Destination {
 
 impl Destination {
     fn new(tag: &str) -> Destination {
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let root = cgroup::delegated_root(unsafe { libc::getuid() })
+        let root = cgroup::delegated_root(ouro_jail::state::real_uid())
             .expect("the delegated subtree exists");
         let path = root.join(format!("ouro-j5c-{tag}-{}", std::process::id()));
         std::fs::create_dir(&path).expect("a destination cgroup");
@@ -1331,8 +1330,7 @@ fn leaf_fault(site: Site, fault: Fault) -> Vec<String> {
     };
     let data = run.data_dir.clone();
     let id = AttemptId::parse(&dir.file_name().unwrap().to_string_lossy()).unwrap();
-    // SAFETY: getuid takes no arguments and cannot fail.
-    let root = cgroup::delegated_root(unsafe { libc::getuid() }).expect("a delegated subtree");
+    let root = cgroup::delegated_root(ouro_jail::state::real_uid()).expect("a delegated subtree");
     let leaf = root.join(cgroup::leaf_name(&id));
     let prior = read_json(&dir.join("jail-state.json"));
     let policy = std::fs::read(dir.join("policy.json")).unwrap();

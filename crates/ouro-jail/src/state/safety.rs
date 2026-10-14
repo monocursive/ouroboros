@@ -42,14 +42,6 @@ pub fn create_private_dir(path: &Path) -> Result<(), JailError> {
     check_state_dir(path)
 }
 
-/// This process's effective uid.
-#[must_use]
-pub fn effective_uid() -> u32 {
-    // SAFETY: `geteuid` reads this process's effective uid. It takes no
-    // argument, touches no memory and cannot fail.
-    unsafe { libc::geteuid() }
-}
-
 /// Whether an object with this mode, owner and group can be written by an
 /// account other than its owner. The sticky bit is the caller's concern.
 ///
@@ -198,7 +190,7 @@ fn mode_of(metadata: &std::fs::Metadata) -> u32 {
 /// Returns [`ErrorCode::UnsafeStatePath`] when `uid` is not this operator or
 /// `mode` grants anything outside `expected`.
 pub fn check_ownership(path: &Path, uid: u32, mode: u32, expected: u32) -> Result<(), JailError> {
-    let effective = effective_uid();
+    let effective = crate::sys::effective_uid();
     if uid != effective {
         return Err(unsafe_path(
             path,

@@ -1728,8 +1728,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_environment_is_not_an_empty_one() {
-        // SAFETY: getpid takes no arguments and cannot fail.
-        let own = unsafe { libc::getpid() };
+        let own = crate::sys::own_pid();
         assert!(!identity::read_environment_names(own).unwrap().is_empty());
         // No process has this pid: pid_max is far below it.
         assert!(identity::read_environment_names(libc::pid_t::MAX).is_err());

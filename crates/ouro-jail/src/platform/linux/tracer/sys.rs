@@ -221,9 +221,10 @@ pub fn is_group_stop(pid: pid_t) -> bool {
 
 /// Send `signal` to one task of this process.
 pub fn tgkill(tid: pid_t, signal: c_int) -> io::Result<()> {
+    let own = crate::sys::own_pid();
     // SAFETY: `tgkill` takes three integers. The tgid is this process, so the
     // signal cannot reach a task outside it even if `tid` has been recycled.
-    let rc = unsafe { libc::syscall(libc::SYS_tgkill, libc::getpid(), tid, signal) };
+    let rc = unsafe { libc::syscall(libc::SYS_tgkill, own, tid, signal) };
     if rc == 0 {
         Ok(())
     } else {
@@ -551,12 +552,6 @@ pub fn wait_any(flags: c_int) -> Wait {
         Some(libc::EINTR) => Wait::Interrupted,
         _ => Wait::NoChildren,
     }
-}
-
-/// This process's id, for the `/proc` walks that need it.
-pub fn getpid() -> pid_t {
-    // SAFETY: `getpid` takes no arguments and cannot fail.
-    unsafe { libc::getpid() }
 }
 
 /// This thread's kernel task id. `TracerPid` in `/proc/<pid>/status` names

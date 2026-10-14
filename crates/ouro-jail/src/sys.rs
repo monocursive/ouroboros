@@ -1,7 +1,9 @@
 //! The portable system calls std does not wrap, each with its safety
-//! argument: `poll(2)` and `O_NONBLOCK`. The Linux platform's helpers
-//! (`platform::linux::sys`) and the proxy's (`proxy::sys`) re-export these
-//! rather than keep copies, so each call has one implementation.
+//! argument: this process's ids (those only Linux code asks for compiled
+//! there only), `poll(2)` and `O_NONBLOCK`. The Linux
+//! platform's helpers (`platform::linux::sys`), the proxy's (`proxy::sys`)
+//! and `state` re-export these rather than keep copies, so each call has one
+//! implementation.
 //!
 //! [`poll`] and [`set_nonblocking`] take descriptors as [`BorrowedFd`], so
 //! every call sees descriptors that are open for its whole duration;
@@ -11,6 +13,45 @@
 use std::io;
 use std::os::fd::{AsRawFd as _, BorrowedFd};
 use std::time::Duration;
+
+/// This process's effective uid.
+#[must_use]
+pub fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` takes no argument, touches no memory and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// This process's real uid.
+#[must_use]
+pub fn real_uid() -> u32 {
+    // SAFETY: `getuid` takes no argument, touches no memory and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+/// This process's effective gid.
+#[must_use]
+pub fn effective_gid() -> u32 {
+    // SAFETY: `getegid` takes no argument, touches no memory and cannot fail.
+    unsafe { libc::getegid() }
+}
+
+/// This process's pid, as the kernel's `pid_t`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn own_pid() -> libc::pid_t {
+    // SAFETY: `getpid` takes no argument, touches no memory and cannot fail.
+    unsafe { libc::getpid() }
+}
+
+/// The parent's pid. Async-signal-safe, so a forked child may call it
+/// before its `exec`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn parent_pid() -> libc::pid_t {
+    // SAFETY: `getppid` takes no argument, touches no memory and cannot
+    // fail.
+    unsafe { libc::getppid() }
+}
 
 /// One `poll(2)` entry: a descriptor and the events wanted from it, or
 /// `None`, a placeholder poll skips (its `revents` stay 0), which keeps the

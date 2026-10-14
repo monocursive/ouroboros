@@ -134,8 +134,7 @@ impl Destination {
     fn new(tag: &str) -> Destination {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let root = cgroup::delegated_root(unsafe { libc::getuid() })
+        let root = cgroup::delegated_root(ouro_jail::state::real_uid())
             .expect("the delegated subtree exists");
         let path = root.join(format!(
             "ouro-j3none-{tag}-{}-{}",
@@ -756,8 +755,7 @@ fn l02_none_supervisor_death_leaves_the_specified_unknown() {
 /// the kernel's migration rules impose on a login session.
 #[test]
 fn l03_none_without_a_usable_cgroup_refuses() {
-    // SAFETY: getuid takes no arguments and cannot fail.
-    let uid = unsafe { libc::getuid() };
+    let uid = ouro_jail::state::real_uid();
     let inside = cgroup::delegated_root(uid).is_some_and(|root| {
         let relative = format!(
             "/{}",
@@ -1640,8 +1638,7 @@ impl ChildMade {
     fn new(tag: &str) -> ChildMade {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let root = cgroup::delegated_root(unsafe { libc::getuid() })
+        let root = cgroup::delegated_root(ouro_jail::state::real_uid())
             .expect("the delegated subtree exists");
         ChildMade {
             path: root.join(format!(

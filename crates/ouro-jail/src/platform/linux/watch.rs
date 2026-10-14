@@ -80,8 +80,7 @@ impl Watcher {
         cgroup_kill: Option<OwnedFd>,
         deadline: Deadline,
     ) -> io::Result<Self> {
-        // SAFETY: getpid takes no arguments and cannot fail.
-        let supervisor = identity::pidfd_open(unsafe { libc::getpid() })?;
+        let supervisor = identity::pidfd_open(crate::sys::own_pid())?;
         let backend = identity::pidfd_open(backend)?;
         let (ready_r, ready_w) = exec::pipe()?;
         let (release_r, release_w) = exec::pipe()?;

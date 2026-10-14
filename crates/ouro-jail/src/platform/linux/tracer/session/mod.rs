@@ -149,10 +149,10 @@ pub(super) fn run(
         start_ticks,
     });
     session.register(launcher);
-    session.owed = Owed::toward(sys::getpid(), launcher, &*session.procfs);
+    session.owed = Owed::toward(crate::sys::own_pid(), launcher, &*session.procfs);
     session.beside = session
         .procfs
-        .children(sys::getpid())
+        .children(crate::sys::own_pid())
         .into_iter()
         .filter_map(|pid| session.procfs.start_ticks(pid).map(|birth| (pid, birth)))
         .collect();

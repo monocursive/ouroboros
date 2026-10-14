@@ -243,8 +243,7 @@ struct Pinned {
 
 /// Pins the recorded leaf under this user's delegated subtree.
 fn pin(leaf: &LeafRecord) -> Result<Pinned, LeafProbe> {
-    // SAFETY: geteuid takes no arguments and cannot fail.
-    let euid = unsafe { libc::geteuid() };
+    let euid = crate::sys::effective_uid();
     let Some(root) = cgroup::delegated_root(euid) else {
         return Err(LeafProbe::Unverifiable(
             "this user has no delegated cgroup subtree".to_owned(),
@@ -262,8 +261,7 @@ fn pin_under(root: &Path, leaf: &LeafRecord) -> Result<Pinned, LeafProbe> {
 /// but the recorded identity, which does not exist; the identity pinned is
 /// the one the directory has when it is opened.
 fn pin_named(path: &Path) -> Result<Pinned, LeafProbe> {
-    // SAFETY: geteuid takes no arguments and cannot fail.
-    let euid = unsafe { libc::geteuid() };
+    let euid = crate::sys::effective_uid();
     let Some(root) = cgroup::delegated_root(euid) else {
         return Err(LeafProbe::Unverifiable(
             "this user has no delegated cgroup subtree".to_owned(),

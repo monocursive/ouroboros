@@ -666,8 +666,7 @@ mod linux {
         #[must_use]
         pub fn with_candidates(candidates: Vec<PathBuf>, budget: std::time::Duration) -> LinuxHost {
             LinuxHost {
-                // SAFETY: getuid takes no arguments and cannot fail.
-                uid: unsafe { libc::getuid() },
+                uid: crate::sys::real_uid(),
                 pid: std::process::id(),
                 budget,
                 deadline: Deadline::after(budget),
@@ -896,8 +895,7 @@ mod linux {
         /// file does not; anything else is unknown, and counts as off.
         #[test]
         fn lingering_is_read_from_loginds_record() {
-            // SAFETY: getuid takes no arguments and cannot fail.
-            let uid = unsafe { libc::getuid() };
+            let uid = crate::sys::real_uid();
             let name = user_name(uid).expect("the test's uid has a name");
             let dir = tempfile::tempdir().unwrap();
             assert_eq!(lingering_of(uid, dir.path()), super::super::Linger::No);

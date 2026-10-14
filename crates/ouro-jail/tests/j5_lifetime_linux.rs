@@ -1159,8 +1159,7 @@ impl Subreaper {
     }
 
     fn children() -> Vec<i32> {
-        // SAFETY: getpid takes no arguments and cannot fail.
-        children(unsafe { libc::getpid() })
+        children(i32::try_from(std::process::id()).expect("a pid fits pid_t"))
     }
 
     /// Every child of this process that it did not have at the start, with
@@ -1716,8 +1715,7 @@ struct TakenLeaf(PathBuf);
 
 impl TakenLeaf {
     fn take(attempt: &str) -> TakenLeaf {
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let uid = unsafe { libc::getuid() };
+        let uid = ouro_jail::state::real_uid();
         let root = ouro_jail::platform::linux::cgroup::delegated_root(uid)
             .expect("the reference host delegates a cgroup subtree");
         let path = root.join(format!("ouro-{attempt}.leaf"));
@@ -2110,8 +2108,7 @@ fn l04_the_preparation_budget_follows_the_boot_clock() {
     }
     for profile in ["tool", "none"] {
         let id = attempt_id();
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let uid = unsafe { libc::getuid() };
+        let uid = ouro_jail::state::real_uid();
         let leaf = ouro_jail::platform::linux::cgroup::delegated_root(uid)
             .expect("the reference host delegates a cgroup subtree")
             .join(format!("ouro-{id}.leaf"));

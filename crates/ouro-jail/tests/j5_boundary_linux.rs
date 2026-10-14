@@ -2281,8 +2281,7 @@ impl Destination {
     fn new(tag: &str) -> Destination {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let root = ouro_jail::platform::linux::cgroup::delegated_root(unsafe { libc::getuid() })
+        let root = ouro_jail::platform::linux::cgroup::delegated_root(ouro_jail::state::real_uid())
             .expect("the delegated subtree exists");
         let path = root.join(format!(
             "ouro-j5b2-{tag}-{}-{}",

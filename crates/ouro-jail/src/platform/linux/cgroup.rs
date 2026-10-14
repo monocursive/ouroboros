@@ -375,8 +375,7 @@ impl ExecutionCgroup {
         name: &str,
         register: Register<'_>,
     ) -> io::Result<Self> {
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let uid = unsafe { libc::getuid() };
+        let uid = crate::sys::real_uid();
         let root = delegated_root(uid).ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "no delegated cgroup")
         })?;
@@ -407,8 +406,7 @@ impl ExecutionCgroup {
         register: Register<'_>,
     ) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(root)?;
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let uid = unsafe { libc::getuid() };
+        let uid = crate::sys::real_uid();
         if !metadata.is_dir() || metadata.uid() != uid {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,

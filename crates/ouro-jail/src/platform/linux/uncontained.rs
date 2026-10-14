@@ -622,8 +622,7 @@ impl Uncontained {
         become_subreaper()?;
         // J5-T: before the launcher exists, everything below this process
         // is something it was started beside, not the attempt.
-        // SAFETY: getpid takes no arguments and cannot fail.
-        let inherited = Inherited::below(unsafe { libc::getpid() });
+        let inherited = Inherited::below(crate::sys::own_pid());
 
         let spawned = spawn_launcher(&exe, &argv, &env, &plan.workspace, observe_on)?;
         let audit = AuditWriter::new(
@@ -752,8 +751,7 @@ impl Uncontained {
                     .as_deref()
                     .and_then(|value| value.parse::<u64>().ok())
             };
-            // SAFETY: getpid takes no arguments and cannot fail.
-            let own = filters(&status(unsafe { libc::getpid() }, "this process's")?);
+            let own = filters(&status(crate::sys::own_pid(), "this process's")?);
             let launcher_status = status(pid, "the launcher's")?;
             let launcher = filters(&launcher_status);
             let no_new_privs = launcher_status.no_new_privs;
@@ -931,8 +929,7 @@ impl Uncontained {
     /// pidfd for termination; a deeper one is recorded and becomes ours when
     /// its parent dies.
     fn scan_descendants(&mut self) {
-        // SAFETY: getpid takes no arguments and cannot fail.
-        let own = unsafe { libc::getpid() };
+        let own = crate::sys::own_pid();
         self.scan_children(own, tracer::children(own));
     }
 
@@ -1013,8 +1010,7 @@ impl Uncontained {
         if observer_attached {
             return;
         }
-        // SAFETY: getpid takes no arguments and cannot fail.
-        let own = unsafe { libc::getpid() };
+        let own = crate::sys::own_pid();
         // J5-T: an inherited child's status is its owner's, not the attempt's.
         let children = tracer::children(own)
             .into_iter()
@@ -1776,8 +1772,7 @@ mod tests {
     fn j5t_an_inherited_record_names_a_process_only_with_its_birth() {
         let root = tempfile::tempdir().unwrap();
         let leaf = fake_leaf(root.path());
-        // SAFETY: getpid takes no arguments and cannot fail.
-        let own = unsafe { libc::getpid() };
+        let own = crate::sys::own_pid();
         let child = spawn_sleeper();
         let pid = libc::pid_t::try_from(child.id()).unwrap();
         let birth = identity::start_time_ticks(pid).expect("the sleeper's start time");
@@ -1829,8 +1824,7 @@ mod tests {
     fn walked_processes_are_attributed_before_they_are_recorded_or_signalled() {
         let root = tempfile::tempdir().unwrap();
         let leaf = fake_leaf(root.path());
-        // SAFETY: getpid takes no arguments and cannot fail.
-        let own = unsafe { libc::getpid() };
+        let own = crate::sys::own_pid();
 
         // Our child, outside the leaf: a loss, and signallable.
         let child = spawn_sleeper();

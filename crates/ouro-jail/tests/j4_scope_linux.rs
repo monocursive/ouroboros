@@ -37,8 +37,7 @@ const UNIT_PREFIX: &str = "ouro-jail-";
 const SCOPE_BOUND: Duration = Duration::from_secs(3);
 
 fn uid() -> u32 {
-    // SAFETY: getuid takes no arguments and cannot fail.
-    unsafe { libc::getuid() }
+    ouro_jail::state::real_uid()
 }
 
 /// The delegated subtree, relative to the v2 root.

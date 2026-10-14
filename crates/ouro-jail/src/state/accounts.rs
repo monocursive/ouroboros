@@ -247,8 +247,7 @@ mod tests {
     /// This process's own account and its primary group are found.
     #[test]
     fn this_processs_account_and_group_are_found() {
-        // SAFETY: getuid and getgid take no arguments and cannot fail.
-        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        let (uid, gid) = (crate::sys::real_uid(), crate::sys::effective_gid());
         let user = user(uid).unwrap().expect("this account");
         assert!(!user.name.is_empty());
         assert!(group(gid).unwrap().is_some());

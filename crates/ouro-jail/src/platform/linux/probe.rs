@@ -21,6 +21,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::policy::LimitKey;
+use crate::sys::own_pid;
 
 use super::bwrap::{self, BwrapPlan};
 use super::cgroup;
@@ -1199,11 +1200,6 @@ fn probe_user_notification() -> ProbeResult {
         ),
         _ => ProbeResult::error(NAME, MECHANISM, "the child reported nothing"),
     }
-}
-
-fn own_pid() -> libc::pid_t {
-    // SAFETY: getpid takes no arguments and cannot fail.
-    unsafe { libc::getpid() }
 }
 
 fn probe_ptrace_seize() -> ProbeResult {

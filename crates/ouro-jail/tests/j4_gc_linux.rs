@@ -828,9 +828,9 @@ fn j4_n7_a_crash_between_mkdir_and_the_receipt_leaves_a_leaf_gc_removes() {
     if !common::live() || !live() {
         return;
     }
-    // SAFETY: geteuid takes no arguments and cannot fail.
-    let root = ouro_jail::platform::linux::cgroup::delegated_root(unsafe { libc::geteuid() })
-        .expect("a delegated subtree (checked by live())");
+    let root =
+        ouro_jail::platform::linux::cgroup::delegated_root(ouro_jail::state::effective_uid())
+            .expect("a delegated subtree (checked by live())");
     // (abort point, whether a leaf exists once the supervisor is dead,
     // whether jail state holds its identity or only its name)
     let cases = [

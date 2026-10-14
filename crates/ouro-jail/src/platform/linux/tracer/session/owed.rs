@@ -5,7 +5,7 @@ use libc::pid_t;
 
 use super::Session;
 use super::seams::ProcView;
-use crate::platform::linux::tracer::{proc, sys};
+use crate::platform::linux::tracer::proc;
 
 /// J5-T: the children of this process, besides its tracees, whose end the
 /// tracer answers for.
@@ -73,7 +73,7 @@ impl Session {
     /// are the attempt's, so the tracer reaps them before it finishes (L01.7).
     fn adopted(&self) -> Vec<pid_t> {
         self.procfs
-            .children(sys::getpid())
+            .children(crate::sys::own_pid())
             .into_iter()
             .filter(|pid| !self.tasks.contains(*pid))
             .filter(|pid| {
@@ -92,7 +92,7 @@ impl Session {
         match self.owed {
             Owed::Every => self
                 .procfs
-                .children(sys::getpid())
+                .children(crate::sys::own_pid())
                 .into_iter()
                 .filter(|pid| !self.tasks.contains(*pid))
                 .collect(),

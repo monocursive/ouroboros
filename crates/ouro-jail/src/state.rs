@@ -32,6 +32,7 @@ mod registration;
 mod safety;
 mod uncontained;
 
+pub use crate::sys::{effective_gid, effective_uid, real_uid};
 pub use durable::{
     Published, TempWrite, create_exclusively_at, leftover_temp_files, replace_atomically,
 };
@@ -70,7 +71,7 @@ pub(crate) use safety::{
     DIRECTORY_MODE, FILE_MODE, check_state_file, create_private_dir, open_attempt_dir, read_capped,
     read_capped_checked, writable_by_others,
 };
-pub use safety::{check_ownership, check_state_dir, effective_uid};
+pub use safety::{check_ownership, check_state_dir};
 pub use uncontained::uncontained_settled_path;
 pub(crate) use uncontained::{UncontainedEpoch, uncontained_epoch};
 pub(crate) use uncontained::{UncontainedRun, ctime_of};

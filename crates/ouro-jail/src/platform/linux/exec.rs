@@ -208,9 +208,8 @@ impl FdMap {
             .iter()
             .map(|(fd, target)| (fd.as_raw_fd(), *target))
             .collect();
-        // SAFETY: getpid takes no arguments and cannot fail; the value is
-        // read before the fork so the child can compare its getppid with it.
-        let supervisor = unsafe { libc::getpid() };
+        // Read before the fork, so the child can compare its parent with it.
+        let supervisor = crate::sys::own_pid();
         // SAFETY: the closure performs only async-signal-safe calls over a
         // `Vec` of plain integers built before the fork, and constructs an
         // `io::Error` from an errno, which does not allocate.
@@ -223,7 +222,7 @@ impl FdMap {
                 }
                 // SAFETY: getppid takes no arguments and cannot fail; _exit
                 // takes a scalar and does not return.
-                if parent_death && libc::getppid() != supervisor {
+                if parent_death && crate::sys::parent_pid() != supervisor {
                     // The supervisor died in the fork window, so the signal
                     // this child just armed will never arrive. Leave before
                     // becoming the orphan that holds the run's descriptors.
@@ -266,7 +265,7 @@ pub unsafe fn die_with_parent_after_fork(parent: libc::pid_t) {
     // does not return.
     unsafe {
         if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) < 0
-            || libc::getppid() != parent
+            || crate::sys::parent_pid() != parent
         {
             libc::_exit(EXIT_SUPERVISOR_GONE);
         }
@@ -278,8 +277,7 @@ pub unsafe fn die_with_parent_after_fork(parent: libc::pid_t) {
 /// [`die_with_parent_after_fork`] does. For children that need no descriptor
 /// layout; [`FdMap::apply`] already does this for the ones that do.
 pub fn die_with_parent(command: &mut Command) {
-    // SAFETY: getpid takes no arguments and cannot fail.
-    let parent = unsafe { libc::getpid() };
+    let parent = crate::sys::own_pid();
     // SAFETY: the closure calls only async-signal-safe functions over an
     // integer copied before the fork.
     unsafe {

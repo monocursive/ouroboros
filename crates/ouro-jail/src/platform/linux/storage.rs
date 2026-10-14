@@ -236,8 +236,7 @@ fn ceiling(file: &File, value: &libc::statfs) -> Result<Ceiling, CeilingRefusal>
         });
     }
     if [libc::EXT4_SUPER_MAGIC, libc::XFS_SUPER_MAGIC].contains(&value.f_type) {
-        // SAFETY: geteuid has no arguments or memory effects.
-        let uid = unsafe { libc::geteuid() };
+        let uid = crate::sys::effective_uid();
         let quota = quota::read(file, uid).map_err(CeilingRefusal::Quota)?;
         return Ok(Ceiling {
             uid: Some(uid),
@@ -710,8 +709,7 @@ mod tests {
             .unwrap();
         let value = stat(&pinned).unwrap();
         assert_eq!(value.f_type, libc::XFS_SUPER_MAGIC);
-        // SAFETY: geteuid has no arguments or memory effects.
-        let uid = unsafe { libc::geteuid() };
+        let uid = crate::sys::effective_uid();
         assert_eq!(
             quota::read(&pinned, uid).err().unwrap().raw_os_error(),
             Some(libc::EBADF)

@@ -1283,8 +1283,7 @@ struct Destination {
 
 impl Destination {
     fn new(tag: &str) -> Destination {
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let root = ouro_jail::platform::linux::cgroup::delegated_root(unsafe { libc::getuid() })
+        let root = ouro_jail::platform::linux::cgroup::delegated_root(ouro_jail::state::real_uid())
             .expect("the delegated subtree exists");
         let path = root.join(format!("ouro-j5c-{tag}-{}", std::process::id()));
         std::fs::create_dir(&path).expect("a destination cgroup");

@@ -1854,8 +1854,7 @@ mod leaf {
     /// is recorded but the move is still attempted, so the result carries
     /// the kernel's own errno rather than a prediction of it.
     pub fn try_leaf(name: &str, pid: libc::pid_t, controller: &str) -> LeafAttempt {
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let uid = unsafe { libc::getuid() };
+        let uid = ouro_jail::state::real_uid();
         let own = own_cgroup().ok();
         let mut attempt = LeafAttempt {
             status: LeafStatus::Moved,
@@ -1982,8 +1981,7 @@ fn a_delegated_leaf_records_the_kernels_own_answer() {
         .delegated_root
         .clone()
         .expect("the reference host delegates a subtree to this account");
-    // SAFETY: geteuid takes no arguments and cannot fail.
-    let uid = unsafe { libc::geteuid() };
+    let uid = ouro_jail::state::effective_uid();
     assert!(
         root.ends_with(format!("user@{uid}.service")),
         "{}",
@@ -2037,8 +2035,7 @@ fn the_probes_report_the_statuses_this_host_warrants() {
     // which the conformance driver enters with `systemd-run --user --scope`
     // and a plain SSH session does not. Derive the expectation from those two
     // facts rather than from the probe under test.
-    // SAFETY: getuid takes no arguments and cannot fail.
-    let in_delegation = cgroup::delegated_root(unsafe { libc::getuid() }).is_some_and(|root| {
+    let in_delegation = cgroup::delegated_root(ouro_jail::state::real_uid()).is_some_and(|root| {
         let relative = format!(
             "/{}",
             root.strip_prefix(cgroup::CGROUP_ROOT)

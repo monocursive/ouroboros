@@ -429,8 +429,7 @@ fn l03_a_real_leaf_without_pids_refuses_required_but_runs_preferred() {
     }
     use ouro_jail::platform::linux::cgroup::{self, ExecutionCgroup};
     use ouro_jail::policy::{LimitCeiling, LimitsSnapshot};
-    // SAFETY: getuid takes no arguments and cannot fail.
-    let root = cgroup::delegated_root(unsafe { libc::getuid() })
+    let root = cgroup::delegated_root(ouro_jail::state::real_uid())
         .unwrap()
         .join(format!("ouro-no-pids-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();

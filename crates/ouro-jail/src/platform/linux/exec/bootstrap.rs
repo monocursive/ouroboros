@@ -270,8 +270,7 @@ pub(crate) fn spawn_bootstrap(
     {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: getpid has no arguments and cannot fail.
-    let parent = unsafe { libc::getpid() };
+    let parent = crate::sys::own_pid();
     let mut pidfd = -1i32;
     let mut args = CloneArgs {
         flags: CLONE_INTO_CGROUP | CLONE_CLEAR_SIGHAND | libc::CLONE_PIDFD as u64,

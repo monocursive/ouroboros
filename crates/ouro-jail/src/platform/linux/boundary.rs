@@ -2089,8 +2089,7 @@ fn launcher_namespaces(
     let ns_ids = identity::ns_ids(launcher);
     // Every namespace the plan asked for has to be one the launcher is
     // actually in, and a different one from this process's.
-    // SAFETY: getpid takes no arguments and cannot fail.
-    let own = identity::ns_ids(unsafe { libc::getpid() });
+    let own = identity::ns_ids(crate::sys::own_pid());
     for (name, inside, outside) in [
         ("pid", ns_ids.pid, own.pid),
         ("mnt", ns_ids.mnt, own.mnt),

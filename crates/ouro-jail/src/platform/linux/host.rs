@@ -494,8 +494,7 @@ mod linux {
         // SAFETY: the buffer holds `count` gids and the length says so.
         let got = unsafe { libc::getgroups(count, gids.as_mut_ptr()) };
         gids.truncate(usize::try_from(got).ok()?);
-        // SAFETY: getegid takes no arguments and cannot fail.
-        gids.push(unsafe { libc::getegid() });
+        gids.push(crate::sys::effective_gid());
         names_of(&gids, group_name)
     }
 
@@ -565,8 +564,7 @@ mod linux {
     /// The `host` object of `doctor --json`.
     #[must_use]
     pub fn manifest() -> serde_json::Value {
-        // SAFETY: getuid takes no arguments and cannot fail.
-        let uid = unsafe { libc::getuid() };
+        let uid = crate::sys::real_uid();
         let (kernel_release, kernel_version) = uname();
         let distribution = std::fs::read_to_string("/etc/os-release")
             .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))

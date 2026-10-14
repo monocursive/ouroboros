@@ -794,8 +794,7 @@ fn step_for(deadline: PortableDeadline) -> Duration {
 /// `unsupported_platform` when the effective uid is 0 or differs from the
 /// real one.
 pub(super) fn refuse_privileged_supervisor() -> Result<(), JailError> {
-    // SAFETY: getuid and geteuid take no arguments and cannot fail.
-    let (ruid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
+    let (ruid, euid) = (crate::sys::real_uid(), crate::sys::effective_uid());
     if euid == 0 || ruid != euid {
         return Err(JailError::new(
             ErrorCode::UnsupportedPlatform,

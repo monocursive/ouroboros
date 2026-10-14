@@ -179,8 +179,7 @@ impl ProcessIdentity {
     ///
     /// As [`ProcessIdentity::capture`].
     pub fn own() -> io::Result<Self> {
-        // SAFETY: getpid takes no arguments and cannot fail.
-        Self::capture(unsafe { libc::getpid() })
+        Self::capture(crate::sys::own_pid())
     }
 
     /// Whether the pid still names the process that was recorded.

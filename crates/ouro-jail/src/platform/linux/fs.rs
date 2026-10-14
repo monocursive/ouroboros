@@ -913,8 +913,7 @@ impl PinnedPath {
     /// errno from `fstat`, or the [`PinError`] of [`PinnedPath::verify`].
     pub fn verify_executable(&self) -> io::Result<()> {
         let now = fstat(self.fd.as_fd())?;
-        // SAFETY: geteuid takes no arguments and cannot fail.
-        let euid = unsafe { libc::geteuid() };
+        let euid = crate::sys::effective_uid();
         if (now.uid != 0 && now.uid != euid)
             || now.uid != self.stat.uid
             || (now.kind, now.mode) != (self.stat.kind, self.stat.mode)
