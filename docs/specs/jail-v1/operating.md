@@ -272,11 +272,14 @@ A launch profile is operator data for one vendor agent: environment mappings
 into vendor state, credential inputs, allowed hosts and a default contained
 profile (`jail`). It never supplies argv and cannot select `none`. It lives at
 `<config-dir>/launch/<name>.toml`, mode 0600, outside every child-writable
-grant. The bundled `codex`, `claude` and `opencode` files under
-`crates/ouro-jail/profiles/launch/` are experimental examples that the binary
-never reads; copy one and check every path and host against your own
-installation. `doctor --launch NAME` checks its credential inputs without
-printing values.
+grant. The starter files under `crates/ouro-jail/profiles/launch/` are
+experimental. The binary embeds all of them except the `*-vault` ones, and
+`--launch NAME` uses the embedded one only when `<config-dir>/launch/NAME.toml`
+does not exist; an operator file of that name replaces it whole.
+`doctor --launch NAME` reports which one resolved (`resolution`: `bundled` or
+`operator file`) and checks its credential inputs without printing values.
+Check every path and host of a starter against your own installation, and
+copy it to `<config-dir>/launch/` to change it.
 
 `doctor` reports every launch profile `experimental`. Which vendor versions
 were run and passed under which profile, platform and mode is recorded in
