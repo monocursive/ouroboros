@@ -320,7 +320,8 @@ impl Dir {
         Ok(Dir { fd: owned(fd)? })
     }
 
-    /// Opens `/` for a no-follow walk.
+    /// Opens `/` for a no-follow walk. Prefer [`walk`] and [`WalkDir`], which
+    /// cannot be mistaken for a readable directory.
     ///
     /// On Linux the handle is `O_PATH`, so a walk needs search permission on
     /// each directory, not read permission, exactly like path resolution.
@@ -373,21 +374,7 @@ impl Dir {
     /// # Errors
     /// The errno from `fstatat`.
     pub fn stat_at(&self, name: &Name) -> io::Result<Stat> {
-        let mut raw = empty_stat();
-        // SAFETY: the descriptor is live, `name` is a validated NUL-terminated
-        // component, `raw` is a writable buffer and AT_SYMLINK_NOFOLLOW
-        // describes the entry itself.
-        check(unsafe {
-            libc::fstatat(
-                self.fd.as_raw_fd(),
-                name.as_c().as_ptr(),
-                &raw mut raw,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        })?;
-        let mut stat = stat_from(&raw);
-        stat.mount_root = mount_root_at(self.as_fd(), name);
-        Ok(stat)
+        stat_at(self.as_fd(), name)
     }
 
     /// Opens one entry as a directory, never following a symlink, and checks
@@ -405,17 +392,15 @@ impl Dir {
         Ok(dir)
     }
 
-    /// Opens one entry as a directory for a walk (`O_PATH` on Linux).
+    /// Opens one entry as a directory for a walk (`O_PATH` on Linux). Prefer
+    /// [`WalkDir`], which cannot be mistaken for a readable directory.
     ///
     /// # Errors
     /// As [`Dir::open_dir_at`].
     pub fn open_walk_at(&self, name: &Name, expected: Option<&Stat>) -> io::Result<Dir> {
-        // SAFETY: live descriptor, validated component; the flags refuse a
-        // symlink and a non-directory.
-        let fd = unsafe { libc::openat(self.fd.as_raw_fd(), name.as_c().as_ptr(), walk_flags()) };
-        let dir = Dir { fd: owned(fd)? };
-        verify(&dir.stat()?, expected)?;
-        Ok(dir)
+        Ok(Dir {
+            fd: open_walk_at(self.as_fd(), name, expected)?,
+        })
     }
 
     /// `mkdirat` of one entry, then `fchmod` to exactly `mode` through a
@@ -463,23 +448,7 @@ impl Dir {
     /// The errno from `openat` (`ELOOP` for a symlink), or `Other` when the
     /// opened object is not `expected`.
     pub fn open_read_at(&self, name: &Name, expected: Option<&Stat>) -> io::Result<File> {
-        // SAFETY: live descriptor, validated component; O_NOFOLLOW refuses a
-        // final symlink, O_NONBLOCK keeps a FIFO from blocking the open and
-        // O_NOCTTY keeps a terminal from becoming controlling.
-        let fd = unsafe {
-            libc::openat(
-                self.fd.as_raw_fd(),
-                name.as_c().as_ptr(),
-                libc::O_RDONLY
-                    | libc::O_NOFOLLOW
-                    | libc::O_NONBLOCK
-                    | libc::O_NOCTTY
-                    | libc::O_CLOEXEC,
-            )
-        };
-        let file = File::from(owned(fd)?);
-        verify(&fstat(file.as_fd())?, expected)?;
-        Ok(file)
+        open_read_at(self.as_fd(), name, expected)
     }
 
     /// Opens one entry as an `O_PATH` handle without following it.
@@ -494,16 +463,7 @@ impl Dir {
     /// The errno from `openat`.
     #[cfg(target_os = "linux")]
     pub fn open_path_at(&self, name: &Name) -> io::Result<OwnedFd> {
-        // SAFETY: live descriptor, validated component; O_PATH|O_NOFOLLOW
-        // opens the entry itself with no I/O authority.
-        let fd = unsafe {
-            libc::openat(
-                self.fd.as_raw_fd(),
-                name.as_c().as_ptr(),
-                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        owned(fd)
+        open_path_at(self.as_fd(), name)
     }
 
     /// `unlinkat` of a non-directory entry: the entry itself is removed; a
@@ -650,6 +610,210 @@ impl Dir {
         // SAFETY: the descriptor is live.
         check(unsafe { libc::fsync(self.fd.as_raw_fd()) })
     }
+}
+
+/// `fstatat(AT_SYMLINK_NOFOLLOW)` of one entry of `dir`, plus, on Linux,
+/// whether it is a mount root.
+fn stat_at(dir: BorrowedFd<'_>, name: &Name) -> io::Result<Stat> {
+    let mut raw = empty_stat();
+    // SAFETY: the descriptor is live, `name` is a validated NUL-terminated
+    // component, `raw` is a writable buffer and AT_SYMLINK_NOFOLLOW
+    // describes the entry itself.
+    check(unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_c().as_ptr(),
+            &raw mut raw,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    })?;
+    let mut stat = stat_from(&raw);
+    stat.mount_root = mount_root_at(dir, name);
+    Ok(stat)
+}
+
+/// Opens one entry of `dir` as a walk handle, checked against `expected`.
+fn open_walk_at(dir: BorrowedFd<'_>, name: &Name, expected: Option<&Stat>) -> io::Result<OwnedFd> {
+    // SAFETY: live descriptor, validated component; the flags refuse a
+    // symlink and a non-directory.
+    let fd = owned(unsafe { libc::openat(dir.as_raw_fd(), name.as_c().as_ptr(), walk_flags()) })?;
+    verify(&fstat(fd.as_fd())?, expected)?;
+    Ok(fd)
+}
+
+/// Opens one entry of `dir` for reading, checked against `expected`.
+fn open_read_at(dir: BorrowedFd<'_>, name: &Name, expected: Option<&Stat>) -> io::Result<File> {
+    // SAFETY: live descriptor, validated component; O_NOFOLLOW refuses a
+    // final symlink, O_NONBLOCK keeps a FIFO from blocking the open and
+    // O_NOCTTY keeps a terminal from becoming controlling.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_c().as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC,
+        )
+    };
+    let file = File::from(owned(fd)?);
+    verify(&fstat(file.as_fd())?, expected)?;
+    Ok(file)
+}
+
+/// Opens one entry of `dir` as an `O_PATH` handle without following it.
+#[cfg(target_os = "linux")]
+fn open_path_at(dir: BorrowedFd<'_>, name: &Name) -> io::Result<OwnedFd> {
+    // SAFETY: live descriptor, validated component; O_PATH|O_NOFOLLOW
+    // opens the entry itself with no I/O authority.
+    owned(unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_c().as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Walk handles and the walk from `/`
+// ---------------------------------------------------------------------------
+
+/// A directory opened for a no-follow walk. On Linux it is an `O_PATH`
+/// handle: it needs search permission on the directory, not read
+/// permission, exactly like path resolution, and it cannot be listed,
+/// synced or have its mode changed, so it has no such methods. It anchors
+/// the next step of a walk and the opening of what the walk reached;
+/// [`Dir`] is the directory that can be read and changed.
+#[derive(Debug)]
+pub struct WalkDir {
+    fd: OwnedFd,
+}
+
+impl WalkDir {
+    /// Opens `/` for a walk.
+    ///
+    /// # Errors
+    /// The errno from `open`.
+    pub fn open_root() -> io::Result<WalkDir> {
+        // SAFETY: the literal is NUL-terminated and static.
+        let fd = unsafe { libc::open(c"/".as_ptr(), walk_flags()) };
+        Ok(WalkDir { fd: owned(fd)? })
+    }
+
+    /// The descriptor, borrowed.
+    #[must_use]
+    pub fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+
+    /// `fstat` of the directory itself.
+    ///
+    /// # Errors
+    /// The errno from `fstat`.
+    pub fn stat(&self) -> io::Result<Stat> {
+        fstat(self.as_fd())
+    }
+
+    /// As [`Dir::stat_at`].
+    ///
+    /// # Errors
+    /// The errno from `fstatat`.
+    pub fn stat_at(&self, name: &Name) -> io::Result<Stat> {
+        stat_at(self.as_fd(), name)
+    }
+
+    /// The next directory of the walk, never followed, checked to be the
+    /// object `expected` described.
+    ///
+    /// # Errors
+    /// As [`Dir::open_dir_at`].
+    pub fn open_walk_at(&self, name: &Name, expected: Option<&Stat>) -> io::Result<WalkDir> {
+        Ok(WalkDir {
+            fd: open_walk_at(self.as_fd(), name, expected)?,
+        })
+    }
+
+    /// As [`Dir::open_read_at`].
+    ///
+    /// # Errors
+    /// As [`Dir::open_read_at`].
+    pub fn open_read_at(&self, name: &Name, expected: Option<&Stat>) -> io::Result<File> {
+        open_read_at(self.as_fd(), name, expected)
+    }
+
+    /// As [`Dir::open_path_at`].
+    ///
+    /// # Errors
+    /// The errno from `openat`.
+    #[cfg(target_os = "linux")]
+    pub fn open_path_at(&self, name: &Name) -> io::Result<OwnedFd> {
+        open_path_at(self.as_fd(), name)
+    }
+}
+
+/// What a walk from `/` reached ([`walk`]).
+#[derive(Debug)]
+pub struct Walked {
+    /// The last directory walked (`/` for no components).
+    pub dir: WalkDir,
+    /// The identities of `/` and of every directory walked, in order.
+    pub chain: Vec<(u64, u64)>,
+}
+
+/// Why a walk from `/` stopped.
+#[derive(Debug)]
+pub enum WalkError<E> {
+    /// `/` or a component could not be inspected or opened (an open that
+    /// reached another object than the one inspected included). `depth` is
+    /// the number of components that lead to it: 0 for `/`.
+    Io {
+        /// Components leading to what failed.
+        depth: usize,
+        /// The failure.
+        error: io::Error,
+    },
+    /// A component is not a directory, and is never walked through.
+    NotDirectory {
+        /// Components leading to it, itself included.
+        depth: usize,
+        /// What it is.
+        kind: Kind,
+    },
+    /// `check` refused `/` or a component.
+    Refused(E),
+}
+
+/// Walks the directories `components` from `/` without following a link:
+/// each is inspected with `fstatat`, must be a directory, is judged by
+/// `check` (given the components that lead to it, none for `/`), and is
+/// opened as a [`WalkDir`] verified to be the object inspected, so nothing
+/// swapped in between the inspection and the open is ever walked through.
+///
+/// # Errors
+/// [`WalkError`]: what stopped the walk, and where.
+pub fn walk<E>(
+    components: &[Name],
+    mut check: impl FnMut(&[Name], &Stat) -> Result<(), E>,
+) -> Result<Walked, WalkError<E>> {
+    let failed = |depth: usize| move |error| WalkError::Io { depth, error };
+    let mut dir = WalkDir::open_root().map_err(failed(0))?;
+    let root = dir.stat().map_err(failed(0))?;
+    check(&[], &root).map_err(WalkError::Refused)?;
+    let mut chain = vec![root.identity()];
+    for (index, component) in components.iter().enumerate() {
+        let depth = index + 1;
+        let stat = dir.stat_at(component).map_err(failed(depth))?;
+        if stat.kind != Kind::Directory {
+            return Err(WalkError::NotDirectory {
+                depth,
+                kind: stat.kind,
+            });
+        }
+        check(&components[..depth], &stat).map_err(WalkError::Refused)?;
+        dir = dir
+            .open_walk_at(component, Some(&stat))
+            .map_err(failed(depth))?;
+        chain.push(stat.identity());
+    }
+    Ok(Walked { dir, chain })
 }
 
 fn verify(actual: &Stat, expected: Option<&Stat>) -> io::Result<()> {
@@ -847,6 +1011,74 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let handle = Dir::open_trusted(&dir.path().canonicalize().unwrap()).expect("open");
         (dir, handle)
+    }
+
+    /// The walk from `/` reaches the directory a path names, records the
+    /// identity of every directory on the way, and judges each one.
+    #[test]
+    fn a_walk_from_the_root_reaches_the_directory_and_records_the_chain() {
+        let (root, _) = temp();
+        let base = root.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("a/b")).unwrap();
+        let target = base.join("a/b");
+        let components = split_absolute(target.as_os_str().as_bytes()).unwrap();
+        let mut judged = Vec::new();
+        let walked = walk(&components, |path, stat| {
+            judged.push(path.len());
+            assert_eq!(stat.kind, Kind::Directory);
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        assert_eq!(judged, (0..=components.len()).collect::<Vec<_>>());
+        assert_eq!(walked.chain.len(), components.len() + 1);
+        let expected = std::fs::metadata(&target).unwrap();
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(
+            walked.dir.stat().unwrap().identity(),
+            (expected.dev(), expected.ino())
+        );
+        assert_eq!(
+            *walked.chain.last().unwrap(),
+            (expected.dev(), expected.ino())
+        );
+    }
+
+    /// A symlink on the way is never walked through, and a refusal stops
+    /// the walk where it was made.
+    #[test]
+    fn a_walk_never_follows_a_link_and_stops_at_a_refusal() {
+        let (root, _) = temp();
+        let base = root.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("real/inner")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
+        let through = split_absolute(base.join("link/inner").as_os_str().as_bytes()).unwrap();
+        let depth = through.len() - 1;
+        match walk(&through, |_, _| Ok::<(), ()>(())) {
+            Err(WalkError::NotDirectory { depth: at, kind }) => {
+                assert_eq!((at, kind), (depth, Kind::Symlink));
+            }
+            other => panic!("walked through a link: {other:?}"),
+        }
+        let real = split_absolute(base.join("real/inner").as_os_str().as_bytes()).unwrap();
+        let refused = walk(&real, |path, _| {
+            if path.last().is_some_and(|name| name.as_bytes() == b"real") {
+                Err("refused")
+            } else {
+                Ok(())
+            }
+        });
+        assert!(
+            matches!(refused, Err(WalkError::Refused("refused"))),
+            "{refused:?}"
+        );
+        let missing = split_absolute(base.join("missing/x").as_os_str().as_bytes()).unwrap();
+        match walk(&missing, |_, _| Ok::<(), ()>(())) {
+            Err(WalkError::Io { depth: at, error }) => {
+                assert_eq!(at, missing.len() - 1);
+                assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
