@@ -793,8 +793,9 @@ struct Binary {
 
 /// Reading libtest's closing `failures:` list, which names every failed
 /// test of the binary whatever its subprocesses printed.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum FailuresList {
+    #[default]
     Off,
     /// After a `failures:` line, before any name.
     Start,
@@ -880,40 +881,254 @@ pub const MARKER_CONFORMANCE: &str = "ouro-suite-conformance=";
 /// anomaly that makes every result in it untrustworthy.
 #[must_use]
 pub fn parse_log(text: &str) -> TestLog {
-    let mut log = TestLog::default();
-    let mut package: Option<String> = None;
-    let mut binary: Option<Binary> = None;
-    let mut pending: Option<String> = None;
-    let mut list = FailuresList::Off;
-    let mut names: Vec<String> = Vec::new();
+    let mut parser = LogParser::default();
+    for line in text.lines() {
+        parser.line(line);
+    }
+    parser.end()
+}
 
-    fn finish(log: &mut TestLog, binary: Option<Binary>, pending: &mut Option<String>) {
-        let Some(mut b) = binary else {
-            if let Some(test) = pending.take() {
-                log.anomalies.push(Anomaly {
-                    text: format!("`{test}` started but no result was printed for it"),
-                    test: Some(test),
-                    binary: None,
-                });
+/// One pass over a `cargo test` log (see [`parse_log`]).
+#[derive(Default)]
+struct LogParser {
+    log: TestLog,
+    /// The package of the last `src/lib.rs` or `src/main.rs` binary: cargo
+    /// names no package on a `Running tests/…` line.
+    package: Option<String>,
+    /// The test binary being read.
+    binary: Option<Binary>,
+    /// The test libtest started and has not yet printed a result for.
+    pending: Option<String>,
+    list: FailuresList,
+    /// The names of the failures list read so far.
+    names: Vec<String>,
+}
+
+impl LogParser {
+    fn line(&mut self, line: &str) {
+        let trimmed = line.trim();
+        if let Some((source, stem)) = running(line) {
+            if source == "src/lib.rs" || source == "src/main.rs" {
+                self.package = Some(stem.replace('_', "-"));
             }
+            let krate = self.package.clone().unwrap_or_else(|| "?".to_string());
+            self.open_binary(format!("{krate}/{source}"));
+            return;
+        }
+        if let Some(krate) = trimmed.strip_prefix("Doc-tests ") {
+            self.open_binary(format!("{}/doc", krate.replace('_', "-")));
+            return;
+        }
+        if self.pending.is_none() {
+            self.markers(line);
+        }
+        if let Some(rest) = trimmed.strip_prefix("test result: ") {
+            self.summary_line(rest);
+            return;
+        }
+        if trimmed.starts_with(SKIP_MARKER) {
+            self.log.skips.push(trimmed.to_string());
+            return;
+        }
+        if self.pending.is_none() && self.binary.is_some() && self.failures_list(line) {
+            return;
+        }
+        if let Some(rest) = line.strip_prefix("test ")
+            && let Some((name, result)) = rest.split_once(" ... ")
+        {
+            self.test_line(name, result, trimmed);
+            return;
+        }
+        self.pending_result(trimmed);
+    }
+
+    /// A new test binary's section: the one before it ends.
+    fn open_binary(&mut self, prefix: String) {
+        self.close_binary();
+        self.list = FailuresList::Off;
+        self.log.binaries += 1;
+        self.binary = Some(Binary {
+            prefix,
+            entries: Vec::new(),
+            summary: Summary::Missing,
+            failures: Vec::new(),
+        });
+    }
+
+    /// The suite's own markers, read outside any test's output.
+    fn markers(&mut self, line: &str) {
+        for (marker, into) in [
+            (MARKER_PATH, &mut self.log.paths),
+            (MARKER_REVISION, &mut self.log.revisions),
+            (MARKER_CONFORMANCE, &mut self.log.conformance),
+        ] {
+            if let Some(value) = line.strip_prefix(marker) {
+                into.push(value.trim().to_string());
+            }
+        }
+    }
+
+    /// A `test result:` line: the binary's own counts, unless a test is
+    /// pending, when it is a nested process's libtest run inside that test.
+    fn summary_line(&mut self, rest: &str) {
+        if self.pending.is_some() {
+            return;
+        }
+        self.log.summaries += 1;
+        if rest.starts_with("FAILED") {
+            self.log.failed_binaries += 1;
+        }
+        if self.list == FailuresList::Names {
+            self.take_names();
+        }
+        self.list = FailuresList::Off;
+        self.names.clear();
+        if let Some(b) = self.binary.as_mut() {
+            b.summary = counted(rest).map_or_else(
+                || Summary::Unparseable(rest.chars().take(200).collect()),
+                Summary::Counted,
+            );
+        }
+    }
+
+    /// libtest's closing `failures:` list, read while no test is pending.
+    /// True when the line is part of it.
+    fn failures_list(&mut self, line: &str) -> bool {
+        if line == "failures:" {
+            self.list = FailuresList::Start;
+            self.names.clear();
+            return true;
+        }
+        match self.list {
+            FailuresList::Off => false,
+            FailuresList::Start | FailuresList::Names if line.trim().is_empty() => {
+                if self.list == FailuresList::Names {
+                    self.take_names();
+                    self.list = FailuresList::Off;
+                }
+                true
+            }
+            FailuresList::Start | FailuresList::Names => {
+                match line.strip_prefix("    ") {
+                    Some(name) if !name.starts_with(' ') && !name.is_empty() => {
+                        self.names.push(name.to_string());
+                        self.list = FailuresList::Names;
+                    }
+                    _ => {
+                        // `---- name stdout ----` and the like: the captured
+                        // output, not the list of names.
+                        self.list = FailuresList::Off;
+                        self.names.clear();
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    /// The names read so far belong to the binary's failures list.
+    fn take_names(&mut self) {
+        if let Some(b) = self.binary.as_mut() {
+            b.failures.append(&mut self.names);
+        }
+    }
+
+    /// A `test <name> ... <result>` line. Without a result it starts the
+    /// pending test; while another test is pending it is a nested process's
+    /// line, never attributed.
+    fn test_line(&mut self, name: &str, result: &str, trimmed: &str) {
+        let Some(b) = self.binary.as_mut() else {
+            self.log.anomalies.push(Anomaly {
+                test: None,
+                binary: None,
+                text: format!(
+                    "a result outside any test binary: {}",
+                    trimmed.chars().take(200).collect::<String>()
+                ),
+            });
             return;
         };
-        if let Some(test) = pending.take() {
-            log.anomalies.push(Anomaly {
+        let id = format!("{}::{}", b.prefix, normalise(name));
+        if let Some(waiting) = &self.pending {
+            self.log.anomalies.push(Anomaly {
+                test: Some(id.clone()),
+                binary: None,
+                text: format!(
+                    "`{id}` reported while `{waiting}` was running: a nested process's line, not attributed"
+                ),
+            });
+            return;
+        }
+        match Outcome::read(result) {
+            Some(outcome) => b.entries.push((id, outcome)),
+            None => {
+                // With one test thread, a live test's skip note lands right
+                // after libtest's `test <name> ... `.
+                if let Some(at) = result.find(SKIP_MARKER) {
+                    self.log
+                        .skips
+                        .push(format!("{id}: {}", result[at..].trim()));
+                }
+                self.pending = Some(id);
+            }
+        }
+    }
+
+    /// The pending test's result: the next line that is exactly a result.
+    fn pending_result(&mut self, trimmed: &str) {
+        if let Some(test) = &self.pending
+            && let Some(outcome) = Outcome::read(trimmed)
+            && let Some(b) = self.binary.as_mut()
+        {
+            b.entries.push((test.clone(), outcome));
+            self.pending = None;
+        }
+    }
+
+    /// The end of the log: the last binary ends with it.
+    fn end(mut self) -> TestLog {
+        if self.list == FailuresList::Names {
+            self.take_names();
+        }
+        self.close_binary();
+        self.log
+    }
+
+    /// The current binary ends. A test still pending printed no result;
+    /// libtest's failures list and counts are checked against what the log
+    /// attributes; the results join the log.
+    fn close_binary(&mut self) {
+        let binary = self.binary.take();
+        if let Some(test) = self.pending.take() {
+            self.log.anomalies.push(Anomaly {
                 text: format!("`{test}` started but no result was printed for it"),
                 test: Some(test),
-                binary: Some(b.prefix.clone()),
+                binary: binary.as_ref().map(|b| b.prefix.clone()),
             });
         }
-        // The failures list is libtest's own word on what failed.
-        for name in std::mem::take(&mut b.failures) {
-            let id = format!("{}::{}", b.prefix, normalise(&name));
+        let Some(mut b) = binary else {
+            return;
+        };
+        b.reconcile_failures(&mut self.log.anomalies);
+        self.log.anomalies.extend(b.count_anomaly());
+        for (id, outcome) in b.entries {
+            self.log.results.entry(id).or_default().push(outcome);
+        }
+    }
+}
+
+impl Binary {
+    /// The failures list is libtest's own word on what failed: a test it
+    /// names is FAILED whatever result line the log attributed to it.
+    fn reconcile_failures(&mut self, anomalies: &mut Vec<Anomaly>) {
+        for name in std::mem::take(&mut self.failures) {
+            let id = format!("{}::{}", self.prefix, normalise(&name));
             let mut found = false;
-            for (entry, outcome) in &mut b.entries {
+            for (entry, outcome) in &mut self.entries {
                 if *entry == id {
                     found = true;
                     if *outcome != Outcome::Failed {
-                        log.anomalies.push(Anomaly {
+                        anomalies.push(Anomaly {
                             test: Some(id.clone()),
                             binary: None,
                             text: format!(
@@ -927,209 +1142,48 @@ pub fn parse_log(text: &str) -> TestLog {
                 }
             }
             if !found {
-                log.anomalies.push(Anomaly {
+                anomalies.push(Anomaly {
                     test: Some(id.clone()),
                     binary: None,
                     text: format!(
                         "`{id}` FAILED (libtest lists it) but the log has no result line for it"
                     ),
                 });
-                b.entries.push((id, Outcome::Failed));
+                self.entries.push((id, Outcome::Failed));
             }
-        }
-        let mut seen = [0usize; 3];
-        for (_, outcome) in &b.entries {
-            seen[*outcome as usize] += 1;
-        }
-        match &b.summary {
-            Summary::Missing => log.anomalies.push(Anomaly {
-                test: None,
-                binary: Some(b.prefix.clone()),
-                text: format!(
-                    "{} has no `test result:` line: it crashed or the log is cut, so none of its results can be trusted",
-                    b.prefix
-                ),
-            }),
-            Summary::Unparseable(line) => log.anomalies.push(Anomaly {
-                test: None,
-                binary: Some(b.prefix.clone()),
-                text: format!(
-                    "{}: its `test result:` line does not read as libtest's counts \
-                     (`{line}`), so none of its results can be trusted",
-                    b.prefix
-                ),
-            }),
-            Summary::Counted(counts) if *counts != seen => log.anomalies.push(Anomaly {
-                test: None,
-                binary: Some(b.prefix.clone()),
-                text: format!(
-                    "{}: libtest counted {} passed, {} failed, {} ignored; the log attributes {}, {}, {}",
-                    b.prefix, counts[0], counts[1], counts[2], seen[0], seen[1], seen[2]
-                ),
-            }),
-            Summary::Counted(_) => {}
-        }
-        for (id, outcome) in b.entries {
-            log.results.entry(id).or_default().push(outcome);
         }
     }
 
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some((source, stem)) = running(line) {
-            finish(&mut log, binary.take(), &mut pending);
-            list = FailuresList::Off;
-            if source == "src/lib.rs" || source == "src/main.rs" {
-                package = Some(stem.replace('_', "-"));
-            }
-            let krate = package.clone().unwrap_or_else(|| "?".to_string());
-            log.binaries += 1;
-            binary = Some(Binary {
-                prefix: format!("{krate}/{source}"),
-                entries: Vec::new(),
-                summary: Summary::Missing,
-                failures: Vec::new(),
-            });
-            continue;
+    /// Why none of this binary's results can be trusted, judged by its own
+    /// `test result:` line; `None` when its counts are what the log
+    /// attributes to it.
+    fn count_anomaly(&self) -> Option<Anomaly> {
+        let mut seen = [0usize; 3];
+        for (_, outcome) in &self.entries {
+            seen[*outcome as usize] += 1;
         }
-        if let Some(krate) = trimmed.strip_prefix("Doc-tests ") {
-            finish(&mut log, binary.take(), &mut pending);
-            list = FailuresList::Off;
-            log.binaries += 1;
-            binary = Some(Binary {
-                prefix: format!("{}/doc", krate.replace('_', "-")),
-                entries: Vec::new(),
-                summary: Summary::Missing,
-                failures: Vec::new(),
-            });
-            continue;
-        }
-        if pending.is_none() {
-            for (marker, into) in [
-                (MARKER_PATH, &mut log.paths),
-                (MARKER_REVISION, &mut log.revisions),
-                (MARKER_CONFORMANCE, &mut log.conformance),
-            ] {
-                if let Some(value) = line.strip_prefix(marker) {
-                    into.push(value.trim().to_string());
-                }
-            }
-        }
-        if let Some(rest) = trimmed.strip_prefix("test result: ") {
-            if pending.is_some() {
-                // A nested process's libtest run inside the pending test.
-                continue;
-            }
-            log.summaries += 1;
-            if rest.starts_with("FAILED") {
-                log.failed_binaries += 1;
-            }
-            if list == FailuresList::Names
-                && let Some(b) = binary.as_mut()
-            {
-                b.failures.append(&mut names);
-            }
-            list = FailuresList::Off;
-            names.clear();
-            if let Some(b) = binary.as_mut() {
-                b.summary = counted(rest).map_or_else(
-                    || Summary::Unparseable(rest.chars().take(200).collect()),
-                    Summary::Counted,
-                );
-            }
-            continue;
-        }
-        if trimmed.starts_with(SKIP_MARKER) {
-            log.skips.push(trimmed.to_string());
-            continue;
-        }
-        if pending.is_none() && binary.is_some() {
-            if line == "failures:" {
-                list = FailuresList::Start;
-                names.clear();
-                continue;
-            }
-            match list {
-                FailuresList::Off => {}
-                FailuresList::Start | FailuresList::Names if line.trim().is_empty() => {
-                    if list == FailuresList::Names {
-                        if let Some(b) = binary.as_mut() {
-                            b.failures.append(&mut names);
-                        }
-                        list = FailuresList::Off;
-                    }
-                    continue;
-                }
-                FailuresList::Start | FailuresList::Names => {
-                    match line.strip_prefix("    ") {
-                        Some(name) if !name.starts_with(' ') && !name.is_empty() => {
-                            names.push(name.to_string());
-                            list = FailuresList::Names;
-                        }
-                        _ => {
-                            // `---- name stdout ----` and the like: the
-                            // captured output, not the list of names.
-                            list = FailuresList::Off;
-                            names.clear();
-                        }
-                    }
-                    continue;
-                }
-            }
-        }
-        if let Some(rest) = line.strip_prefix("test ")
-            && let Some((name, result)) = rest.split_once(" ... ")
-        {
-            let Some(b) = binary.as_mut() else {
-                log.anomalies.push(Anomaly {
-                    test: None,
-                    binary: None,
-                    text: format!(
-                        "a result outside any test binary: {}",
-                        trimmed.chars().take(200).collect::<String>()
-                    ),
-                });
-                continue;
-            };
-            let id = format!("{}::{}", b.prefix, normalise(name));
-            if let Some(waiting) = &pending {
-                log.anomalies.push(Anomaly {
-                    test: Some(id.clone()),
-                    binary: None,
-                    text: format!(
-                        "`{id}` reported while `{waiting}` was running: a nested process's line, not attributed"
-                    ),
-                });
-                continue;
-            }
-            match Outcome::read(result) {
-                Some(outcome) => b.entries.push((id, outcome)),
-                None => {
-                    // With one test thread, a live test's skip note lands
-                    // right after libtest's `test <name> ... `.
-                    if let Some(at) = result.find(SKIP_MARKER) {
-                        log.skips.push(format!("{id}: {}", result[at..].trim()));
-                    }
-                    pending = Some(id);
-                }
-            }
-            continue;
-        }
-        if let Some(test) = &pending
-            && let Some(outcome) = Outcome::read(trimmed)
-            && let Some(b) = binary.as_mut()
-        {
-            b.entries.push((test.clone(), outcome));
-            pending = None;
-        }
+        let text = match &self.summary {
+            Summary::Missing => format!(
+                "{} has no `test result:` line: it crashed or the log is cut, so none of its results can be trusted",
+                self.prefix
+            ),
+            Summary::Unparseable(line) => format!(
+                "{}: its `test result:` line does not read as libtest's counts \
+                 (`{line}`), so none of its results can be trusted",
+                self.prefix
+            ),
+            Summary::Counted(counts) if *counts != seen => format!(
+                "{}: libtest counted {} passed, {} failed, {} ignored; the log attributes {}, {}, {}",
+                self.prefix, counts[0], counts[1], counts[2], seen[0], seen[1], seen[2]
+            ),
+            Summary::Counted(_) => return None,
+        };
+        Some(Anomaly {
+            test: None,
+            binary: Some(self.prefix.clone()),
+            text,
+        })
     }
-    if list == FailuresList::Names
-        && let Some(b) = binary.as_mut()
-    {
-        b.failures.append(&mut names);
-    }
-    finish(&mut log, binary.take(), &mut pending);
-    log
 }
 
 impl TestLog {
