@@ -3050,7 +3050,7 @@ fn review_settlement_itself_produces_no_helper_note() {
             quiet(&run, &format!("sleep, observe {observe}, round {round}"));
         }
     }
-    // J4: the target exits only once its background child is asleep in
+    // The target exits only once its background child is asleep in
     // `sleep` itself (`/proc/<pid>/syscall` names clock_nanosleep or
     // nanosleep), so no closed-set call of the child's is in flight when the
     // namespace's teardown kills it. Without that gate the kill could catch
@@ -3059,20 +3059,19 @@ fn review_settlement_itself_produces_no_helper_note() {
     // that strict evidence reports with exit 1 — a timing race in this check,
     // not the settlement quietness it is about (§15: synchronise on protocol
     // events, not timing). `j4_loss_linux` covers that loss on purpose.
+    // The numbers are this architecture's: the gate never opens on a host
+    // whose `sleep` makes a call the script does not name.
+    let asleep = format!(
+        "sleep 30 & \
+         while :; do \
+           read -r nr rest < /proc/$!/syscall 2>/dev/null; \
+           case \"$nr\" in {}|{}) exit 0;; esac; \
+         done",
+        libc::SYS_clock_nanosleep,
+        libc::SYS_nanosleep
+    );
     let c = case("agent");
-    let run = c
-        .jail
-        .target([
-            "/bin/sh",
-            "-c",
-            "sleep 30 & \
-             while :; do \
-               read -r nr rest < /proc/$!/syscall 2>/dev/null; \
-               case \"$nr\" in 230|35) exit 0;; esac; \
-             done",
-        ])
-        .run()
-        .unwrap();
+    let run = c.jail.target(["/bin/sh", "-c", &asleep]).run().unwrap();
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
     let receipt = common::settled(&run);
     assert_eq!(
