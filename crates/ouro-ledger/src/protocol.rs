@@ -7,6 +7,9 @@ use serde_json::Value;
 
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 pub const MAX_CONNECTIONS: usize = 32;
+/// The socket protocol this build speaks. The writer reports it in `ping`;
+/// clients refuse a writer that speaks another.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub struct LedgerError(pub String);

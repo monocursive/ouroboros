@@ -928,11 +928,114 @@ fn concurrent_operator_ingress_and_lost_reply_keep_one_sequence_per_identity() {
     let mut socket = UnixStream::connect(cli.data.join("ledger/serve.sock")).unwrap();
     socket.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
     write_frame(&mut socket, &forged).unwrap();
+    let refused = ouro_ledger::daemon::read_frame::<ouro_ledger::protocol::Response>(&mut socket);
     assert!(
-        ouro_ledger::daemon::read_frame::<ouro_ledger::protocol::Response>(&mut socket).is_err()
+        matches!(&refused, Ok(ouro_ledger::protocol::Response::Error { message })
+            if message.starts_with("unsupported_request:")),
+        "{refused:?}"
     );
     assert_eq!(
         cli.json(&["show", &run_id, "--json"])["chain"]["head_seq"],
         2
     );
+}
+
+#[test]
+fn writer_refuses_undecodable_oversized_and_excess_connections_explicitly() {
+    use ouro_ledger::{
+        daemon::{Client, read_frame, write_frame},
+        protocol::{MAX_CONNECTIONS, MAX_FRAME_BYTES, PROTOCOL_VERSION, Response},
+    };
+    use std::io::{Read as _, Write as _};
+    let mut cli = LocalCli::new();
+    let _writer = cli.start_writer();
+    let socket_path = cli.data.join("ledger/serve.sock");
+    let refusal = |socket: &mut UnixStream| -> String {
+        socket.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
+        match read_frame::<Response>(socket).unwrap() {
+            Response::Error { message } => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    };
+    let closed = |socket: &mut UnixStream| {
+        let mut byte = [0];
+        assert_eq!(socket.read(&mut byte).unwrap(), 0, "connection stays open");
+    };
+    // A request from another protocol version gets a reason, then a close.
+    let mut socket = UnixStream::connect(&socket_path).unwrap();
+    write_frame(&mut socket, &json!({"op":"from_the_future"})).unwrap();
+    assert!(refusal(&mut socket).starts_with("unsupported_request:"));
+    closed(&mut socket);
+    let mut socket = UnixStream::connect(&socket_path).unwrap();
+    socket
+        .write_all(&((MAX_FRAME_BYTES + 1) as u32).to_be_bytes())
+        .unwrap();
+    assert!(refusal(&mut socket).starts_with("invalid_frame:"));
+    closed(&mut socket);
+    // Connections past the bound are told so instead of being dropped.
+    let held: Vec<_> = (0..MAX_CONNECTIONS)
+        .map(|_| UnixStream::connect(&socket_path).unwrap())
+        .collect();
+    let mut excess = UnixStream::connect(&socket_path).unwrap();
+    assert!(refusal(&mut excess).starts_with("writer_busy:"));
+    drop(held);
+    let deadline = Instant::now() + WAIT_LIMIT;
+    let mut client = loop {
+        match Client::connect(&cli.data) {
+            Ok(client) => break client,
+            Err(error) => assert!(Instant::now() < deadline, "{error}"),
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(client.ping().unwrap()["protocol"], PROTOCOL_VERSION);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn writer_keeps_accepting_after_descriptor_exhaustion() {
+    use ouro_ledger::{
+        daemon::{read_frame, write_frame},
+        protocol::{Request, Response},
+    };
+    let mut cli = LocalCli::new();
+    let mut writer = cli.start_writer();
+    let pid = writer.0.id() as libc::pid_t;
+    let mut original = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: both pointers reference live, correctly typed rlimit values.
+    assert_eq!(
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, std::ptr::null(), &mut original) },
+        0
+    );
+    // Descriptors already open stay usable; every new one fails with EMFILE.
+    let exhausted = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: original.rlim_max,
+    };
+    // SAFETY: as above; this lowers only the writer's soft descriptor limit.
+    assert_eq!(
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &exhausted, std::ptr::null_mut()) },
+        0
+    );
+    // The writer cannot take a descriptor for this connection: accept fails.
+    let mut queued = UnixStream::connect(cli.data.join("ledger/serve.sock")).unwrap();
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        writer.0.try_wait().unwrap().is_none(),
+        "the writer exited after a transient accept failure"
+    );
+    // SAFETY: as above; this restores the writer's original limits.
+    assert_eq!(
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &original, std::ptr::null_mut()) },
+        0
+    );
+    queued.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
+    write_frame(&mut queued, &Request::Ping).unwrap();
+    assert!(matches!(
+        read_frame::<Response>(&mut queued).unwrap(),
+        Response::Ok { .. }
+    ));
+    assert!(writer.0.try_wait().unwrap().is_none());
 }
