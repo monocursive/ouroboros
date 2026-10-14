@@ -1,16 +1,10 @@
 //! Capture-only expiry retains canonical events. An exact durable inventory
 //! authorizes deletion, and the terminal chain anchors it to canonical history.
-use super::gc::{
-    RemovedFile, check_member, directory, file_hash, member, publish, read_json, safe_file,
-};
+use super::gc::{self, Authority, RemovedFile, check_member, directory, file_hash, member};
 use super::*;
 use crate::faults::{self, Point};
 use crate::protocol::{CaptureGcReceipt, PrunedHistory};
 use serde::{Deserialize, Serialize};
-
-const ANCHOR: &str = "captures-gc.json";
-const DONE: &str = "captures-gc-done.json";
-const MAX_ANCHOR: usize = 65_536;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,17 +21,7 @@ struct Retained {
     operator: Peer,
     files: Vec<RemovedFile>,
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Envelope {
-    digest: String,
-    retained: Retained,
-}
-
 impl Retained {
-    fn digest(&self) -> Result<String> {
-        digest(&serde_json::to_value(self)?)
-    }
     fn history(&self, complete: bool) -> Result<PrunedHistory> {
         Ok(PrunedHistory {
             state: if complete { "pruned" } else { "pruning" }.into(),
@@ -61,34 +45,6 @@ impl Retained {
         }
         value
     }
-    fn completion(&self) -> Result<Value> {
-        Ok(json!({"schema":schemas::CAPTURE_GC_COMPLETE,"anchor_digest":self.digest()?}))
-    }
-    fn complete(&self, root: &Path) -> Result<bool> {
-        match fs::symlink_metadata(root.join(DONE)) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e.into()),
-            Ok(_) => {
-                if read_json(&root.join(DONE), 1024)? == self.completion()? {
-                    Ok(true)
-                } else {
-                    Err(LedgerError(
-                        "capture GC completion differs from its authority".into(),
-                    ))
-                }
-            }
-        }
-    }
-    fn check_files(&self, root: &Path, complete: bool) -> Result<()> {
-        for file in &self.files {
-            if check_member(root, file)?.2 && complete {
-                return Err(LedgerError(
-                    "pruned capture reappeared after completion".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
     fn receipt(&self) -> Result<CaptureGcReceipt> {
         Ok(CaptureGcReceipt {
             run_id: self.run_id.clone(),
@@ -100,78 +56,94 @@ impl Retained {
     }
 }
 
-fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
-    directory(root)?;
-    match fs::symlink_metadata(root.join(ANCHOR)) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if fs::symlink_metadata(root.join(DONE)).is_ok() {
-                return Err(LedgerError("capture GC completion has no authority".into()));
-            }
-            return Ok(None);
+impl Authority for Retained {
+    const ANCHOR: &'static str = "captures-gc.json";
+    const DONE: &'static str = "captures-gc-done.json";
+    const MAX_ANCHOR: usize = 65_536;
+    const COMPLETE_SCHEMA: &'static str = schemas::CAPTURE_GC_COMPLETE;
+    const ORPHANED: &'static str = "capture GC completion has no authority";
+    const CORRUPT: &'static str = "invalid capture GC authority";
+    const VANISHED: &'static str = "capture GC authority vanished";
+    const CHANGED: &'static str = "capture GC authority changed";
+    const MISMATCH: &'static str = "capture GC completion differs from its authority";
+
+    fn files(&self) -> &[RemovedFile] {
+        &self.files
+    }
+
+    fn validate(&self, _root: &Path, id: &str) -> Result<()> {
+        let r = self;
+        if r.schema != schemas::CAPTURE_GC_ANCHOR
+            || r.run_id != id
+            || r.chain.head_seq == 0
+            || !r
+                .chain
+                .head_digest
+                .as_deref()
+                .is_some_and(crate::protocol::sha256_digest)
+            || !ouro_records::retention::RETAIN_DAYS.contains(&r.retain_days)
+            || r.files.is_empty()
+            || r.files.len() > 3
+            || ![&r.last_activity_at, &r.cutoff, &r.collected_at]
+                .into_iter()
+                .all(|s| crate::reader::utc_second(s))
+            || r.last_activity_at > r.cutoff
+            || r.cutoff >= r.collected_at
+        {
+            return Err(LedgerError("invalid capture GC authority".into()));
         }
-        Err(e) => return Err(e.into()),
-        Ok(_) => {}
-    }
-    let value = read_json(&root.join(ANCHOR), MAX_ANCHOR)?;
-    let envelope: Envelope = serde_json::from_value(value.clone())?;
-    let r = &envelope.retained;
-    if envelope.digest != r.digest()?
-        || serde_json::to_value(&envelope)? != value
-        || r.schema != schemas::CAPTURE_GC_ANCHOR
-        || r.run_id != id
-        || r.chain.head_seq == 0
-        || !r
-            .chain
-            .head_digest
-            .as_deref()
-            .is_some_and(crate::protocol::sha256_digest)
-        || !ouro_records::retention::RETAIN_DAYS.contains(&r.retain_days)
-        || r.files.is_empty()
-        || r.files.len() > 3
-        || ![&r.last_activity_at, &r.cutoff, &r.collected_at]
-            .into_iter()
-            .all(|s| crate::reader::utc_second(s))
-        || r.last_activity_at > r.cutoff
-        || r.cutoff >= r.collected_at
-    {
-        return Err(LedgerError("invalid capture GC authority".into()));
-    }
-    for (i, f) in r.files.iter().enumerate() {
-        let name = match f.path.as_str() {
-            "artifacts/stdout.bin" => "stdout",
-            "artifacts/stderr.bin" => "stderr",
-            "artifacts/argv.bin" => "argv",
-            _ => return Err(LedgerError("unsafe capture GC inventory".into())),
-        };
-        if f.bytes > crate::protocol::MAX_CAPTURE_BYTES
-            || !crate::protocol::sha256_digest(&f.digest)
-            || r.files[..i].iter().any(|other| other.path == f.path)
-            || r.capture[name]["stored_bytes"].as_u64() != Some(f.bytes)
-            || !matches!(
+        for (i, f) in r.files.iter().enumerate() {
+            let name = match f.path.as_str() {
+                "artifacts/stdout.bin" => "stdout",
+                "artifacts/stderr.bin" => "stderr",
+                "artifacts/argv.bin" => "argv",
+                _ => return Err(LedgerError("unsafe capture GC inventory".into())),
+            };
+            if f.bytes > crate::protocol::MAX_CAPTURE_BYTES
+                || !crate::protocol::sha256_digest(&f.digest)
+                || r.files[..i].iter().any(|other| other.path == f.path)
+                || r.capture[name]["stored_bytes"].as_u64() != Some(f.bytes)
+                || !matches!(
+                    r.capture[name]["state"].as_str(),
+                    Some("captured" | "incomplete")
+                )
+            {
+                return Err(LedgerError(
+                    "capture GC inventory differs from recorded capture".into(),
+                ));
+            }
+        }
+        for name in crate::protocol::CAPTURE_STREAMS {
+            if matches!(
                 r.capture[name]["state"].as_str(),
                 Some("captured" | "incomplete")
-            )
-        {
-            return Err(LedgerError(
-                "capture GC inventory differs from recorded capture".into(),
-            ));
+            ) && !r
+                .files
+                .iter()
+                .any(|f| f.path == format!("artifacts/{name}.bin"))
+            {
+                return Err(LedgerError(
+                    "capture GC inventory omits a recorded stream".into(),
+                ));
+            }
         }
+        Ok(())
     }
-    for name in crate::protocol::CAPTURE_STREAMS {
-        if matches!(
-            r.capture[name]["state"].as_str(),
-            Some("captured" | "incomplete")
-        ) && !r
-            .files
-            .iter()
-            .any(|f| f.path == format!("artifacts/{name}.bin"))
-        {
-            return Err(LedgerError(
-                "capture GC inventory omits a recorded stream".into(),
-            ));
+
+    fn check_remaining(&self, root: &Path, complete: bool) -> Result<()> {
+        for file in &self.files {
+            if check_member(root, file)?.2 && complete {
+                return Err(LedgerError(
+                    "pruned capture reappeared after completion".into(),
+                ));
+            }
         }
+        Ok(())
     }
-    Ok(Some(envelope.retained))
+}
+
+fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
+    gc::read(root, id)
 }
 
 /// A read-only projection overlay. `verify` must never resume deletion.
@@ -194,7 +166,7 @@ pub(super) fn apply(root: &Path, stream: &mut Stream) -> Result<()> {
         ));
     }
     let complete = retained.complete(root)?;
-    retained.check_files(root, complete)?;
+    retained.check_remaining(root, complete)?;
     stream.run.capture = retained.capture(complete);
     stream.run.capture_history = Some(retained.history(complete)?);
     Ok(())
@@ -210,7 +182,7 @@ pub(super) fn check_pruned_history(root: &Path, run: &RunRecord) -> Result<()> {
                 && run.capture == r.capture(true)
                 && r.complete(root)? =>
         {
-            r.check_files(root, true)
+            r.check_remaining(root, true)
         }
         _ => Err(LedgerError(
             "capture GC authority differs from retained history".into(),
@@ -253,24 +225,11 @@ impl Store {
                 r
             }
             None => {
-                let verified = self.load_stream_with_sync(id, &File::sync_all)?.0;
-                let live = self.stream(id)?;
-                if !verified.poisoned.is_empty()
-                    || verified.manifest() != live.manifest()
-                    || serde_json::to_value(&verified.run)? != serde_json::to_value(&live.run)?
-                    || verified.replay != live.replay
-                    || !verified.run.holds.is_empty()
-                    || verified.run.capture_history.is_some()
-                    || !verified.retention_time_valid
-                    || verified
-                        .last_activity_at
-                        .as_deref()
-                        .is_none_or(|t| t > cutoff)
-                {
-                    return Err(LedgerError(
-                        "capture GC canonical verification differs from accepted writer state"
-                            .into(),
-                    ));
+                const DIFFERS: &str =
+                    "capture GC canonical verification differs from accepted writer state";
+                let verified = self.verified_for_gc(id, cutoff, DIFFERS)?;
+                if verified.run.capture_history.is_some() {
+                    return Err(LedgerError(DIFFERS.into()));
                 }
                 let files = inventory(&root, &verified.run)?;
                 if files.is_empty() {
@@ -289,13 +248,9 @@ impl Store {
                     operator: peer.clone(),
                     files,
                 };
-                r.check_files(&root, false)?;
+                r.check_remaining(&root, false)?;
                 faults::hit(Point::GcIntentWrite)?;
-                let value = serde_json::to_value(Envelope {
-                    digest: r.digest()?,
-                    retained: r.clone(),
-                })?;
-                if let Err(e) = publish(&root, ANCHOR, &value, MAX_ANCHOR) {
+                if let Err(e) = gc::publish_anchor(&root, &r) {
                     self.poison(
                         id,
                         PoisonKind::Incomplete,
@@ -324,38 +279,7 @@ impl Store {
     }
 
     fn finish_capture_pruning(&self, id: &str, r: &Retained) -> Result<()> {
-        let root = self.root.join(id);
-        let current =
-            read(&root, id)?.ok_or_else(|| LedgerError("capture GC authority vanished".into()))?;
-        if current.digest()? != r.digest()? {
-            return Err(LedgerError("capture GC authority changed".into()));
-        }
-        let complete = r.complete(&root)?;
-        r.check_files(&root, complete)?;
-        safe_file(&root.join(ANCHOR))?.sync_all()?;
-        directory(&root)?.sync_all()?;
-        if !complete {
-            for entry in &r.files {
-                let (parent, name, exists) = check_member(&root, entry)?;
-                if !exists {
-                    continue;
-                }
-                faults::hit(Point::GcBeforeUnlink)?;
-                // SAFETY: only the verified basename in the pinned parent is removed.
-                if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-                    return Err(std::io::Error::last_os_error().into());
-                }
-                faults::hit(Point::GcAfterUnlink)?;
-                parent.sync_all()?;
-                faults::hit(Point::GcDirectorySync)?;
-            }
-            directory(&root.join("artifacts"))?.sync_all()?;
-            directory(&root)?.sync_all()?;
-            faults::hit(Point::GcCompletion)?;
-        }
-        publish(&root, DONE, &r.completion()?, 1024)?;
-        faults::hit(Point::GcCompletionSync)?;
-        Ok(())
+        gc::finish(&self.root.join(id), id, r)
     }
 }
 

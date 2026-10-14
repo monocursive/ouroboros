@@ -3,10 +3,10 @@
 //! only private members relative to pinned directories.
 use std::{ffi::CString, io::Read};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::*;
-use crate::faults::Replaced;
+use crate::faults::{self, Point, Replaced};
 use crate::fsx;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -158,4 +158,166 @@ pub(super) fn publish(root: &Path, name: &str, value: &Value, max: usize) -> Res
         &bytes,
         Replaced::GcRecord,
     )
+}
+
+/// A durable GC authority: an anchor naming the exact files one collection
+/// may delete, published before any deletion, and the completion marker
+/// published after the last one. Both GC paths delete through [`finish`],
+/// so any hardening of the deletion protocol lands once.
+pub(super) trait Authority: Serialize + DeserializeOwned {
+    /// The anchor's and the completion marker's names in the run directory.
+    const ANCHOR: &'static str;
+    const DONE: &'static str;
+    /// The anchor's size bound.
+    const MAX_ANCHOR: usize;
+    /// The completion marker's schema.
+    const COMPLETE_SCHEMA: &'static str;
+    /// Refusals, as each path words them: a completion without its anchor,
+    /// an anchor whose checksum or encoding is wrong, an anchor that
+    /// vanished or changed while this writer held it, and a completion that
+    /// names another anchor.
+    const ORPHANED: &'static str;
+    const CORRUPT: &'static str;
+    const VANISHED: &'static str;
+    const CHANGED: &'static str;
+    const MISMATCH: &'static str;
+
+    /// The files this authority allows deleting.
+    fn files(&self) -> &[RemovedFile];
+
+    /// Refuse an authority that this run could not have produced.
+    fn validate(&self, root: &Path, id: &str) -> Result<()>;
+
+    /// Refuse a run directory whose remaining files contradict the
+    /// authority; once `complete`, no inventoried file may exist.
+    fn check_remaining(&self, root: &Path, complete: bool) -> Result<()>;
+
+    fn digest(&self) -> Result<String> {
+        digest(&serde_json::to_value(self)?)
+    }
+
+    fn completion(&self) -> Result<Value> {
+        Ok(json!({"schema":Self::COMPLETE_SCHEMA,"anchor_digest":self.digest()?}))
+    }
+
+    /// Whether this authority's completion marker is published.
+    fn complete(&self, root: &Path) -> Result<bool> {
+        match fs::symlink_metadata(root.join(Self::DONE)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+            Ok(_) => {
+                if read_json(&root.join(Self::DONE), DONE_BYTES)? != self.completion()? {
+                    return Err(LedgerError(Self::MISMATCH.into()));
+                }
+                Ok(true)
+            }
+        }
+    }
+}
+
+/// The bound on a completion marker: a schema id and one digest.
+const DONE_BYTES: usize = 1024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Envelope<A> {
+    digest: String,
+    retained: A,
+}
+
+/// The authority published in `root`, if any, exactly as published and
+/// valid for run `id`.
+pub(super) fn read<A: Authority>(root: &Path, id: &str) -> Result<Option<A>> {
+    directory(root)?;
+    match fs::symlink_metadata(root.join(A::ANCHOR)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if fs::symlink_metadata(root.join(A::DONE)).is_ok() {
+                return Err(LedgerError(A::ORPHANED.into()));
+            }
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+        Ok(_) => {}
+    }
+    let value = read_json(&root.join(A::ANCHOR), A::MAX_ANCHOR)?;
+    let envelope: Envelope<A> = serde_json::from_value(value.clone())?;
+    if envelope.digest != envelope.retained.digest()? || serde_json::to_value(&envelope)? != value {
+        return Err(LedgerError(A::CORRUPT.into()));
+    }
+    envelope.retained.validate(root, id)?;
+    Ok(Some(envelope.retained))
+}
+
+/// Publish `retained` as the run's authority. Until this returns, nothing
+/// may be deleted; if it fails, whether the anchor is durable is unknown.
+pub(super) fn publish_anchor<A: Authority>(root: &Path, retained: &A) -> Result<()> {
+    let value = serde_json::to_value(Envelope {
+        digest: retained.digest()?,
+        retained,
+    })?;
+    publish(root, A::ANCHOR, &value, A::MAX_ANCHOR)
+}
+
+/// The deletion protocol, resumable from any crash. The published anchor
+/// must still be `retained`; each inventoried file is re-identified and
+/// re-hashed, then unlinked by name in its pinned parent; the completion
+/// marker is published only after every namespace is synchronized.
+pub(super) fn finish<A: Authority>(root: &Path, id: &str, retained: &A) -> Result<()> {
+    let current = read::<A>(root, id)?.ok_or_else(|| LedgerError(A::VANISHED.into()))?;
+    if current.digest()? != retained.digest()? {
+        return Err(LedgerError(A::CHANGED.into()));
+    }
+    let complete = retained.complete(root)?;
+    retained.check_remaining(root, complete)?;
+    // A visible anchor after an interrupted rename is not a completed durability barrier.
+    safe_file(&root.join(A::ANCHOR))?.sync_all()?;
+    directory(root)?.sync_all()?;
+    if !complete {
+        for entry in retained.files() {
+            let (parent, name, exists) = check_member(root, entry)?;
+            if !exists {
+                continue;
+            }
+            faults::hit(Point::GcBeforeUnlink)?;
+            // Only this verified name in its still-pinned parent; a file
+            // that vanished since its check is a change, never a success.
+            if !fsx::unlink_at(&parent, &name)? {
+                return Err(std::io::Error::from_raw_os_error(libc::ENOENT).into());
+            }
+            faults::hit(Point::GcAfterUnlink)?;
+            parent.sync_all()?;
+            faults::hit(Point::GcDirectorySync)?;
+        }
+        // Sync both namespaces even if a preceding unlink survived a crash.
+        directory(&root.join("artifacts"))?.sync_all()?;
+        directory(root)?.sync_all()?;
+        faults::hit(Point::GcCompletion)?;
+    }
+    publish(root, A::DONE, &retained.completion()?, DONE_BYTES)?;
+    faults::hit(Point::GcCompletionSync)?;
+    Ok(())
+}
+
+impl Store {
+    /// The run re-read from its canonical bytes, if it is exactly what this
+    /// writer accepted, unheld, and last active no later than `cutoff`.
+    /// Anything else refuses with `refusal` before any authority exists.
+    pub(super) fn verified_for_gc(&self, id: &str, cutoff: &str, refusal: &str) -> Result<Stream> {
+        let verified = self.load_stream_with_sync(id, &File::sync_all)?.0;
+        let live = self.stream(id)?;
+        if !verified.poisoned.is_empty()
+            || verified.manifest() != live.manifest()
+            || serde_json::to_value(&verified.run)? != serde_json::to_value(&live.run)?
+            || verified.replay != live.replay
+            || !verified.run.holds.is_empty()
+            || !verified.retention_time_valid
+            || verified
+                .last_activity_at
+                .as_deref()
+                .is_none_or(|t| t > cutoff)
+        {
+            return Err(LedgerError(refusal.into()));
+        }
+        Ok(verified)
+    }
 }

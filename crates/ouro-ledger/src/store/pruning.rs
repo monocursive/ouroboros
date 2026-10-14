@@ -2,14 +2,11 @@
 //! inventory; recovery never guesses which missing files or replay ids existed.
 use serde::{Deserialize, Serialize};
 
-use super::gc::{RemovedFile, check_member, directory, publish, read_json, safe_file};
+use super::gc::{self, Authority, RemovedFile, check_member, read_json, safe_file};
 use super::*;
 use crate::faults::{self, Point};
 use crate::protocol::{GcFailure, GcReceipt, GcResult, PrunedHistory};
 
-const ANCHOR: &str = "gc.json";
-const DONE: &str = "gc-done.json";
-const MAX_ANCHOR: usize = 16 * 1024 * 1024;
 const MAX_REPLAYS: usize = 65_536;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -28,17 +25,7 @@ pub(super) struct Retained {
     files: Vec<RemovedFile>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Envelope {
-    digest: String,
-    retained: Retained,
-}
-
 impl Retained {
-    fn digest(&self) -> Result<String> {
-        digest(&serde_json::to_value(self)?)
-    }
     fn history(&self, complete: bool) -> Result<PrunedHistory> {
         Ok(PrunedHistory {
             state: if complete { "pruned" } else { "pruning" }.into(),
@@ -73,23 +60,23 @@ impl Retained {
         }
         Ok(run)
     }
-    fn completion(&self) -> Result<Value> {
-        Ok(json!({"schema":schemas::GC_COMPLETE,"anchor_digest":self.digest()?}))
+}
+
+impl Authority for Retained {
+    const ANCHOR: &'static str = "gc.json";
+    const DONE: &'static str = "gc-done.json";
+    const MAX_ANCHOR: usize = 16 * 1024 * 1024;
+    const COMPLETE_SCHEMA: &'static str = schemas::GC_COMPLETE;
+    const ORPHANED: &'static str = "GC completion is missing its retained authority";
+    const CORRUPT: &'static str = "GC anchor checksum or encoding mismatch";
+    const VANISHED: &'static str = "GC authority vanished";
+    const CHANGED: &'static str = "GC authority changed";
+    const MISMATCH: &'static str = "GC completion does not match its anchor";
+
+    fn files(&self) -> &[RemovedFile] {
+        &self.files
     }
-    fn complete(&self, root: &Path) -> Result<bool> {
-        match fs::symlink_metadata(root.join(DONE)) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e.into()),
-            Ok(_) => {
-                if read_json(&root.join(DONE), 1024)? != self.completion()? {
-                    return Err(LedgerError(
-                        "GC completion does not match its anchor".into(),
-                    ));
-                }
-                Ok(true)
-            }
-        }
-    }
+
     fn validate(&self, root: &Path, id: &str) -> Result<()> {
         validate_frozen("run", &serde_json::to_value(&self.run)?)?;
         if self.schema != schemas::GC_ANCHOR
@@ -211,28 +198,7 @@ impl Retained {
 }
 
 pub(super) fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
-    directory(root)?;
-    match fs::symlink_metadata(root.join(ANCHOR)) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if fs::symlink_metadata(root.join(DONE)).is_ok() {
-                return Err(LedgerError(
-                    "GC completion is missing its retained authority".into(),
-                ));
-            }
-            return Ok(None);
-        }
-        Err(e) => return Err(e.into()),
-        Ok(_) => {}
-    }
-    let value = read_json(&root.join(ANCHOR), MAX_ANCHOR)?;
-    let envelope: Envelope = serde_json::from_value(value.clone())?;
-    if envelope.digest != envelope.retained.digest()? || serde_json::to_value(&envelope)? != value {
-        return Err(LedgerError(
-            "GC anchor checksum or encoding mismatch".into(),
-        ));
-    }
-    envelope.retained.validate(root, id)?;
-    Ok(Some(envelope.retained))
+    gc::read(root, id)
 }
 
 impl Store {
@@ -384,7 +350,7 @@ impl Store {
         peer: &Peer,
     ) -> Result<Retained> {
         let root = self.root.join(id);
-        if fs::symlink_metadata(root.join(ANCHOR)).is_ok() {
+        if fs::symlink_metadata(root.join(Retained::ANCHOR)).is_ok() {
             return Err(LedgerError(
                 "uncertain GC publication requires writer restart".into(),
             ));
@@ -394,24 +360,11 @@ impl Store {
                 "GC replay inventory exceeds its bounded size; run retained".into(),
             ));
         }
-        let verified = self.load_stream_with_sync(id, &File::sync_all)?.0;
-        let live = self.stream(id)?;
-        if !verified.poisoned.is_empty()
-            || verified.manifest() != live.manifest()
-            || serde_json::to_value(&verified.run)? != serde_json::to_value(&live.run)?
-            || verified.replay != live.replay
-            || !verified.run.holds.is_empty()
-            || !verified.retention_time_valid
-            || verified
-                .last_activity_at
-                .as_deref()
-                .is_none_or(|t| t > cutoff)
-        {
-            return Err(LedgerError(
-                "GC canonical verification differs from accepted writer state; nothing removed"
-                    .into(),
-            ));
-        }
+        let verified = self.verified_for_gc(
+            id,
+            cutoff,
+            "GC canonical verification differs from accepted writer state; nothing removed",
+        )?;
         let mut files = Vec::new();
         for segment in &verified.segments {
             let file = safe_file(&root.join(&segment.name))?;
@@ -447,11 +400,7 @@ impl Store {
         retained.validate(&root, id)?;
         retained.check_remaining(&root, false)?;
         faults::hit(Point::GcIntentWrite)?;
-        let value = serde_json::to_value(Envelope {
-            digest: retained.digest()?,
-            retained: retained.clone(),
-        })?;
-        if let Err(error) = publish(&root, ANCHOR, &value, MAX_ANCHOR) {
+        if let Err(error) = gc::publish_anchor(&root, &retained) {
             self.poison(
                 id,
                 PoisonKind::Incomplete,
@@ -469,40 +418,7 @@ impl Store {
     }
 
     fn finish_pruning(&self, id: &str, retained: &Retained) -> Result<()> {
-        let root = self.root.join(id);
-        let current =
-            read(&root, id)?.ok_or_else(|| LedgerError("GC authority vanished".into()))?;
-        if current.digest()? != retained.digest()? {
-            return Err(LedgerError("GC authority changed".into()));
-        }
-        let complete = retained.complete(&root)?;
-        retained.check_remaining(&root, complete)?;
-        // A visible anchor after an interrupted rename is not a completed durability barrier.
-        safe_file(&root.join(ANCHOR))?.sync_all()?;
-        directory(&root)?.sync_all()?;
-        if !complete {
-            for entry in &retained.files {
-                let (parent, name, exists) = check_member(&root, entry)?;
-                if !exists {
-                    continue;
-                }
-                faults::hit(Point::GcBeforeUnlink)?;
-                // SAFETY: delete only this verified basename in its still-pinned parent directory.
-                if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-                    return Err(std::io::Error::last_os_error().into());
-                }
-                faults::hit(Point::GcAfterUnlink)?;
-                parent.sync_all()?;
-                faults::hit(Point::GcDirectorySync)?;
-            }
-            // Sync both namespaces even if a preceding unlink survived a crash.
-            directory(&root.join("artifacts"))?.sync_all()?;
-            directory(&root)?.sync_all()?;
-            faults::hit(Point::GcCompletion)?;
-        }
-        publish(&root, DONE, &retained.completion()?, 1024)?;
-        faults::hit(Point::GcCompletionSync)?;
-        Ok(())
+        gc::finish(&self.root.join(id), id, retained)
     }
 
     pub(super) fn restore_pruned(&self, id: &str, retained: Retained) -> Result<Stream> {
