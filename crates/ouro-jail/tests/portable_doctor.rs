@@ -832,6 +832,23 @@ fn this_hosts_doctor_report_is_valid_against_the_schema() {
     let bundled = Harness::new().json(&["doctor", "--launch", "codex", "--json"]);
     assert_eq!(bundled["launch"]["resolution"], "bundled");
     assert_eq!(schema_errors(&bundled), Vec::<String>::new(), "{bundled:#}");
+    // An operator file of the same name shadows the embedded profile, and
+    // the report still names the resolution in the schema's own words.
+    use std::os::unix::fs::PermissionsExt as _;
+    let harness = Harness::new();
+    let launch = harness.config.join("launch");
+    std::fs::create_dir(&launch).expect("the launch directory");
+    std::fs::set_permissions(&launch, std::fs::Permissions::from_mode(0o700)).expect("private");
+    let file = launch.join("codex.toml");
+    std::fs::write(&file, "name = \"codex\"\njail = \"agent\"\n").expect("a launch file");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("0600");
+    let operator = harness.json(&["doctor", "--launch", "codex", "--json"]);
+    assert_eq!(operator["launch"]["resolution"], "operator file");
+    assert_eq!(
+        schema_errors(&operator),
+        Vec::<String>::new(),
+        "{operator:#}"
+    );
 }
 
 fn examples() -> Vec<(String, serde_json::Value)> {

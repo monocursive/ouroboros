@@ -1003,16 +1003,24 @@ pub fn network_layer(launch: &LaunchProfile) -> Option<Layer> {
 /// canonicalization errors of the snapshot digest.
 pub fn apply(mut resolved: Resolved, launch: &LaunchProfile) -> Result<Resolved, JailError> {
     let origin = format!("launch-profile:{}", launch.name);
+    // `launch.resolution` is the [`LaunchSource`] spelling and nothing else:
+    // `doctor --launch` reports it, and its schema admits exactly those
+    // values. That an operator file hides an embedded profile of the same
+    // name is a fact of its own.
     resolved.provenance.push(ProvenanceEntry {
         origin: origin.clone(),
         key: "launch.resolution".into(),
-        detail: Some(match &launch.source {
-            LaunchSource::OperatorFile { .. } if bundled_profile(&launch.name).is_some() => {
-                "operator file (shadows bundled)".to_owned()
-            }
-            source => source.as_str().to_owned(),
-        }),
+        detail: Some(launch.source.as_str().to_owned()),
     });
+    if matches!(launch.source, LaunchSource::OperatorFile { .. })
+        && bundled_profile(&launch.name).is_some()
+    {
+        resolved.provenance.push(ProvenanceEntry {
+            origin: origin.clone(),
+            key: "launch.shadows".into(),
+            detail: Some(LaunchSource::Bundled.as_str().to_owned()),
+        });
+    }
     for bundle in &launch.bundles {
         resolved.provenance.push(ProvenanceEntry {
             origin: origin.clone(),

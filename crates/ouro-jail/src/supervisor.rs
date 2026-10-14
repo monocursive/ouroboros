@@ -135,7 +135,8 @@ pub struct DoctorReport {
 /// separately." Each credential is named by the profile's own id, mode and
 /// destination; the support status is reported apart from the host probes.
 pub struct LaunchReadiness {
-    /// Embedded data or a trusted operator override.
+    /// `bundled` or `operator file`, the profile's `LaunchSource` spelling
+    /// (the doctor schema's enum).
     pub resolution: String,
     /// The launch profile name.
     pub name: String,

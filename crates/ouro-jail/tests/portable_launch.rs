@@ -635,12 +635,20 @@ jail = "agent"
     let plan = fixture
         .plan(launch_args("codex", &fixture.workspace))
         .unwrap();
-    assert!(
+    // The resolution is the `LaunchSource` spelling `doctor` reports; the
+    // shadowing is recorded beside it.
+    let detail = |key: &str| {
         plan.resolved
             .provenance
             .iter()
-            .any(|p| p.detail.as_deref() == Some("operator file (shadows bundled)"))
+            .find(|p| p.key == key)
+            .and_then(|p| p.detail.clone())
+    };
+    assert_eq!(
+        detail("launch.resolution").as_deref(),
+        Some("operator file")
     );
+    assert_eq!(detail("launch.shadows").as_deref(), Some("bundled"));
 }
 
 // ---------------------------------------------------------------------------
