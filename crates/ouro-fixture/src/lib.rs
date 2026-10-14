@@ -37,6 +37,7 @@ pub mod errno;
 pub mod harness;
 pub mod net;
 pub mod ops;
+pub mod perf;
 pub mod raw;
 pub mod report;
 pub mod sandbox;

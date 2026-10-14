@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use clap::{Args, Subcommand, ValueEnum};
+use ouro_fixture::perf::{HarvestedAttempt, PerfLaunchResult, TraceHarvest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -349,7 +350,11 @@ pub fn cell_seed(seed: u64, session: Session, workload: Workload) -> u64 {
 
 // ------------------------------------------------------------------- records
 
-/// What `ouro-fixture perf-launch` wrote for one launch.
+/// The launcher's facts of one launch, as the raw record keeps them: the
+/// fixture's [`PerfLaunchResult`], read strictly, without its schema, argv
+/// and raw wait status. The defaults here only let raw records written
+/// before a field existed be summarised again; a fresh launch is never
+/// read through them.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct LauncherFacts {
@@ -426,6 +431,72 @@ pub struct TraceFacts {
     pub by_operation: BTreeMap<String, u64>,
     pub notes: BTreeMap<String, u64>,
     pub error: Option<String>,
+}
+
+impl From<PerfLaunchResult> for LauncherFacts {
+    fn from(r: PerfLaunchResult) -> Self {
+        LauncherFacts {
+            pid: i64::from(r.pid),
+            t0_ns: r.t0_ns,
+            exec_ns: r.exec_ns,
+            t1_ns: r.t1_ns,
+            timens: r.timens,
+            exec_errno: r.exec_errno,
+            timed_out: r.timed_out,
+            wait_errno: r.wait_errno,
+            status: ExitFacts {
+                exited: r.status.exited,
+                code: r.status.code,
+                signal: r.status.signal,
+            },
+            rusage: RusageFacts {
+                maxrss_kib: r.rusage.maxrss_kib,
+                utime_us: r.rusage.utime_us,
+                stime_us: r.rusage.stime_us,
+            },
+            sampling: SamplingFacts {
+                interval_ms: r.sampling.interval_ms,
+                samples: r.sampling.samples,
+                hwm_kib: r.sampling.hwm_kib,
+                leaf_path: r.sampling.leaf_path,
+                leaf_peak_bytes: r.sampling.leaf_peak_bytes,
+                leaf_samples: r.sampling.leaf_samples,
+                leaf_note: r.sampling.leaf_note,
+            },
+            attempts: r
+                .attempts
+                .map(|attempts| attempts.into_iter().map(AttemptFacts::from).collect()),
+            cgroup: r.cgroup,
+            waited_via: Some(r.waited_via.as_str().to_owned()),
+        }
+    }
+}
+
+impl From<HarvestedAttempt> for AttemptFacts {
+    fn from(a: HarvestedAttempt) -> Self {
+        let trace = match a.trace {
+            TraceHarvest::Read(c) => TraceFacts {
+                bytes: c.bytes,
+                state: c.state.as_str().to_owned(),
+                frames: c.frames,
+                guard: c.guard,
+                by_source: c.by_source,
+                by_operation: c.by_operation,
+                notes: c.notes,
+                error: None,
+            },
+            TraceHarvest::Unreadable(error) => TraceFacts {
+                error: Some(error),
+                ..TraceFacts::default()
+            },
+        };
+        AttemptFacts {
+            id: a.id,
+            dir: a.dir,
+            receipt: a.receipt,
+            trace,
+        }
+    }
 }
 
 /// The target's own two lines.
@@ -3100,8 +3171,8 @@ fn launch(
         Err(e) => rec.launch_error = Some(format!("perf-launch did not start: {e}")),
     }
     match std::fs::read(&result_path) {
-        Ok(bytes) => match serde_json::from_slice::<LauncherFacts>(&bytes) {
-            Ok(l) => rec.launcher = Some(l),
+        Ok(bytes) => match PerfLaunchResult::parse(&bytes) {
+            Ok(l) => rec.launcher = Some(l.into()),
             Err(e) => {
                 rec.launch_error
                     .get_or_insert(format!("the perf-launch result is unreadable: {e}"));
@@ -3234,6 +3305,96 @@ mod tests {
             },
             ..LauncherFacts::default()
         }
+    }
+
+    /// Review FX1: the launcher's facts are the fixture's own typed result,
+    /// read strictly; a trace that could not be read stays an error.
+    #[test]
+    fn launcher_facts_come_from_the_fixtures_typed_result() {
+        use ouro_fixture::perf::{
+            LaunchRusage, LaunchStatus, PERF_LAUNCH_SCHEMA, Sampling, TraceCompleteness,
+            TraceCounts, WaitedVia,
+        };
+        let result = PerfLaunchResult {
+            schema: PERF_LAUNCH_SCHEMA.to_owned(),
+            argv: vec!["/usr/bin/true".to_owned()],
+            pid: 7,
+            t0_ns: 1,
+            exec_ns: 2,
+            t1_ns: 3,
+            timens: Some("time:[1]".to_owned()),
+            exec_errno: Some("ENOENT".to_owned()),
+            timed_out: true,
+            wait_errno: None,
+            waited_via: WaitedVia::Wnohang,
+            cgroup: Some("/x".to_owned()),
+            status: LaunchStatus {
+                raw: 127 << 8,
+                exited: true,
+                code: Some(127),
+                signal: None,
+            },
+            rusage: LaunchRusage {
+                maxrss_kib: 9,
+                utime_us: 1,
+                stime_us: 2,
+            },
+            sampling: Sampling {
+                interval_ms: 5,
+                samples: 3,
+                hwm_kib: Some(4),
+                leaf_path: None,
+                leaf_peak_bytes: None,
+                leaf_samples: 0,
+                leaf_note: Some("memory.peak: gone".to_owned()),
+            },
+            attempts: Some(vec![
+                HarvestedAttempt {
+                    id: Some("att_1".to_owned()),
+                    dir: "/d/att_1".to_owned(),
+                    receipt: true,
+                    trace: TraceHarvest::Read(TraceCounts {
+                        bytes: 10,
+                        state: TraceCompleteness::Incomplete,
+                        frames: 2,
+                        guard: Some("no final note".to_owned()),
+                        by_source: BTreeMap::from([("audit".to_owned(), 2)]),
+                        by_operation: BTreeMap::new(),
+                        notes: BTreeMap::new(),
+                    }),
+                },
+                HarvestedAttempt {
+                    id: None,
+                    dir: "/d/att_2".to_owned(),
+                    receipt: false,
+                    trace: TraceHarvest::Unreadable("No such file".to_owned()),
+                },
+            ]),
+        };
+        let bytes = serde_json::to_vec(&result).unwrap();
+        let facts = LauncherFacts::from(PerfLaunchResult::parse(&bytes).unwrap());
+        assert_eq!(
+            (facts.pid, facts.t0_ns, facts.exec_ns, facts.t1_ns),
+            (7, 1, 2, 3)
+        );
+        assert_eq!(facts.exec_errno.as_deref(), Some("ENOENT"));
+        assert!(facts.timed_out);
+        assert_eq!(facts.waited_via.as_deref(), Some("wnohang"));
+        assert_eq!(facts.status.code, Some(127));
+        assert_eq!(
+            facts.sampling.leaf_note.as_deref(),
+            Some("memory.peak: gone")
+        );
+        let attempts = facts.attempts.unwrap();
+        assert_eq!(attempts[0].trace.state, "incomplete");
+        assert_eq!(attempts[0].trace.guard.as_deref(), Some("no final note"));
+        assert_eq!(attempts[0].trace.error, None);
+        assert_eq!(attempts[1].trace.error.as_deref(), Some("No such file"));
+        // A result of another schema is not read as this one.
+        let old = String::from_utf8(bytes)
+            .unwrap()
+            .replace(PERF_LAUNCH_SCHEMA, "ouro.fixture.perf-launch/1");
+        assert!(PerfLaunchResult::parse(old.as_bytes()).is_err());
     }
 
     fn complete_attempt() -> AttemptFacts {

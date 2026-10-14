@@ -1,4 +1,4 @@
-//! J5-E: the performance workloads and the per-launch launcher of
+//! The performance workloads and the per-launch launcher of
 //! `cargo xtask perf` (jail-v1 §5), run as real processes.
 //!
 //! `fileops` and `spawn-tree` are the fixed file-operation and the
@@ -240,6 +240,10 @@ fn perf_launch(extra: &[OsString], argv: &[OsString]) -> Launch {
         String::from_utf8_lossy(&out.stderr)
     );
     let bytes = std::fs::read(&result_path).expect("perf-launch writes its result");
+    // What `cargo xtask perf` reads: strictly, every field present.
+    if let Err(e) = ouro_fixture::perf::PerfLaunchResult::parse(&bytes) {
+        panic!("{e}: {}", String::from_utf8_lossy(&bytes));
+    }
     let result: Value = serde_json::from_slice(&bytes).expect("the result is one JSON object");
     Launch { out, result }
 }
@@ -266,7 +270,7 @@ fn perf_launch_brackets_the_command_on_the_clock_the_workload_reads() {
         ],
     );
     let r = &launch.result;
-    assert_eq!(r["schema"], "ouro.fixture.perf-launch/1", "{r:#}");
+    assert_eq!(r["schema"], ouro_fixture::perf::PERF_LAUNCH_SCHEMA, "{r:#}");
     assert_eq!(r["exec_errno"], Value::Null, "{r:#}");
     assert_eq!(r["timed_out"], false);
     assert_eq!(r["status"]["exited"], true, "{r:#}");
@@ -451,7 +455,7 @@ fn perf_launch_finds_the_leaf_from_the_receipt_and_harvests_the_attempt() {
     let a = &attempts[0];
     assert_eq!(a["id"], "att_x");
     assert_eq!(a["receipt"], true);
-    let t = &a["trace"];
+    let t = &a["trace"]["read"];
     assert_eq!(t["state"], "complete", "{r:#}");
     assert_eq!(t["frames"], 4);
     assert_eq!(
@@ -488,7 +492,7 @@ fn perf_launch_says_when_a_trace_does_not_end_on_its_receipt() {
         &["--data-dir".into(), os(&state.path().join("data"))],
         &["/usr/bin/true".into()],
     );
-    let t = &launch.result["attempts"][0]["trace"];
+    let t = &launch.result["attempts"][0]["trace"]["read"];
     assert_eq!(t["state"], "complete", "{t:#}");
     assert!(
         t["guard"]

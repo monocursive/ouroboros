@@ -17,6 +17,9 @@ serde_json = "1"
 # the jail's own renderings of its baselines and backend plans.
 sha2 = "0.10.9"
 ouro-jail = { path = "../ouro-jail" }
+# `perf` reads the fixture's perf-launch result through the type that writes
+# it. No cycle: the fixture depends on neither the jail nor this crate.
+ouro-fixture = { path = "../ouro-fixture" }
 toml = "0.8"
 
 [dev-dependencies]
