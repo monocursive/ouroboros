@@ -216,12 +216,14 @@ fn project_host_narrowing_cannot_name_a_port_the_base_omitted() {
     }
 }
 
-/// A layer's host grants are checked against the network mode that layer
-/// leaves, its own `network.mode` included: the operator's `config.toml`
-/// switching `tool` to `proxy` and listing a host in the same table is one
-/// consistent request (it was refused, while the same two keys in two layers
-/// passed), and a project file switching to `none` while listing hosts asks
-/// for grants nothing would apply.
+/// Host grants exist only under `agent`, the one profile with a proxy, and
+/// within it they are checked against the network mode their layer leaves.
+/// The operator's `config.toml` switching `tool` to `proxy` and listing a
+/// host is refused at the mode, whatever layer kind writes it: the snapshot
+/// would say `proxy` and list the grant while `tool` runs with no network at
+/// all. Under `agent`, a layer that sets `proxy` and lists hosts is one
+/// consistent request, and a project file switching to `none` while listing
+/// hosts asks for grants nothing would apply.
 #[test]
 fn host_grants_follow_the_mode_their_own_layer_sets() {
     let workspace = Workspace::new();
@@ -231,7 +233,12 @@ fn host_grants_follow_the_mode_their_own_layer_sets() {
         network_allow_present: true,
         ..PolicyDelta::default()
     };
-    let resolve = |profile: ProfileName, layer: Layer| {
+    let hosts_only = PolicyDelta {
+        network_allow: vec!["api.example.com".to_owned()],
+        network_allow_present: true,
+        ..PolicyDelta::default()
+    };
+    let resolve = |profile: ProfileName, origin: LayerOrigin, delta: &PolicyDelta| {
         let inputs = ResolveInputs {
             platform: Os::Linux,
             base_profile: profile,
@@ -242,19 +249,54 @@ fn host_grants_follow_the_mode_their_own_layer_sets() {
             vendor_state: None,
             operator_home: None,
             translation_prefixes: Vec::new(),
-            layers: vec![layer],
+            layers: vec![Layer {
+                origin,
+                base_dir: Some(workspace.bytes()),
+                delta: delta.clone(),
+            }],
         };
         ouro_jail::policy::resolve(&inputs)
     };
-    let resolved = resolve(
-        ProfileName::Tool,
-        Layer {
-            origin: LayerOrigin::OperatorConfig("config.toml".to_owned()),
-            base_dir: Some(workspace.bytes()),
-            delta: proxy_with_host,
-        },
-    )
-    .expect("one layer may set the mode and grant under it");
+    let config = || LayerOrigin::OperatorConfig("config.toml".to_owned());
+    for profile in [ProfileName::Tool, ProfileName::Build, ProfileName::None] {
+        let error = resolve(profile, config(), &proxy_with_host)
+            .expect_err("no proxy outside `agent`, whatever a layer writes");
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{profile:?}");
+        assert_eq!(error.key_path.as_deref(), Some("jail.network.mode"));
+        assert!(error.message.contains("no proxy"), "{}", error.message);
+        // A host grant alone refuses too, from every layer that may grant.
+        for (origin, key) in [
+            (config(), "jail.network.allow"),
+            (LayerOrigin::CommandLine, "network.allow"),
+            (
+                LayerOrigin::LaunchProfile("hosts".to_owned()),
+                "launch.network.allow",
+            ),
+        ] {
+            let error =
+                resolve(profile, origin, &hosts_only).expect_err("no proxy grant outside `agent`");
+            assert_eq!(error.code, ErrorCode::InvalidConfig, "{profile:?}");
+            assert_eq!(error.key_path.as_deref(), Some(key));
+            assert!(
+                error.message.contains("rejects proxy grants"),
+                "{}",
+                error.message
+            );
+        }
+    }
+    // The contained profiles never use the host network either.
+    for profile in [ProfileName::Tool, ProfileName::Build, ProfileName::Agent] {
+        let host = PolicyDelta {
+            network_mode: Some(NetworkMode::Host),
+            ..PolicyDelta::default()
+        };
+        let error = resolve(profile, config(), &host).expect_err("no host network");
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{profile:?}");
+        assert_eq!(error.key_path.as_deref(), Some("jail.network.mode"));
+    }
+
+    let resolved = resolve(ProfileName::Agent, config(), &proxy_with_host)
+        .expect("one layer may set the mode and grant under it");
     assert_eq!(resolved.snapshot.network.mode, "proxy");
     assert_eq!(resolved.snapshot.network.allow, ["api.example.com:443"]);
 
@@ -1416,6 +1458,53 @@ fn p02_widening_through_a_launch_profile_refuses_with_its_key_path() {
     assert!(files.plan(&with("agent", "creds")).is_ok());
     assert!(files.plan(&with("agent", "hosts")).is_ok());
     assert!(files.plan(&with("tool", "plain")).is_ok());
+}
+
+/// The live shape of a grant that never applied: the operator's `config.toml`
+/// selects `proxy` and lists a host, and the run says `--profile tool`. `tool`
+/// starts no proxy and has a network namespace of its own, so the snapshot
+/// must not say `proxy` and the receipt must not list `allow_host` beside an
+/// applied network of `none`: resolution refuses at the mode. The same file
+/// resolves under `agent`, where the grant applies.
+#[test]
+fn a_config_file_cannot_give_tool_a_proxy() {
+    let files = Files::new();
+    let config = files.config.join("config.toml");
+    files.write(
+        &config,
+        "[jail.network]\nmode = \"proxy\"\nallow = [\"example.com\"]\n",
+    );
+    for profile in ["tool", "build"] {
+        let error = refuses(
+            files.plan(&files.args(profile)),
+            ErrorCode::InvalidConfig,
+            "jail.network.mode",
+        );
+        assert!(error.message.contains(profile), "{}", error.message);
+    }
+    let plan = files
+        .plan(&files.args("agent"))
+        .expect("`agent` has the proxy the file asks for");
+    assert_eq!(plan.resolved.snapshot.network.mode, "proxy");
+    assert_eq!(plan.resolved.snapshot.network.allow, ["example.com:443"]);
+
+    // Without the mode key, the host grant itself refuses, as does the same
+    // host on the command line.
+    files.write(&config, "[jail.network]\nallow = [\"example.com\"]\n");
+    refuses(
+        files.plan(&files.args("tool")),
+        ErrorCode::InvalidConfig,
+        "jail.network.allow",
+    );
+    std::fs::remove_file(&config).expect("removed");
+    refuses(
+        files.plan(&PolicyArgs {
+            allow_host: vec!["example.com".to_owned()],
+            ..files.args("tool")
+        }),
+        ErrorCode::InvalidConfig,
+        "network.allow",
+    );
 }
 
 /// P02.13: `none` cannot be selected through an untrusted layer — neither a

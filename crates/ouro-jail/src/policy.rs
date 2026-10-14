@@ -1470,6 +1470,9 @@ fn apply_layer(
                 ),
             ));
         }
+        if let Some(reason) = unapplied_network_mode(inputs.base_profile, mode) {
+            return Err(refuse(ErrorCode::InvalidConfig, &key, reason));
+        }
         authority.network_mode = mode;
         provenance.push(ProvenanceEntry {
             origin: layer.origin.label(),
@@ -1483,14 +1486,24 @@ fn apply_layer(
     }
     for raw in &layer.delta.network_allow {
         let key = format!("{prefix}network.allow");
-        // The mode this layer leaves, its own `network.mode` included: a
-        // file that switches to `proxy` and lists hosts is one consistent
-        // request, and one that switches to `none` and lists hosts asks for
+        // §6.1: `tool` and `build` reject proxy grants, whatever mode a layer
+        // writes: only `agent` starts a proxy, so a host rule anywhere else
+        // would be recorded as a grant that never applied.
+        if inputs.base_profile != ProfileName::Agent {
+            return Err(refuse(
+                ErrorCode::InvalidConfig,
+                &key,
+                format!(
+                    "the `{}` profile rejects proxy grants (jail-v1 §6.1); only `agent` has a \
+                     proxy",
+                    inputs.base_profile.as_str()
+                ),
+            ));
+        }
+        // Within `agent`, the mode this layer leaves, its own `network.mode`
+        // included: a file that switches to `none` and lists hosts asks for
         // grants nothing would apply.
         if authority.network_mode != NetworkMode::Proxy {
-            // §6.1: `tool` and `build` reject proxy grants, and a policy with
-            // no proxy has nothing for a host rule to authorize. Accepting it
-            // silently would leave an operator believing a grant applied.
             return Err(refuse(
                 ErrorCode::InvalidConfig,
                 &key,
@@ -1617,6 +1630,31 @@ fn apply_layer(
     }
 
     Ok(())
+}
+
+/// Why `profile` cannot apply the network `mode` a layer asks for, if it
+/// cannot. Only `agent` starts a proxy (§6.1: `tool` and `build` reject proxy
+/// grants), and the contained profiles always run in a network namespace of
+/// their own (§10: "`tool` and `build` have no network proxy and no host
+/// network access"), so `host` is `none`'s alone. A snapshot recording a mode
+/// the boundary never applies would be a grant that never applied. `none`
+/// asking for `none` is left to its requirements, which refuse it as
+/// unsatisfiable (I02).
+fn unapplied_network_mode(profile: ProfileName, mode: NetworkMode) -> Option<String> {
+    match (profile, mode) {
+        (ProfileName::Agent, NetworkMode::Proxy)
+        | (ProfileName::None, NetworkMode::Host)
+        | (_, NetworkMode::None) => None,
+        (_, NetworkMode::Proxy) => Some(format!(
+            "the `{}` profile has no proxy (jail-v1 §6.1); only `agent` does",
+            profile.as_str()
+        )),
+        (_, NetworkMode::Host) => Some(format!(
+            "the `{}` profile runs in a network namespace of its own; only `none` uses the \
+             host network",
+            profile.as_str()
+        )),
+    }
 }
 
 fn build_snapshot(
