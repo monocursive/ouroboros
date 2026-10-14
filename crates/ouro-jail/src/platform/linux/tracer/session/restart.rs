@@ -378,9 +378,43 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::seams::LiveProc;
+    use super::super::tasks::Pending;
     use super::super::testkit::*;
     use super::*;
-    use crate::platform::linux::tracer::{ClosedOp, OpSet, TracerConfig, TracerEvent};
+    use crate::platform::linux::tracer::{
+        Args, ClosedOp, OpSet, TracerConfig, TracerEvent, closed_set,
+    };
+
+    /// The wait keeps the site its call entered at, which is where the
+    /// kernel's re-entry stops again: a re-entry there settles the wait as
+    /// restarted, with no result and no loss, and releases the slot.
+    #[test]
+    fn a_wait_keeps_the_site_its_call_entered_at() {
+        let (mut session, rx) = traced(
+            TracerConfig::default(),
+            &FakeProc::default().task(RECYCLED, RECYCLED, 1000),
+        );
+        let site = Site {
+            arch: abi::AUDIT_ARCH,
+            nr: libc::SYS_openat as u64,
+            ip: 0x40_1004,
+            arg0: 7,
+        };
+        assert_ne!(site, Site::default());
+        let openat = closed_set::lookup(libc::SYS_openat as u64).expect("openat");
+        let call = Call::Closed(Pending::new(openat, Args::default(), [7, 0, 0, 0, 0, 0]));
+        session.begin(RECYCLED, call, site);
+        session.handle_exit(RECYCLED, -sys::ERESTARTSYS);
+        assert_eq!(
+            session.tasks.wait(RECYCLED).map(|wait| wait.site),
+            Some(site)
+        );
+        session.judge_entry_stop(RECYCLED, EntryStop::At(site));
+        assert_eq!(session.summary.restarts, 1);
+        assert_eq!(session.summary.loss.total(), 0);
+        assert!(drained(&rx, &mut session).is_empty());
+        assert_eq!(session.tasks.in_flight(), 0);
+    }
 
     /// J4 O-2: the kernel's rule at a handler's entry, for every restart
     /// code. Only `ERESTARTSYS` depends on the frame, and only the two frames
