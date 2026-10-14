@@ -459,7 +459,7 @@ clause = "Label-only with a gate or attempt id refuses as a usage error"
 tag = "live-cli"
 lane = "macos"
 tests = [
-  "ouro-jail/tests/macos_refusal.rs::usage_errors_exit_two",
+  "ouro-jail/tests/portable_cli_config.rs::usage_errors_exit_two",
 ]
 note = "Proved on the macOS lane only; a Linux copy would let the conformance verdict close X02 by itself."
 
@@ -470,7 +470,7 @@ clause = "An attempt id with a wrong version nibble, a path escape or a non-UUID
 tag = "live-cli"
 lane = "macos"
 tests = [
-  "ouro-jail/tests/macos_refusal.rs::a_malformed_attempt_id_is_a_usage_error_not_a_path",
+  "ouro-jail/tests/portable_cli_config.rs::a_malformed_attempt_id_is_a_usage_error_not_a_path",
 ]
 
 [[clause]]
@@ -2828,6 +2828,7 @@ tests = [
   "ouro-fixture/src/lib.rs::bounded::tests::a_read_never_writes_past_the_buffer_it_was_given",
   "ouro-records/src/lib.rs::canonical::tests::argv_framing_is_length_prefixed_not_delimited",
   "ouro-jail/tests/portable_canonical.rs::p01_both_canonical_inputs_resolve_to_the_golden_snapshot",
+  "ouro-jail/tests/portable_cli_config.rs::usage_errors_exit_two",
   "ouro-jail/tests/portable_gate.rs::x02_a_gate_that_never_delivers_times_out_rather_than_waiting_forever",
   "ouro-jail/tests/portable_gc.rs::j4_c03_a_foreign_os_or_architecture_is_retained",
   "ouro-jail/tests/portable_j4_records.rs::d3::j4_d3_a_pre_created_attempt_root_stays_claimable_after_gc",
@@ -2954,10 +2955,10 @@ tag = "live-cli"
 lane = "macos"
 tests = [
   "ouro-jail/tests/macos_refusal.rs::m03_inspection_commands_use_the_exit_codes_of_section_six_four",
-  "ouro-jail/tests/macos_refusal.rs::usage_errors_exit_two",
-  "ouro-jail/tests/macos_refusal.rs::an_unknown_or_duplicate_configuration_key_refuses",
-  "ouro-jail/tests/macos_refusal.rs::doctor_takes_no_policy_override_flags",
-  "ouro-jail/tests/macos_refusal.rs::m7_gc_refuses_a_state_root_that_is_not_private",
+  "ouro-jail/tests/portable_cli_config.rs::usage_errors_exit_two",
+  "ouro-jail/tests/portable_cli_config.rs::an_unknown_or_duplicate_configuration_key_refuses",
+  "ouro-jail/tests/portable_cli_config.rs::doctor_takes_no_policy_override_flags",
+  "ouro-jail/tests/portable_cli_config.rs::m7_gc_refuses_a_state_root_that_is_not_private",
 ]
 
 [[clause]]
