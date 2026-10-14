@@ -36,7 +36,7 @@ name the tested combinations. Native macOS `ouro-jail` supports inspection
 commands and refuses execution.
 
 You can [build the jail and try a small command](https://github.com/monocursive/ouroboros/blob/dev/docs/guide.md#build-and-check-your-host)
-today. [Signed Linux developer-preview packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
+today. [Signed Linux developer-preview packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2)
 are also available; a Homebrew tap remains unconfigured.
 
 The separate [Ouro VM preview for Apple Silicon](https://ouroboros.monocursive.com/guide/#macos-vm-preview)

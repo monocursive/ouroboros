@@ -21,7 +21,7 @@ Writing an integration? Start with [agents and scripts](#for-agents-and-scripts)
 The same installer detects your platform. The following commands are for Linux;
 Mac users should follow the [Mac quickstart](#macos-vm-preview).
 
-[Ouroboros Jail 0.1.0-rc.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
+[Ouroboros Jail 0.1.0-rc.2](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2)
 ships Linux x86_64 and ARM64 packages. Install your distribution's
 `bubblewrap` package first. The binaries require glibc 2.39 or
 newer; Alpine/musl and macOS execution are unavailable in this preview.
@@ -164,7 +164,7 @@ for the packaged release.
 ## Verify a supplied package
 
 For offline installation, save the [Bash installer](https://ouroboros.monocursive.com/install.sh)
-and the archive for your architecture from the [release](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1).
+and the archive for your architecture from the [release](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2).
 The installer verifies its embedded SHA-256 pin even when the archive comes from
 a local directory. No checksum manifest or signature tool is needed:
 

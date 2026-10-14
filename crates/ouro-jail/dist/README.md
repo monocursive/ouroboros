@@ -4,7 +4,8 @@ The first developer preview targets `monocursive/ouroboros`, with
 `ouro-jail-vVERSION` tags and Linux x86_64/ARM64 packages. The dedicated production
 identity is [release.pub](release.pub).
 [Ouroboros Jail 0.1.0-rc.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
-is the first public signed developer preview.
+was the first public signed developer preview; the current one is
+[0.1.0-rc.2](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2).
 See the [publication procedure](../../../docs/RELEASING.md) for the Bash entry
 point, native `release-candidate` workflow, and draft/publish verification helper.
 The standalone packager below remains useful for local inspection packages.

@@ -22,8 +22,10 @@ credential forwarding, interactive stdin or agent/provider integration.
 The `build` profile explicitly grants the disposable workspace copy read/write;
 this grant is recorded in the Linux policy and receipt.
 
-`prepare.py` downloads a dated Ubuntu 26.04 ARM64 image and the existing
-`0.1.0-rc.1` Linux archive, checks embedded SHA-256 pins, and prepares the guest.
+`prepare.py` downloads a dated Ubuntu 26.04 ARM64 image and the current public
+Linux archive named in `dist/release.json` (`0.1.0-rc.2`; the published
+`0.1.0-preview.1` DMG carries `0.1.0-rc.1`), checks embedded SHA-256 pins, and
+prepares the guest.
 Only that setup VM has NAT networking, for Ubuntu package installation. Package
 versions are recorded inside the guest; apt repositories are not snapshot-pinned,
 so this is not a reproducible release-image builder. It requires Python 3.11+,

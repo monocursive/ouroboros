@@ -15,7 +15,7 @@ agent keeps its own models and workflow.
 [Website](https://ouroboros.monocursive.com/) · [User guide](docs/guide.md) ·
 [Roadmap](docs/roadmap.md) · [Operator reference](docs/specs/jail-v1/operating.md)
 
-**Developer preview 0.1.0-rc.1.** [Signed Linux x86_64 and ARM64 packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
+**Developer preview 0.1.0-rc.2.** [Signed Linux x86_64 and ARM64 packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2)
 are available. The reference x86_64 conformance host and native Raspberry Pi
 checks are recorded; available profiles depend on the host's kernel capabilities.
 Native macOS `ouro-jail` builds provide inspection commands and refuse execution.

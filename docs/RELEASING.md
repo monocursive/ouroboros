@@ -1,5 +1,10 @@
 # Publish an Ouroboros Jail developer preview
 
+[Ouroboros Jail 0.1.0-rc.2](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2) was published on 14 October 2026 from
+`531d252a6c56e0403ae7b1937988f2037e294853`, following the procedure below; its
+[publication record](benchmarks/jail/release-preview-2026-10-14.md) lists the
+exact-commit checks, the clean-VM evidence and the verified installations.
+
 [Ouroboros Jail 0.1.0-rc.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
 was published on 10 October 2026 from
 `06a48d5a2de89d5d0ebffa84a9561d034cdd8b5d`. All eight signed assets were
@@ -103,7 +108,7 @@ skipped reference host or an older passing run is insufficient.
 Set the reviewed coordinates and production key:
 
 ```sh
-release_version=0.1.0-rc.1
+release_version=0.1.0-rc.2
 release_revision=$(git rev-parse HEAD)
 release_public_key=$(sed -n '2p' crates/ouro-jail/dist/release.pub)
 release_private_key="$HOME/.config/ouroboros/release-keys/ouro-jail-2026-10-10.key"

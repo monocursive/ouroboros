@@ -1,7 +1,7 @@
 {
   "repository": "monocursive/ouroboros",
   "jail": {
-    "version": "0.1.0-rc.1",
+    "version": "0.1.0-rc.2",
     "tag_prefix": "ouro-jail-v",
     "publication_scope": "linux-preview",
     "unsupported_clauses": ["K22.2", "K23.1", "K24.1", "K26.1", "K29.1"],
