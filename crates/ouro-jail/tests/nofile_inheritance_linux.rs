@@ -30,45 +30,6 @@ fn private_dir(path: &Path) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-/// This process's `RLIMIT_NOFILE`, lowered for the test and put back after.
-struct SoftNofile(libc::rlimit);
-
-impl SoftNofile {
-    fn read() -> libc::rlimit {
-        let mut limit = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: `limit` is a live, writable rlimit.
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) },
-            0
-        );
-        limit
-    }
-
-    fn set(soft: libc::rlim_t) -> SoftNofile {
-        let old = SoftNofile::read();
-        let lowered = libc::rlimit {
-            rlim_cur: soft.min(old.rlim_max),
-            rlim_max: old.rlim_max,
-        };
-        // SAFETY: a live rlimit; lowering the soft limit within the hard one.
-        assert_eq!(
-            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lowered) },
-            0
-        );
-        SoftNofile(old)
-    }
-}
-
-impl Drop for SoftNofile {
-    fn drop(&mut self) {
-        // SAFETY: restores the rlimit read before the test lowered it.
-        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const self.0) };
-    }
-}
-
 /// The soft `Max open files` the target of a `tool` run over a workspace
 /// with `segments` protected `.git` directories reads from its own
 /// `/proc/self/limits`.
@@ -80,7 +41,7 @@ fn target_soft_limit(segments: usize) -> String {
         private_dir(&workspace.join(format!("r{index}/.git")));
     }
     let marker = workspace.join("limits");
-    let _soft = SoftNofile::set(OPERATOR_SOFT);
+    let _soft = common::SoftNofile::set(OPERATOR_SOFT);
     let run = jail
         .arg("run")
         .arg("--profile")
@@ -115,7 +76,7 @@ fn the_target_keeps_the_operators_descriptor_limit() {
     if !common::live() {
         return;
     }
-    if SoftNofile::read().rlim_max < 4 * OPERATOR_SOFT {
+    if common::SoftNofile::read().rlim_max < 4 * OPERATOR_SOFT {
         harness::skip_or_fail(
             "the hard RLIMIT_NOFILE leaves no room for the supervisor to raise its soft one",
         );

@@ -29,48 +29,9 @@ fn private_dir(path: &Path) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-/// This process's `RLIMIT_NOFILE`, lowered for the test and put back after.
-struct SoftNofile(libc::rlimit);
-
-impl SoftNofile {
-    fn read() -> libc::rlimit {
-        // SAFETY: an all-zero rlimit is a valid value the call overwrites.
-        let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
-        // SAFETY: `limit` is writable storage of the type getrlimit fills.
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) },
-            0
-        );
-        limit
-    }
-
-    fn set(soft: libc::rlim_t) -> SoftNofile {
-        let old = SoftNofile::read();
-        let lowered = libc::rlimit {
-            rlim_cur: soft.min(old.rlim_max),
-            rlim_max: old.rlim_max,
-        };
-        // SAFETY: a valid rlimit that outlives the call; lowering the soft
-        // limit within the hard one needs no privilege.
-        assert_eq!(
-            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lowered) },
-            0
-        );
-        SoftNofile(old)
-    }
-}
-
-impl Drop for SoftNofile {
-    fn drop(&mut self) {
-        // SAFETY: restores the limit read at construction, within the
-        // unchanged hard limit.
-        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const self.0) };
-    }
-}
-
 /// Whether the hard limit leaves the supervisor room above its range.
 fn room_to_raise() -> bool {
-    let room = SoftNofile::read().rlim_max > 1024;
+    let room = common::SoftNofile::read().rlim_max > 1024;
     if !room {
         harness::skip_or_fail("the hard RLIMIT_NOFILE leaves no room above the supervisor's range");
     }
@@ -85,7 +46,7 @@ fn target_soft_limit(profile: &str) -> String {
     let workspace = jail.root().join("workspace");
     private_dir(&workspace);
     let marker = workspace.join("limits");
-    let _soft = SoftNofile::set(OPERATOR_SOFT);
+    let _soft = common::SoftNofile::set(OPERATOR_SOFT);
     let run = jail
         .arg("run")
         .arg("--profile")
@@ -137,7 +98,7 @@ fn an_observed_run_works_below_the_supervisors_descriptor_range() {
 fn doctor_observer_probe(hard: Option<libc::rlim_t>) -> Value {
     use std::os::unix::process::CommandExt as _;
     let jail = Jail::new().unwrap();
-    let _soft = SoftNofile::set(OPERATOR_SOFT);
+    let _soft = common::SoftNofile::set(OPERATOR_SOFT);
     let mut command = Command::new(harness::jail_path());
     command
         .arg("doctor")

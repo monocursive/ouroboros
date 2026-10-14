@@ -43,6 +43,54 @@ pub fn private_tempdir() -> TempDir {
 }
 
 // ---------------------------------------------------------------------------
+// The descriptor limit a run starts from
+// ---------------------------------------------------------------------------
+
+/// This process's `RLIMIT_NOFILE` with its soft limit lowered, which the
+/// jail a test spawns inherits; the old limit is put back on drop.
+pub struct SoftNofile(libc::rlimit);
+
+impl SoftNofile {
+    /// This process's `RLIMIT_NOFILE`.
+    #[must_use]
+    pub fn read() -> libc::rlimit {
+        // SAFETY: an all-zero rlimit is a valid value the call overwrites.
+        let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+        // SAFETY: `limit` is writable storage of the type getrlimit fills.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) },
+            0
+        );
+        limit
+    }
+
+    /// Lowers the soft limit to `soft` (never above the hard limit).
+    #[must_use]
+    pub fn set(soft: libc::rlim_t) -> SoftNofile {
+        let old = SoftNofile::read();
+        let lowered = libc::rlimit {
+            rlim_cur: soft.min(old.rlim_max),
+            rlim_max: old.rlim_max,
+        };
+        // SAFETY: a valid rlimit that outlives the call; lowering the soft
+        // limit within the hard one needs no privilege.
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lowered) },
+            0
+        );
+        SoftNofile(old)
+    }
+}
+
+impl Drop for SoftNofile {
+    fn drop(&mut self) {
+        // SAFETY: restores the limit read at construction, within the
+        // unchanged hard limit.
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const self.0) };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Bounded waits
 // ---------------------------------------------------------------------------
 
