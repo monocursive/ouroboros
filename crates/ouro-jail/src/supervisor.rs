@@ -885,26 +885,32 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
         .all(|requirement| satisfied(requirement, &capabilities));
     // §14.1 launch readiness; a missing or unsafe source
     // makes the plan unavailable (north star §4.5: it refuses the launch).
-    let forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
-    let launch = args.launch.as_ref().map(|name| LaunchReadiness {
-        resolution: plan
-            .resolved
-            .provenance
-            .iter()
-            .find(|p| p.key == "launch.resolution")
-            .and_then(|p| p.detail.clone())
-            .unwrap_or_default(),
-        name: name.clone(),
-        support: LAUNCH_SUPPORT,
-        support_reason: LAUNCH_SUPPORT_REASON,
-        credentials: plan
-            .resolved
-            .snapshot
-            .launch
-            .as_ref()
-            .map(|launch| crate::credentials::inspect(launch, &forbidden))
-            .unwrap_or_default(),
-    });
+    // Only `--launch` has credential sources to place.
+    let launch = match &args.launch {
+        Some(name) => {
+            let forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
+            Some(LaunchReadiness {
+                resolution: plan
+                    .resolved
+                    .provenance
+                    .iter()
+                    .find(|p| p.key == "launch.resolution")
+                    .and_then(|p| p.detail.clone())
+                    .unwrap_or_default(),
+                name: name.clone(),
+                support: LAUNCH_SUPPORT,
+                support_reason: LAUNCH_SUPPORT_REASON,
+                credentials: plan
+                    .resolved
+                    .snapshot
+                    .launch
+                    .as_ref()
+                    .map(|launch| crate::credentials::inspect(launch, &forbidden))
+                    .unwrap_or_default(),
+            })
+        }
+        None => None,
+    };
     let ready = ready
         && launch
             .as_ref()

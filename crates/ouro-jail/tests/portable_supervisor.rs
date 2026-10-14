@@ -206,3 +206,54 @@ fn a_claimed_attempt_always_has_a_receipt() {
     assert_eq!(receipt["phase"], "refused", "{receipt:#}");
     common::assert_semantic_receipt(&receipt);
 }
+
+/// §14.1: plain `doctor` reports the host; only `--launch` has credential
+/// sources whose placement against the writable grants it must judge, so a
+/// grant it cannot inspect is no reason for plain `doctor` to fail.
+#[test]
+fn plain_doctor_never_inspects_credential_placement() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new();
+    let config = fixture.root.join("config");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sealed = fixture.root.join("sealed");
+    std::fs::create_dir_all(sealed.join("inner")).unwrap();
+    let config_file = config.join("config.toml");
+    std::fs::write(
+        &config_file,
+        format!(
+            "[jail.filesystem]\nread_write = [{:?}]\n",
+            sealed.join("inner").display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&config_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // The grant's parent cannot be searched, so its identity cannot be read.
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let context = supervisor::Context {
+        platform: Box::new(Sim::default()),
+        env_settings: EnvSettings {
+            config_dir: Some(config),
+            data_dir: Some(fixture.data()),
+            ..Default::default()
+        },
+        cwd: fixture.workspace.clone(),
+        home: None,
+        env_lookup: Box::new(|_| None),
+    };
+    let cli::Command::Doctor(args) = cli::Cli::parse_from([
+        "ouro-jail",
+        "doctor",
+        "--workspace",
+        fixture.workspace.to_str().unwrap(),
+    ])
+    .command
+    else {
+        unreachable!()
+    };
+    let result = supervisor::doctor(&context, &args);
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let report = result.unwrap_or_else(|error| panic!("plain doctor refused: {error:?}"));
+    assert!(report.launch.is_none());
+}
