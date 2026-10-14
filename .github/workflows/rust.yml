@@ -101,12 +101,14 @@ jobs:
             echo "### ${{ matrix.os }}"
             echo
             if [ -f test-output.txt ]; then
-              count=$(grep -c '^skipped:' test-output.txt || true)
+              # With one test thread a skip note lands on the test's own
+              # line (`test x ... skipped: ...`), so match it anywhere.
+              count=$({ grep -o 'skipped: .*' test-output.txt || true; } | wc -l | tr -d ' ')
               echo "Live tests skipped on this runner: **${count}**"
               if [ "$count" -gt 0 ]; then
                 echo
                 echo '```'
-                grep '^skipped:' test-output.txt | sort | uniq -c
+                grep -o 'skipped: .*' test-output.txt | sort | uniq -c
                 echo '```'
                 echo
                 echo "These are not failures here: §16 lets a generic runner"
