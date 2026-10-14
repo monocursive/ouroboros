@@ -183,15 +183,10 @@ pub(super) fn snapshot(path: &[u8]) -> PathSnapshot {
 
 /// Make `pending` the call `tid` has in flight, as its entry stop would.
 pub(super) fn plant(session: &mut Session, tid: pid_t, pending: Pending) {
-    let state = TaskState::InFlight {
-        call: Call::Closed(pending),
-        site: Site::default(),
-        fresh: false,
-    };
+    assert!(idle(session, tid), "a registered task between calls");
     session
         .tasks
-        .set_state(tid, state)
-        .expect("a registered task");
+        .begin_call(tid, Call::Closed(pending), Site::default(), false);
 }
 
 /// Whether `tid` is between calls, with nothing in flight.

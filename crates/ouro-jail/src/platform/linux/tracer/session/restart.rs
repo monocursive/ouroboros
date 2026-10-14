@@ -4,7 +4,7 @@
 use libc::pid_t;
 
 use super::Session;
-use super::tasks::{Call, TaskState};
+use super::tasks::Call;
 use crate::platform::linux::abi;
 use crate::platform::linux::tracer::{GapReason, sys};
 
@@ -321,7 +321,7 @@ impl Session {
             // not a second time as a restart that never finished (J4 W3,
             // tracer review R2).
             (EntryStop::Killed, Awaiting::Decision | Awaiting::Reentry { by_kernel: true }) => {
-                self.tasks.take_restart(tid);
+                let _ = self.tasks.take_restart(tid);
             }
             _ => self.settle_restart(tid, Verdict::Unknown),
         }
@@ -329,31 +329,26 @@ impl Session {
 
     /// Settle a thread's restart wait with `verdict`.
     pub(super) fn settle_restart(&mut self, tid: pid_t, verdict: Verdict) {
-        let Some(wait) = self.tasks.take_restart(tid) else {
-            return;
-        };
         match verdict {
             Verdict::Restarted => {
                 // The re-entered call is a new entry with its own slot.
-                self.summary.restarts += 1;
+                if self.tasks.take_restart(tid).is_some() {
+                    self.summary.restarts += 1;
+                }
             }
             Verdict::Interrupted => {
                 // The call's result is EINTR, delivered as any other result:
                 // back in flight, to its exit.
-                self.summary.interrupted += 1;
-                self.tasks.set_state(
-                    tid,
-                    TaskState::InFlight {
-                        call: wait.call,
-                        site: wait.site,
-                        fresh: false,
-                    },
-                );
-                self.handle_exit(tid, -i64::from(libc::EINTR));
+                if self.tasks.end_wait_into_call(tid) {
+                    self.summary.interrupted += 1;
+                    self.handle_exit(tid, -i64::from(libc::EINTR));
+                }
             }
             Verdict::Unknown => {
-                self.summary.loss.restart_unresolved += 1;
-                self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
+                if let Some(wait) = self.tasks.take_restart(tid) {
+                    self.summary.loss.restart_unresolved += 1;
+                    self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
+                }
             }
         }
     }

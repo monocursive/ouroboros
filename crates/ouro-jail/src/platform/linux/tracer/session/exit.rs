@@ -5,7 +5,6 @@ use libc::pid_t;
 
 use super::Session;
 use super::evidence::path_corroborated;
-use super::restart::{Awaiting, RestartWait};
 use super::seams::path_has_marker;
 use super::tasks::{Call, Pending, TaskState};
 use crate::platform::linux::tracer::closed_set::{self, ClosedOp, FlagSource};
@@ -55,28 +54,18 @@ impl Session {
     /// flight, which becomes one result or one gap — or, with a kernel
     /// restart code, a wait for the kernel's decision.
     pub(super) fn handle_exit(&mut self, tid: pid_t, rval: i64) {
-        let Some((call, site)) = self.tasks.take_call(tid) else {
+        // A restart code is not a result yet (J4 O-2): the kernel decides
+        // after this stop whether to re-enter the call or to return EINTR,
+        // and the call stays in flight until the observer has seen which.
+        if sys::is_restart(rval) && self.tasks.start_wait(tid, -rval) {
+            return;
+        }
+        let Some(call) = self.tasks.take_call(tid) else {
             // A syscall exit with no entry to pair it with: either the entry
             // was never seen or this thread is not one we track.
             self.unmatched_exit();
             return;
         };
-        if sys::is_restart(rval) {
-            // Not a result yet (J4 O-2): the kernel decides after this stop
-            // whether to re-enter the call or to return EINTR, and the call
-            // stays in flight until the observer has seen which.
-            self.tasks.set_state(
-                tid,
-                TaskState::Restarting(RestartWait {
-                    call,
-                    code: -rval,
-                    site,
-                    delivered: None,
-                    awaiting: Awaiting::Decision,
-                }),
-            );
-            return;
-        }
         match call {
             Call::Closed(pending) => self.closed_returned(tid, pending, rval),
             Call::Foreign => self.foreign_returned(rval),

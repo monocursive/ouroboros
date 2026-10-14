@@ -7,7 +7,7 @@ use std::time::Instant;
 use libc::pid_t;
 
 use super::owed::Owed;
-use super::restart::{RestartWait, Site};
+use super::restart::{Awaiting, RestartWait, Site};
 use super::{KILL_GRACE, Session};
 use crate::platform::linux::tracer::closed_set::{ClosedOp, Entry};
 use crate::platform::linux::tracer::sys;
@@ -63,9 +63,14 @@ impl TaskState {
 /// The traced threads by tid, and how many of them hold an in-flight slot.
 ///
 /// A thread holds a slot exactly while its state is not
-/// [`TaskState::Idle`]. A state is changed or dropped only here, and every
-/// change keeps the count with it, so the count cannot drift from the
-/// states it counts; a slot is released in one place, [`Tasks::release`].
+/// [`TaskState::Idle`]. A state is changed or dropped only here, by a named
+/// transition that keeps the count with it, so the count cannot drift from
+/// the states it counts: a slot is taken in one place,
+/// [`Tasks::begin_call`], and released in one, [`Tasks::release`]. No
+/// transition puts one call or wait in the place of another: the only moves
+/// between the two states that hold a slot carry the same call
+/// ([`Tasks::start_wait`], [`Tasks::end_wait_into_call`]), and a call is
+/// begun only on a thread between calls.
 #[derive(Default)]
 pub(super) struct Tasks {
     map: HashMap<pid_t, Task>,
@@ -99,19 +104,20 @@ impl Tasks {
     }
 
     /// Track `tid`, a thread of `tgid` born at `start_ticks`, between calls.
+    /// A tid already tracked keeps its task and whatever it has in flight:
+    /// registering a thread twice is the caller's mistake, never a new
+    /// thread that could hide the old one's call.
     pub(super) fn insert(&mut self, tid: pid_t, tgid: pid_t, start_ticks: Option<u64>) {
-        self.remove(tid);
-        self.map.insert(
-            tid,
-            Task {
-                tgid,
-                start_ticks,
-                state: TaskState::Idle,
-            },
-        );
+        debug_assert!(!self.map.contains_key(&tid), "tid {tid} is already tracked");
+        self.map.entry(tid).or_insert(Task {
+            tgid,
+            start_ticks,
+            state: TaskState::Idle,
+        });
     }
 
     /// Stop tracking `tid`, releasing the slot its state held.
+    #[must_use]
     pub(super) fn remove(&mut self, tid: pid_t) -> Option<Task> {
         let task = self.map.remove(&tid)?;
         if task.state.holds_slot() {
@@ -120,20 +126,78 @@ impl Tasks {
         Some(task)
     }
 
-    /// Put `tid` into `state` and return the state it leaves; `None`, with
-    /// nothing changed, when `tid` is not tracked. Entering a state that
-    /// holds a slot from one that does not takes a slot, and the other way
-    /// round releases it.
-    pub(super) fn set_state(&mut self, tid: pid_t, state: TaskState) -> Option<TaskState> {
-        let task = self.map.get_mut(&tid)?;
-        let takes = state.holds_slot();
-        let left = std::mem::replace(&mut task.state, state);
-        match (left.holds_slot(), takes) {
-            (false, true) => self.in_flight += 1,
-            (true, false) => self.release(),
-            _ => {}
+    /// Put `call`, which entered the kernel at `site`, in flight for `tid`,
+    /// taking its slot; `fresh` when it was taken at the stop not yet
+    /// resumed.
+    ///
+    /// Only a thread between calls begins one. A thread that still has a
+    /// call or a restart wait is refused and keeps it — the callers end
+    /// either first, and refusing is what keeps an unended one from
+    /// vanishing without the gap its end records — so the refused call is
+    /// never paired, and its exit is an `unmatched_exit` gap.
+    pub(super) fn begin_call(&mut self, tid: pid_t, call: Call, site: Site, fresh: bool) {
+        let Some(task) = self.map.get_mut(&tid) else {
+            return;
+        };
+        debug_assert!(
+            matches!(task.state, TaskState::Idle),
+            "tid {tid} begins a call with one in flight or a restart owed"
+        );
+        if matches!(task.state, TaskState::Idle) {
+            task.state = TaskState::InFlight { call, site, fresh };
+            self.in_flight += 1;
         }
-        Some(left)
+    }
+
+    /// Turn the call `tid` has in flight into a wait for the kernel's
+    /// decision on the restart `code` (J4 O-2). The wait keeps the call, the
+    /// site it entered at — where a re-entry stops again — and its slot.
+    /// False, with nothing changed, when `tid` has no call in flight.
+    #[must_use]
+    pub(super) fn start_wait(&mut self, tid: pid_t, code: i64) -> bool {
+        let Some(task) = self.map.get_mut(&tid) else {
+            return false;
+        };
+        match std::mem::replace(&mut task.state, TaskState::Idle) {
+            TaskState::InFlight { call, site, .. } => {
+                task.state = TaskState::Restarting(RestartWait {
+                    call,
+                    code,
+                    site,
+                    delivered: None,
+                    awaiting: Awaiting::Decision,
+                });
+                true
+            }
+            other => {
+                task.state = other;
+                false
+            }
+        }
+    }
+
+    /// End the restart wait of `tid` with its call back in flight, keeping
+    /// its slot: the kernel returned `EINTR`, which is the call's result.
+    /// False, with nothing changed, when `tid` has no wait.
+    #[must_use]
+    pub(super) fn end_wait_into_call(&mut self, tid: pid_t) -> bool {
+        let Some(task) = self.map.get_mut(&tid) else {
+            return false;
+        };
+        match std::mem::replace(&mut task.state, TaskState::Idle) {
+            TaskState::Restarting(wait) => {
+                task.state = TaskState::InFlight {
+                    call: wait.call,
+                    site: wait.site,
+                    fresh: false,
+                };
+                true
+            }
+            other => {
+                task.state = other;
+                false
+            }
+        }
     }
 
     fn release(&mut self) {
@@ -141,14 +205,27 @@ impl Tasks {
         self.in_flight = self.in_flight.saturating_sub(1);
     }
 
-    /// The call `tid` has in flight and where it entered, leaving the
-    /// thread between calls; `None`, with nothing changed, when it has none.
-    pub(super) fn take_call(&mut self, tid: pid_t) -> Option<(Call, Site)> {
+    /// Whatever `tid` had — a call in flight, a restart wait, or nothing —
+    /// leaving it between calls; `None` when `tid` is not tracked.
+    #[must_use]
+    pub(super) fn take_state(&mut self, tid: pid_t) -> Option<TaskState> {
+        let task = self.map.get_mut(&tid)?;
+        let left = std::mem::replace(&mut task.state, TaskState::Idle);
+        if left.holds_slot() {
+            self.release();
+        }
+        Some(left)
+    }
+
+    /// The call `tid` has in flight, leaving the thread between calls;
+    /// `None`, with nothing changed, when it has none.
+    #[must_use]
+    pub(super) fn take_call(&mut self, tid: pid_t) -> Option<Call> {
         let task = self.map.get_mut(&tid)?;
         match std::mem::replace(&mut task.state, TaskState::Idle) {
-            TaskState::InFlight { call, site, .. } => {
+            TaskState::InFlight { call, .. } => {
                 self.release();
-                Some((call, site))
+                Some(call)
             }
             other => {
                 task.state = other;
@@ -159,6 +236,7 @@ impl Tasks {
 
     /// The restart wait of `tid`, leaving the thread between calls; `None`,
     /// with nothing changed, when it has none.
+    #[must_use]
     pub(super) fn take_restart(&mut self, tid: pid_t) -> Option<RestartWait> {
         let task = self.map.get_mut(&tid)?;
         match std::mem::replace(&mut task.state, TaskState::Idle) {

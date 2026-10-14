@@ -119,7 +119,7 @@ impl Session {
     /// entry is in hand.
     fn end_leaders_flight(&mut self, tid: pid_t, non_leader: bool) {
         if non_leader {
-            match self.tasks.set_state(tid, TaskState::Idle) {
+            match self.tasks.take_state(tid) {
                 Some(TaskState::InFlight { call, .. }) => {
                     self.summary.loss.abandoned_entries += 1;
                     self.gap(GapReason::EntryAbandoned, call.ops(), Some(1));
@@ -174,14 +174,7 @@ impl Session {
     /// transition's, not a second result.
     fn confirm_entry(&mut self, tid: pid_t, carried: Option<(Call, Site)>) -> ExecEntry {
         if let Some((call, site)) = carried {
-            self.tasks.set_state(
-                tid,
-                TaskState::InFlight {
-                    call,
-                    site,
-                    fresh: false,
-                },
-            );
+            self.tasks.begin_call(tid, call, site, false);
         }
         let rules = !self.config.commands.is_empty();
         let Some(Call::Closed(pending)) = self.tasks.call_mut(tid) else {
@@ -223,9 +216,9 @@ impl Session {
             evidence.image.as_ref().map(|image| image.path.as_slice()),
         )?);
         // The exec was observed whole and its event carries the verdict,
-        // so its entry leaves flight here: the death that follows has no
-        // call to abandon.
-        self.tasks.take_call(tid);
+        // so its entry leaves flight here, with nothing to account for: the
+        // death that follows has no call to abandon.
+        let _ = self.tasks.take_call(tid);
         if !Self::kill_tracee(tid) {
             // The hit is live: the process dies before its image runs an
             // instruction — after `evidence` was read, so the event keeps

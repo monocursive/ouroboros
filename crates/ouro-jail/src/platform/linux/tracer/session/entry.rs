@@ -5,7 +5,7 @@ use libc::pid_t;
 
 use super::Session;
 use super::restart::{Site, Verdict};
-use super::tasks::{Call, Pending, TaskState};
+use super::tasks::{Call, Pending};
 use crate::platform::linux::tracer::closed_set::{self, ClosedOp, Entry, FlagSource};
 use crate::platform::linux::tracer::{Args, GapReason, OpSet, filter, sys};
 use crate::platform::linux::{abi, seccomp};
@@ -289,20 +289,13 @@ impl Session {
             // `handle_restart_stop`, so this is out of sequence.
             self.settle_restart(tid, Verdict::Unknown);
         }
-        if let Some((replaced, _)) = self.tasks.take_call(tid) {
+        if let Some(replaced) = self.tasks.take_call(tid) {
             // The previous entry for this thread never returned, and the gap
             // names the call it was (§11.4).
             self.summary.loss.abandoned_entries += 1;
             self.gap(GapReason::EntryAbandoned, replaced.ops(), Some(1));
         }
-        self.tasks.set_state(
-            tid,
-            TaskState::InFlight {
-                call,
-                site,
-                fresh: true,
-            },
-        );
+        self.tasks.begin_call(tid, call, site, true);
     }
 
     /// A stop for a number the narrowing filter never traces. The trace
@@ -339,9 +332,64 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tasks::{Task, TaskState};
     use super::super::testkit::*;
     use super::*;
     use crate::platform::linux::tracer::TracerConfig;
+
+    /// A new entry is the thread's next call, so whatever it still owed is
+    /// over first: a restart decision never seen is one unresolved gap of
+    /// its call's classes, and a call that never returned is one abandoned
+    /// entry. Only then does the new call take the thread's one slot.
+    #[test]
+    fn a_new_entry_ends_what_its_thread_still_owed_before_it_begins() {
+        let (mut session, rx) = traced(
+            TracerConfig::default(),
+            &FakeProc::default().task(RECYCLED, RECYCLED, 1000),
+        );
+        let in_flight = |session: &Session| {
+            session
+                .tasks
+                .get(RECYCLED)
+                .map(Task::state)
+                .and_then(|state| match state {
+                    TaskState::InFlight { call, .. } => Some(call.ops()),
+                    _ => None,
+                })
+        };
+        waiting(&mut session, RECYCLED, libc::SYS_openat as u64, "/w/fifo");
+        session.begin(RECYCLED, Call::Untraced, Site::default());
+        assert_eq!(
+            gaps_of(&drained(&rx, &mut session)),
+            vec![(
+                GapReason::RestartUnresolved,
+                OpSet::of(ClosedOp::Open),
+                Some(1)
+            )]
+        );
+        assert_eq!(in_flight(&session), Some(OpSet::ALL), "the new call");
+        assert_eq!(session.tasks.in_flight(), 1);
+        pend_instead(&mut session);
+        assert_eq!(
+            gaps_of(&drained(&rx, &mut session)),
+            vec![(GapReason::EntryAbandoned, OpSet::ALL, Some(1))]
+        );
+        assert_eq!(
+            in_flight(&session),
+            Some(OpSet::of(ClosedOp::Mkdir)),
+            "the call that replaced it"
+        );
+        assert_eq!(session.tasks.in_flight(), 1);
+        assert_eq!(session.summary.loss.restart_unresolved, 1);
+        assert_eq!(session.summary.loss.abandoned_entries, 1);
+    }
+
+    /// A `mkdirat` entered while the untraced clone is still in flight.
+    fn pend_instead(session: &mut Session) {
+        let mkdirat = closed_set::lookup(u64::from(abi::nr(258, 34))).expect("mkdirat");
+        let call = Call::Closed(Pending::new(mkdirat, Args::default(), [0; 6]));
+        session.begin(RECYCLED, call, Site::default());
+    }
 
     /// Security 2026-09-25-2 (audit S1), mutation-B10 guard: the entry
     /// filter never takes an `openat2`, whatever its flags claim — its
