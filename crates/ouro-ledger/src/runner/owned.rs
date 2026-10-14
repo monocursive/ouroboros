@@ -169,6 +169,38 @@ mod admission {
             Ok(())
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn admission_binds_only_the_executing_image_the_request_was_prepared_with() {
+            let program = "/bin/sleep";
+            let prepared = || Prepared {
+                receipt: Value::Null,
+                receipt_digest: String::new(),
+                policy_digest: String::new(),
+            };
+            let image = image_digest(&File::open(program).unwrap()).unwrap();
+            let other = format!("sha256:{}", "0".repeat(64));
+            assert_ne!(image, other);
+            let mut child = std::process::Command::new(program)
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let bound = prepared().bind_image(pid, &image).map(drop);
+            let refused = prepared().bind_image(pid, &other).map(drop);
+            child.kill().unwrap();
+            child.wait().unwrap();
+            bound.unwrap();
+            assert_eq!(
+                refused.unwrap_err().message(),
+                "executing jail image differs from the prepared image digest"
+            );
+        }
+    }
 }
 
 /// What the owner holds and has learned while it supervises one jail.
