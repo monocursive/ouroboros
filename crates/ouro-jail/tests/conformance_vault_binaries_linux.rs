@@ -9,8 +9,9 @@
 //! that process runs the pinned executable. The pin is the opened file's
 //! identity (device, inode, size and ctime), not its name or its bytes, so
 //! the test pins the system curl and offers the same placeholder from a
-//! byte-identical copy of it and from Python: one attempt, three clients,
-//! one origin that records every `Authorization` value it receives.
+//! byte-identical copy of it and from Python, then from the pinned curl:
+//! one attempt, three clients, one origin that records every
+//! `Authorization` value it receives.
 //!
 //! The secret and its origin are fixtures this file creates; nothing here is
 //! an operator's.
@@ -184,9 +185,12 @@ fn serve(mut stream: TcpStream, seen: &Mutex<Vec<Seen>>) {
 // ---------------------------------------------------------------------------
 
 /// Runs the three clients in turn, each to completion before the next starts,
-/// so the proxy accepts their connections in this order: the pinned curl
-/// (`/pinned`), the byte-identical copy (`/copy`) and the driver's own urllib
-/// (`/python`). Each sends the placeholder as the complete `Authorization`
+/// so the proxy accepts their connections in this order: the byte-identical
+/// copy (`/copy`), the driver's own urllib (`/python`) and the pinned curl
+/// (`/pinned`). The pinned client goes last: a proxy that trusted whichever
+/// process first presented the placeholder would relay the copy's request
+/// and refuse the pinned one, where pinned-first would pass it. Each sends
+/// the placeholder as the complete `Authorization`
 /// value, the placement a credential without a `header` declaration accepts,
 /// through the proxy the agent profile names in the environment. Prints one
 /// JSON line: the placeholder the child held and what each client got back.
@@ -213,9 +217,9 @@ def python(path):
         return {"status": str(error.code), "body": error.read().decode(),
                 "reason": error.headers.get("X-Ouro-Proxy-Reason")}
 out = {"placeholder": placeholder}
-out["pinned"] = curl(pinned, "/pinned")
 out["copy"] = curl(copy, "/copy")
 out["python"] = python("/python")
+out["pinned"] = curl(pinned, "/pinned")
 print(json.dumps(out))
 "#;
 
@@ -332,9 +336,11 @@ fn a_binaries_bound_vault_credential_reaches_only_the_pinned_client() {
     let jail = Jail::new().unwrap();
     let workspace = jail.root().join("workspace");
     private_dir(&workspace.join("bin"));
-    // The impostor: curl's exact bytes under another inode, in the workspace
-    // the child can execute from. Only the inode tells it from the pinned
-    // file, so its denial shows what the pin is.
+    // The impostor: a file named `curl` with curl's exact bytes, in the
+    // workspace the child can execute from. Its name and its bytes match the
+    // pinned file's; its path and its identity (device, inode, ctime) are its
+    // own, so its denial shows the pin is the file's identity and not a
+    // name or content check.
     let copy = workspace.join("bin/curl");
     std::fs::copy(&curl, &copy).unwrap();
     std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -426,7 +432,7 @@ fn a_binaries_bound_vault_credential_reaches_only_the_pinned_client() {
 
     // The trace: one proxy result per connection, in accept order (each
     // client finished before the next connected, so request ids 1, 2 and 3
-    // are the pinned curl, the copy and Python).
+    // are the copy, Python and the pinned curl).
     let events = run.trace_events();
     let proxy: Vec<&Value> = events
         .iter()
@@ -447,7 +453,7 @@ fn a_binaries_bound_vault_credential_reaches_only_the_pinned_client() {
         assert_eq!(event["fields"]["kind"], "http", "{event:#}");
         assert_eq!(event["fields"]["destination"], destination, "{event:#}");
     }
-    let relayed = result(1);
+    let relayed = result(3);
     assert_eq!(relayed["decision"], "allow", "{relayed:#}");
     assert_eq!(relayed["fields"]["reason"], "relayed", "{relayed:#}");
     assert_eq!(
@@ -455,7 +461,7 @@ fn a_binaries_bound_vault_credential_reaches_only_the_pinned_client() {
         "{relayed:#}"
     );
     assert_eq!(relayed["outcome"]["ok"], true, "{relayed:#}");
-    for id in [2, 3] {
+    for id in [1, 2] {
         let denied = result(id);
         assert_eq!(denied["decision"], "deny", "{denied:#}");
         assert_eq!(
