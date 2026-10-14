@@ -96,6 +96,16 @@ pub enum Kind {
     Credential,
 }
 
+impl Kind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Scripted => "scripted",
+            Kind::Credential => "credential",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Gate {
@@ -290,9 +300,12 @@ impl Map {
                 Some(kind) => {
                     if (c.tag == Tag::Credential) != (*kind == Kind::Credential) {
                         p.push(format!(
-                            "{} is tagged {:?} but its gate {} is {:?}: credential clauses belong to credential gates, and only there",
-                            c.id, c.tag, c.gate, kind
-                        ).replace("Credential", "credential"));
+                            "{} is tagged {} but its gate {} is {}: credential clauses belong to credential gates, and only there",
+                            c.id,
+                            c.tag.as_str(),
+                            c.gate,
+                            kind.as_str()
+                        ));
                     }
                 }
             }
@@ -308,15 +321,7 @@ impl Map {
             }
             let evidence = !c.tests.is_empty() || !c.checks.is_empty();
             if matches!(c.tag, Tag::Untested | Tag::Credential) && evidence {
-                p.push(format!(
-                    "{} is {} but lists evidence",
-                    c.id,
-                    if c.tag == Tag::Untested {
-                        "untested"
-                    } else {
-                        "credential"
-                    }
-                ));
+                p.push(format!("{} is {} but lists evidence", c.id, c.tag.as_str()));
             }
             let mut seen = BTreeSet::new();
             for t in &c.tests {
@@ -1193,7 +1198,78 @@ pub struct ClauseVerdict {
     pub tag: Tag,
     pub lane: Lane,
     pub status: ClauseStatus,
-    pub reasons: Vec<String>,
+    pub reasons: Vec<ClauseReason>,
+}
+
+/// Why a clause did not pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClauseReason {
+    /// The clause is tagged `untested`.
+    Untested,
+    /// It names neither a test nor a check, and is not a recorded limit.
+    NoEvidence,
+    /// A listed test is not in the lane's log.
+    Absent { test: String, lane: Lane },
+    /// A listed test FAILED.
+    Failed { test: String },
+    /// A listed test was ignored.
+    Ignored { test: String },
+    /// A listed test is reported more than once.
+    Repeated {
+        test: String,
+        outcomes: Vec<Outcome>,
+    },
+    /// The log cannot be trusted about a listed test (an [`Anomaly`]).
+    Untrusted(String),
+    /// A listed driver check failed.
+    CheckFailed(String),
+    /// A listed driver check was not produced by this run.
+    CheckMissing(String),
+    /// The publication scope reports the clause unsupported.
+    Unsupported { scope: String },
+}
+
+impl std::fmt::Display for ClauseReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClauseReason::Untested => f.write_str(UNTESTED),
+            ClauseReason::NoEvidence => f.write_str("no test or check asserts this clause"),
+            ClauseReason::Absent { test, lane } => {
+                write!(f, "`{test}` is absent from the {} log", lane.as_str())
+            }
+            ClauseReason::Failed { test } => write!(f, "`{test}` FAILED"),
+            ClauseReason::Ignored { test } => write!(f, "`{test}` was ignored"),
+            ClauseReason::Repeated { test, outcomes } => write!(
+                f,
+                "`{test}` is reported {} times ({})",
+                outcomes.len(),
+                outcomes
+                    .iter()
+                    .map(|o| o.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            ClauseReason::Untrusted(text) => f.write_str(text),
+            ClauseReason::CheckFailed(check) => write!(f, "check `{check}` failed"),
+            ClauseReason::CheckMissing(check) => {
+                write!(f, "check `{check}` was not produced by this run")
+            }
+            ClauseReason::Unsupported { scope } => write!(
+                f,
+                "macOS execution is unsupported by the {scope} release; the full specification \
+                 requirement remains open"
+            ),
+        }
+    }
+}
+
+/// The reasons, as one line.
+fn joined(reasons: &[ClauseReason]) -> String {
+    reasons
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1293,32 +1369,23 @@ fn clause_verdict(
         ClauseStatus::Credential
     } else if c.tag == Tag::Untested {
         // Untested in every lane, evaluated or not.
-        reasons.push(UNTESTED.to_string());
+        reasons.push(ClauseReason::Untested);
         ClauseStatus::Fail
     } else if let Some(log) = logs.get(&c.lane) {
-        let lane = c.lane.as_str();
         for t in &c.tests {
+            let test = t.clone();
             match log.results.get(t).map(Vec::as_slice) {
-                None => reasons.push(format!("`{t}` is absent from the {lane} log")),
+                None => reasons.push(ClauseReason::Absent { test, lane: c.lane }),
                 Some([Outcome::Ok]) => {}
-                Some([one]) => reasons.push(format!(
-                    "`{t}` {}",
-                    match one {
-                        Outcome::Failed => "FAILED",
-                        _ => "was ignored",
-                    }
-                )),
-                Some(many) => reasons.push(format!(
-                    "`{t}` is reported {} times ({})",
-                    many.len(),
-                    many.iter()
-                        .map(|o| o.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
+                Some([Outcome::Failed]) => reasons.push(ClauseReason::Failed { test }),
+                Some([Outcome::Ignored]) => reasons.push(ClauseReason::Ignored { test }),
+                Some(many) => reasons.push(ClauseReason::Repeated {
+                    test,
+                    outcomes: many.to_vec(),
+                }),
             }
             for a in log.anomalies_of(t) {
-                reasons.push(a.text.clone());
+                reasons.push(ClauseReason::Untrusted(a.text.clone()));
             }
         }
         for k in &c.checks {
@@ -1330,12 +1397,12 @@ fn clause_verdict(
             };
             match passed {
                 Some(true) => {}
-                Some(false) => reasons.push(format!("check `{k}` failed")),
-                None => reasons.push(format!("check `{k}` was not produced by this run")),
+                Some(false) => reasons.push(ClauseReason::CheckFailed(k.clone())),
+                None => reasons.push(ClauseReason::CheckMissing(k.clone())),
             }
         }
         if c.tests.is_empty() && c.checks.is_empty() && c.tag != Tag::RecordedLimit {
-            reasons.push("no test or check asserts this clause".to_string());
+            reasons.push(ClauseReason::NoEvidence);
         }
         if !reasons.is_empty() {
             ClauseStatus::Fail
@@ -1451,11 +1518,9 @@ fn evaluate_in(
             for clause in &mut clauses {
                 if clause.lane == Lane::Macos && scope.unsupported.contains(&clause.id) {
                     clause.status = ClauseStatus::Unsupported;
-                    clause.reasons = vec![format!(
-                        "macOS execution is unsupported by the {} release; the full \
-                         specification requirement remains open",
-                        scope.name
-                    )];
+                    clause.reasons = vec![ClauseReason::Unsupported {
+                        scope: scope.name.clone(),
+                    }];
                 }
             }
         }
@@ -1547,7 +1612,7 @@ impl Verdict {
         for g in self.gates.iter().filter(|g| g.status == GateStatus::Fail) {
             let mut why: Vec<String> = g.reasons.clone();
             for c in g.clauses.iter().filter(|c| c.status == ClauseStatus::Fail) {
-                why.push(format!("{}: {}", c.id, c.reasons.join("; ")));
+                why.push(format!("{}: {}", c.id, joined(&c.reasons)));
             }
             out.push(format!("gate {} fails: {}", g.id, why.join(" | ")));
         }
@@ -1640,7 +1705,7 @@ impl Verdict {
                             "{} [{}]: {}",
                             c.id,
                             c.tag.as_str(),
-                            c.reasons.join("; ")
+                            joined(&c.reasons)
                         ));
                     }
                     ClauseStatus::Limit => detail.push(format!("{} recorded limit", c.id)),
@@ -1649,7 +1714,7 @@ impl Verdict {
                     }
                     ClauseStatus::Credential => detail.push(format!("{} needs a real agent", c.id)),
                     ClauseStatus::Unsupported => {
-                        detail.push(format!("{} unsupported: {}", c.id, c.reasons.join("; ")))
+                        detail.push(format!("{} unsupported: {}", c.id, joined(&c.reasons)))
                     }
                     ClauseStatus::Pass => {}
                 }
@@ -1715,7 +1780,7 @@ impl Verdict {
                             "checks": mapped.map(|m| m.checks.as_slice()).unwrap_or_default(),
                             "limit": mapped.and_then(|m| m.limit.as_deref()),
                             "note": mapped.and_then(|m| m.note.as_deref()),
-                            "reasons": c.reasons,
+                            "reasons": c.reasons.iter().map(ToString::to_string).collect::<Vec<_>>(),
                         })
                     })
                     .collect();
@@ -3115,40 +3180,44 @@ reason = ""
     #[test]
     fn a_mapped_test_that_is_absent_failed_or_ignored_fails_its_gate() {
         let (map, rows) = mini();
+        let test = "ouro-jail/tests/conformance_j1.rs::x01_literal_argv".to_owned();
         for (log, why) in [
             (
                 MINI_LOG.replace("test x01_literal_argv ... ok\n", ""),
-                "absent",
+                ClauseReason::Absent {
+                    test: test.clone(),
+                    lane: Lane::Linux,
+                },
             ),
             (
                 MINI_LOG.replace(
                     "test x01_literal_argv ... ok",
                     "test x01_literal_argv ... FAILED",
                 ),
-                "FAILED",
+                ClauseReason::Failed { test: test.clone() },
             ),
             (
                 MINI_LOG.replace(
                     "test x01_literal_argv ... ok",
                     "test x01_literal_argv ... ignored",
                 ),
-                "ignored",
+                ClauseReason::Ignored { test: test.clone() },
             ),
             (
                 MINI_LOG.replace(
                     "test x01_literal_argv ... ok",
                     "test x01_literal_argv ... ok\ntest x01_literal_argv ... ok",
                 ),
-                "2 times",
+                ClauseReason::Repeated {
+                    test: test.clone(),
+                    outcomes: vec![Outcome::Ok, Outcome::Ok],
+                },
             ),
         ] {
             let v = evaluate(&map, &rows, &linux(&log), &no_checks());
             let x01 = gate(&v, "X01");
             assert_eq!(x01.status, GateStatus::Fail, "{why}: {x01:#?}");
-            assert!(
-                x01.clauses[0].reasons.iter().any(|r| r.contains(why)),
-                "{why}: {x01:#?}"
-            );
+            assert!(x01.clauses[0].reasons.contains(&why), "{why}: {x01:#?}");
             assert!(
                 v.failures().iter().any(|f| f.starts_with("gate X01 fails")),
                 "{why}: {:#?}",
@@ -3174,8 +3243,7 @@ reason = ""
         assert!(
             gate(&v, "X01").clauses[0]
                 .reasons
-                .iter()
-                .any(|r| r.contains("no test")),
+                .contains(&ClauseReason::Untested),
             "{v:#?}"
         );
 
@@ -3276,11 +3344,9 @@ reason = ""
         let rows = spec_rows(&spec).unwrap();
         let v = evaluate(&map, &rows, &linux(MINI_LOG), &no_checks());
         assert_eq!(gate(&v, "I01").status, GateStatus::Fail);
-        assert!(
-            gate(&v, "I01").clauses[0]
-                .reasons
-                .iter()
-                .any(|r| r.contains("i01_absent") && r.contains("not produced")),
+        assert_eq!(
+            gate(&v, "I01").clauses[0].reasons,
+            [ClauseReason::CheckMissing("i01_absent".into())],
             "{v:#?}"
         );
         let passed = BTreeMap::from([(DriverCheck::I01Absent, true)]);
@@ -3618,7 +3684,10 @@ reason = "an `ignore` doc example"
             let x01 = gate(&v, "X01");
             assert_eq!(x01.status, GateStatus::Fail, "{x01:#?}");
             assert!(
-                x01.clauses[0].reasons.iter().any(|r| r.contains("FAILED")),
+                x01.clauses[0]
+                    .reasons
+                    .iter()
+                    .any(|r| matches!(r, ClauseReason::Failed { .. })),
                 "{x01:#?}"
             );
             assert!(!v.all_noncredential_gates_pass());
@@ -3653,7 +3722,10 @@ reason = "an `ignore` doc example"
         let x01 = gate(&v, "X01");
         assert_eq!(x01.status, GateStatus::Fail, "{x01:#?}");
         assert!(
-            x01.clauses[0].reasons.iter().any(|r| r.contains("counted")),
+            x01.clauses[0]
+                .reasons
+                .iter()
+                .any(|r| matches!(r, ClauseReason::Untrusted(text) if text.contains("counted"))),
             "{x01:#?}"
         );
         assert!(!v.failures().is_empty());
@@ -4236,12 +4308,17 @@ Unrelated prose.
         for g in &v.gates {
             for c in &g.clauses {
                 for r in &c.reasons {
-                    let newer_test = r.ends_with("is absent from the linux log");
                     assert!(
-                        r == UNTESTED
-                            || (r.starts_with("check `")
-                                && r.ends_with("was not produced by this run"))
-                            || newer_test,
+                        matches!(
+                            r,
+                            ClauseReason::Untested
+                                | ClauseReason::CheckMissing(_)
+                                // A test newer than the log.
+                                | ClauseReason::Absent {
+                                    lane: Lane::Linux,
+                                    ..
+                                }
+                        ),
                         "{}: {r}",
                         c.id
                     );
