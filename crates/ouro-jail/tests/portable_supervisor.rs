@@ -55,7 +55,7 @@ impl Platform for Sim {
         plan.requirements
             .iter()
             .map(|name| Capability {
-                name: name.clone(),
+                name: name.to_string(),
                 status: CapabilityStatus::Available,
                 scope: CapabilityScope::Tree,
                 mechanism: Some("simulation".into()),

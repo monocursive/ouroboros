@@ -2166,17 +2166,17 @@ mod tests {
             .collect();
         for (requirement, probes, scope) in [
             (
-                crate::capability::REQ_SYSCALL_FILTER,
+                crate::capability::Requirement::SyscallFilter,
                 &["seccomp_filter_load"][..],
                 CapabilityScope::Process,
             ),
             (
-                crate::capability::REQ_CLOSED_SET_OBSERVATION,
+                crate::capability::Requirement::ClosedSetObservation,
                 &["ptrace_seize_descendant", "observer_closed_set"][..],
                 CapabilityScope::Tree,
             ),
             (
-                crate::capability::REQ_NETWORK_PROXY,
+                crate::capability::Requirement::NetworkProxy,
                 &[
                     "bwrap_present",
                     "network_namespace",

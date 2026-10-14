@@ -70,16 +70,13 @@ use std::time::SystemTime;
 
 use serde_json::{Map, Value};
 
-use crate::capability::{
-    Capability, CapabilityScope, REASON_NOT_APPLIED_BY_NONE, REQ_FILESYSTEM_CONTAINMENT,
-    REQ_NETWORK_NONE, REQ_NETWORK_PROXY, REQ_SYSCALL_FILTER, REQ_TREE_TERMINATION,
-};
+use crate::capability::{Capability, CapabilityScope, REASON_NOT_APPLIED_BY_NONE, Requirement};
 use crate::environment;
 use crate::lifecycle::{BoundaryKind, VerificationScope};
 use crate::platform::{
     BoundaryIdentity, LimitCause, PreparedExecution, PreparedPlan, RunEvent, Sinks, TreeObservation,
 };
-use crate::policy::{EnvValue, PolicySnapshot, ProfileName, ProtectedCoverage};
+use crate::policy::{EnvValue, LimitKey, PolicySnapshot, ProfileName, ProtectedCoverage};
 use crate::records::{
     Applied, AppliedLimit, AppliedNetwork, ErrorCode, ErrorStage, Event, JailError, NativeLifetime,
     ObserveMode, Os, ProcessIdentity as RecordIdentity, ProcessRecord, Remediation,
@@ -123,16 +120,16 @@ pub const TREE_MECHANISM: &str = "cgroup-kill";
 /// Requirements `none` can never satisfy: it mounts, filters and isolates
 /// nothing, so a policy that narrowed it into asking for any of these
 /// refuses (§3.1, I02) instead of running with the restriction dropped.
-fn never_applied(requirement: &str) -> bool {
+fn never_applied(requirement: Requirement) -> bool {
     matches!(
         requirement,
-        REQ_FILESYSTEM_CONTAINMENT
-            | REQ_SYSCALL_FILTER
-            | REQ_NETWORK_NONE
-            | REQ_NETWORK_PROXY
-            | "limit:storage"
-            | "limit:inodes"
-    ) || requirement.starts_with("protected_coverage:")
+        Requirement::FilesystemContainment
+            | Requirement::SyscallFilter
+            | Requirement::NetworkNone
+            | Requirement::NetworkProxy
+            | Requirement::Limit(LimitKey::Storage | LimitKey::Inodes)
+            | Requirement::ProtectedCoverage(_)
+    )
 }
 
 /// The probes a `none` requirement is derived from, where they differ from a
@@ -143,11 +140,14 @@ fn never_applied(requirement: &str) -> bool {
 /// no host can make it available. `None` means "the contained mapping
 /// applies".
 #[must_use]
-pub fn probes_for(profile: ProfileName, requirement: &str) -> Option<&'static [&'static str]> {
+pub fn probes_for(
+    profile: ProfileName,
+    requirement: Requirement,
+) -> Option<&'static [&'static str]> {
     if profile != ProfileName::None {
         return None;
     }
-    if requirement == REQ_TREE_TERMINATION {
+    if requirement == Requirement::TreeTermination {
         return Some(&["cgroup_delegated_leaf"]);
     }
     never_applied(requirement).then_some(&[][..])
@@ -158,13 +158,13 @@ pub fn probes_for(profile: ProfileName, requirement: &str) -> Option<&'static [&
 #[must_use]
 pub fn capability_for(
     profile: ProfileName,
-    requirement: &str,
+    requirement: Requirement,
     results: &[ProbeResult],
     measured_at: &str,
 ) -> Option<Capability> {
     if profile == ProfileName::None && never_applied(requirement) {
         return Some(Capability::unsupported(
-            requirement,
+            requirement.to_string(),
             CapabilityScope::Tree,
             REASON_NOT_APPLIED_BY_NONE,
         ));
@@ -1398,17 +1398,17 @@ mod tests {
     #[test]
     fn none_keeps_the_contained_probes_for_what_it_shares() {
         assert_eq!(
-            probes_for(ProfileName::None, REQ_TREE_TERMINATION),
+            probes_for(ProfileName::None, Requirement::TreeTermination),
             Some(&["cgroup_delegated_leaf"][..])
         );
         for profile in [ProfileName::Tool, ProfileName::Build, ProfileName::Agent] {
-            assert_eq!(probes_for(profile, REQ_TREE_TERMINATION), None);
+            assert_eq!(probes_for(profile, Requirement::TreeTermination), None);
         }
         for requirement in [
-            crate::capability::REQ_EXECUTION_CGROUP,
-            crate::capability::REQ_CLOSED_SET_OBSERVATION,
-            "limit:wall",
-            "limit:pids",
+            Requirement::ExecutionBoundary,
+            Requirement::ClosedSetObservation,
+            Requirement::Limit(LimitKey::Wall),
+            Requirement::Limit(LimitKey::Pids),
         ] {
             assert_eq!(probes_for(ProfileName::None, requirement), None);
         }
@@ -1417,11 +1417,11 @@ mod tests {
     #[test]
     fn restrictions_none_cannot_apply_are_never_available() {
         for requirement in [
-            REQ_FILESYSTEM_CONTAINMENT,
-            REQ_SYSCALL_FILTER,
-            REQ_NETWORK_NONE,
-            REQ_NETWORK_PROXY,
-            "protected_coverage:existing_and_root",
+            Requirement::FilesystemContainment,
+            Requirement::SyscallFilter,
+            Requirement::NetworkNone,
+            Requirement::NetworkProxy,
+            Requirement::ProtectedCoverage(ProtectedCoverage::ExistingAndRoot),
         ] {
             assert_eq!(
                 probes_for(ProfileName::None, requirement),
@@ -1489,7 +1489,7 @@ mod tests {
         assert!(
             capability_for(
                 ProfileName::Tool,
-                REQ_TREE_TERMINATION,
+                Requirement::TreeTermination,
                 &[],
                 "2026-09-22T00:00:00Z"
             )
@@ -1497,7 +1497,7 @@ mod tests {
         );
         let skipped = capability_for(
             ProfileName::None,
-            REQ_TREE_TERMINATION,
+            Requirement::TreeTermination,
             &[],
             "2026-09-22T00:00:00Z",
         )

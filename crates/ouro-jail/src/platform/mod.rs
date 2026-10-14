@@ -116,7 +116,7 @@ pub struct PlanRequest {
     /// The resolved policy; its `profile` is the base profile.
     pub snapshot: PolicySnapshot,
     /// The capability requirements the policy derives.
-    pub requirements: Vec<String>,
+    pub requirements: Vec<crate::capability::Requirement>,
 }
 
 /// Everything a platform needs to build the boundary and the blocked launcher.

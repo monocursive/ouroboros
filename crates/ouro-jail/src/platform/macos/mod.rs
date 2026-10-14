@@ -10,7 +10,7 @@
 //! successful no-op, and none of them measures anything, so no capability row
 //! claims a probe that did not run.
 
-use crate::capability::{Capability, CapabilityScope, CapabilityStatus};
+use crate::capability::{Capability, CapabilityScope, CapabilityStatus, Requirement};
 use crate::platform::{
     PlanRequest, Platform, PlatformIdentity, PreparedExecution, PreparedPlan,
     REASON_UNSUPPORTED_PLATFORM, Sinks, kernel_release,
@@ -34,9 +34,9 @@ impl MacosPlatform {
     }
 
     /// The capability scope a requirement is measured at.
-    fn scope_for(requirement: &str) -> CapabilityScope {
+    fn scope_for(requirement: Requirement) -> CapabilityScope {
         match requirement {
-            "syscall_filter" => CapabilityScope::Process,
+            Requirement::SyscallFilter => CapabilityScope::Process,
             _ => CapabilityScope::Tree,
         }
     }
@@ -56,8 +56,8 @@ impl Platform for MacosPlatform {
         // about this implementation, not a measurement of this host.
         plan.requirements
             .iter()
-            .map(|requirement| Capability {
-                name: requirement.clone(),
+            .map(|&requirement| Capability {
+                name: requirement.to_string(),
                 status: CapabilityStatus::Unsupported,
                 scope: Self::scope_for(requirement),
                 mechanism: None,

@@ -1035,12 +1035,9 @@ fn p02_every_narrowing_category_is_allowed() {
         resolved.snapshot.filesystem.protected_coverage,
         ProtectedCoverage::AllDescendants
     );
-    assert!(
-        resolved
-            .requirements
-            .iter()
-            .any(|requirement| requirement == "protected_coverage:all_descendants")
-    );
+    assert!(resolved.requirements.contains(
+        &ouro_jail::capability::Requirement::ProtectedCoverage(ProtectedCoverage::AllDescendants)
+    ));
 }
 
 #[test]

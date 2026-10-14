@@ -23,7 +23,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::capability::Capability;
+use crate::capability::{Capability, Requirement};
 use crate::platform::{
     PlanRequest, Platform, PlatformIdentity, PreparedExecution, PreparedPlan, Sinks, kernel_release,
 };
@@ -281,14 +281,14 @@ impl Platform for LinuxPlatform {
         // are not free. `doctor` runs them all through `probe_all`.
         // `none` terminates its tree through the delegated leaf (§9.3)
         // Shadows the fn for this call only; the closure falls back to it.
-        let probes_for = |requirement: &str| {
+        let probes_for = |requirement: Requirement| {
             super::uncontained::probes_for(plan.snapshot.profile, requirement)
                 .unwrap_or_else(|| probes_for(requirement))
         };
         let wanted: std::collections::BTreeSet<&str> = plan
             .requirements
             .iter()
-            .flat_map(|requirement| probes_for(requirement).iter().copied())
+            .flat_map(|requirement| probes_for(*requirement).iter().copied())
             .collect();
         self.measure(plan, |name| wanted.contains(name))
     }

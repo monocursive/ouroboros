@@ -6,6 +6,8 @@
 //! means prerequisites are missing. A `skipped` check cannot satisfy a
 //! requirement, which [`satisfies`] enforces.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::network::NetworkMode;
@@ -110,62 +112,103 @@ impl Capability {
     }
 }
 
-/// Requirement identifier for tree-scoped termination.
-pub const REQ_TREE_TERMINATION: &str = "tree_termination";
-/// Requirement identifier for the closed-set observer.
-pub const REQ_CLOSED_SET_OBSERVATION: &str = "closed_set_observation";
-/// Requirement identifier for the filesystem boundary.
-pub const REQ_FILESYSTEM_CONTAINMENT: &str = "filesystem_containment";
-/// Requirement identifier for the syscall filter.
-pub const REQ_SYSCALL_FILTER: &str = "syscall_filter";
-/// Requirement identifier for a fully absent network.
-pub const REQ_NETWORK_NONE: &str = "network_none";
-/// Requirement identifier for the mediating proxy.
-pub const REQ_NETWORK_PROXY: &str = "network_proxy";
-// The portable name (§3.1, I10; decided 2026-09-24)
-/// Requirement identifier for a supervisor-owned execution boundary: a tree
-/// the supervisor can place the target in, bound resources on, kill as a
-/// whole and verify empty. `none` needs it for lifetime, and every explicit
-/// tree ceiling needs it. How a platform provides it is its own plan (on
-/// Linux, a delegated cgroup v2 leaf); the requirement names the semantic.
-pub const REQ_EXECUTION_BOUNDARY: &str = "execution_boundary";
-/// The Linux platform's spelling of [`REQ_EXECUTION_BOUNDARY`], which it
-/// satisfies with a delegated cgroup. The same value: only the Rust name
-/// differs, so the Linux mapping reads in its own vocabulary. Nothing
-/// renders this name; the wire carries `execution_boundary`.
-pub const REQ_EXECUTION_CGROUP: &str = REQ_EXECUTION_BOUNDARY;
-// Credential staging requirement (§12)
-/// Requirement identifier for staging launch credentials: anchored copies
-/// into vendor state and read-only binds of the exact source objects.
-pub const REQ_CREDENTIAL_STAGING: &str = "credential_staging";
+/// A capability requirement a policy derives (§3.1, §6.4).
+///
+/// Its wire spelling ([`fmt::Display`]) is what `explain` and `doctor`
+/// list, what a receipt's `policy.requirements` carries and what the
+/// capability that answers it is named: one spelling, so a requirement is
+/// never re-parsed from its own text.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Requirement {
+    /// `tree_termination`: the attempt's tree can be ended as a whole.
+    TreeTermination,
+    /// `closed_set_observation`: the closed-set observer.
+    ClosedSetObservation,
+    /// `filesystem_containment`: the filesystem boundary.
+    FilesystemContainment,
+    /// `syscall_filter`: the syscall filter.
+    SyscallFilter,
+    /// `network_none`: a fully absent network.
+    NetworkNone,
+    /// `network_proxy`: the mediating proxy.
+    NetworkProxy,
+    // The portable name (§3.1, I10; decided 2026-09-24)
+    /// `execution_boundary`: a supervisor-owned execution boundary, a tree
+    /// the supervisor can place the target in, bound resources on, kill as
+    /// a whole and verify empty. `none` needs it for lifetime, and every
+    /// explicit tree ceiling needs it. How a platform provides it is its own
+    /// plan (on Linux, a delegated cgroup v2 leaf); the requirement names
+    /// the semantic.
+    ExecutionBoundary,
+    /// `credential_staging`: anchored copies of launch credentials into
+    /// vendor state and read-only binds of the exact source objects (§12).
+    CredentialStaging,
+    /// `protected_coverage:<coverage>`: protected segments covered as the
+    /// policy asks.
+    ProtectedCoverage(ProtectedCoverage),
+    /// `limit:<key>`: an explicit, required ceiling.
+    Limit(LimitKey),
+}
+
+impl fmt::Display for Requirement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Requirement::TreeTermination => f.write_str("tree_termination"),
+            Requirement::ClosedSetObservation => f.write_str("closed_set_observation"),
+            Requirement::FilesystemContainment => f.write_str("filesystem_containment"),
+            Requirement::SyscallFilter => f.write_str("syscall_filter"),
+            Requirement::NetworkNone => f.write_str("network_none"),
+            Requirement::NetworkProxy => f.write_str("network_proxy"),
+            Requirement::ExecutionBoundary => f.write_str("execution_boundary"),
+            Requirement::CredentialStaging => f.write_str("credential_staging"),
+            Requirement::ProtectedCoverage(coverage) => {
+                write!(f, "protected_coverage:{}", coverage.as_str())
+            }
+            Requirement::Limit(key) => write!(f, "limit:{}", key.as_str()),
+        }
+    }
+}
+
+impl Serialize for Requirement {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl Requirement {
+    /// Whether `capability` answers this requirement: it carries its name.
+    #[must_use]
+    pub fn answered_by(self, capability: &Capability) -> bool {
+        capability.name == self.to_string()
+    }
+}
 
 /// Derives the capability requirements a snapshot implies (§6.4, §3.1).
 ///
 /// Only requirements are derived here. Whether the host offers them is a
 /// separate measurement, which `explain` explicitly reports as unmeasured.
 #[must_use]
-pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
-    let mut out = vec![REQ_TREE_TERMINATION.to_owned()];
+pub fn requirements(snapshot: &PolicySnapshot) -> Vec<Requirement> {
+    let mut out = vec![Requirement::TreeTermination];
     if snapshot.observation.mode == ObserveMode::On {
-        out.push(REQ_CLOSED_SET_OBSERVATION.to_owned());
+        out.push(Requirement::ClosedSetObservation);
     }
     if snapshot.profile.is_contained() {
-        out.push(REQ_FILESYSTEM_CONTAINMENT.to_owned());
-        out.push(REQ_SYSCALL_FILTER.to_owned());
+        out.push(Requirement::FilesystemContainment);
+        out.push(Requirement::SyscallFilter);
     }
     match snapshot.network.mode {
         NetworkMode::None if snapshot.profile.is_contained() => {
-            out.push(REQ_NETWORK_NONE.to_owned());
+            out.push(Requirement::NetworkNone);
         }
-        NetworkMode::Proxy => out.push(REQ_NETWORK_PROXY.to_owned()),
+        NetworkMode::Proxy => out.push(Requirement::NetworkProxy),
         NetworkMode::None | NetworkMode::Host => {}
     }
     // Restrictions `none` cannot apply are requirements it refuses
     out.extend(none_restrictions(snapshot));
     if snapshot.filesystem.protected_coverage != ProtectedCoverage::None {
-        out.push(format!(
-            "protected_coverage:{}",
-            snapshot.filesystem.protected_coverage.as_str()
+        out.push(Requirement::ProtectedCoverage(
+            snapshot.filesystem.protected_coverage,
         ));
     }
     // §4.9 of the north star: `none` still needs an execution boundary the
@@ -185,7 +228,7 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
         if let Some(ceiling) = ceiling
             && ceiling.required
         {
-            out.push(format!("limit:{}", key.as_str()));
+            out.push(Requirement::Limit(key));
             if matches!(
                 key,
                 LimitKey::Pids | LimitKey::Mem | LimitKey::Swap | LimitKey::Cpu
@@ -195,7 +238,7 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
         }
     }
     if needs_cgroup {
-        out.push(REQ_EXECUTION_BOUNDARY.to_owned());
+        out.push(Requirement::ExecutionBoundary);
     }
     // A launch profile that declares credentials needs them
     // staged, and a platform that cannot stage them must refuse, not skip.
@@ -204,7 +247,7 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
         .as_ref()
         .is_some_and(|launch| !launch.credentials.is_empty())
     {
-        out.push(REQ_CREDENTIAL_STAGING.to_owned());
+        out.push(Requirement::CredentialStaging);
     }
     out
 }
@@ -223,16 +266,16 @@ pub const REASON_NOT_APPLIED_BY_NONE: &str = "uncontained_profile";
 /// a contained profile would satisfy, which `none` reports unsatisfiable, so
 /// the run refuses instead of executing with the restriction dropped (I02).
 /// Protected coverage already derives its own requirement above.
-fn none_restrictions(snapshot: &PolicySnapshot) -> Vec<String> {
+fn none_restrictions(snapshot: &PolicySnapshot) -> Vec<Requirement> {
     let mut out = Vec::new();
     if snapshot.profile != ProfileName::None {
         return out;
     }
     if !snapshot.filesystem.deny_read.is_empty() || !snapshot.filesystem.read_only.is_empty() {
-        out.push(REQ_FILESYSTEM_CONTAINMENT.to_owned());
+        out.push(Requirement::FilesystemContainment);
     }
     if snapshot.network.mode == NetworkMode::None {
-        out.push(REQ_NETWORK_NONE.to_owned());
+        out.push(Requirement::NetworkNone);
     }
     out
 }
@@ -263,33 +306,63 @@ mod tests {
 
     #[test]
     fn a_skipped_probe_never_satisfies_a_requirement() {
-        let mut capability =
-            Capability::unsupported(REQ_TREE_TERMINATION, CapabilityScope::Tree, "x");
+        let mut capability = Capability::unsupported(
+            Requirement::TreeTermination.to_string(),
+            CapabilityScope::Tree,
+            "x",
+        );
         capability.status = CapabilityStatus::Skipped;
         assert!(!capability.satisfies());
         capability.status = CapabilityStatus::Available;
         assert!(capability.satisfies());
     }
 
+    /// Every requirement's wire spelling, as `explain`, `doctor` and the
+    /// receipt carry it.
+    #[test]
+    fn each_requirement_has_its_wire_spelling() {
+        for (requirement, spelled) in [
+            (Requirement::TreeTermination, "tree_termination"),
+            (Requirement::ClosedSetObservation, "closed_set_observation"),
+            (Requirement::FilesystemContainment, "filesystem_containment"),
+            (Requirement::SyscallFilter, "syscall_filter"),
+            (Requirement::NetworkNone, "network_none"),
+            (Requirement::NetworkProxy, "network_proxy"),
+            (Requirement::ExecutionBoundary, "execution_boundary"),
+            (Requirement::CredentialStaging, "credential_staging"),
+            (
+                Requirement::ProtectedCoverage(ProtectedCoverage::AllDescendants),
+                "protected_coverage:all_descendants",
+            ),
+            (Requirement::Limit(LimitKey::Inodes), "limit:inodes"),
+        ] {
+            assert_eq!(requirement.to_string(), spelled);
+            assert_eq!(
+                serde_json::to_value(requirement).unwrap(),
+                serde_json::Value::from(spelled)
+            );
+        }
+    }
+
     #[test]
     fn tool_requires_containment_observation_and_a_wall() {
         let requirements = requirements(&snapshot_for(ProfileName::Tool));
         for expected in [
-            REQ_TREE_TERMINATION,
-            REQ_CLOSED_SET_OBSERVATION,
-            REQ_FILESYSTEM_CONTAINMENT,
-            REQ_SYSCALL_FILTER,
-            REQ_NETWORK_NONE,
-            "protected_coverage:existing_and_root",
-            "limit:wall",
+            Requirement::TreeTermination,
+            Requirement::ClosedSetObservation,
+            Requirement::FilesystemContainment,
+            Requirement::SyscallFilter,
+            Requirement::NetworkNone,
+            Requirement::ProtectedCoverage(ProtectedCoverage::ExistingAndRoot),
+            Requirement::Limit(LimitKey::Wall),
         ] {
             assert!(
-                requirements.iter().any(|item| item == expected),
+                requirements.contains(&expected),
                 "missing {expected} in {requirements:?}"
             );
         }
         assert!(
-            !requirements.iter().any(|item| item == "limit:pids"),
+            !requirements.contains(&Requirement::Limit(LimitKey::Pids)),
             "a preferred pids ceiling is never a requirement"
         );
     }
@@ -298,37 +371,25 @@ mod tests {
     #[test]
     fn a_restriction_on_none_is_a_requirement_not_a_silent_drop() {
         let bare = requirements(&snapshot_for(ProfileName::None));
-        assert!(!bare.iter().any(|item| item == REQ_NETWORK_NONE));
+        assert!(!bare.contains(&Requirement::NetworkNone));
 
         let mut denied = snapshot_for(ProfileName::None);
         denied.filesystem.deny_read.push(crate::policy::PathRef {
             root: crate::policy::RootToken::Workspace,
             path: crate::records::NativeString::Text("secret".to_owned()),
         });
-        assert!(
-            requirements(&denied)
-                .iter()
-                .any(|item| item == REQ_FILESYSTEM_CONTAINMENT)
-        );
+        assert!(requirements(&denied).contains(&Requirement::FilesystemContainment));
 
         let mut read_only = snapshot_for(ProfileName::None);
         read_only.filesystem.read_only.push(crate::policy::PathRef {
             root: crate::policy::RootToken::Workspace,
             path: crate::records::NativeString::Text("fixtures".to_owned()),
         });
-        assert!(
-            requirements(&read_only)
-                .iter()
-                .any(|item| item == REQ_FILESYSTEM_CONTAINMENT)
-        );
+        assert!(requirements(&read_only).contains(&Requirement::FilesystemContainment));
 
         let mut isolated = snapshot_for(ProfileName::None);
         isolated.network.mode = NetworkMode::None;
-        assert!(
-            requirements(&isolated)
-                .iter()
-                .any(|item| item == REQ_NETWORK_NONE)
-        );
+        assert!(requirements(&isolated).contains(&Requirement::NetworkNone));
     }
 
     #[test]
@@ -336,48 +397,36 @@ mod tests {
         let requirements = requirements(&snapshot_for(ProfileName::None));
         // J5-D: the portable name of the tree boundary (§3.1, I10); how a
         // platform provides it (a cgroup on Linux) is the platform's plan.
-        assert!(requirements.iter().any(|item| item == "execution_boundary"));
-        assert!(
-            !requirements
-                .iter()
-                .any(|item| item == REQ_FILESYSTEM_CONTAINMENT)
-        );
-        assert!(
-            requirements
-                .iter()
-                .any(|item| item == REQ_CLOSED_SET_OBSERVATION)
-        );
+        assert!(requirements.contains(&Requirement::ExecutionBoundary));
+        assert!(!requirements.contains(&Requirement::FilesystemContainment));
+        assert!(requirements.contains(&Requirement::ClosedSetObservation));
     }
 
     /// Every tree-enforced ceiling — pids, mem, swap and cpu — needs the
     /// execution boundary, not just pids (audit survivor, capability.rs).
     #[test]
     fn every_tree_enforced_limit_requires_the_execution_boundary() {
-        for key in ["pids", "mem", "swap", "cpu"] {
+        for key in [LimitKey::Pids, LimitKey::Mem, LimitKey::Swap, LimitKey::Cpu] {
             let mut snapshot = snapshot_for(ProfileName::None);
             let ceiling = crate::policy::LimitCeiling {
                 value: "1".to_owned(),
                 required: true,
             };
             match key {
-                "pids" => snapshot.limits.pids = Some(ceiling),
-                "mem" => snapshot.limits.mem = Some(ceiling),
-                "swap" => snapshot.limits.swap = Some(ceiling),
-                "cpu" => snapshot.limits.cpu = Some(ceiling),
-                other => unreachable!("{other}"),
+                LimitKey::Pids => snapshot.limits.pids = Some(ceiling),
+                LimitKey::Mem => snapshot.limits.mem = Some(ceiling),
+                LimitKey::Swap => snapshot.limits.swap = Some(ceiling),
+                LimitKey::Cpu => snapshot.limits.cpu = Some(ceiling),
+                other => unreachable!("{other:?}"),
             }
             let requirements = requirements(&snapshot);
             assert!(
-                requirements
-                    .iter()
-                    .any(|item| *item == format!("limit:{key}")),
-                "{key} ceiling is a requirement: {requirements:?}"
+                requirements.contains(&Requirement::Limit(key)),
+                "{key:?} ceiling is a requirement: {requirements:?}"
             );
             assert!(
-                requirements
-                    .iter()
-                    .any(|item| item == REQ_EXECUTION_BOUNDARY),
-                "{key} requires the execution boundary: {requirements:?}"
+                requirements.contains(&Requirement::ExecutionBoundary),
+                "{key:?} requires the execution boundary: {requirements:?}"
             );
         }
     }

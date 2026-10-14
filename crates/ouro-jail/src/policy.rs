@@ -964,7 +964,7 @@ pub struct Resolved {
     /// Input provenance, deliberately not part of the digest.
     pub provenance: Vec<ProvenanceEntry>,
     /// Derived capability requirements.
-    pub requirements: Vec<String>,
+    pub requirements: Vec<crate::capability::Requirement>,
     /// Requested limit spellings for the receipt's `applied.limits`.
     pub ceilings: Ceilings,
     /// The display name of the selected policy.

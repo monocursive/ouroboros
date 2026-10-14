@@ -630,8 +630,7 @@ fn c01_a_launch_profile_resolves_into_the_snapshot_and_validates_against_the_sch
     assert!(
         plan.resolved
             .requirements
-            .iter()
-            .any(|requirement| requirement == "credential_staging")
+            .contains(&ouro_jail::capability::Requirement::CredentialStaging)
     );
     assert!(
         plan.resolved
@@ -834,8 +833,7 @@ fn s6_1_tool_and_build_reject_credentials_and_none_rejects_any_launch() {
         !plan
             .resolved
             .requirements
-            .iter()
-            .any(|requirement| requirement == "credential_staging")
+            .contains(&ouro_jail::capability::Requirement::CredentialStaging)
     );
 
     let mut args = launch_args("plain", &fixture.workspace);

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::capability::Capability;
+use crate::capability::{Capability, Requirement};
 use crate::cleanup;
 use crate::cli::{DoctorArgs, ExplainArgs, PolicyArgs, RunArgs};
 use crate::config::{self, EnvSettings};
@@ -127,7 +127,7 @@ pub struct ExplainReport {
 /// What `doctor` measured.
 pub struct DoctorReport {
     /// The requested plan.
-    pub requirements: Vec<String>,
+    pub requirements: Vec<Requirement>,
     /// The measured capabilities.
     pub capabilities: Vec<Capability>,
     /// The platform identity.
@@ -1094,7 +1094,7 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
         .resolved
         .requirements
         .iter()
-        .all(|requirement| satisfied(requirement, &capabilities));
+        .all(|requirement| satisfied(*requirement, &capabilities));
     // §14.1 launch readiness; a missing or unsafe source
     // makes the plan unavailable (north star §4.5: it refuses the launch).
     // Only `--launch` has credential sources to place.
@@ -1154,20 +1154,23 @@ pub fn platform_record(ctx: &Context) -> PlatformRecord {
     }
 }
 
-fn satisfied(requirement: &str, capabilities: &[Capability]) -> bool {
+fn satisfied(requirement: Requirement, capabilities: &[Capability]) -> bool {
     capabilities
         .iter()
-        .any(|capability| capability.name == requirement && capability.satisfies())
+        .any(|capability| requirement.answered_by(capability) && capability.satisfies())
 }
 
 /// The first requirement no capability satisfies, as a typed refusal.
-fn first_unsatisfied(requirements: &[String], capabilities: &[Capability]) -> Option<JailError> {
-    let requirement = requirements
+fn first_unsatisfied(
+    requirements: &[Requirement],
+    capabilities: &[Capability],
+) -> Option<JailError> {
+    let requirement = *requirements
         .iter()
-        .find(|requirement| !satisfied(requirement, capabilities))?;
+        .find(|requirement| !satisfied(**requirement, capabilities))?;
     let reason = capabilities
         .iter()
-        .find(|capability| &capability.name == requirement)
+        .find(|capability| requirement.answered_by(capability))
         .and_then(|capability| capability.reason_code.as_deref())
         .unwrap_or("not_measured");
     let (code, remediation, message) = match reason {
@@ -4146,7 +4149,7 @@ mod tests {
             measured_at: None,
             evidence_ref: None,
         };
-        let requirements = ["tree_termination".to_owned()];
+        let requirements = [Requirement::TreeTermination];
         let refusal = |capabilities: &[Capability]| {
             let error = first_unsatisfied(&requirements, capabilities).expect("a refusal");
             (error.code, error.remediation, error.message)

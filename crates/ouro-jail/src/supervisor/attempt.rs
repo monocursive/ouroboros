@@ -1157,7 +1157,12 @@ pub(super) fn first_record(
             digest: plan.resolved.digest.clone(),
             observe: plan.resolved.snapshot.observation.mode,
             evidence: plan.resolved.snapshot.observation.evidence,
-            requirements: plan.resolved.requirements.clone(),
+            requirements: plan
+                .resolved
+                .requirements
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             // §13.2: the receipt's grants are the explicit operator grants,
             // not the profile baseline every `tool` run gets.
             grants: plan.resolved.grants.clone(),
