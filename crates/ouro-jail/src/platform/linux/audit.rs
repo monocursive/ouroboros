@@ -14,9 +14,7 @@ use serde_json::{Map, Value};
 use crate::observer::{
     ClassSummary, ClosedOperation, CoverageClass, CoverageSummary, LEARNING_READ_KIND,
 };
-use crate::records::{
-    CLOSED_SET_LINUX_V1, Completion, Event, EventOutcome, Gap, SourceHealth, SourceStatus,
-};
+use crate::records::{CLOSED_SET_LINUX_V1, Completion, Event, EventOutcome, Gap, SourceStatus};
 use crate::trace::{Priority, SharedTrace};
 
 use super::tracer::{Args, ClosedOp, GapReason, OpSet, PathSnapshot, TracerSummary};
@@ -826,14 +824,31 @@ impl AuditWriter {
     }
 
     /// The coverage summary for an attempt this writer observed.
+    ///
+    /// `known` is what the caller states and this writer cannot: whether the
+    /// observer attached, the wrapper's health, and the proxy source with
+    /// its `proxy.net` class (see [`CoverageSummary::applied`]). This writer
+    /// fills in the observer backend and set, the audit source and its four
+    /// classes, the `limits` class it accumulates, and its gaps.
+    ///
+    /// `tracer` is the observer's own account. Without one, or with a tracer
+    /// thread that panicked, nothing says what the observer lost: the loss
+    /// is a gap in every audit class from before attachment (this writer's
+    /// creation) to now, with no count, so each degraded class names its
+    /// missing interval (§11.4).
     #[must_use]
-    pub fn summary(&self, tracer: &TracerSummary, attached: bool) -> CoverageSummary {
-        // A panicked tracer thread leaves every audit class without an
-        // account. The loss is stated as a gap in each, from
-        // before attachment (this writer's creation) to now, with no count,
-        // so a degraded class always names its missing interval (§11.4).
+    pub fn summary(
+        &self,
+        tracer: Option<&TracerSummary>,
+        known: CoverageSummary,
+    ) -> CoverageSummary {
         let mut gaps = self.gaps.clone();
-        if tracer.thread_panicked {
+        let account_lost = match tracer {
+            None => Some(OBSERVER_ACCOUNT_MISSING),
+            Some(tracer) if tracer.thread_panicked => Some(OBSERVER_PANICKED),
+            Some(_) => None,
+        };
+        if let Some(reason) = account_lost {
             gaps.push(Gap {
                 classes: CoverageClass::AUDIT
                     .iter()
@@ -842,7 +857,7 @@ impl AuditWriter {
                 source: "audit".to_owned(),
                 start_ns: self.created_ns.to_string(),
                 end_ns: Some(now_ns().max(self.created_ns).to_string()),
-                reason: OBSERVER_PANICKED.to_owned(),
+                reason: reason.to_owned(),
                 lost_count: None,
             });
         }
@@ -853,14 +868,20 @@ impl AuditWriter {
             .degraded
             .iter()
             .any(|class| *class != CoverageClass::Limits);
-        let audit_status = if !audit_source_degraded && !tracer.thread_panicked {
-            SourceStatus::Active
-        } else {
+        let CoverageSummary {
+            attached,
+            mut sources,
+            gaps: mut summary_gaps,
+            mut classes,
+            ..
+        } = known;
+        sources.audit = if audit_source_degraded || account_lost.is_some() {
             SourceStatus::Degraded
+        } else {
+            SourceStatus::Active
         };
-        let mut classes = BTreeMap::new();
         for class in CoverageClass::AUDIT {
-            let status = if self.degraded.contains(&class) || tracer.thread_panicked {
+            let status = if self.degraded.contains(&class) || account_lost.is_some() {
                 SourceStatus::Degraded
             } else {
                 SourceStatus::Active
@@ -884,18 +905,14 @@ impl AuditWriter {
                 },
             );
         }
-        classes.insert(CoverageClass::ProxyNet, ClassSummary::unsupported());
         classes.insert(CoverageClass::Limits, self.limits_class());
+        summary_gaps.extend(gaps);
         CoverageSummary {
             backend: Some(OBSERVER_BACKEND.to_owned()),
             set: Some(CLOSED_SET_LINUX_V1.to_owned()),
             attached,
-            sources: SourceHealth {
-                wrapper: SourceStatus::Active,
-                audit: audit_status,
-                proxy: SourceStatus::Unsupported,
-            },
-            gaps,
+            sources,
+            gaps: summary_gaps,
             classes,
         }
     }
@@ -1081,6 +1098,8 @@ enum Frame {
 const TRACE_WRITER_POISONED: &str = "trace_writer_poisoned";
 /// The gap reason of an observer whose tracer thread panicked.
 const OBSERVER_PANICKED: &str = "observer_panicked";
+/// The gap reason of an observed attempt whose observer left no account.
+const OBSERVER_ACCOUNT_MISSING: &str = "observer_account_missing";
 /// The gap reason of a result whose operation the closed set does not name.
 const OPERATION_UNMAPPED: &str = "operation_unmapped";
 
@@ -1227,6 +1246,11 @@ mod tests {
         }
     }
 
+    /// What a platform states for an attempt whose observer attached.
+    fn applied() -> CoverageSummary {
+        CoverageSummary::applied(true)
+    }
+
     /// One call by thread 10 of process 10, born at tick 1.
     fn call<'a>(op: ClosedOp, syscall: &'a str, args: &'a Args, ret: i64) -> SyscallResult<'a> {
         SyscallResult {
@@ -1315,7 +1339,7 @@ mod tests {
     fn an_unmapped_operation_is_a_gap_in_every_audit_class_never_a_count() {
         let mut writer = writer();
         writer.record_unmapped();
-        let summary = writer.summary(&TracerSummary::default(), true);
+        let summary = writer.summary(Some(&TracerSummary::default()), applied());
         assert_degraded_classes_name_their_gaps(&summary);
         for class in CoverageClass::AUDIT {
             let entry = &summary.classes[&class];
@@ -1335,7 +1359,7 @@ mod tests {
         assert_eq!(writer.gaps().len(), 1);
         assert_eq!(writer.gaps()[0].reason, "mediation_response_undelivered");
         assert_eq!(writer.gaps()[0].lost_count, Some(1));
-        let summary = writer.summary(&TracerSummary::default(), true);
+        let summary = writer.summary(Some(&TracerSummary::default()), applied());
         for class in [CoverageClass::Net, CoverageClass::FsDeny] {
             assert_eq!(summary.classes[&class].status, SourceStatus::Degraded);
             assert_eq!(summary.classes[&class].observed_count, None);
@@ -1484,7 +1508,7 @@ mod tests {
         assert_eq!(writer.gaps().len(), 1);
         assert_eq!(writer.gaps()[0].lost_count, Some(10_000));
         assert_eq!(writer.gaps()[0].end_ns.as_deref(), Some("10000"));
-        let summary = writer.summary(&TracerSummary::default(), true);
+        let summary = writer.summary(Some(&TracerSummary::default()), applied());
         for class in CoverageClass::AUDIT {
             assert_eq!(summary.classes[&class].status, SourceStatus::Degraded);
             assert_eq!(summary.classes[&class].observed_count, None);
@@ -1552,7 +1576,7 @@ mod tests {
         let mut writer = writer();
         writer.record_limit_hit();
         writer.record_limit_evidence_missing("storage_hit_evidence_positive_only");
-        let summary = writer.summary(&TracerSummary::default(), true);
+        let summary = writer.summary(Some(&TracerSummary::default()), applied());
         assert_degraded_classes_name_their_gaps(&summary);
         let limits = &summary.classes[&CoverageClass::Limits];
         assert_eq!(limits.status, SourceStatus::Degraded);
@@ -1566,14 +1590,14 @@ mod tests {
         // coalesces into the first.
         writer.record_limit_evidence_missing("storage_hit_evidence_positive_only");
         writer.record_limit_evidence_missing("cgroup_counters_unreadable");
-        let summary = writer.summary(&TracerSummary::default(), true);
+        let summary = writer.summary(Some(&TracerSummary::default()), applied());
         assert_degraded_classes_name_their_gaps(&summary);
         let limits = &summary.classes[&CoverageClass::Limits];
         assert_eq!(limits.gaps.len(), 2, "{limits:?}");
         // Without missing evidence the class stays active with its count.
         let mut clean = AuditWriter::new("att_x", None, b"/work/space", b"/tmp");
         clean.record_limit_hit();
-        let summary = clean.summary(&TracerSummary::default(), true);
+        let summary = clean.summary(Some(&TracerSummary::default()), applied());
         let limits = &summary.classes[&CoverageClass::Limits];
         assert_eq!(limits.status, SourceStatus::Active);
         assert_eq!(limits.observed_count, Some(1));
@@ -1615,11 +1639,11 @@ mod tests {
     fn a_panicked_observer_is_a_gap_in_every_audit_class() {
         let writer = writer();
         let summary = writer.summary(
-            &TracerSummary {
+            Some(&TracerSummary {
                 thread_panicked: true,
                 ..TracerSummary::default()
-            },
-            true,
+            }),
+            applied(),
         );
         assert_degraded_classes_name_their_gaps(&summary);
         for class in CoverageClass::AUDIT {
@@ -1646,6 +1670,62 @@ mod tests {
         );
     }
 
+    /// An observed attempt with no observer account claims nothing: every
+    /// audit class is degraded by a gap with no count, never active with a
+    /// count of zero, and the caller's attachment state is what it reports.
+    #[test]
+    fn a_missing_observer_account_is_a_gap_in_every_audit_class() {
+        let mut writer = writer();
+        writer.record_exec(
+            10,
+            Some(1),
+            Some("execve"),
+            Some(&snap("/work/space/t")),
+            None,
+        );
+        let summary = writer.summary(None, CoverageSummary::applied(false));
+        assert_degraded_classes_name_their_gaps(&summary);
+        assert!(
+            !summary.attached,
+            "the caller said the observer never attached"
+        );
+        assert_eq!(summary.sources.audit, SourceStatus::Degraded);
+        for class in CoverageClass::AUDIT {
+            let entry = &summary.classes[&class];
+            assert_eq!(entry.status, SourceStatus::Degraded, "{class:?}");
+            assert_eq!(entry.observed_count, None, "{class:?}");
+            assert_eq!(entry.gaps[0].reason, "observer_account_missing");
+            assert_eq!(entry.gaps[0].lost_count, None);
+        }
+    }
+
+    /// The sources this writer does not own come from the caller: the
+    /// wrapper's health and the proxy's class pass through untouched.
+    #[test]
+    fn the_callers_sources_pass_through_the_summary() {
+        let writer = writer();
+        let mut known = CoverageSummary::applied(true);
+        known.sources.wrapper = SourceStatus::Degraded;
+        known.sources.proxy = SourceStatus::Active;
+        let proxy = ClassSummary {
+            status: SourceStatus::Active,
+            observed_count: Some(3),
+            gaps: Vec::new(),
+            resolver_refused: 1,
+        };
+        known.classes.insert(CoverageClass::ProxyNet, proxy.clone());
+        let summary = writer.summary(Some(&TracerSummary::default()), known);
+        assert!(summary.attached);
+        assert_eq!(summary.sources.wrapper, SourceStatus::Degraded);
+        assert_eq!(summary.sources.proxy, SourceStatus::Active);
+        assert_eq!(summary.sources.audit, SourceStatus::Active);
+        assert_eq!(summary.classes[&CoverageClass::ProxyNet], proxy);
+        assert_eq!(
+            summary.classes[&CoverageClass::Exec].observed_count,
+            Some(0)
+        );
+    }
+
     #[test]
     fn a_result_a_poisoned_trace_cannot_take_is_a_gap_of_its_class() {
         let mut writer =
@@ -1660,7 +1740,7 @@ mod tests {
             },
             3,
         ));
-        let summary = writer.summary(&TracerSummary::default(), true);
+        let summary = writer.summary(Some(&TracerSummary::default()), applied());
         assert_degraded_classes_name_their_gaps(&summary);
         let entry = &summary.classes[&CoverageClass::FsWrite];
         assert_eq!(entry.status, SourceStatus::Degraded);
@@ -1683,7 +1763,7 @@ mod tests {
             },
             4,
         ));
-        let summary = writer.summary(&TracerSummary::default(), true);
+        let summary = writer.summary(Some(&TracerSummary::default()), applied());
         let entry = &summary.classes[&CoverageClass::FsWrite];
         assert_eq!(entry.gaps.len(), 1, "coalesced: {entry:?}");
         assert_eq!(entry.gaps[0].lost_count, Some(2));
@@ -1701,7 +1781,7 @@ mod tests {
             Some(1),
         );
         writer.record_limit_unapplied("pids", "no delegated cgroup");
-        let summary = writer.summary(&TracerSummary::default(), true);
+        let summary = writer.summary(Some(&TracerSummary::default()), applied());
         assert_degraded_classes_name_their_gaps(&summary);
         let entry = &summary.classes[&CoverageClass::FsWrite];
         assert_eq!(entry.status, SourceStatus::Degraded);
@@ -1797,7 +1877,7 @@ mod tests {
             2,
             Some(4),
         );
-        let summary = writer.summary(&TracerSummary::default(), true);
+        let summary = writer.summary(Some(&TracerSummary::default()), applied());
         let coverage = summary.to_coverage();
         assert_eq!(coverage.fs_write.status, SourceStatus::Degraded);
         assert_eq!(coverage.fs_write.observed_count, None);
@@ -1886,7 +1966,7 @@ mod tests {
         assert_eq!(gap.end_ns, None, "the interval has no end");
         assert_eq!(gap.start_ns, "3");
         assert_eq!(gap.lost_count, None);
-        let summary = writer.summary(&TracerSummary::default(), true);
+        let summary = writer.summary(Some(&TracerSummary::default()), applied());
         for class in CoverageClass::AUDIT {
             assert_eq!(summary.classes[&class].status, SourceStatus::Degraded);
             assert_eq!(summary.classes[&class].observed_count, None);

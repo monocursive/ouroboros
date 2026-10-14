@@ -230,6 +230,19 @@ impl CoverageSummary {
         }
     }
 
+    /// What a platform states about an attempt whose boundary it applied,
+    /// before any evidence source reports: the wrapper source is active, the
+    /// observer attached or not as `attached` says, and every other source
+    /// and class is as in [`CoverageSummary::unobserved`] until its owner
+    /// fills it in (the audit writer its classes, the proxy `proxy.net`).
+    #[must_use]
+    pub fn applied(attached: bool) -> Self {
+        let mut summary = CoverageSummary::unobserved();
+        summary.attached = attached;
+        summary.sources.wrapper = SourceStatus::Active;
+        summary
+    }
+
     /// The closed set this build implements on Linux.
     #[must_use]
     pub fn linux_closed_set() -> &'static str {

@@ -150,11 +150,11 @@ fn poisoned_trace() -> ouro_jail::trace::SharedTrace {
 fn j5_a_panicked_observer_writes_a_receipt_that_passes_the_frozen_contract() {
     let writer = AuditWriter::new("att_test", None, b"/work/space", b"/tmp");
     let summary = writer.summary(
-        &TracerSummary {
+        Some(&TracerSummary {
             thread_panicked: true,
             ..TracerSummary::default()
-        },
-        true,
+        }),
+        CoverageSummary::applied(true),
     );
     let receipt = settled_receipt(&summary);
     common::check_receipt(&receipt)
@@ -183,7 +183,10 @@ fn j5_a_poisoned_trace_writes_a_receipt_that_passes_the_frozen_contract() {
         },
         ret: 3,
     });
-    let summary = writer.summary(&TracerSummary::default(), true);
+    let summary = writer.summary(
+        Some(&TracerSummary::default()),
+        CoverageSummary::applied(true),
+    );
     let receipt = settled_receipt(&summary);
     common::check_receipt(&receipt)
         .unwrap_or_else(|error| panic!("{error}\n{:#}", receipt["coverage"]));

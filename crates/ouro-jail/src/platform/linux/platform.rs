@@ -4375,8 +4375,12 @@ impl RunningExecution for LinuxRunning {
         // without the observer (§11.4)
         self.boundary.stop_agent(TREE_BUDGET);
         let mut summary = if self.boundary.observe_on {
-            let tracer = shared::observer_account(self.boundary.tracer_summary.as_ref());
-            self.boundary.audit.summary(&tracer, true)
+            // The observer attached during preparation exactly when a tracer
+            // was kept; stopping it is what leaves its account here.
+            let tracer = self.boundary.tracer_summary.as_ref();
+            self.boundary
+                .audit
+                .summary(tracer, CoverageSummary::applied(tracer.is_some()))
         } else {
             // §11.4: observation off makes every audit class unsupported
             // with a null count. The wrapper's own `limits` class still

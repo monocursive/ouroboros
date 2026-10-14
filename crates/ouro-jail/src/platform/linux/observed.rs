@@ -1315,7 +1315,10 @@ mod tests {
                 Fact::CoverageLost(GapReason::InflightExhausted),
                 "{op:?}"
             );
-            let summary = audit.summary(&TracerSummary::default(), true);
+            let summary = audit.summary(
+                Some(&TracerSummary::default()),
+                crate::observer::CoverageSummary::applied(true),
+            );
             for class in [CoverageClass::FsWrite, CoverageClass::FsDeny] {
                 let entry = &summary.classes[&class];
                 assert_eq!(
@@ -1368,7 +1371,10 @@ mod tests {
             );
         }
         assert_eq!(audit.count(CoverageClass::FsWrite), 1000, "all observed");
-        let summary = audit.summary(&TracerSummary::default(), true);
+        let summary = audit.summary(
+            Some(&TracerSummary::default()),
+            crate::observer::CoverageSummary::applied(true),
+        );
         let entry = &summary.classes[&CoverageClass::FsWrite];
         assert_eq!(entry.status, crate::records::SourceStatus::Degraded);
         assert_eq!(entry.observed_count, None);
@@ -1458,7 +1464,10 @@ mod tests {
             Fact::Nothing
         );
         assert!(audit.has_gaps() && !audit.has_loss_gaps());
-        let summary = audit.summary(&TracerSummary::default(), true);
+        let summary = audit.summary(
+            Some(&TracerSummary::default()),
+            crate::observer::CoverageSummary::applied(true),
+        );
         for class in CoverageClass::ALL {
             if let Some(entry) = summary.classes.get(&class) {
                 assert_ne!(
