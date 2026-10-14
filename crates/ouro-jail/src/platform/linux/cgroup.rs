@@ -334,7 +334,7 @@ pub fn populated(dir: &Path) -> io::Result<bool> {
     parse_populated(&fs::read_to_string(dir.join("cgroup.events"))?)
 }
 
-// J4-G begin: shared by `gc` reconciliation (jail-v1 §14.2)
+// Shared by `gc` reconciliation (jail-v1 §14.2)
 /// The `populated` line of a `cgroup.events` file's contents.
 ///
 /// # Errors
@@ -395,7 +395,6 @@ pub fn is_leaf_name(name: &std::ffi::OsStr) -> bool {
         .and_then(|rest| rest.strip_suffix(LEAF_SUFFIX))
         .is_some_and(|token| crate::state::AttemptId::parse(token).is_ok())
 }
-// J4-G end
 
 /// A unique, pinned execution leaf. No controller is enabled or disabled by a
 /// run: delegation is operator configuration, never a side effect of doctor.
@@ -424,7 +423,7 @@ struct Counters {
     cpu: u64,
 }
 
-// J4 W2-S begin: N7
+// N7
 /// What a leaf registration hook is told, in order (N7).
 #[derive(Clone, Copy, Debug)]
 pub enum LeafStep<'a> {
@@ -444,7 +443,6 @@ pub enum LeafStep<'a> {
 
 /// A hook that makes each [`LeafStep`] durable before creation goes on.
 pub type Register<'a> = &'a mut dyn FnMut(LeafStep<'_>) -> io::Result<()>;
-// J4 W2-S end
 
 impl ExecutionCgroup {
     /// Create and configure an empty leaf that belongs to no attempt (a
@@ -455,7 +453,7 @@ impl ExecutionCgroup {
         Self::create_named(limits, &probe_leaf_name(), &mut |_| Ok(()))
     }
 
-    // J4 W2-S begin: N7
+    // N7
     /// [`ExecutionCgroup::create`] for an attempt: the leaf is registered in
     /// the attempt's jail state by name before `mkdir` (P15) and by device
     /// and inode right after (P16), before anything is placed in it, so a
@@ -524,7 +522,6 @@ impl ExecutionCgroup {
         name: &str,
         register: Register<'_>,
     ) -> io::Result<Self> {
-        // J4 W2-S end
         let root = delegated_root(unsafe { libc::getuid() }).ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "no delegated cgroup")
         })?;
@@ -1166,7 +1163,6 @@ mod tests {
         assert!(!within(leaf, "/"), "the root is not a registered boundary");
     }
 
-    // J4-G begin
     #[test]
     fn only_the_created_leaf_shape_is_a_leaf_name() {
         use std::ffi::OsStr;
@@ -1204,7 +1200,6 @@ mod tests {
             assert!(parse_populated(bad).is_err(), "{bad:?}");
         }
     }
-    // J4-G end
 
     #[test]
     fn a_leaf_outside_the_cgroup_root_has_no_relative_path() {

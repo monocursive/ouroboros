@@ -1024,7 +1024,7 @@ fn c01_launch_refusals_happen_before_any_attempt_exists() {
     assert_eq!(std::fs::read(&source).unwrap(), b"fixture-token");
 }
 
-// J3-agent begin: wave 2 wired `agent`; the launch profile now runs as it does
+// Wired `agent`; the launch profile now runs as it does
 #[test]
 fn an_agent_launch_profile_runs_exactly_as_agent_does_on_this_host() {
     if !common::live() {
@@ -1073,7 +1073,6 @@ fn an_agent_launch_profile_runs_exactly_as_agent_does_on_this_host() {
     ));
     assert_eq!(std::fs::read(&source).unwrap(), b"fixture-token");
 }
-// J3-agent end
 
 // ---------------------------------------------------------------------------
 // J3 review findings, adopted as live tests

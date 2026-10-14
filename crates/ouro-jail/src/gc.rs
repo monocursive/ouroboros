@@ -192,7 +192,7 @@ pub trait Host {
     /// # Errors
     /// Why the leaf was not identified, not empty or not removed.
     fn remove_leaf(&self, leaf: &LeafRecord, entries: &mut usize) -> Result<(), String>;
-    // J4 W2-S begin: N7
+    // N7
     /// What is at a leaf jail state registers by name only (a supervisor
     /// that died between the name and the identity, N7). `Identified` means
     /// only a cgroup v2 directory with an execution leaf's name directly
@@ -212,7 +212,6 @@ pub trait Host {
         let _ = (path, entries);
         Err("this host cannot remove an execution leaf".to_owned())
     }
-    // J4 W2-S end
 }
 
 /// The host `gc` runs on: the platform's identity, and on Linux the
@@ -290,7 +289,7 @@ impl Host for NativeHost {
         }
     }
 
-    // J4 W2-S begin: N7
+    // N7
     fn probe_named_leaf(&self, path: &Path) -> LeafProbe {
         #[cfg(target_os = "linux")]
         {
@@ -314,7 +313,6 @@ impl Host for NativeHost {
             Err(NO_MECHANISM.to_owned())
         }
     }
-    // J4 W2-S end
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +368,6 @@ pub struct Entry {
     pub scratch: Option<String>,
     /// The actions this pass recorded in jail state (S6), in order.
     pub recorded: Vec<String>,
-    // J4 W2-S begin: leftovers
     /// The temporary files (`.<name>.tmp`) found in the attempt root when
     /// gc held its lease, sorted: what a crashed durable replacement left.
     pub leftover_temp_files: Vec<String>,
@@ -378,7 +375,6 @@ pub struct Entry {
     /// `retained: <why>`, `pending: <why>` or `failed: <why>`; `None` when
     /// there were none.
     pub temp_files: Option<String>,
-    // J4 W2-S end
 }
 
 impl From<Report> for GcReport {
@@ -436,7 +432,7 @@ pub struct StateView {
     pub gc_finished: Option<String>,
 }
 
-// J4 W2-S begin: N7
+// N7
 /// The execution leaf as jail state registers it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RegisteredLeaf {
@@ -467,7 +463,6 @@ impl RegisteredLeaf {
         }
     }
 }
-// J4 W2-S end
 
 /// Where the execution leaf is, as gc reads it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -476,10 +471,9 @@ pub enum LeafSource {
     NotRecorded(String),
     /// The registration.
     Recorded(LeafRecord),
-    // J4 W2-S begin: N7
+    // N7
     /// Registered by name only, before `mkdir` (N7).
     NamedOnly(std::path::PathBuf),
-    // J4 W2-S end
     /// A registration that does not have the shape the supervisor writes.
     Malformed(String),
 }
@@ -767,11 +761,10 @@ pub enum Next {
     ProbeOwner(OwnerRecord),
     /// Ask the host about this leaf, then decide again.
     ProbeLeaf(LeafRecord),
-    // J4 W2-S begin: N7
+    // N7
     /// Ask the host about the leaf registered by this name only, then
     /// decide again.
     ProbeNamedLeaf(std::path::PathBuf),
-    // J4 W2-S end
     /// Done.
     Decided(Decision),
 }
@@ -803,10 +796,9 @@ pub enum CgroupStep {
     Terminate(LeafRecord),
     /// An empty, positively identified leaf: remove it.
     Remove(LeafRecord),
-    // J4 W2-S begin: N7
+    // N7
     /// An empty leaf registered by name only: remove it (never kill it).
     RemoveNamed(std::path::PathBuf),
-    // J4 W2-S end
 }
 
 /// What may be done with managed scratch.
@@ -1185,7 +1177,7 @@ const GONE_AFTER_GC: &str = "removed: gone after an earlier gc verified it empty
                              (gc_terminated_orphan or gc_removing_cgroup), so the tree's end \
                              is verified";
 
-// J4 W2-S begin: N7
+// N7
 /// [`decide`] for a leaf jail state registers by name only: the supervisor
 /// died between naming it (P15) and identifying it (P16), before anything
 /// could be placed in it. Nothing identifies it beyond its name and place,
@@ -1289,7 +1281,6 @@ fn decide_named(
         ),
     }
 }
-// J4 W2-S end
 
 // ---------------------------------------------------------------------------
 // The walk
@@ -1931,7 +1922,7 @@ fn remove(
     )
 }
 
-// J4 W2-S begin: N7
+// N7
 fn remove_named(
     dir: &AttemptDir,
     path: &Path,
@@ -1971,7 +1962,6 @@ fn remove_named(
         recorded,
     )
 }
-// J4 W2-S end
 
 /// The managed directories present, or `None` when scratch is not managed
 /// (an operator `--scratch` is never deleted) or the policy is unreadable.
@@ -2055,7 +2045,7 @@ fn remove_scratch(
     }
 }
 
-// J3-agent begin: `gc` of a dead supervisor's proxy directory (§14.2), moved
+// `gc` of a dead supervisor's proxy directory (§14.2), moved
 // here from `supervisor.rs` with the rest of gc (J4 exception G1)
 /// Runs [`state::gc_proxy_dir`], says in `proxy_dir` what became of the
 /// directory (one whose read or removal failed is a cleanup that did not
@@ -2090,8 +2080,7 @@ fn proxy_then_resume(
             Some(format!("failed: {}", error.code.as_str()))
         }
     };
-    // J3-agent end
-    // J3-launch begin: §12, §14.2 — resume a pending vendor-state cleanup the
+    // §12, §14.2 — resume a pending vendor-state cleanup the
     // terminal receipt permits.
     // J4 W2-S: or gc's own verification of the registered leaf permits (see
     // `cleanup::permitted`); within what is left of this invocation's bound
@@ -2149,11 +2138,9 @@ fn proxy_then_resume(
             ("skipped".to_owned(), error.message)
         }
     };
-    // J3-launch end
     (action, reason, visited, settled)
 }
 
-// J4 W2-S begin: leftovers and gc's verification
 /// What [`proxy_then_resume`] may spend, and what permits the resumption.
 struct Resumption {
     /// What is left of this invocation's bound (S7).
@@ -2282,7 +2269,6 @@ fn leftovers(
         }
     }
 }
-// J4 W2-S end
 
 /// The entry's action and reason: a failed gc step makes it `pending`; a gc
 /// step that did something names the action when the J3 resumption had
@@ -2553,7 +2539,7 @@ mod tests {
         assert!(parse_receipt(&serde_json::to_vec(&phaseless).unwrap(), id).is_err());
     }
 
-    // J4 W2-S begin: N7
+    // N7
     #[test]
     fn the_leaf_comes_from_jail_state_and_must_agree_with_the_receipt() {
         let base = facts(state(), receipt(None));
@@ -2673,9 +2659,7 @@ mod tests {
             assert!(parse_state(&state(bad.clone()), id).is_err(), "{bad}");
         }
     }
-    // J4 W2-S end
 
-    // J4 wave 3 begin
     #[test]
     fn a_registration_of_another_attempts_leaf_is_never_probed() {
         for registered in [
@@ -2818,7 +2802,6 @@ mod tests {
         assert_eq!(parsed.gc_finished.as_deref(), Some("t9"));
         assert_eq!(parsed.attempt_id, id);
     }
-    // J4 wave 3 end
 
     #[test]
     fn the_seam_only_shrinks_the_bound() {
@@ -2827,8 +2810,6 @@ mod tests {
             assert_eq!(seam_max_entries(ignored, 100), 100, "{ignored:?}");
         }
     }
-
-    // Portable-mutation regressions (audit 2026-10-08) begin
 
     /// G2: `receipt_is_none` in the tree-never-existed test. Without it gc
     /// treats a dead owner's enforced receipt as if none had been written and
@@ -2921,5 +2902,4 @@ mod tests {
         );
         assert!(std::fs::read(&target).is_ok(), "the target is untouched");
     }
-    // Portable-mutation regressions end
 }

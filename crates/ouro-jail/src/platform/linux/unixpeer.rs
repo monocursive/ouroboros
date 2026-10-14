@@ -267,7 +267,7 @@ pub enum Verdict {
 pub struct MediationRecord {
     /// The connecting task's host pid (a thread id).
     pub pid: libc::pid_t,
-    // J3-agent begin: what the audit event needs besides the verdict
+    // What the audit event needs besides the verdict
     /// The thread group the task belonged to while its notification was
     /// pending, read before the verdict was sent; `None` when `/proc` would
     /// not say. The platform uses it to tell a helper's connect (the bridge)
@@ -284,7 +284,6 @@ pub struct MediationRecord {
     /// The address fact read from the `sockaddr` (issue drafts 13/14): the
     /// AF_UNIX path, the abstract name, or the internet address.
     pub peer: Option<Peer>,
-    // J3-agent end
     /// A short, safe reason code (never a path or payload).
     pub reason: &'static str,
     /// The verdict.

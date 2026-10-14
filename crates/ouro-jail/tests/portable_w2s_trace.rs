@@ -85,7 +85,7 @@ struct Script {
     /// read (after the tree's end and the receipts still in flight, before
     /// any settlement write): the last receipt written while the target ran.
     before_settlement: Arc<Mutex<Option<Value>>>,
-    // J4 W3 begin: P4
+    // P4
     /// The observer's final account is an attached audit observer whose
     /// frames the lost sink refused, as the Linux audit writer reports it:
     /// `fs.write` degraded with a null count (instead of observation off).
@@ -93,7 +93,6 @@ struct Script {
     /// The trace payload is exhausted while the tree is verified, after the
     /// run loop's last iteration, as a tracer draining at settlement does.
     fill_at_settlement: bool,
-    // J4 W3 end
 }
 
 struct Simulated(Script);

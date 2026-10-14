@@ -60,7 +60,7 @@ pub enum Site {
     GcResume,
     /// P13: `gc`'s record of a dead attempt's proxy directory (§14.2).
     GcProxyDir,
-    // J4 W2-S begin: P14 to P16
+    // P14 to P16
     /// P14: `gc`'s reconciliation records in jail state (`gc_actions`, S6).
     GcRecord,
     /// P15: the execution leaf's name in jail state, before `mkdir` (N7).
@@ -68,7 +68,6 @@ pub enum Site {
     /// P16: the execution leaf's device and inode in jail state, right after
     /// `mkdir` and before anything is placed in it (N7).
     ExecutionLeafIdentity,
-    // J4 W2-S end
     /// A replacement written through the plain API, outside any site.
     Unnamed,
 }
@@ -354,7 +353,7 @@ pub fn with_persist_io<R>(io: SharedIo, body: impl FnOnce() -> R) -> R {
 /// value that does not name a site and a point.
 pub const ABORT_AT_SEAM: &str = "OURO_JAIL_TEST_ABORT_AT";
 
-// J5-C begin: R02.3, the nth replacement at a site
+// R02.3, the nth replacement at a site
 /// The largest replacement ordinal [`ABORT_AT_SEAM`] accepts.
 pub const ABORT_AT_MAX_ORDINAL: usize = 10_000;
 
@@ -408,7 +407,6 @@ pub fn crash_point(site: Site, point: CrashPoint) {
         std::process::abort();
     }
 }
-// J5-C end
 
 /// The prefix of every test seam's environment name (S9).
 pub const TEST_SEAM_PREFIX: &str = "OURO_JAIL_TEST_";
@@ -941,7 +939,7 @@ impl PersistIo for Forward {
     }
 }
 
-// J5-C begin: R02.3, the seam's ordinal
+// R02.3, the seam's ordinal
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,4 +985,3 @@ mod tests {
         }
     }
 }
-// J5-C end

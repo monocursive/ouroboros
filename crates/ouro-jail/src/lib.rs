@@ -43,34 +43,22 @@ pub mod canonical;
 pub mod capability;
 pub mod cleanup;
 pub mod cli;
+pub mod commands;
 pub mod config;
-// J3-launch begin: credential staging
 pub mod credentials;
-// J3-launch end
-// J3-none begin: reserved environment names (§12)
 pub mod environment;
-// J3-none end
-// J4-G begin: `gc` reconciliation (§14.2, C03)
 pub mod gc;
-// J4-G end
-// J3-launch begin: data-only launch profiles
 pub mod journal;
 pub mod launch_profile;
 pub mod learn;
-// J3-launch end
 pub mod network;
 pub mod observer;
 pub mod platform;
 pub mod policy;
 pub mod profiles;
-// J3-P begin: the outside HTTP proxy library (jail-v1 §10)
 pub mod proxy;
-// J3-P end
 pub mod records;
 pub mod state;
 pub mod supervisor;
 pub mod trace;
-
-pub mod commands;
-
 pub mod vault;

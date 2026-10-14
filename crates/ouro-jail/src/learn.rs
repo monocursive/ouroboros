@@ -431,8 +431,6 @@ mod tests {
         );
     }
 
-    // Portable-mutation regressions (audit 2026-10-08) begin
-
     /// L1: the refusal list for learning roots (`/`, `/etc`, `/home`,
     /// `/Users`, `/proc`, `/sys`, `/dev`) must not be emptiable: a read of
     /// such a root is recorded as unresolved, never proposed as a grant.
@@ -469,5 +467,4 @@ mod tests {
             );
         }
     }
-    // Portable-mutation regressions end
 }

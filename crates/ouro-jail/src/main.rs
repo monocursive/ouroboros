@@ -145,7 +145,7 @@ fn schema_identifiers() -> serde_json::Value {
     })
 }
 
-// J5-D begin: build provenance (§16) and the doctor record's identifier
+// Build provenance (§16) and the doctor record's identifier
 /// The identifier of the `doctor --json` record, whose schema is
 /// `docs/specs/jail-v1/jail-doctor.schema.json` (§3.2: it is the host
 /// manifest every conformance run records).
@@ -202,7 +202,6 @@ fn print_build_text() {
     );
     println!("build inputs {}", env!("OURO_BUILD_INPUTS"));
 }
-// J5-D end
 
 fn platform_json(platform: &PlatformRecord) -> serde_json::Value {
     serde_json::json!({
@@ -212,7 +211,7 @@ fn platform_json(platform: &PlatformRecord) -> serde_json::Value {
     })
 }
 
-// J5-D begin: the running platform's closed set (§3.2)
+// The running platform's closed set (§3.2)
 /// The closed set this build observes: `linux-closed-v1` on Linux built for
 /// an architecture the syscall tables cover, and none anywhere else (macOS,
 /// and a Linux build for another architecture, whose observer reports
@@ -226,7 +225,6 @@ fn closed_set_for(linux: bool, arch: &str) -> Option<&'static str> {
     (linux && ouro_jail::platform::linux::seccomp::tables_cover(arch))
         .then(CoverageSummary::linux_closed_set)
 }
-// J5-D end
 
 fn version(context: &Context, args: &VersionArgs) -> ExitCode {
     let identity = context.platform.identity();
@@ -323,7 +321,7 @@ fn redact_environment(snapshot: &mut serde_json::Value) {
     }
 }
 
-// J3-launch begin: credential sources are private operational state (§12)
+// Credential sources are private operational state (§12)
 /// Removes every credential `source` from the snapshot's `launch` group,
 /// leaving the profile's own names: `id`, `mode` and `dest`.
 ///
@@ -345,14 +343,11 @@ fn redact_launch(snapshot: &mut serde_json::Value) {
         }
     }
 }
-// J3-launch end
 
 fn explain_json(report: &ExplainReport) -> Result<serde_json::Value, JailError> {
     let mut snapshot = report.resolved.snapshot.to_canonical_value()?;
     redact_environment(&mut snapshot);
-    // J3-launch begin
     redact_launch(&mut snapshot);
-    // J3-launch end
     let requirements: Vec<serde_json::Value> = report
         .resolved
         .requirements
@@ -378,9 +373,7 @@ fn explain_json(report: &ExplainReport) -> Result<serde_json::Value, JailError> 
             // says so rather than leaving a reader to infer it.
             "snapshot": snapshot,
             "environment_values": "omitted",
-            // J3-launch begin
             "credential_sources": "omitted",
-            // J3-launch end
         },
         "requirements": requirements,
         "capabilities": {
@@ -464,7 +457,7 @@ fn explain_text(report: &ExplainReport) -> String {
             );
         }
     }
-    // J3-launch begin: the launch group by the profile's own names only
+    // The launch group by the profile's own names only
     if let Some(launch) = &snapshot.launch {
         let _ = writeln!(
             out,
@@ -492,7 +485,6 @@ fn explain_text(report: &ExplainReport) -> String {
             );
         }
     }
-    // J3-launch end
     for requirement in &report.resolved.requirements {
         let _ = writeln!(out, "requirement {requirement} unmeasured");
     }
@@ -543,7 +535,7 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
             .map(capability_json)
             .collect::<Vec<_>>(),
         "ready": report.ready,
-        // J3-launch begin: §14.1 launch readiness, names and statuses only
+        // §14.1 launch readiness, names and statuses only
         "launch": report.launch.as_ref().map(|launch| serde_json::json!({
             "name": launch.name,
             "support": launch.support,
@@ -561,7 +553,6 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
                 }))
                 .collect::<Vec<_>>(),
         })),
-        // J3-launch end
     });
     // J4 autoscope: what the supervisor scope step did for this `doctor`
     // (the `supervisor_scope` capability row carries its state too).
@@ -572,7 +563,7 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
             ouro_jail::platform::linux::scope::details(),
         );
     }
-    // J5-D begin: the host manifest (§3.2) and the binaries (§14.1)
+    // The host manifest (§3.2) and the binaries (§14.1)
     if let Some(object) = value.as_object_mut() {
         object.insert("binaries".to_owned(), binaries_json());
         #[cfg(target_os = "linux")]
@@ -581,11 +572,9 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
             ouro_jail::platform::linux::host::manifest(),
         );
     }
-    // J5-D end
     value
 }
 
-// J5-D begin
 /// The binaries this `doctor` vouches for: itself, and on Linux the
 /// bubblewrap the platform resolved. The resolution is made once per
 /// process (`resolved_bwrap`), so the record names exactly the file every
@@ -605,7 +594,6 @@ fn binaries_json() -> serde_json::Value {
     );
     serde_json::Value::Object(binaries)
 }
-// J5-D end
 
 // Security 2026-10-08 (audit M1): the launch-profile name and credential
 // fields come from a workspace `launch.toml`, so they are escaped like every
@@ -634,7 +622,7 @@ fn doctor_text(report: &DoctorReport) -> String {
             capability.reason_code.as_deref().unwrap_or("none")
         );
     }
-    // J3-launch begin: §14.1 launch readiness, names and statuses only
+    // §14.1 launch readiness, names and statuses only
     if let Some(launch) = &report.launch {
         let _ = writeln!(
             out,
@@ -659,7 +647,6 @@ fn doctor_text(report: &DoctorReport) -> String {
             );
         }
     }
-    // J3-launch end
     let _ = writeln!(out, "ready {}", report.ready);
     out
 }
@@ -686,7 +673,7 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
     } else {
         print!("{}", gc_text(&report));
     }
-    // J3-launch begin: §6.4 — a cleanup that stopped again exits 1, after the
+    // §6.4 — a cleanup that stopped again exits 1, after the
     // report is printed (J3 review L1).
     if !report.incomplete.is_empty() {
         ouro_jail::diag!(
@@ -695,7 +682,6 @@ fn gc(context: &Context, args: &GcArgs) -> ExitCode {
         );
         return ExitCode::from(1);
     }
-    // J3-launch end
     ExitCode::SUCCESS
 }
 
@@ -711,7 +697,6 @@ fn gc_text(report: &ouro_jail::gc::Report) -> String {
         // crate's own spellings.
         let attempt_id = records::escape_control(&entry.attempt_id);
         let _ = writeln!(out, "{} {} {}", attempt_id, entry.action, entry.reason);
-        // J3-agent begin
         if let Some(proxy_dir) = &entry.proxy_dir {
             let _ = writeln!(
                 out,
@@ -720,8 +705,6 @@ fn gc_text(report: &ouro_jail::gc::Report) -> String {
                 records::escape_control(proxy_dir)
             );
         }
-        // J3-agent end
-        // J4-G begin
         for (key, value) in [
             ("owner", &entry.owner),
             // J5-D: the portable name of what became of the execution
@@ -741,8 +724,6 @@ fn gc_text(report: &ouro_jail::gc::Report) -> String {
         for action in &entry.recorded {
             let _ = writeln!(out, "{} recorded {action}", attempt_id);
         }
-        // J4-G end
-        // J4 W2-S begin
         for name in &entry.leftover_temp_files {
             let _ = writeln!(
                 out,
@@ -759,10 +740,9 @@ fn gc_text(report: &ouro_jail::gc::Report) -> String {
                 records::escape_control(temp_files)
             );
         }
-        // J4 W2-S end
     }
     let _ = writeln!(out, "scanned {}", report.entries.len());
-    // J4-G begin: S7, S9
+    // S7, S9
     let _ = writeln!(
         out,
         "entries {} of {}{}",
@@ -777,7 +757,6 @@ fn gc_text(report: &ouro_jail::gc::Report) -> String {
     for (name, value) in &report.test_seams {
         let _ = writeln!(out, "test_seam {name}={value}");
     }
-    // J4-G end
     out
 }
 
@@ -792,22 +771,18 @@ fn gc_json(report: &ouro_jail::gc::Report) -> serde_json::Value {
                 "attempt_id": entry.attempt_id,
                 "action": entry.action,
                 "reason": entry.reason,
-                // J3-agent begin
                 "proxy_dir": entry.proxy_dir,
-                // J3-agent end
-                // J4-G begin
                 "owner": entry.owner,
                 // J5-D: portable key; the value is the platform's report
                 "execution_boundary": entry.cgroup,
                 "scratch": entry.scratch,
                 "recorded": entry.recorded,
-                // J4-G end
                 // J4 W2-S: leftover `.tmp` files a crash left (§7)
                 "leftover_temp_files": entry.leftover_temp_files,
                 "temp_files": entry.temp_files,
             }))
             .collect::<Vec<_>>(),
-        // J4-G begin: S7 and S9
+        // S7 and S9
         "budget": {
             "max_entries": report.budget.max_entries,
             "charged": report.budget.charged,
@@ -815,7 +790,6 @@ fn gc_json(report: &ouro_jail::gc::Report) -> serde_json::Value {
             "listing_complete": report.budget.listing_complete,
         },
         "test_seams": report.test_seams,
-        // J4-G end
     })
 }
 
@@ -919,7 +893,7 @@ fn internal_subcommand() -> Option<ExitCode> {
         #[cfg(target_os = "linux")]
         "__seccomp-table" => {
             use ouro_jail::platform::linux::seccomp;
-            // J3-agent begin: the agent tables beside the tool one
+            // The agent tables beside the tool one
             let table = match args.get(2).and_then(|arg| arg.to_str()) {
                 None | Some("tool") => seccomp::tool_baseline_table(),
                 Some("agent") => {
@@ -930,19 +904,17 @@ fn internal_subcommand() -> Option<ExitCode> {
                 }
                 Some(_) => return Some(ExitCode::from(2)),
             };
-            // J3-agent end
             print!("{table}");
             Some(ExitCode::SUCCESS)
         }
-        // J3-agent begin: the in-namespace loopback bridge (jail-v1 §10)
+        // The in-namespace loopback bridge (jail-v1 §10)
         #[cfg(target_os = "linux")]
         "__bridge" => ouro_jail::platform::linux::bridge::bridge_main(&args[2..]),
-        // J3-agent end
         _ => None,
     }
 }
 
-// J5-D begin: unit tests of the renderings this binary owns
+// Unit tests of the renderings this binary owns
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1211,4 +1183,3 @@ mod tests {
         );
     }
 }
-// J5-D end

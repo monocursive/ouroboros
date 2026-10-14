@@ -47,7 +47,7 @@ pub struct LauncherSetup {
     _sockdiag: OwnedFd,
 }
 
-// J3-agent begin: the launcher places both at fixed numbers
+// The launcher places both at fixed numbers
 impl LauncherSetup {
     /// The listener and the sock_diag socket, so the launcher can place them
     /// at the descriptor numbers the supervisor expects.
@@ -56,7 +56,6 @@ impl LauncherSetup {
         (self._listener, self._sockdiag)
     }
 }
-// J3-agent end
 
 /// Open a `NETLINK_SOCK_DIAG` socket in this netns, then install the agent
 /// mediation filter with a new user-notification listener and
@@ -104,7 +103,7 @@ pub fn install_filter(flags: libc::c_ulong) -> io::Result<OwnedFd> {
     install_program(&mediation_program(), flags)
 }
 
-// J3-agent begin: installing an already-built program, for a caller that
+// Installing an already-built program, for a caller that
 // must not allocate between fork and the install (the doctor probe)
 /// [`install_filter`] for a program built by the caller.
 ///
@@ -142,7 +141,6 @@ pub fn install_program(
     // SAFETY: `fd` was just returned by seccomp(NEW_LISTENER) and is owned here.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
-// J3-agent end
 
 // ---------------------------------------------------------------------------
 // Step 2: the supervisor takes the listener and sock_diag fds
@@ -153,12 +151,11 @@ pub fn install_program(
 pub struct PeerAuthority {
     listener: OwnedFd,
     sockdiag: SockDiag,
-    // J3-agent begin: the authorized proxy (jail-v1 §10)
+    // The authorized proxy (jail-v1 §10)
     authorized: Option<(u64, u64)>,
-    // J3-agent end
 }
 
-// J3-agent begin: "deny access to host peers except the authorized proxy"
+// "deny access to host peers except the authorized proxy"
 impl PeerAuthority {
     /// Also allow a pathname connect that reaches exactly this node, by its
     /// full `(st_dev, st_ino)`: the attempt's proxy socket, which lives in
@@ -173,7 +170,6 @@ impl PeerAuthority {
         self
     }
 }
-// J3-agent end
 
 /// Take the listener and sock_diag fds from the blocked launcher with
 /// `pidfd_getfd` (§3.4 step 2).
@@ -298,7 +294,6 @@ struct Workers {
     // whole requests.
     sockdiag: std::sync::Mutex<SockDiag>,
     sink: Arc<dyn MediationSink>,
-    // J3-agent begin
     authorized: Option<(u64, u64)>,
     /// Held while a worker checks for a pending notification and receives
     /// it. `SECCOMP_IOCTL_NOTIF_RECV` ignores `O_NONBLOCK`: with nothing
@@ -320,7 +315,6 @@ struct Workers {
     // bridge's identity; before that every connect to the authorized node
     // is refused (fail closed; the target is not released yet).
     authorized_connector: std::sync::Mutex<Option<(libc::pid_t, u64)>>,
-    // J3-agent end
     // Kept alive so the stop pipe read end outlives every worker.
     _stop_r_owned: OwnedFd,
 }
@@ -422,7 +416,7 @@ fn worker_loop(w: &Workers) {
 fn service_one(w: &Workers) -> io::Result<()> {
     let listener = w.listener;
     let sink = w.sink.as_ref();
-    // J3-agent begin: receive only what is still pending (see `Workers::recv`)
+    // Receive only what is still pending (see `Workers::recv`)
     let received = {
         let _guard = w
             .recv
@@ -437,7 +431,6 @@ fn service_one(w: &Workers) -> io::Result<()> {
     let Some(received) = received else {
         return Ok(());
     };
-    // J3-agent end
     let notif = match received {
         Ok(n) => n,
         // A stale notification (the task went away) or a spurious poll wakeup on
@@ -467,7 +460,7 @@ fn service_one(w: &Workers) -> io::Result<()> {
     if !notif_id_valid(listener, id) {
         return Ok(());
     }
-    // J3-agent begin: read while the task is parked in its notification, so
+    // Read while the task is parked in its notification, so
     // the thread group named is the one that asked (validated again below).
     let tgid = task_tgid(pid);
     let mut facts = Facts {
@@ -479,7 +472,6 @@ fn service_one(w: &Workers) -> io::Result<()> {
         address_complete: false,
         peer: None,
     };
-    // J3-agent end
     let Ok(child_pidfd) = open_notifying_thread(pid, tgid) else {
         respond_and_record(
             listener,
@@ -510,7 +502,6 @@ fn service_one(w: &Workers) -> io::Result<()> {
     if !notif_id_valid(listener, id) {
         return Ok(());
     }
-    // J3-agent begin
     facts.family = (sockaddr.len() >= 2).then(|| u16::from_ne_bytes([sockaddr[0], sockaddr[1]]));
     facts.address_complete = ualen <= 256 && sockaddr.len() == ualen;
     facts.peer = peer_of(&sockaddr);
@@ -616,7 +607,7 @@ fn mediate_pathname(
     if st.st_mode & libc::S_IFMT != libc::S_IFSOCK {
         return (Err(libc::ECONNREFUSED), "not_a_socket");
     }
-    // J3-agent begin: the authorized proxy, by its full pinned identity. It
+    // The authorized proxy, by its full pinned identity. It
     // is bound in the host network namespace, so sock_diag in the attempt's
     // namespace never lists it; nothing else from the host is let through.
     // Security 2026-09-25 (audit F2): the inode match alone is not enough:
@@ -643,7 +634,6 @@ fn mediate_pathname(
             Err(errno) => (Err(errno), "proxy_connect_failed"),
         };
     }
-    // J3-agent end
     // Filesystem identity; refuse a node too wide for the sock_diag interface.
     let Some(want) = VfsId::from_stat(st.st_ino, st.st_dev) else {
         return (Err(libc::EACCES), "inode_too_wide");
@@ -760,7 +750,7 @@ fn so_error(fd: RawFd) -> i32 {
 
 // ---- syscall helpers ------------------------------------------------------
 
-// J3-agent begin: the facts a record carries beside its verdict
+// The facts a record carries beside its verdict
 struct Facts {
     pid: libc::pid_t,
     tgid: Option<libc::pid_t>,
@@ -777,7 +767,6 @@ fn task_tgid(tid: libc::pid_t) -> Option<libc::pid_t> {
         .find_map(|line| line.strip_prefix("Tgid:"))
         .and_then(|value| value.trim().parse().ok())
 }
-// J3-agent end
 
 fn record(sink: &dyn MediationSink, facts: &Facts, reason: &'static str, verdict: Verdict) {
     sink.record(MediationRecord {
@@ -838,7 +827,7 @@ fn notif_recv(listener: RawFd) -> io::Result<libc::seccomp_notif> {
     Ok(n)
 }
 
-// J3-agent begin: a notification is pending on the listener right now
+// A notification is pending on the listener right now
 /// Whether a notification is waiting to be received, by a `poll` that does
 /// not wait. A closed or broken listener counts as pending, so the caller's
 /// RECV reports the failure instead of this hiding it.
@@ -852,7 +841,6 @@ fn pending(listener: RawFd) -> bool {
     let rc = unsafe { libc::poll(&raw mut pfd, 1, 0) };
     rc > 0 && pfd.revents != 0
 }
-// J3-agent end
 
 /// A pidfd whose descriptor table is the notifying thread's own.
 ///

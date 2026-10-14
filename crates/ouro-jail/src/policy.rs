@@ -420,14 +420,13 @@ impl PolicySnapshot {
                 }
             }
         }
-        // J4-D7 begin: keyed collections follow the same byte order
+        // Keyed collections follow the same byte order
         for path in [
             &["environment", "bindings"][..],
             &["launch", "credentials"][..],
         ] {
             sort_keyed_at(&mut value, path)?;
         }
-        // J4-D7 end
         Ok(value)
     }
 
@@ -454,7 +453,6 @@ fn sort_set_at(value: &mut serde_json::Value, path: &[&str]) -> Result<(), JailE
     sort_by_canonical_bytes_at(value, path, true)
 }
 
-// J4-D7 begin
 fn sort_keyed_at(value: &mut serde_json::Value, path: &[&str]) -> Result<(), JailError> {
     sort_by_canonical_bytes_at(value, path, false)
 }
@@ -464,7 +462,6 @@ fn sort_by_canonical_bytes_at(
     path: &[&str],
     dedup: bool,
 ) -> Result<(), JailError> {
-    // J4-D7 end
     let mut node = value;
     for key in path {
         node = match node.get_mut(key) {
@@ -650,11 +647,10 @@ pub enum LayerOrigin {
     CommandLine,
     /// The workspace-root `ouro.toml`, which can only narrow.
     ProjectConfig(String),
-    // J3-launch begin: the §6.2 step-2 launch-profile layer
+    // The §6.2 step-2 launch-profile layer
     /// An operator launch profile (`<config-dir>/launch/<name>.toml`), whose
     /// `network.allow` is an operator grant.
     LaunchProfile(String),
-    // J3-launch end
 }
 
 impl LayerOrigin {
@@ -669,9 +665,8 @@ impl LayerOrigin {
             self,
             LayerOrigin::CommandLine | LayerOrigin::OperatorConfig(_)
         )
-        // J3-launch begin: a launch profile's allowed hosts are operator grants
+        // A launch profile's allowed hosts are operator grants
         || matches!(self, LayerOrigin::LaunchProfile(_))
-        // J3-launch end
     }
 
     /// Whether this layer may RAISE a resource ceiling above the base
@@ -714,9 +709,7 @@ impl LayerOrigin {
             LayerOrigin::Environment => "environment".to_owned(),
             LayerOrigin::CommandLine => "cli".to_owned(),
             LayerOrigin::ProjectConfig(name) => format!("project-config:{name}"),
-            // J3-launch begin: provenance label
             LayerOrigin::LaunchProfile(name) => format!("launch-profile:{name}"),
-            // J3-launch end
         }
     }
 }
@@ -1693,7 +1686,7 @@ fn build_snapshot(
     })
 }
 
-// J5-B1-w3 begin: §9.1 — an operator grant may not expose a pseudo filesystem
+// §9.1 — an operator grant may not expose a pseudo filesystem
 /// Whether a filesystem `f_type` magic is `proc`, `sysfs`, cgroup (v1 or v2)
 /// or devtmpfs. The Linux platform reads it with `fstatfs` on the resolved,
 /// pinned source; keeping the set here lets the resolution rule and its test
@@ -1743,7 +1736,6 @@ pub fn grant_exposes_pseudo_fs(
         .iter()
         .any(|mount| mount.starts_with(resolved) || resolved.starts_with(mount))
 }
-// J5-B1-w3 end
 
 fn is_false(value: &bool) -> bool {
     !value

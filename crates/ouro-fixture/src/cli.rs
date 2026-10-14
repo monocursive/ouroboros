@@ -519,7 +519,7 @@ pub enum Mode {
     Raise { signal: String },
     /// Run a JSON array of argv arrays in this one process.
     Script { file: OsString },
-    // J5-E begin: the performance workloads and launcher (jail-v1 §5)
+    // The performance workloads and launcher (jail-v1 §5)
     /// The fixed file-operation workload (J0's): ROUNDS rounds of create
     /// (`openat` with `O_WRONLY|O_CREAT|O_TRUNC`, then `close`), `rename` and
     /// `unlink` of one name in DIR, which must exist (`renameat`/`unlinkat`
@@ -563,7 +563,6 @@ pub enum Mode {
         #[arg(last = true, required = true, num_args = 1.., value_name = "ARGV")]
         argv: Vec<OsString>,
     },
-    // J5-E end
 }
 
 /// Parse an octal mode string.

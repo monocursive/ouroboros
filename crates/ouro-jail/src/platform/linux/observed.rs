@@ -336,7 +336,7 @@ fn script_kernel_confirms(
 /// Records `event` in `audit` and returns the fact it establishes.
 pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent) -> Fact {
     match event {
-        // J4-O begin: the birth identity and the exec's own call (slice O)
+        // The birth identity and the exec's own call (slice O)
         TracerEvent::Exec {
             pid,
             start_ticks,
@@ -364,7 +364,6 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
                     return Fact::CommandForbidden(hit.pattern.clone());
                 }
             }
-            // J4-O end
             if *pid != target.launcher {
                 return Fact::Nothing;
             }
@@ -407,7 +406,6 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
                 Fact::Nothing
             }
         }
-        // J4-O begin: the birth identity (slice O)
         TracerEvent::Syscall {
             pid,
             start_ticks,
@@ -433,7 +431,6 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             ..
         } => {
             audit.record_exit(*pid, *start_ticks, *status);
-            // J4-O end
             if *pid == target.launcher {
                 Fact::TargetExit(*status)
             } else {
@@ -604,10 +601,8 @@ mod tests {
     ) -> TracerEvent {
         TracerEvent::Exec {
             pid,
-            // J4-O begin
             start_ticks: None,
             syscall: None,
-            // J4-O end
             path,
             kernel_image,
             dirfd: None,

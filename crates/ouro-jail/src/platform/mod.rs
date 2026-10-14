@@ -104,7 +104,7 @@ pub struct PreparedPlan {
     /// here): trusted input the stdio screening must treat like the state
     /// root (audit 2026-10-08 H1).
     pub config_dir: PathBuf,
-    // J3-launch begin: vendor state and bind_ro handles staged by the
+    // Vendor state and bind_ro handles staged by the
     // supervisor, bound by descriptor (§9.1, §12). A field, so the platform
     // receives the exact objects staging examined instead of re-resolving
     // paths. (The other J3-launch change here is the additive
@@ -112,16 +112,13 @@ pub struct PreparedPlan {
     /// The vendor-state directory and `bind_ro` sources, when a launch
     /// profile needs them; `None` otherwise.
     pub launch: Option<crate::credentials::LaunchHandoff>,
-    // J3-launch end
-    // J3-agent begin: the registered proxy directory (jail-v1 §10)
+    // The registered proxy directory (jail-v1 §10)
     /// The attempt's registered, 0700 proxy directory, for a proxy-mode
     /// profile; `None` otherwise. The platform binds the proxy socket inside
     /// it and exposes it read-only by this descriptor.
     pub proxy: Option<ProxyDirHandoff>,
-    // J3-agent end
 }
 
-// J3-agent begin: the proxy directory hand-off
 /// The proxy directory the supervisor registered and created (§10).
 #[derive(Clone)]
 pub struct ProxyDirHandoff {
@@ -151,7 +148,6 @@ impl std::fmt::Debug for ProxyDirHandoff {
             .finish_non_exhaustive()
     }
 }
-// J3-agent end
 
 /// The output channels a prepared execution may write to.
 ///
@@ -251,15 +247,13 @@ pub enum RunEvent {
     EvidenceLost {
         /// A safe reason.
         reason: String,
-        // J4 W2-S begin: R-2
         /// Whether the platform had already seen the target's own end when it
         /// processed the loss. Such a loss is recorded, but the target's end
         /// is not a stop the supervisor acted on, so the loss never becomes
         /// `outcome.cause` (§6.4) and nothing is left to stop for it.
         after_target_end: bool,
-        // J4 W2-S end
     },
-    // J5-B1 begin: §6.4
+    // §6.4
     /// Without an observer, the target's exec could not be confirmed (it
     /// ended before its new image was seen); the outcome is unknown and the
     /// run is a coded tool error, never a silent exit 1.
@@ -267,7 +261,6 @@ pub enum RunEvent {
         /// A safe reason.
         reason: String,
     },
-    // J5-B1 end
     /// The facts needed are missing; never a fabricated outcome.
     Unknown {
         /// A safe reason.
@@ -275,7 +268,7 @@ pub enum RunEvent {
     },
 }
 
-// J5-B1 begin: X04
+// X04
 /// What a target exec failure's errno does not say, when the platform
 /// established it (X04).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -306,7 +299,6 @@ impl ExecFailureDetail {
         }
     }
 }
-// J5-B1 end
 
 /// A monotonic deadline (§6.4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -411,7 +403,7 @@ pub trait PreparedExecution {
     /// Returns a typed error when teardown could not be completed or verified.
     fn abort(self: Box<Self>) -> Result<Teardown, JailError>;
 
-    // J3-launch begin: a failed release reports its teardown (§13.2 row 4)
+    // A failed release reports its teardown (§13.2 row 4)
     /// [`PreparedExecution::release`], plus what the teardown after a failed
     /// release established about the tree.
     ///
@@ -433,10 +425,9 @@ pub trait PreparedExecution {
             })
         })
     }
-    // J3-launch end
 }
 
-// J3-launch begin: a failed release with its teardown
+// A failed release with its teardown
 /// Why a release failed, and what the teardown it ran established.
 #[derive(Debug)]
 pub struct ReleaseFailure {
@@ -445,7 +436,6 @@ pub struct ReleaseFailure {
     /// The teardown's observation, when the platform ran and can report one.
     pub teardown: Option<Teardown>,
 }
-// J3-launch end
 
 /// A released execution (§4).
 pub trait RunningExecution {
@@ -466,7 +456,7 @@ pub trait RunningExecution {
     fn storage_loss(&self) -> Option<String> {
         None
     }
-    // J3-none begin: a detected lifetime-integrity loss reaches the next receipt (§9.3)
+    // A detected lifetime-integrity loss reaches the next receipt (§9.3)
     /// Whether the platform has detected, while running, that the boundary's
     /// lifetime integrity was lost: a membership escape, a replaced identity
     /// or a failed verification. Once true it stays true. The default is a
@@ -474,8 +464,7 @@ pub trait RunningExecution {
     fn integrity_lost(&self) -> bool {
         false
     }
-    // J3-none end
-    // J3-agent begin: native facts that exist only once the run is over
+    // Native facts that exist only once the run is over
     /// `lifetime.native.details` entries to replace in the receipts written
     /// after [`RunningExecution::observer_summary`]: facts the platform only
     /// knows once its helpers have stopped (what the `agent` bridge did, for
@@ -483,7 +472,6 @@ pub trait RunningExecution {
     fn final_native_details(&self) -> serde_json::Map<String, serde_json::Value> {
         serde_json::Map::new()
     }
-    // J3-agent end
 
     /// Waits for the next event, up to `deadline`.
     fn wait(&mut self, deadline: Deadline) -> RunEvent;

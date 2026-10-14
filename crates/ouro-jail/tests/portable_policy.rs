@@ -507,10 +507,9 @@ fn p02_a_host_the_ruleset_cannot_normalize_refuses_as_an_unknown_subset() {
                 baseline.network_allow = HostRule::parse("*.example.com:443").expect("parses");
             },
             PolicyDelta {
-                // J3-P begin: IDNA now maps `bücher`; a malformed A-label is
+                // IDNA now maps `bücher`; a malformed A-label is
                 // what the ruleset still cannot normalize.
                 network_allow: vec!["xn--a.example.com:443".to_owned()],
-                // J3-P end
                 ..PolicyDelta::default()
             },
         )
@@ -618,7 +617,7 @@ fn an_operator_profile_file_may_raise_a_ceiling_like_the_cli() {
     assert_eq!(wall.value.as_str(), "32400000");
 }
 
-// J5-B1 begin: P02 — mem/cpu ceilings and launch/executable/backend keys
+// P02 — mem/cpu ceilings and launch/executable/backend keys
 /// Raising the `mem` or `cpu` ceiling refuses with that limit's key path.
 /// The §6.3 battery raised only `wall` and `pids`; a baseline that already
 /// carries a `mem` and a `cpu` ceiling is needed, because adding a
@@ -706,7 +705,6 @@ fn p02_a_project_file_cannot_add_credentials_launch_executable_or_backend() {
         );
     }
 }
-// J5-B1 end
 
 #[test]
 fn p02_weakening_coverage_evidence_or_observation_refuses() {
@@ -1042,7 +1040,7 @@ fn p02_the_workspace_root_itself_is_a_real_directory() {
     );
 }
 
-// J5-B1 begin: the real file layers, through supervisor::resolve_plan
+// The real file layers, through supervisor::resolve_plan
 // (P01.6, P02.6, P02.9, P02.10, P02.13, I02.4)
 
 /// An operator config directory, a private state root and a workspace, and
@@ -1351,9 +1349,8 @@ fn i02_launch_reads_only_the_operators_configuration() {
     let plan = files.plan(&args).expect("the operator's own file resolves");
     assert_eq!(plan.config_dir, files.config);
 }
-// J5-B1 end
 
-// J5-B1 begin: P02.12
+// P02.12
 /// P02.12: a symlink component and a case variation of a denied subtree
 /// refuse as a widening with the exact key path of the grant that tried
 /// them, for both grant keys a narrowing file has. (P02.11 proves the
@@ -1381,9 +1378,8 @@ fn p02_a_symlink_component_and_a_case_variation_refuse_with_the_key_path() {
         }
     }
 }
-// J5-B1 end
 
-// J5-B1-w3 begin: §9.1 pseudo-filesystem grant rule (S02)
+// §9.1 pseudo-filesystem grant rule (S02)
 /// The pure resolution rule `grant_exposes_pseudo_fs`: a grant whose source
 /// is on a proc/sysfs/cgroup/devtmpfs filesystem is forbidden, and so is one
 /// that is an ancestor of (or equal to) such a mount point; an ordinary path
@@ -1464,4 +1460,3 @@ fn pseudo_fs_grant_rule_follows_filesystem_type_and_mount_topology() {
         &mounts
     ));
 }
-// J5-B1-w3 end

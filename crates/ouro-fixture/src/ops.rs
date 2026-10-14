@@ -421,7 +421,6 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
         }
         Mode::Raise { signal } => raise(rep, &signal),
         Mode::Script { file } => script(session, &file),
-        // J5-E begin
         Mode::Fileops { rounds, dir } => j5e::fileops(rep, rounds, &dir),
         Mode::SpawnTree { count, argv } => j5e::spawn_tree(rep, count, &argv),
         Mode::PerfLaunch {
@@ -431,7 +430,6 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
             deadline_ms,
             argv,
         } => j5e::perf_launch(&out, data_dir.as_deref(), sample_ms, deadline_ms, &argv),
-        // J5-E end
     }
 }
 
@@ -2217,7 +2215,7 @@ mod tests {
     }
 }
 
-// J5-E begin: the performance workloads and the per-launch launcher of
+// The performance workloads and the per-launch launcher of
 // `cargo xtask perf` (jail-v1 §5). One module, so the whole slice is this
 // block and the two dispatch arms above.
 mod j5e {
@@ -2874,4 +2872,3 @@ mod j5e {
         }
     }
 }
-// J5-E end

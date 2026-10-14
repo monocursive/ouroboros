@@ -20,19 +20,17 @@ use super::sys::{PathError, cstring_from_os, empty_stat, errno_name, last_errno}
 pub const JAIL_INSIDE_PATH: &str = "/run/ouro/jail";
 /// Where the scratch directory appears inside the sandbox.
 pub const SCRATCH_INSIDE_PATH: &str = "/tmp";
-// J3-launch begin: the in-sandbox location of vendor state
+// The in-sandbox location of vendor state
 /// Where vendor state appears inside the sandbox. jail-v1 §9.1 fixes no
 /// location; this is beside [`JAIL_INSIDE_PATH`], under the sandbox's own
 /// read-only `/run/ouro`, so its parent (the attempt directory) is never
 /// visible and no operator grant can shadow it (J3 contract §3.2).
 pub const VENDOR_STATE_INSIDE_PATH: &str = "/run/ouro/state";
-// J3-launch end
-// J3-agent begin: the proxy's dedicated directory inside the sandbox
+// The proxy's dedicated directory inside the sandbox
 /// Where the attempt's proxy directory appears inside the sandbox, read-only
 /// (jail-v1 §10: "Expose only its dedicated directory at `/run/ouro/proxy`,
 /// read-only to the child").
 pub const PROXY_INSIDE_PATH: &str = "/run/ouro/proxy";
-// J3-agent end
 
 /// The system roots the `tool` profile grants read-only (north-star §4.2).
 pub const RUNTIME_ROOTS: [&str; 7] = [
@@ -676,7 +674,7 @@ pub struct BwrapPlan {
     /// The command inside the sandbox, normally
     /// `/run/ouro/jail __launch ... -- PROGRAM ARG...`.
     pub inner: Vec<OsString>,
-    // J3-launch begin: vendor state and bind_ro credentials, bound by
+    // Vendor state and bind_ro credentials, bound by
     // descriptor only (§9.1, §12)
     /// The host vendor-state directory, for the mount table and diagnostics.
     /// It is never bound by this path: only by [`BwrapPlan::vendor_state_fd`].
@@ -687,16 +685,13 @@ pub struct BwrapPlan {
     /// `bind_ro` credential views: each exact source object's descriptor and
     /// its destination under [`VENDOR_STATE_INSIDE_PATH`] (`--ro-bind-fd`).
     pub credential_binds: Vec<CredentialBind>,
-    // J3-launch end
-    // J3-agent begin: the proxy directory, bound by descriptor only (§10)
+    // The proxy directory, bound by descriptor only (§10)
     /// The host proxy directory, for the mount table and diagnostics. Never
     /// bound by this path: only by [`BwrapPlan::proxy_dir_fd`].
     pub proxy_dir: Option<PathBuf>,
     /// Descriptor number, valid in the bubblewrap process, of the pinned
     /// proxy directory (`--ro-bind-fd` at [`PROXY_INSIDE_PATH`]).
     pub proxy_dir_fd: Option<RawFd>,
-    // J3-agent end
-    // Security 2026-09-25 (audit F5) begin: a sanitized resolver view
     /// When set, the file bound at `/etc/resolv.conf` is this sanitized
     /// per-attempt copy instead of the host's: the host file can carry the
     /// operator's search domains, which are host facts the child has no
@@ -704,10 +699,8 @@ pub struct BwrapPlan {
     /// namespace either way; `etc_paths` still lists `/etc/resolv.conf`
     /// so operator-grant overlap checks keep their meaning.
     pub resolv_source: Option<PathBuf>,
-    // Security 2026-09-25 (audit F5) end
 }
 
-// J3-launch begin: one bind_ro credential view
 /// One read-only credential view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialBind {
@@ -718,7 +711,6 @@ pub struct CredentialBind {
     /// The destination inside the sandbox.
     pub destination: PathBuf,
 }
-// J3-launch end
 
 /// Why a plan cannot be rendered.
 #[derive(Debug)]
@@ -731,13 +723,12 @@ pub enum PlanError {
     ArgsFdMissing,
     /// There is no command to run.
     NoCommand,
-    // J3-launch begin: a staged object is bound by descriptor or not at all
+    // A staged object is bound by descriptor or not at all
     /// A vendor-state or credential mount has no descriptor.
     StagedFdMissing(&'static str),
     /// An argument contains NUL, which would split it into several options
     /// in the NUL-separated `--args` payload.
     ArgumentNul,
-    // J3-launch end
     // Audit 2026-09-25-2, S3 begin
     /// A `deny_read` mask that would shadow the boundary's own plumbing
     /// (`/run`, `/run/ouro` or beneath it: the jail binary, the proxy
@@ -755,7 +746,6 @@ impl fmt::Display for PlanError {
             Self::Path(what, e) => write!(f, "{what}: {e}"),
             Self::ArgsFdMissing => write!(f, "the argument list needs --args but no fd was given"),
             Self::NoCommand => write!(f, "the plan has no command to run"),
-            // J3-launch begin
             Self::StagedFdMissing(what) => {
                 write!(
                     f,
@@ -765,7 +755,7 @@ impl fmt::Display for PlanError {
             Self::ArgumentNul => write!(
                 f,
                 "an argument contains NUL, which would split it into bubblewrap options"
-            ), // J3-launch end
+            ),
             // Audit 2026-09-25-2, S3 begin
             Self::MaskedBoundaryPlumbing(path) => write!(
                 f,
@@ -857,15 +847,11 @@ impl BwrapPlan {
             args_fd: None,
             force_args_fd: false,
             inner: Vec::new(),
-            // J3-launch begin
             vendor_state: None,
             vendor_state_fd: None,
             credential_binds: Vec::new(),
-            // J3-launch end
-            // J3-agent begin
             proxy_dir: None,
             proxy_dir_fd: None,
-            // J3-agent end
             resolv_source: None,
         }
     }
@@ -979,7 +965,7 @@ impl BwrapPlan {
                 destination: placeholder.destination.as_os_str().to_owned(),
             });
         }
-        // J3-launch begin: vendor state, then the credential views inside it.
+        // Vendor state, then the credential views inside it.
         // After every operator grant, so no `--ro`/`--rw` of an ancestor of
         // `/run/ouro` can shadow them; before the masks, like the jail binary.
         if let Some(host) = &self.vendor_state {
@@ -999,8 +985,7 @@ impl BwrapPlan {
                 destination: view.destination.as_os_str().to_owned(),
             });
         }
-        // J3-launch end
-        // J3-agent begin: the proxy directory, read-only, after every grant
+        // The proxy directory, read-only, after every grant
         if let Some(host) = &self.proxy_dir {
             rows.push(MountRow {
                 kind: "proxy",
@@ -1008,7 +993,6 @@ impl BwrapPlan {
                 destination: OsString::from(PROXY_INSIDE_PATH),
             });
         }
-        // J3-agent end
         rows.push(MountRow {
             kind: "ro-bind",
             source: Some(self.jail_exe.as_os_str().to_owned()),
@@ -1062,19 +1046,16 @@ impl BwrapPlan {
             cstring_from_os(path.as_os_str()).map_err(|e| PlanError::Path(what, e))?;
         }
 
-        // J3-launch begin: every staged mount has its descriptor
+        // Every staged mount has its descriptor
         if self.vendor_state.is_some() && self.vendor_state_fd.is_none() {
             return Err(PlanError::StagedFdMissing("vendor-state"));
         }
         if self.credential_binds.iter().any(|view| view.fd.is_none()) {
             return Err(PlanError::StagedFdMissing("credential"));
         }
-        // J3-launch end
-        // J3-agent begin
         if self.proxy_dir.is_some() && self.proxy_dir_fd.is_none() {
             return Err(PlanError::StagedFdMissing("proxy directory"));
         }
-        // J3-agent end
         // Audit 2026-09-25-2, S3: a mask is rendered last, over every other
         // row, so one over the plumbing would unmount the jail's own binary,
         // proxy socket or staged state for the whole attempt.
@@ -1145,7 +1126,7 @@ impl BwrapPlan {
                         .find(|p| p.source.as_os_str() == row.destination)
                         .and_then(|p| p.fd)
                 });
-                // J3-launch begin: staged objects carry their own descriptor
+                // Staged objects carry their own descriptor
                 let fd = match row.kind {
                     "vendor-state" => self.vendor_state_fd,
                     "credential" => self
@@ -1153,12 +1134,9 @@ impl BwrapPlan {
                         .iter()
                         .find(|view| view.destination.as_os_str() == row.destination)
                         .and_then(|view| view.fd),
-                    // J3-agent begin
                     "proxy" => self.proxy_dir_fd,
-                    // J3-agent end
                     _ => fd,
                 };
-                // J3-launch end
                 let flag = match row.kind {
                     "bind" if fd.is_some() => "--bind-fd",
                     "ro-bind" | "ro-bind-fd" | "placeholder" if fd.is_some() => "--ro-bind-fd",
@@ -1170,13 +1148,10 @@ impl BwrapPlan {
                     "dev" => "--dev",
                     "dev-bind" => "--dev-bind",
                     "cwd" => "--tmpfs",
-                    // J3-launch begin: checked above to have a descriptor
+                    // Checked above to have a descriptor
                     "vendor-state" => "--bind-fd",
                     "credential" => "--ro-bind-fd",
-                    // J3-launch end
-                    // J3-agent begin
                     "proxy" => "--ro-bind-fd",
-                    // J3-agent end
                     _ => unreachable!("mount table kind"),
                 };
                 if let Some(fd) = fd {
@@ -1208,7 +1183,7 @@ impl BwrapPlan {
                 push(&[OsStr::new("--json-status-fd"), OsStr::new(&fd.to_string())]);
             }
         }
-        // J3-launch begin: no argument may carry a NUL (J3 review M4). The
+        // No argument may carry a NUL (J3 review M4). The
         // `--args` payload separates options with NUL, so one embedded in an
         // environment name or value would become further bubblewrap options;
         // the launch grammar refuses NUL, and this refuses it again here.
@@ -1219,7 +1194,6 @@ impl BwrapPlan {
         {
             return Err(PlanError::ArgumentNul);
         }
-        // J3-launch end
         let size: usize = tail
             .iter()
             .chain(self.inner.iter())
@@ -1273,7 +1247,7 @@ pub fn inner_launch_command(
     inner_launch_command_with(release_fd, error_fd, narrow, None, None, None, target)
 }
 
-// J3-agent begin: the agent launcher's mediation and bridge options
+// The agent launcher's mediation and bridge options
 /// [`inner_launch_command`], plus, for `agent`, the descriptor numbers the
 /// launcher places its mediation listener, sock_diag socket and the bridge's
 /// report pipe at (jail-v1 §10), and the signal mask the launcher restores
@@ -1315,7 +1289,6 @@ pub fn inner_launch_command_with(
         out.push(OsString::from("--sigmask"));
         out.push(OsString::from(format!("{mask:x}")));
     }
-    // J3-agent end
     out.push(OsString::from("--"));
     out.extend(target.iter().cloned());
     out
@@ -1728,7 +1701,7 @@ mod tests {
             Err(PlanError::Path("workspace", _))
         ));
     }
-    // J3-launch begin: staged mounts render by descriptor or not at all
+    // Staged mounts render by descriptor or not at all
     #[test]
     fn staged_vendor_state_and_views_render_by_descriptor_after_every_grant() {
         let mut plan = sample_plan();
@@ -1799,9 +1772,8 @@ mod tests {
         plan.inner.push(OsString::from("tail\0--bind"));
         assert!(matches!(plan.render(), Err(PlanError::ArgumentNul)));
     }
-    // J3-launch end
 
-    // J3-agent begin: the proxy directory renders by descriptor or not at all
+    // The proxy directory renders by descriptor or not at all
     #[test]
     fn the_proxy_directory_is_bound_read_only_by_descriptor_after_every_grant() {
         let mut plan = sample_plan();
@@ -1849,5 +1821,4 @@ mod tests {
             inner_launch_command_with(12, 13, false, None, None, None, &[OsString::from("x")])
         );
     }
-    // J3-agent end
 }

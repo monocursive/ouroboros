@@ -125,11 +125,10 @@ pub struct Removal {
     pub removed: usize,
     /// The most directory descriptors the traversal held at once.
     pub peak_held: usize,
-    // J4 W2-S begin: S7
+    // S7
     /// Entries this pass charged against its bound (`Limits::max_entries`):
     /// every name it read and looked at, which is what the bound counts.
     pub visited: usize,
-    // J4 W2-S end
 }
 
 impl Removal {
@@ -560,7 +559,6 @@ pub fn remove_managed_dir(attempt_dir: &AttemptDir, name: &str, limits: Limits) 
     removal
 }
 
-// J4 W2-S begin: permitted by gc's own verification
 /// The reason recorded when no receipt proves anything and gc did not verify
 /// the registered leaf either (a crash before any terminal receipt).
 pub const REASON_NO_TERMINAL_RECEIPT: &str = "no_terminal_receipt";
@@ -583,7 +581,6 @@ pub fn permitted(receipt: Option<&Receipt>, gc_verified_leaf: bool) -> Result<()
         None => Err(REASON_NO_TERMINAL_RECEIPT),
     }
 }
-// J4 W2-S end
 
 /// Whether a receipt proves that vendor state may be deleted (§12, §14.2).
 ///
@@ -685,7 +682,7 @@ pub fn resume(attempt_dir: &AttemptDir, dry_run: bool) -> Result<Resume, JailErr
     resume_with(attempt_dir, dry_run, Limits::DEFAULT, false).map(|resumed| resumed.outcome)
 }
 
-// J4 W2-S begin: S7 and gc's verification
+// S7 and gc's verification
 /// What [`resume_with`] did, and what it spent.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Resumed {
@@ -767,7 +764,6 @@ fn resume_within(
             }
         }
     }
-    // J4 W2-S end
     if result.status != StateCleanup::Complete {
         state::record_cleanup_at(
             state::Site::GcResume,
@@ -1311,7 +1307,6 @@ mod tests {
         assert_eq!(permitted_by(&receipt), Err(REASON_TREE_UNVERIFIED));
     }
 
-    // J4 W2-S begin
     #[test]
     fn gcs_verification_of_the_leaf_is_proof_enough_except_after_lost_integrity() {
         let mut receipt = sample_receipt();
@@ -1328,7 +1323,6 @@ mod tests {
         receipt.lifetime.integrity = "lost".into();
         assert_eq!(permitted(Some(&receipt), true), Err(REASON_INTEGRITY_LOST));
     }
-    // J4 W2-S end
 
     fn sample_receipt() -> Receipt {
         use crate::observer::CoverageSummary;

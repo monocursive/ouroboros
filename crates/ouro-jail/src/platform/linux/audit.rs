@@ -47,7 +47,7 @@ struct NamedRoot {
     label: String,
 }
 
-// J3-agent begin: one mediated connect, as the audit writer needs it
+// One mediated connect, as the audit writer needs it
 /// One `connect` whose mediated response the kernel accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediatedConnect {
@@ -77,7 +77,6 @@ fn snap_bytes(bytes: &[u8]) -> super::tracer::PathSnapshot {
         complete: true,
     }
 }
-// J3-agent end
 
 /// How a command-rule hit was enforced ([`AuditWriter::record_command_rule`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,11 +106,10 @@ pub struct AuditWriter {
     limit_hits: u64,
     /// True once a frame could not be written; recorded, never ignored.
     lost_frames: u64,
-    // J5-C begin: review item 12
+    // Review item 12
     /// When this writer was made, before the observer attached: the last
     /// point nothing can have been lost, where a loss of unknown start begins.
     created_ns: u64,
-    // J5-C end
 }
 
 impl AuditWriter {
@@ -208,14 +206,13 @@ impl AuditWriter {
         }
     }
 
-    // J5-C begin: review item 12
+    // Review item 12
     /// Frames that never reached the trace: results, gap notes and limit
     /// notes the sink refused or a poisoned trace lock could not take.
     #[must_use]
     pub fn lost_frames(&self) -> u64 {
         self.lost_frames
     }
-    // J5-C end
 
     /// Events emitted for one coverage class so far.
     #[must_use]
@@ -486,7 +483,7 @@ impl AuditWriter {
         }
     }
 
-    // J3-agent begin: mediated connects are audit-source results (§10, §11.4)
+    // Mediated connects are audit-source results (§10, §11.4)
     /// One `connect` the unix-peer mediator decided (jail-v1 §10).
     ///
     /// A mediated connect is not a ptrace stop — `SECCOMP_RET_USER_NOTIF`
@@ -619,7 +616,6 @@ impl AuditWriter {
             Some(1),
         );
     }
-    // J3-agent end
 
     /// A confirmed exec transition (`PTRACE_EVENT_EXEC`).
     ///
@@ -1103,7 +1099,7 @@ impl AuditWriter {
     }
 }
 
-// J5-C begin: review item 12
+// Review item 12
 /// The gap reason of a result a poisoned trace lock could not take.
 const TRACE_WRITER_POISONED: &str = "trace_writer_poisoned";
 /// The gap reason of an observer whose tracer thread panicked.
@@ -1113,7 +1109,6 @@ const OBSERVER_PANICKED: &str = "observer_panicked";
 fn now_ns() -> u64 {
     u64::try_from(crate::platform::elapsed_since_start_ns()).unwrap_or(u64::MAX)
 }
-// J5-C end
 
 /// `fields.pid_start_ticks`: the birth of the process `fields.pid` names —
 /// the start time of its thread-group leader, field 22 of `/proc/<pid>/stat`
@@ -1518,7 +1513,7 @@ mod tests {
         assert!(limits.gaps.is_empty());
     }
 
-    // J5-C begin: review item 12, a degraded class always names its gap
+    // Review item 12, a degraded class always names its gap
     /// A trace whose lock a panicking thread held: every later `lock()` is
     /// `Err(PoisonError)`.
     fn poisoned_trace() -> crate::trace::SharedTrace {
@@ -1656,7 +1651,6 @@ mod tests {
         writer.record_limit_unapplied("pids", "no delegated cgroup");
         assert_eq!(writer.lost_frames(), 2, "nor did the limit note");
     }
-    // J5-C end
 
     #[test]
     fn a_relative_path_is_never_joined_to_a_guessed_cwd() {

@@ -573,9 +573,8 @@ pub struct ProxyHandle {
     /// listener's path.
     wake: Option<UnixStream>,
     accept_done: Option<mpsc::Receiver<()>>,
-    // J3-agent begin: whether the accept loop still runs
+    // Whether the accept loop still runs
     serving: Arc<std::sync::atomic::AtomicBool>,
-    // J3-agent end
 }
 
 fn invalid(message: String) -> io::Error {
@@ -674,10 +673,8 @@ pub fn start_with_vault(
     });
     let (done_tx, done_rx) = mpsc::channel();
     let accept_shared = Arc::clone(&shared);
-    // J3-agent begin
     let serving = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let serving_flag = Arc::clone(&serving);
-    // J3-agent end
     thread::Builder::new()
         .name("ouro-proxy-accept".to_owned())
         .spawn(move || {
@@ -695,7 +692,7 @@ pub fn start_with_vault(
 }
 
 impl ProxyHandle {
-    // J3-agent begin: a proxy that stopped serving is a recorded fact (§10)
+    // A proxy that stopped serving is a recorded fact (§10)
     /// Whether the accept loop still runs. It stops on [`ProxyHandle::stop`]
     /// and when its listener is no longer listening (shut down by anything),
     /// after which every new connection to the socket is refused: the proxy
@@ -704,7 +701,6 @@ impl ProxyHandle {
     pub fn serving(&self) -> bool {
         self.serving.load(Ordering::SeqCst)
     }
-    // J3-agent end
 
     /// The number of admitted connections that have not settled.
     #[must_use]
@@ -792,7 +788,7 @@ fn accept_loop(shared: &Arc<Shared>, listener: &UnixListener, wake: &UnixStream)
     loop {
         match sys::poll(&[listener.as_fd(), wake.as_fd()], libc::POLLIN, None) {
             Ok(revents) if revents.get(1).is_some_and(|&events| events != 0) => return,
-            // J3-agent begin: a listening socket reports POLLHUP only once it
+            // A listening socket reports POLLHUP only once it
             // was shut down (measured on the reference host: accept then
             // returns EAGAIN for ever and every connect is refused). It will
             // never accept again, so the loop ends instead of spinning, and
@@ -804,7 +800,6 @@ fn accept_loop(shared: &Arc<Shared>, listener: &UnixListener, wake: &UnixStream)
             {
                 return;
             }
-            // J3-agent end
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => {

@@ -1206,7 +1206,7 @@ fn gc_case(site: Site, fault: Fault) -> Vec<String> {
     problems
 }
 
-// J4 wave 3 begin: G8, gc's cgroup records at P14
+// G8, gc's cgroup records at P14
 /// gc's records, in the order one pass over a dead supervisor's populated
 /// leaf and managed scratch writes them (P14).
 const GC_CGROUP_RECORDS: [&str; 6] = [
@@ -1512,7 +1512,6 @@ fn gc_cgroup_case(action: &'static str, fault: Fault) -> Vec<String> {
     }
     problems
 }
-// J4 wave 3 end
 
 #[test]
 fn j4_r02_every_site_under_every_fault_leaves_valid_records() {

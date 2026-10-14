@@ -44,7 +44,7 @@ pub const EXIT_USAGE: i32 = 125;
 pub const EXIT_INTERNAL: i32 = 126;
 /// `execvp` failed; the errno is on the error pipe.
 pub const EXIT_EXEC_FAILED: i32 = 127;
-// J3-agent begin: the agent launcher's own setup failures
+// The agent launcher's own setup failures
 /// The unix-peer mediation (filter with its own listener, sock_diag socket)
 /// could not be set up; the errno is on the error pipe. The target did not
 /// run.
@@ -52,7 +52,6 @@ pub const EXIT_MEDIATION_FAILED: i32 = 120;
 /// The in-namespace bridge could not be started; the errno is on the error
 /// pipe. The target did not run.
 pub const EXIT_BRIDGE_FAILED: i32 = 121;
-// J3-agent end
 
 /// Parsed `__launch` arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,7 +70,7 @@ pub struct LaunchArgs {
     /// and everything the filter will carry — is readable in `/proc/1/cmdline`
     /// from inside the sandbox.
     pub trace_data_fd: Option<RawFd>,
-    // J3-agent begin: mediation and bridge (jail-v1 §10)
+    // Mediation and bridge (jail-v1 §10)
     /// Install the unix-peer mediation filter with its own listener and open
     /// a `NETLINK_SOCK_DIAG` socket, placing them at these two descriptor
     /// numbers for the supervisor to take before release.
@@ -86,7 +85,6 @@ pub struct LaunchArgs {
     /// inherited blocked SIGCHLD would otherwise be lost. `None` leaves the
     /// mask as inherited (`none`, where nothing in between changes it).
     pub sigmask: Option<u64>,
-    // J3-agent end
     /// The target's argv; element 0 is also the program to execute.
     pub argv: Vec<OsString>,
 }
@@ -179,7 +177,6 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
                 trace_data_fd = Some(fd);
                 index += 2;
             }
-            // J3-agent begin
             "--mediate" => {
                 mediate = Some(fd_pair(args.get(index + 1), "--mediate")?);
                 index += 2;
@@ -202,18 +199,16 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
                 );
                 index += 2;
             }
-            // J3-agent end
             _ => return Err(LaunchUsage::UnknownOption(name)),
         }
     }
 
-    // J3-agent begin: the three placed descriptors are three numbers
+    // The three placed descriptors are three numbers
     if let (Some(report), Some((listener, sockdiag))) = (bridge, mediate)
         && (report == listener || report == sockdiag)
     {
         return Err(LaunchUsage::BadFd("--bridge"));
     }
-    // J3-agent end
     let argv = argv.ok_or(LaunchUsage::MissingSeparator)?;
     if argv.is_empty() {
         return Err(LaunchUsage::EmptyArgv);
@@ -236,7 +231,6 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
     })
 }
 
-// J3-agent begin: `--mediate L,S`
 fn fd_pair(raw: Option<&OsString>, option: &'static str) -> Result<(RawFd, RawFd), LaunchUsage> {
     let raw = raw.ok_or(LaunchUsage::MissingValue(option))?;
     let text = raw.to_str().ok_or(LaunchUsage::BadFd(option))?;
@@ -255,7 +249,6 @@ fn fd_pair(raw: Option<&OsString>, option: &'static str) -> Result<(RawFd, RawFd
     }
     Ok(pair)
 }
-// J3-agent end
 
 fn fd_value(raw: Option<&OsString>, option: &'static str) -> Result<RawFd, LaunchUsage> {
     let raw = raw.ok_or(LaunchUsage::MissingValue(option))?;
@@ -321,7 +314,7 @@ pub fn launch_main(args: &[OsString]) -> ! {
         report_and_exit(parsed.error_fd, errno, EXIT_INTERNAL);
     }
 
-    // J3-agent begin: mediation, then the bridge, both before the narrowing
+    // Mediation, then the bridge, both before the narrowing
     // filter. The bridge must exist before it: an untraced process that
     // meets the narrowing filter's SECCOMP_RET_TRACE gets ENOSYS, and the
     // bridge is never traced (it is a helper, not a descendant of the
@@ -337,7 +330,6 @@ pub fn launch_main(args: &[OsString]) -> ! {
     {
         report_and_exit(parsed.error_fd, errno, EXIT_BRIDGE_FAILED);
     }
-    // J3-agent end
 
     // Audit 2026-09-25-2, S14: read this attempt's narrowing data before the
     // filter goes in. Two bytes, already in the pipe; the descriptor closes
@@ -416,7 +408,7 @@ pub fn launch_main(args: &[OsString]) -> ! {
     // SAFETY: closing a descriptor this process owns; the target must not see
     // the release pipe.
     unsafe { libc::close(parsed.release_fd) };
-    // J3-agent begin: undo what the jail itself changed in the signal state
+    // Undo what the jail itself changed in the signal state
     // the target inherits. The Rust runtime set SIGPIPE to ignored in this
     // process (and a raw execve keeps an ignored disposition), and
     // bubblewrap unblocked SIGCHLD for its child; the target gets SIGPIPE's
@@ -445,9 +437,8 @@ pub fn launch_main(args: &[OsString]) -> ! {
             }
         }
     }
-    // J3-agent end
 
-    // J3-agent begin: the supervisor took these objects before release; the
+    // The supervisor took these objects before release; the
     // target never holds the listener, the sock_diag socket or the bridge's
     // report socket (X06). This close is the only thing that keeps them from
     // it (see `mediate` and `spawn_bridge`).
@@ -462,7 +453,6 @@ pub fn launch_main(args: &[OsString]) -> ! {
         // SAFETY: closing a descriptor this process placed itself.
         unsafe { libc::close(report_fd) };
     }
-    // J3-agent end
 
     // `execve`, never `execvp`. On `ENOEXEC` the library call re-executes the
     // file through `/bin/sh`, so a file that is neither ELF nor a script with
@@ -471,23 +461,21 @@ pub fn launch_main(args: &[OsString]) -> ! {
     // implicit shell, and X04 wants `ENOEXEC` to be its own distinct outcome,
     // so the error reaches the error pipe as itself.
     let mut last_errno = libc::ENOENT;
-    // J5-B1 begin: X04 — ENOENT for a file that exists
+    // X04 — ENOENT for a file that exists
     let mut interpreter_missing = false;
-    // J5-B1 end
     for candidate in &candidates {
         // SAFETY: `candidate` and `argv_ptrs` are NUL-terminated C strings and
         // a NULL-terminated pointer array, all live for the call, and
         // `environ` is this process's own. execve only returns on failure.
         unsafe { libc::execve(candidate.as_ptr(), argv_ptrs.as_ptr(), environ()) };
         last_errno = errno();
-        // J5-B1 begin: X04 — the kernel answers ENOENT both for a program
+        // X04 — the kernel answers ENOENT both for a program
         // that is not there and for one whose `#!` interpreter or ELF loader
         // is not there. A candidate that exists tells the two apart; the
         // errno stays the kernel's own.
         if last_errno == libc::ENOENT && exists(candidate) {
             interpreter_missing = true;
         }
-        // J5-B1 end
         // The search continues only where a PATH search is defined to: a
         // component that is not there, or not a directory. Anything else — a
         // file that exists and cannot be executed, a file that is not an
@@ -496,17 +484,16 @@ pub fn launch_main(args: &[OsString]) -> ! {
             break;
         }
     }
-    // J5-B1 begin: X04
+    // X04
     let detail = if last_errno == libc::ENOENT && interpreter_missing {
         DETAIL_INTERPRETER_MISSING
     } else {
         0
     };
     report_exec_failure_and_exit(parsed.error_fd, last_errno, detail, EXIT_EXEC_FAILED);
-    // J5-B1 end
 }
 
-// J5-B1 begin: X04 — what an exec failure's errno does not say
+// X04 — what an exec failure's errno does not say
 /// The launcher's detail code for an `ENOENT` from a file that exists: what
 /// is missing is the interpreter its `#!` line names, or its ELF loader.
 pub const DETAIL_INTERPRETER_MISSING: u32 = 1;
@@ -586,9 +573,8 @@ fn report_exec_failure_and_exit(fd: RawFd, errno: i32, detail: u32, code: i32) -
     // SAFETY: _exit takes a scalar and never returns.
     unsafe { libc::_exit(code) }
 }
-// J5-B1 end
 
-// J3-agent begin: the signal mask the jail hands the target
+// The signal mask the jail hands the target
 /// The calling thread's blocked signals as a bitmask (bit `n - 1` for signal
 /// `n`, `1..=64`). The supervisor calls it on its main thread, which never
 /// changes its mask, so it is the mask the supervisor inherited.
@@ -610,9 +596,7 @@ pub fn blocked_mask() -> u64 {
         })
     }
 }
-// J3-agent end
 
-// J3-agent begin: the launcher's agent setup
 /// Installs the unix-peer mediation filter with its own listener and opens a
 /// `NETLINK_SOCK_DIAG` socket in this network namespace, then places them at
 /// `listener_fd` and `sockdiag_fd` for the supervisor to take with
@@ -766,7 +750,6 @@ fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
     close_report();
     if placed < 0 { Err(e) } else { Ok(()) }
 }
-// J3-agent end
 
 /// The same list as [`exec_candidates`], as raw bytes, each spelling followed
 /// by its symlink-resolved form when it exists on this host.
@@ -968,7 +951,6 @@ mod tests {
         assert_eq!(parsed.argv, osv(&["/bin/echo", "--narrow", "--release-fd"]));
     }
 
-    // J3-agent begin
     #[test]
     fn the_agent_options_parse_and_bad_pairs_refuse() {
         let parsed = parse(&osv(&[
@@ -1050,7 +1032,6 @@ mod tests {
             );
         }
     }
-    // J3-agent end
 
     #[test]
     fn missing_pieces_are_usage_errors() {
@@ -1104,7 +1085,7 @@ mod tests {
         assert_eq!(decode_error_report(&[]), None);
     }
 
-    // J5-B1 begin: X04
+    // X04
     #[test]
     fn an_exec_failure_report_carries_the_interpreter_detail_only_for_enoent() {
         let report = |errno: i32, detail: Option<u32>| {
@@ -1159,5 +1140,4 @@ mod tests {
         .unwrap();
         assert!(!exists(&absent));
     }
-    // J5-B1 end
 }

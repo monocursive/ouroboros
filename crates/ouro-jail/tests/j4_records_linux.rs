@@ -96,7 +96,7 @@ const SITES: [Site; 12] = [
         exec_fails: false,
         phases: (None, None),
     },
-    // J4 W2-S begin: N7, P15 and P16
+    // N7, P15 and P16
     Site {
         name: "execution_leaf",
         record: "jail-state.json",
@@ -111,7 +111,6 @@ const SITES: [Site; 12] = [
         exec_fails: false,
         phases: (None, None),
     },
-    // J4 W2-S end
     Site {
         name: "boundary",
         record: "jail-state.json",
@@ -317,7 +316,7 @@ fn crash(site: &Site, point: Point) -> Vec<String> {
                 ));
             }
         }
-        // J4 W2-S begin: N7
+        // N7
         "execution_leaf" => {
             let registered =
                 record("jail-state.json").is_some_and(|state| !state["execution_cgroup"].is_null());
@@ -338,7 +337,6 @@ fn crash(site: &Site, point: Point) -> Vec<String> {
                 ));
             }
         }
-        // J4 W2-S end
         "launch_state" => {
             let registered =
                 record("jail-state.json").is_some_and(|state| !state["vendor_state"].is_null());

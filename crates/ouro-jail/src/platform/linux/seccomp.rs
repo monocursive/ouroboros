@@ -28,7 +28,6 @@ pub const REASON_UNSUPPORTED_ARCHITECTURE: &str = "unsupported_architecture";
 pub fn tables_cover(arch: &str) -> bool {
     matches!(arch, "x86_64" | "aarch64")
 }
-// J5-D end
 /// Bit set in the syscall number for the x32 ABI (`__X32_SYSCALL_BIT`).
 pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
@@ -868,7 +867,6 @@ pub use linux_only::{install, program_pipe, set_no_new_privs};
 
 #[cfg(test)]
 mod tests {
-    // J5-D begin: the architecture the tables cover
     #[test]
     #[cfg(all(
         target_os = "linux",
@@ -951,7 +949,6 @@ mod tests {
         }
         assert_eq!(REASON_UNSUPPORTED_ARCHITECTURE, "unsupported_architecture");
     }
-    // J5-D end
 
     use super::*;
 

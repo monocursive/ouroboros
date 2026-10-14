@@ -1249,7 +1249,7 @@ fn n04_stop_closes_every_connection_and_accounts_for_each() {
     server.join().expect("the server ran");
 }
 
-// J3-agent begin: a proxy whose listener dies stops serving, visibly
+// A proxy whose listener dies stops serving, visibly
 /// The descriptor of this process's socket bound at `path`, found by asking
 /// every open descriptor its own name.
 #[cfg(target_os = "linux")]
@@ -1305,7 +1305,6 @@ fn n04_a_listener_shut_down_underneath_the_proxy_stops_serving_and_refuses() {
     assert_eq!(summary.accepted, 1);
     assert_eq!(results.len(), 1);
 }
-// J3-agent end
 
 /// A resolver that announces each call and then blocks until the deadline./// A resolver that announces each call and then blocks until the deadline.
 struct GateResolver {

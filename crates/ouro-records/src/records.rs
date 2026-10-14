@@ -18,9 +18,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-// J5-C begin: the record rules JSON Schema cannot state (R01, §17)
+// The record rules JSON Schema cannot state (R01, §17)
 pub mod semantic;
-// J5-C end
 
 // ---------------------------------------------------------------------------
 // Schema identifiers (§13, §6.3, §8.2). `version --json` announces these and a
@@ -48,7 +47,7 @@ pub const SCHEMA_NETWORK: &str = "ouro.jail.network/1";
 /// `linux-closed-v1`: the observed operation set (§11.2).
 pub const CLOSED_SET_LINUX_V1: &str = "linux-closed-v1";
 
-// J5-C begin: the milestone-1 freeze of the wire schemas (§13, §17)
+// The milestone-1 freeze of the wire schemas (§13, §17)
 /// Whether the wire identifiers above name frozen schemas: `true` since
 /// milestone 1. `version --json` announces it as `"frozen": true`; the frozen
 /// files and their sha256s are `docs/specs/jail-v1/frozen-schemas.toml`, and
@@ -56,7 +55,6 @@ pub const CLOSED_SET_LINUX_V1: &str = "linux-closed-v1";
 /// identifier (§13: "After freeze, a breaking semantic change needs a new
 /// schema identifier").
 pub const SCHEMAS_FROZEN: bool = true;
-// J5-C end
 
 /// Maximum gate frame, including the single trailing LF (§8.2).
 pub const GATE_FRAME_MAX: usize = 1024;
@@ -335,7 +333,7 @@ pub enum ErrorCode {
     AttemptExists,
     /// The target `exec` failed; no target instruction ran (§8.1).
     ExecFailed,
-    // J5-B1 begin: X04
+    // X04
     /// The target `exec` failed with ENOENT although the named file exists:
     /// its `#!` interpreter or ELF loader is what is missing (X04). The
     /// errno stays in `outcome.cause`; this code tells it from a missing
@@ -345,7 +343,6 @@ pub enum ErrorCode {
     /// ended before the supervisor saw its new image, so whether it ran is
     /// unknown (§6.4: exit 1 is a tool error with a stable code).
     ExecUnconfirmed,
-    // J5-B1 end
     /// Observation evidence was lost (§11.4).
     EvidenceLost,
     /// Tree death could not be verified within its budget (§9.3).
@@ -380,10 +377,9 @@ impl ErrorCode {
             ErrorCode::PrepareTimeout => "prepare_timeout",
             ErrorCode::AttemptExists => "attempt_exists",
             ErrorCode::ExecFailed => "exec_failed",
-            // J5-B1 begin: X04
+            // X04
             ErrorCode::ExecInterpreterMissing => "exec_interpreter_missing",
             ErrorCode::ExecUnconfirmed => "exec_unconfirmed",
-            // J5-B1 end
             ErrorCode::EvidenceLost => "evidence_lost",
             ErrorCode::TreeUnknown => "tree_unknown",
             ErrorCode::StateWriteFailed => "state_write_failed",
@@ -537,7 +533,6 @@ impl JailError {
         self.stage = stage;
         self
     }
-    // J4-R end
 
     /// The wire form for `errors[]` and `outcome.error`.
     #[must_use]
@@ -565,7 +560,7 @@ impl fmt::Display for JailError {
     }
 }
 
-// J4 W3 begin: P5, an error that reached no receipt is printed like any other
+// P5, an error that reached no receipt is printed like any other
 /// The same one-line diagnostic as [`JailError`]'s, for an error known only
 /// in its wire form.
 impl fmt::Display for ErrorObject {
@@ -580,7 +575,6 @@ impl fmt::Display for ErrorObject {
         )
     }
 }
-// J4 W3 end
 
 /// Replaces every control character with a visible spelling.
 ///
@@ -1545,7 +1539,7 @@ impl Event {
         }
     }
 
-    // J3-none begin: the note a detected lifetime-integrity loss writes (§9.3)
+    // The note a detected lifetime-integrity loss writes (§9.3)
     /// A wrapper lifetime note (`fields.kind = lifetime`): the registered
     /// boundary's integrity was lost, what lost it, and a safe reason code.
     /// It names no path, argument or value (I09).
@@ -1575,7 +1569,6 @@ impl Event {
             .insert("reason".to_owned(), serde_json::Value::from(reason));
         event
     }
-    // J3-none end
 
     /// A wrapper coverage-gap note (`fields.kind = coverage_gap`).
     #[must_use]

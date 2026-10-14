@@ -78,7 +78,7 @@ pub fn parse_flags(raw: &str) -> io::Result<u64> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("flags: {e}")))
 }
 
-// J4-G begin: a dead-but-unreaped owner is not alive (`gc`, jail-v1 §14.2)
+// A dead-but-unreaped owner is not alive (`gc`, jail-v1 §14.2)
 /// Field 3 (`state`) of a `/proc/<pid>/stat` line: `R`, `S`, `D`, `Z` (a
 /// zombie: exited, not yet reaped), `X` (dead) and so on.
 ///
@@ -94,9 +94,8 @@ pub fn parse_state(raw: &str) -> io::Result<char> {
         .and_then(|field| field.chars().next())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "stat has no state field"))
 }
-// J4-G end
 
-// J4 wave 3 begin: P1 (c), a zombie leader is not a dead thread group
+// P1 (c), a zombie leader is not a dead thread group
 /// The thread ids of the thread group led by `pid` other than `pid` itself,
 /// from `/proc/<pid>/task`: a leader that has exited is a zombie (`Z`) for
 /// as long as any of these lives, and each of them may still be inside a
@@ -122,7 +121,6 @@ pub fn threads_besides(pid: libc::pid_t, names: &[std::ffi::OsString]) -> Vec<li
         .filter(|tid| *tid != pid)
         .collect()
 }
-// J4 wave 3 end
 
 fn stat_path(pid: libc::pid_t) -> PathBuf {
     PathBuf::from(format!("/proc/{pid}/stat"))
@@ -393,7 +391,6 @@ mod tests {
         assert_eq!(parse_start_time_ticks(&fields).unwrap(), 987_654);
     }
 
-    // J4-G begin
     #[test]
     fn the_state_is_the_field_after_the_last_parenthesis() {
         assert_eq!(parse_state("42 (a) b) Z 1 42").unwrap(), 'Z');
@@ -401,7 +398,6 @@ mod tests {
         assert!(parse_state("42 (sleep)").is_err());
         assert!(parse_state("no comm").is_err());
     }
-    // J4-G end
 
     #[test]
     fn a_stat_line_without_a_comm_field_is_invalid_data() {

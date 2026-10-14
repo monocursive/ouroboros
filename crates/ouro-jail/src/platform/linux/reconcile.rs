@@ -283,7 +283,7 @@ fn pin_under(root: &Path, leaf: &LeafRecord) -> Result<Pinned, LeafProbe> {
     pin_as(root, &leaf.path, Some((leaf.device, leaf.inode)))
 }
 
-// J4 W2-S begin: N7
+// N7
 /// Pins a leaf jail state registers by name only: every check of [`pin`]
 /// but the recorded identity, which does not exist; the identity pinned is
 /// the one the directory has when it is opened.
@@ -297,7 +297,6 @@ fn pin_named(path: &Path) -> Result<Pinned, LeafProbe> {
     };
     pin_as(&root, path, None)
 }
-// J4 W2-S end
 
 /// Pins `path` under `root`, as the recorded `identity` when there is one.
 fn pin_as(root: &Path, path: &Path, recorded: Option<(u64, u64)>) -> Result<Pinned, LeafProbe> {
@@ -531,7 +530,7 @@ pub fn terminate_leaf(leaf: &LeafRecord, budget: Duration) -> Result<(), String>
     }
 }
 
-// J4 W2-S begin: N7
+// N7
 /// What is at a leaf registered by name only: `Identified` when a cgroup v2
 /// directory with the leaf's name stands directly under this user's
 /// delegated subtree (the recorded name is the only identity there is).
@@ -577,7 +576,6 @@ pub fn remove_named_leaf(path: &Path, entries: &mut usize) -> Result<(u64, u64),
     pinned.remove(entries)?;
     Ok(pinned.identity)
 }
-// J4 W2-S end
 
 /// Re-pins the leaf, checks it is empty and removes it with its empty child
 /// cgroups, spending at most `entries` directory entries.

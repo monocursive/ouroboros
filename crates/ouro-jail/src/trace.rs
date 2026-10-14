@@ -102,7 +102,7 @@ pub struct TraceWriter {
     last_healthy_ns: u128,
     /// Whether the note recording the first loss has been attempted.
     gap_noted: bool,
-    // J5-C begin: review item 15
+    // Review item 15
     /// The evidence classes this attempt's stream carries: what a loss note
     /// names. Every class a stream could carry until the supervisor narrows
     /// it to the attempt's own (observation on, proxy applied).
@@ -110,11 +110,10 @@ pub struct TraceWriter {
     /// Where the first loss note's interval starts, once it was attempted:
     /// the receipts record the same loss from the same point (§13.3).
     loss_start_ns: Option<u128>,
-    // J5-C end
 }
 
 impl TraceWriter {
-    // J5-C begin: review item 15
+    // Review item 15
     /// Narrows the classes this stream's loss note names to the evidence
     /// classes the attempt actually covers.
     pub fn set_stream_classes(&mut self, classes: &[&str]) {
@@ -126,7 +125,6 @@ impl TraceWriter {
     pub fn loss_start_ns(&self) -> Option<u128> {
         self.loss_start_ns
     }
-    // J5-C end
 
     /// Serialize under the stream lock. All wrapper notes share this sequence.
     ///
@@ -304,7 +302,7 @@ pub fn local_bounds(env: Option<&str>, seam: Option<&str>) -> (u64, u64) {
     (cap, LOCAL_RESERVE.min(cap / 2))
 }
 
-// J5-C begin: wave 3, the trace-fd write-size seam (R03.5)
+// The trace-fd write-size seam (R03.5)
 /// A test seam (S9, J5 wave 3): `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX=<bytes>`
 /// makes the external `--trace-fd` sink put at most that many bytes into each
 /// `write(2)`, so every frame longer than it reaches the consumer in several
@@ -330,7 +328,6 @@ pub fn fd_write_max(seam: Option<&str>) -> Option<usize> {
     .and_then(|text| text.parse::<usize>().ok())
     .filter(|max| (1..=EVENT_MAX).contains(max))
 }
-// J5-C end
 
 /// One bounded NDJSON trace sink.
 pub trait TraceSink {
@@ -613,11 +610,9 @@ pub struct FdSink {
     /// Whole frames, each ending in its LF; the front one may be partly
     /// written.
     frames: VecDeque<Vec<u8>>,
-    // J5-C begin: fix wave
     /// Each queued frame's priority, in step with `frames`: a drain that
     /// drops a reserve note must not let a later one through.
     priorities: VecDeque<Priority>,
-    // J5-C end
     /// Bytes of the front frame already written.
     front_written: usize,
     /// Bytes still to write, over all queued frames.
@@ -629,10 +624,8 @@ pub struct FdSink {
     state: FdState,
     loss: Option<Loss>,
     lost_frames: u64,
-    // J5-C begin: wave 3
     /// [`TRACE_FD_WRITE_SEAM`]'s cap on each write, when the seam is set.
     write_max: Option<usize>,
-    // J5-C end
 }
 
 impl FdSink {
@@ -667,7 +660,6 @@ impl FdSink {
         })
     }
 
-    // J5-C begin: wave 3
     /// Takes ownership of `fd` for an attempt, applying
     /// [`TRACE_FD_WRITE_SEAM`]'s value `seam` if it is one.
     ///
@@ -682,7 +674,6 @@ impl FdSink {
         sink.write_max = fd_write_max(seam);
         Ok(sink)
     }
-    // J5-C end
 
     /// Overrides the bounds, for tests that must reach them quickly. The
     /// reserve shrinks with the queue: at most a quarter of it.
@@ -1126,7 +1117,7 @@ mod tests {
         assert_eq!(sink.loss().unwrap().lost_frames, Some(3));
     }
 
-    // J5-C begin: review item 15, the loss note names what the attempt covers
+    // Review item 15, the loss note names what the attempt covers
     /// The first loss note names the evidence classes this attempt's stream
     /// was set to carry, not every class a stream could carry, and the writer
     /// keeps the note's start so the receipts can record the same loss.
@@ -1230,9 +1221,8 @@ mod tests {
         );
         drop(reader);
     }
-    // J5-C end
 
-    // J5-C begin: wave 3, the trace-fd write-size seam (R03.5)
+    // The trace-fd write-size seam (R03.5)
     /// The seam's values: plain decimal bytes in `1..=EVENT_MAX`, else no cap.
     #[test]
     fn the_write_size_seam_accepts_only_a_byte_count() {
@@ -1299,7 +1289,6 @@ mod tests {
             "each ~620-byte frame took at least ten writes: {writes}"
         );
     }
-    // J5-C end
 
     #[test]
     fn an_oversized_event_is_refused_rather_than_truncated() {
@@ -1312,8 +1301,6 @@ mod tests {
         assert_eq!(error.code, ErrorCode::EvidenceLost);
         assert_eq!(sink.written(), 0);
     }
-
-    // Portable-mutation regressions (audit 2026-10-08) begin
 
     /// T1 (§13.3): `last_healthy_ns` does not advance across a failed write,
     /// so the loss note's interval starts at the last *healthy* point, not
@@ -1390,5 +1377,4 @@ mod tests {
             "no frame reached the trace, not even after the loss"
         );
     }
-    // Portable-mutation regressions end
 }

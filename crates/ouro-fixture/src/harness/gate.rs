@@ -32,10 +32,9 @@ pub struct ExpectedPlan {
     pub attempt_id: Option<String>,
     pub policy_digest: Option<String>,
     pub argv_digest: Option<String>,
-    // J5-B1 begin: I03 — §8.2 "and applied requirements"
+    // I03 — §8.2 "and applied requirements"
     /// The requirement names the owner authorised, compared as a set.
     pub requirements: Option<Vec<String>>,
-    // J5-B1 end
     pub phase: Option<String>,
 }
 
@@ -57,7 +56,7 @@ impl ExpectedPlan {
         }
     }
 
-    // J5-B1 begin: I03
+    // I03
     /// Every binding §8.2 asks an owner to compare: the attempt, policy and
     /// argv bindings and the applied requirements.
     #[must_use]
@@ -84,7 +83,6 @@ impl ExpectedPlan {
         self.requirements = Some(sorted_set(names));
         self
     }
-    // J5-B1 end
 
     /// The complete plan: every binding §8.2 asks an owner to compare.
     #[must_use]
@@ -112,11 +110,10 @@ impl ExpectedPlan {
         if self.argv_digest.is_none() {
             out.push("argv_digest");
         }
-        // J5-B1 begin: I03
+        // I03
         if self.requirements.is_none() {
             out.push("requirements");
         }
-        // J5-B1 end
         out
     }
 
@@ -154,14 +151,13 @@ pub struct Proposal {
     pub attempt_id: Option<String>,
     pub policy_digest: Option<String>,
     pub argv_digest: Option<String>,
-    // J5-B1 begin: I03
+    // I03
     /// `policy.requirements` of the prepared receipt, as a sorted set.
     pub requirements: Option<Vec<String>>,
-    // J5-B1 end
     pub phase: Option<String>,
 }
 
-// J5-B1 begin: I03
+// I03
 fn sorted_set<I, S>(names: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
@@ -170,7 +166,6 @@ where
     let set: std::collections::BTreeSet<String> = names.into_iter().map(Into::into).collect();
     set.into_iter().collect()
 }
-// J5-B1 end
 
 fn string_at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     let mut cur = v;
@@ -200,7 +195,7 @@ impl Proposal {
             }
             p.policy_digest = string_at(r, &["policy", "digest"]).map(str::to_string);
             p.argv_digest = string_at(r, &["argv_digest"]).map(str::to_string);
-            // J5-B1 begin: I03 — a non-string entry makes the whole list
+            // I03 — a non-string entry makes the whole list
             // absent rather than silently shorter.
             p.requirements = r
                 .pointer("/policy/requirements")
@@ -212,7 +207,6 @@ impl Proposal {
                         .collect::<Option<Vec<String>>>()
                 })
                 .map(sorted_set);
-            // J5-B1 end
             if let Some(v) = string_at(r, &["phase"]) {
                 p.phase = Some(v.to_string());
             }
@@ -244,7 +238,7 @@ pub fn mismatches(plan: &ExpectedPlan, proposal: &Proposal) -> Vec<String> {
     );
     one("argv_digest", &plan.argv_digest, &proposal.argv_digest);
     one("phase", &plan.phase, &proposal.phase);
-    // J5-B1 begin: I03
+    // I03
     if let Some(want) = &plan.requirements
         && proposal.requirements.as_ref() != Some(want)
     {
@@ -256,7 +250,6 @@ pub fn mismatches(plan: &ExpectedPlan, proposal: &Proposal) -> Vec<String> {
                 .map_or_else(|| "<absent>".to_owned(), |got| format!("{got:?}"))
         ));
     }
-    // J5-B1 end
     out
 }
 
@@ -293,10 +286,9 @@ pub enum Release {
     DuplicateKeys,
     /// Exactly these bytes.
     Raw(Vec<u8>),
-    // J5-B1 begin: X02 "missing/extra LF"
+    // X02 "missing/extra LF"
     /// A valid frame followed by a second LF: a blank line after the frame.
     ExtraLf,
-    // J5-B1 end
 }
 
 /// The canonical frame body (no terminator) for an attempt and digest.
@@ -367,12 +359,11 @@ pub fn frame_bytes(variant: &Release, attempt_id: &str, policy_digest: &str) -> 
             with_lf(&dup)
         }
         Release::Raw(bytes) => bytes.clone(),
-        // J5-B1 begin
         Release::ExtraLf => {
             let mut b = with_lf(&body);
             b.push(b'\n');
             b
-        } // J5-B1 end
+        }
     }
 }
 
@@ -518,7 +509,7 @@ impl<'a> GateOwner<'a> {
         self.gate.take();
     }
 
-    // J5-B1 begin: X02 — withheld (open, silent) is not closed (EOF)
+    // X02 — withheld (open, silent) is not closed (EOF)
     /// Take the gate writer and keep it open without writing a byte. The
     /// jail sees neither a frame nor EOF for as long as the caller holds the
     /// returned writer; dropping it closes the gate.
@@ -550,7 +541,6 @@ impl<'a> GateOwner<'a> {
             }
         }
     }
-    // J5-B1 end
 
     /// Drain and return whatever else the jail says on the control channel.
     ///
@@ -659,7 +649,7 @@ mod tests {
         assert_eq!(extra, valid);
     }
 
-    // J5-B1 begin: I03
+    // I03
     #[test]
     fn requirements_are_compared_as_a_set_and_an_absent_list_mismatches() {
         let receipt = serde_json::json!({
@@ -691,7 +681,6 @@ mod tests {
         let odd = serde_json::json!({"policy": {"requirements": ["a", 1]}});
         assert_eq!(Proposal::read(&control, Some(&odd)).requirements, None);
     }
-    // J5-B1 end
 
     #[test]
     fn a_proposal_prefers_the_receipt_bindings_over_the_control_message() {

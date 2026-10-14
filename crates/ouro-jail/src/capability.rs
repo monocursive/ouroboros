@@ -95,7 +95,7 @@ pub const REQ_SYSCALL_FILTER: &str = "syscall_filter";
 pub const REQ_NETWORK_NONE: &str = "network_none";
 /// Requirement identifier for the mediating proxy.
 pub const REQ_NETWORK_PROXY: &str = "network_proxy";
-// J5-D begin: the portable name (§3.1, I10; decided 2026-09-24)
+// The portable name (§3.1, I10; decided 2026-09-24)
 /// Requirement identifier for a supervisor-owned execution boundary: a tree
 /// the supervisor can place the target in, bound resources on, kill as a
 /// whole and verify empty. `none` needs it for lifetime, and every explicit
@@ -107,12 +107,10 @@ pub const REQ_EXECUTION_BOUNDARY: &str = "execution_boundary";
 /// differs, so the Linux mapping reads in its own vocabulary. Nothing
 /// renders this name; the wire carries `execution_boundary`.
 pub const REQ_EXECUTION_CGROUP: &str = REQ_EXECUTION_BOUNDARY;
-// J5-D end
-// J3-launch begin: credential staging requirement (§12)
+// Credential staging requirement (§12)
 /// Requirement identifier for staging launch credentials: anchored copies
 /// into vendor state and read-only binds of the exact source objects.
 pub const REQ_CREDENTIAL_STAGING: &str = "credential_staging";
-// J3-launch end
 
 /// Derives the capability requirements a snapshot implies (§6.4, §3.1).
 ///
@@ -133,9 +131,8 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
         "proxy" => out.push(REQ_NETWORK_PROXY.to_owned()),
         _ => {}
     }
-    // J3-none begin: restrictions `none` cannot apply are requirements it refuses
+    // Restrictions `none` cannot apply are requirements it refuses
     out.extend(none_restrictions(snapshot));
-    // J3-none end
     if snapshot.filesystem.protected_coverage != ProtectedCoverage::None {
         out.push(format!(
             "protected_coverage:{}",
@@ -171,7 +168,7 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
     if needs_cgroup {
         out.push(REQ_EXECUTION_BOUNDARY.to_owned());
     }
-    // J3-launch begin: a launch profile that declares credentials needs them
+    // A launch profile that declares credentials needs them
     // staged, and a platform that cannot stage them must refuse, not skip.
     if snapshot
         .launch
@@ -180,11 +177,10 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
     {
         out.push(REQ_CREDENTIAL_STAGING.to_owned());
     }
-    // J3-launch end
     out
 }
 
-// J3-none begin: what `none` cannot apply refuses instead of running unapplied
+// What `none` cannot apply refuses instead of running unapplied
 /// The reason code of a requirement the uncontained profile cannot satisfy on
 /// any host, because it applies no filesystem, syscall or network
 /// restriction (§3.1, §9.3).
@@ -211,7 +207,6 @@ fn none_restrictions(snapshot: &PolicySnapshot) -> Vec<String> {
     }
     out
 }
-// J3-none end
 
 #[cfg(test)]
 mod tests {
@@ -270,7 +265,7 @@ mod tests {
         );
     }
 
-    // J3-none begin: narrowed `none` snapshots carry the restriction as a requirement
+    // Narrowed `none` snapshots carry the restriction as a requirement
     #[test]
     fn a_restriction_on_none_is_a_requirement_not_a_silent_drop() {
         let bare = requirements(&snapshot_for(ProfileName::None));
@@ -306,7 +301,6 @@ mod tests {
                 .any(|item| item == REQ_NETWORK_NONE)
         );
     }
-    // J3-none end
 
     #[test]
     fn none_requires_a_cgroup_but_no_containment() {

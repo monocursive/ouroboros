@@ -596,8 +596,6 @@ fn path_has_marker(snapshot: Option<&PathSnapshot>, marker: &[u8]) -> bool {
     })
 }
 
-// J5-B2 O03 seams end.
-
 /// The named components of a raw pathname: empty components (`//`, a
 /// trailing `/`) and `.` name nothing and are dropped.
 fn components(path: &[u8]) -> impl DoubleEndedIterator<Item = &[u8]> {
@@ -4802,7 +4800,7 @@ mod tests {
         );
     }
 
-    // Audit-6 review begin: the descriptor corroboration and the exec-time
+    // The descriptor corroboration and the exec-time
     // command re-check.
 
     /// Plays the kernel's side of the audit-6 checks: each task's thread
@@ -5192,5 +5190,4 @@ mod tests {
             Some(("git push --force".to_owned(), false))
         );
     }
-    // Audit-6 review end.
 }

@@ -9,17 +9,11 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 mod conformance;
-// J5-D begin
 mod freeze;
-// J5-D end
-// J5-A begin
 mod gates;
-// J5-A end
 mod i02;
 mod manifest;
-// J5-E begin
 mod perf;
-// J5-E end
 mod stamp;
 
 #[derive(Parser)]
@@ -65,7 +59,6 @@ enum Task {
         #[arg(long)]
         linux_release: bool,
     },
-    // J5-D begin
     /// Write the milestone-1 freeze file (jail-v1 §16) from this tree.
     Freeze {
         /// Repository root; defaults to the current git worktree.
@@ -80,23 +73,17 @@ enum Task {
         #[arg(long)]
         check: bool,
     },
-    // J5-D end
-    // J5-A begin
     /// The per-gate verdict of jail-v1 §15 over saved test logs.
     Gates(gates::GatesArgs),
     /// Fold acceptance-additions files into the acceptance map.
     GatesMerge(gates::MergeArgs),
-    // J5-A end
-    // J5-E begin
     /// Measure jail-v1 §5's performance budgets on the reference host.
     Perf(perf::Cli),
-    // J5-E end
 }
 
 fn main() -> ExitCode {
     match Cli::parse().task {
         Task::I02Scan { root } => i02_scan(root),
-        // J5-D begin
         Task::Freeze {
             root,
             doctor,
@@ -138,14 +125,9 @@ fn main() -> ExitCode {
                 }
             }
         }
-        // J5-D end
-        // J5-A begin
         Task::Gates(args) => gates::run_cli(&args, &conformance::worktree_root()),
         Task::GatesMerge(args) => gates::run_merge(&args, &conformance::worktree_root()),
-        // J5-A end
-        // J5-E begin
         Task::Perf(cli) => perf::main(cli),
-        // J5-E end
         Task::Conformance {
             host,
             user,

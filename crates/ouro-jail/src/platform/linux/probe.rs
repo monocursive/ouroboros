@@ -27,9 +27,7 @@ use super::identity::{self, ns_ids};
 use super::seccomp;
 use super::sys::{empty_stat, errno_name};
 
-// J3-agent begin: the agent probes
 pub mod agent;
-// J3-agent end
 
 /// The hidden subcommand the probes run inside the sandbox.
 pub const INSIDE_SUBCOMMAND: &str = "__probe-inside";
@@ -58,14 +56,13 @@ pub const PROBE_NAMES: [&str; 23] = [
     "storage_ceiling",
     "apparmor_userns_restriction",
     "nested_user_namespace",
-    // J3-agent begin: the unix-peer mediation's kernel mechanism (§10), and
+    // The unix-peer mediation's kernel mechanism (§10), and
     // the three `agent` rows of §14.1, read from one real agent run
     "seccomp_user_notification",
     "unix_socket_diagnostics",
     "agent_proxy_bridge",
     "agent_unix_peer_mediation",
     "agent_inner_sandbox",
-    // J3-agent end
     // Issue draft 15: whether a GPU can be passed through to a contained
     // profile (informational; no requirement demands it)
     "gpu_passthrough",
@@ -327,7 +324,7 @@ fn run_status_checks(
     run_inside(jail_exe, bwrap, &checks, binds, with_seccomp)
 }
 
-// J5-D begin: probes that execute bubblewrap (review F1)
+// Probes that execute bubblewrap (review F1)
 /// The probes that execute bubblewrap, with the mechanism each names. With
 /// no resolved backend they report `unavailable` with `backend_unavailable`
 /// and execute nothing: a bare name would be looked up again, and an empty
@@ -378,9 +375,8 @@ fn seam_refusal_for(name: &str, seam: Option<&str>) -> Option<ProbeResult> {
     refusal.evidence = format!("{} (test seam {ARCH_SEAM}={seam})", refusal.evidence);
     Some(refusal)
 }
-// J5-D end
 
-// J5-D begin: the architecture refusal (§3.2)
+// The architecture refusal (§3.2)
 /// The probes whose mechanism is one of this implementation's native
 /// syscall tables, with the mechanism each one names: the `tool` and `agent`
 /// filters, the observer's closed set and narrowing filter, and the
@@ -448,13 +444,11 @@ pub fn run_one_for(name: &str, arch: &str, jail_exe: &Path, bwrap: Backend<'_>) 
         "storage_ceiling" => probe_storage_ceiling(),
         "apparmor_userns_restriction" => probe_apparmor(),
         "nested_user_namespace" => probe_nested_userns(jail_exe, bwrap),
-        // J3-agent begin
         "seccomp_user_notification" => probe_user_notification(),
         "unix_socket_diagnostics" => probe_unix_socket_diagnostics(),
         "agent_proxy_bridge" => agent::proxy_bridge(jail_exe),
         "agent_unix_peer_mediation" => agent::unix_peer(jail_exe),
         "agent_inner_sandbox" => agent::inner_sandbox(jail_exe),
-        // J3-agent end
         "gpu_passthrough" => probe_gpu_passthrough(),
         _ => ProbeResult::new(
             "unknown",
@@ -465,7 +459,6 @@ pub fn run_one_for(name: &str, arch: &str, jail_exe: &Path, bwrap: Backend<'_>) 
         ),
     }
 }
-// J5-D end
 
 // ---------------------------------------------------------------------------
 // Probes that need a sandbox
@@ -956,7 +949,6 @@ fn probe_unix_socket_diagnostics() -> ProbeResult {
     }
 }
 
-// J3-agent begin: the mediation's own mechanism, measured
 /// `seccomp_user_notification`: an unprivileged child installs the agent's
 /// mediation filter with its own notification listener, and this process
 /// takes that listener from it with `pidfd_getfd` — the two steps the
@@ -1069,7 +1061,6 @@ fn probe_user_notification() -> ProbeResult {
         _ => ProbeResult::error(NAME, MECHANISM, "the child reported nothing"),
     }
 }
-// J3-agent end
 
 fn own_pid() -> libc::pid_t {
     // SAFETY: getpid takes no arguments and cannot fail.
@@ -1165,7 +1156,6 @@ fn last() -> i32 {
     super::sys::last_errno()
 }
 
-// J4 autoscope begin
 /// The supervisor scope step's record (§9.3), as a row: `available` when
 /// this process is inside the delegated subtree (`already_delegated` or
 /// `entered`), `unavailable` with the step's reason otherwise. It runs
@@ -1183,7 +1173,6 @@ fn probe_supervisor_scope() -> ProbeResult {
     };
     ProbeResult::new(NAME, status, MECHANISM, reason_code, outcome.summary())
 }
-// J4 autoscope end
 
 fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResult {
     const MECHANISM: &str = "cgroup-v2-delegated";
@@ -1498,13 +1487,11 @@ pub fn probe_inside_main(args: &[OsString]) -> ! {
             "listdir" => check_listdir(argument),
             "unshare-userns" => check_unshare_userns(),
             "socket-afunix" => check_socket_afunix(),
-            // J3-agent begin: the agent probe's inside checks
             "http" => agent::check_http(argument),
             "tcp" => agent::check_tcp(argument),
             "unix" => agent::check_unix(argument),
             "unix-self" => agent::check_unix_self(argument),
             "inner" => agent::check_inner(argument),
-            // J3-agent end
             _ => format!("unknown_check:{check}"),
         };
         let _ = writeln!(out, "{label}={value}");
@@ -1835,7 +1822,6 @@ mod tests {
         }
     }
 
-    // J4 autoscope begin
     #[test]
     fn the_scope_row_never_claims_a_step_that_did_not_run() {
         // No test in this binary runs the step, so the row reports the
@@ -1849,7 +1835,6 @@ mod tests {
         assert_eq!(result.reason_code, "not_attempted");
         assert!(result.evidence.starts_with("unavailable"), "{result:?}");
     }
-    // J4 autoscope end
 
     #[test]
     fn the_storage_ceiling_probe_reports_a_known_status_and_reason() {
@@ -1893,7 +1878,7 @@ mod tests {
         assert_eq!(result.reason_code, "backend_unavailable");
     }
 
-    // J5-D begin: the architecture refusal (§3.2; gap analysis §2.3b)
+    // The architecture refusal (§3.2; gap analysis §2.3b)
     /// The rows whose mechanism is one of this implementation's x86_64
     /// syscall tables. Written out, so a probe that drops out of the refusal
     /// is a failing test, not a silent change.
@@ -2015,7 +2000,6 @@ mod tests {
             assert!(!capability.satisfies(), "{requirement}");
         }
     }
-    // J5-D end
 
     #[test]
     fn statuses_render_as_the_spec_spells_them() {

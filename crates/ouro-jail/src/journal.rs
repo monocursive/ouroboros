@@ -212,8 +212,6 @@ mod tests {
         }
     }
 
-    // Portable-mutation regressions (audit 2026-10-08) begin
-
     /// J1: a torn final frame — truncated mid-frame, no LF — is never
     /// printed as evidence; the tail refuses.
     #[test]
@@ -272,5 +270,4 @@ mod tests {
             dir.path().join("attempts").join(good)
         );
     }
-    // Portable-mutation regressions end
 }

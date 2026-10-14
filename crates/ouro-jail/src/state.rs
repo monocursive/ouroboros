@@ -403,14 +403,13 @@ impl AttemptDir {
         }
     }
 
-    // J4 W2-S begin: N7
+    // N7
     /// The layout of the attempt rooted at `root`, as a platform that was
     /// handed the attempt directory names it.
     #[must_use]
     pub fn from_root(root: PathBuf) -> Self {
         AttemptDir { root }
     }
-    // J4 W2-S end
 
     /// The attempt root.
     #[must_use]
@@ -856,7 +855,7 @@ pub fn read_capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>, std::io::Er
     Ok(Some(bytes))
 }
 
-// J4-R begin: the persistence seam (§7, §13.2, §13.3; R02)
+// The persistence seam (§7, §13.2, §13.3; R02)
 pub mod persist;
 
 pub use persist::{
@@ -1122,7 +1121,7 @@ pub fn leftover_temp_files(attempt_dir: &AttemptDir) -> std::io::Result<Vec<Stri
     leftover_temp_files_within(attempt_dir, usize::MAX).map(|listing| listing.names)
 }
 
-// J4 W2-S begin: gc's leftovers (S7: the listing is charged)
+// Gc's leftovers (S7: the listing is charged)
 /// [`leftover_temp_files`] reading at most `max_entries` names of the
 /// attempt root.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1186,8 +1185,6 @@ pub fn is_record_temp_name(name: &str) -> bool {
         && id.len() == 36
         && uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.hyphenated().to_string() == id)
 }
-// J4 W2-S end
-// J4-R end
 
 /// An exclusive advisory lease on `jail.lock` (§7).
 ///
@@ -1236,7 +1233,7 @@ impl Lease {
         Self::lock(file, path)
     }
 
-    // J4-D3 begin: `gc` probes a lease without creating its file
+    // `gc` probes a lease without creating its file
     /// Takes the lease of an attempt that already has a `jail.lock`, without
     /// blocking and without ever creating one (§14.2: `gc` "takes nonblocking
     /// attempt locks").
@@ -1277,7 +1274,6 @@ impl Lease {
             None => LeaseProbe::Held,
         })
     }
-    // J4-D3 end
 
     fn lock(file: File, path: &Path) -> Result<Option<Lease>, JailError> {
         // SAFETY: `flock` takes a valid open descriptor, which `file` owns for
@@ -1303,7 +1299,6 @@ impl Lease {
     }
 }
 
-// J4-D3 begin
 /// What [`Lease::probe_existing`] found.
 #[derive(Debug)]
 pub enum LeaseProbe {
@@ -1315,7 +1310,6 @@ pub enum LeaseProbe {
     /// The lease was free and the caller now holds it.
     Acquired(Lease),
 }
-// J4-D3 end
 
 impl Drop for Lease {
     fn drop(&mut self) {
@@ -1570,7 +1564,7 @@ fn withdraw_vendor_registration(attempt_dir: &AttemptDir) -> Result<(), JailErro
     })
 }
 
-// J3-agent begin: the proxy directory in jail state (jail-v1 §10)
+// The proxy directory in jail state (jail-v1 §10)
 
 /// The proxy directory's name inside an attempt directory (§10).
 pub const PROXY_DIR_NAME: &str = "proxy";
@@ -1925,7 +1919,6 @@ fn removal(attempt_dir: &AttemptDir, registered: Option<(u64, u64)>) -> ProxyDir
     }
     ProxyDirRemoval::Removed
 }
-// J3-agent end
 
 /// The jail-owned names of an attempt directory (§7), which an existing
 /// attempt root must not already hold before this supervisor claims it.
@@ -2003,7 +1996,7 @@ pub fn record_staged_credentials(
     })
 }
 
-// J4 W2-S begin: N7
+// N7
 /// Registers the execution leaf in jail state (§7): `identity` `None` names
 /// it before `mkdir` (P15), `Some((device, inode))` identifies it right
 /// after, before anything is placed in it (P16). `gc` reads the leaf from
@@ -2038,7 +2031,6 @@ pub fn register_execution_leaf(
         });
     })
 }
-// J4 W2-S end
 
 /// Records cleanup progress in jail state, atomically and durably.
 ///
@@ -2072,7 +2064,6 @@ pub fn record_cleanup_at(
 mod tests {
     use super::*;
 
-    // J4 W2-S begin
     #[test]
     fn only_a_temporary_name_of_a_root_record_is_ours() {
         let id = uuid::Uuid::new_v4().to_string();
@@ -2094,7 +2085,6 @@ mod tests {
             assert!(!is_record_temp_name(&other), "{other}");
         }
     }
-    // J4 W2-S end
 
     #[test]
     fn world_write_always_counts_and_no_group_write_never_does() {
@@ -2432,7 +2422,6 @@ mod tests {
         );
     }
 
-    // J3-agent begin
     #[test]
     fn the_proxy_directory_is_registered_created_private_and_removed_by_identity() {
         use std::os::unix::fs::MetadataExt as _;
@@ -2636,7 +2625,6 @@ mod tests {
         );
         assert!(attempt.proxy_dir_path().exists(), "not ours, never removed");
     }
-    // J3-agent end
 
     #[test]
     fn a_generated_attempt_id_round_trips_through_the_grammar() {
@@ -2667,8 +2655,6 @@ mod tests {
             "variant nibble b is valid"
         );
     }
-
-    // Portable-mutation regressions (audit 2026-10-08) begin
 
     /// S1: the epoch takes the *newest* settled marker across the marker
     /// directories, not the last directory's. A `config.toml` written
@@ -2723,5 +2709,4 @@ mod tests {
         assert_eq!(error.code, ErrorCode::UnsafeStatePath, "{error:?}");
         std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    // Portable-mutation regressions end
 }
