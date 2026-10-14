@@ -39,10 +39,10 @@ pub struct TreeInputs {
     pub abandoned_tracees: u64,
     /// Direct children whose exit status no longer has a route here.
     pub unreaped_children: usize,
-    /// Stops another filter asked for — a child's own `SECCOMP_RET_TRACE`
-    /// with its own trace data, on a call outside the closed set. Surfaced
-    /// for the receipt (audit 3 A5); never a verdict input,
-    /// because the stop was continued and nothing was lost.
+    /// Stops another filter asked for — a child's own `SECCOMP_RET_TRACE` with
+    /// its own trace data, on a call outside the closed set. Surfaced for the
+    /// receipt; never a verdict input, because the stop was continued and
+    /// nothing was lost.
     pub requested_by_other_filters: u64,
     /// The observer's thread panicked, so its counters mean nothing.
     pub observer_panicked: bool,
@@ -102,8 +102,8 @@ pub struct AbortInputs {
     /// This process's children the observer left unreaped when it stopped.
     pub unreaped_children: Vec<libc::pid_t>,
     /// Stops another filter asked for, continued unobserved. Surfaced for the
-    /// receipt (audit 3 A5); never a verdict input, because
-    /// the stop was continued and nothing was lost.
+    /// receipt; never a verdict input, because the stop was continued and
+    /// nothing was lost.
     pub requested_by_other_filters: u64,
     /// The backend's pid.
     pub backend_pid: libc::pid_t,
@@ -239,9 +239,8 @@ mod tests {
         assert_eq!(verified.integrity, Integrity::Verified);
         assert!(verified.verified_at.is_some());
 
-        // Security 2026-09-27 (audit 3 A5): wrong-guess trace stops are carried
-        // for the receipt, and because each was continued they are not loss:
-        // they never unverify the tree.
+        // Wrong-guess trace stops are carried for the receipt, and because each
+        // was continued they are not loss: they never unverify the tree.
         let guessed = TreeInputs {
             requested_by_other_filters: 15,
             ..seen
@@ -340,9 +339,8 @@ mod tests {
             unreaped_children: Vec::new(),
             ..good.clone()
         }));
-        // Security 2026-09-27 (audit 3 A5): wrong-guess trace stops ride in the
-        // inputs for the receipt and never unverify the abort, because each
-        // was continued and nothing was lost.
+        // Wrong-guess trace stops ride in the inputs for the receipt and never
+        // unverify the abort, because each was continued and nothing was lost.
         let guessed = AbortInputs {
             requested_by_other_filters: 10,
             ..good.clone()

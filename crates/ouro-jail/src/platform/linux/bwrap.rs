@@ -1675,8 +1675,8 @@ mod tests {
         plan
     }
 
-    /// Issue draft 15: an allowlisted device grant renders `--dev-bind`,
-    /// binding the single node instead of any devtmpfs surface.
+    /// An allowlisted device grant renders `--dev-bind`, binding the single
+    /// node instead of any devtmpfs surface.
     #[test]
     fn a_device_grant_renders_dev_bind() {
         let mut plan = sample_plan();

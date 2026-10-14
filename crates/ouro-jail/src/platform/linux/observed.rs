@@ -18,13 +18,12 @@ use super::tracer::{
     TracerSummary,
 };
 
-/// Test seam (J4 decision S9): a smaller in-flight bound, so a live test can
-/// reach map exhaustion through the product. Shrink-only.
+/// Test seam: a smaller in-flight bound, so a live test can reach map
+/// exhaustion through the product. Shrink-only.
 pub const INFLIGHT_SEAM: &str = "OURO_JAIL_TEST_TRACER_INFLIGHT";
 
-/// Test seam (J4 decision S9): a smaller user-space event queue budget, in
-/// bytes, so a live test can reach ring loss through the product.
-/// Shrink-only.
+/// Test seam: a smaller user-space event queue budget, in bytes, so a live test
+/// can reach ring loss through the product. Shrink-only.
 pub const QUEUE_BYTES_SEAM: &str = "OURO_JAIL_TEST_TRACER_QUEUE_BYTES";
 
 /// The §11.4 bounds an attempt's observer runs with: its "observer plan".
@@ -88,11 +87,10 @@ impl ObserverPlan {
     /// in-flight bound ("map exhaustion") and the queue ("ring loss").
     ///
     /// The queue's figures are the bounds in force, from the same
-    /// [`TracerConfig::queue_bounds`] the tracer applies (J4 W3, loss review
-    /// finding 4): `queue_bytes_max` bounds everything held for the
-    /// consumer, the handoff channel included, and is never below one
-    /// fixed-size event; `queue_result_bytes_max` is what results may bring
-    /// it to, short of `queue_lifecycle_reserve_bytes`.
+    /// [`TracerConfig::queue_bounds`] the tracer applies: `queue_bytes_max`
+    /// bounds everything held for the consumer, the handoff channel included,
+    /// and is never below one fixed-size event; `queue_result_bytes_max` is
+    /// what results may bring it to, short of `queue_lifecycle_reserve_bytes`.
     #[must_use]
     pub fn details(&self) -> Value {
         let bounds = self.config.queue_bounds();
@@ -194,12 +192,12 @@ pub enum Fact {
 /// exec is witnessed and carries a path. A pathname that is not one the
 /// launcher would have tried is some other image.
 ///
-/// Security 2026-09-27 (audit 3 A1): the snapshot is tracee memory, which a
-/// thread of the tracee can rewrite for the kernel's copy, so it decides
-/// only when the kernel's own image (`/proc/<tid>/exe` at the exec stop) was
-/// not read — the weaker claim §11.3 documents. When it was read,
-/// [`kernel_confirms`] decides, and a snapshot naming the target beside a
-/// kernel image that does not is an `exec_image_mismatch` gap.
+/// The snapshot is tracee memory, which a thread of the tracee can rewrite for
+/// the kernel's copy, so it decides only when the kernel's own image
+/// (`/proc/<tid>/exe` at the exec stop) was not read — the weaker claim §11.3
+/// documents. When it was read, [`kernel_confirms`] decides, and a snapshot
+/// naming the target beside a kernel image that does not is an
+/// `exec_image_mismatch` gap.
 fn snapshot_names_target(images: &[Vec<u8>], path: Option<&PathSnapshot>) -> bool {
     path.is_some_and(|path| {
         path.complete
@@ -209,10 +207,10 @@ fn snapshot_names_target(images: &[Vec<u8>], path: Option<&PathSnapshot>) -> boo
     })
 }
 
-/// Whether the kernel's own image record confirms one of `images` (audit 4
-/// B3). Confirmation needs either the inode's agreement or raw bytes no live
-/// file contradicts; the deleted-suffix form only confirms when nothing
-/// living under the stripped name is a *different* file.
+/// Whether the kernel's own image record confirms one of `images`. Confirmation
+/// needs either the inode's agreement or raw bytes no live file contradicts;
+/// the deleted-suffix form only confirms when nothing living under the stripped
+/// name is a *different* file.
 fn kernel_confirms(images: &[Vec<u8>], kernel: &KernelImage) -> bool {
     // The consumer may run after the child has renamed or removed these paths.
     // Only the identities captured at the exec stop can decide this event.
@@ -244,11 +242,11 @@ fn kernel_confirms(images: &[Vec<u8>], kernel: &KernelImage) -> bool {
             return true;
         }
     }
-    // The deleted-suffix form: the kernel's annotation for an unlinked
-    // image. Audit 3 confirmed the stripped match; audit 4 B3 keeps that
-    // for images whose candidates are gone or agree, and refuses it when a
-    // live file under the stripped name is a different file than the image
-    // — the decoy named `tool (deleted)` beside the real `tool`.
+    // The deleted-suffix form: the kernel's annotation for an unlinked image.
+    // The stripped match confirms an image whose candidates are gone or agree,
+    // and is refused when a live file under the stripped name is a different
+    // file than the image — the decoy named `tool (deleted)` beside the real
+    // `tool`.
     if kernel.path.ends_with(b" (deleted)") {
         let stripped = &kernel.path[..kernel.path.len() - b" (deleted)".len()];
         for candidate in images {
@@ -264,16 +262,15 @@ fn kernel_confirms(images: &[Vec<u8>], kernel: &KernelImage) -> bool {
     false
 }
 
-/// Audit 2026-10-08 H2: whether the kernel's own records show the `#!`
-/// rewrite of one of `images`. The kernel loaded the interpreter a script
-/// candidate's first line names — identity agreement in the tracee's root
-/// decides, with the interpreter's raw spelling as the weaker form — and
-/// the kernel's own argv carries the pathname this exec was called with in
-/// the interpreter's script slot, the slot after the interpreter and its
-/// optional single argument, and that pathname is the candidate's own
-/// spelling. A tracee that execs the interpreter directly cannot place the
-/// script in that slot without making the interpreter run the script, so
-/// argv shape alone does not confirm anything here.
+/// Whether the kernel's own records show the `#!` rewrite of one of `images`.
+/// The kernel loaded the interpreter a script candidate's first line names —
+/// identity agreement in the tracee's root decides, with the interpreter's raw
+/// spelling as the weaker form — and the kernel's own argv carries the pathname
+/// this exec was called with in the interpreter's script slot, the slot after
+/// the interpreter and its optional single argument, and that pathname is the
+/// candidate's own spelling. A tracee that execs the interpreter directly
+/// cannot place the script in that slot without making the interpreter run the
+/// script, so argv shape alone does not confirm anything here.
 fn script_kernel_confirms(
     images: &[Vec<u8>],
     path: Option<&PathSnapshot>,
@@ -331,14 +328,13 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             ..
         } => {
             audit.record_exec(*pid, *start_ticks, *syscall, path.as_ref(), *dirfd);
-            // Security 2026-09-29 (audit 6 N2): a hit re-checked against the
-            // kernel's own copy of the new argv killed the process at this
-            // stop. Every such hit is recorded — a `deny` or an unreadable
-            // argv as much as a `forbid`, since the note is the only account
-            // of that kill — and a `forbid` outranks everything else this
-            // event could establish, for any process in the tree: command
-            // rules govern the whole run, not only the launcher's image (the
-            // syscall arm below makes the same call).
+            // A hit re-checked against the kernel's own copy of the new argv
+            // killed the process at this stop. Every such hit is recorded — a
+            // `deny` or an unreadable argv as much as a `forbid`, since the
+            // note is the only account of that kill — and a `forbid` outranks
+            // everything else this event could establish, for any process in
+            // the tree: command rules govern the whole run, not only the
+            // launcher's image (the syscall arm below makes the same call).
             if let Some(hit) = command {
                 audit.record_command_rule(*pid, hit, CommandEnforcement::KilledAtExec);
                 if hit.forbidden {
@@ -348,14 +344,14 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             if *pid != target.launcher {
                 return Fact::Nothing;
             }
-            // Security 2026-09-27 (audit 3 A1): the kernel's own image, when
-            // it was read, decides the confirmation. A snapshot that names a
-            // target image while the kernel loaded another is an A-B-A
-            // rewrite of the pathname: the confirmation is refused and the
-            // contradiction is a gap of the exec class, so no receipt can
-            // certify a spoofed confirmation. Audit 4 B3: the decision is
-            // [`kernel_confirms`]'s — inode first, raw bytes second, the
-            // deleted-suffix form only when no live candidate contradicts.
+            // The kernel's own image, when it was read, decides the
+            // confirmation. A snapshot that names a target image while the
+            // kernel loaded another is an A-B-A rewrite of the pathname: the
+            // confirmation is refused and the contradiction is a gap of the
+            // exec class, so no receipt can certify a spoofed confirmation. The
+            // decision is [`kernel_confirms`]'s — inode first, raw bytes
+            // second, the deleted-suffix form only when no live candidate
+            // contradicts.
             if let Some(kernel) = kernel_image.as_ref() {
                 if kernel_confirms(target.images, kernel)
                     || script_kernel_confirms(
@@ -549,11 +545,10 @@ fn record_unreported_losses(audit: &mut AuditWriter, summary: &TracerSummary) {
             u64::try_from(summary.unreaped_children.len()).ok(),
         );
     }
-    // Audit 7 L9: a lifecycle drop no longer lands here. Drops counted at
-    // the emit site carry their own named `queue_full` gap, so repeating
-    // them as an all-class gap from 0 to the end overstated every class's
-    // exposure. This catch-all stays for losses recorded without a gap of
-    // their own.
+    // A lifecycle drop no longer lands here. Drops counted at the emit site
+    // carry their own named `queue_full` gap, so repeating them as an all-class
+    // gap from 0 to the end overstated every class's exposure. This catch-all
+    // stays for losses recorded without a gap of their own.
     if summary.loss.total() > 0 && !audit.has_loss_gaps() {
         audit.record_gap(GapReason::QueueFull, OpSet::ALL, 0, now, None);
     }
@@ -747,12 +742,12 @@ mod tests {
         );
     }
 
-    /// Security 2026-09-27 (audit 3 A1): the kernel's own image decides the
-    /// confirmation. It confirms a target image even against a snapshot that
-    /// was raced into naming another path, it refuses a snapshot that names
-    /// the target while the kernel loaded something else — recording an
-    /// `exec_image_mismatch` gap so no receipt certifies the spoof — and a
-    /// kernel image naming a non-target refuses without any gap.
+    /// The kernel's own image decides the confirmation. It confirms a target
+    /// image even against a snapshot that was raced into naming another path,
+    /// it refuses a snapshot that names the target while the kernel loaded
+    /// something else — recording an `exec_image_mismatch` gap so no receipt
+    /// certifies the spoof — and a kernel image naming a non-target refuses
+    /// without any gap.
     #[test]
     fn the_kernel_image_decides_the_exec_confirmation() {
         let images = images();
@@ -816,12 +811,12 @@ mod tests {
         assert!(!quiet.has_gaps(), "a non-target image is not a mismatch");
     }
 
-    /// Audit 2026-10-08 H2: a `#!` target loads the interpreter its script
-    /// names, so the kernel image is not one of the target's spellings.
-    /// The exec still confirms when the kernel's own records show that
-    /// rewrite: the interpreter is the loaded image (by identity), and the
-    /// kernel's argv carries the exec'd pathname in the script slot, after
-    /// the interpreter and its optional single argument.
+    /// A `#!` target loads the interpreter its script names, so the kernel
+    /// image is not one of the target's spellings. The exec still confirms when
+    /// the kernel's own records show that rewrite: the interpreter is the
+    /// loaded image (by identity), and the kernel's argv carries the exec'd
+    /// pathname in the script slot, after the interpreter and its optional
+    /// single argument.
     #[test]
     fn a_shebang_target_confirms_through_the_interpreter_image() {
         let images = vec![b"/w/s.sh".to_vec()];
@@ -894,11 +889,11 @@ mod tests {
         assert!(!audit.has_gaps());
     }
 
-    /// Audit 2026-10-08 H2: the interpreter image alone confirms nothing.
-    /// Without the candidate in the kernel's argv script slot — a direct
-    /// exec of the interpreter, whatever its argv says — a snapshot naming
-    /// the script stays a contradiction the gap names (I06), and a script
-    /// slot naming another pathname is an ordinary inner exec.
+    /// The interpreter image alone confirms nothing. Without the candidate in
+    /// the kernel's argv script slot — a direct exec of the interpreter,
+    /// whatever its argv says — a snapshot naming the script stays a
+    /// contradiction the gap names (I06), and a script slot naming another
+    /// pathname is an ordinary inner exec.
     #[test]
     fn the_interpreter_image_alone_does_not_confirm_a_script_target() {
         let images = vec![b"/w/s.sh".to_vec()];
@@ -954,11 +949,10 @@ mod tests {
         );
     }
 
-    /// Security 2026-09-27 (audit 4 B3): the raw link plus the image inode
-    /// separate an unlinked target (confirm) from a decoy genuinely named
-    /// `tool (deleted)` (refuse, and contradict a snapshot that names the
-    /// target), and a spelling that resolves to the image's own inode
-    /// confirms through a symlink.
+    /// The raw link plus the image inode separate an unlinked target (confirm)
+    /// from a decoy genuinely named `tool (deleted)` (refuse, and contradict a
+    /// snapshot that names the target), and a spelling that resolves to the
+    /// image's own inode confirms through a symlink.
     #[test]
     fn the_inode_separates_an_unlinked_target_from_a_deleted_named_decoy() {
         use std::os::unix::ffi::OsStrExt as _;
@@ -1002,8 +996,8 @@ mod tests {
             Fact::TargetExec
         );
         // An image whose kernel link carries the deleted annotation for the
-        // target, with the target's own inode: the audit-3 rule keeps
-        // confirming it (the file is gone; only the name matched).
+        // target, with the target's own inode, is still confirmed (the file is
+        // gone; only the name matched).
         let deleted_link = [raw(&target_path), b" (deleted)".to_vec()].concat();
         let mut audit = AuditWriter::new("att_u", None, b"/work", b"");
         assert_eq!(
@@ -1084,7 +1078,7 @@ mod tests {
         let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
         let exit = |pid| TracerEvent::Exit {
             pid,
-            start_ticks: None, // J4-O
+            start_ticks: None,
             status: 3 << 8,
         };
         assert_eq!(
@@ -1121,7 +1115,7 @@ mod tests {
         );
         let syscall = TracerEvent::Syscall {
             pid: LAUNCHER,
-            start_ticks: None, // J4-O
+            start_ticks: None,
             tid: LAUNCHER,
             op: ClosedOp::Open,
             syscall: "openat",
@@ -1144,8 +1138,8 @@ mod tests {
         })
     }
 
-    /// J4 S9: the seams only ever shrink a bound, and every one that is set
-    /// is named in the plan, with the bound it applied or `null`.
+    /// The seams only ever shrink a bound, and every one that is set is named
+    /// in the plan, with the bound it applied or `null`.
     #[test]
     fn j4_the_tracer_seams_only_shrink_and_are_always_recorded() {
         let defaults = TracerConfig::default();
@@ -1207,13 +1201,12 @@ mod tests {
         assert_eq!(plan.tracer_config(0).inflight_max, defaults.inflight_max);
     }
 
-    /// J4 W3 (loss review finding 4): the plan records the queue bounds in
-    /// force, not the figure they were derived from. The byte budget bounds
-    /// everything the observer holds for its consumer, the handoff channel
-    /// included, and cannot be smaller than one fixed-size event; results
-    /// stop short of the lifecycle reserve, which below about 64 KiB leaves
-    /// them room for one fixed-size event and no pathname — and the plan
-    /// says so rather than leave it to be inferred.
+    /// The plan records the queue bounds in force, not the figure they were
+    /// derived from. The byte budget bounds everything the observer holds for
+    /// its consumer, the handoff channel included, and cannot be smaller than
+    /// one fixed-size event; results stop short of the lifecycle reserve, which
+    /// below about 64 KiB leaves them room for one fixed-size event and no
+    /// pathname — and the plan says so rather than leave it to be inferred.
     #[test]
     fn j4_w3_the_plan_records_the_queue_bounds_in_force() {
         for (value, bytes, results) in [
@@ -1269,12 +1262,12 @@ mod tests {
         }
     }
 
-    /// J4 O05: "Directory-operation losses degrade fs.write". Every
-    /// directory-entry operation of the closed set — and the two mutations
-    /// of an existing file — lost to the observer is a loss of `fs.write`
-    /// (and of `fs.deny`, which its result could also have been), a fact
-    /// strict evidence stops for, and nothing else: `exec` and `net` keep
-    /// their exact counts.
+    /// O05: "Directory-operation losses degrade fs.write". Every
+    /// directory-entry operation of the closed set — and the two mutations of
+    /// an existing file — lost to the observer is a loss of `fs.write` (and of
+    /// `fs.deny`, which its result could also have been), a fact strict
+    /// evidence stops for, and nothing else: `exec` and `net` keep their exact
+    /// counts.
     #[test]
     fn j4_o05_every_directory_operation_loss_degrades_fs_write() {
         let images = images();
@@ -1341,9 +1334,9 @@ mod tests {
         }
     }
 
-    /// J4 O03: "Coverage cannot return to fully active for the entire run
-    /// after a historical gap." One early loss, then a thousand clean
-    /// results of the same class: still degraded, still no count.
+    /// O03: "Coverage cannot return to fully active for the entire run after a
+    /// historical gap." One early loss, then a thousand clean results of the
+    /// same class: still degraded, still no count.
     #[test]
     fn j4_o03_a_class_never_returns_to_active_after_an_early_gap() {
         let images = images();
@@ -1387,9 +1380,9 @@ mod tests {
         assert_eq!(coverage.fs_write.observed_count, None);
     }
 
-    /// Audit-6 review: a command-rule hit found at the exec event killed its
-    /// process there, so every one is recorded — the note is that kill's only
-    /// account — and only a `forbid` stops the run.
+    /// A command-rule hit found at the exec event killed its process there, so
+    /// every one is recorded — the note is that kill's only account — and only
+    /// a `forbid` stops the run.
     #[test]
     fn an_exec_time_command_hit_is_recorded_and_only_forbid_stops_the_run() {
         let images = images();
@@ -1443,9 +1436,9 @@ mod tests {
         }
     }
 
-    /// Audit-6 review: a `path_claim_unverified` gap is bookkeeping for a
-    /// delivered result: it degrades nothing and never stands in for the
-    /// account of counted loss whose own gaps were dropped.
+    /// A `path_claim_unverified` gap is bookkeeping for a delivered result: it
+    /// degrades nothing and never stands in for the account of counted loss
+    /// whose own gaps were dropped.
     #[test]
     fn a_path_claim_gap_degrades_nothing_and_accounts_for_no_loss() {
         let images = images();

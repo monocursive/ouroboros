@@ -60,16 +60,15 @@ pub fn tracer_pid(pid: pid_t) -> Option<pid_t> {
     if raw == 0 { None } else { Some(raw) }
 }
 
-/// The image the kernel loaded for `tid`: the raw `/proc/<tid>/exe` link
-/// bytes and the image's own `(dev, ino)`, read while the tracee is stopped
-/// at its exec event (audit 3 A1), so the tracee cannot change either
-/// between the read and the kernel's decision — the kernel has already made
-/// it. The bytes are **not** stripped of the kernel's ` (deleted)`
-/// annotation: security 2026-09-27 (audit 4 B3) — a decoy genuinely *named*
-/// `tool (deleted)` produces the same link as an unlinked `tool`, and only
-/// the inode can tell them apart, so the raw bytes plus identity travel
-/// together and the confirmation logic decides. `None` when the link cannot
-/// be read; the caller then has no corroboration, not a negative answer.
+/// The image the kernel loaded for `tid`: the raw `/proc/<tid>/exe` link bytes
+/// and the image's own `(dev, ino)`, read while the tracee is stopped at its
+/// exec event, so the tracee cannot change either between the read and the
+/// kernel's decision — the kernel has already made it. The bytes are **not**
+/// stripped of the kernel's ` (deleted)` annotation: a decoy genuinely *named*
+/// `tool (deleted)` produces the same link as an unlinked `tool`, and only the
+/// inode can tell them apart, so the raw bytes plus identity travel together
+/// and the confirmation logic decides. `None` when the link cannot be read; the
+/// caller then has no corroboration, not a negative answer.
 #[must_use]
 pub fn kernel_exe(tid: pid_t, images: &[Vec<u8>]) -> Option<super::KernelImage> {
     use std::os::unix::ffi::OsStrExt as _;
@@ -97,15 +96,14 @@ pub fn kernel_exe(tid: pid_t, images: &[Vec<u8>]) -> Option<super::KernelImage> 
     })
 }
 
-/// Audit 2026-10-08 H2: the `#!` evidence for one target-image candidate,
-/// read through the tracee's root while the tracee is stopped at its exec
-/// event: the interpreter the script's first line names, its optional
-/// single argument, and the interpreter's `(dev, ino)` in the tracee's
-/// root. `None` for a non-absolute spelling (the resolved form of the same
-/// file carries the evidence), a file that cannot be read through the
-/// root, or a first line that is not a shebang. The kernel's own buffer
-/// for this line is 256 bytes: the interpreter name must fit, while its
-/// optional argument may be truncated by the kernel.
+/// The `#!` evidence for one target-image candidate, read through the tracee's
+/// root while the tracee is stopped at its exec event: the interpreter the
+/// script's first line names, its optional single argument, and the
+/// interpreter's `(dev, ino)` in the tracee's root. `None` for a non-absolute
+/// spelling (the resolved form of the same file carries the evidence), a file
+/// that cannot be read through the root, or a first line that is not a shebang.
+/// The kernel's own buffer for this line is 256 bytes: the interpreter name
+/// must fit, while its optional argument may be truncated by the kernel.
 #[must_use]
 pub fn shebang_image(tid: pid_t, script: &[u8]) -> Option<super::ShebangImage> {
     use std::os::unix::ffi::OsStrExt as _;
@@ -291,13 +289,12 @@ fn binfmt_matches(
         })
 }
 
-/// Audit 2026-10-08 H2 residual: the `binfmt_misc` image a candidate would
-/// load, as the same evidence shape the `#!` rule uses. The kernel hands a
-/// registered handler the file the way it hands an interpreter a script —
-/// `[interpreter, pathname, ...]` (`load_misc_binary`) — so the confirmation
-/// rule is the same, with no optional argument: a registration has none.
-/// The `P` flag keeps the original `argv[0]` *after* the pathname, so the
-/// pathname's slot is 1 either way.
+/// The `binfmt_misc` image a candidate would load, as the same evidence shape
+/// the `#!` rule uses. The kernel hands a registered handler the file the way
+/// it hands an interpreter a script — `[interpreter, pathname, ...]`
+/// (`load_misc_binary`) — so the confirmation rule is the same, with no
+/// optional argument: a registration has none. The `P` flag keeps the original
+/// `argv[0]` *after* the pathname, so the pathname's slot is 1 either way.
 ///
 /// Registrations are read from this process's view of
 /// `/proc/sys/fs/binfmt_misc`, and only while the facility is enabled there.
@@ -363,11 +360,11 @@ pub fn binfmt_image(tid: pid_t, candidate: &[u8]) -> Option<super::ShebangImage>
 }
 
 /// The raw `/proc/<tid>/cmdline` bytes: the argument area of the image the
-/// kernel installed, read while the tracee is stopped at its exec event
-/// (audit 6 N2). The kernel copied it from the tracee's argv vector into
-/// the new image's stack; at that stop the exec has already destroyed every
-/// other thread and the new image has run no instruction, so nothing can
-/// rewrite it before this read. `None` when the file cannot be read.
+/// kernel installed, read while the tracee is stopped at its exec event. The
+/// kernel copied it from the tracee's argv vector into the new image's stack;
+/// at that stop the exec has already destroyed every other thread and the new
+/// image has run no instruction, so nothing can rewrite it before this read.
+/// `None` when the file cannot be read.
 #[must_use]
 pub fn cmdline_bytes(tid: pid_t) -> Option<Vec<u8>> {
     fs::read(proc_path(tid, "cmdline")).ok()
@@ -472,10 +469,10 @@ pub fn children(pid: pid_t) -> Vec<pid_t> {
     out
 }
 
-/// The child of `ancestor` through which `pid` descends: `pid` itself when
-/// it is a direct child, else the child found by following each parent up
-/// from `pid` (J5-T), as `parent_of` reads it ([`ppid`] for the live
-/// tree). For the launcher under bubblewrap it is bubblewrap.
+/// The child of `ancestor` through which `pid` descends: `pid` itself when it
+/// is a direct child, else the child found by following each parent up from
+/// `pid`, as `parent_of` reads it ([`ppid`] for the live tree). For the
+/// launcher under bubblewrap it is bubblewrap.
 ///
 /// `None` when a parent cannot be read, the walk reaches init first, or it
 /// is deeper than [`MAX_DEPTH`]: then `pid` is not provably below
@@ -685,8 +682,8 @@ mod tests {
         assert!(!mine.is_empty(), "and it is not empty");
     }
 
-    /// J5-T: the walk names the direct child a descendant came through, and
-    /// refuses rather than guesses when the task is not below the ancestor.
+    /// The walk names the direct child a descendant came through, and refuses
+    /// rather than guesses when the task is not below the ancestor.
     #[test]
     fn j5t_the_child_toward_a_descendant_is_the_one_it_came_through() {
         let me = std::process::id() as pid_t;
@@ -738,9 +735,9 @@ mod tests {
         assert_eq!(ppid(1), Some(0), "init reports no parent");
     }
 
-    /// Audit-6 review: only the final terminator is stripped, so empty
-    /// arguments keep their positions, and the kernel's inserted argv for
-    /// an `execve` with none reads as one empty argument, not as nothing.
+    /// Only the final terminator is stripped, so empty arguments keep their
+    /// positions, and the kernel's inserted argv for an `execve` with none
+    /// reads as one empty argument, not as nothing.
     #[test]
     fn a_cmdline_keeps_empty_arguments_and_its_positions() {
         let argv = |items: &[&str]| {
@@ -772,11 +769,10 @@ mod tests {
         );
     }
 
-    /// Audit 2026-10-08 H2 residual: a `binfmt_misc` registration parses
-    /// and matches as `fs/binfmt_misc.c` does — by masked magic at its
-    /// offset, or by the pathname's extension — and its interpreter is one
-    /// path, never a path and an argument. The text is the shape
-    /// `/proc/sys/fs/binfmt_misc` serves.
+    /// A `binfmt_misc` registration parses and matches as `fs/binfmt_misc.c`
+    /// does — by masked magic at its offset, or by the pathname's extension —
+    /// and its interpreter is one path, never a path and an argument. The text
+    /// is the shape `/proc/sys/fs/binfmt_misc` serves.
     #[test]
     fn binfmt_registrations_parse_and_match() {
         let text = concat!(

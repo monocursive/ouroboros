@@ -68,17 +68,16 @@ use super::watch::{self, Watcher};
 /// The most a stop gives the proxy to drain its last results (§10).
 const AGENT_STOP_BUDGET: Duration = Duration::from_secs(2);
 
-/// Audit 2026-09-25-2, S14; reworded by audit 3 (A5): a per-attempt value for
-/// the narrowing filter's `SECCOMP_RET_DATA`, unpredictable to the child. The
-/// kernel's data field is sixteen bits, so this is a speed bump rather than a
-/// wall. What a guess costs: a stop carrying this attempt's data on a number
-/// the narrowing filter does not trace is a visible `unexpected_trace_stop`
-/// gap, so forging our verdict costs the receipt its evidence one gap at a
-/// time, and strict evidence fails on the first — while a stop carrying other
-/// data is another filter's own request, continued and counted in
-/// `requested_by_other_filters`, which the receipt's
-/// `lifetime.native.details` carries. Guessing is therefore never silent:
-/// every stop lands in the receipt as a gap or as a count.
+/// A per-attempt value for the narrowing filter's `SECCOMP_RET_DATA`,
+/// unpredictable to the child. The kernel's data field is sixteen bits, so this
+/// is a speed bump rather than a wall. What a guess costs: a stop carrying this
+/// attempt's data on a number the narrowing filter does not trace is a visible
+/// `unexpected_trace_stop` gap, so forging our verdict costs the receipt its
+/// evidence one gap at a time, and strict evidence fails on the first — while a
+/// stop carrying other data is another filter's own request, continued and
+/// counted in `requested_by_other_filters`, which the receipt's
+/// `lifetime.native.details` carries. Guessing is therefore never silent: every
+/// stop lands in the receipt as a gap or as a count.
 fn random_trace_data() -> u16 {
     use std::hash::{BuildHasher, Hasher as _};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
@@ -91,10 +90,9 @@ fn random_trace_data() -> u16 {
 }
 
 /// The named roots the audit path classification knows besides the workspace
-/// and scratch (issue draft 10): every operator grant by its in-jail
-/// spelling, and the system read-only roots, so exec paths like
-/// `/usr/bin/git` and writes under a `--ro` grant are named instead of
-/// digested.
+/// and scratch: every operator grant by its in-jail spelling, and the system
+/// read-only roots, so exec paths like `/usr/bin/git` and writes under a `--ro`
+/// grant are named instead of digested.
 fn audit_named_roots(bplan: &bwrap::BwrapPlan) -> Vec<(Vec<u8>, String)> {
     let mut roots = Vec::new();
     for (_, dest) in bplan
@@ -308,9 +306,9 @@ struct Started {
     placeholder_outcomes: Vec<PlaceholderOutcome>,
     /// The proxy, mediator and bridge of an `agent` attempt.
     agent: Option<AgentNet>,
-    /// Audit 2026-10-08 H1 follow-up: the regular-file and socket stdio
-    /// streams, relayed through supervisor-owned pipes so the child holds no
-    /// reopenable handle on any file.
+    /// The regular-file and socket stdio streams, relayed through
+    /// supervisor-owned pipes so the child holds no reopenable handle on any
+    /// file.
     stdio_relays: Vec<StdioRelay>,
     /// Set before this boundary kills anything: what dies after it did not
     /// die on its own.
@@ -462,9 +460,8 @@ impl Started {
             unreaped_children: observer
                 .map(|summary| summary.unreaped_children.clone())
                 .unwrap_or_default(),
-            // Security 2026-09-27 (audit 3 A5): carried for the receipt;
-            // never a verdict input, because the stop was continued and
-            // nothing was lost.
+            // Carried for the receipt; never a verdict input, because the stop
+            // was continued and nothing was lost.
             requested_by_other_filters: observer
                 .map_or(0, |summary| summary.requested_by_other_filters),
             backend_pid: self.bwrap_pid,
@@ -826,10 +823,9 @@ fn bring_up(
         }
     }
     let discovered = discover(started, launcher_error, inputs)?;
-    // Audit 2026-10-08 M2: storage and inode ceilings expose occupancy, not
-    // refusal counters — their hit evidence is positive-only saturation
-    // sampling (§11.4), so the `limits` class starts degraded with a null
-    // count and names its gap.
+    // Storage and inode ceilings expose occupancy, not refusal counters — their
+    // hit evidence is positive-only saturation sampling (§11.4), so the
+    // `limits` class starts degraded with a null count and names its gap.
     if discovered
         .storage
         .as_ref()
@@ -959,9 +955,9 @@ struct Planned {
     /// Whether the installed baseline denies `link` and `linkat`, read from
     /// the program itself; the storage ceiling's evidence states it.
     hard_links_denied: bool,
-    /// Audit 2026-09-25-2, S14: the narrowing filter's per-attempt
-    /// `SECCOMP_RET_DATA`, with observation on; shared only with the
-    /// launcher (through the trace-data pipe) and the tracer.
+    /// The narrowing filter's per-attempt `SECCOMP_RET_DATA`, with observation
+    /// on; shared only with the launcher (through the trace-data pipe) and the
+    /// tracer.
     trace_data: Option<u16>,
     /// The launcher's argv, by which discovery finds it.
     launcher_argv: Vec<Vec<u8>>,
@@ -1002,11 +998,11 @@ impl Planned {
         let staged = bind_staged(&mut bplan, snapshot, plan)?;
         bind_grants(&mut bplan, snapshot, &plan.workspace, scratch)?;
 
-        // A sanitized resolver view (audit F5): the host's
-        // `/etc/resolv.conf` can carry the operator's search domains, host
-        // facts the child has no grant for. The child's resolver is
-        // unreachable inside its network namespace either way; the copy
-        // keeps the nameservers and drops `search`/`domain` lines.
+        // A sanitized resolver view: the host's `/etc/resolv.conf` can carry
+        // the operator's search domains, host facts the child has no grant for.
+        // The child's resolver is unreachable inside its network namespace
+        // either way; the copy keeps the nameservers and drops
+        // `search`/`domain` lines.
         let (resolver, resolv_sanitization) = stage_sanitized_resolv_conf(&plan.attempt_dir)?;
         refuse_pseudo_fs_sources(snapshot, &plan.workspace, &bplan)?;
 
@@ -1110,11 +1106,10 @@ impl Planned {
 ///
 /// A bound reached is a refusal, never a shorter answer (§9.1). The walk's
 /// names are the snapshot's own segments: every contained baseline carries
-/// exactly its literals (`tool` the built-in `.git`/`.ouroboros`, `agent` —
-/// audit 2026-10-08 M5 — only `.git/hooks` and `.git/config`, which the walk
-/// matches at any depth, so the rest of Git metadata stays writable), so
-/// merging the built-ins in again here would protect more than the profile
-/// asked for.
+/// exactly its literals (`tool` the built-in `.git`/`.ouroboros`, `agent` only
+/// `.git/hooks` and `.git/config`, which the walk matches at any depth, so the
+/// rest of Git metadata stays writable), so merging the built-ins in again here
+/// would protect more than the profile asked for.
 fn protected_names(snapshot: &PolicySnapshot) -> Vec<String> {
     let mut names: Vec<String> = snapshot.filesystem.protected_segments.clone();
     names.sort_unstable();
@@ -1355,9 +1350,8 @@ fn bind_grants(
 ) -> Result<(), JailError> {
     for reference in &snapshot.filesystem.read_write {
         if let Ok(host) = host_path_of(reference, workspace, scratch) {
-            // Issue draft 15: an allowlisted device node (the NVIDIA class)
-            // binds individually with `--dev-bind`, never as a devtmpfs
-            // surface.
+            // An allowlisted device node (the NVIDIA class) binds individually
+            // with `--dev-bind`, never as a devtmpfs surface.
             if is_allowed_device_node(&host) {
                 let destination = resolve_path_ref(reference, workspace)?;
                 bplan
@@ -1574,10 +1568,9 @@ impl Channels {
         .map_err(io)?;
         fds.add(release_r, RELEASE_FD).map_err(io)?;
         fds.add(error_w, ERROR_FD).map_err(io)?;
-        // Audit 2026-09-25-2, S14: the narrowing data is already in the pipe
-        // before the spawn, so the launcher's blocking read always
-        // completes; the descriptor closes in the launcher and never
-        // reaches the target.
+        // The narrowing data is already in the pipe before the spawn, so the
+        // launcher's blocking read always completes; the descriptor closes in
+        // the launcher and never reaches the target.
         if let Some(data) = planned.trace_data {
             let (trace_r, trace_w) = exec::pipe().map_err(io)?;
             // Two bytes always fit the pipe's capacity, so the write
@@ -1634,11 +1627,10 @@ impl Channels {
     }
 }
 
-/// §8.3: stdio passes through without capture except regular files and
-/// sockets, which are relayed through supervisor-owned pipes (audit
-/// 2026-10-08 H1): the child gets a pipe end here and never the file, so no
-/// `/dev/stdin` reopen can reach the host mount. Every other descriptor the
-/// supervisor holds is closed on exec.
+/// §8.3: stdio passes through without capture except regular files and sockets,
+/// which are relayed through supervisor-owned pipes: the child gets a pipe end
+/// here and never the file, so no `/dev/stdin` reopen can reach the host mount.
+/// Every other descriptor the supervisor holds is closed on exec.
 fn attach_stdio(plans: [StdioPlan; 3], fds: &mut FdMap) -> Result<Vec<StdioRelay>, JailError> {
     let mut relays = Vec::new();
     for (fd, plan) in plans.into_iter().enumerate() {
@@ -1784,8 +1776,8 @@ fn attach_observer(
     // CLOCK_BOOTTIME base as every other monotonic_ns. §11.4: the bounds are
     // the plan's, which the receipt records.
     let mut config = plan.tracer_config(clock::mark_supervisor_start());
-    // Audit 2026-09-25-2, S14: the tracer expects exactly the data this
-    // attempt's narrowing filter carries.
+    // The tracer expects exactly the data this attempt's narrowing filter
+    // carries.
     config.trace_data = trace_data;
     config.learning = snapshot.observation.learning;
     // Resolution validated these rules; rules that no longer compile are
@@ -2274,9 +2266,8 @@ fn read_applied(
             protected_coverage: if inputs.snapshot.filesystem.protected_coverage
                 == ProtectedCoverage::None
             {
-                // Audit 2026-09-25-2, S5: nothing was requested or scanned,
-                // so the walk's vacuous pass must not be reported as
-                // existing-and-covered.
+                // Nothing was requested or scanned, so the walk's vacuous pass
+                // must not be reported as existing-and-covered.
                 "none".to_owned()
             } else {
                 scan_coverage(inputs.scan)
@@ -2340,8 +2331,7 @@ pub(super) struct Boundary {
     /// The §11.4 bounds the observer runs with, decided once; `None` with
     /// observation off.
     observer_plan: Option<super::observed::ObserverPlan>,
-    /// Audit 2026-09-25-2, S14: the narrowing filter's per-attempt
-    /// `SECCOMP_RET_DATA`.
+    /// The narrowing filter's per-attempt `SECCOMP_RET_DATA`.
     trace_data: u16,
     /// bubblewrap's raw wait status, once collected (from the observer, or
     /// with observation off from this process's own wait).
@@ -2381,8 +2371,8 @@ impl Boundary {
         }
     }
 
-    /// Moves relayed stdio while the run is live (audit 2026-10-08 H1);
-    /// `true` while a relay made progress.
+    /// Moves relayed stdio while the run is live; `true` while a relay made
+    /// progress.
     fn pump_stdio(&mut self, run: &mut RunState) -> bool {
         match pump_stdio_relays(&mut self.started.stdio_relays) {
             Ok(active) => active,
@@ -2522,8 +2512,8 @@ impl Tree for Boundary {
             "watcher_pid".to_owned(),
             Value::from(self.started.watcher.pid()),
         );
-        // J4 autoscope: §9.3 — where the supervisor stood when the leaf was
-        // made: already delegated, entered a scope of its own, or why not.
+        // §9.3 — where the supervisor stood when the leaf was made: already
+        // delegated, entered a scope of its own, or why not.
         details.insert("supervisor_scope".to_owned(), super::scope::details());
         details.insert(
             "bootstrap_spawn".to_owned(),
@@ -2583,12 +2573,11 @@ impl Tree for Boundary {
         // baseline bubblewrap loads, recorded in `applied.syscalls`, and the
         // observer's narrowing filter the launcher installs. The receipt names
         // both, by the digest each of them reports for itself. Security
-        // 2026-09-27 (audit 4 B9): `narrowing_filter_digest` names the
-        // canonical program the published table freezes, and
-        // `narrowing_filter_digest_installed` names the bytes this attempt
-        // **installed** — the launcher installs the filter carrying the
-        // per-attempt trace data (audit 2026-09-25-2, S14), so the canonical
-        // digest alone no longer identifies the running program.
+        // `narrowing_filter_digest` names the canonical program the published
+        // table freezes, and `narrowing_filter_digest_installed` names the
+        // bytes this attempt **installed** — the launcher installs the filter
+        // carrying the per-attempt trace data, so the canonical digest alone no
+        // longer identifies the running program.
         details.insert(
             "narrowing_filter_digest".to_owned(),
             if run.observe_on {
@@ -2724,9 +2713,9 @@ impl Tree for Boundary {
     }
 
     fn sample(&mut self, run: &mut RunState) {
-        // Audit 2026-10-08 L2: the storage keeps whether its loss was found
-        // before the target's end, which stays known after its outcome was
-        // reported; only such a loss may become the cause.
+        // The storage keeps whether its loss was found before the target's end,
+        // which stays known after its outcome was reported; only such a loss
+        // may become the cause.
         let target_ended = self.target_ended(run);
         if let Some(storage) = self.storage.as_mut() {
             match storage.sample(target_ended) {
@@ -2736,9 +2725,9 @@ impl Tree for Boundary {
                     }
                 }
                 Err(_) => {
-                    // Audit 2026-10-08 L1: the loss is sticky (`Storage::sample`
-                    // replays it every call), and losing the storage read must
-                    // not also blind the cgroup ceilings.
+                    // The loss is sticky (`Storage::sample` replays it every
+                    // call), and losing the storage read must not also blind
+                    // the cgroup ceilings.
                     run.audit
                         .record_limit_evidence_missing(LimitCause::StorageEnforcementLost.cause());
                     self.hard_kill(run);
@@ -2825,8 +2814,8 @@ impl Tree for Boundary {
 
     fn tree_ended(&mut self, run: &mut RunState) -> bool {
         self.pump_status(run);
-        // The observer finishes once every tracee and the backend are reaped
-        // (J5-T); the watcher, released here, is reaped at settlement.
+        // The observer finishes once every tracee and the backend are reaped;
+        // the watcher, released here, is reaped at settlement.
         self.started.release_watcher_after_backend();
         self.bwrap_status.is_some() && !self.init.alive() && self.started.cgroup_empty()
     }
@@ -2856,9 +2845,8 @@ impl Tree for Boundary {
             abandoned_tracees: observer.map_or(0, |summary| summary.loss.abandoned_tracees),
             unreaped_children: observer.map_or(0, |summary| summary.unreaped_children.len()),
             observer_panicked: observer.is_some_and(|summary| summary.thread_panicked),
-            // Security 2026-09-27 (audit 3 A5): carried for the receipt;
-            // never a verdict input, because the stop was continued and
-            // nothing was lost.
+            // Carried for the receipt; never a verdict input, because the stop
+            // was continued and nothing was lost.
             requested_by_other_filters: observer
                 .map_or(0, |summary| summary.requested_by_other_filters),
         });
@@ -2905,10 +2893,10 @@ impl Tree for Boundary {
     }
 
     fn limit_cause(&self) -> Option<LimitCause> {
-        // Audit 2026-10-08 L2 (§6.4): a storage enforcement loss becomes the
-        // cause only when it was found while the target still ran. A loss
-        // discovered after the target's own end — including the settlement
-        // sample — is recorded in `errors[]` but is never the cause.
+        // A storage enforcement loss becomes the cause only when it was found
+        // while the target still ran. A loss discovered after the target's own
+        // end — including the settlement sample — is recorded in `errors[]` but
+        // is never the cause.
         if self
             .storage
             .as_ref()
@@ -2924,7 +2912,7 @@ impl Tree for Boundary {
     }
 
     /// The storage enforcement loss's own message, for the receipt's
-    /// `errors[]` (audit 2026-10-08 L2); `None` while enforcement holds.
+    /// `errors[]`; `None` while enforcement holds.
     fn storage_loss(&self) -> Option<String> {
         self.storage.as_ref()?.loss().map(str::to_owned)
     }
@@ -2949,29 +2937,28 @@ impl Tree for Boundary {
             details.insert("placeholders_left".to_owned(), left);
         }
         let observer = run.tracer_summary.as_ref();
-        // Security 2026-09-27 (audit 4 B9): the honest count of read-only
-        // open verdicts the observer certified (register-sourced flags, and
-        // the memory-sourced ones every `memory_flags_unverified` gap already
-        // names). A count that never leaves the tracer is unauditable.
+        // The honest count of read-only open verdicts the observer certified
+        // (register-sourced flags, and the memory-sourced ones every
+        // `memory_flags_unverified` gap already names). A count that never
+        // leaves the tracer is unauditable.
         details.insert(
             "filtered_readonly_opens".to_owned(),
             observer.map_or(Value::Null, |summary| {
                 Value::from(summary.filtered_readonly_opens)
             }),
         );
-        // Security 2026-09-29 (audit 6 N1): open events delivered with their
-        // pathname claim downgraded because the descriptor link did not
-        // corroborate it. Not loss, so no class counts it; the receipt does.
+        // Open events delivered with their pathname claim downgraded because
+        // the descriptor link did not corroborate it. Not loss, so no class
+        // counts it; the receipt does.
         details.insert(
             "path_claims_unverified".to_owned(),
             observer.map_or(Value::Null, |summary| {
                 Value::from(summary.path_claims_unverified)
             }),
         );
-        // Security 2026-09-27 (audit 3 A5): wrong-guess trace stops are
-        // counted in the receipt, so a child probing the trace-data space
-        // shows up in `lifetime.native.details` instead of continuing
-        // silently.
+        // Wrong-guess trace stops are counted in the receipt, so a child
+        // probing the trace-data space shows up in `lifetime.native.details`
+        // instead of continuing silently.
         details.insert(
             "requested_by_other_filters".to_owned(),
             wrong_guess_stops_detail(observer),

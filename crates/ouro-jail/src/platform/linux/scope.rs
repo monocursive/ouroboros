@@ -26,15 +26,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// Test seam (J4 decision S9): `assume-outside` makes the supervisor take the
-/// branch it takes outside a delegated scope even when it is inside one, so a
-/// live test run inside the conformance scope exercises the move;
-/// `assume-outside-no-busctl` and `assume-outside-no-bus` take that branch
-/// with `busctl` treated as absent, or with the user bus made unreachable for
-/// the call, so a live test exercises the path that records `unavailable`.
-/// None of them widens anything: the scope requested lies in the subtree the
-/// supervisor already runs in, and a failure only records why. Any other
-/// value is ignored (recorded as `null`).
+/// Test seam: `assume-outside` makes the supervisor take the branch it takes
+/// outside a delegated scope even when it is inside one, so a live test run
+/// inside the conformance scope exercises the move; `assume-outside-no-busctl`
+/// and `assume-outside-no-bus` take that branch with `busctl` treated as
+/// absent, or with the user bus made unreachable for the call, so a live test
+/// exercises the path that records `unavailable`. None of them widens anything:
+/// the scope requested lies in the subtree the supervisor already runs in, and
+/// a failure only records why. Any other value is ignored (recorded as `null`).
 pub const SEAM: &str = "OURO_JAIL_TEST_SUPERVISOR_SCOPE";
 
 /// The whole step's budget: the call and the observed move share it.

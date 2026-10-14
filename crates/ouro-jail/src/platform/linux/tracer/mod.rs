@@ -2,10 +2,10 @@
 //!
 //! This is the ptrace backend of jail-v1 §5.2 — the one that runs on any
 //! host with nothing installed, under the default Yama scope every major
-//! distribution ships. It implements the observer interface of the J1
-//! contract §3.5 and the event semantics of §11. Its narrowing filter speaks
-//! the seccomp ABI the baseline filters define (`seccomp`, `bpf`), and its
-//! exec stops judge the command rules (`crate::commands`).
+//! distribution ships. It implements the platform's observer interface
+//! ([`crate::observer`]) and the event semantics of §11. Its narrowing filter
+//! speaks the seccomp ABI the baseline filters define (`seccomp`, `bpf`), and
+//! its exec stops judge the command rules (`crate::commands`).
 //!
 //! # How it is used
 //!
@@ -19,16 +19,15 @@
 //! [`TracerEvent::UntracedChildExit`]. The supervisor then releases the
 //! launcher, which execs the target.
 //!
-//! The thread ends on its own account (J5-T): when every tracee has been
-//! reaped, the child the launcher descends through — bubblewrap, when the
-//! launcher is not itself a child — has had its exit delivered, and every
-//! child this process gained after the attach (an orphan of the traced tree
-//! that a subreaper supervisor adopted, often already a zombie) has been
-//! reaped. It never waits for a child this process already had when it
-//! attached, such as a shell's process substitution the supervisor
-//! inherited when that shell `exec`ed it: one that exits while the thread
-//! runs is reaped and delivered like any untraced child, and one still alive
-//! at the end is left to its owner.
+//! The thread ends on its own account: when every tracee has been reaped, the
+//! child the launcher descends through — bubblewrap, when the launcher is not
+//! itself a child — has had its exit delivered, and every child this process
+//! gained after the attach (an orphan of the traced tree that a subreaper
+//! supervisor adopted, often already a zombie) has been reaped. It never waits
+//! for a child this process already had when it attached, such as a shell's
+//! process substitution the supervisor inherited when that shell `exec`ed it:
+//! one that exits while the thread runs is reaped and delivered like any
+//! untraced child, and one still alive at the end is left to its owner.
 //!
 //! ```no_run
 //! # use ouro_jail::platform::linux::tracer::{Tracer, TracerConfig, TracerEvent};
@@ -133,16 +132,16 @@ pub struct TracerConfig {
     /// known healthy point", which is an age, not an instant on the boot
     /// clock). Zero leaves the raw boottime readings in place.
     pub epoch_boottime_ns: u64,
-    /// The `SECCOMP_RET_DATA` this attempt's narrowing filter carries, which
-    /// a closed-set stop must show to be ours (audit 2026-09-25-2, S14: the
-    /// constant is public, so a child filter echoing it could forge
-    /// `unexpected_trace_stop` gaps; a per-attempt value makes the echo a
-    /// 1-in-65536 guess). What a guess costs, audit 3 (A5): a stop carrying
-    /// this attempt's data on a number the narrowing filter does not trace is
-    /// a visible `unexpected_trace_stop` gap, and strict evidence fails on
-    /// the first; a stop carrying other data is the child's own request,
-    /// continued and counted in `requested_by_other_filters`, which the
-    /// receipt carries — so probing is never silent, only cheap.
+    /// The `SECCOMP_RET_DATA` this attempt's narrowing filter carries, which a
+    /// closed-set stop must show to be ours (the constant is public, so a child
+    /// filter echoing it could forge `unexpected_trace_stop` gaps; a
+    /// per-attempt value makes the echo a 1-in-65536 guess). What a guess
+    /// costs: a stop carrying this attempt's data on a number the narrowing
+    /// filter does not trace is a visible `unexpected_trace_stop` gap, and
+    /// strict evidence fails on the first; a stop carrying other data is the
+    /// child's own request, continued and counted in
+    /// `requested_by_other_filters`, which the receipt carries — so probing is
+    /// never silent, only cheap.
     pub trace_data: u16,
 }
 
@@ -151,9 +150,9 @@ pub struct TracerConfig {
 pub const EVENT_FIXED_BYTES: usize = 256;
 
 /// Bytes of the §11.4 queue budget that results may not consume, so the
-/// lifecycle facts — an `Exec`, a `Fork` — have room to land behind them.
-/// The critical facts (`Exit`, `Gap`, `Finished`) need no reserve: they are
-/// exempt from every bound (J4 D6).
+/// lifecycle facts — an `Exec`, a `Fork` — have room to land behind them. The
+/// critical facts (`Exit`, `Gap`, `Finished`) need no reserve: they are exempt
+/// from every bound.
 const LIFECYCLE_RESERVE: usize = 64 * 1024;
 
 /// What an event costs the queue budget: its retained allocation capacities plus
@@ -217,7 +216,7 @@ fn event_bytes(event: &TracerEvent) -> usize {
 /// The queue bounds a [`TracerConfig`] puts in force (§11.4, "Record actual
 /// values in the observer plan"). Computed here once, for the tracer that
 /// applies them and for the observer plan that records them, so the record
-/// cannot drift from what is in force (J4 W3, loss review finding 4).
+/// cannot drift from what is in force.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueBounds {
     /// Most bytes held for the consumer — buffered, or handed to the channel
@@ -416,10 +415,10 @@ pub enum GapReason {
     UnexpectedTraceStop,
     /// The tracer stopped while tracees were still alive; they were killed.
     TraceesAbandoned,
-    /// The tracer stopped while a direct child of this process it answers
-    /// for — the backend the launcher descends through, or one gained after
-    /// the attach — had not been reaped, so its exit status had no delivery
-    /// route left (J5-T).
+    /// The tracer stopped while a direct child of this process it answers for —
+    /// the backend the launcher descends through, or one gained after the
+    /// attach — had not been reaped, so its exit status had no delivery route
+    /// left.
     UnreapedChildren,
     /// A stopped tracee could not be restarted, so it was killed rather than
     /// left stopped forever.
@@ -430,31 +429,30 @@ pub enum GapReason {
     LifecycleDropped,
     /// A tracee died and could not be attributed to a thread group.
     DeathUnattributed,
-    /// A syscall under another ABI — a non-native architecture or the x32
-    /// bit — ran, and this observer decodes only the native table, so it
-    /// cannot say which operation, if any, it was (J4 D2). One the kernel
-    /// refused as nonexistent (`ENOSYS`) had no effect and is not this.
+    /// A syscall under another ABI — a non-native architecture or the x32 bit —
+    /// ran, and this observer decodes only the native table, so it cannot say
+    /// which operation, if any, it was. One the kernel refused as nonexistent
+    /// (`ENOSYS`) had no effect and is not this.
     ForeignAbi,
-    /// A child installed a seccomp filter with its own notification
-    /// listener (J4 D1). The listener can answer `CONTINUE`, which runs the
-    /// call with no trace stop, so from then on any closed-set call may be
-    /// unobserved; how many is unknown and the interval has no end.
+    /// A child installed a seccomp filter with its own notification listener.
+    /// The listener can answer `CONTINUE`, which runs the call with no trace
+    /// stop, so from then on any closed-set call may be unobserved; how many is
+    /// unknown and the interval has no end.
     ChildNotificationListener,
-    /// A tracee created a task with `clone(CLONE_UNTRACED)` (J4 S4), which
-    /// the kernel does not attach to this tracer. §11.2: an untracked
-    /// descendant is a coverage gap. Its own closed-set calls fail with
-    /// `ENOSYS` (a trace stop with no tracer), but nothing about it is
-    /// observed — not its calls, not its lifetime — so the count is unknown
-    /// and the interval has no end.
+    /// A tracee created a task with `clone(CLONE_UNTRACED)`, which the kernel
+    /// does not attach to this tracer. §11.2: an untracked descendant is a
+    /// coverage gap. Its own closed-set calls fail with `ENOSYS` (a trace stop
+    /// with no tracer), but nothing about it is observed — not its calls, not
+    /// its lifetime — so the count is unknown and the interval has no end.
     UntracedDescendant,
     /// A covered call's syscall exit carried a kernel restart code, and the
     /// observer could not establish what the kernel then did with it —
-    /// re-entered it, or returned `EINTR` (J4 O-2). Its one result is
-    /// unknown, so it is a hole naming that call's classes. The observer
-    /// follows the call to the kernel's decision, so this is only for a
-    /// decision it could not read: an unreadable or unrecognised signal
-    /// frame, a continuation through `restart_syscall`, which is outside the
-    /// traced set, or a stop out of the sequence the kernel produces.
+    /// re-entered it, or returned `EINTR`. Its one result is unknown, so it is
+    /// a hole naming that call's classes. The observer follows the call to the
+    /// kernel's decision, so this is only for a decision it could not read: an
+    /// unreadable or unrecognised signal frame, a continuation through
+    /// `restart_syscall`, which is outside the traced set, or a stop out of the
+    /// sequence the kernel produces.
     RestartUnresolved,
     /// A covered call's pointed argument — `openat2`'s `open_how.flags`, a
     /// pathname, or a socket address family — read at the entry stop no
@@ -465,36 +463,34 @@ pub enum GapReason {
     /// it is this gap, naming the call's classes. Register arguments cannot
     /// drift this way; only memory the kernel re-reads after the stop can.
     ArgumentSnapshotUnstable,
-    /// A memory-sourced `openat2` read stably as read-only at both the
-    /// entry and the exit stops. Security 2026-09-27 (audit 3 A1): a thread
-    /// of the tracee can flip `open_how.flags` for the kernel's own copy
-    /// and restore them before the exit re-read (an A-B-A rewrite), so
-    /// agreement between the two reads proves nothing about what the kernel
-    /// applied. Such a call can never be certified as outside the covered
-    /// set: it is this gap of its own classes, never a silent filter.
+    /// A memory-sourced `openat2` read stably as read-only at both the entry
+    /// and the exit stops. A thread of the tracee can flip `open_how.flags` for
+    /// the kernel's own copy and restore them before the exit re-read (an A-B-A
+    /// rewrite), so agreement between the two reads proves nothing about what
+    /// the kernel applied. Such a call can never be certified as outside the
+    /// covered set: it is this gap of its own classes, never a silent filter.
     /// Register-sourced flags are immune (the kernel consumes the saved
     /// `pt_regs`) and keep their entry-time read-only skip.
     MemoryFlagsUnverified,
-    /// An exec whose entry pathname matched an image the observer treats as
-    /// the target, while the image the kernel actually loaded
-    /// (`/proc/<tid>/exe` at the exec event) matched none: the snapshot was
-    /// rewritten for the kernel's copy (audit 3 A1), so the confirmation
-    /// the snapshot would have granted is refused and named here.
+    /// An exec whose entry pathname matched an image the observer treats as the
+    /// target, while the image the kernel actually loaded (`/proc/<tid>/exe` at
+    /// the exec event) matched none: the snapshot was rewritten for the
+    /// kernel's copy, so the confirmation the snapshot would have granted is
+    /// refused and named here.
     ExecImageMismatch,
-    /// A successful open-class call's pathname claim could not be
-    /// corroborated against the kernel's own resolution of the returned
-    /// descriptor (`/proc/<tid>/fd/<ret>`): the link was unreadable, or its
-    /// components disagreed with the snapshot's — which a symlink, a pipe
-    /// behind `/dev/stderr` or a concurrent rename can also cause.
-    /// Security 2026-09-29 (audit 6 N1): a byte-stable snapshot still
-    /// cannot be certified as the path the kernel used, because a sibling
-    /// thread can rewrite it for the kernel's copy and restore it before the
-    /// exit re-read (the same A-B-A rewrite `MemoryFlagsUnverified` names
-    /// for flags). Unlike that gap, no result is missing here: the call is
-    /// counted and its event delivered with the claim downgraded to an
-    /// incomplete path, so the gap is bookkeeping (an empty operation set)
-    /// and never stops a strict run — ordinary `O_TMPFILE` and
-    /// `/dev/stderr` opens reach it.
+    /// A successful open-class call's pathname claim could not be corroborated
+    /// against the kernel's own resolution of the returned descriptor
+    /// (`/proc/<tid>/fd/<ret>`): the link was unreadable, or its components
+    /// disagreed with the snapshot's — which a symlink, a pipe behind
+    /// `/dev/stderr` or a concurrent rename can also cause. A byte-stable
+    /// snapshot still cannot be certified as the path the kernel used, because
+    /// a sibling thread can rewrite it for the kernel's copy and restore it
+    /// before the exit re-read (the same A-B-A rewrite `MemoryFlagsUnverified`
+    /// names for flags). Unlike that gap, no result is missing here: the call
+    /// is counted and its event delivered with the claim downgraded to an
+    /// incomplete path, so the gap is bookkeeping (an empty operation set) and
+    /// never stops a strict run — ordinary `O_TMPFILE` and `/dev/stderr` opens
+    /// reach it.
     PathClaimUnverified,
     /// An exec the command rules refused — or, with rules configured, one
     /// the observer could not follow to judge — could not be stopped the way
@@ -585,10 +581,10 @@ impl GapReason {
     }
 }
 
-/// The kernel's own record of the image an exec loaded (audit 4 B3): the
-/// raw `/proc/<tid>/exe` link bytes, plus the image inode's `(dev, ino)`
-/// when the link could be statted (it still can after the image was
-/// unlinked; the link holds the orphan).
+/// The kernel's own record of the image an exec loaded: the raw
+/// `/proc/<tid>/exe` link bytes, plus the image inode's `(dev, ino)` when the
+/// link could be statted (it still can after the image was unlinked; the link
+/// holds the orphan).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KernelImage {
     /// The raw link bytes, ` (deleted)` annotation included.
@@ -606,10 +602,10 @@ pub struct CandidateImage {
     pub identity: Option<(u64, u64)>,
 }
 
-/// Audit 2026-10-08 H2: the `#!` evidence for one target-image candidate,
-/// read through the tracee's root while the tracee is stopped at its exec
-/// event. A `#!` target loads the interpreter its script names, not the
-/// script, so confirming the target's exec needs the line the kernel read.
+/// The `#!` evidence for one target-image candidate, read through the tracee's
+/// root while the tracee is stopped at its exec event. A `#!` target loads the
+/// interpreter its script names, not the script, so confirming the target's
+/// exec needs the line the kernel read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShebangImage {
     /// The interpreter path the script's first line names, as written.
@@ -664,11 +660,10 @@ pub enum TracerEvent {
         /// The call whose entry this transition was paired with, `execve` or
         /// `execveat`; `None` when the entry was not witnessed.
         syscall: Option<&'static str>,
-        /// The pathname argument of the `execve`/`execveat` that produced
-        /// this transition, snapshotted at its entry. Descendant argv
-        /// digests stay null in J1, so this snapshot is the only way to name
-        /// the image, and §11.3 makes it an argument snapshot rather than a
-        /// resolved path.
+        /// The pathname argument of the `execve`/`execveat` that produced this
+        /// transition, snapshotted at its entry. Descendant argv digests stay
+        /// null, so this snapshot is the only way to name the image, and §11.3
+        /// makes it an argument snapshot rather than a resolved path.
         ///
         /// `None` means the tracer did not witness the entry of this exec.
         /// The case that matters is the first transition after
@@ -679,45 +674,42 @@ pub enum TracerEvent {
         /// require a path, or attach only after the launcher has said it is
         /// past its own exec.
         path: Option<PathSnapshot>,
-        /// The image the kernel actually loaded, as `/proc/<tid>/exe`
-        /// resolves at this stop. Security 2026-09-27 (audit 3 A1): the
-        /// entry pathname above is a snapshot the tracee can rewrite for
-        /// the kernel's own copy (an A-B-A race), so the kernel's link is
-        /// read once here, while the tracee is stopped at its exec event,
-        /// and carried beside the snapshot. Security 2026-09-27 (audit 4
-        /// B3): the bytes are the link's **raw** form (the kernel's
-        /// ` (deleted)` annotation is not stripped) and travel with the
-        /// image's own `(dev, ino)` — a decoy genuinely named
-        /// `tool (deleted)` produces the same stripped link as an unlinked
-        /// `tool`, and only the inode tells them apart. `None` when the
-        /// link could not be read; a consumer confirming an exec from the
-        /// snapshot alone must treat that as the weaker claim it was
-        /// before.
+        /// The image the kernel actually loaded, as `/proc/<tid>/exe` resolves
+        /// at this stop. The entry pathname above is a snapshot the tracee can
+        /// rewrite for the kernel's own copy (an A-B-A race), so the kernel's
+        /// link is read once here, while the tracee is stopped at its exec
+        /// event, and carried beside the snapshot. The bytes are the link's
+        /// **raw** form (the kernel's ` (deleted)` annotation is not stripped)
+        /// and travel with the image's own `(dev, ino)` — a decoy genuinely
+        /// named `tool (deleted)` produces the same stripped link as an
+        /// unlinked `tool`, and only the inode tells them apart. `None` when
+        /// the link could not be read; a consumer confirming an exec from the
+        /// snapshot alone must treat that as the weaker claim it was before.
         kernel_image: Option<KernelImage>,
         /// The directory fd the pathname was resolved against, when the
         /// witnessed entry was an `execveat` with one. §11.3: `dirfd` is
         /// accounted, never silently replaced by a cwd. `None` for a plain
         /// `execve` and for a transition whose entry was not seen.
         dirfd: Option<i32>,
-        /// Security 2026-09-29 (audit 6 N2): a command-rule hit found at this
-        /// stop by re-checking the rules against the kernel's own copy of
-        /// the new argv (`/proc/<tid>/cmdline`) and image (`/proc/<tid>/exe`).
-        /// The entry-stop check reads the tracee's memory, which a sibling
-        /// thread can rewrite between that read and the kernel's copy (the
-        /// same A-B-A race the path snapshots carry). A hit here means the
-        /// process was killed at this stop, before its image ran an
-        /// instruction (unless an `exec_denial_failed` gap says the kill did
-        /// not reach it); `deny`, `forbid` and an unreadable kernel argv are
-        /// all recorded, and only `forbid` stops the run. `None` when no rules
-        /// are configured, the entry check already denied the call (the exec
-        /// then fails and the denial surfaces on the syscall event), or the
-        /// re-check found nothing.
+        /// A command-rule hit found at this stop by re-checking the rules
+        /// against the kernel's own copy of the new argv
+        /// (`/proc/<tid>/cmdline`) and image (`/proc/<tid>/exe`). The
+        /// entry-stop check reads the tracee's memory, which a sibling thread
+        /// can rewrite between that read and the kernel's copy (the same A-B-A
+        /// race the path snapshots carry). A hit here means the process was
+        /// killed at this stop, before its image ran an instruction (unless an
+        /// `exec_denial_failed` gap says the kill did not reach it); `deny`,
+        /// `forbid` and an unreadable kernel argv are all recorded, and only
+        /// `forbid` stops the run. `None` when no rules are configured, the
+        /// entry check already denied the call (the exec then fails and the
+        /// denial surfaces on the syscall event), or the re-check found
+        /// nothing.
         command: Option<Box<crate::commands::Hit>>,
-        /// Audit 2026-10-08 H2: the `#!` evidence for each target image,
-        /// parallel to the image list and read in the same stopped-exec
-        /// window as `kernel_image` (`None` entries for non-script
-        /// candidates and non-absolute spellings). Empty when this process
-        /// is not the target, so only the target's own exec pays the reads.
+        /// The `#!` evidence for each target image, parallel to the image list
+        /// and read in the same stopped-exec window as `kernel_image` (`None`
+        /// entries for non-script candidates and non-absolute spellings). Empty
+        /// when this process is not the target, so only the target's own exec
+        /// pays the reads.
         shebangs: Vec<Option<ShebangImage>>,
         /// The kernel's own copy of the new argv (`/proc/<tid>/cmdline`),
         /// read in the same window. `None` when it could not be read; the
@@ -756,9 +748,9 @@ pub enum TracerEvent {
         start_ticks: Option<u64>,
         status: i32,
     },
-    /// A child of this process that was never a tracee has exited —
-    /// bubblewrap, which lives outside the namespaces it creates, or any
-    /// other child that ended while the tracer owned every `waitpid` (J5-T).
+    /// A child of this process that was never a tracee has exited — bubblewrap,
+    /// which lives outside the namespaces it creates, or any other child that
+    /// ended while the tracer owned every `waitpid`.
     UntracedChildExit { pid: pid_t, status: i32 },
     /// Coverage has a hole. `count` is `None` when the size of the hole
     /// cannot be established; `ops` names the closed-set operations it
@@ -823,8 +815,8 @@ pub struct LossCounters {
     /// killed and reaped; anything they were about to do is unobserved.
     pub abandoned_tracees: u64,
     /// Children the tracer answers for (the backend, and any gained after the
-    /// attach), never reaped, so their exit statuses have no route left to
-    /// the supervisor (J5-T).
+    /// attach), never reaped, so their exit statuses have no route left to the
+    /// supervisor.
     pub unreaped_children: u64,
     /// Stopped tracees that could not be restarted and were killed.
     pub restart_failed: u64,
@@ -846,10 +838,10 @@ pub struct LossCounters {
     /// because the tracee can rewrite memory the kernel re-reads after the
     /// entry stop, which would falsify the snapshot's classification.
     pub argument_snapshot_unstable: u64,
-    /// Memory-sourced `openat2` flags that read identically at the entry
-    /// and the exit but can still have been flipped for the kernel's own
-    /// copy (audit 3 A1): each became a `memory_flags_unverified` gap of
-    /// its call's classes instead of a silent read-only filter.
+    /// Memory-sourced `openat2` flags that read identically at the entry and
+    /// the exit but can still have been flipped for the kernel's own copy: each
+    /// became a `memory_flags_unverified` gap of its call's classes instead of
+    /// a silent read-only filter.
     pub memory_flags_unverified: u64,
     /// Execs whose command-rule verdict could not be enforced the way the
     /// observer enforces it ([`GapReason::ExecDenialFailed`]).
@@ -954,12 +946,11 @@ pub struct TracerSummary {
     /// unlimited "loss" by passing pointers that cannot work.
     pub argument_invalid: u64,
     /// Successful open-class calls whose pathname claim could not be
-    /// corroborated against the returned descriptor's `/proc/<tid>/fd` link
-    /// (audit 6 N1): each kept its count and its event, with the claim
-    /// downgraded to an incomplete path, and a bookkeeping
-    /// `path_claim_unverified` gap. Not loss — the result is there and says
-    /// its path is not certified — so it does not feed
-    /// [`LossCounters::total`]; the receipt surfaces it in
+    /// corroborated against the returned descriptor's `/proc/<tid>/fd` link:
+    /// each kept its count and its event, with the claim downgraded to an
+    /// incomplete path, and a bookkeeping `path_claim_unverified` gap. Not loss
+    /// — the result is there and says its path is not certified — so it does
+    /// not feed [`LossCounters::total`]; the receipt surfaces it in
     /// `lifetime.native.details`.
     pub path_claims_unverified: u64,
     /// Tasks the kernel destroyed as part of another thread's `execve`,
@@ -967,9 +958,9 @@ pub struct TracerSummary {
     pub tasks_destroyed_by_exec: u64,
     /// The most bytes the observer ever held on the consumer's behalf.
     pub queue_bytes_peak: usize,
-    /// Direct children of this process the tracer answers for (the backend,
-    /// and any gained after the attach) that were still unreaped when it
-    /// stopped. Children it was attached beside are not the tracer's (J5-T).
+    /// Direct children of this process the tracer answers for (the backend, and
+    /// any gained after the attach) that were still unreaped when it stopped.
+    /// Children it was attached beside are not the tracer's.
     pub unreaped_children: Vec<pid_t>,
     /// Syscall exits with a kernel restart code that the kernel then
     /// re-entered: seen re-entered at the same instruction, or decided at a
@@ -978,31 +969,29 @@ pub struct TracerSummary {
     /// its one result.
     pub restarts: u64,
     /// Syscall exits with a kernel restart code that the kernel turned into
-    /// `EINTR` at a handler's entry (J4 O-2). Each is a result, `-EINTR`, and
-    /// is counted in [`TracerSummary::ops`] like any other.
+    /// `EINTR` at a handler's entry. Each is a result, `-EINTR`, and is counted
+    /// in [`TracerSummary::ops`] like any other.
     pub interrupted: u64,
     /// Syscall exits with a kernel restart code whose thread ended before
     /// the kernel decided — a fatal signal, or another thread's `execve`. A
     /// restart code means the call did nothing, and no result was ever
     /// returned: not a result and not loss.
     pub restarts_unfinished: u64,
-    /// Entries whose thread was killed at its seccomp stop before the
-    /// observer resumed it (J4 O-3): the stop could not be read, or the
-    /// resume failed with `ESRCH`, which at an unresumed stop only a
-    /// `SIGKILL` causes. The kernel skips a call when a fatal signal is
-    /// pending after the trace event (`__seccomp_filter`), so the call had
-    /// no effect: not loss.
+    /// Entries whose thread was killed at its seccomp stop before the observer
+    /// resumed it: the stop could not be read, or the resume failed with
+    /// `ESRCH`, which at an unresumed stop only a `SIGKILL` causes. The kernel
+    /// skips a call when a fatal signal is pending after the trace event
+    /// (`__seccomp_filter`), so the call had no effect: not loss.
     pub killed_at_entry: u64,
     /// Syscalls under another ABI the kernel refused as nonexistent
     /// (`ENOSYS`): stopped and labelled foreign, but with no effect, so not
     /// loss — a tracee cannot manufacture a gap by naming a call no table has.
     pub foreign_rejected: u64,
     /// Stops another filter asked for — a child's own `SECCOMP_RET_TRACE`,
-    /// recognised by trace data that is not
-    /// [`NARROWING_TRACE_DATA`] — on calls outside the closed set. Continued
-    /// untouched: not a result and not loss. Audit 3 (A5): the counter is
-    /// surfaced in the receipt's `lifetime.native.details`, so probing the
-    /// trace-data space is visible in aggregate.
+    /// recognised by trace data that is not [`NARROWING_TRACE_DATA`] — on calls
+    /// outside the closed set. Continued untouched: not a result and not loss.
+    /// The counter is surfaced in the receipt's `lifetime.native.details`, so
+    /// probing the trace-data space is visible in aggregate.
     pub requested_by_other_filters: u64,
     /// Notification-listener requests the kernel refused (`EBUSY` under the
     /// `agent` mediation listener, for one): no listener, nothing hidden.
@@ -1077,11 +1066,10 @@ impl std::error::Error for TracerError {}
 
 /// The consumer's end of the event stream.
 ///
-/// A receiver that gives each event's bytes back to the queue budget as it
-/// is taken (J4 W3, loss review finding 4): the tracer counts what it has
-/// handed over and not seen taken, so the §11.4 budget bounds the channel
-/// as well as the tracer's own buffer. The three methods are
-/// [`Receiver`]'s own.
+/// A receiver that gives each event's bytes back to the queue budget as it is
+/// taken: the tracer counts what it has handed over and not seen taken, so the
+/// §11.4 budget bounds the channel as well as the tracer's own buffer. The
+/// three methods are [`Receiver`]'s own.
 pub struct Events {
     rx: Receiver<TracerEvent>,
     handed: Arc<AtomicUsize>,
@@ -1150,13 +1138,12 @@ impl Tracer {
     /// Returns once the seize is confirmed against `/proc`, so a caller that
     /// releases the launcher after this returns cannot lose the first exec.
     ///
-    /// From here until the tracer stops, the tracer thread owns every
-    /// `waitpid` in this process. The caller must not wait on its own
-    /// children; their exits arrive as
-    /// [`TracerEvent::UntracedChildExit`]. The thread finishes once every
-    /// tracee is reaped, the child `launcher` descends through has exited
-    /// and every child gained since the attach is reaped, whatever other
-    /// children this process already had (J5-T).
+    /// From here until the tracer stops, the tracer thread owns every `waitpid`
+    /// in this process. The caller must not wait on its own children; their
+    /// exits arrive as [`TracerEvent::UntracedChildExit`]. The thread finishes
+    /// once every tracee is reaped, the child `launcher` descends through has
+    /// exited and every child gained since the attach is reaped, whatever other
+    /// children this process already had.
     ///
     /// # Errors
     /// [`TracerError`], which distinguishes a refused seize from one that
@@ -1488,8 +1475,8 @@ mod tests {
         }
     }
 
-    /// J4 W3 (loss review finding 4): the bounds in force, including for a
-    /// budget too small to hold a pathname or even one event.
+    /// The bounds in force, including for a budget too small to hold a pathname
+    /// or even one event.
     #[test]
     fn j4_w3_queue_bounds_are_the_budget_with_a_floor_of_one_event() {
         let bounds = |queue_bytes_max| {

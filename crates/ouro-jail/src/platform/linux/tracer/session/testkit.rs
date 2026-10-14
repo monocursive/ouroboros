@@ -298,9 +298,8 @@ impl Mkdirer {
                         libc::O_WRONLY | libc::O_CLOEXEC,
                     );
                 } else {
-                    // J5-D: `mkdir` has no syscall of its own off x86_64;
-                    // the test only runs where the tracer does, but it
-                    // must compile for every Linux target.
+                    // aarch64 has no `mkdir` syscall of its own: the same
+                    // call goes through `mkdirat` there.
                     #[cfg(target_arch = "x86_64")]
                     libc::syscall(libc::SYS_mkdir, path.as_ptr(), 0o700);
                     #[cfg(not(target_arch = "x86_64"))]

@@ -104,8 +104,8 @@ pub(crate) use libc::{
 /// | `ERESTART_RESTARTBLOCK` | `EINTR` | continued by `restart_syscall` |
 ///
 /// Taking a code for a result would double-count a re-entered call (jail-v1
-/// §11.2, "Syscall restarts must not create duplicate successes"); taking
-/// every code for a re-entry loses the `EINTR` result (J4 O-2).
+/// §11.2, "Syscall restarts must not create duplicate successes"); taking every
+/// code for a re-entry loses the `EINTR` result.
 pub const ERESTARTSYS: i64 = 512;
 pub const ERESTARTNOINTR: i64 = 513;
 pub const ERESTARTNOHAND: i64 = 514;
@@ -451,16 +451,16 @@ pub fn handler_ucontext(
 /// The `ucontext` address of the frame a handler's entry shows in `regs`,
 /// or `None` when they are not a handler's entry for `delivered`.
 ///
-/// rt_sigframe is siginfo (128 bytes), then ucontext. The kernel only
-/// supplies x2 with SA_SIGINFO, so the frame is derived from sp for ordinary
-/// handlers too; `setup_return` always sets x0 to the delivered signal and
-/// the PC to the handler. Audit 2026-10-08 L18: `do_signal` rewinds a
-/// restartable call before `get_signal` — x0 back to the original argument,
-/// the PC back onto the `svc` (`restart_ip`) — so a signal the program sent
-/// itself, stopping there with that signal's number as its first argument,
-/// satisfies the x0 and sp tests. The PC decides: at a handler's entry it is
-/// the handler, never the `svc` the kernel rewound to nor the instruction
-/// after it (`continue_ip`, where an `EINTR` decision leaves it).
+/// rt_sigframe is siginfo (128 bytes), then ucontext. The kernel only supplies
+/// x2 with SA_SIGINFO, so the frame is derived from sp for ordinary handlers
+/// too; `setup_return` always sets x0 to the delivered signal and the PC to the
+/// handler. `do_signal` rewinds a restartable call before `get_signal` — x0
+/// back to the original argument, the PC back onto the `svc` (`restart_ip`) —
+/// so a signal the program sent itself, stopping there with that signal's
+/// number as its first argument, satisfies the x0 and sp tests. The PC decides:
+/// at a handler's entry it is the handler, never the `svc` the kernel rewound
+/// to nor the instruction after it (`continue_ip`, where an `EINTR` decision
+/// leaves it).
 #[cfg(target_arch = "aarch64")]
 fn arm64_handler_frame(
     regs: &Arm64Regs,
@@ -672,10 +672,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<libc::siginfo_t>(), 128);
     }
 
-    /// Audit 2026-10-08 L18: the arm64 handler-entry predicate, on the
-    /// registers each stop shows. `continue_ip` is the address just past the
-    /// `svc` (what `PTRACE_GET_SYSCALL_INFO` reports as the call's
-    /// instruction pointer), `restart_ip` the `svc` itself.
+    /// The arm64 handler-entry predicate, on the registers each stop shows.
+    /// `continue_ip` is the address just past the `svc` (what
+    /// `PTRACE_GET_SYSCALL_INFO` reports as the call's instruction pointer),
+    /// `restart_ip` the `svc` itself.
     #[test]
     #[cfg(target_arch = "aarch64")]
     fn arm64_handler_entry_is_never_the_rewound_or_continued_call() {

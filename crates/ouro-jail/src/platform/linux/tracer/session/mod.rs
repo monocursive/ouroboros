@@ -18,25 +18,24 @@
 //!   thread's id becomes the leader's, the in-flight entry moves with it, and
 //!   the process keeps the identity it was born with. Whatever the leader
 //!   itself had in flight can no longer return: it is abandoned, a gap of its
-//!   own classes, and never paired with the exec's syscall exit (J4 W3).
+//!   own classes, and never paired with the exec's syscall exit.
 //! * Entry and exit are paired per thread. An exit with no entry is a gap. A
 //!   kernel restart code at the exit (`ERESTARTSYS` and its family) is not a
 //!   result yet: the kernel decides afterwards whether to re-enter the call
-//!   or to return `EINTR` (J4 O-2), and the call stays in flight until the
+//!   or to return `EINTR`, and the call stays in flight until the
 //!   observer has seen that decision — see [`RestartWait`]. A re-entry
 //!   produces the one result; an `EINTR` is the result; emitting the code
 //!   itself would be the duplicate §11.2 forbids, and dropping it would be
 //!   the silence §11.4 forbids. A restart read from a handler's frame, which
-//!   the program can rewrite, is believed only when the re-entry is seen
-//!   (J4 W3, R1).
+//!   the program can rewrite, is believed only when the re-entry is seen.
 //! * A read-only open never becomes an event, never takes an in-flight slot
-//!   and so is never refused one (J4 O-1), and never even costs a second
+//!   and so is never refused one, and never even costs a second
 //!   stop: the tracee is continued from the seccomp stop instead of being
 //!   stepped to the syscall exit.
 //! * A tracee killed at its seccomp entry stop before the observer resumed
 //!   it made no call: the kernel skips a call whose thread has a fatal signal
 //!   pending after the trace event (`__seccomp_filter`), so it is neither a
-//!   result nor a loss (J4 O-3). A call the observer had already let run
+//!   result nor a loss. A call the observer had already let run
 //!   when the kill came may have had its effect and stays a gap.
 //! * Nothing observed is ever replaced by a guess. Unreadable argument
 //!   memory, an undecodable `open_how`, an untracked task and a final status
@@ -181,8 +180,8 @@ fn seize_and_confirm(
     launcher: pid_t,
     wake_handler: impl FnOnce() -> std::io::Result<()>,
 ) -> Result<(), TracerError> {
-    // J5-D: the one statement of which architecture the tables cover, so
-    // the tracer refuses exactly where `doctor` reports it unsupported.
+    // The one statement of which architecture the tables cover, so the tracer
+    // refuses exactly where `doctor` reports it unsupported.
     if !seccomp::tables_cover(std::env::consts::ARCH) {
         return Err(TracerError::UnsupportedArch);
     }
@@ -269,11 +268,11 @@ struct Session {
     // unmatched. `None` in the release binary unless the seam is set.
     force_truncate_marker: Option<Vec<u8>>,
     force_unmatched_marker: Option<Vec<u8>>,
-    /// J5-T: which children, besides the tracees, the tracer answers for.
+    /// Which children, besides the tracees, the tracer answers for.
     owed: Owed,
-    /// J5-T: the children this process had when the tracer attached, by
-    /// birth. Any other child that is not a tracee came after — an orphan
-    /// a subreaper supervisor adopted from the traced tree — and is owed.
+    /// The children this process had when the tracer attached, by birth. Any
+    /// other child that is not a tracee came after — an orphan a subreaper
+    /// supervisor adopted from the traced tree — and is owed.
     beside: Vec<(pid_t, u64)>,
 }
 
@@ -313,8 +312,8 @@ impl Session {
             procfs,
             force_truncate_marker: seam_marker(TRUNCATE_PATH_SEAM),
             force_unmatched_marker: seam_marker(UNMATCHED_EXIT_SEAM),
-            // `run` reads the real one once the launcher is seized; a
-            // session built without it keeps the rule before J5-T.
+            // `run` reads the real one once the launcher is seized; a session
+            // built without it owes every child.
             owed: Owed::Every,
             beside: Vec::new(),
         }
@@ -343,8 +342,8 @@ impl Session {
                     break;
                 }
             }
-            // J5-T: done on its own account. Past this point a blocking
-            // wait could only be for a child the tracer does not answer for.
+            // Done on its own account. Past this point a blocking wait could
+            // only be for a child the tracer does not answer for.
             if self.accounted_for() {
                 break;
             }
@@ -486,12 +485,12 @@ impl Session {
             Ok(()) => {}
             Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {
                 if fresh {
-                    // J4 O-3: the entry was taken at this very stop, and the
-                    // tracee was killed before it could be resumed from it
-                    // (at an unresumed stop only SIGKILL makes the resume
-                    // fail with ESRCH). The kernel skips a call whose thread
-                    // has a fatal signal pending after the trace event, so
-                    // this one never ran: no result, and no loss.
+                    // The entry was taken at this very stop, and the tracee was
+                    // killed before it could be resumed from it (at an
+                    // unresumed stop only SIGKILL makes the resume fail with
+                    // ESRCH). The kernel skips a call whose thread has a fatal
+                    // signal pending after the trace event, so this one never
+                    // ran: no result, and no loss.
                     self.entry_never_ran(pid);
                 }
             }
@@ -499,7 +498,7 @@ impl Session {
         }
     }
 
-    /// J4 O-3: forget the entry of a thread killed at its seccomp stop.
+    /// Forget the entry of a thread killed at its seccomp stop.
     fn entry_never_ran(&mut self, tid: pid_t) {
         if self.tasks.take_call(tid).is_some() {
             self.summary.killed_at_entry += 1;
@@ -550,11 +549,11 @@ impl Session {
     }
 
     fn finish(mut self, handles: &Handles) -> TracerSummary {
-        // Direct children that were never reaped have no route left for
-        // their exit status: the supervisor was told not to wait for its own
-        // children while a tracer is attached. J5-T: only those it answers
-        // for — the backend and any child gained after it attached; a child
-        // it was attached beside is its owner's to wait for once this ends.
+        // Direct children that were never reaped have no route left for their
+        // exit status: the supervisor was told not to wait for its own children
+        // while a tracer is attached. Only those it answers for count — the
+        // backend and any child gained after it attached; a child it was
+        // attached beside is its owner's to wait for once this ends.
         let unreaped = self.unreaped();
         if !unreaped.is_empty() {
             self.summary.loss.unreaped_children += unreaped.len() as u64;
@@ -686,12 +685,12 @@ mod tests {
         assert_eq!(gaps_of(&events), vec![]);
     }
 
-    /// J4 O-3, the first window: the tracee is killed after the tracer has
-    /// taken its seccomp entry stop from `waitpid` and before the tracer
-    /// reads it. `PTRACE_GET_SYSCALL_INFO` then fails with `ESRCH` — and the
-    /// kernel skips the call, because a fatal signal is pending after the
-    /// trace event (`__seccomp_filter`). The directory is never made: the
-    /// call had no effect, so it is not loss.
+    /// The first window: the tracee is killed after the tracer has taken its
+    /// seccomp entry stop from `waitpid` and before the tracer reads it.
+    /// `PTRACE_GET_SYSCALL_INFO` then fails with `ESRCH` — and the kernel skips
+    /// the call, because a fatal signal is pending after the trace event
+    /// (`__seccomp_filter`). The directory is never made: the call had no
+    /// effect, so it is not loss.
     #[test]
     fn j4_o3_a_tracee_killed_before_its_entry_is_read_made_no_call() {
         let dir = tempfile::tempdir().unwrap();
@@ -722,10 +721,10 @@ mod tests {
         assert_eq!(session.tasks.in_flight(), 0);
     }
 
-    /// J4 O-3, the second window: the entry was read (the tracer holds it)
-    /// and the tracee is killed before the tracer resumes it. The resume
-    /// fails with `ESRCH`, and the kernel skips the call for the same
-    /// reason. The entry is not abandoned: it never ran.
+    /// The second window: the entry was read (the tracer holds it) and the
+    /// tracee is killed before the tracer resumes it. The resume fails with
+    /// `ESRCH`, and the kernel skips the call for the same reason. The entry is
+    /// not abandoned: it never ran.
     ///
     /// The kill has to reach the tracee before the resume does. A tracee
     /// fast enough to get to its exit notification first is resumed from
@@ -783,11 +782,11 @@ mod tests {
         panic!("the resume never met the killed stop in 20 attempts");
     }
 
-    /// J4 O-3, the exit window: the tracee is killed after its call ran and
-    /// stopped at its syscall exit, before the tracer read the return. The
-    /// call did run (the directory exists), and its result can no longer be
-    /// read: that is a loss, and exactly one — of the call's own classes
-    /// (`entry_abandoned` naming `mkdir`), not a second gap in every class.
+    /// The exit window: the tracee is killed after its call ran and stopped at
+    /// its syscall exit, before the tracer read the return. The call did run
+    /// (the directory exists), and its result can no longer be read: that is a
+    /// loss, and exactly one — of the call's own classes (`entry_abandoned`
+    /// naming `mkdir`), not a second gap in every class.
     #[test]
     fn j4_o3_a_tracee_killed_at_its_exit_stop_is_one_loss_of_its_own_classes() {
         let dir = tempfile::tempdir().unwrap();

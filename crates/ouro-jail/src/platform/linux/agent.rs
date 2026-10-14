@@ -115,7 +115,7 @@ struct ProxyTally {
     seq: u64,
     delivered: u64,
     lost: u64,
-    /// Denials that were resolver capacity, not policy (issue draft 04).
+    /// Denials that were resolver capacity, not policy.
     resolver_refused: u64,
 }
 
@@ -451,9 +451,9 @@ impl AgentNet {
         let kind = crate::state::anchored::fstat(report.as_fd())
             .map_err(|error| refusal("bridge", format!("its report socket: {error}")))?
             .kind;
-        // Audit 2026-09-25-2, S2: a SOCK_SEQPACKET socket, not a pipe — a
-        // same-uid peer cannot reopen a socket through /proc/<pid>/fd, so
-        // the report channel cannot be forged from inside the jail.
+        // A SOCK_SEQPACKET socket, not a pipe — a same-uid peer cannot reopen a
+        // socket through /proc/<pid>/fd, so the report channel cannot be forged
+        // from inside the jail.
         if kind != crate::state::anchored::Kind::Socket {
             return Err(refusal("bridge", "its report descriptor is not a socket"));
         }
@@ -555,18 +555,17 @@ impl AgentNet {
             fd,
             seccomp_filters: filters,
         });
-        // Security 2026-09-25 (audit F2): the bridge, and only the bridge,
-        // may connect the authorized proxy node through the mediation.
+        // The bridge, and only the bridge, may connect the authorized proxy
+        // node through the mediation.
         if let Some(mediator) = &self.mediator {
             mediator.restrict_authorized_connector(Some((pid, start_ticks)));
         }
-        // Security 2026-09-27 (audit 3 A4): seal the bridge. Every `/proc`
-        // read-back above is done; one datagram on the report pair tells the
-        // bridge to make itself non-dumpable before the target is released,
-        // so a same-uid peer cannot reach its memory or descriptors on any
-        // host, `ptrace_scope=0` included. A bridge that cannot be sealed
-        // never serves: the run refuses here rather than release beside an
-        // unprotected helper.
+        // Seal the bridge. Every `/proc` read-back above is done; one datagram
+        // on the report pair tells the bridge to make itself non-dumpable
+        // before the target is released, so a same-uid peer cannot reach its
+        // memory or descriptors on any host, `ptrace_scope=0` included. A
+        // bridge that cannot be sealed never serves: the run refuses here
+        // rather than release beside an unprotected helper.
         let Some(report) = &self.bridge_report else {
             return Err(refusal(
                 "bridge",
@@ -911,7 +910,7 @@ pub struct ProxyAccount {
     pub delivered: u64,
     /// Results the trace refused.
     pub lost: u64,
-    /// Denials that were resolver capacity, not policy (issue draft 04).
+    /// Denials that were resolver capacity, not policy.
     pub resolver_refused: u64,
     /// Accepted connections whose result the drain did not deliver; `None`
     /// when the proxy was never stopped and drained.
@@ -1104,11 +1103,11 @@ impl Backoff {
     }
 }
 
-/// The number of seccomp filters a contained launcher must be running
-/// under when it blocks: the baseline bubblewrap loads, the mediation filter
-/// for `agent`, and the observer's narrowing filter when observation is on.
-/// The J2 check read only `Seccomp: 2` (filter mode), which a missing
-/// narrowing filter does not change.
+/// The number of seccomp filters a contained launcher must be running under
+/// when it blocks: the baseline bubblewrap loads, the mediation filter for
+/// `agent`, and the observer's narrowing filter when observation is on.
+/// `Seccomp: 2` (filter mode) alone would not do: a missing narrowing filter
+/// does not change it.
 #[must_use]
 pub fn expected_launcher_filters(agent: bool, observe_on: bool) -> u32 {
     1 + u32::from(agent) + u32::from(observe_on)

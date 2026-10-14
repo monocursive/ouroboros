@@ -10,7 +10,7 @@
 //!   consumer returns. The §11.4 byte budget and a count bound them too — an
 //!   `Exec` carries a child-chosen pathname, so it is dropped with a gap when
 //!   either is full — but the critical facts, `Exit`, `UntracedChildExit`,
-//!   `Gap` and `Finished`, are exempt from every cap (J4 D6). The first
+//!   `Gap` and `Finished`, are exempt from every cap. The first
 //!   three are fixed-size and bounded by the tasks that exist; a `Gap` past a
 //!   cap is merged into the one summary per reason that is delivered ahead of
 //!   the next fact, so its reason, classes, count and interval survive while
@@ -20,7 +20,7 @@
 //!   bytes and two four-kilobyte pathnames per event make a count meaningless.
 //!   The budget covers what was handed to the channel and not yet taken as
 //!   well ([`Events`](crate::platform::linux::tracer::Events) gives the bytes back), so the figure the
-//!   observer plan records is the bound in force (J4 W3).
+//!   observer plan records is the bound in force.
 //! * Nothing is ever delivered with a bare `try_send`. Every send has a
 //!   deadline, and what misses it is counted.
 use std::sync::atomic::Ordering;
@@ -80,11 +80,11 @@ impl Session {
     /// overshoot it only by their own small size — the alternative is a
     /// supervisor without the exit status it exists to report.
     ///
-    /// Audit 7 L10: an `Exec` that carries a command hit is critical too.
-    /// The kill itself happens at the exec stop, but the `command_rule` note
-    /// rides on this event, and a best-effort `forbid` needs the
-    /// `Fact::CommandForbidden` it carries to stop the run; a verdict lost
-    /// to queue pressure would leave a forbidden command unreported.
+    /// An `Exec` that carries a command hit is critical too. The kill itself
+    /// happens at the exec stop, but the `command_rule` note rides on this
+    /// event, and a best-effort `forbid` needs the `Fact::CommandForbidden` it
+    /// carries to stop the run; a verdict lost to queue pressure would leave a
+    /// forbidden command unreported.
     fn is_critical(event: &TracerEvent) -> bool {
         match event {
             TracerEvent::Exec { command, .. } => command.is_some(),
@@ -205,9 +205,9 @@ impl Session {
             let over =
                 self.lifecycle_pending >= LIFECYCLE_MAX || self.held() + bytes > self.bytes_max;
             if over {
-                // J4 D6: the critical facts are exempt from every cap, both
-                // of them. Checking the count first, as this used to, dropped
-                // a target's `Exit` behind a backlog of fork facts.
+                // The critical facts are exempt from every cap, both of them.
+                // Checking the count first, as this used to, dropped a target's
+                // `Exit` behind a backlog of fork facts.
                 if !Session::is_critical(&event) {
                     self.summary.loss.lifecycle_dropped += 1;
                     self.note_drop(GapReason::LifecycleDropped, ops);
@@ -337,10 +337,10 @@ mod tests {
         }
     }
 
-    /// J4 D6, at the unit level: with the lifecycle count full, a gap is not
-    /// dropped but merged into its reason's summary (so a child that causes
-    /// one per syscall cannot grow the backlog), an exit is admitted past
-    /// the cap, and the summaries are delivered ahead of it.
+    /// At the unit level, with the lifecycle count full, a gap is not dropped
+    /// but merged into its reason's summary (so a child that causes one per
+    /// syscall cannot grow the backlog), an exit is admitted past the cap, and
+    /// the summaries are delivered ahead of it.
     #[test]
     fn j4_d6_gaps_past_the_caps_are_coalesced_and_exits_admitted() {
         let (mut session, rx) = stalled_session();
@@ -440,9 +440,8 @@ mod tests {
         );
     }
 
-    /// J4 W3, loss review finding 4, at the session: what was handed to the
-    /// channel and not taken counts against the budget, and taking it gives
-    /// the bytes back.
+    /// At the session, what was handed to the channel and not taken counts
+    /// against the budget, and taking it gives the bytes back.
     #[test]
     fn j4_w3_the_handoff_channel_is_inside_the_byte_budget() {
         let config = TracerConfig {

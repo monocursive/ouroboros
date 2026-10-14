@@ -12,11 +12,11 @@ use super::exec::{self, FdMap};
 use super::platform::error;
 use super::sys::set_nonblocking;
 
-/// §8.3 and §9.2: reject directory and anonymous-inode stdio, and
-/// regular-file stdio that resolves into protected supervisor state or the
-/// operator's trusted config directory (audit 2026-10-08 H1). Every other
-/// regular file, and every socket, is relayed through a supervisor-owned
-/// pipe; everything else passes through untouched.
+/// §8.3 and §9.2: reject directory and anonymous-inode stdio, and regular-file
+/// stdio that resolves into protected supervisor state or the operator's
+/// trusted config directory. Every other regular file, and every socket, is
+/// relayed through a supervisor-owned pipe; everything else passes through
+/// untouched.
 ///
 /// `state_root` is the whole runtime state directory, not just this attempt's
 /// own: a redirect into a sibling attempt's receipts is the same disclosure.
@@ -25,13 +25,12 @@ use super::sys::set_nonblocking;
 /// supervisor itself copy child bytes into (or out of) files later runs
 /// trust, so it refuses like the state root even under the relay.
 ///
-/// The relay (audit 2026-10-08 H1 follow-up) closes the reopen hole: the
-/// sandbox has its own `/proc`, and a regular file inherited directly is
-/// reopenable through `/dev/stdin` against the inode's permission bits and
-/// the host mount — never the descriptor's open mode — which is
-/// write-and-truncate authority outside every grant (§9.1's closed view,
-/// §6.4's uncharged write). A pipe end is not reopenable at all, so the
-/// child never learns the file, its path, or its permissions; the
+/// The relay closes the reopen hole: the sandbox has its own `/proc`, and a
+/// regular file inherited directly is reopenable through `/dev/stdin` against
+/// the inode's permission bits and the host mount — never the descriptor's open
+/// mode — which is write-and-truncate authority outside every grant (§9.1's
+/// closed view, §6.4's uncharged write). A pipe end is not reopenable at all,
+/// so the child never learns the file, its path, or its permissions; the
 /// supervisor's copies run on the operator's own descriptor, preserving its
 /// open mode and offset.
 ///
@@ -75,11 +74,11 @@ pub(super) fn validate_stdio(
                 "{name} is a directory, which a contained run refuses"
             ));
         }
-        // A socket is bridged through a supervisor-owned pipe (issue draft
-        // 11): socketpairs are how supervisors, systemd units and test
-        // harnesses hand a child its stdio, and the pipe keeps the child
-        // from using the socket for anything but byte I/O (no recvmsg, no
-        // descriptor passing) exactly as for a regular file.
+        // A socket is bridged through a supervisor-owned pipe: socketpairs are
+        // how supervisors, systemd units and test harnesses hand a child its
+        // stdio, and the pipe keeps the child from using the socket for
+        // anything but byte I/O (no recvmsg, no descriptor passing) exactly as
+        // for a regular file.
         if kind == libc::S_IFSOCK {
             plans[fd as usize] = StdioPlan::Relay { socket: true };
         }
@@ -120,7 +119,7 @@ pub(super) fn validate_stdio(
     Ok(plans)
 }
 
-/// What the child inherits on one stdio stream (audit 2026-10-08 H1).
+/// What the child inherits on one stdio stream.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum StdioPlan {
     /// Passed through untouched: a tty, a pipe, `/dev/null`.
@@ -129,10 +128,10 @@ pub(super) enum StdioPlan {
     Relay { socket: bool },
 }
 
-/// One relayed stdio stream (audit 2026-10-08 H1 follow-up): the child holds
-/// one end of a supervisor-owned pipe; the supervisor copies between the
-/// pipe and the operator's original descriptor, which keeps its open mode
-/// and offset. The child never owns a reopenable handle on the file.
+/// One relayed stdio stream: the child holds one end of a supervisor-owned
+/// pipe; the supervisor copies between the pipe and the operator's original
+/// descriptor, which keeps its open mode and offset. The child never owns a
+/// reopenable handle on the file.
 pub(super) struct StdioRelay {
     /// A duplicate of the operator's original descriptor, taken at spawn:
     /// the supervisor later points its own stdout elsewhere (§8.3,
@@ -322,8 +321,8 @@ impl StdioRelay {
 
 /// Whether a relay origin is ready to read (`for_read`) or write right now,
 /// asked with a zero-timeout poll so a socket origin never blocks the pump
-/// loop (issue draft 11). A regular file is always ready; a socket that
-/// would block is simply visited again on a later pump.
+/// loop. A regular file is always ready; a socket that would block is simply
+/// visited again on a later pump.
 pub(super) fn origin_ready(fd: BorrowedFd<'_>, for_read: bool) -> bool {
     let events = if for_read {
         libc::POLLIN

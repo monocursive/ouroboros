@@ -11,10 +11,10 @@ use crate::platform::linux::tracer::{Args, GapReason, OpSet, filter, sys};
 use crate::platform::linux::{abi, seccomp};
 
 impl Session {
-    /// Security 2026-09-27 (audit 4 B2): whether a *foreign-ABI* entry is one of
-    /// the two special calls anyway — a `seccomp` asking for its own
-    /// notification listener, or a `clone` the kernel will not attach to this
-    /// tracer — or a `clone3`, whose flags no filter can read.
+    /// Whether a *foreign-ABI* entry is one of the two special calls anyway — a
+    /// `seccomp` asking for its own notification listener, or a `clone` the
+    /// kernel will not attach to this tracer — or a `clone3`, whose flags no
+    /// filter can read.
     ///
     /// Three compat ABIs carry them: i386 (`int 0x80` on x86_64: `seccomp`
     /// 354, `clone` 120), x32 (the x86_64 numbers 317 and 56 with the x32 bit
@@ -54,24 +54,23 @@ impl Session {
         None
     }
 
-    /// Whether a covered, register-sourced read-only open is filtered at
-    /// its entry (`--read-open-fast-path`), counted as such. An `openat2`
-    /// never is: its flags live in tracee memory the kernel re-reads after
-    /// this stop (audit 2026-09-25-2, S1), so a read-only verdict there is
-    /// only an assertion until the exit re-read confirms it, and the call
-    /// is followed to its exit. Filtered at entry, a sibling flipping
-    /// `open_how.flags` between the two kernel reads could perform a
-    /// covered mutation with no event and no gap.
+    /// Whether a covered, register-sourced read-only open is filtered at its
+    /// entry (`--read-open-fast-path`), counted as such. An `openat2` never is:
+    /// its flags live in tracee memory the kernel re-reads after this stop, so
+    /// a read-only verdict there is only an assertion until the exit re-read
+    /// confirms it, and the call is followed to its exit. Filtered at entry, a
+    /// sibling flipping `open_how.flags` between the two kernel reads could
+    /// perform a covered mutation with no event and no gap.
     fn filter_readonly_open_at_entry(&mut self, entry: &'static Entry) -> bool {
         if matches!(entry.flags, FlagSource::OpenHow { .. }) {
             return false;
         }
-        // A read-only open is outside `linux-closed-v1`. It is not a loss,
-        // it is not an event, and the tracee is continued from here rather
-        // than stepped to a syscall exit nobody reads. It is filtered before
-        // the in-flight bound is consulted (J4 O-1): with the table full it
-        // is still not a call the observer had to follow, so refusing it
-        // would record a read as lost evidence.
+        // A read-only open is outside `linux-closed-v1`. It is not a loss, it
+        // is not an event, and the tracee is continued from here rather than
+        // stepped to a syscall exit nobody reads. It is filtered before the
+        // in-flight bound is consulted: with the table full it is still not a
+        // call the observer had to follow, so refusing it would record a read
+        // as lost evidence.
         self.summary.filtered_readonly_opens += 1;
         true
     }
@@ -119,11 +118,11 @@ impl Session {
             {
                 Some(info)
             }
-            // J4 O-3: the tracee left this stop without being resumed, which
-            // only a SIGKILL does — it is either on its way out (`ESRCH`) or
-            // already stopped at its exit notification. The kernel skips a
-            // call whose thread has a fatal signal pending after the trace
-            // event (`__seccomp_filter`), so whatever it was, it never ran.
+            // The tracee left this stop without being resumed, which only a
+            // SIGKILL does — it is either on its way out (`ESRCH`) or already
+            // stopped at its exit notification. The kernel skips a call whose
+            // thread has a fatal signal pending after the trace event
+            // (`__seccomp_filter`), so whatever it was, it never ran.
             Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {
                 self.summary.killed_at_entry += 1;
                 None
@@ -144,35 +143,35 @@ impl Session {
     /// consulted: a foreign-ABI entry, a listener request and an untraced
     /// clone. Returns whether `info` was one of them.
     fn follow_special(&mut self, tid: pid_t, info: &sys::SyscallInfo, site: Site) -> bool {
-        // jail-v1 §9.2: validate the architecture before the syscall number.
-        // A compat or x32 entry carries a number from a different table, and
-        // naming it from this one would mislabel the call (J4 D2): it is
-        // foreign, followed to its return and never decoded.
+        // jail-v1 §9.2: validate the architecture before the syscall number. A
+        // compat or x32 entry carries a number from a different table, and
+        // naming it from this one would mislabel the call: it is foreign,
+        // followed to its return and never decoded.
         if info.arch != abi::AUDIT_ARCH || info.nr & u64::from(seccomp::X32_SYSCALL_BIT) != 0 {
-            // Security 2026-09-27 (audit 4 B2): the two calls whose *native*
-            // forms carry their own classification — a listener hides every
-            // later syscall for as long as it is held, and an untraced
-            // descendant is never seen again, so both are open-ended gaps,
-            // not closed intervals — reach those classifications through a
-            // compat ABI too. Only `none` stops here (contained baselines
-            // EPERM the foreign arch before the trace), but its receipt must
-            // not present a live listener channel as an ended interval.
+            // The two calls whose *native* forms carry their own classification
+            // — a listener hides every later syscall for as long as it is held,
+            // and an untraced descendant is never seen again, so both are
+            // open-ended gaps, not closed intervals — reach those
+            // classifications through a compat ABI too. Only `none` stops here
+            // (contained baselines EPERM the foreign arch before the trace),
+            // but its receipt must not present a live listener channel as an
+            // ended interval.
             let call = Session::compat_special(info).unwrap_or(Call::Foreign);
             self.follow(tid, call, site);
             return true;
         }
-        // J4 D1: a child asking for its own notification listener. The flags
-        // are the register the kernel will read, not memory the child could
-        // change behind this stop.
+        // A child asking for its own notification listener. The flags are the
+        // register the kernel will read, not memory the child could change
+        // behind this stop.
         if info.nr == u64::from(filter::LISTENER_SYSCALL.1)
             && info.args[1] & u64::from(filter::SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
         {
             self.follow(tid, Call::Listener, site);
             return true;
         }
-        // J4 S4: a clone the kernel will not attach to this tracer. The flags
-        // are the register the kernel reads. Contained baselines refuse the
-        // flag (EPERM outranks the trace), so only `none` stops here.
+        // A clone the kernel will not attach to this tracer. The flags are the
+        // register the kernel reads. Contained baselines refuse the flag (EPERM
+        // outranks the trace), so only `none` stops here.
         if info.nr == u64::from(filter::CLONE_SYSCALL.1)
             && info.args[0] & u64::from(filter::CLONE_UNTRACED) != 0
         {
@@ -290,7 +289,7 @@ impl Session {
     }
 
     /// Whether a tracee is stopped at its `PTRACE_EVENT_EXIT` notification:
-    /// where a thread killed at another stop stops next (J4 O-3).
+    /// where a thread killed at another stop stops next.
     pub(super) fn at_exit_notification(tid: pid_t) -> bool {
         matches!(
             sys::siginfo(tid),
@@ -313,14 +312,14 @@ impl Session {
     /// Follow `call`, which is not a closed-set call but decides what the
     /// observer can see from here on, or record what refusing it costs.
     ///
-    /// Refused an in-flight slot, it runs unfollowed, and its return is the
-    /// one fact that would have said whether it did anything. So the refusal
-    /// costs what success would (J4 W3, loss review finding 3): a listener
-    /// request is the open-ended `child_notification_listener` gap, and a
-    /// `clone(CLONE_UNTRACED)` the open-ended `untraced_descendant` gap —
-    /// never a one-count `inflight_exhausted` gap with an end, which would
-    /// claim coverage back that the listener or the descendant can take. A
-    /// foreign call is one call: `inflight_exhausted`, as for any other.
+    /// Refused an in-flight slot, it runs unfollowed, and its return is the one
+    /// fact that would have said whether it did anything. So the refusal costs
+    /// what success would: a listener request is the open-ended
+    /// `child_notification_listener` gap, and a `clone(CLONE_UNTRACED)` the
+    /// open-ended `untraced_descendant` gap — never a one-count
+    /// `inflight_exhausted` gap with an end, which would claim coverage back
+    /// that the listener or the descendant can take. A foreign call is one
+    /// call: `inflight_exhausted`, as for any other.
     fn follow(&mut self, tid: pid_t, call: Call, site: Site) {
         if self.tasks.in_flight() < self.config.inflight_max {
             self.begin(tid, call, site);
@@ -367,8 +366,8 @@ impl Session {
     /// gap.
     fn stop_not_ours(&mut self, tid: pid_t) {
         match sys::event_msg(tid) {
-            // Audit 2026-09-25-2, S14: the expected data is this attempt's
-            // own, not the public constant a child filter could echo.
+            // The expected data is this attempt's own, not the public constant
+            // a child filter could echo.
             Ok(data)
                 if data & u64::from(sys::SECCOMP_RET_DATA) != u64::from(self.config.trace_data) =>
             {
@@ -378,7 +377,7 @@ impl Session {
                 self.summary.loss.unexpected_trace_stops += 1;
                 self.gap(GapReason::UnexpectedTraceStop, OpSet::ALL, Some(1));
             }
-            // J4 O-3: killed at this seccomp stop; the kernel skips the call.
+            // Killed at this seccomp stop; the kernel skips the call.
             Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {
                 self.summary.killed_at_entry += 1;
             }
@@ -451,11 +450,10 @@ mod tests {
         session.begin(RECYCLED, call, Site::default());
     }
 
-    /// Security 2026-09-25-2 (audit S1), mutation-B10 guard: the entry
-    /// filter never takes an `openat2`, whatever its flags claim — its
-    /// verdict is memory-sourced and only the exit re-read may certify it —
-    /// while a read-only `open`/`openat` (register-sourced) is the entry
-    /// fast path and is counted as filtered.
+    /// The entry filter never takes an `openat2`, whatever its flags claim —
+    /// its verdict is memory-sourced and only the exit re-read may certify it —
+    /// while a read-only `open`/`openat` (register-sourced) is the entry fast
+    /// path and is counted as filtered.
     #[test]
     fn the_entry_filter_never_takes_a_readonly_openat2() {
         let (mut session, _rx) = stalled_session();
@@ -477,9 +475,9 @@ mod tests {
         assert_eq!(session.summary.filtered_readonly_opens, 1);
     }
 
-    /// Security 2026-09-27 (audit 4 B2): the compat-ABI spellings of the
-    /// listener and untraced-clone requests reach their own classifications,
-    /// and everything else foreign stays `None` (the plain foreign path).
+    /// The compat-ABI spellings of the listener and untraced-clone requests
+    /// reach their own classifications, and everything else foreign stays
+    /// `None` (the plain foreign path).
     #[test]
     fn audit4_compat_abi_listener_and_untraced_clone_route_to_their_gaps() {
         use crate::platform::linux::tracer::filter as tfilter;
@@ -610,9 +608,9 @@ mod tests {
         );
     }
 
-    /// J4 W3, loss review finding 3, at the session: refused an in-flight
-    /// slot, a listener request and an untraced clone cost the open-ended
-    /// gap of their kind; a foreign call is one call.
+    /// At the session, refused an in-flight slot, a listener request and an
+    /// untraced clone cost the open-ended gap of their kind; a foreign call is
+    /// one call.
     #[test]
     fn j4_w3_a_refused_listener_or_untraced_clone_is_the_open_ended_gap_of_its_kind() {
         let (mut session, rx) = traced(

@@ -10,16 +10,16 @@
 //!
 //! * every number in `linux-closed-v1`, compared only after the architecture
 //!   has been checked, because a number means nothing without it;
-//! * every syscall under another architecture or with the x32 bit (J4 D2).
+//! * every syscall under another architecture or with the x32 bit.
 //!   The tracer never decodes these from the native table; it labels them
 //!   foreign. In a contained profile the baseline's `EPERM` for those ABIs
 //!   outranks the trace, so only `none` ever stops on one;
-//! * `seccomp(2)` whose flags ask for `SECCOMP_FILTER_FLAG_NEW_LISTENER`
-//!   (J4 D1). A child's own notification listener outranks this filter's
+//! * `seccomp(2)` whose flags ask for `SECCOMP_FILTER_FLAG_NEW_LISTENER`.
+//!   A child's own notification listener outranks this filter's
 //!   trace, and a `CONTINUE` reply runs the call with no stop, so the tracer
 //!   must learn that one exists. The flags are a register, which the filter
 //!   reads directly; `tool` and `build` refuse the flag outright (EPERM);
-//! * `clone(2)` whose flags carry `CLONE_UNTRACED` (J4 S4). The kernel does
+//! * `clone(2)` whose flags carry `CLONE_UNTRACED`. The kernel does
 //!   not attach such a child to the tracer, so the tracer must learn that
 //!   one exists. The contained baselines refuse the flag (EPERM), which
 //!   outranks the trace, so only `none` ever stops on one.
@@ -51,12 +51,12 @@ use crate::platform::linux::tracer::sys;
 use crate::platform::linux::{abi, bpf, seccomp};
 
 /// The `SECCOMP_RET_DATA` this filter's trace carries, which the tracer reads
-/// back at a stop (`PTRACE_GETEVENTMSG`). A stop for a number this filter
-/// does not trace, carrying other data, is one another filter asked for — a
-/// child's own `SECCOMP_RET_TRACE` — and is continued, counted in
-/// `requested_by_other_filters` (audit 3 A5: the receipt carries the count,
-/// so it is not silent), never mislabelled; one carrying this value for such
-/// a number means the installed program is not this one, and is a visible
+/// back at a stop (`PTRACE_GETEVENTMSG`). A stop for a number this filter does
+/// not trace, carrying other data, is one another filter asked for — a child's
+/// own `SECCOMP_RET_TRACE` — and is continued, counted in
+/// `requested_by_other_filters` (the receipt carries the count, so it is not
+/// silent), never mislabelled; one carrying this value for such a number means
+/// the installed program is not this one, and is a visible
 /// `unexpected_trace_stop` gap.
 pub const NARROWING_TRACE_DATA: u16 = 0x4f4a;
 
@@ -74,14 +74,14 @@ pub const CLONE_SYSCALL: (&str, u32) = ("clone", seccomp::NR_CLONE);
 /// memory the filter cannot read.
 pub const CLONE3_SYSCALL: (&str, u32) = ("clone3", seccomp::NR_CLONE3);
 
-/// Security 2026-09-27 (audit 4 B2): the i386 (`int 0x80`) numbers of the
-/// two calls whose *native* forms get their own classification. A compat-ABI
-/// entry carrying them must reach the same open-ended gaps, not the bounded
-/// `foreign_abi` interval the plain foreign classification records — the
-/// reference host does accept `int 0x80`, and under `none` a listener created
-/// through it can pass any syscall with `SECCOMP_USER_NOTIF_FLAG_CONTINUE`
-/// and no trace stop at all. The flags live in `args[1]` (seccomp) and
-/// `args[0]` (clone) in that ABI too: the register positions are identical.
+/// The i386 (`int 0x80`) numbers of the two calls whose *native* forms get
+/// their own classification. A compat-ABI entry carrying them must reach the
+/// same open-ended gaps, not the bounded `foreign_abi` interval the plain
+/// foreign classification records — the reference host does accept `int 0x80`,
+/// and under `none` a listener created through it can pass any syscall with
+/// `SECCOMP_USER_NOTIF_FLAG_CONTINUE` and no trace stop at all. The flags live
+/// in `args[1]` (seccomp) and `args[0]` (clone) in that ABI too: the register
+/// positions are identical.
 pub const I386_LISTENER_SYSCALL: u32 = 354;
 /// i386 `clone`: same `CLONE_UNTRACED` flag semantics as the native number.
 pub const I386_CLONE_SYSCALL: u32 = 120;
@@ -165,9 +165,9 @@ const fn skip(from: usize, to: usize) -> u8 {
 
 /// Write the program into `out` and return its length.
 ///
-/// Allocation-free by construction, so [`install_narrowing_filter_for`] can
-/// run between `fork` and `execve`. `data` is the `SECCOMP_RET_DATA` the
-/// tracer expects (audit 2026-09-25-2, S14: chosen per attempt).
+/// Allocation-free by construction, so [`install_narrowing_filter_for`] can run
+/// between `fork` and `execve`. `data` is the `SECCOMP_RET_DATA` the tracer
+/// expects, chosen per attempt.
 fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16, learning: bool) -> usize {
     let n = CLOSED_SET.len();
     let listener = n + 7;
@@ -327,10 +327,9 @@ pub fn narrowing_filter_digest() -> String {
     sha256(&narrowing_filter_bytes())
 }
 
-/// Security 2026-09-27 (audit 4 B9): `sha256:<hex>` of the program an
-/// attempt installed, [`narrowing_filter_for`] the same `data` and mode. The
-/// receipt must name the bytes the launcher **installed**, and since audit
-/// 2026-09-25-2 (S14) those carry a per-attempt value, so the canonical
+/// `sha256:<hex>` of the program an attempt installed, [`narrowing_filter_for`]
+/// the same `data` and mode. The receipt must name the bytes the launcher
+/// **installed**, and those carry a per-attempt value, so the canonical
 /// digest alone does not identify them.
 #[must_use]
 pub fn narrowing_filter_digest_for(data: u16, learning: bool) -> String {
@@ -344,10 +343,9 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 /// Install the narrowing filter for `data` and a mode (see
-/// [`narrowing_filter_for`]) on the calling thread group. Audit 2026-09-25-2,
-/// S14: `data` is chosen per attempt by the supervisor and read by the
-/// launcher from a pipe, so neither the public constant nor any inherited
-/// argument names it.
+/// [`narrowing_filter_for`]) on the calling thread group. `data` is chosen per
+/// attempt by the supervisor and read by the launcher from a pipe, so neither
+/// the public constant nor any inherited argument names it.
 ///
 /// Async-signal-safe: it allocates nothing, takes no lock and touches no
 /// global state. The program is built into a stack array from a `const`
@@ -401,9 +399,9 @@ mod tests {
     use super::*;
     use crate::platform::linux::tracer::closed_set::lookup;
 
-    /// Security 2026-09-27 (audit 4 B9): the installed-bytes digest names
-    /// the program an attempt ran, which is the canonical program only when
-    /// the attempt drew the canonical trace data in learning mode.
+    /// The installed-bytes digest names the program an attempt ran, which is
+    /// the canonical program only when the attempt drew the canonical trace
+    /// data in learning mode.
     #[test]
     fn audit4_installed_digest_differs_with_the_trace_data() {
         assert_eq!(
@@ -570,11 +568,11 @@ mod tests {
         assert_eq!(narrowing_filter_for(42, false).len(), FILTER_LEN);
     }
 
-    /// J4 D2: without a containment baseline (`none`) nothing else refuses
-    /// another ABI, so the narrowing filter stops on every syscall under a
-    /// non-native architecture and on every x32 number; the tracer labels
-    /// the stop foreign and never decodes it from this table. In contained
-    /// profiles the baseline's `EPERM` outranks the trace, so no stop happens.
+    /// Without a containment baseline (`none`) nothing else refuses another
+    /// ABI, so the narrowing filter stops on every syscall under a non-native
+    /// architecture and on every x32 number; the tracer labels the stop foreign
+    /// and never decodes it from this table. In contained profiles the
+    /// baseline's `EPERM` outranks the trace, so no stop happens.
     #[test]
     fn j4_d2_every_foreign_abi_syscall_is_traced() {
         const OTHER_ARCH: u32 = if abi::AARCH64 {
@@ -606,12 +604,11 @@ mod tests {
         );
     }
 
-    /// J4 D1: every observed profile stops on `seccomp(2)` asking for a
-    /// notification listener — the one filter shape that can let a
-    /// closed-set call take effect with no trace stop (integrator decision
-    /// S3) — and on nothing else of the seccomp interface: a plain filter,
-    /// the query operations and `prctl(PR_SET_SECCOMP)`, which cannot ask
-    /// for a listener, run untraced.
+    /// Every observed profile stops on `seccomp(2)` asking for a notification
+    /// listener — the one filter shape that can let a closed-set call take
+    /// effect with no trace stop (integrator decision S3) — and on nothing else
+    /// of the seccomp interface: a plain filter, the query operations and
+    /// `prctl(PR_SET_SECCOMP)`, which cannot ask for a listener, run untraced.
     #[test]
     fn j4_d1_a_listener_request_is_traced() {
         const SECCOMP: u32 = LISTENER_SYSCALL.1;
@@ -676,10 +673,10 @@ mod tests {
 
     const ENOSYS: u32 = seccomp::SECCOMP_RET_ERRNO | seccomp::LINUX_ENOSYS;
 
-    /// J4 S4: `clone` stops when its flags carry `CLONE_UNTRACED`, whatever
-    /// else they carry, and runs untouched otherwise — the flags glibc uses
-    /// for threads, `fork` and `posix_spawn` included. `clone3` is refused
-    /// with ENOSYS whatever its (unreadable) arguments, and nothing else is.
+    /// `clone` stops when its flags carry `CLONE_UNTRACED`, whatever else they
+    /// carry, and runs untouched otherwise — the flags glibc uses for threads,
+    /// `fork` and `posix_spawn` included. `clone3` is refused with ENOSYS
+    /// whatever its (unreadable) arguments, and nothing else is.
     #[test]
     fn j4_s4_an_untraced_clone_stops_and_clone3_is_enosys() {
         const CLONE: u32 = CLONE_SYSCALL.1;

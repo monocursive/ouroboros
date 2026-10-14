@@ -10,36 +10,34 @@ use crate::platform::linux::tracer::{KernelImage, PathSnapshot, ShebangImage};
 /// Every `/proc` read the session makes.
 ///
 /// A seam, so a unit test can play what the kernel will not hand an
-/// unprivileged test on the reference host — a tid recycled for a new task
-/// (J4 S1), a reused backend pid, a raced exec image — and so that what a
-/// stop reads can be counted. The live implementation is [`LiveProc`]; the
-/// trait has no defaults, so a fake answers every read itself and never
-/// falls through to the real `/proc`.
+/// unprivileged test on the reference host — a tid recycled for a new task, a
+/// reused backend pid, a raced exec image — and so that what a stop reads can
+/// be counted. The live implementation is [`LiveProc`]; the trait has no
+/// defaults, so a fake answers every read itself and never falls through to the
+/// real `/proc`.
 pub(super) trait ProcView: Send {
     /// The thread group `tid` belongs to, in this process's pid namespace.
     fn tgid(&self, tid: pid_t) -> Option<pid_t>;
     /// Field 22 of `/proc/<tid>/stat`: the task's start time in clock ticks
     /// since boot.
     fn start_ticks(&self, tid: pid_t) -> Option<u64>;
-    /// The parent `pid` currently reports (J5-T).
+    /// The parent `pid` currently reports.
     fn ppid(&self, pid: pid_t) -> Option<pid_t>;
-    /// The direct children of every thread of `pid` (J5-T).
+    /// The direct children of every thread of `pid`.
     fn children(&self, pid: pid_t) -> Vec<pid_t>;
-    /// The raw `/proc/<tid>/cmdline` bytes (audit 6 N2).
+    /// The raw `/proc/<tid>/cmdline` bytes.
     fn cmdline(&self, tid: pid_t) -> Option<Vec<u8>>;
-    /// The image the kernel loaded for `tid` (`/proc/<tid>/exe`, raw, with
-    /// its identity) and each of `images`' identity in the tracee's root
-    /// (audit 3 A1, audit 4 B3).
+    /// The image the kernel loaded for `tid` (`/proc/<tid>/exe`, raw, with its
+    /// identity) and each of `images`' identity in the tracee's root.
     fn kernel_image(&self, tid: pid_t, images: &[Vec<u8>]) -> Option<KernelImage>;
-    /// The `#!` or `binfmt_misc` interpreter a target candidate would load
-    /// (audit 2026-10-08 H2).
+    /// The `#!` or `binfmt_misc` interpreter a target candidate would load.
     fn script_image(&self, tid: pid_t, candidate: &[u8]) -> Option<ShebangImage>;
     /// The raw `/proc/<tid>/cwd` link bytes (§11.3).
     fn cwd(&self, tid: pid_t) -> Option<Vec<u8>>;
-    /// The raw `/proc/<tid>/fd/<fd>` link bytes (audit 6 N1).
+    /// The raw `/proc/<tid>/fd/<fd>` link bytes.
     fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>>;
-    /// The link count of the file `/proc/<tid>/fd/<fd>` resolves to (audit 7
-    /// L7): 0 once the file is unlinked. `None` when it cannot be read.
+    /// The link count of the file `/proc/<tid>/fd/<fd>` resolves to: 0 once the
+    /// file is unlinked. `None` when it cannot be read.
     fn fd_nlink(&self, tid: pid_t, fd: i64) -> Option<u64>;
 }
 

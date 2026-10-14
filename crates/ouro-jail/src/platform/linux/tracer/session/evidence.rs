@@ -15,10 +15,9 @@ fn components(path: &[u8]) -> impl DoubleEndedIterator<Item = &[u8]> {
         .filter(|component| !component.is_empty() && *component != b".")
 }
 
-/// Security 2026-09-29 (audit 6 N1, review fixes): whether the kernel's own
-/// resolution of the descriptor a successful open returned — the
-/// `/proc/<tid>/fd/<ret>` link, `resolved` — corroborates the pathname
-/// snapshot the event would certify.
+/// Whether the kernel's own resolution of the descriptor a successful open
+/// returned — the `/proc/<tid>/fd/<ret>` link, `resolved` — corroborates the
+/// pathname snapshot the event would certify.
 ///
 /// Components are compared, not only the final one, so an A-B-A rewrite of
 /// a directory component is caught as well as one of the name: an absolute
@@ -36,14 +35,13 @@ fn components(path: &[u8]) -> impl DoubleEndedIterator<Item = &[u8]> {
 /// same-named file at descriptor `ret` before the link is read. That is the
 /// residual of reading a shared table from outside the process.
 ///
-/// Audit 7 L7, the ` (deleted)` annotation: the kernel appends it to an
-/// unlinked file's link, but a live file can also be
-/// *named* that way, so the annotation alone would let a decoy named
-/// `README.md (deleted)` pass an A-B-A race as a certified `README.md`
-/// claim. When the annotation is present and the open is not an
-/// `O_TMPFILE` (whose descriptor is legitimately unnamed), the link count
-/// read from the descriptor decides: only a file whose count has reached 0
-/// corroborates. `nlink` is `None` when the count could not be read or was
+/// The ` (deleted)` annotation: the kernel appends it to an unlinked file's
+/// link, but a live file can also be *named* that way, so the annotation alone
+/// would let a decoy named `README.md (deleted)` pass an A-B-A race as a
+/// certified `README.md` claim. When the annotation is present and the open is
+/// not an `O_TMPFILE` (whose descriptor is legitimately unnamed), the link
+/// count read from the descriptor decides: only a file whose count has reached
+/// 0 corroborates. `nlink` is `None` when the count could not be read or was
 /// never asked for; an unreadable count does not corroborate. The check only
 /// ever weakens.
 pub(super) fn path_corroborated(
@@ -81,8 +79,8 @@ pub(super) fn path_corroborated(
     }
 }
 
-/// Security 2026-09-29 (audit 6 N2, review fixes): the command rules
-/// re-checked at the exec event, against what the kernel installed.
+/// The command rules re-checked at the exec event, against what the kernel
+/// installed.
 ///
 /// `entry` is the argv the entry stop judged (tracee memory), `kernel` the
 /// kernel's own copy (`/proc/<tid>/cmdline`), `claimed` the exec pathname
@@ -135,14 +133,14 @@ pub(super) fn exec_recheck(
 /// exec has already destroyed every other thread, so nothing changes it
 /// between these reads and the kernel's own decision.
 pub(super) struct ExecEvidence {
-    /// The image the kernel loaded (audit 3 A1), with the target candidates'
-    /// identities. `None` when the link could not be read.
+    /// The image the kernel loaded, with the target candidates' identities.
+    /// `None` when the link could not be read.
     pub(super) image: Option<KernelImage>,
-    /// The kernel's copy of the new argv (audit 6 N2). `None` when nothing
-    /// needed it or it could not be read.
+    /// The kernel's copy of the new argv. `None` when nothing needed it or it
+    /// could not be read.
     pub(super) argv: Option<Vec<Vec<u8>>>,
-    /// The `#!` evidence per target candidate (audit 2026-10-08 H2); empty
-    /// unless this is the target's exec and its image could be read.
+    /// The `#!` evidence per target candidate; empty unless this is the
+    /// target's exec and its image could be read.
     pub(super) scripts: Vec<Option<ShebangImage>>,
 }
 
@@ -234,9 +232,9 @@ mod tests {
         assert!(path_corroborated(b"../out/x", b"/w/out/x", false, None));
         assert!(!path_corroborated(b"../out/x", b"/w/in/x", false, None));
         assert!(!path_corroborated(b"a/..", b"/w", false, None));
-        // Unlinked since: the annotation is the kernel's and the count
-        // agrees; a live decoy *named* `gone (deleted)` or an unreadable
-        // count does not corroborate (audit 7 L7).
+        // Unlinked since: the annotation is the kernel's and the count agrees;
+        // a live decoy *named* `gone (deleted)` or an unreadable count does not
+        // corroborate.
         assert!(path_corroborated(
             b"/w/gone",
             b"/w/gone (deleted)",

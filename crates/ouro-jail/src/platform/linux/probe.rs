@@ -71,8 +71,8 @@ pub enum Probe {
     AgentProxyBridge,
     AgentUnixPeerMediation,
     AgentInnerSandbox,
-    /// Issue draft 15: whether a GPU can be passed through to a contained
-    /// profile (informational; no requirement demands it).
+    /// Whether a GPU can be passed through to a contained profile
+    /// (informational; no requirement demands it).
     GpuPassthrough,
 }
 
@@ -710,10 +710,10 @@ fn probe_bwrap_present(bwrap: &Path) -> ProbeResult {
     }
 }
 
-/// Issue draft 15: whether the host has the NVIDIA device nodes a contained
-/// GPU grant binds. Informational — no requirement demands a GPU, so it
-/// never affects readiness; a grant of a missing node still refuses at the
-/// mount itself, naming the node.
+/// Whether the host has the NVIDIA device nodes a contained GPU grant binds.
+/// Informational — no requirement demands a GPU, so it never affects readiness;
+/// a grant of a missing node still refuses at the mount itself, naming the
+/// node.
 fn probe_gpu_passthrough() -> ProbeResult {
     const NAME: &str = Probe::GpuPassthrough.name();
     const MECHANISM: &str = Probe::GpuPassthrough.mechanism();
@@ -2109,9 +2109,11 @@ mod tests {
                 );
             }
         }
-        // On the architecture the tables cover, nothing is refused.
-        for name in PROBE_NAMES {
-            assert_eq!(architecture_refusal(name, "x86_64"), None, "{name}");
+        // On the architectures the tables cover, nothing is refused.
+        for arch in ["x86_64", "aarch64"] {
+            for name in PROBE_NAMES {
+                assert_eq!(architecture_refusal(name, arch), None, "{arch} {name}");
+            }
         }
     }
 

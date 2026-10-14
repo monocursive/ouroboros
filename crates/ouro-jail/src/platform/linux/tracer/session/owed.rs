@@ -1,5 +1,5 @@
-//! Which children of this process, besides its tracees, the tracer
-//! answers for (J5-T), and so when it is done.
+//! Which children of this process, besides its tracees, the tracer answers for,
+//! and so when it is done.
 
 use libc::pid_t;
 
@@ -7,8 +7,8 @@ use super::Session;
 use super::seams::ProcView;
 use crate::platform::linux::tracer::proc;
 
-/// J5-T: the children of this process, besides its tracees, whose end the
-/// tracer answers for.
+/// The children of this process, besides its tracees, whose end the tracer
+/// answers for.
 ///
 /// It ends on this account, never on `waitpid(-1)` returning `ECHILD`. A
 /// process can start with children it never made — a shell's process
@@ -32,8 +32,8 @@ pub(super) enum Owed {
         birth: Option<u64>,
         reaped: bool,
     },
-    /// The launcher's ancestry could not be read, so which child is the
-    /// backend is unknown: every child is waited for, as before J5-T.
+    /// The launcher's ancestry could not be read, so which child is the backend
+    /// is unknown: every child is waited for.
     Every,
 }
 
@@ -55,7 +55,7 @@ impl Owed {
 }
 
 impl Session {
-    /// J5-T: every tracee has been reaped and the backend's exit delivered
+    /// Every tracee has been reaped and the backend's exit delivered
     /// ([`Owed`]). Any other child of this process may live on.
     pub(super) fn accounted_for(&self) -> bool {
         self.tasks.is_empty()
@@ -67,10 +67,10 @@ impl Session {
             && self.adopted().is_empty()
     }
 
-    /// J5-T: this process's children that are not tracees and that it did
-    /// not have, under the same birth, when the tracer attached — orphans of
-    /// the traced tree a subreaper supervisor adopted, zombie or alive. They
-    /// are the attempt's, so the tracer reaps them before it finishes (L01.7).
+    /// This process's children that are not tracees and that it did not have,
+    /// under the same birth, when the tracer attached — orphans of the traced
+    /// tree a subreaper supervisor adopted, zombie or alive. They are the
+    /// attempt's, so the tracer reaps them before it finishes (L01.7).
     fn adopted(&self) -> Vec<pid_t> {
         self.procfs
             .children(crate::sys::own_pid())
@@ -124,11 +124,10 @@ mod tests {
     use super::*;
     use crate::platform::linux::tracer::TracerConfig;
 
-    /// J5-T, through the `/proc` seam: what the tracer owes follows the
-    /// parent links from the launcher up to this process. Nothing when the
-    /// launcher is its own child; the child it descends through, with that
-    /// child's birth, when it is deeper; every child when the chain cannot
-    /// be read to this process.
+    /// Through the `/proc` seam, what the tracer owes follows the parent links
+    /// from the launcher up to this process. Nothing when the launcher is its
+    /// own child; the child it descends through, with that child's birth, when
+    /// it is deeper; every child when the chain cannot be read to this process.
     #[test]
     fn j5t_what_is_owed_follows_the_launchers_parents() {
         const OWN: pid_t = 5_000_100;
@@ -168,12 +167,12 @@ mod tests {
         );
     }
 
-    /// J5-T (review of the fix, M5): the backend is owed only while its
-    /// number still names the process born at the recorded time. A reused
-    /// number — same pid, another birth — is not the backend: the tracer
-    /// neither waits for it nor lists it as unreaped. The same pid and
-    /// birth is, zombie included, until its exit is reaped. The kernel
-    /// will not reuse a live pid on demand, so the birth is scripted.
+    /// The backend is owed only while its number still names the process born
+    /// at the recorded time. A reused number — same pid, another birth — is not
+    /// the backend: the tracer neither waits for it nor lists it as unreaped.
+    /// The same pid and birth is, zombie included, until its exit is reaped.
+    /// The kernel will not reuse a live pid on demand, so the birth is
+    /// scripted.
     #[test]
     fn j5t_the_backend_is_owed_only_under_its_own_birth() {
         const BACKEND: pid_t = RECYCLED;
@@ -245,12 +244,12 @@ mod tests {
         drop(rx);
     }
 
-    /// J5-T w3: the children a session was attached beside are recognised
-    /// by pid and birth; anything else that is not a tracee was gained since
-    /// and is owed — awaited, and listed unreaped if the tracer stops first.
-    /// A pid the kernel reused after a bystander ended is gained, not beside.
-    /// Scripted: the kernel will not reuse a pid, or hand an unprivileged
-    /// test a live orphan, on demand.
+    /// The children a session was attached beside are recognised by pid and
+    /// birth; anything else that is not a tracee was gained since and is owed —
+    /// awaited, and listed unreaped if the tracer stops first. A pid the kernel
+    /// reused after a bystander ended is gained, not beside. Scripted: the
+    /// kernel will not reuse a pid, or hand an unprivileged test a live orphan,
+    /// on demand.
     #[test]
     fn j5t_a_child_gained_after_the_attach_is_owed_and_a_bystander_is_not() {
         const BYSTANDER: pid_t = RECYCLED;

@@ -42,8 +42,8 @@ pub(super) enum TaskState {
     InFlight {
         call: Call,
         site: Site,
-        /// The call was taken at the stop not yet resumed: a resume that
-        /// fails with `ESRCH` means the kernel will skip it (J4 O-3).
+        /// The call was taken at the stop not yet resumed: a resume that fails
+        /// with `ESRCH` means the kernel will skip it.
         fresh: bool,
     },
     /// A call whose exit carried a restart code, waiting for the kernel's
@@ -150,10 +150,10 @@ impl Tasks {
         }
     }
 
-    /// Turn the call `tid` has in flight into a wait for the kernel's
-    /// decision on the restart `code` (J4 O-2). The wait keeps the call, the
-    /// site it entered at — where a re-entry stops again — and its slot.
-    /// False, with nothing changed, when `tid` has no call in flight.
+    /// Turn the call `tid` has in flight into a wait for the kernel's decision
+    /// on the restart `code`. The wait keeps the call, the site it entered at —
+    /// where a re-entry stops again — and its slot. False, with nothing
+    /// changed, when `tid` has no call in flight.
     #[must_use]
     pub(super) fn start_wait(&mut self, tid: pid_t, code: i64) -> bool {
         let Some(task) = self.map.get_mut(&tid) else {
@@ -296,14 +296,14 @@ impl Tasks {
 pub(super) enum Call {
     /// A closed-set call, with the arguments read at its entry.
     Closed(Pending),
-    /// A syscall under another ABI (J4 D2): never decoded, so its return is
-    /// the one thing the observer learns about it.
+    /// A syscall under another ABI: never decoded, so its return is the one
+    /// thing the observer learns about it.
     Foreign,
-    /// `seccomp(2)` asking for a notification listener (J4 D1): its return
-    /// says whether the child now holds one.
+    /// `seccomp(2)` asking for a notification listener: its return says whether
+    /// the child now holds one.
     Listener,
-    /// `clone(2)` with `CLONE_UNTRACED` (J4 S4): its return says whether a
-    /// task now exists that the kernel did not attach to this tracer.
+    /// `clone(2)` with `CLONE_UNTRACED`: its return says whether a task now
+    /// exists that the kernel did not attach to this tracer.
     Untraced,
 }
 
@@ -492,8 +492,8 @@ impl Session {
                 self.tracee_deaths.insert(pid, Instant::now() + KILL_GRACE);
                 return;
             }
-            // J5-T: the backend's exit is the one the tracer owes; any other
-            // child's is delivered all the same, and is not the tree's.
+            // The backend's exit is the one the tracer owes; any other child's
+            // is delivered all the same, and is not the tree's.
             if let Owed::Backend {
                 pid: backend,
                 reaped,
@@ -580,17 +580,16 @@ mod tests {
     use super::*;
     use crate::platform::linux::tracer::TracerConfig;
 
-    /// J4 O02, S1: a tid the kernel recycles for a new task after the old
-    /// one was reaped. The stock reference host will not let an
-    /// unprivileged test choose a pid (`ns_last_pid`, `clone3 set_tid` and a
-    /// namespace's `pid_max` all need `CAP_SYS_ADMIN` there), so the seam
-    /// over the two `/proc` reads plays it. Every event names the birth its
-    /// process had when the tracer took it on: a worker's result names its
-    /// leader's birth, not the worker's own, even when the worker is the
-    /// first task of the group the tracer sees; the old process's exec, result
-    /// and exit name the old birth; the new task under the same number names
-    /// its own, inherits no witnessed exec (so its death is no `Exit`) and
-    /// no entry in flight.
+    /// A tid the kernel recycles for a new task after the old one was reaped.
+    /// The stock reference host will not let an unprivileged test choose a pid
+    /// (`ns_last_pid`, `clone3 set_tid` and a namespace's `pid_max` all need
+    /// `CAP_SYS_ADMIN` there), so the seam over the two `/proc` reads plays it.
+    /// Every event names the birth its process had when the tracer took it on:
+    /// a worker's result names its leader's birth, not the worker's own, even
+    /// when the worker is the first task of the group the tracer sees; the old
+    /// process's exec, result and exit name the old birth; the new task under
+    /// the same number names its own, inherits no witnessed exec (so its death
+    /// is no `Exit`) and no entry in flight.
     #[test]
     fn j4_o02_recycled_tid_carries_nothing_over() {
         let proc = FakeProc::default()

@@ -202,8 +202,8 @@ pub fn pidfd_getfd(pidfd: BorrowedFd<'_>, target: RawFd) -> io::Result<OwnedFd> 
 // Step 3: the mediation thread
 // ---------------------------------------------------------------------------
 
-/// Number of mediation worker threads. A small bounded pool so one slow
-/// connect cannot starve every other request (review fix 2). Each worker calls
+/// Number of mediation worker threads. A small bounded pool so one slow connect
+/// cannot starve every other request. Each worker calls
 /// `SECCOMP_IOCTL_NOTIF_RECV` on the shared listener; the kernel hands each a
 /// distinct pending notification.
 const WORKERS: usize = 4;
@@ -240,11 +240,10 @@ impl MediatorHandle {
         self.signal_stop();
     }
 
-    /// Security 2026-09-25 (audit F2): pin the only thread group whose
-    /// connects to the authorized proxy node the mediation will perform.
-    /// Called by the supervisor once the bridge is discovered and its
-    /// identity pinned; until then the authorized node is refused for
-    /// everyone, and the target has not been released.
+    /// Pin the only thread group whose connects to the authorized proxy node
+    /// the mediation will perform. Called by the supervisor once the bridge is
+    /// discovered and its identity pinned; until then the authorized node is
+    /// refused for everyone, and the target has not been released.
     pub fn restrict_authorized_connector(&self, identity: Option<(libc::pid_t, u64)>) {
         *crate::sync::lock(&self.workers.authorized_connector) = identity;
     }
@@ -296,13 +295,13 @@ struct Workers {
     /// lock, not a descriptor flag, is the guarantee that RECV never blocks
     /// a worker. The slow part of a mediation runs outside the lock.
     recv: std::sync::Mutex<()>,
-    // Security 2026-09-25 (audit F2): the authorized proxy socket is
-    // connectable through the mediation only by the bridge itself. The
-    // inode check alone admitted any process in the sandbox, which made the
-    // bridge's accounting and the bridge's fail-closed budget skippable by
-    // the target. `None` until the supervisor has discovered and pinned the
-    // bridge's identity; before that every connect to the authorized node
-    // is refused (fail closed; the target is not released yet).
+    // The authorized proxy socket is connectable through the mediation only by
+    // the bridge itself. The inode check alone admitted any process in the
+    // sandbox, which made the bridge's accounting and the bridge's fail-closed
+    // budget skippable by the target. `None` until the supervisor has
+    // discovered and pinned the bridge's identity; before that every connect to
+    // the authorized node is refused (fail closed; the target is not released
+    // yet).
     authorized_connector: std::sync::Mutex<Option<(libc::pid_t, u64)>>,
 }
 
@@ -542,11 +541,10 @@ fn decide(
         }
         Route::Refuse(errno, reason) => return (Err(errno), reason),
     }
-    // Security 2026-09-27 (audit 4 B9): an address longer than the
-    // `sockaddr_un` layout is one the kernel itself would refuse at
-    // `connect`; classifying its bytes (a pathname truncated into whatever
-    // follows) would mediate an address that cannot exist. Refuse it with
-    // the kernel's own answer, `EINVAL`.
+    // An address longer than the `sockaddr_un` layout is one the kernel itself
+    // would refuse at `connect`; classifying its bytes (a pathname truncated
+    // into whatever follows) would mediate an address that cannot exist. Refuse
+    // it with the kernel's own answer, `EINVAL`.
     if ualen > std::mem::size_of::<libc::sockaddr_un>() {
         return (Err(libc::EINVAL), "addr_overlong");
     }
@@ -578,9 +576,8 @@ fn mediate_pathname(
         return (Err(libc::EACCES), "cwd_unresolved");
     };
     // Pin the node without escaping the child's view. A path that does not
-    // exist in the child's own view gets the kernel's own answer, ENOENT
-    // (issue draft 13); anything that cannot be resolved at all refuses
-    // closed with EACCES.
+    // exist in the child's own view gets the kernel's own answer, ENOENT;
+    // anything that cannot be resolved at all refuses closed with EACCES.
     let node = match openat2_in_root(root_fd.as_fd(), &rel) {
         Ok(fd) => fd,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -595,14 +592,13 @@ fn mediate_pathname(
     if st.st_mode & libc::S_IFMT != libc::S_IFSOCK {
         return (Err(libc::ECONNREFUSED), "not_a_socket");
     }
-    // The authorized proxy, by its full pinned identity. It
-    // is bound in the host network namespace, so sock_diag in the attempt's
-    // namespace never lists it; nothing else from the host is let through.
-    // Security 2026-09-25 (audit F2): the inode match alone is not enough:
-    // every process in the sandbox could name the node, skipping the bridge
-    // and its accounting. Only the bridge's pinned (tgid, start ticks) may
-    // connect here; before the supervisor pins it, and for any other
-    // connector, the node is refused.
+    // The authorized proxy, by its full pinned identity. It is bound in the
+    // host network namespace, so sock_diag in the attempt's namespace never
+    // lists it; nothing else from the host is let through. The inode match
+    // alone is not enough: every process in the sandbox could name the node,
+    // skipping the bridge and its accounting. Only the bridge's pinned (tgid,
+    // start ticks) may connect here; before the supervisor pins it, and for any
+    // other connector, the node is refused.
     if w.authorized == Some((st.st_dev, st.st_ino)) {
         let connector = crate::sync::lock(&w.authorized_connector);
         let admitted = matches!(
@@ -661,9 +657,9 @@ fn connect_pinned(dup: &OwnedFd, node: &OwnedFd, stop_r: BorrowedFd<'_>) -> Resu
 /// notify wait, so this is invisible to it, and the flag is restored). A
 /// connect that returns `EINPROGRESS` (TCP, or a Unix connect that is queued)
 /// is polled to [`CONNECT_DEADLINE_MS`] or until stop; a Unix connect to a full
-/// listener backlog returns `EAGAIN` immediately and becomes the child's
-/// result — either way one slow or hostile peer cannot wedge the mediator
-/// (review fix 2). A stop mid-connect fails the request closed.
+/// listener backlog returns `EAGAIN` immediately and becomes the child's result
+/// — either way one slow or hostile peer cannot wedge the mediator. A stop
+/// mid-connect fails the request closed.
 fn bounded_connect(
     fd: BorrowedFd<'_>,
     sockaddr: &[u8],

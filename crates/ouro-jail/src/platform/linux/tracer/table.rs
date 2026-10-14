@@ -325,8 +325,8 @@ mod tests {
             .find(|line| line.starts_with("nr & 0x40000000"))
             .expect("the high-bit row");
         assert_eq!(high_bit.contains("x32:"), !abi::AARCH64, "{high_bit}");
-        // J4 W3: the rules the loss and tracer reviews added, and the
-        // agent's named exclusion, are stated.
+        // The loss and restart rules, and the agent's named exclusion, are
+        // stated.
         for text in [
             "one the in-flight bound cannot follow is that gap too",
             "fs.deny count the connects the mediator received",

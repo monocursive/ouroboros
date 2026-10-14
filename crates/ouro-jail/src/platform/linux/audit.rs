@@ -29,7 +29,7 @@ enum PathClass {
     /// Its relationship to the scratch directory is established.
     ScratchRelative(Vec<u8>),
     /// Its relationship to a named root (an operator grant, or a system
-    /// read-only root) is established (issue draft 10).
+    /// read-only root) is established.
     RootRelative { root: String, rest: Vec<u8> },
     /// Neither, so only a digest of the snapshot is emitted.
     Digest(String, &'static str),
@@ -37,7 +37,7 @@ enum PathClass {
     Unavailable(&'static str),
 }
 
-/// One named root a classified path can be relative to (issue draft 10).
+/// One named root a classified path can be relative to.
 struct NamedRoot {
     bytes: Vec<u8>,
     label: String,
@@ -102,8 +102,7 @@ pub struct AuditWriter {
     seq: u64,
     workspace: Vec<u8>,
     scratch_inside: Vec<u8>,
-    /// Named roots a path can be relative to (issue draft 10), most
-    /// specific first.
+    /// Named roots a path can be relative to, most specific first.
     roots: Vec<NamedRoot>,
     counts: BTreeMap<CoverageClass, u64>,
     degraded: BTreeSet<CoverageClass>,
@@ -164,12 +163,11 @@ impl AuditWriter {
         self.limit_hits += 1;
     }
 
-    /// Records that an applied ceiling's hit evidence is missing or was
-    /// lost (audit 2026-10-08 M2): storage and inode ceilings sample
-    /// saturation positively only, and unreadable cgroup counters leave
-    /// their `false` claims unsupported. §11.4: missing hit evidence makes
-    /// coverage degraded and the count null, and a degraded class names
-    /// its gap.
+    /// Records that an applied ceiling's hit evidence is missing or was lost:
+    /// storage and inode ceilings sample saturation positively only, and
+    /// unreadable cgroup counters leave their `false` claims unsupported.
+    /// §11.4: missing hit evidence makes coverage degraded and the count null,
+    /// and a degraded class names its gap.
     pub fn record_limit_evidence_missing(&mut self, reason: &str) {
         // Nothing observes the evidence to come back: the hole stays
         // open-ended, like a child's own lost notifications (§13.1).
@@ -280,12 +278,11 @@ impl AuditWriter {
     /// The `command_rule` note of one command-rule hit (jail-v2 §7.2):
     /// pattern, argv digest, pid, and how the hit was enforced.
     ///
-    /// Security 2026-09-29 (audit 6 N2, review fixes): a hit found at the
-    /// exec event, re-checked against the kernel's own argv, is recorded like
-    /// one found at the entry stop. The process was killed there, not failed
-    /// with `EPERM`, so the note says so instead of carrying an `errno`: a
-    /// `deny` or unreadable-argv hit at that stop kills the process without
-    /// stopping the run, and this note is its only account.
+    /// A hit found at the exec event, re-checked against the kernel's own argv,
+    /// is recorded like one found at the entry stop. The process was killed
+    /// there, not failed with `EPERM`, so the note says so instead of carrying
+    /// an `errno`: a `deny` or unreadable-argv hit at that stop kills the
+    /// process without stopping the run, and this note is its only account.
     pub fn record_command_rule(
         &mut self,
         pid: libc::pid_t,
@@ -393,8 +390,8 @@ impl AuditWriter {
         let base = op.audit_operation(args.flags);
         // A write refused by the filesystem itself — EROFS on a read-only
         // grant, EBUSY on a rename or unlink across one — is a denial of a
-        // mutation just like EACCES/EPERM (issue draft 09); the receipt's
-        // fs.deny must not read 0 while the trace shows refused writes.
+        // mutation just like EACCES/EPERM; the receipt's fs.deny must not read
+        // 0 while the trace shows refused writes.
         let denied = matches!(errno, Some(libc::EACCES | libc::EPERM))
             || (base.coverage_class() == CoverageClass::FsWrite
                 && matches!(errno, Some(libc::EROFS | libc::EBUSY)));
@@ -468,17 +465,16 @@ impl AuditWriter {
     ///
     /// A mediated connect is not a ptrace stop — `SECCOMP_RET_USER_NOTIF`
     /// outranks the observer's `SECCOMP_RET_TRACE` — so for `agent` the
-    /// mediator is the witness of every native `connect` in the attempt's
-    /// tree, and this is the audit source's `net.connect` result for it, with
-    /// the return value the kernel accepted for the child's `connect`.
-    /// Whatever its verdict it is network evidence (issue draft 13: a
-    /// refused AF_UNIX connect is not a "denied write"); the socket path or
-    /// internet address the child named is reported (issue drafts 13/14), the
-    /// mediator's safe reason code is recorded as `mediator_reason`, and a
-    /// failed direct internet connect is marked `egress: blocked` (issue
-    /// draft 14). The audit `decision` stays null (§13.1). Proxy-source
-    /// facts are never merged into it: the proxy emits its own `net.connect`
-    /// results.
+    /// mediator is the witness of every native `connect` in the attempt's tree,
+    /// and this is the audit source's `net.connect` result for it, with the
+    /// return value the kernel accepted for the child's `connect`. Whatever its
+    /// verdict it is network evidence (a refused AF_UNIX connect is not a
+    /// "denied write"); the socket path or internet address the child named is
+    /// reported, the mediator's safe reason code is recorded as
+    /// `mediator_reason`, and a failed direct internet connect is marked
+    /// `egress: blocked`. The audit `decision` stays null
+    /// (§13.1). Proxy-source facts are never merged into it: the proxy emits
+    /// its own `net.connect` results.
     ///
     /// Only a decision the kernel accepted as the child's response is a
     /// result; an undelivered one is [`AuditWriter::record_mediation_response_loss`].
@@ -529,9 +525,9 @@ impl AuditWriter {
                 "address".to_owned(),
                 Value::from(format!("{address}:{port}")),
             );
-            // A direct connect that failed in the empty network namespace is
-            // a blocked egress attempt (issue draft 14): exactly the case an
-            // operator most wants named.
+            // A direct connect that failed in the empty network namespace is a
+            // blocked egress attempt: exactly the case an operator most wants
+            // named.
             if matches!(errno, Some(libc::ENETUNREACH | libc::ECONNREFUSED)) {
                 fields.insert("egress".to_owned(), Value::from("blocked"));
             }
@@ -761,9 +757,9 @@ impl AuditWriter {
     }
 
     /// Whether any recorded gap accounts for counted loss. Every gap does
-    /// except `path_claim_unverified`, which downgrades a delivered result
-    /// and feeds no loss counter (audit 6 N1), so it never stands in for the
-    /// account of loss whose own gaps were dropped.
+    /// except `path_claim_unverified`, which downgrades a delivered result and
+    /// feeds no loss counter, so it never stands in for the account of loss
+    /// whose own gaps were dropped.
     #[must_use]
     pub fn has_loss_gaps(&self) -> bool {
         self.gaps
@@ -816,9 +812,9 @@ impl AuditWriter {
                 lost_count: None,
             });
         }
-        // Audit 2026-10-08 M2: the `limits` class degrades on missing hit
-        // evidence too, but it is the wrapper's own class (§11.4) — its
-        // degradation says nothing about the audit source's health.
+        // The `limits` class degrades on missing hit evidence too, but it is
+        // the wrapper's own class (§11.4) — its degradation says nothing about
+        // the audit source's health.
         let audit_source_degraded = self
             .degraded
             .iter()
@@ -917,8 +913,8 @@ impl AuditWriter {
         self.describe_path_in(fields, key, snapshot, dirfd, None);
     }
 
-    /// [`describe_path`] with the thread's observed working directory, which
-    /// a relative pathname is resolved against (issue draft 12).
+    /// [`describe_path`] with the thread's observed working directory, which a
+    /// relative pathname is resolved against.
     fn describe_path_in(
         &self,
         fields: &mut Map<String, Value>,
@@ -991,11 +987,10 @@ impl AuditWriter {
             );
         }
         if bytes[0] != b'/' {
-            // Issue draft 12: a relative pathname the kernel resolves
-            // against the thread's own cwd is resolved against that cwd,
-            // observed at the syscall stop. Only the true dirfd cases (and a
-            // cwd that could not be read or named) keep their distinct
-            // reasons.
+            // A relative pathname the kernel resolves against the thread's own
+            // cwd is resolved against that cwd, observed at the syscall stop.
+            // Only the true dirfd cases (and a cwd that could not be read or
+            // named) keep their distinct reasons.
             let at_cwd = dirfd.is_none_or(|fd| fd == libc::AT_FDCWD);
             if at_cwd && cwd.is_some_and(|cwd| cwd.ends_with(DELETED_MARK)) {
                 // The kernel names a removed directory by its old path plus
@@ -1171,9 +1166,9 @@ fn classes_for(ops: OpSet) -> Vec<CoverageClass> {
 /// that loss is never observed to end). The bounds read back are the ones
 /// [`AuditWriter::push_gap`] wrote from numbers.
 ///
-/// An open interval stays open, and audit 7 L13: an open-ended loss merged
-/// into a closed interval leaves it open — only a presented or written end
-/// bounds an interval, never a merge.
+/// An open interval stays open, and an open-ended loss merged into a closed
+/// interval leaves it open — only a presented or written end bounds an
+/// interval, never a merge.
 fn extend_gap_interval(gap: &mut Gap, from: u64, to: Option<u64>) {
     gap.start_ns = gap
         .start_ns
@@ -1299,9 +1294,9 @@ mod tests {
         }
     }
 
-    /// Issue drafts 13/14: a mediated connect is network evidence whatever
-    /// its verdict, names the socket path or internet address, and a failed
-    /// direct internet connect is marked blocked egress.
+    /// A mediated connect is network evidence whatever its verdict, names the
+    /// socket path or internet address, and a failed direct internet connect is
+    /// marked blocked egress.
     #[test]
     fn mediated_connects_are_net_evidence_with_their_address_named() {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -1502,7 +1497,7 @@ mod tests {
         assert_eq!(writer.count(CoverageClass::Exec), 0);
     }
 
-    // Audit 2026-10-08 M2: missing hit evidence degrades the `limits` class.
+    // Missing hit evidence degrades the `limits` class.
     #[test]
     fn missing_limit_hit_evidence_degrades_the_limits_class() {
         let mut writer = writer();
@@ -1941,9 +1936,9 @@ mod tests {
         assert_eq!(writer.count(CoverageClass::FsWrite), 1);
     }
 
-    /// J4 D1: a child's notification listener degrades every audit class,
-    /// with no count and no end — the listener can continue calls unseen
-    /// for as long as anyone holds it — and a merged repeat keeps it open.
+    /// A child's notification listener degrades every audit class, with no
+    /// count and no end — the listener can continue calls unseen for as long as
+    /// anyone holds it — and a merged repeat keeps it open.
     #[test]
     fn j4_d1_a_listener_gap_degrades_every_class_and_has_no_end() {
         let mut writer = writer();
@@ -1999,9 +1994,9 @@ mod tests {
         assert_eq!(merged(gap(5, None), 1, Some(3)), ("1".to_owned(), None));
     }
 
-    /// Audit 7 L13: at the 64-gap bound, an open-ended loss merged into the
-    /// closed `coalesced_losses` interval leaves it open — a merge never
-    /// gives the loss an end.
+    /// At the 64-gap bound, an open-ended loss merged into the closed
+    /// `coalesced_losses` interval leaves it open — a merge never gives the
+    /// loss an end.
     #[test]
     fn an_open_ended_loss_merged_at_the_gap_bound_leaves_the_interval_open() {
         let mut writer = writer();
@@ -2066,8 +2061,8 @@ mod tests {
         );
     }
 
-    /// J4 O02: every audit result names its process by pid and birth, and
-    /// a confirmed exec names the call it was.
+    /// O02: every audit result names its process by pid and birth, and a
+    /// confirmed exec names the call it was.
     #[test]
     fn j4_o02_every_result_carries_the_birth_it_was_given() {
         let file = tempfile::NamedTempFile::new().unwrap();

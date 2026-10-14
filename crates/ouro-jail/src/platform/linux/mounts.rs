@@ -18,12 +18,11 @@ use super::fs as jfs;
 use super::platform::{PINNED_FD_BASE, error, preparing};
 
 /// Whether `path` is one of the device nodes a contained run may bind
-/// individually (issue draft 15): the NVIDIA class an ML workload needs —
-/// `nvidia[0-9]*`, `nvidiactl`, `nvidia-uvm`, `nvidia-uvm-tools`,
-/// `nvidia-modeset` — directly under `/dev`, and really a character device.
-/// Anything else under `/dev` keeps the §9.1 pseudo-filesystem refusal:
-/// `/dev/kvm`, `/dev/fuse` and devtmpfs itself are host surfaces this
-/// allowlist does not vouch for.
+/// individually: the NVIDIA class an ML workload needs — `nvidia[0-9]*`,
+/// `nvidiactl`, `nvidia-uvm`, `nvidia-uvm-tools`, `nvidia-modeset` — directly
+/// under `/dev`, and really a character device. Anything else under `/dev`
+/// keeps the §9.1 pseudo-filesystem refusal: `/dev/kvm`, `/dev/fuse` and
+/// devtmpfs itself are host surfaces this allowlist does not vouch for.
 pub(crate) fn is_allowed_device_node(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt as _;
     if path.parent() != Some(Path::new("/dev")) {
@@ -638,12 +637,12 @@ pub(super) type MountPreparation = (
     PlaceholderSet,
 );
 
-/// `OURO_JAIL_TEST_MOUNT_SWAP=<dir>`: a test seam (J5-B2) that opens a
-/// deterministic window at the §9.1 mount handoff. When the variable names a
-/// directory, the supervisor writes `<dir>/pinned` once every mount source has
-/// been pinned and then waits (bounded, 10 s) for `<dir>/go` before running the
-/// handoff verification. A test replaces a pinned object in that window to
-/// prove the verification refuses the replacement (F04 source-identity swap).
+/// `OURO_JAIL_TEST_MOUNT_SWAP=<dir>`: a test seam that opens a deterministic
+/// window at the §9.1 mount handoff. When the variable names a directory, the
+/// supervisor writes `<dir>/pinned` once every mount source has been pinned and
+/// then waits (bounded, 10 s) for `<dir>/go` before running the handoff
+/// verification. A test replaces a pinned object in that window to prove the
+/// verification refuses the replacement (F04 source-identity swap).
 ///
 /// Test-only. It can only delay the verification that is already there — never
 /// widen anything — and, like every `OURO_JAIL_TEST_*` variable, it is recorded
@@ -702,8 +701,8 @@ pub(super) fn refuse_pseudo_fs_grants_among(
         .with_key_path(key)
     })?;
     for (source, _destination) in binds {
-        // Issue draft 15: an allowlisted device node is exactly the narrow
-        // exception — one character device under /dev, never devtmpfs.
+        // An allowlisted device node is exactly the narrow exception — one
+        // character device under /dev, never devtmpfs.
         if is_allowed_device_node(source) {
             continue;
         }
@@ -755,11 +754,10 @@ pub(super) fn source_on_pseudo_fs(resolved: &Path) -> bool {
     crate::policy::is_pseudo_fs_magic(f_type)
 }
 
-/// Security 2026-09-27 (audit 3 A3): the mount points of every proc, sysfs or
-/// cgroup (v1 or v2) mount, every devtmpfs mount, and every tmpfs mounted at
-/// or beneath `/run` (the operator's runtime tree — `/run` alone, nowhere
-/// else, so a tmpfs-backed `/tmp` or scratch stays grantable), from
-/// `/proc/self/mountinfo` read as bytes.
+/// The mount points of every proc, sysfs or cgroup (v1 or v2) mount, every
+/// devtmpfs mount, and every tmpfs mounted at or beneath `/run` (the operator's
+/// runtime tree — `/run` alone, nowhere else, so a tmpfs-backed `/tmp` or
+/// scratch stays grantable), from `/proc/self/mountinfo` read as bytes.
 ///
 /// # Errors
 /// The read's error, or a table the parser refuses: an unreadable table is
@@ -786,11 +784,10 @@ pub(super) fn pseudo_fs_points(rows: &[mountinfo::Row]) -> Vec<PathBuf> {
             out.push(PathBuf::from(OsStr::from_bytes(point)));
         }
     }
-    // Security 2026-09-27 (audit 4 B7): the runtime tree is refused by its
-    // path as well, not only by the tmpfs fstype — a host whose `/run` (or a
-    // subtree of it) is not tmpfs would otherwise slip the fstype branch
-    // above, and `grant_exposes_pseudo_fs` refuses an entry however the
-    // overlap runs (ancestor, equal or beneath).
+    // The runtime tree is refused by its path as well, not only by the tmpfs
+    // fstype — a host whose `/run` (or a subtree of it) is not tmpfs would
+    // otherwise slip the fstype branch above, and `grant_exposes_pseudo_fs`
+    // refuses an entry however the overlap runs (ancestor, equal or beneath).
     if !out.iter().any(|point| point == Path::new("/run")) {
         out.push(PathBuf::from("/run"));
     }
@@ -1168,8 +1165,8 @@ mod tests {
     use super::super::exec::FdMap;
     use super::super::identity;
 
-    /// Issue draft 15: only the NVIDIA class under `/dev` is allowlisted,
-    /// and only as a real character device.
+    /// Only the NVIDIA class under `/dev` is allowlisted, and only as a real
+    /// character device.
     #[test]
     fn only_nvidia_device_nodes_are_allowlisted() {
         for refused in [
@@ -1195,9 +1192,9 @@ mod tests {
         );
     }
 
-    /// Security 2026-09-27 (audit 4 B7): the runtime tree is in the refused
-    /// set by its path, whatever fstype carries it — a host whose `/run` is
-    /// not tmpfs would otherwise slip the fstype branch.
+    /// The runtime tree is in the refused set by its path, whatever fstype
+    /// carries it — a host whose `/run` is not tmpfs would otherwise slip the
+    /// fstype branch.
     #[test]
     fn audit4_run_is_refused_by_path_whatever_its_fstype() {
         for mounts in [
@@ -1839,8 +1836,8 @@ mod tests {
             super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&unbound))
                 .is_err()
         );
-        // A bind whose id or destination the policy does not declare, with
-        // the count right (J3 review RM36).
+        // A bind whose id or destination the policy does not declare, with the
+        // count right.
         let mut renamed = good.clone();
         renamed.binds[0].dest = NativeString::Text("elsewhere".to_owned());
         assert!(

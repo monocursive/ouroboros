@@ -6,7 +6,7 @@
 //! operator sees. What it keeps from the contained profiles is lifetime:
 //!
 //! * a supervisor-owned execution cgroup, required even with observation off,
-//!   made by J2's [`ExecutionCgroup`] with the same identity pinning, limits,
+//!   made by the same [`ExecutionCgroup`] with its identity pinning, limits,
 //!   counters and `cgroup.kill`;
 //! * the same trusted launcher (`ouro-jail __launch`), started directly on the
 //!   host, placed in that leaf while it blocks and before release, with the
@@ -51,13 +51,13 @@
 //! between two reads while observation is on, or a process another service
 //! starts on the operator's behalf, is not seen.
 //!
-//! What this supervisor already had below it before it started the launcher
-//! is not the attempt (J5-T): a child it was exec'd beside — a shell's
-//! process substitution reading `--trace-fd`, a background job — and that
-//! child's descendants are recorded by birth identity then, and never walked,
-//! reaped, recorded as an escape or signalled. One such process born after
-//! that snapshot and orphaned here is indistinguishable from an escaped
-//! attempt process and is treated as one (a recorded limit).
+//! What this supervisor already had below it before it started the launcher is
+//! not the attempt: a child it was exec'd beside — a shell's process
+//! substitution reading `--trace-fd`, a background job — and that child's
+//! descendants are recorded by birth identity then, and never walked, reaped,
+//! recorded as an escape or signalled. One such process born after that
+//! snapshot and orphaned here is indistinguishable from an escaped attempt
+//! process and is treated as one (a recorded limit).
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -274,8 +274,8 @@ pub fn prepare(
     Ok(Box::new(Uncontained::create(plan, sinks, deadline)?))
 }
 
-/// J5-T: the processes below this supervisor before it started the
-/// launcher, by pid and birth, so a pid reused later is not mistaken for one.
+/// The processes below this supervisor before it started the launcher, by pid
+/// and birth, so a pid reused later is not mistaken for one.
 #[derive(Debug, Default)]
 struct Inherited(Vec<(libc::pid_t, u64)>);
 
@@ -329,7 +329,7 @@ struct Uncontained {
     /// Escaped processes that are this supervisor's own children, so their
     /// pidfds provably name attempt processes and may be signalled.
     escaped: Vec<(libc::pid_t, OwnedFd)>,
-    /// J5-T: what was below this supervisor before the launcher existed.
+    /// What was below this supervisor before the launcher existed.
     inherited: Inherited,
     /// The target's raw wait status, when this process collected it.
     target_status: Option<i32>,
@@ -620,8 +620,8 @@ impl Uncontained {
             ));
         };
         become_subreaper()?;
-        // J5-T: before the launcher exists, everything below this process
-        // is something it was started beside, not the attempt.
+        // Before the launcher exists, everything below this process is
+        // something it was started beside, not the attempt.
         let inherited = Inherited::below(crate::sys::own_pid());
 
         let spawned = spawn_launcher(&exe, &argv, &env, &plan.workspace, observe_on)?;
@@ -933,9 +933,9 @@ impl Uncontained {
         self.scan_children(own, tracer::children(own));
     }
 
-    /// [`Uncontained::scan_descendants`] over a given list of `own`'s
-    /// children. J5-T: an inherited child and everything below it are left
-    /// out, so none of them can be attributed through it either.
+    /// [`Uncontained::scan_descendants`] over a given list of `own`'s children.
+    /// An inherited child and everything below it are left out, so none of them
+    /// can be attributed through it either.
     fn scan_children(&mut self, own: libc::pid_t, children: Vec<libc::pid_t>) {
         let mut walked = Vec::new();
         for child in children {
@@ -1011,7 +1011,7 @@ impl Uncontained {
             return;
         }
         let own = crate::sys::own_pid();
-        // J5-T: an inherited child's status is its owner's, not the attempt's.
+        // An inherited child's status is its owner's, not the attempt's.
         let children = tracer::children(own)
             .into_iter()
             .filter(|pid| !self.inherited.contains(*pid))
@@ -1172,8 +1172,8 @@ impl Tree for Uncontained {
             }),
         );
         details.insert("launcher_pid".to_owned(), Value::from(i64::from(self.pid)));
-        // J4 autoscope: §9.3 — where the supervisor stood when the leaf was
-        // made: already delegated, entered a scope of its own, or why not.
+        // §9.3 — where the supervisor stood when the leaf was made: already
+        // delegated, entered a scope of its own, or why not.
         details.insert("supervisor_scope".to_owned(), super::scope::details());
         // Observation, not containment: the observer's filter is in the
         // target, and the receipt names it by the digest it reports.
@@ -1762,12 +1762,12 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// J5-T (review of the fix): an inherited record names a process only
-    /// with its birth. The same pid under another start time is a number the
-    /// kernel reused after the inherited process ended — possibly for an
-    /// escaped attempt process — so it is not inherited and is scanned like
-    /// any child. The kernel will not reuse a live pid on demand, so the
-    /// record's birth is made to differ instead.
+    /// An inherited record names a process only with its birth. The same pid
+    /// under another start time is a number the kernel reused after the
+    /// inherited process ended — possibly for an escaped attempt process — so
+    /// it is not inherited and is scanned like any child. The kernel will not
+    /// reuse a live pid on demand, so the record's birth is made to differ
+    /// instead.
     #[test]
     fn j5t_an_inherited_record_names_a_process_only_with_its_birth() {
         let root = tempfile::tempdir().unwrap();

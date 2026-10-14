@@ -51,12 +51,11 @@ impl Session {
         let tgid = self.tgid_of(tid);
         self.destroy_other_threads(tgid, tid);
         let entry = self.confirm_entry(tid, carried);
-        // Security 2026-09-27 (audit 3 A1): the kernel has already installed
-        // the new image at this stop, so `/proc/<tid>/exe` names what actually
-        // runs, whatever the tracee did to the pathname between the entry
-        // snapshot and the kernel's own copy. A read that fails keeps the
-        // event (the snapshot's claim stands, as before) without the
-        // corroboration.
+        // The kernel has already installed the new image at this stop, so
+        // `/proc/<tid>/exe` names what actually runs, whatever the tracee did
+        // to the pathname between the entry snapshot and the kernel's own copy.
+        // A read that fails keeps the event (the snapshot's claim stands, as
+        // before) without the corroboration.
         let images = self
             .config
             .target
@@ -110,13 +109,12 @@ impl Session {
     /// this exec.
     ///
     /// It was the leader until now. After a non-leader exec that thread is
-    /// gone: the kernel destroyed it, and the thread that execed took its
-    /// id. Whatever it had in flight can no longer return, and the syscall
-    /// exit that follows is the exec's own — whether or not the exec's
-    /// entry was followed (J4 W3, loss review finding 1: when it was refused
-    /// an in-flight slot, the leader's stale entry used to be paired with
-    /// that exit, an invented result). The gap names the call, because the
-    /// entry is in hand.
+    /// gone: the kernel destroyed it, and the thread that execed took its id.
+    /// Whatever it had in flight can no longer return, and the syscall exit
+    /// that follows is the exec's own — whether or not the exec's entry was
+    /// followed: when it was refused an in-flight slot, pairing the leader's
+    /// stale entry with that exit would invent a result. The gap names the
+    /// call, because the entry is in hand.
     fn end_leaders_flight(&mut self, tid: pid_t, non_leader: bool) {
         if non_leader {
             match self.tasks.take_state(tid) {
@@ -188,11 +186,10 @@ impl Session {
             syscall: Some(pending.entry.name),
             path: pending.args.path.clone(),
             dirfd: pending.args.dirfd,
-            // Security 2026-09-29 (audit 6 N2): the argv the entry-stop
-            // check judged is tracee memory, which a sibling thread can
-            // rewrite for the kernel's own copy. The image is installed
-            // here and has run nothing, so the kernel's own copy of the
-            // argv and of the image are re-checked ([`exec_recheck`]).
+            // The argv the entry-stop check judged is tracee memory, which a
+            // sibling thread can rewrite for the kernel's own copy. The image
+            // is installed here and has run nothing, so the kernel's own copy
+            // of the argv and of the image are re-checked ([`exec_recheck`]).
             // An entry the rules already denied never reaches this stop.
             rejudge: (rules && pending.args.command.is_none())
                 .then(|| pending.entry_argv.clone().unwrap_or_default()),
@@ -241,12 +238,11 @@ mod tests {
     use crate::platform::linux::tracer::closed_set;
     use crate::platform::linux::tracer::{Args, OpSet, ShebangImage, TracerConfig};
 
-    /// J4 W3, loss review finding 1, at the session: after a non-leader
-    /// exec the leader's entry is abandoned — a gap of its own classes —
-    /// whether the thread that execed carried its own entry or had none
-    /// (refused an in-flight slot), and nothing is left on the leader's id
-    /// that the exec's syscall exit could be paired with. A restart the
-    /// leader owed ends as its death would.
+    /// At the session, after a non-leader exec the leader's entry is abandoned
+    /// — a gap of its own classes — whether the thread that execed carried its
+    /// own entry or had none (refused an in-flight slot), and nothing is left
+    /// on the leader's id that the exec's syscall exit could be paired with. A
+    /// restart the leader owed ends as its death would.
     #[test]
     fn j4_w3_a_non_leader_exec_abandons_the_leaders_entry_whatever_was_carried() {
         for carried in [false, true] {
@@ -401,9 +397,9 @@ mod tests {
         );
     }
 
-    /// Audit-6 review: the process an exec-time hit kills leaves flight at
-    /// its exec event, which carries the verdict, so the death that follows
-    /// has no entry to abandon — no invented `entry_abandoned` loss.
+    /// The process an exec-time hit kills leaves flight at its exec event,
+    /// which carries the verdict, so the death that follows has no entry to
+    /// abandon — no invented `entry_abandoned` loss.
     #[test]
     fn an_exec_the_recheck_kills_leaves_flight_with_its_event_and_no_abandoned_gap() {
         // No real task has this pid, so the SIGKILL touches nothing.

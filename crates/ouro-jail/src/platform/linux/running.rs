@@ -743,13 +743,12 @@ pub(super) fn outcome_from_status(status: i32) -> RunEvent {
     }
 }
 
-/// Security 2026-09-27 (audit 3 A5): the receipt's account of stops another
-/// filter asked for — a child's own `SECCOMP_RET_TRACE` on a call outside the
-/// closed set, carrying its own trace data, not this attempt's. Each is
-/// continued unobserved: not a result, not a loss, never a
-/// `unexpected_trace_stop` gap. The count is what makes the guessing visible,
-/// so it is carried in `lifetime.native.details`; null when no observer ran,
-/// because a detail must not claim a count nothing read.
+/// The receipt's account of stops another filter asked for — a child's own
+/// `SECCOMP_RET_TRACE` on a call outside the closed set, carrying its own trace
+/// data, not this attempt's. Each is continued unobserved: not a result, not a
+/// loss, never a `unexpected_trace_stop` gap. The count is what makes the
+/// guessing visible, so it is carried in `lifetime.native.details`; null when
+/// no observer ran, because a detail must not claim a count nothing read.
 pub(super) fn wrong_guess_stops_detail(summary: Option<&TracerSummary>) -> Value {
     summary.map_or(Value::Null, |summary| {
         Value::from(summary.requested_by_other_filters)
@@ -979,9 +978,8 @@ mod tests {
 
     #[test]
     fn wrong_guess_trace_stops_are_counted_in_the_receipts_native_details() {
-        // Security 2026-09-27 (audit 3 A5): the receipt carries the counter, or
-        // null when no observer ran, so a detail never claims a count nothing
-        // read.
+        // The receipt carries the counter, or null when no observer ran, so a
+        // detail never claims a count nothing read.
         assert_eq!(super::wrong_guess_stops_detail(None), Value::Null);
         let mut summary = TracerSummary::default();
         assert_eq!(

@@ -13,18 +13,17 @@
 //! `/run/ouro/proxy/proxy.sock`, which only the bridge may reach.
 //!
 //! The launcher starts it before the target is released, with a double fork,
-//! `/dev/null` as stdin and stdout, the report end of a `SOCK_SEQPACKET`
-//! pair as stderr (the supervisor holds the other end), no other descriptor,
-//! an empty environment and a session of its own. Security 2026-09-27
-//! (audit 3 A4): once the supervisor has discovered and verified the bridge,
-//! it seals it over that pair and the bridge makes itself non-dumpable
-//! before it serves its first client, so a same-uid target cannot reach its
-//! `/proc` entries on any host. It runs under the same
-//! seccomp filters as the child,
-//! so its `connect` to the proxy socket is mediated: the supervisor allows
-//! exactly the pinned proxy socket identity, whatever the path now names.
-//! That is what makes the path unredirectable by a child rename, unlink,
-//! symlink or mount change — not anything the bridge checks itself.
+//! `/dev/null` as stdin and stdout, the report end of a `SOCK_SEQPACKET` pair
+//! as stderr (the supervisor holds the other end), no other descriptor, an
+//! empty environment and a session of its own. Once the supervisor has
+//! discovered and verified the bridge, it seals it over that pair and the
+//! bridge makes itself non-dumpable before it serves its first client, so a
+//! same-uid target cannot reach its `/proc` entries on any host. It runs under
+//! the same seccomp filters as the child, so its `connect` to the proxy socket
+//! is mediated: the supervisor allows exactly the pinned proxy socket identity,
+//! whatever the path now names. That is what makes the path unredirectable by a
+//! child rename, unlink, symlink or mount change — not anything the bridge
+//! checks itself.
 //!
 //! It is one thread with nonblocking sockets and `poll`, bounded at
 //! [`MAX_CONNECTIONS`] relays with [`BUFFER`] bytes per direction, so its
@@ -71,11 +70,10 @@ Content-Length: 16\r\nX-Ouro-Proxy-Reason: bridge_overload\r\nConnection: close\
 pub const BUFFER: usize = 16 * 1024;
 
 /// How long a poll round waits after `accept` failed for fd or memory
-/// exhaustion (Security 2026-09-27, audit 3 A7b: `EMFILE`, `ENFILE`, `ENOMEM`,
-/// `ENOBUFS`). The refusal leaves the listener readable, so without the wait
-/// the loop would poll, accept-fail and poll again as fast as it could,
-/// burning a core for the attempt's remaining life. The queue that produced
-/// the ceiling does not drain by spinning on it.
+/// exhaustion (`EMFILE`, `ENFILE`, `ENOMEM`, `ENOBUFS`). The refusal leaves the
+/// listener readable, so without the wait the loop would poll, accept-fail and
+/// poll again as fast as it could, burning a core for the attempt's remaining
+/// life. The queue that produced the ceiling does not drain by spinning on it.
 pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Exit status when the bridge cannot bind its address.
@@ -177,13 +175,12 @@ pub fn bridge_main(args: &[OsString]) -> ! {
     if socks.set_nonblocking(true).is_err() {
         std::process::exit(EXIT_BIND_FAILED);
     }
-    // Security 2026-09-27 (audit 3 A4): the supervisor discovers and reads
-    // back this bridge while it is still dumpable, then seals it — one
-    // datagram on the report pair — and only then is the target released.
-    // The seal is the bridge's own signal to drop out of `/proc` reach of a
-    // same-uid peer: until it lands, the bridge parks here and serves no
-    // one. A peer that closes the pair (the supervisor dying) fails the
-    // wait rather than parking the bridge forever.
+    // The supervisor discovers and reads back this bridge while it is still
+    // dumpable, then seals it — one datagram on the report pair — and only then
+    // is the target released. The seal is the bridge's own signal to drop out
+    // of `/proc` reach of a same-uid peer: until it lands, the bridge parks
+    // here and serves no one. A peer that closes the pair (the supervisor
+    // dying) fails the wait rather than parking the bridge forever.
     let Some(credential_origin) = await_seal() else {
         std::process::exit(EXIT_UNSEALED);
     };
@@ -338,10 +335,9 @@ impl Relay {
 /// once for each client turned away at capacity.
 ///
 /// Returns only when `poll` fails for a reason other than `EINTR`. An accept
-/// that fails for fd or memory exhaustion (audit 3 A7b) leaves the
-/// listener readable, so the round that discovers it sleeps before the next
-/// poll instead of spinning; every other accept error is answered as before,
-/// with no wait.
+/// that fails for fd or memory exhaustion leaves the listener readable, so the
+/// round that discovers it sleeps before the next poll instead of spinning;
+/// every other accept error is answered as before, with no wait.
 pub fn serve(
     listener: &TcpListener,
     connect: &dyn Fn() -> io::Result<UnixStream>,
@@ -406,9 +402,9 @@ fn serve_many(
             if revents[index] != 0
                 && accept_all(listener, connect, rejected, &mut relays, credential_origin)
             {
-                // Security 2026-09-27 (audit 3 A7b): the accept failed on
-                // process-wide resource exhaustion while the listener stayed
-                // readable; poll once less often rather than spin a core.
+                // The accept failed on process-wide resource exhaustion while
+                // the listener stayed readable; poll once less often rather
+                // than spin a core.
                 std::thread::sleep(ACCEPT_BACKOFF);
             }
         }
@@ -439,11 +435,11 @@ fn step(relay: &mut Relay, client: libc::c_short, upstream: libc::c_short) -> io
     Ok(())
 }
 
-/// Accepts every client waiting now. Returns whether an accept failed for fd
-/// or memory exhaustion, which leaves the listener readable and asks [`serve`]
-/// for one [`ACCEPT_BACKOFF`] before the next poll round (audit 3 A7b). Any
-/// other accept error — a reset connection, a race with a client that went
-/// away — is answered as before, with no wait.
+/// Accepts every client waiting now. Returns whether an accept failed for fd or
+/// memory exhaustion, which leaves the listener readable and asks [`serve`] for
+/// one [`ACCEPT_BACKOFF`] before the next poll round. Any other accept error —
+/// a reset connection, a race with a client that went away — is answered as
+/// before, with no wait.
 fn accept_all(
     listener: &TcpListener,
     connect: &dyn Fn() -> io::Result<UnixStream>,

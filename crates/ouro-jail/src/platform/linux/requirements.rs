@@ -173,8 +173,8 @@ pub(super) fn capability_from(
     }
 }
 
-// J5-D: the derivation apart from the probing, so the requirement→probe
-// mapping is testable with stated results (review F12).
+// The derivation apart from the probing, so the requirement→probe mapping is
+// testable with stated results (review F12).
 /// The plan's capabilities from the probe results: one row per requirement
 /// (through [`capability_for`] and `none`'s own mapping), then the probe
 /// rows.
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn a_run_probes_only_what_its_requirements_name() {
         assert!(super::probes_for(Requirement::Limit(LimitKey::Wall)).is_empty());
-        // J3-agent: the agent network is measured, never granted for free.
+        // The agent network is measured, never granted for free.
         assert_eq!(
             super::probes_for(Requirement::NetworkProxy),
             [
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn a_proxy_requirement_rests_on_measured_probes_and_never_on_a_skip() {
-        // J3-agent: no longer unsupported; derived from what was measured.
+        // No longer unsupported; derived from what was measured.
         let unmeasured = capability_for(Requirement::NetworkProxy, &[], "2026-09-22T00:00:00Z");
         assert_eq!(unmeasured.status, CapabilityStatus::Skipped);
         let ok = |name: &'static str| ProbeResult {

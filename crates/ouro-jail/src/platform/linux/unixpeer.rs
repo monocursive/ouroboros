@@ -54,8 +54,7 @@ pub const NON_UNIX_NOTE: &str = "a mediated connect runs in the supervisor's LSM
 /// notification (before the first id revalidation). It defaults to zero and has
 /// no effect in production; a live test raises it to force the task-death /
 /// pid-reuse window that the id revalidation guards, so removing that guard
-/// turns a test red (contract rule 6 / review fix 3). It is an atomic load per
-/// mediation, which is negligible.
+/// turns a test red. It is an atomic load per mediation, which is negligible.
 pub static MEDIATION_TEST_DELAY_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -191,7 +190,7 @@ pub enum Peer {
     UnixPath(Vec<u8>),
     /// An abstract socket's name bytes.
     Abstract(Vec<u8>),
-    /// An internet address the child named (issue drafts 13/14).
+    /// An internet address the child named.
     Internet {
         port: u16,
         address: std::net::IpAddr,
@@ -270,8 +269,8 @@ pub struct ConnectFacts {
     pub family: Option<u16>,
     /// Whether the whole `sockaddr` the child passed was read.
     pub address_complete: bool,
-    /// The address fact read from the `sockaddr` (issue drafts 13/14): the
-    /// AF_UNIX path, the abstract name, or the internet address.
+    /// The address fact read from the `sockaddr`: the AF_UNIX path, the
+    /// abstract name, or the internet address.
     pub peer: Option<Peer>,
 }
 

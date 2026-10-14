@@ -1,5 +1,5 @@
-//! Restart decisions (J4 O-2): a call whose syscall exit carried a kernel
-//! restart code is followed to what the kernel then did with it.
+//! Restart decisions: a call whose syscall exit carried a kernel restart code
+//! is followed to what the kernel then did with it.
 
 use libc::pid_t;
 
@@ -9,9 +9,9 @@ use crate::platform::linux::abi;
 use crate::platform::linux::tracer::{GapReason, sys};
 
 /// Where a call entered the kernel: its ABI, its number and the user
-/// instruction pointer just past the instruction that made it. A kernel
-/// restart re-executes that instruction with the same number, so a re-entry
-/// stops here again (J4 O-2).
+/// instruction pointer just past the instruction that made it. A kernel restart
+/// re-executes that instruction with the same number, so a re-entry stops here
+/// again.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Site {
     pub(super) arch: u32,
@@ -46,7 +46,7 @@ impl Site {
     }
 }
 
-/// A call whose syscall exit carried a kernel restart code (J4 O-2).
+/// A call whose syscall exit carried a kernel restart code.
 ///
 /// The code is not the call's result. When the thread next heads for user
 /// space the kernel delivers any pending signal and then either re-enters
@@ -67,12 +67,11 @@ impl Site {
 ///   `restart_syscall`, which is not traced), an unreadable or unrecognised
 ///   frame, a stop out of this sequence: [`GapReason::RestartUnresolved`].
 ///
-/// "Restarted" at a handler's entry is not yet the end (J4 W3, tracer review
-/// R1). The re-entry comes only after the handler returns, through
-/// `rt_sigreturn`, which restores the frame — and the frame is the
-/// program's memory: the handler, or a sibling thread before the observer
-/// reads it, can rewrite it, so the program sees `EINTR` from a call the
-/// observer read as restarted. The thread is then let run
+/// "Restarted" at a handler's entry is not yet the end. The re-entry comes only
+/// after the handler returns, through `rt_sigreturn`, which restores the frame
+/// — and the frame is the program's memory: the handler, or a sibling thread
+/// before the observer reads it, can rewrite it, so the program sees `EINTR`
+/// from a call the observer read as restarted. The thread is then let run
 /// ([`Awaiting::Reentry`]) and the wait is settled by what follows:
 ///
 /// * its next entry stop at the same [`Site`]: the re-entry, restarted;
@@ -298,8 +297,8 @@ impl Session {
                     arg0: info.args[0],
                 })
             }
-            // Left this stop without being resumed, which only a SIGKILL does
-            // (J4 O-3): on its way out, or already at its exit notification.
+            // Left this stop without being resumed, which only a SIGKILL does:
+            // on its way out, or already at its exit notification.
             Err(err) if err.raw_os_error() == Some(libc::ESRCH) => EntryStop::Killed,
             Ok(_) if Self::at_exit_notification(tid) => EntryStop::Killed,
             _ => EntryStop::Unreadable,
@@ -314,12 +313,11 @@ impl Session {
         };
         match (seen, awaiting) {
             (EntryStop::At(at), _) if at == site => self.settle_restart(tid, Verdict::Restarted),
-            // Killed at the re-entry, which the kernel now skips (J4 O-3):
-            // stepped here, it can only be the re-entry; let run, it is taken
-            // as one only when the kernel alone decided the restart. The call
-            // is counted once, as killed at its entry, by `handle_entry` —
-            // not a second time as a restart that never finished (J4 W3,
-            // tracer review R2).
+            // Killed at the re-entry, which the kernel now skips: stepped here,
+            // it can only be the re-entry; let run, it is taken as one only
+            // when the kernel alone decided the restart. The call is counted
+            // once, as killed at its entry, by `handle_entry` — not a second
+            // time as a restart that never finished.
             (EntryStop::Killed, Awaiting::Decision | Awaiting::Reentry { by_kernel: true }) => {
                 let _ = self.tasks.take_restart(tid);
             }
@@ -358,8 +356,7 @@ impl Session {
     /// left its thread. Before the kernel's decision the call did nothing and
     /// returned nothing, and so after a restart the kernel alone decided:
     /// neither a result nor a loss. After a restart read from the frame, the
-    /// `EINTR` the program may have seen was never observed: a gap (J4 W3,
-    /// R1).
+    /// `EINTR` the program may have seen was never observed: a gap.
     pub(super) fn restart_ended(&mut self, wait: RestartWait) {
         match wait.awaiting {
             Awaiting::Decision | Awaiting::Reentry { by_kernel: true } => {
@@ -416,9 +413,9 @@ mod tests {
         assert_eq!(session.tasks.in_flight(), 0);
     }
 
-    /// J4 O-2: the kernel's rule at a handler's entry, for every restart
-    /// code. Only `ERESTARTSYS` depends on the frame, and only the two frames
-    /// the kernel writes for it are accepted.
+    /// The kernel's rule at a handler's entry, for every restart code. Only
+    /// `ERESTARTSYS` depends on the frame, and only the two frames the kernel
+    /// writes for it are accepted.
     #[test]
     fn j4_o2_the_verdict_at_a_handler_follows_the_kernel_for_every_code() {
         let site = Site {
@@ -478,8 +475,8 @@ mod tests {
         );
     }
 
-    /// Audit 2026-10-08 L18: the restart address is the syscall instruction
-    /// itself, one instruction before the `ip` the entry stop reports.
+    /// The restart address is the syscall instruction itself, one instruction
+    /// before the `ip` the entry stop reports.
     #[test]
     fn the_restart_address_is_the_syscall_instruction_before_the_reported_ip() {
         let at = |arch| Site {
@@ -518,11 +515,11 @@ mod tests {
         }
     }
 
-    /// J4 O-2 at the session: a restart code keeps the call in flight; each
-    /// way the wait ends gives exactly what it should — `EINTR` one result,
-    /// a re-entry nothing (the re-entered call is its own entry), an
-    /// unresolved decision one gap naming the call's classes, a death
-    /// nothing — and every one releases the slot.
+    /// At the session, a restart code keeps the call in flight; each way the
+    /// wait ends gives exactly what it should — `EINTR` one result, a re-entry
+    /// nothing (the re-entered call is its own entry), an unresolved decision
+    /// one gap naming the call's classes, a death nothing — and every one
+    /// releases the slot.
     #[test]
     fn j4_o2_each_end_of_a_restart_wait_is_exact() {
         let (mut session, rx) = traced(
@@ -605,12 +602,11 @@ mod tests {
         assert!(!GapReason::RestartUnresolved.is_open_ended());
     }
 
-    /// J4 W3, tracer review R1, at the session: a restart read at a
-    /// handler's entry is settled by what the thread does next. Its
-    /// re-entry at the same site: restarted, no result of its own and no
-    /// loss. Any other entry: one `restart_unresolved` gap of the call's
-    /// classes. Its end: nothing when the restart code alone decided
-    /// (`ERESTARTNOINTR`), a gap when the frame did. Killed at an entry
+    /// At the session, a restart read at a handler's entry is settled by what
+    /// the thread does next. Its re-entry at the same site: restarted, no
+    /// result of its own and no loss. Any other entry: one `restart_unresolved`
+    /// gap of the call's classes. Its end: nothing when the restart code alone
+    /// decided (`ERESTARTNOINTR`), a gap when the frame did. Killed at an entry
     /// stop that cannot be read: taken as the re-entry only when the code
     /// decided. Every end releases the slot.
     #[test]
@@ -731,13 +727,13 @@ mod tests {
                 == Some(nr)
     }
 
-    /// J4 W3, tracer review R2: a SIGKILL exactly at the re-entry of a
-    /// restarted call. The child sleeps in `openat` of a FIFO, a default-
-    /// ignored signal interrupts it (`-ERESTARTSYS` at the exit), the kernel
-    /// re-enters the call, and the child is killed at that re-entry's
-    /// seccomp stop. The kernel skips the re-entered call, so it is neither
-    /// a result nor a loss — and it is one call, counted once. On the base
-    /// it was counted twice, as `killed_at_entry` and `restarts_unfinished`.
+    /// A SIGKILL exactly at the re-entry of a restarted call. The child sleeps
+    /// in `openat` of a FIFO, a default- ignored signal interrupts it
+    /// (`-ERESTARTSYS` at the exit), the kernel re-enters the call, and the
+    /// child is killed at that re-entry's seccomp stop. The kernel skips the
+    /// re-entered call, so it is neither a result nor a loss — and it is one
+    /// call, counted once. On the base it was counted twice, as
+    /// `killed_at_entry` and `restarts_unfinished`.
     #[test]
     fn j4_w3_r2_a_kill_at_the_reentry_of_a_restarted_call_is_counted_once() {
         let dir = tempfile::tempdir().unwrap();

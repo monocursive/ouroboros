@@ -314,7 +314,7 @@ impl Platform for LinuxPlatform {
         if plan.request.snapshot.profile == ProfileName::None {
             return super::uncontained::prepare(plan, sinks, deadline);
         }
-        // J5-D: never a bare name, so nothing but the resolved file runs.
+        // Never a bare name, so nothing but the resolved file runs.
         let bwrap = self.backend().map_err(|reason| {
             error(
                 ErrorCode::BackendUnavailable,
@@ -461,7 +461,8 @@ pub(super) mod tests {
                 probe::run_one(name, exe, std::path::Path::new("bwrap")),
                 probe::run_one_backend(name, exe, Err("PATH is unset")),
             ] {
-                // A table-bound probe is refused first off x86_64.
+                // A table-bound probe is refused first on an architecture
+                // the syscall tables do not cover.
                 if result.status == ProbeStatus::Unsupported {
                     continue;
                 }

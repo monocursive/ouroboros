@@ -23,11 +23,11 @@ impl Session {
                         .get(tid)
                         .is_some_and(|task| matches!(task.state(), TaskState::InFlight { .. })) =>
             {
-                // J4 O-3, at the exit: killed after its call ran, before the
-                // return could be read. The result is lost, and the entry in
-                // hand is what names it: the death that follows records it
-                // once, as `entry_abandoned` of that call's own classes —
-                // not a second gap in every class.
+                // Killed at the exit, after its call ran, before the return
+                // could be read. The result is lost, and the entry in hand is
+                // what names it: the death that follows records it once, as
+                // `entry_abandoned` of that call's own classes — not a second
+                // gap in every class.
                 return;
             }
             Err(_) => {
@@ -54,9 +54,9 @@ impl Session {
     /// flight, which becomes one result or one gap — or, with a kernel
     /// restart code, a wait for the kernel's decision.
     pub(super) fn handle_exit(&mut self, tid: pid_t, rval: i64) {
-        // A restart code is not a result yet (J4 O-2): the kernel decides
-        // after this stop whether to re-enter the call or to return EINTR,
-        // and the call stays in flight until the observer has seen which.
+        // A restart code is not a result yet: the kernel decides after this
+        // stop whether to re-enter the call or to return EINTR, and the call
+        // stays in flight until the observer has seen which.
         if sys::is_restart(rval) && self.tasks.start_wait(tid, -rval) {
             return;
         }
@@ -80,8 +80,8 @@ impl Session {
         self.gap(GapReason::UnmatchedExit, OpSet::ALL, Some(1));
     }
 
-    /// A call under another ABI returned (J4 D2): never decoded, so its
-    /// return is all the observer learns of it.
+    /// A call under another ABI returned: never decoded, so its return is all
+    /// the observer learns of it.
     fn foreign_returned(&mut self, rval: i64) {
         if rval == -i64::from(libc::ENOSYS) {
             // No such call in its table, or an ABI this kernel lacks
@@ -95,7 +95,7 @@ impl Session {
         }
     }
 
-    /// A request for a notification listener returned (J4 D1).
+    /// A request for a notification listener returned.
     fn listener_returned(&mut self, rval: i64) {
         if rval >= 0 {
             // The return is the listener's descriptor. From here on
@@ -110,7 +110,7 @@ impl Session {
         }
     }
 
-    /// A `clone(CLONE_UNTRACED)` returned (J4 S4).
+    /// A `clone(CLONE_UNTRACED)` returned.
     fn untraced_returned(&mut self, rval: i64) {
         if rval > 0 {
             // The return is the new task's id. Nothing traces it: not
@@ -141,17 +141,16 @@ impl Session {
             return;
         }
         let op = pending.entry.op;
-        // Security 2026-09-25 (audit F1): the entry snapshot of pointed
-        // arguments is only an assertion while the same bytes still read at
-        // the exit. A thread of the tracee can rewrite `open_how.flags`, a
-        // pathname or an address family between the entry stop and the
-        // kernel's own copy after it, which would falsify this event's
-        // classification — a mutation recorded as a read, or a path that was
-        // never used. Re-read and compare; on any disagreement the event is
-        // dropped and the call becomes a gap of its own classes, so the
-        // receipt can never present a falsified snapshot as observed fact.
-        // Register arguments need no re-read: the kernel consumes the saved
-        // pt_regs, which this stop pair already saw.
+        // The entry snapshot of pointed arguments is only an assertion while
+        // the same bytes still read at the exit. A thread of the tracee can
+        // rewrite `open_how.flags`, a pathname or an address family between the
+        // entry stop and the kernel's own copy after it, which would falsify
+        // this event's classification — a mutation recorded as a read, or a
+        // path that was never used. Re-read and compare; on any disagreement
+        // the event is dropped and the call becomes a gap of its own classes,
+        // so the receipt can never present a falsified snapshot as observed
+        // fact. Register arguments need no re-read: the kernel consumes the
+        // saved pt_regs, which this stop pair already saw.
         if !self.arguments_stable(tid, &pending) {
             self.summary.loss.argument_snapshot_unstable += 1;
             self.gap(GapReason::ArgumentSnapshotUnstable, OpSet::of(op), Some(1));
@@ -261,16 +260,15 @@ impl Session {
     /// Whether the call is a read-only open whose verdict rests on flags in
     /// memory, counted and named by its gap.
     ///
-    /// A memory-sourced read-only `openat2` followed for verification
-    /// (audit 2026-09-25-2, S1). Security 2026-09-27 (audit 3 A1): the exit
+    /// A memory-sourced read-only `openat2` followed for verification: the exit
     /// re-read agreeing with the entry snapshot does NOT prove the kernel
-    /// applied these flags — a thread of the tracee can flip
-    /// `open_how.flags` for the kernel's own copy and restore them before
-    /// this stop (an A-B-A rewrite), which this observer cannot tell apart.
-    /// The verdict is therefore not certifiable: the call is counted, but it
-    /// is also a gap of its own classes, never a silent filter.
-    /// Register-sourced flags are immune (the kernel consumes the saved
-    /// `pt_regs`) and keep their entry-time read-only skip.
+    /// applied these flags — a thread of the tracee can flip `open_how.flags`
+    /// for the kernel's own copy and restore them before this stop (an A-B-A
+    /// rewrite), which this observer cannot tell apart. The verdict is
+    /// therefore not certifiable: the call is counted, but it is also a gap of
+    /// its own classes, never a silent filter. Register-sourced flags are
+    /// immune (the kernel consumes the saved `pt_regs`) and keep their
+    /// entry-time read-only skip.
     fn readonly_open_unverified(&mut self, pending: &Pending) -> bool {
         let op = pending.entry.op;
         if op == ClosedOp::Open
@@ -289,20 +287,19 @@ impl Session {
     /// Weaken a successful open's pathname claim the kernel does not
     /// corroborate.
     ///
-    /// Security 2026-09-29 (audit 6 N1): byte stability is not
-    /// certification for a pathname either — a sibling thread can rewrite
-    /// the buffer for the kernel's own copy and restore it before the exit
-    /// re-read, the same A-B-A rewrite the flags gap names. A successful
-    /// open hands the observer one kernel fact: the descriptor's own
+    /// Byte stability is not certification for a pathname either — a sibling
+    /// thread can rewrite the buffer for the kernel's own copy and restore it
+    /// before the exit re-read, the same A-B-A rewrite the flags gap names. A
+    /// successful open hands the observer one kernel fact: the descriptor's own
     /// `/proc/<tid>/fd/<ret>` link, resolved by the kernel for the file it
     /// actually opened. When it corroborates the snapshot
-    /// ([`path_corroborated`]) the claim stands; otherwise (an unreadable
-    /// link, or a disagreement a symlink, a pipe or a rename could also
-    /// explain) the claim is downgraded to an incomplete path, counted, and
-    /// named by a bookkeeping gap, so a receipt never certifies a pathname
-    /// the kernel may not have used. The call and its event are kept — no
-    /// result is missing — so this never degrades a class or stops a strict
-    /// run: failures of this check only weaken, never accuse.
+    /// ([`path_corroborated`]) the claim stands; otherwise (an unreadable link,
+    /// or a disagreement a symlink, a pipe or a rename could also explain) the
+    /// claim is downgraded to an incomplete path, counted, and named by a
+    /// bookkeeping gap, so a receipt never certifies a pathname the kernel may
+    /// not have used. The call and its event are kept — no result is missing —
+    /// so this never degrades a class or stops a strict run: failures of this
+    /// check only weaken, never accuse.
     fn corroborate_open_path(&mut self, tid: pid_t, pending: &mut Pending, rval: i64) {
         if pending.entry.op == ClosedOp::Open
             && rval >= 0
@@ -314,11 +311,10 @@ impl Session {
                 .flags
                 .is_some_and(|flags| flags & (libc::O_TMPFILE as u64) == libc::O_TMPFILE as u64);
             let corroborated = self.procfs.fd_link(tid, rval).is_some_and(|resolved| {
-                // Audit 7 L7: the kernel's ` (deleted)` annotation can
-                // also be a live file's literal name, so when the raw
-                // link carries it the descriptor's link count — read
-                // while the tracee is stopped — must agree the file is
-                // truly unlinked.
+                // The kernel's ` (deleted)` annotation can also be a live
+                // file's literal name, so when the raw link carries it the
+                // descriptor's link count — read while the tracee is stopped —
+                // must agree the file is truly unlinked.
                 let nlink = if resolved.ends_with(b" (deleted)") {
                     self.procfs.fd_nlink(tid, rval)
                 } else {
@@ -335,7 +331,7 @@ impl Session {
     }
 
     /// Whether the pointed arguments this event asserts still read at the
-    /// syscall exit as they read at the entry stop (audit F1).
+    /// syscall exit as they read at the entry stop.
     ///
     /// The kernel consumes pointed arguments *after* the entry stop resumes,
     /// re-reading the same user memory the observer snapshotted; a thread of
@@ -433,11 +429,11 @@ mod tests {
     use super::*;
     use crate::platform::linux::tracer::{Args, TracerConfig};
 
-    /// Security 2026-09-25 (audit F1): the exit re-read of pointed
-    /// arguments. A snapshot that still reads at the exit is stable; one
-    /// whose memory changed (or can no longer be read) is not, and its event
-    /// must become an `argument_snapshot_unstable` gap. Verified against
-    /// this very process's memory, which `read_remote` can read.
+    /// The exit re-read of pointed arguments. A snapshot that still reads at
+    /// the exit is stable; one whose memory changed (or can no longer be read)
+    /// is not, and its event must become an `argument_snapshot_unstable` gap.
+    /// Verified against this very process's memory, which `read_remote` can
+    /// read.
     #[test]
     fn pointed_arguments_are_reverified_at_the_exit() {
         let (mut session, _rx) = stalled_session();
@@ -485,13 +481,12 @@ mod tests {
         );
     }
 
-    /// Security 2026-09-25-2 (audit S1): an `openat2` classified read-only
-    /// at its entry is followed to its exit, where the flags are re-read.
-    /// Security 2026-09-27 (audit 3 A1): even stable read-only flags cannot
-    /// be certified — an A-B-A rewrite satisfies both reads — so the call is
-    /// counted AND recorded as a `memory_flags_unverified` gap of its
-    /// classes, never a silent filter; flags rewritten between the two
-    /// kernel reads remain an `argument_snapshot_unstable` gap.
+    /// An `openat2` classified read-only at its entry is followed to its exit,
+    /// where the flags are re-read. Even stable read-only flags cannot be
+    /// certified — an A-B-A rewrite satisfies both reads — so the call is
+    /// counted AND recorded as a `memory_flags_unverified` gap of its classes,
+    /// never a silent filter; flags rewritten between the two kernel reads
+    /// remain an `argument_snapshot_unstable` gap.
     #[test]
     fn a_readonly_openat2_is_reverified_at_its_exit() {
         let self_pid = std::process::id() as pid_t;
@@ -544,13 +539,12 @@ mod tests {
         );
     }
 
-    /// Mutation-M02 guard: the REAL unmatched-exit branch of
-    /// `handle_exit` — a syscall exit with no entry to pair (the O03.2
-    /// seam's manufactured gap is this same shape, but the branch here is
-    /// reached without the seam) — counts the loss and records one
-    /// `unmatched_exit` gap over every class. Both shapes reach it: a
-    /// thread this tracer tracks whose entry was never seen, and one it
-    /// does not track at all.
+    /// The real unmatched-exit branch of `handle_exit` — a syscall exit with no
+    /// entry to pair (the O03.2 seam's manufactured gap is this same shape, but
+    /// the branch here is reached without the seam) — counts the loss and
+    /// records one `unmatched_exit` gap over every class. Both shapes reach it:
+    /// a thread this tracer tracks whose entry was never seen, and one it does
+    /// not track at all.
     #[test]
     fn an_exit_with_no_entry_is_one_unmatched_exit_gap() {
         // A tracked thread whose pending entry is gone: the entry was
@@ -590,8 +584,8 @@ mod tests {
         }
     }
 
-    /// J4 S4 at the session: a `clone(CLONE_UNTRACED)` that created a task
-    /// is a gap in every class with no count; one that failed is nothing.
+    /// At the session, a `clone(CLONE_UNTRACED)` that created a task is a gap
+    /// in every class with no count; one that failed is nothing.
     #[test]
     fn j4_s4_an_untraced_descendant_is_a_gap_and_a_failed_clone_is_not() {
         let (mut session, rx) = traced(
@@ -624,12 +618,11 @@ mod tests {
         );
     }
 
-    /// Audit-6 review: a claim the descriptor does not corroborate is
-    /// downgraded and named by a bookkeeping gap — never loss, never a
-    /// degraded class — so ordinary `O_TMPFILE` and `/dev/stderr` opens cannot
-    /// stop a strict run, while a bare relative name is checked like any
-    /// other. Verified against this process's own memory, which the exit's
-    /// stability re-read can read.
+    /// A claim the descriptor does not corroborate is downgraded and named by a
+    /// bookkeeping gap — never loss, never a degraded class — so ordinary
+    /// `O_TMPFILE` and `/dev/stderr` opens cannot stop a strict run, while a
+    /// bare relative name is checked like any other. Verified against this
+    /// process's own memory, which the exit's stability re-read can read.
     #[test]
     fn an_open_claim_the_descriptor_does_not_corroborate_is_downgraded_not_lost() {
         let self_pid = std::process::id() as pid_t;

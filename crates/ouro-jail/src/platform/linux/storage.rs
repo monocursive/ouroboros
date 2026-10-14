@@ -22,11 +22,10 @@ pub(super) struct Storage {
     capacity_bytes: Option<u64>,
     capacity_inodes: Option<u64>,
     failure: Option<String>,
-    /// The loss was found before the target's end was known, the only
-    /// timing that may make it `outcome.cause` (§6.4, audit 2026-10-08 L2):
-    /// while the target ran, or before the release, where the check that
-    /// finds it refuses the run anyway. A loss first seen after the
-    /// target's own end never does.
+    /// The loss was found before the target's end was known, the only timing
+    /// that may make it `outcome.cause` (§6.4): while the target ran, or before
+    /// the release, where the check that finds it refuses the run anyway. A
+    /// loss first seen after the target's own end never does.
     lost_while_running: bool,
 }
 
