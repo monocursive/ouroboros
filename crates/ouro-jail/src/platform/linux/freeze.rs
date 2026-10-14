@@ -151,10 +151,14 @@ mod linux {
     /// with fixed paths, the declared runtime roots and `/etc` grants as
     /// binds (not this host's resolution of them, so the rendering is the
     /// same on every host), a fixed target and the descriptors preparation
-    /// hands bubblewrap (filter, status, arguments). What preparation adds
-    /// from the host and the attempt (operator grants, masks, staged vendor
-    /// state and credentials, protected-segment pins) is not here; the
-    /// baselines pin the snapshot those come from.
+    /// hands bubblewrap (filter, status, arguments). This is the plan before
+    /// preparation binds by descriptor: production then binds every source
+    /// with `--ro-bind-fd`/`--bind-fd` from its pin (`prepare_mounts`), swaps
+    /// in the sanitized `/etc/resolv.conf`, binds the protected segments and
+    /// placeholders, and sets the launcher's command line. What preparation
+    /// adds from the host and the attempt (operator grants, masks, staged
+    /// vendor state and credentials) is not here either; the baselines pin
+    /// the snapshot those come from.
     ///
     /// # Errors
     /// A baseline that does not resolve or a plan that does not render.
