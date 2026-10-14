@@ -455,7 +455,13 @@ type Control = [u64; 16];
 
 /// `CMSG_SPACE` for `fds` descriptors, checked against [`Control`].
 fn control_space(fds: usize) -> usize {
-    let payload = (fds * size_of::<c_int>()) as u32;
+    // Bounded before any narrowing: a payload that cannot fit the buffer is
+    // refused here, not wrapped by a cast.
+    let payload = fds
+        .checked_mul(size_of::<c_int>())
+        .filter(|bytes| *bytes <= size_of::<Control>())
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .unwrap_or_else(|| panic!("control buffer too small for {fds} descriptors"));
     // SAFETY: `CMSG_SPACE` is arithmetic on its argument; it dereferences
     // nothing.
     let space = unsafe { libc::CMSG_SPACE(payload) } as usize;

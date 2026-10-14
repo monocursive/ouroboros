@@ -51,6 +51,10 @@ pub const fn sun_path_capacity() -> usize {
     size_of::<libc::sockaddr_un>() - sun_path_offset()
 }
 
+// Every AF_UNIX length here is at most the structure's size, so its casts to
+// `socklen_t` and to Darwin's one-byte `sun_len` cannot truncate.
+const _: () = assert!(size_of::<libc::sockaddr_un>() <= u8::MAX as usize);
+
 fn zeroed_un() -> libc::sockaddr_un {
     // SAFETY: `sockaddr_un` is plain old data; all-zero bytes are a valid
     // value (family 0, empty path).

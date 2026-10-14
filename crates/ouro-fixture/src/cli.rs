@@ -566,13 +566,29 @@ pub enum Mode {
 }
 
 /// Parse an octal mode string.
+/// The largest mode a call takes: the file-type and permission bits, which
+/// is also all a Darwin `mode_t` (16 bits) holds.
+pub const MAX_MODE: u32 = 0o177_777;
+
 pub fn parse_mode(s: &str) -> Result<u32, String> {
-    u32::from_str_radix(s, 8).map_err(|_| format!("`{s}` is not an octal mode"))
+    let mode = u32::from_str_radix(s, 8).map_err(|_| format!("`{s}` is not an octal mode"))?;
+    if mode > MAX_MODE {
+        return Err(format!("`{s}` is wider than a mode (at most {MAX_MODE:o})"));
+    }
+    Ok(mode)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mode_wider_than_mode_t_is_refused_not_truncated() {
+        assert_eq!(parse_mode("177777"), Ok(MAX_MODE));
+        assert_eq!(parse_mode("600"), Ok(0o600));
+        assert!(parse_mode("200000").is_err());
+        assert!(parse_mode("9").is_err());
+    }
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("ouro-fixture").chain(args.iter().copied())).unwrap()

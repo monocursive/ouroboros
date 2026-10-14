@@ -702,8 +702,18 @@ mod linux {
                 k: i.k,
             })
             .collect();
+        // At most `seccomp_program`'s bound, far inside `BPF_MAXINSNS`
+        // (4096) and so inside the `u16` the kernel reads.
+        let Ok(len) = u16::try_from(program.len()) else {
+            return super::refuse(
+                rep,
+                "seccomp",
+                "unsupported",
+                format!("a filter of {} instructions", program.len()),
+            );
+        };
         let fprog = libc::sock_fprog {
-            len: program.len() as u16,
+            len,
             filter: program.as_ptr().cast_mut(),
         };
         let mut r = OpReport::new("seccomp");
