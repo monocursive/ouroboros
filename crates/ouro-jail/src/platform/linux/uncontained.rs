@@ -428,21 +428,7 @@ impl Uncontained {
                 "the uncontained boundary was asked to run a contained profile",
             ));
         }
-        // §5.2, as for every profile: v1 refuses a privileged or setuid
-        // supervisor rather than model that boundary. (Untestable on the
-        // reference host: the conformance account has no privilege to gain.)
-        // SAFETY: getuid and geteuid take no arguments and cannot fail.
-        let (ruid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
-        if euid == 0 || ruid != euid {
-            return Err(refusal(
-                ErrorCode::UnsupportedPlatform,
-                Remediation::HostSetup,
-                format!(
-                    "this slice refuses a privileged or setuid supervisor: real uid {ruid}, \
-                     effective uid {euid} (jail-v1 §5.2)"
-                ),
-            ));
-        }
+        shared::refuse_privileged_supervisor()?;
         if let Some(key) = unapplied_restriction(&snapshot) {
             return Err(refusal(
                 ErrorCode::MissingCapability,
@@ -816,36 +802,7 @@ impl Uncontained {
     /// The `applied` group: nothing but the leaf's limits, the wall and the
     /// environment, which is read back from the launcher.
     fn read_applied(&self, removed: Vec<String>) -> Applied {
-        let mut limits = Vec::new();
-        for (key, ceiling) in [
-            ("wall", self.snapshot.limits.wall.as_ref()),
-            ("pids", self.snapshot.limits.pids.as_ref()),
-            ("mem", self.snapshot.limits.mem.as_ref()),
-            ("swap", self.snapshot.limits.swap.as_ref()),
-            ("cpu", self.snapshot.limits.cpu.as_ref()),
-        ] {
-            let Some(ceiling) = ceiling else { continue };
-            if key != "wall"
-                && let Some(limit) = self
-                    .leaf
-                    .limits()
-                    .into_iter()
-                    .find(|limit| limit.key == key)
-            {
-                limits.push(limit);
-                continue;
-            }
-            let applied = key == "wall";
-            limits.push(AppliedLimit {
-                key: key.to_owned(),
-                requested: ceiling.value.clone(),
-                required: ceiling.required,
-                applied,
-                mechanism: applied.then(|| "boottime-deadline".to_owned()),
-                scope: applied.then(|| "tree".to_owned()),
-                hit: applied.then_some(false),
-            });
-        }
+        let limits = shared::ceiling_rows(&self.snapshot.limits, Some(&self.leaf));
         Applied {
             filesystem: None,
             network: AppliedNetwork {
@@ -1137,30 +1094,7 @@ impl Uncontained {
 
     /// Reads whatever the launcher wrote about a failed exec.
     fn pump_error(&mut self) {
-        if self.error_eof {
-            return;
-        }
-        let mut buffer = [0u8; 64];
-        loop {
-            // SAFETY: the buffer is live, the length matches and the
-            // descriptor is owned and non-blocking.
-            let n = unsafe {
-                libc::read(
-                    self.error.as_raw_fd(),
-                    buffer.as_mut_ptr().cast::<libc::c_void>(),
-                    buffer.len(),
-                )
-            };
-            if n > 0 {
-                let read = usize::try_from(n).unwrap_or(0);
-                self.error_bytes.extend_from_slice(&buffer[..read]);
-                continue;
-            }
-            if n == 0 {
-                self.error_eof = true;
-            }
-            return;
-        }
+        shared::drain_error_pipe(&self.error, &mut self.error_bytes, &mut self.error_eof);
     }
 
     fn pump_tracer(&mut self, block: Duration) {
@@ -1238,12 +1172,9 @@ impl Uncontained {
     /// Counters, the leaf's identity and every descendant's membership, at
     /// the contained profiles' counter cadence (and always when `force`).
     fn sample(&mut self, force: bool) {
-        let now = boottime_ns();
-        let interval = u64::try_from(shared::LIMIT_SAMPLE_INTERVAL.as_nanos()).unwrap_or(u64::MAX);
-        if !force && now.saturating_sub(self.sampled_at_ns) < interval {
+        if !shared::sample_due(&mut self.sampled_at_ns, force) {
             return;
         }
-        self.sampled_at_ns = now;
         if self.scan_leaf().is_some() {
             match shared::sample_counters(&mut self.leaf, &mut self.audit) {
                 shared::Counters::Read { oom_killed } => {
@@ -1260,52 +1191,41 @@ impl Uncontained {
         self.scan_descendants();
     }
 
-    /// Exec confirmation with no observer while the target lives: the error
-    /// pipe at EOF with no bytes and a changed image (see `platform.rs`).
+    /// Exec confirmation with no observer while the target lives
+    /// ([`shared::exec_without_observer`]).
     fn check_exec_without_tracer(&mut self) {
-        if self.exec_confirmed || self.tracer_attached {
-            return;
-        }
-        if !self.error_bytes.is_empty() || !self.error_eof {
-            return;
-        }
-        if self.launcher.is_live() && shared::image_changed(self.pid) {
+        if shared::exec_without_observer(
+            self.tracer_attached || self.exec_confirmed,
+            &self.error_bytes,
+            self.error_eof,
+            &self.launcher,
+        ) {
             self.exec_confirmed = true;
             self.pending.push_back(RunEvent::ExecConfirmed);
         }
     }
 
     fn check_wall(&mut self) {
-        if self.wall_reported {
-            return;
-        }
-        if self.wall.is_some_and(clock::Deadline::expired) {
-            self.wall_reported = true;
-            self.audit.record_limit_hit();
-            self.pending.push_back(RunEvent::WallExpired);
+        if let Some(event) = shared::check_wall(self.wall, &mut self.wall_reported, &mut self.audit)
+        {
+            self.pending.push_back(event);
         }
     }
 
     fn check_grace(&mut self) {
-        if self.hard_killed || self.stop_requested.is_none() {
-            return;
+        if shared::grace_spent(
+            self.hard_killed,
+            self.stop_requested.is_some(),
+            self.stop_at,
+        ) {
+            self.hard_kill();
         }
-        let Some(at) = self.stop_at else { return };
-        if boottime_ns().saturating_sub(at)
-            < u64::try_from(shared::STOP_GRACE.as_nanos()).unwrap_or(u64::MAX)
-        {
-            return;
-        }
-        self.hard_kill();
     }
 
     fn hard_kill(&mut self) {
-        if self.hard_killed {
-            return;
+        if shared::arm_hard_kill(&mut self.hard_killed, &mut self.hard_deadline) {
+            self.kill_all();
         }
-        self.hard_killed = true;
-        self.hard_deadline = Some(clock::Deadline::after(TREE_BUDGET));
-        self.kill_all();
     }
 
     /// `cgroup.kill` on the identity-checked leaf (never on a replacement:
@@ -1352,13 +1272,12 @@ impl Uncontained {
     /// insufficient if launcher death could also have closed that fd" — a
     /// signal death stays unknown).
     fn terminal_event(&mut self) -> Option<RunEvent> {
-        if let Some(outcome) = self.target_outcome.take() {
-            if !self.exec_confirmed {
-                self.exec_confirmed = true;
-                self.pending.push_back(outcome);
-                return Some(RunEvent::ExecConfirmed);
-            }
-            return Some(outcome);
+        if let Some(event) = shared::observed_outcome(
+            &mut self.target_outcome,
+            &mut self.exec_confirmed,
+            &mut self.pending,
+        ) {
+            return Some(event);
         }
         if self.tracer_attached {
             return self.finished.then(|| RunEvent::Unknown {

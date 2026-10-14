@@ -775,28 +775,14 @@ impl Boundary {
         deadline: clock::Deadline,
     ) -> Result<Boundary, JailError> {
         let snapshot = plan.request.snapshot.clone();
-        // §5.2: effective UID 0 and mismatched real/effective UIDs refuse in
-        // v1 — a privileged supervisor is a boundary this slice does not
-        // model, and the child-side capability readback is not a substitute
-        // for refusing to be privileged in the first place.
-        let (ruid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
-        if euid == 0 || ruid != euid {
-            return Err(error(
-                ErrorCode::UnsupportedPlatform,
-                ErrorStage::Preparing,
-                Remediation::HostSetup,
-                format!(
-                    "this slice refuses a privileged or setuid supervisor: real uid {ruid}, \
-                     effective uid {euid} (jail-v1 §5.2)"
-                ),
-            ));
-        }
+        shared::refuse_privileged_supervisor()?;
         if !snapshot.profile.is_contained() {
+            // `prepare` hands `none` to its own boundary before this point.
             return Err(error(
-                ErrorCode::UnsupportedPlatform,
+                ErrorCode::InternalError,
                 ErrorStage::Preparing,
-                Remediation::Unsupported,
-                "the uncontained `none` profile is not implemented in this slice".to_owned(),
+                Remediation::InspectState,
+                "the contained boundary was asked to run the uncontained `none` profile".to_owned(),
             ));
         }
         let observe_on = snapshot.observation.mode == ObserveMode::On;
@@ -1845,23 +1831,8 @@ impl Boundary {
     /// established instead of a generic backend failure.
     fn launcher_setup_failure(&mut self) -> JailError {
         self.status.pump();
-        let mut errno_bytes = Vec::new();
-        let mut buffer = [0u8; 16];
-        loop {
-            // SAFETY: the buffer is live and the length matches; the
-            // descriptor is owned and non-blocking.
-            let n = unsafe {
-                libc::read(
-                    self.error.as_raw_fd(),
-                    buffer.as_mut_ptr().cast::<libc::c_void>(),
-                    buffer.len(),
-                )
-            };
-            if n <= 0 {
-                break;
-            }
-            errno_bytes.extend_from_slice(&buffer[..usize::try_from(n).unwrap_or(0)]);
-        }
+        let (mut errno_bytes, mut eof) = (Vec::new(), false);
+        shared::drain_error_pipe(&self.error, &mut errno_bytes, &mut eof);
         launcher_failure(
             self.status.parsed().exit_code,
             &errno_bytes,
@@ -1882,37 +1853,10 @@ impl Boundary {
         if let Some(storage) = &self.storage {
             limits.extend(storage.limits());
         }
-        for (key, ceiling) in [
-            ("wall", self.snapshot.limits.wall.as_ref()),
-            ("pids", self.snapshot.limits.pids.as_ref()),
-            ("mem", self.snapshot.limits.mem.as_ref()),
-            ("swap", self.snapshot.limits.swap.as_ref()),
-            ("cpu", self.snapshot.limits.cpu.as_ref()),
-        ] {
-            let Some(ceiling) = ceiling else { continue };
-            if key != "wall"
-                && let Some(limit) = self
-                    .cgroup
-                    .as_ref()
-                    .and_then(|leaf| leaf.limits().into_iter().find(|limit| limit.key == key))
-            {
-                limits.push(limit);
-                continue;
-            }
-            let applied = key == "wall";
-            limits.push(AppliedLimit {
-                key: key.to_owned(),
-                requested: ceiling.value.clone(),
-                required: ceiling.required,
-                applied,
-                mechanism: applied.then(|| "boottime-deadline".to_owned()),
-                scope: applied.then(|| "tree".to_owned()),
-                // An applied ceiling that has not been hit says so; a null hit
-                // means unknown or unapplied (§6.4). The supervisor flips this
-                // to true when the deadline expires.
-                hit: applied.then_some(false),
-            });
-        }
+        limits.extend(shared::ceiling_rows(
+            &self.snapshot.limits,
+            self.cgroup.as_ref(),
+        ));
         let mut mounts = mounts;
         // A protected name the walk refused to follow is authority this plan
         // did not apply. The mount table is where §13.2 lists what the child's
@@ -3880,12 +3824,9 @@ impl LinuxRunning {
     }
 
     fn sample_limits(&mut self, force: bool) {
-        let now = boottime_ns();
-        let interval = u64::try_from(LIMIT_SAMPLE_INTERVAL.as_nanos()).unwrap_or(u64::MAX);
-        if !force && now.saturating_sub(self.sampled_at_ns) < interval {
+        if !shared::sample_due(&mut self.sampled_at_ns, force) {
             return;
         }
-        self.sampled_at_ns = now;
         if let Some(storage) = self.boundary.storage.as_mut() {
             match storage.sample() {
                 Ok(hits) => {
@@ -3924,30 +3865,12 @@ impl LinuxRunning {
     }
     /// Reads whatever the launcher wrote about a failed exec.
     fn pump_error(&mut self) {
-        if self.boundary.error_eof {
-            return;
-        }
-        let mut buffer = [0u8; 64];
-        loop {
-            // SAFETY: the buffer is live, the length matches and the
-            // descriptor is owned and non-blocking.
-            let n = unsafe {
-                libc::read(
-                    self.boundary.error.as_raw_fd(),
-                    buffer.as_mut_ptr().cast::<libc::c_void>(),
-                    buffer.len(),
-                )
-            };
-            if n > 0 {
-                let read = usize::try_from(n).unwrap_or(0);
-                self.boundary.error_bytes.extend_from_slice(&buffer[..read]);
-                continue;
-            }
-            if n == 0 {
-                self.boundary.error_eof = true;
-            }
-            return;
-        }
+        let boundary = &mut self.boundary;
+        shared::drain_error_pipe(
+            &boundary.error,
+            &mut boundary.error_bytes,
+            &mut boundary.error_eof,
+        );
     }
 
     /// Drains the tracer channel into audit events and run events.
@@ -4014,72 +3937,53 @@ impl LinuxRunning {
         }
     }
 
-    /// Exec confirmation with no observer.
-    ///
-    /// The launcher sets the error pipe close-on-exec before it blocks, and
-    /// measured on this host the only holder of that descriptor inside the
-    /// sandbox is the launcher itself: neither bubblewrap nor its reaper keeps
-    /// a copy. So EOF means the launcher closed it, which it does either by
-    /// execing or by dying. Require a changed executable inode too: a zombie
-    /// retains its birth identity, and even pidfd readiness can lag fd closure
-    /// during exit. If the kernel image is unreadable or unchanged, exec stays
-    /// unknown unless the observer independently witnessed it.
+    /// Exec confirmation with no observer ([`shared::exec_without_observer`]).
     fn check_exec_without_tracer(&mut self) {
-        if self.exec_confirmed || self.boundary.tracer.is_some() {
-            return;
-        }
-        if !self.boundary.error_bytes.is_empty() || !self.boundary.error_eof {
-            return;
-        }
-        if self.boundary.launcher.is_live() && image_changed(self.boundary.launcher.pid) {
+        let boundary = &self.boundary;
+        if shared::exec_without_observer(
+            boundary.observe_on || self.exec_confirmed,
+            &boundary.error_bytes,
+            boundary.error_eof,
+            &boundary.launcher,
+        ) {
             self.exec_confirmed = true;
             self.pending.push_back(RunEvent::ExecConfirmed);
         }
     }
 
     fn check_wall(&mut self) {
-        if self.wall_reported {
-            return;
-        }
-        if self.wall.is_some_and(clock::Deadline::expired) {
-            self.wall_reported = true;
-            self.boundary.audit.record_limit_hit();
-            self.pending.push_back(RunEvent::WallExpired);
+        if let Some(event) =
+            shared::check_wall(self.wall, &mut self.wall_reported, &mut self.boundary.audit)
+        {
+            self.pending.push_back(event);
         }
     }
 
     /// Escalates a cooperative stop to a hard one once the grace has passed.
     fn check_grace(&mut self) {
-        if self.hard_killed || self.stop_requested.is_none() {
-            return;
+        if shared::grace_spent(
+            self.hard_killed,
+            self.stop_requested.is_some(),
+            self.stop_at,
+        ) {
+            self.hard_kill();
         }
-        let Some(at) = self.stop_at else { return };
-        if boottime_ns().saturating_sub(at)
-            < u64::try_from(STOP_GRACE.as_nanos()).unwrap_or(u64::MAX)
-        {
-            return;
-        }
-        self.hard_kill();
     }
 
     fn hard_kill(&mut self) {
-        if self.hard_killed {
-            return;
+        if shared::arm_hard_kill(&mut self.hard_killed, &mut self.hard_deadline) {
+            self.boundary.kill_boundary();
         }
-        self.hard_killed = true;
-        self.hard_deadline = Some(clock::Deadline::after(TREE_BUDGET));
-        self.boundary.kill_boundary();
     }
 
     /// The outcome once no more facts can arrive.
     fn terminal_event(&mut self) -> Option<RunEvent> {
-        if let Some(outcome) = self.target_outcome.take() {
-            if !self.exec_confirmed {
-                self.exec_confirmed = true;
-                self.pending.push_back(outcome);
-                return Some(RunEvent::ExecConfirmed);
-            }
-            return Some(outcome);
+        if let Some(event) = shared::observed_outcome(
+            &mut self.target_outcome,
+            &mut self.exec_confirmed,
+            &mut self.pending,
+        ) {
+            return Some(event);
         }
         // Without an observer the target's own status is not visible, so the
         // backend's report is all there is.
@@ -4667,18 +4571,26 @@ fn sleep_for(step: Duration) {
     unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
 }
 
-// J2 helpers the uncontained boundary reuses instead of copying
-/// The J2 helpers `super::uncontained` calls. Delegation only: each body stays
-/// above, in one copy, so the two boundaries cannot drift apart.
+/// What the contained boundary and `super::uncontained` share: the rules
+/// both run loops apply, each written once in this module, and delegations
+/// to helpers above. A fix to one of these rules (an evidence gap, a stop, a
+/// refusal) reaches both boundaries; what still differs between them is the
+/// state each keeps, not these rules.
 pub(super) mod shared {
-    use std::os::fd::RawFd;
+    use std::collections::VecDeque;
+    use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
     use std::time::Duration;
 
     use crate::capability::{Capability, CapabilityScope};
     use crate::platform::{Deadline, RunEvent};
+    use crate::policy::LimitsSnapshot;
+    use crate::records::{AppliedLimit, ErrorCode, ErrorStage, JailError, Remediation};
+    use crate::supervisor::TREE_BUDGET;
 
     use super::super::audit::AuditWriter;
     use super::super::cgroup::ExecutionCgroup;
+    use super::super::clock;
+    use super::super::identity::ProcessIdentity;
     use super::super::probe::ProbeResult;
     use super::super::tracer::TracerSummary;
 
@@ -4704,9 +4616,6 @@ pub(super) mod shared {
     pub(in crate::platform::linux) fn observer_verdict(summary: Option<&TracerSummary>) -> bool {
         super::observer_verdict(summary)
     }
-    pub(in crate::platform::linux) fn image_changed(pid: libc::pid_t) -> bool {
-        super::image_changed(pid)
-    }
     pub(in crate::platform::linux) fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
         super::set_nonblocking(fd)
     }
@@ -4724,6 +4633,203 @@ pub(super) mod shared {
     }
     pub(in crate::platform::linux) fn nap() {
         super::nap();
+    }
+
+    /// §5.2, for every profile: v1 refuses a privileged or setuid
+    /// supervisor rather than model that boundary; a child-side capability
+    /// read-back is no substitute for not being privileged in the first
+    /// place. (Untestable on the reference host: the conformance account has
+    /// no privilege to gain.)
+    ///
+    /// # Errors
+    /// `unsupported_platform` when the effective uid is 0 or differs from the
+    /// real one.
+    pub(in crate::platform::linux) fn refuse_privileged_supervisor() -> Result<(), JailError> {
+        // SAFETY: getuid and geteuid take no arguments and cannot fail.
+        let (ruid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
+        if euid == 0 || ruid != euid {
+            return Err(JailError::new(
+                ErrorCode::UnsupportedPlatform,
+                ErrorStage::Preparing,
+                Remediation::HostSetup,
+                format!(
+                    "v1 refuses a privileged or setuid supervisor: real uid {ruid}, effective \
+                     uid {euid} (jail-v1 §5.2)"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The `applied.limits` rows of the wall and the cgroup ceilings, in
+    /// snapshot order: the leaf's own row for a cgroup ceiling it holds, the
+    /// supervisor's boot-clock deadline for the wall, and an unapplied row
+    /// for anything else. An applied ceiling not yet hit says `false`; a
+    /// null `hit` means unknown or unapplied (§6.4). The supervisor flips
+    /// the wall's to `true` when the deadline expires.
+    pub(in crate::platform::linux) fn ceiling_rows(
+        limits: &LimitsSnapshot,
+        leaf: Option<&ExecutionCgroup>,
+    ) -> Vec<AppliedLimit> {
+        let mut rows = Vec::new();
+        for (key, ceiling) in [
+            ("wall", limits.wall.as_ref()),
+            ("pids", limits.pids.as_ref()),
+            ("mem", limits.mem.as_ref()),
+            ("swap", limits.swap.as_ref()),
+            ("cpu", limits.cpu.as_ref()),
+        ] {
+            let Some(ceiling) = ceiling else { continue };
+            if key != "wall"
+                && let Some(limit) =
+                    leaf.and_then(|leaf| leaf.limits().into_iter().find(|limit| limit.key == key))
+            {
+                rows.push(limit);
+                continue;
+            }
+            let applied = key == "wall";
+            rows.push(AppliedLimit {
+                key: key.to_owned(),
+                requested: ceiling.value.clone(),
+                required: ceiling.required,
+                applied,
+                mechanism: applied.then(|| "boottime-deadline".to_owned()),
+                scope: applied.then(|| "tree".to_owned()),
+                hit: applied.then_some(false),
+            });
+        }
+        rows
+    }
+
+    /// Reads whatever the launcher wrote to its error pipe (a failed exec's
+    /// report, or a setup failure's errno) without blocking; `eof` is set
+    /// once the pipe has closed.
+    pub(in crate::platform::linux) fn drain_error_pipe(
+        fd: &OwnedFd,
+        bytes: &mut Vec<u8>,
+        eof: &mut bool,
+    ) {
+        if *eof {
+            return;
+        }
+        let mut buffer = [0u8; 64];
+        loop {
+            // SAFETY: the buffer is live, the length matches and the
+            // descriptor is owned and non-blocking.
+            let n = unsafe {
+                libc::read(
+                    fd.as_raw_fd(),
+                    buffer.as_mut_ptr().cast::<libc::c_void>(),
+                    buffer.len(),
+                )
+            };
+            if n > 0 {
+                bytes.extend_from_slice(&buffer[..usize::try_from(n).unwrap_or(0)]);
+                continue;
+            }
+            if n == 0 {
+                *eof = true;
+            }
+            return;
+        }
+    }
+
+    /// Whether the counters are due: always when `force`, otherwise once per
+    /// [`LIMIT_SAMPLE_INTERVAL`]. A due sample moves `sampled_at_ns` to now.
+    pub(in crate::platform::linux) fn sample_due(sampled_at_ns: &mut u64, force: bool) -> bool {
+        let now = clock::boottime_ns();
+        let interval = u64::try_from(LIMIT_SAMPLE_INTERVAL.as_nanos()).unwrap_or(u64::MAX);
+        if !force && now.saturating_sub(*sampled_at_ns) < interval {
+            return false;
+        }
+        *sampled_at_ns = now;
+        true
+    }
+
+    /// Exec confirmation without an observer (§8.1 step 7). `settled` means
+    /// there is nothing to decide here: an observer was attached (it is the
+    /// witness), or the exec is already confirmed.
+    ///
+    /// The launcher sets the error pipe close-on-exec before it blocks, and
+    /// measured on the reference host the only holder of that descriptor is
+    /// the launcher itself (in a contained run, neither bubblewrap nor its
+    /// reaper keeps a copy). So end-of-file with no bytes means the launcher
+    /// closed it, by execing or by dying. A changed executable image is
+    /// required too: a zombie keeps its birth identity, and even pidfd
+    /// readiness can lag the descriptor's close during exit. If the image is
+    /// unreadable or unchanged, exec stays unknown.
+    pub(in crate::platform::linux) fn exec_without_observer(
+        settled: bool,
+        error_bytes: &[u8],
+        error_eof: bool,
+        launcher: &ProcessIdentity,
+    ) -> bool {
+        !settled
+            && error_bytes.is_empty()
+            && error_eof
+            && launcher.is_live()
+            && super::image_changed(launcher.pid)
+    }
+
+    /// The wall, reported once when it has passed: the hit is counted in the
+    /// `limits` class, and the returned `WallExpired` asks the supervisor to
+    /// stop the run.
+    pub(in crate::platform::linux) fn check_wall(
+        wall: Option<clock::Deadline>,
+        reported: &mut bool,
+        audit: &mut AuditWriter,
+    ) -> Option<RunEvent> {
+        if *reported || !wall.is_some_and(clock::Deadline::expired) {
+            return None;
+        }
+        *reported = true;
+        audit.record_limit_hit();
+        Some(RunEvent::WallExpired)
+    }
+
+    /// Whether a requested cooperative stop has had its [`STOP_GRACE`]
+    /// (§9.3) and must become a forced one.
+    pub(in crate::platform::linux) fn grace_spent(
+        hard_killed: bool,
+        stop_requested: bool,
+        stop_at: Option<u64>,
+    ) -> bool {
+        let grace = u64::try_from(STOP_GRACE.as_nanos()).unwrap_or(u64::MAX);
+        !hard_killed
+            && stop_requested
+            && stop_at.is_some_and(|at| clock::boottime_ns().saturating_sub(at) >= grace)
+    }
+
+    /// Arms the forced stop, once: `true` the first time, when the caller
+    /// kills its tree and the tree budget (§9.3) for seeing it die starts.
+    pub(in crate::platform::linux) fn arm_hard_kill(
+        hard_killed: &mut bool,
+        hard_deadline: &mut Option<clock::Deadline>,
+    ) -> bool {
+        if *hard_killed {
+            return false;
+        }
+        *hard_killed = true;
+        *hard_deadline = Some(clock::Deadline::after(TREE_BUDGET));
+        true
+    }
+
+    /// The target's outcome as the observer reported it, taken once. The
+    /// observer's final status of the target also confirms its exec: when
+    /// nothing confirmed the exec yet, `ExecConfirmed` comes first and the
+    /// outcome is queued behind it.
+    pub(in crate::platform::linux) fn observed_outcome(
+        target_outcome: &mut Option<RunEvent>,
+        exec_confirmed: &mut bool,
+        pending: &mut VecDeque<RunEvent>,
+    ) -> Option<RunEvent> {
+        let outcome = target_outcome.take()?;
+        if *exec_confirmed {
+            return Some(outcome);
+        }
+        *exec_confirmed = true;
+        pending.push_back(outcome);
+        Some(RunEvent::ExecConfirmed)
     }
 
     /// What one read of the execution cgroup's counters established.
