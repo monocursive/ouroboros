@@ -189,13 +189,15 @@ const STAGING_WAIT_STEP: Duration = Duration::from_millis(250);
 /// A source on a hung filesystem (FUSE, NFS) can block `read(2)`
 /// indefinitely. The worker is left behind on expiry, holding only its own
 /// descriptors until it ends with the process. It is told it was abandoned
-/// and starts no further credential or state directory after that, and the
+/// and checks before every further state directory and credential, and the
 /// refusal carries exactly the credentials it reported staged before then,
-/// without their bind descriptors (nothing is bound after a refusal). A
-/// credential it was reading at expiry may still finish writing its copy;
-/// that copy is not reported staged, and it lies in vendor state, which the
-/// refusal's cleanup removes (or leaves `pending` while the worker still
-/// writes there, for `gc` to finish).
+/// without their bind descriptors (nothing is bound after a refusal). A copy
+/// it was already writing at expiry may still complete; it is never reported
+/// staged, and its target file is in vendor state, which the refusal's
+/// cleanup removes, after which the worker writes only to the removed file.
+/// An entry the worker creates in the instant between its check and the
+/// create is removed the same way, or, if it appears while cleanup walks
+/// the directory, leaves the cleanup `pending` for `gc`.
 ///
 /// # Errors
 /// As [`stage`], plus [`ErrorCode::CredentialUnavailable`] with remediation
