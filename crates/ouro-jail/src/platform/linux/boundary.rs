@@ -21,7 +21,9 @@ use serde_json::{Map, Value};
 
 use crate::lifecycle::{BoundaryKind, Integrity, VerificationScope};
 use crate::observer::CoverageSummary;
-use crate::platform::{BoundaryIdentity, PreparedPlan, RunEvent, Sinks, TreeObservation};
+use crate::platform::{
+    BoundaryIdentity, LimitCause, PreparedPlan, RunEvent, Sinks, TreeObservation,
+};
 use crate::policy::{PolicySnapshot, ProfileName, ProtectedCoverage, ScratchRoot};
 use crate::records::{
     Applied, AppliedFilesystem, AppliedLimit, AppliedMount, AppliedNetwork, AppliedSyscalls,
@@ -2663,7 +2665,7 @@ impl Tree for Boundary {
                     // replays it every call), and losing the storage read must
                     // not also blind the cgroup ceilings.
                     run.audit
-                        .record_limit_evidence_missing("storage_enforcement_lost");
+                        .record_limit_evidence_missing(LimitCause::StorageEnforcementLost.cause());
                     self.hard_kill(run);
                 }
             }
@@ -2827,7 +2829,7 @@ impl Tree for Boundary {
         limits
     }
 
-    fn limit_cause(&self) -> Option<String> {
+    fn limit_cause(&self) -> Option<LimitCause> {
         // Audit 2026-10-08 L2 (§6.4): a storage enforcement loss becomes the
         // cause only when it was found while the target still ran. A loss
         // discovered after the target's own end — including the settlement
@@ -2837,13 +2839,13 @@ impl Tree for Boundary {
             .as_ref()
             .is_some_and(super::storage::Storage::lost_while_running)
         {
-            return Some("storage_enforcement_lost".to_owned());
+            return Some(LimitCause::StorageEnforcementLost);
         }
         self.started
             .cgroup
             .as_ref()
             .is_some_and(ExecutionCgroup::oom_killed)
-            .then(|| "memory_oom".to_owned())
+            .then_some(LimitCause::MemoryOom)
     }
 
     /// The storage enforcement loss's own message, for the receipt's

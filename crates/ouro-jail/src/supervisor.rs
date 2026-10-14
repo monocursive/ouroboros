@@ -2032,7 +2032,10 @@ fn storage_loss_error(reason: String) -> JailError {
         ErrorCode::EvidenceLost,
         ErrorStage::Running,
         Remediation::InspectState,
-        format!("storage_enforcement_lost: {reason}"),
+        format!(
+            "{}: {reason}",
+            crate::platform::LimitCause::StorageEnforcementLost.cause()
+        ),
     )
 }
 

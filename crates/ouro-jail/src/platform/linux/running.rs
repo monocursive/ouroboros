@@ -21,8 +21,8 @@ use serde_json::{Map, Value};
 
 use crate::observer::{CoverageClass, CoverageSummary};
 use crate::platform::{
-    BoundaryIdentity, Deadline as PortableDeadline, PreparedExecution, ReleaseFailure, RunEvent,
-    RunningExecution, StopReason, Teardown, TreeObservation,
+    BoundaryIdentity, Deadline as PortableDeadline, LimitCause, PreparedExecution, ReleaseFailure,
+    RunEvent, RunningExecution, StopReason, Teardown, TreeObservation,
 };
 use crate::policy::{LimitsSnapshot, PolicySnapshot};
 use crate::records::{Applied, AppliedLimit, ErrorCode, ErrorStage, JailError, Remediation};
@@ -424,7 +424,7 @@ pub(super) trait Tree: 'static {
 
     fn final_limits(&self) -> Vec<AppliedLimit>;
 
-    fn limit_cause(&self) -> Option<String>;
+    fn limit_cause(&self) -> Option<LimitCause>;
 
     fn storage_loss(&self) -> Option<String> {
         None
@@ -576,7 +576,7 @@ impl<T: Tree> RunningExecution for Run<T> {
         self.tree.final_limits()
     }
 
-    fn limit_cause(&self) -> Option<String> {
+    fn limit_cause(&self) -> Option<LimitCause> {
         self.tree.limit_cause()
     }
 

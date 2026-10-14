@@ -77,7 +77,7 @@ use crate::capability::{
 use crate::environment;
 use crate::lifecycle::{BoundaryKind, VerificationScope};
 use crate::platform::{
-    BoundaryIdentity, PreparedExecution, PreparedPlan, RunEvent, Sinks, TreeObservation,
+    BoundaryIdentity, LimitCause, PreparedExecution, PreparedPlan, RunEvent, Sinks, TreeObservation,
 };
 use crate::policy::{EnvValue, PolicySnapshot, ProfileName, ProtectedCoverage};
 use crate::records::{
@@ -1374,8 +1374,8 @@ impl Tree for Uncontained {
         self.leaf.limits()
     }
 
-    fn limit_cause(&self) -> Option<String> {
-        self.leaf.oom_killed().then(|| "memory_oom".to_owned())
+    fn limit_cause(&self) -> Option<LimitCause> {
+        self.leaf.oom_killed().then_some(LimitCause::MemoryOom)
     }
 
     fn integrity_lost(&self) -> bool {

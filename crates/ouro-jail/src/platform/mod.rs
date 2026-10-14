@@ -254,6 +254,29 @@ impl StopReason {
     }
 }
 
+/// A resource event that ended the tree, as `outcome.cause` records it when
+/// it is the first stop (§6.4): reported by the platform that enforces the
+/// limit, never inferred from an exit code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LimitCause {
+    /// The kernel's OOM killer acted inside the execution cgroup.
+    MemoryOom,
+    /// Storage enforcement was lost while the target still ran, and the
+    /// tree was killed for it.
+    StorageEnforcementLost,
+}
+
+impl LimitCause {
+    /// The `outcome.cause` this event records.
+    #[must_use]
+    pub fn cause(self) -> &'static str {
+        match self {
+            LimitCause::MemoryOom => "memory_oom",
+            LimitCause::StorageEnforcementLost => "storage_enforcement_lost",
+        }
+    }
+}
+
 /// One thing that happened while the target was running.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RunEvent {
@@ -477,7 +500,7 @@ pub trait RunningExecution {
 
     /// A resource event that actually caused termination, never inferred from
     /// an exit code or from ordinary CPU bandwidth throttling.
-    fn limit_cause(&self) -> Option<String> {
+    fn limit_cause(&self) -> Option<LimitCause> {
         None
     }
 

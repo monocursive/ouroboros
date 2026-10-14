@@ -782,7 +782,9 @@ impl<'a> Attempt<'a> {
         outcome.code = None;
         outcome.signal = None;
         if let Some(cause) = running.limit_cause() {
-            outcome.cause.get_or_insert(cause);
+            outcome
+                .cause
+                .get_or_insert_with(|| cause.cause().to_owned());
         }
         outcome.cause.get_or_insert(reason);
     }
@@ -919,7 +921,10 @@ impl<'a> Attempt<'a> {
             }
         }
         if let Some(cause) = running.limit_cause() {
-            self.record.outcome.cause.get_or_insert(cause);
+            self.record
+                .outcome
+                .cause
+                .get_or_insert_with(|| cause.cause().to_owned());
         }
         let summary = running.observer_summary();
         // A sink loss that arrived after the last loop iteration, including
