@@ -259,11 +259,7 @@ impl Runtime {
                 // Only one local exchange. Other attempts contend through the
                 // source CAS + flock and observe the persisted pending marker.
                 let _guard = lock(&self.exchange);
-                let fresh = read_vault_source(path, forbidden, SOURCE_MAX)
-                    .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
-                if fresh.as_slice() != raw.as_slice() {
-                    return Err(self.failed("source_changed", Reason::CredentialUnavailable));
-                }
+                self.unchanged(path, forbidden, &raw)?;
                 let value = self.exchange_token(policy, path, forbidden, raw, epoch, doc)?;
                 let (_, current) = read_vault_source_version(path, forbidden, SOURCE_MAX)
                     .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
@@ -363,11 +359,7 @@ impl Runtime {
         let pending = encode(doc).map_err(|reason| self.failed("document_unencodable", reason))?;
         update_vault_source(path, forbidden, raw, identity, &pending)
             .map_err(|code| self.deny(self.failed(code, Reason::CredentialUnavailable)))?;
-        let (confirmed, pending_epoch) = read_vault_source_version(path, forbidden, SOURCE_MAX)
-            .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
-        if confirmed.as_slice() != pending.as_slice() || pending_epoch.identity() != identity {
-            return Err(self.deny(self.failed("source_changed", Reason::CredentialRevoked)));
-        }
+        let pending_epoch = self.confirm(path, forbidden, &pending, identity)?;
         let generation = {
             let mut state = lock(&self.state);
             state.pending = preserve.then(|| Pending {
@@ -381,6 +373,34 @@ impl Runtime {
             return Err(self.deny(self.failed("audit_unavailable", Reason::CredentialUnavailable)));
         }
         Ok(pending)
+    }
+
+    /// Re-reads the source under the exchange lock: a refresh starts only
+    /// from the very bytes `raw` its decision was made on.
+    fn unchanged(&self, path: &[u8], forbidden: &[(u64, u64)], raw: &[u8]) -> Result<(), Reason> {
+        let fresh = read_vault_source(path, forbidden, SOURCE_MAX)
+            .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
+        if fresh.as_slice() != raw {
+            return Err(self.failed("source_changed", Reason::CredentialUnavailable));
+        }
+        Ok(())
+    }
+
+    /// Reads back the pending document just written: the source must hold
+    /// exactly `pending`, at `identity`. Returns the version read.
+    fn confirm(
+        &self,
+        path: &[u8],
+        forbidden: &[(u64, u64)],
+        pending: &[u8],
+        identity: (u64, u64),
+    ) -> Result<crate::state::anchored::Stat, Reason> {
+        let (confirmed, epoch) = read_vault_source_version(path, forbidden, SOURCE_MAX)
+            .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
+        if confirmed.as_slice() != pending || epoch.identity() != identity {
+            return Err(self.deny(self.failed("source_changed", Reason::CredentialRevoked)));
+        }
+        Ok(epoch)
     }
 
     /// The one exchange with the issuer: the refresh grant, then a bounded
@@ -833,7 +853,6 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         (dir, path.as_os_str().as_bytes().to_vec())
     }
-    #[cfg(target_os = "linux")]
     fn doc(expiry: u64) -> Vec<u8> {
         format!(
             r#"{{"access_token":"old-access","refresh_token":"old-refresh","expires_at":{expiry}}}"#
@@ -911,6 +930,188 @@ mod tests {
         fs::set_permissions(source, fs::Permissions::from_mode(0o600)).unwrap();
         let error = refused(path);
         assert!(error.contains("(source_refused)"), "{error}");
+    }
+    /// Runs `step` from no recorded label and returns its result with the
+    /// label it left: the one staging's refusal names (`Runtime::source`).
+    fn labelled<T>(
+        runtime: &Runtime,
+        step: impl FnOnce(&Runtime) -> T,
+    ) -> (T, Option<&'static str>) {
+        *lock(&runtime.last_error) = None;
+        let result = step(runtime);
+        (result, *lock(&runtime.last_error))
+    }
+    /// A source-backed runtime refreshing through `token_url`, with an
+    /// audit that answers `audit` for each transition.
+    #[cfg(target_os = "linux")]
+    fn refreshing(
+        path: &[u8],
+        token_url: String,
+        audit: impl Fn(&str) -> bool + Send + Sync + 'static,
+    ) -> Runtime {
+        let runtime = Runtime {
+            source: Some((path.to_vec(), vec![])),
+            refresh: Some(RefreshPolicy {
+                token_url,
+                client_id: "test".into(),
+                refresh_before_seconds: 0,
+                encoding: TokenEncoding::Form,
+            }),
+            ..Runtime::static_value(Zeroizing::new(Vec::new()))
+        };
+        *lock(&runtime.audit) = Some((
+            "api".into(),
+            Arc::new(move |_, _, transition| audit(transition)),
+        ));
+        runtime
+    }
+    /// The refresh's re-read under the exchange lock names a source that
+    /// changed since the read the refresh was decided on, or that the
+    /// re-read refuses.
+    #[test]
+    fn a_source_changed_before_its_refresh_starts_is_named() {
+        let (_dir, path) = file(b"first");
+        let runtime = Runtime::source(path.clone(), vec![], None).unwrap();
+        assert_eq!(
+            labelled(&runtime, |r| r.unchanged(&path, &[], b"first")),
+            (Ok(()), None)
+        );
+        assert_eq!(
+            labelled(&runtime, |r| r.unchanged(&path, &[], b"other")),
+            (Err(Reason::CredentialUnavailable), Some("source_changed"))
+        );
+        fs::set_permissions(
+            std::ffi::OsStr::from_bytes(&path),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        assert_eq!(
+            labelled(&runtime, |r| r.unchanged(&path, &[], b"first")),
+            (Err(Reason::CredentialRevoked), Some("source_not_private"))
+        );
+    }
+    /// The read-back of a pending marker names a marker that did not land:
+    /// other bytes, another file, or a source the read refuses.
+    #[test]
+    fn a_pending_marker_that_did_not_land_is_named() {
+        let (_dir, path) = file(b"pending");
+        let runtime = Runtime::source(path.clone(), vec![], None).unwrap();
+        let (_, stat) = read_vault_source_version(&path, &[], SOURCE_MAX).unwrap();
+        let identity = stat.identity();
+        let confirmed = labelled(&runtime, |r| r.confirm(&path, &[], b"pending", identity));
+        assert!(confirmed.0.is_ok());
+        assert_eq!(confirmed.1, None);
+        let other_file = (identity.0, identity.1.wrapping_add(1));
+        for (pending, identity) in [(&b"other"[..], identity), (&b"pending"[..], other_file)] {
+            let refused = labelled(&runtime, |r| r.confirm(&path, &[], pending, identity));
+            assert_eq!(
+                (refused.0.err(), refused.1),
+                (Some(Reason::CredentialRevoked), Some("source_changed"))
+            );
+        }
+        fs::remove_file(std::ffi::OsStr::from_bytes(&path)).unwrap();
+        let refused = labelled(&runtime, |r| r.confirm(&path, &[], b"pending", identity));
+        assert_eq!(
+            (refused.0.err(), refused.1),
+            (Some(Reason::CredentialRevoked), Some("source_unavailable"))
+        );
+    }
+    /// A load the trace refuses to audit is named, and is not served.
+    #[test]
+    fn a_load_the_trace_refused_is_named() {
+        let (_dir, path) = file(b"key");
+        let runtime = Runtime {
+            source: Some((path, vec![])),
+            ..Runtime::static_value(Zeroizing::new(Vec::new()))
+        };
+        *lock(&runtime.audit) = Some((
+            "api".into(),
+            Arc::new(|_, _, transition| transition != "loaded"),
+        ));
+        let (loaded, label) = labelled(&runtime, Runtime::current);
+        assert_eq!(
+            (loaded.err(), label),
+            (
+                Some(Reason::CredentialUnavailable),
+                Some("audit_unavailable")
+            )
+        );
+    }
+    /// Off Linux a refresh cannot persist its pending marker, and staging
+    /// says so instead of a catch-all.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn a_refresh_this_platform_cannot_run_is_named() {
+        let (_dir, path) = file(&doc(now()));
+        let refresh = RefreshPolicy {
+            token_url: "https://issuer.example.com/token".into(),
+            client_id: "test".into(),
+            refresh_before_seconds: 0,
+            encoding: TokenEncoding::Form,
+        };
+        let Err(error) = Runtime::source(path, vec![], Some(refresh)) else {
+            panic!("an expired token cannot be refreshed here");
+        };
+        assert!(error.contains("(refresh_requires_linux)"), "{error}");
+    }
+    /// A refresh whose source another holder has locked is named, before
+    /// any exchange with the issuer.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_busy_source_is_named_when_its_refresh_cannot_start() {
+        let (_dir, path) = file(&doc(now()));
+        let held = fs::File::open(std::ffi::OsStr::from_bytes(&path)).unwrap();
+        held.lock().unwrap();
+        let refresh = RefreshPolicy {
+            // Never reached: the marker cannot be written.
+            token_url: "https://issuer.example.com/token".into(),
+            client_id: "test".into(),
+            refresh_before_seconds: 0,
+            encoding: TokenEncoding::Form,
+        };
+        let Err(error) = Runtime::source(path, vec![], Some(refresh)) else {
+            panic!("a locked source must not start a refresh");
+        };
+        assert!(error.contains("(refresh_busy)"), "{error}");
+    }
+    /// A refresh whose start the trace refuses to audit is named; the
+    /// issuer is never asked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refresh_start_the_trace_refused_is_named() {
+        let (_dir, path) = file(&doc(now()));
+        let runtime = refreshing(&path, "https://issuer.example.com/token".into(), |t| {
+            t != "refresh_started"
+        });
+        let (refreshed, label) = labelled(&runtime, Runtime::current);
+        assert_eq!(
+            (refreshed.err(), label),
+            (
+                Some(Reason::CredentialUnavailable),
+                Some("audit_unavailable")
+            )
+        );
+    }
+    /// A source that changes after a refresh committed, before the new
+    /// value is served, is named by the read that refused it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_source_changed_after_its_refresh_is_named() {
+        let (url, issuer) = issuer(200, SUCCESS);
+        let (_dir, path) = file(&doc(now()));
+        let source = std::ffi::OsStr::from_bytes(&path).to_owned();
+        let runtime = refreshing(&path, url, move |transition| {
+            if transition == "refreshed" {
+                fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+            }
+            true
+        });
+        let (refreshed, label) = labelled(&runtime, Runtime::current);
+        issuer.join().unwrap();
+        assert_eq!(
+            (refreshed.err(), label),
+            (Some(Reason::CredentialRevoked), Some("source_not_private"))
+        );
     }
     #[cfg(target_os = "linux")]
     #[test]
