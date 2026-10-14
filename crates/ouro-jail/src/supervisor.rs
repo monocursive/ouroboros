@@ -54,7 +54,7 @@ use crate::trace::{self, FdSink, FileSink, Priority, SharedTrace, TraceSink};
 mod amend;
 mod attempt;
 
-use attempt::Attempt;
+use attempt::{Attempt, first_record};
 
 /// External gate wait after `prepared` (§8.2).
 pub const GATE_WAIT: Duration = Duration::from_secs(60);
@@ -311,12 +311,66 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
         check_launch_placement(&resolved, &workspace, launch)?;
     }
 
-    Ok(Plan {
+    let plan = Plan {
         resolved,
         workspace,
         config_dir,
         data_dir,
-    })
+    };
+    check_record_bounds(ctx, &plan)?;
+    Ok(plan)
+}
+
+/// What a run adds to a receipt beyond what its plan fixes: its errors, the
+/// boundary's native identities and process, the environment names, and the
+/// rest of the applied group the platform reports.
+const RECEIPT_RESERVE: u64 = 512 * 1024;
+
+/// §7 and I01: the records of this plan's attempt stay within the bound
+/// every reader holds receipts and `policy.json` to
+/// ([`cleanup::RECEIPT_MAX`]). Checked while the plan is resolved, so
+/// `run`, `--label-only`, `explain` and `doctor` agree, and no attempt is
+/// claimed whose refusal could not be recorded.
+///
+/// `policy.json` is known exactly. The receipt is not built yet, so its size
+/// is projected from what the plan fixes: the refused receipt the attempt
+/// would start from (it carries the operator grants), the filesystem policy
+/// once more for the mount table the platform reports from it, and
+/// [`RECEIPT_RESERVE`] for what a run adds.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] when either would be past the bound.
+fn check_record_bounds(ctx: &Context, plan: &Plan) -> Result<(), JailError> {
+    fn pretty_len(value: &impl serde::Serialize) -> u64 {
+        serde_json::to_vec_pretty(value)
+            .ok()
+            .and_then(|bytes| u64::try_from(bytes.len()).ok())
+            .unwrap_or(u64::MAX)
+    }
+    let envelope = pretty_len(&policy_envelope(plan)?);
+    let start = first_record(
+        ctx,
+        plan,
+        &AttemptId::generate(),
+        Some(crate::canonical::argv_digest(&[])),
+    );
+    let receipt = pretty_len(&start.receipt(Phase::Refused))
+        .saturating_add(pretty_len(&plan.resolved.snapshot.filesystem))
+        .saturating_add(RECEIPT_RESERVE);
+    let bound = cleanup::RECEIPT_MAX;
+    if envelope <= bound && receipt <= bound {
+        return Ok(());
+    }
+    Err(JailError::new(
+        ErrorCode::InvalidConfig,
+        ErrorStage::Resolving,
+        Remediation::Configuration,
+        format!(
+            "the resolved policy is too large to record: its policy.json would be {envelope} \
+             bytes and its receipt about {receipt}, and every reader holds them to {bound}; \
+             grant fewer or shorter paths"
+        ),
+    ))
 }
 
 /// §6.2 step 2: the operator launch profile `--launch NAME`, read once
@@ -2815,6 +2869,59 @@ fn persist_noted(
     Ok(receipt)
 }
 
+/// Room a refused receipt keeps under the reader bound for what its terminal
+/// write may still add: the correction for a trace loss its final note
+/// meets, and the omission note of [`fit_refused_receipt`].
+const REFUSED_RECEIPT_ROOM: u64 = 64 * 1024;
+
+/// Keeps a refused receipt within the bound every reader holds receipts to
+/// ([`cleanup::RECEIPT_MAX`]), so a claimed attempt still ends with a
+/// receipt (I01) when the errors raised before its refusal would take it
+/// past the bound: those errors are omitted, newest first, and an error
+/// says how many. The refusal itself, the last error, always stays.
+///
+/// Returns the omitted errors, in the order they were raised, for stderr.
+fn fit_refused_receipt(record: &mut AttemptRecord) -> Vec<crate::records::ErrorObject> {
+    let limit = cleanup::RECEIPT_MAX - REFUSED_RECEIPT_ROOM;
+    let fits = |record: &AttemptRecord| {
+        serde_json::to_vec_pretty(&record.receipt(Phase::Refused))
+            .is_ok_and(|bytes| u64::try_from(bytes.len()).is_ok_and(|len| len <= limit))
+    };
+    if fits(record) {
+        return Vec::new();
+    }
+    let Some(refusal) = record.errors.pop() else {
+        return Vec::new();
+    };
+    let mut omitted = Vec::new();
+    while !fits(record)
+        && let Some(error) = record.errors.pop()
+    {
+        omitted.push(error);
+    }
+    omitted.reverse();
+    if !omitted.is_empty() {
+        // Raised where the refusal was: it is part of recording it.
+        let mut note = JailError::new(
+            ErrorCode::StateWriteFailed,
+            ErrorStage::Preparing,
+            Remediation::InspectState,
+            format!(
+                "{} earlier error(s) are omitted from this receipt, which with them would be \
+                 past the {}-byte bound every reader holds receipts to; they were reported on \
+                 stderr",
+                omitted.len(),
+                cleanup::RECEIPT_MAX
+            ),
+        )
+        .to_object();
+        note.stage.clone_from(&refusal.stage);
+        record.errors.push(note);
+    }
+    record.errors.push(refusal);
+    omitted
+}
+
 /// A terminal receipt write that failed, and what it left on disk.
 #[derive(Debug)]
 struct Unpersisted {
@@ -2988,14 +3095,19 @@ fn register_boundary_in_state(
     })
 }
 
-fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailError> {
-    let snapshot = plan.resolved.snapshot.to_canonical_value()?;
-    let envelope = serde_json::json!({
+/// The `policy.json` envelope of `plan` (§7): the canonical snapshot, its
+/// digest and its provenance.
+fn policy_envelope(plan: &Plan) -> Result<serde_json::Value, JailError> {
+    Ok(serde_json::json!({
         "schema": SCHEMA_POLICY_FILE,
-        "snapshot": snapshot,
+        "snapshot": plan.resolved.snapshot.to_canonical_value()?,
         "policy_digest": plan.resolved.digest,
         "provenance": plan.resolved.provenance,
-    });
+    }))
+}
+
+fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailError> {
+    let envelope = policy_envelope(plan)?;
     let bytes = cleanup::record_bytes("policy envelope", &envelope, ErrorStage::Preparing)?;
     state::replace_atomically_at(state::Site::Policy, &attempt_dir.policy_path(), &bytes)
 }
