@@ -1340,6 +1340,36 @@ impl Session {
         let _ = sys::kill(pid, libc::SIGKILL);
     }
 
+    /// `SIGKILL` a tracee held at a stop this observer has not resumed, so
+    /// that what it would do next — the call at an entry stop, the new image
+    /// at an exec stop — never runs. `ESRCH` means it is already gone, the
+    /// same outcome. False when the signal could not reach a live task.
+    fn kill_tracee(tid: pid_t) -> bool {
+        match sys::kill(tid, libc::SIGKILL) {
+            Ok(()) => true,
+            Err(err) => err.raw_os_error() == Some(libc::ESRCH),
+        }
+    }
+
+    /// An exec whose command-rule verdict could not be enforced the way the
+    /// observer enforces it ([`GapReason::ExecDenialFailed`]).
+    fn exec_denial_failed(&mut self) {
+        self.summary.loss.exec_denials_failed += 1;
+        self.gap(
+            GapReason::ExecDenialFailed,
+            OpSet::of(ClosedOp::Exec),
+            Some(1),
+        );
+    }
+
+    /// The register rewrite that denies an exec failed: the process is
+    /// killed instead. One gap whatever the kill does — if it fails too, the
+    /// exec it names may run, and that is the same one call.
+    fn deny_by_kill(&mut self, tid: pid_t) {
+        self.exec_denial_failed();
+        let _ = Self::kill_tracee(tid);
+    }
+
     // ---------------------------------------------------------- identity
 
     /// Make sure `tid` is tracked, learning its thread group and birth from
@@ -1624,14 +1654,13 @@ impl Session {
         } else {
             (Vec::new(), None)
         };
-        if command.is_some() {
+        if command.is_some() && !Self::kill_tracee(tid) {
             // The hit is live: the process dies before its image runs an
             // instruction — after the image was read above, so the event
             // keeps the kernel's evidence — and the event records the verdict
-            // and stops the run for a `forbid`.
-            unsafe {
-                libc::kill(tid, libc::SIGKILL);
-            }
+            // and stops the run for a `forbid`. A kill that could not be sent
+            // leaves the image free to run, which the gap says.
+            self.exec_denial_failed();
         }
         let start_ticks = self.birth_of(tgid);
         self.emit(TracerEvent::Exec {
@@ -1832,10 +1861,11 @@ impl Session {
             // at all. The refusal already recorded its gap; the process dies
             // rather than run an unjudged exec (the `deny_exec` failure path
             // below makes the same call).
-            if entry.op == ClosedOp::Exec && !self.config.commands.is_empty() {
-                unsafe {
-                    libc::kill(tid, libc::SIGKILL);
-                }
+            if entry.op == ClosedOp::Exec
+                && !self.config.commands.is_empty()
+                && !Self::kill_tracee(tid)
+            {
+                self.exec_denial_failed();
             }
             return;
         }
@@ -1856,10 +1886,11 @@ impl Session {
                 .map(Box::new);
             pending.entry_argv = argv;
             if pending.args.command.is_some() && sys::deny_exec(tid, true).is_err() {
-                self.gap(GapReason::ForeignAbi, OpSet::ALL, None);
-                unsafe {
-                    libc::kill(tid, libc::SIGKILL);
-                }
+                // The call has not run, and the kill keeps it from running.
+                // It still costs a gap: the verdict — a `forbid` stops the
+                // run — rides only on the denied call's result, which a
+                // killed tracee never produces.
+                self.deny_by_kill(tid);
                 return;
             }
         }
@@ -2093,10 +2124,10 @@ impl Session {
         };
         if pending.args.command.is_some() {
             if sys::deny_exec(tid, false).is_err() {
-                self.gap(GapReason::ForeignAbi, OpSet::ALL, None);
-                unsafe {
-                    libc::kill(tid, libc::SIGKILL);
-                }
+                // The entry rewrite already skipped the call; only its
+                // `EPERM` could not be written, so the verdict's result is
+                // what is missing.
+                self.deny_by_kill(tid);
                 return;
             }
             rval = -i64::from(libc::EPERM);
@@ -5179,6 +5210,61 @@ mod tests {
             exec_recheck(&rules, &argv(&["ls"]), None, Some(b"/bin/ls"), None)
                 .map(|hit| (hit.pattern, hit.forbidden)),
             Some(("<unreadable-or-oversized-argv>".to_owned(), false))
+        );
+    }
+
+    /// A denied exec whose `EPERM` cannot be written at its exit is killed,
+    /// and the missing verdict is one exec-class gap with its own counter —
+    /// not a `foreign_abi` gap over every class with no count, which would
+    /// name another ABI and a hole of unknown size.
+    #[test]
+    fn a_denial_that_cannot_be_written_is_one_exec_gap() {
+        // No real task has this pid: the register write fails with ESRCH,
+        // and the kill finds it already gone.
+        const EXECER: pid_t = RECYCLED;
+        let (mut session, rx) = kernel_session(
+            TracerConfig::default(),
+            Kernel {
+                tasks: [(EXECER, EXECER)].into(),
+                ..Kernel::default()
+            },
+        );
+        session.tasks.get_mut(&EXECER).unwrap().pending = Some(InFlight::Closed(Pending {
+            entry: closed_set::lookup(libc::SYS_execve as u64).expect("execve"),
+            args: Args {
+                command: Some(Box::new(crate::commands::Hit {
+                    pattern: "git push".to_owned(),
+                    digest: String::new(),
+                    forbidden: true,
+                })),
+                ..Args::default()
+            },
+            exec_confirmed: false,
+            path_unreadable: false,
+            path2_unreadable: false,
+            sockaddr_unreadable: false,
+            flags_unavailable: false,
+            raw: [0; 6],
+            entry_argv: None,
+        }));
+        session.inflight += 1;
+        session.handle_exit(EXECER, -i64::from(libc::ENOSYS));
+        let events = drained(&rx, &mut session);
+        assert_eq!(
+            gaps_of(&events),
+            vec![(
+                GapReason::ExecDenialFailed,
+                OpSet::of(ClosedOp::Exec),
+                Some(1)
+            )]
+        );
+        assert_eq!(session.summary.loss.exec_denials_failed, 1);
+        assert_eq!(session.summary.loss.total(), 1);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, TracerEvent::Syscall { .. })),
+            "no result is invented for a call whose return was never written"
         );
     }
 

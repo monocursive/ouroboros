@@ -1,8 +1,10 @@
 //! The raw kernel interface the observer needs: ptrace, `process_vm_readv`,
 //! `waitpid`, `seccomp`.
 //!
-//! Every `unsafe` block in the tracer that is not the seccomp install lives
-//! here, so the rest of the module is ordinary Rust. The request numbers and
+//! Every `unsafe` block the tracer runs, its tests aside, lives here except
+//! the filter install (`filter::install_narrowing_filter_for`), which has to
+//! stay allocation-free between `fork` and `execve`; the rest of the module
+//! is ordinary Rust. The request numbers and
 //! option bits are spelled out rather than taken from `libc` so that the ABI
 //! this module speaks is visible in one place; [`tests`] asserts each one
 //! against `libc` so a typo cannot survive a build.
@@ -210,6 +212,9 @@ pub fn listen(pid: pid_t) -> io::Result<()> {
 pub fn is_group_stop(pid: pid_t) -> bool {
     // `siginfo_t` is larger than anything the kernel writes here; a local of
     // the right type is the safe way to give the kernel its buffer.
+    // SAFETY: `siginfo_t` is integers and a union of integers and pointers,
+    // for which all-zero is a valid value; nothing reads it, the kernel only
+    // writes it.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     match ptrace_raw(
         PTRACE_GETSIGINFO,
@@ -572,6 +577,8 @@ pub fn gettid() -> pid_t {
 /// Suppress an exec at entry, or inject its EPERM result at exit.
 #[cfg(target_arch = "x86_64")]
 pub fn deny_exec(pid: pid_t, entry: bool) -> io::Result<()> {
+    // SAFETY: `user_regs_struct` is plain integers, for which all-zero is a
+    // valid value; PTRACE_GETREGS overwrites it before it is read.
     let mut regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
     ptrace_raw(
         PTRACE_GETREGS,

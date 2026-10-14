@@ -497,11 +497,23 @@ pub enum GapReason {
     /// and never stops a strict run — ordinary `O_TMPFILE` and
     /// `/dev/stderr` opens reach it.
     PathClaimUnverified,
+    /// An exec the command rules refused — or, with rules configured, one
+    /// the observer could not follow to judge — could not be stopped the way
+    /// the observer stops it: the register rewrite that makes it fail with
+    /// `EPERM` failed, or the `SIGKILL` that enforces a verdict did not reach
+    /// the process. The denied call's result, which carries the verdict, is
+    /// never produced, and a `forbid` must not vanish with it, so this is a
+    /// gap of the exec class with one call. After a failed rewrite the
+    /// process is killed instead, before the exec ran: at its entry stop,
+    /// where the kernel skips a call whose thread has a fatal signal
+    /// pending, or at the exit of a call the entry rewrite already skipped.
+    /// After a failed kill the exec may have run.
+    ExecDenialFailed,
 }
 
 impl GapReason {
     /// Every reason, in declaration order: `reason as usize` is its index.
-    pub const ALL: [GapReason; 25] = [
+    pub const ALL: [GapReason; 26] = [
         GapReason::QueueFull,
         GapReason::MediationResponseUndelivered,
         GapReason::UnmatchedExit,
@@ -527,6 +539,7 @@ impl GapReason {
         GapReason::MemoryFlagsUnverified,
         GapReason::ExecImageMismatch,
         GapReason::PathClaimUnverified,
+        GapReason::ExecDenialFailed,
     ];
 
     #[must_use]
@@ -557,6 +570,7 @@ impl GapReason {
             GapReason::MemoryFlagsUnverified => "memory_flags_unverified",
             GapReason::ExecImageMismatch => "exec_image_mismatch",
             GapReason::PathClaimUnverified => "path_claim_unverified",
+            GapReason::ExecDenialFailed => "exec_denial_failed",
         }
     }
 
@@ -693,7 +707,8 @@ pub enum TracerEvent {
         /// thread can rewrite between that read and the kernel's copy (the
         /// same A-B-A race the path snapshots carry). A hit here means the
         /// process was killed at this stop, before its image ran an
-        /// instruction; `deny`, `forbid` and an unreadable kernel argv are
+        /// instruction (unless an `exec_denial_failed` gap says the kill did
+        /// not reach it); `deny`, `forbid` and an unreadable kernel argv are
         /// all recorded, and only `forbid` stops the run. `None` when no rules
         /// are configured, the entry check already denied the call (the exec
         /// then fails and the denial surfaces on the syscall event), or the
@@ -837,6 +852,9 @@ pub struct LossCounters {
     /// copy (audit 3 A1): each became a `memory_flags_unverified` gap of
     /// its call's classes instead of a silent read-only filter.
     pub memory_flags_unverified: u64,
+    /// Execs whose command-rule verdict could not be enforced the way the
+    /// observer enforces it ([`GapReason::ExecDenialFailed`]).
+    pub exec_denials_failed: u64,
 }
 
 impl LossCounters {
@@ -870,6 +888,7 @@ impl LossCounters {
             restart_unresolved,
             argument_snapshot_unstable,
             memory_flags_unverified,
+            exec_denials_failed,
         } = *self;
         [
             queue_dropped,
@@ -894,6 +913,7 @@ impl LossCounters {
             restart_unresolved,
             argument_snapshot_unstable,
             memory_flags_unverified,
+            exec_denials_failed,
         ]
         .iter()
         .sum()
@@ -1527,7 +1547,7 @@ mod tests {
         // whether it is the last one declared, and the last one declared
         // closes `ALL` — so with the order check above, `ALL` has them all.
         let last_declared = |reason: GapReason| match reason {
-            GapReason::PathClaimUnverified => true,
+            GapReason::ExecDenialFailed => true,
             GapReason::QueueFull
             | GapReason::MediationResponseUndelivered
             | GapReason::UnmatchedExit
@@ -1551,7 +1571,8 @@ mod tests {
             | GapReason::RestartUnresolved
             | GapReason::ArgumentSnapshotUnstable
             | GapReason::MemoryFlagsUnverified
-            | GapReason::ExecImageMismatch => false,
+            | GapReason::ExecImageMismatch
+            | GapReason::PathClaimUnverified => false,
         };
         assert!(last_declared(GapReason::ALL[GapReason::ALL.len() - 1]));
         let names: std::collections::BTreeSet<&str> =
@@ -1593,6 +1614,7 @@ mod tests {
             restart_unresolved,
             argument_snapshot_unstable,
             memory_flags_unverified,
+            exec_denials_failed,
         } = &mut loss;
         for field in [
             queue_dropped,
@@ -1617,6 +1639,7 @@ mod tests {
             restart_unresolved,
             argument_snapshot_unstable,
             memory_flags_unverified,
+            exec_denials_failed,
         ] {
             set(field);
         }
