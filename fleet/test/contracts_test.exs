@@ -102,9 +102,45 @@ defmodule OuroFleet.ContractsTest do
 
     assert {:error, "component_response_invalid"} =
              OuroFleet.Command.json("/bin/echo", ["not-json"])
+  end
+
+  test "a component past its time or output bound is killed, not only disconnected" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "ouro-fleet-command-" <> Base.encode16(:crypto.strong_rand_bytes(8))
+      )
+
+    File.mkdir!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+    pidfile = Path.join(root, "pid")
+    # `exec` keeps the shell's pid, so the recorded pid is the process left running.
+    silent = ~s(echo $$ > "$0"; exec /bin/sleep 30)
+    noisy = ~s(echo $$ > "$0"; head -c 1100000 /dev/zero; exec /bin/sleep 30)
 
     assert {:error, "component_timeout_outcome_unknown"} =
-             OuroFleet.Command.raw("/bin/sleep", ["5"], 5)
+             OuroFleet.Command.raw("/bin/sh", ["-c", silent, pidfile], 1_000)
+
+    assert gone?(File.read!(pidfile))
+
+    assert {:error, "component_response_too_large"} =
+             OuroFleet.Command.raw("/bin/sh", ["-c", noisy, pidfile], 20_000)
+
+    assert gone?(File.read!(pidfile))
+    refute_received {_port, _message}
+  end
+
+  # The VM's child reaper collects a killed child within moments; a live one answers
+  # `kill -0` for the full 30 seconds of its sleep.
+  defp gone?(pid, tries \\ 100) do
+    case System.cmd("/bin/kill", ["-0", String.trim(pid)], stderr_to_stdout: true) do
+      {_, 0} when tries > 0 ->
+        Process.sleep(50)
+        gone?(pid, tries - 1)
+
+      {_, status} ->
+        status != 0
+    end
   end
 end
 

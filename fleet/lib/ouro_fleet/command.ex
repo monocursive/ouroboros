@@ -32,7 +32,7 @@ defmodule OuroFleet.Command do
         collect(port, [bytes | chunks], size + byte_size(bytes), deadline)
 
       {^port, {:data, _bytes}} ->
-        Port.close(port)
+        stop(port)
         {:error, "component_response_too_large"}
 
       {^port, {:exit_status, status}} ->
@@ -40,8 +40,37 @@ defmodule OuroFleet.Command do
         {:ok, data, status}
     after
       remaining ->
-        Port.close(port)
+        stop(port)
         {:error, "component_timeout_outcome_unknown"}
+    end
+  end
+
+  # Closing a port only closes its pipes, which a child that is not writing never
+  # notices: it would keep running after its reply was already reported unknown. So
+  # the child is killed first. Only the direct child is signalled; anything it spawned
+  # and detached is its own.
+  defp stop(port) do
+    with {:os_pid, pid} <- Port.info(port, :os_pid) do
+      System.cmd("/bin/kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+    end
+
+    # The dying child's exit status closes the port on its own, possibly first.
+    try do
+      Port.close(port)
+    rescue
+      ArgumentError -> :ok
+    end
+
+    flush(port)
+  end
+
+  # Drop what the port delivered before it closed, so it never reaches the caller's
+  # mailbox as a stray message.
+  defp flush(port) do
+    receive do
+      {^port, _} -> flush(port)
+    after
+      0 -> :ok
     end
   end
 end
