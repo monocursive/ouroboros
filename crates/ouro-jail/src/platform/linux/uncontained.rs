@@ -768,7 +768,7 @@ impl Uncontained {
                 format!("the launcher's identity could not be recorded: {err}"),
             )
         })?;
-        self.applied = self.read_applied(removed);
+        self.applied = self.read_applied(removed)?;
         self.leaf
             .verify_member(pid)
             .and_then(|()| self.leaf.arm())
@@ -800,10 +800,17 @@ impl Uncontained {
     }
 
     /// The `applied` group: nothing but the leaf's limits, the wall and the
-    /// environment, which is read back from the launcher.
-    fn read_applied(&self, removed: Vec<String>) -> Applied {
+    /// environment, which is read back from the launcher; a read-back that
+    /// fails refuses rather than record an empty environment.
+    fn read_applied(&self, removed: Vec<String>) -> Result<Applied, JailError> {
         let limits = shared::ceiling_rows(&self.snapshot.limits, Some(&self.leaf));
-        Applied {
+        let environment_names = shared::read_environment_names(self.pid).map_err(|err| {
+            host_setup(
+                ErrorCode::BackendUnavailable,
+                format!("the launcher's environment cannot be read back: {err}"),
+            )
+        })?;
+        Ok(Applied {
             filesystem: None,
             network: AppliedNetwork {
                 mode: "host".to_owned(),
@@ -812,9 +819,9 @@ impl Uncontained {
             },
             syscalls: None,
             limits,
-            environment_names: shared::read_environment_names(self.pid),
+            environment_names,
             removed_environment_names: removed,
-        }
+        })
     }
 
     fn boundary_identity(&self) -> BoundaryIdentity {

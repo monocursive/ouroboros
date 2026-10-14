@@ -1822,7 +1822,7 @@ impl Boundary {
                 )?,
             );
         }
-        self.applied = self.read_applied(launcher, filter_digest, scan);
+        self.applied = self.read_applied(launcher, filter_digest, scan)?;
         Ok(())
     }
 
@@ -1842,15 +1842,27 @@ impl Boundary {
         )
     }
 
-    /// The `applied` group, read back from the boundary that exists.
+    /// The `applied` group, read back from the boundary that exists. A
+    /// read-back that fails refuses: an empty mount table or environment in
+    /// the receipt would be a claim about the child's view nothing measured.
     fn read_applied(
         &self,
         launcher: libc::pid_t,
         filter_digest: &str,
         scan: &jfs::ProtectedScan,
-    ) -> Applied {
-        let mounts = read_mount_table(launcher);
-        let environment_names = read_environment_names(launcher);
+    ) -> Result<Applied, JailError> {
+        let mounts = read_mount_table(launcher).map_err(|err| {
+            preparing(
+                ErrorCode::BackendUnavailable,
+                format!("the launcher's mount table cannot be read back: {err}"),
+            )
+        })?;
+        let environment_names = read_environment_names(launcher).map_err(|err| {
+            preparing(
+                ErrorCode::BackendUnavailable,
+                format!("the launcher's environment cannot be read back: {err}"),
+            )
+        })?;
         let mut limits = Vec::new();
         if let Some(storage) = &self.storage {
             limits.extend(storage.limits());
@@ -1874,7 +1886,7 @@ impl Boundary {
                 });
             }
         }
-        Applied {
+        Ok(Applied {
             filesystem: Some(AppliedFilesystem {
                 mechanism: "bubblewrap-binds".to_owned(),
                 protected_coverage: if self.snapshot.filesystem.protected_coverage
@@ -1909,7 +1921,7 @@ impl Boundary {
             limits,
             environment_names,
             removed_environment_names: Vec::new(),
-        }
+        })
     }
 
     /// A workspace-relative name as the absolute bytes the child sees.
@@ -2952,31 +2964,45 @@ fn skipped_protected_names(scan: &jfs::ProtectedScan) -> Vec<String> {
         .collect()
 }
 
-/// The mount table the launcher actually sees, from `/proc/<pid>/mountinfo`.
-// P01.8 — mountinfo is bytes, not text. It was read with
-// `read_to_string`, so one mount point that is not UTF-8 (a `--deny-read` of
-// such a name, say) made the whole read fail and the receipt claimed an empty
-// mount table.
-fn read_mount_table(pid: libc::pid_t) -> Vec<AppliedMount> {
-    let Ok(raw) = std::fs::read(format!("/proc/{pid}/mountinfo")) else {
-        return Vec::new();
-    };
-    parse_mount_table(&raw)
+/// The most rows a receipt's mount table records. A boundary with more is
+/// refused rather than recorded in part: a shortened table would still read
+/// as the child's whole view (§13.2).
+const MOUNT_TABLE_ROWS_MAX: usize = 1024;
+
+/// The mount table the launcher actually sees, from `/proc/<pid>/mountinfo`
+/// read as bytes (P01.8): one mount point that is not UTF-8 must not cost
+/// the whole table.
+///
+/// # Errors
+/// The read's error, or [`parse_mount_table`]'s.
+fn read_mount_table(pid: libc::pid_t) -> std::io::Result<Vec<AppliedMount>> {
+    parse_mount_table(&std::fs::read(format!("/proc/{pid}/mountinfo"))?)
 }
 
 /// The `(mount point, mode)` rows of a `mountinfo` file's bytes. Fields are
 /// separated by single spaces; a space, tab, newline or backslash inside a
 /// path is an octal escape, so splitting on the byte is exact.
-fn parse_mount_table(raw: &[u8]) -> Vec<AppliedMount> {
+///
+/// # Errors
+/// [`std::io::ErrorKind::InvalidData`] for a row without a mount point and
+/// options, a mount point holding a NUL, or more than
+/// [`MOUNT_TABLE_ROWS_MAX`] rows: the table is read whole or not at all.
+fn parse_mount_table(raw: &[u8]) -> std::io::Result<Vec<AppliedMount>> {
+    let invalid = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidData, what);
     let mut out = Vec::new();
-    for line in raw.split(|byte| *byte == b'\n') {
+    for line in raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
         let fields: Vec<&[u8]> = line
             .split(|byte| *byte == b' ')
             .filter(|field| !field.is_empty())
             .collect();
-        let Some(point) = fields.get(4) else { continue };
-        let Some(options) = fields.get(5) else {
-            continue;
+        let (Some(point), Some(options)) = (fields.get(4), fields.get(5)) else {
+            return Err(invalid(format!(
+                "a mountinfo row has {} fields, not a mount point and options",
+                fields.len()
+            )));
         };
         let mode = if options
             .split(|byte| *byte == b',')
@@ -2986,19 +3012,20 @@ fn parse_mount_table(raw: &[u8]) -> Vec<AppliedMount> {
         } else {
             "rw"
         };
-        let decoded = decode_mountinfo_path(point);
-        let Ok(native) = NativeString::from_bytes(decoded) else {
-            continue;
-        };
+        let native = NativeString::from_bytes(decode_mountinfo_path(point))
+            .map_err(|_| invalid("a mount point holds a NUL byte".to_owned()))?;
+        if out.len() == MOUNT_TABLE_ROWS_MAX {
+            return Err(invalid(format!(
+                "the boundary has more than {MOUNT_TABLE_ROWS_MAX} mounts, more than a \
+                 receipt records"
+            )));
+        }
         out.push(AppliedMount {
             path: native,
             mode: mode.to_owned(),
         });
-        if out.len() >= 1024 {
-            break;
-        }
     }
-    out
+    Ok(out)
 }
 
 /// `mountinfo` escapes space, tab, newline and backslash as octal.
@@ -3025,10 +3052,11 @@ pub(super) fn decode_mountinfo_path(bytes: &[u8]) -> Vec<u8> {
 /// The environment names the launcher actually has, read from `/proc`.
 ///
 /// I09: names only, never values.
-fn read_environment_names(pid: libc::pid_t) -> Vec<String> {
-    let Ok(raw) = std::fs::read(format!("/proc/{pid}/environ")) else {
-        return Vec::new();
-    };
+///
+/// # Errors
+/// The read's error: an unreadable environment is not an empty one.
+fn read_environment_names(pid: libc::pid_t) -> std::io::Result<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/environ"))?;
     let mut names: Vec<String> = raw
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
@@ -3039,7 +3067,7 @@ fn read_environment_names(pid: libc::pid_t) -> Vec<String> {
         .collect();
     names.sort();
     names.dedup();
-    names
+    Ok(names)
 }
 
 /// The environment bindings of the snapshot, resolved to the paths the child
@@ -3253,7 +3281,8 @@ fn mount_swap_rendezvous() {
 /// `/proc`, `/sys`, cgroupfs, devtmpfs or the `/run` runtime tree (jail-v1
 /// §9.1), keyed by `key` (`filesystem.read_only` or `filesystem.read_write`).
 /// A policy refusal (`policy_widening`, remediation `configuration`) before
-/// any mount.
+/// any mount; a mount table that cannot be read refuses too (`host_setup`),
+/// since without it no grant can be shown to be clear.
 pub(crate) fn refuse_pseudo_fs_grants(
     binds: &[(PathBuf, PathBuf)],
     key: &str,
@@ -3261,7 +3290,27 @@ pub(crate) fn refuse_pseudo_fs_grants(
     if binds.is_empty() {
         return Ok(());
     }
-    let mounts = pseudo_fs_mount_points();
+    refuse_pseudo_fs_grants_among(binds, key, pseudo_fs_mount_points())
+}
+
+/// [`refuse_pseudo_fs_grants`] against a given read of the mount points.
+fn refuse_pseudo_fs_grants_among(
+    binds: &[(PathBuf, PathBuf)],
+    key: &str,
+    mounts: std::io::Result<Vec<PathBuf>>,
+) -> Result<(), JailError> {
+    let mounts = mounts.map_err(|err| {
+        error(
+            ErrorCode::BackendUnavailable,
+            ErrorStage::Preparing,
+            Remediation::HostSetup,
+            format!(
+                "this process's mount table cannot be read, so no grant can be shown to stay \
+                 clear of host /proc, /sys, cgroupfs, devtmpfs and the /run runtime tree: {err}"
+            ),
+        )
+        .with_key_path(key)
+    })?;
     for (source, _destination) in binds {
         // Issue draft 15: an allowlisted device node is exactly the narrow
         // exception — one character device under /dev, never devtmpfs.
@@ -3323,11 +3372,18 @@ fn source_on_pseudo_fs(resolved: &Path) -> bool {
 /// else, so a tmpfs-backed `/tmp` or scratch stays grantable), from
 /// `/proc/self/mountinfo` read as bytes. The fstype is the field after the
 /// ` - ` separator.
-fn pseudo_fs_mount_points() -> Vec<PathBuf> {
-    use std::os::unix::ffi::OsStrExt as _;
-    let Ok(raw) = std::fs::read("/proc/self/mountinfo") else {
-        return Vec::new();
-    };
+///
+/// # Errors
+/// The read's error: an unreadable table is not one without such mounts.
+fn pseudo_fs_mount_points() -> std::io::Result<Vec<PathBuf>> {
+    Ok(parse_pseudo_fs_mount_points(&std::fs::read(
+        "/proc/self/mountinfo",
+    )?))
+}
+
+/// The pseudo-filesystem mount points of a `mountinfo` file's bytes, `/run`
+/// always among them.
+fn parse_pseudo_fs_mount_points(raw: &[u8]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for line in raw.split(|byte| *byte == b'\n') {
         let Some(separator) = line.windows(3).position(|w| w == b" - ") else {
@@ -4619,7 +4675,9 @@ pub(super) mod shared {
     pub(in crate::platform::linux) fn write_all(fd: RawFd, bytes: &[u8]) -> std::io::Result<()> {
         super::write_all(fd, bytes)
     }
-    pub(in crate::platform::linux) fn read_environment_names(pid: libc::pid_t) -> Vec<String> {
+    pub(in crate::platform::linux) fn read_environment_names(
+        pid: libc::pid_t,
+    ) -> std::io::Result<Vec<String>> {
         super::read_environment_names(pid)
     }
     pub(in crate::platform::linux) fn step_for(deadline: Deadline) -> Duration {
@@ -5101,12 +5159,39 @@ mod tests {
     /// not tmpfs would otherwise slip the fstype branch.
     #[test]
     fn audit4_run_is_refused_by_path_whatever_its_fstype() {
-        let mounts = super::pseudo_fs_mount_points();
+        for mounts in [
+            super::pseudo_fs_mount_points().unwrap(),
+            super::parse_pseudo_fs_mount_points(b"22 1 0:1 / / rw - ext4 /dev/vda1 rw\n"),
+        ] {
+            assert!(
+                mounts
+                    .iter()
+                    .any(|point| point == std::path::Path::new("/run")),
+                "the /run entry is unconditional: {mounts:?}"
+            );
+        }
+    }
+
+    /// A mount table that cannot be read is no proof that a grant stays
+    /// clear of the pseudo filesystems: the guard refuses, it never passes.
+    #[test]
+    fn an_unreadable_mount_table_refuses_every_grant() {
+        let grant = [(PathBuf::from("/srv/data"), PathBuf::from("/srv/data"))];
+        let error = super::refuse_pseudo_fs_grants_among(
+            &grant,
+            "filesystem.read_only",
+            Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackendUnavailable);
         assert!(
-            mounts
-                .iter()
-                .any(|point| point == std::path::Path::new("/run")),
-            "the /run entry is unconditional: {mounts:?}"
+            error.message.contains("mount table cannot be read"),
+            "{}",
+            error.message
+        );
+        assert!(
+            super::refuse_pseudo_fs_grants_among(&grant, "filesystem.read_only", Ok(Vec::new()))
+                .is_ok()
         );
     }
 
@@ -5526,7 +5611,7 @@ mod tests {
         let raw: &[u8] = b"22 1 0:1 / / ro,nosuid - tmpfs tmpfs ro\n\
             23 22 0:2 / /work/sec\xffret rw,nosuid - tmpfs tmpfs rw\n\
             24 22 0:3 / /work/a\\040b ro - tmpfs tmpfs ro\n";
-        let table = parse_mount_table(raw);
+        let table = parse_mount_table(raw).unwrap();
         let rows: Vec<(Vec<u8>, &str)> = table
             .iter()
             .map(|mount| (mount.path.as_bytes().to_vec(), mount.mode.as_str()))
@@ -5539,6 +5624,34 @@ mod tests {
                 (b"/work/a b".to_vec(), "ro"),
             ]
         );
+    }
+
+    /// The table is read whole or not at all: a row the parser cannot read,
+    /// or more rows than a receipt records, refuses instead of shortening.
+    #[test]
+    fn a_mount_table_is_never_recorded_in_part() {
+        assert!(parse_mount_table(b"22 1 0:1 / / ro - tmpfs tmpfs ro\n\n").is_ok());
+        assert!(parse_mount_table(b"22 1 0:1\n").is_err(), "a short row");
+        assert!(parse_mount_table(b"22 1 0:1 / /a\\000b ro - tmpfs t ro\n").is_err());
+        let row = |index: usize| format!("{index} 1 0:1 / /m{index} ro - tmpfs tmpfs ro\n");
+        let full: String = (0..MOUNT_TABLE_ROWS_MAX).map(row).collect();
+        assert_eq!(
+            parse_mount_table(full.as_bytes()).unwrap().len(),
+            MOUNT_TABLE_ROWS_MAX
+        );
+        let over = format!("{full}{}", row(MOUNT_TABLE_ROWS_MAX));
+        let error = parse_mount_table(over.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("more than"), "{error}");
+    }
+
+    #[test]
+    fn an_unreadable_environment_is_not_an_empty_one() {
+        // SAFETY: getpid takes no arguments and cannot fail.
+        let own = unsafe { libc::getpid() };
+        assert!(!read_environment_names(own).unwrap().is_empty());
+        // No process has this pid: pid_max is far below it.
+        assert!(read_environment_names(libc::pid_t::MAX).is_err());
+        assert!(read_mount_table(libc::pid_t::MAX).is_err());
     }
 
     #[test]
