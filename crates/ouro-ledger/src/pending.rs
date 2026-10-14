@@ -93,7 +93,13 @@ impl Drop for Journal {
     }
 }
 impl Journal {
+    #[cfg(any(target_os = "linux", test))]
     pub fn open(run_dir: &Path) -> Result<Self> {
+        Self::try_open(run_dir)?
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::WouldBlock).into())
+    }
+    /// The journal, or `None` while another open description holds its lock.
+    pub fn try_open(run_dir: &Path) -> Result<Option<Self>> {
         use std::os::unix::fs::OpenOptionsExt;
         let dir = File::options()
             .read(true)
@@ -106,9 +112,13 @@ impl Journal {
         let lock = Self::file(&dir, LOCK_NAME, libc::O_RDWR | libc::O_CREAT)?;
         // SAFETY: flock takes the open descriptor and flags by value.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error.into());
         }
-        Ok(Self { dir, lock })
+        Ok(Some(Self { dir, lock }))
     }
     fn file(dir: &File, name: &CStr, flags: i32) -> Result<File> {
         // SAFETY: the directory descriptor and the NUL-terminated name stay

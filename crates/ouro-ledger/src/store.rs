@@ -1134,15 +1134,25 @@ impl Store {
             if self.pending_exists(&id) {
                 // Corrupt or incomplete local evidence must never imply
                 // settlement; its refusal is recorded with the unknown outcome.
-                let result = self.reconcile_pending(&id, peer, &alive);
+                let result = self.reconcile(&id, peer, &alive);
                 if !["prepared", "admitted"].contains(&self.stream(&id)?.run.state.as_str()) {
                     reconciled.push(self.show(&id)?);
                     continue;
                 }
-                if let Err(problem) = result {
-                    self.record_invalid_pending(&id, peer, &problem)?;
-                    reconciled.push(self.show(&id)?);
-                    continue;
+                match result {
+                    Ok(_) => {}
+                    Err(pending_recovery::PendingFailure::Refused(refusal, _)) => {
+                        self.record_invalid_pending(&id, peer, refusal)?;
+                        reconciled.push(self.show(&id)?);
+                        continue;
+                    }
+                    // Not the journal's doing: nothing is recorded for this
+                    // run, and a later settlement can retry it.
+                    Err(pending_recovery::PendingFailure::Other(problem)) => {
+                        return Err(LedgerError(format!(
+                            "{id}: pending evidence could not be reconciled now: {problem}"
+                        )));
+                    }
                 }
             }
             let owner = self.stream(&id)?.run.owner.clone();
@@ -2178,7 +2188,16 @@ mod tests {
             .unwrap()
             .create(&run, &peer())
             .unwrap();
-        fs::write(directory.join(STATE), b"{\"damaged\":true}").unwrap();
+        // Decoding this journal fails with an error that quotes its value.
+        fs::write(
+            directory.join(STATE),
+            b"{\"state\":\"journal-value-7f3a\",\"digest\":\"x\"}",
+        )
+        .unwrap();
+        let refusal = store
+            .reconcile_pending(&run.run_id, &peer(), &|_| false)
+            .unwrap_err();
+        assert!(refusal.0.contains("journal-value-7f3a"), "{refusal}");
         let settled = store.settle_orphans(&peer(), |_| false).unwrap();
         assert_eq!(settled[0].state, "outcome_unknown");
         assert_eq!(
@@ -2194,12 +2213,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(last["request_id"], "reconcile:pending-invalid");
-        assert!(
-            last["body"]["problem"]
-                .as_str()
-                .is_some_and(|problem| !problem.is_empty()),
-            "{last}"
+        // History keeps the refusal's class, never its text.
+        assert_eq!(
+            last["body"],
+            json!({"reason":"invalid_pending_evidence","refusal":"journal_unreadable",
+                "outcome":{"kind":"unknown","unknown":true,
+                    "unknown_reason":"pending evidence could not be reconciled"},
+                "coverage":{"status":"degraded","gaps":[{"reason":"invalid_pending_evidence"}]}})
         );
+        assert!(!String::from_utf8_lossy(&stream).contains("journal-value-7f3a"));
     }
 
     #[cfg(target_os = "linux")]
@@ -2252,6 +2274,44 @@ mod tests {
             store.show(&run.run_id).unwrap().chain,
             recorded.chain,
             "a terminal run gains no second unknown outcome"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reconciliation_the_journal_did_not_refuse_is_neither_recorded_nor_cached() {
+        use crate::pending::Journal;
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let mut plan = payload();
+        plan["evidence"] = "best-effort".into();
+        let run = store.prepare("pending-busy", &plan, &peer()).unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        store
+            .append_owner(
+                &run.run_id,
+                "admission",
+                "admitted",
+                None,
+                &json!({"receipt":prepared(&run)}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        let run = store.show(&run.run_id).unwrap();
+        let journal = Journal::open(&store.root.join(&run.run_id)).unwrap();
+        journal.create(&run, &peer()).unwrap();
+        // While another holder keeps the journal locked, nothing is decided.
+        store.recover_pending_orphans(&peer());
+        assert_eq!(store.show(&run.run_id).unwrap().state, "admitted");
+        drop(journal);
+        // The unchanged journal is tried again and reconciled.
+        store.recover_pending_orphans(&peer());
+        let reconciled = store.show(&run.run_id).unwrap();
+        assert_eq!(reconciled.state, "outcome_unknown");
+        assert_eq!(
+            reconciled.outcome.unwrap()["unknown_reason"],
+            "pending owner has no durable local exit record"
         );
     }
 
