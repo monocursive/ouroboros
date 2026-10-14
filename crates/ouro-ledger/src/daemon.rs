@@ -415,24 +415,28 @@ fn spawn_thread(handler: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
 
 /// Accept until a non-transient failure, which is returned. Connections past
 /// the bound, or whose handler cannot start, are refused explicitly rather
-/// than dropped.
+/// than dropped. Repeated failures to accept, and to start handlers, each
+/// back off on their own: a connection accepted between two handlers that
+/// cannot start does not make the second wait any shorter.
 fn accept_connections(
     listener: UnixListener,
     sender: mpsc::SyncSender<Message>,
     spawn: Spawn,
+    pause: fn(Duration),
 ) -> LedgerError {
     let count = Arc::new(AtomicUsize::new(0));
-    let mut backoff = ACCEPT_BACKOFF;
+    let mut accept_wait = ACCEPT_BACKOFF;
+    let mut spawn_wait = ACCEPT_BACKOFF;
     loop {
         let socket = match listener.accept() {
             Ok((socket, _)) => {
-                backoff = ACCEPT_BACKOFF;
+                accept_wait = ACCEPT_BACKOFF;
                 socket
             }
             Err(error) if transient_accept_error(&error) => {
                 eprintln!("ouro-ledger: retrying accept after {error}");
-                thread::sleep(backoff);
-                backoff = (backoff * 2).min(ACCEPT_BACKOFF_LIMIT);
+                pause(accept_wait);
+                accept_wait = (accept_wait * 2).min(ACCEPT_BACKOFF_LIMIT);
                 continue;
             }
             Err(error) => return error.into(),
@@ -461,12 +465,15 @@ fn accept_connections(
                 count.fetch_sub(1, Ordering::AcqRel);
             }
         };
-        if let Err(error) = spawn(Box::new(handler)) {
-            count.fetch_sub(1, Ordering::AcqRel);
-            refuse_busy(&socket, "the writer cannot start a connection handler now");
-            eprintln!("ouro-ledger: refusing a connection after {error}");
-            thread::sleep(backoff);
-            backoff = (backoff * 2).min(ACCEPT_BACKOFF_LIMIT);
+        match spawn(Box::new(handler)) {
+            Ok(()) => spawn_wait = ACCEPT_BACKOFF,
+            Err(error) => {
+                count.fetch_sub(1, Ordering::AcqRel);
+                refuse_busy(&socket, "the writer cannot start a connection handler now");
+                eprintln!("ouro-ledger: refusing a connection after {error}");
+                pause(spawn_wait);
+                spawn_wait = (spawn_wait * 2).min(ACCEPT_BACKOFF_LIMIT);
+            }
         }
     }
 }
@@ -637,7 +644,8 @@ pub fn serve(data: &Path) -> Result<()> {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     fs::File::open(store.root())?.sync_all()?;
     let (sender, receiver) = mpsc::sync_channel::<Message>(MAX_CONNECTIONS);
-    let acceptor = thread::spawn(move || accept_connections(listener, sender, spawn_thread));
+    let acceptor =
+        thread::spawn(move || accept_connections(listener, sender, spawn_thread, thread::sleep));
     let mut capabilities = BTreeMap::new();
     #[cfg(target_os = "linux")]
     let recovery_peer = peer_identity(crate::fsx::euid(), std::process::id())?;
@@ -1074,7 +1082,9 @@ mod tests {
         let (data, listener) = listening(temp.path());
         let (sender, receiver) = mpsc::sync_channel(MAX_CONNECTIONS);
         answer_requests(receiver, json!({"protocol":PROTOCOL_VERSION}));
-        thread::spawn(move || accept_connections(listener, sender, first_start_fails));
+        thread::spawn(move || {
+            accept_connections(listener, sender, first_start_fails, thread::sleep)
+        });
         let mut refused = UnixStream::connect(data.join("ledger/serve.sock")).unwrap();
         refused.set_read_timeout(Some(TIMEOUT)).unwrap();
         match read_frame::<Response>(&mut refused).unwrap() {
@@ -1087,6 +1097,51 @@ mod tests {
         // The acceptor survived and serves the next connection.
         Client::connect(&data).unwrap();
         assert_eq!(STARTS.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn handlers_that_cannot_start_back_off_and_release_their_slots() {
+        // More handlers than the connection bound cannot start; later ones can.
+        static STARTS: AtomicUsize = AtomicUsize::new(0);
+        static WAITS: std::sync::Mutex<Vec<Duration>> = std::sync::Mutex::new(Vec::new());
+        fn starts_fail(handler: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+            if STARTS.fetch_add(1, Ordering::AcqRel) <= MAX_CONNECTIONS {
+                return Err(std::io::Error::from_raw_os_error(libc::EAGAIN));
+            }
+            spawn_thread(handler)
+        }
+        fn record(wait: Duration) {
+            WAITS.lock().unwrap().push(wait);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (data, listener) = listening(temp.path());
+        let (sender, receiver) = mpsc::sync_channel(MAX_CONNECTIONS);
+        answer_requests(receiver, json!({"protocol":PROTOCOL_VERSION}));
+        thread::spawn(move || accept_connections(listener, sender, starts_fail, record));
+        // Each refused connection is accepted successfully first.
+        for _ in 0..=MAX_CONNECTIONS {
+            let mut refused = UnixStream::connect(data.join("ledger/serve.sock")).unwrap();
+            refused.set_read_timeout(Some(TIMEOUT)).unwrap();
+            match read_frame::<Response>(&mut refused).unwrap() {
+                Response::Error { message } => assert!(
+                    message
+                        .starts_with("writer_busy: the writer cannot start a connection handler"),
+                    "{message}"
+                ),
+                response => panic!("unexpected {response:?}"),
+            }
+        }
+        // No handler that never started kept its slot.
+        Client::connect(&data).unwrap();
+        // Repeated failures wait longer each time, up to the bound.
+        let waits = WAITS.lock().unwrap().clone();
+        assert_eq!(waits.len(), MAX_CONNECTIONS + 1);
+        let mut expected = ACCEPT_BACKOFF;
+        for wait in waits {
+            assert_eq!(wait, expected);
+            expected = (expected * 2).min(ACCEPT_BACKOFF_LIMIT);
+        }
+        assert_eq!(expected, ACCEPT_BACKOFF_LIMIT);
     }
 
     #[test]
@@ -1110,7 +1165,9 @@ mod tests {
             let (data, listener) = listening(temp.path());
             let (sender, receiver) = mpsc::sync_channel(MAX_CONNECTIONS);
             answer_requests(receiver, writer);
-            thread::spawn(move || accept_connections(listener, sender, spawn_thread));
+            thread::spawn(move || {
+                accept_connections(listener, sender, spawn_thread, thread::sleep)
+            });
             let expected = format!(
                 "ledger writer speaks {spoken}, this client speaks protocol {PROTOCOL_VERSION}; \
                  restart the writer once its runs settle"
@@ -1123,7 +1180,7 @@ mod tests {
         let (data, listener) = listening(temp.path());
         let (sender, receiver) = mpsc::sync_channel(MAX_CONNECTIONS);
         answer_requests(receiver, json!({"protocol":PROTOCOL_VERSION}));
-        thread::spawn(move || accept_connections(listener, sender, spawn_thread));
+        thread::spawn(move || accept_connections(listener, sender, spawn_thread, thread::sleep));
         assert!(Client::reachable(&data).unwrap().is_some());
     }
 
