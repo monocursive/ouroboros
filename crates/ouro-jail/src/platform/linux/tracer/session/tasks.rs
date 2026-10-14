@@ -130,11 +130,12 @@ impl Tasks {
     /// taking its slot; `fresh` when it was taken at the stop not yet
     /// resumed.
     ///
-    /// Only a thread between calls begins one. A thread that still has a
-    /// call or a restart wait is refused and keeps it — the callers end
-    /// either first, and refusing is what keeps an unended one from
-    /// vanishing without the gap its end records — so the refused call is
-    /// never paired, and its exit is an `unmatched_exit` gap.
+    /// Only a thread between calls begins one. Every caller ends what the
+    /// thread still had first, with the gap that end records, so a thread
+    /// that still has a call or a restart wait here is a caller's mistake:
+    /// it is asserted in debug builds, and otherwise refused, keeping the
+    /// call or wait it has rather than letting the new call take its place
+    /// without a word.
     pub(super) fn begin_call(&mut self, tid: pid_t, call: Call, site: Site, fresh: bool) {
         let Some(task) = self.map.get_mut(&tid) else {
             return;
