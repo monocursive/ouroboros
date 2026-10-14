@@ -1722,6 +1722,200 @@ fn this_hosts_backend_version_is_the_pinned_one() {
 // cgroups
 // ===========================================================================
 
+/// The measurement this test makes: create a leaf beneath the delegated
+/// subtree and move a process into it, recording the kernel's own answer at
+/// each step. Test support only — it may enable a controller in the parent,
+/// which a run never does (delegation is operator configuration), and it
+/// puts the parent back afterwards.
+mod leaf {
+    use std::fmt;
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use ouro_jail::platform::linux::cgroup::{
+        CGROUP_ROOT, common_ancestor_ok, delegated_root, own_cgroup,
+    };
+    use ouro_jail::platform::linux::sys::errno_name;
+
+    /// The controllers a cgroup directory makes available to its children.
+    pub fn subtree_control(dir: &Path) -> io::Result<Vec<String>> {
+        Ok(fs::read_to_string(dir.join("cgroup.subtree_control"))?
+            .split_ascii_whitespace()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// What happened when a leaf was attempted.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum LeafStatus {
+        /// There is no delegated subtree for this uid.
+        NotDelegated { reason: String },
+        /// The parent's `cgroup.subtree_control` could not be read.
+        SubtreeControlUnreadable { errno: i32 },
+        /// Creating the leaf directory failed.
+        CreateFailed { errno: i32 },
+        /// The leaf exists but enabling a controller in the parent failed.
+        SubtreeControlFailed { controller: String, errno: i32 },
+        /// The leaf exists but the process could not be moved into it.
+        MoveFailed { errno: i32 },
+        /// The leaf exists and the process is in it.
+        Moved,
+    }
+
+    impl fmt::Display for LeafStatus {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::NotDelegated { reason } => write!(f, "not delegated: {reason}"),
+                Self::SubtreeControlUnreadable { errno } => {
+                    write!(f, "subtree_control unreadable: {}", errno_name(*errno))
+                }
+                Self::CreateFailed { errno } => {
+                    write!(f, "leaf creation failed: {}", errno_name(*errno))
+                }
+                Self::SubtreeControlFailed { controller, errno } => write!(
+                    f,
+                    "enabling {controller} in the parent failed: {}",
+                    errno_name(*errno)
+                ),
+                Self::MoveFailed { errno } => {
+                    write!(f, "moving the process in failed: {}", errno_name(*errno))
+                }
+                Self::Moved => write!(f, "leaf created and process moved in"),
+            }
+        }
+    }
+
+    /// The full record of a leaf attempt, including the facts that explain it.
+    #[derive(Clone, Debug)]
+    pub struct LeafAttempt {
+        pub status: LeafStatus,
+        /// The leaf directory, when one was created.
+        pub path: Option<PathBuf>,
+        pub delegated_root: Option<PathBuf>,
+        /// This process's own cgroup at the time of the attempt.
+        pub own_cgroup: Option<String>,
+        /// Whether the kernel's common-ancestor rule permits the move at all.
+        pub common_ancestor_ok: bool,
+        /// The parent's `cgroup.subtree_control` before the attempt.
+        pub subtree_control_before: Option<Vec<String>>,
+        /// Whether this attempt changed `cgroup.subtree_control`.
+        pub subtree_control_changed: bool,
+    }
+
+    impl LeafAttempt {
+        /// Whether the leaf is usable: created and populated with the pid.
+        pub fn moved(&self) -> bool {
+            self.status == LeafStatus::Moved
+        }
+    }
+
+    fn errno_of(error: &io::Error) -> i32 {
+        error.raw_os_error().unwrap_or(libc::EIO)
+    }
+
+    /// Create a leaf beneath the delegated subtree, make sure `controller`
+    /// is available in it, and move `pid` into it. The common-ancestor check
+    /// is recorded but the move is still attempted, so the result carries
+    /// the kernel's own errno rather than a prediction of it.
+    pub fn try_leaf(name: &str, pid: libc::pid_t, controller: &str) -> LeafAttempt {
+        // SAFETY: getuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let own = own_cgroup().ok();
+        let mut attempt = LeafAttempt {
+            status: LeafStatus::Moved,
+            path: None,
+            delegated_root: None,
+            own_cgroup: own.clone(),
+            common_ancestor_ok: false,
+            subtree_control_before: None,
+            subtree_control_changed: false,
+        };
+        let Some(root) = delegated_root(uid) else {
+            attempt.status = LeafStatus::NotDelegated {
+                reason: format!(
+                    "no directory {CGROUP_ROOT}/user.slice/user-{uid}.slice/user@{uid}.service \
+                     owned by uid {uid}"
+                ),
+            };
+            return attempt;
+        };
+        let relative = format!(
+            "/{}",
+            root.strip_prefix(CGROUP_ROOT)
+                .expect("the delegated root lies beneath the cgroup mount")
+                .display()
+        );
+        attempt.common_ancestor_ok = own
+            .as_deref()
+            .is_some_and(|own| common_ancestor_ok(own, &relative));
+        attempt.delegated_root = Some(root.clone());
+        let before = match subtree_control(&root) {
+            Ok(before) => before,
+            Err(error) => {
+                attempt.status = LeafStatus::SubtreeControlUnreadable {
+                    errno: errno_of(&error),
+                };
+                return attempt;
+            }
+        };
+        attempt.subtree_control_before = Some(before.clone());
+        if !before.iter().any(|c| c == controller) {
+            if let Err(error) = fs::write(
+                root.join("cgroup.subtree_control"),
+                format!("+{controller}"),
+            ) {
+                attempt.status = LeafStatus::SubtreeControlFailed {
+                    controller: controller.to_owned(),
+                    errno: errno_of(&error),
+                };
+                return attempt;
+            }
+            attempt.subtree_control_changed = true;
+        }
+        let leaf = root.join(name);
+        if let Err(error) = fs::create_dir(&leaf) {
+            attempt.status = LeafStatus::CreateFailed {
+                errno: errno_of(&error),
+            };
+            return attempt;
+        }
+        attempt.status = match fs::write(leaf.join("cgroup.procs"), pid.to_string()) {
+            Ok(()) => LeafStatus::Moved,
+            Err(error) => LeafStatus::MoveFailed {
+                errno: errno_of(&error),
+            },
+        };
+        attempt.path = Some(leaf);
+        attempt
+    }
+
+    /// Remove the leaf the attempt created and put the parent's
+    /// `cgroup.subtree_control` back the way it was found. A parent that can
+    /// no longer be read is an error, never a restore that was skipped.
+    pub fn remove_leaf(attempt: &LeafAttempt) -> io::Result<()> {
+        if let Some(path) = attempt.path.as_ref()
+            && path.exists()
+        {
+            fs::remove_dir(path)?;
+        }
+        if attempt.subtree_control_changed
+            && let Some(root) = attempt.delegated_root.as_ref()
+            && let Some(before) = attempt.subtree_control_before.as_ref()
+        {
+            for controller in subtree_control(root)? {
+                if !before.contains(&controller) {
+                    fs::write(
+                        root.join("cgroup.subtree_control"),
+                        format!("-{controller}"),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[test]
 fn a_delegated_leaf_records_the_kernels_own_answer() {
     if !reference_host("a systemd-delegated cgroup subtree") {
@@ -1738,14 +1932,14 @@ fn a_delegated_leaf_records_the_kernels_own_answer() {
     }
     assert!(pid > 0, "fork failed");
 
-    let attempt = cgroup::try_leaf(&format!("ouro-j1-test-{pid}.leaf"), pid, "pids");
+    let attempt = leaf::try_leaf(&format!("ouro-j1-test-{pid}.leaf"), pid, "pids");
     // SAFETY: `pid` is this test's own child.
     unsafe {
         libc::kill(pid, libc::SIGKILL);
         let mut status = 0;
         libc::waitpid(pid, &raw mut status, 0);
     }
-    let cleanup = cgroup::remove_leaf(&attempt);
+    let cleanup = leaf::remove_leaf(&attempt);
 
     let own = attempt.own_cgroup.clone().expect("own cgroup");
     assert!(own.starts_with("/user.slice/"), "own cgroup is {own}");
@@ -1761,8 +1955,8 @@ fn a_delegated_leaf_records_the_kernels_own_answer() {
 
     // From an SSH session scope the common-ancestor rule forbids the move.
     match attempt.status {
-        cgroup::LeafStatus::Moved if attempt.common_ancestor_ok => {}
-        cgroup::LeafStatus::MoveFailed { errno } => {
+        leaf::LeafStatus::Moved if attempt.common_ancestor_ok => {}
+        leaf::LeafStatus::MoveFailed { errno } => {
             assert!(
                 errno == libc::EACCES || errno == libc::EPERM,
                 "the move failed with an unexpected errno {errno}"
