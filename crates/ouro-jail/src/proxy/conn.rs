@@ -112,6 +112,21 @@ impl ResultSlot<'_> {
         }
     }
 
+    /// A relayed request's result: its counters and how it ended.
+    fn relayed(
+        &self,
+        connected: SocketAddr,
+        outcome: &relay::RelayOutcome,
+        end: EndReason,
+    ) -> ProxyResult {
+        let mut result = self.allowed(Reason::Relayed, Some(connected));
+        result.bytes_in = outcome.bytes_in;
+        result.bytes_out = outcome.bytes_out;
+        result.discarded_bytes = outcome.discarded;
+        result.end = Some(end);
+        result
+    }
+
     fn no_request(&mut self) {
         if !self.done {
             self.done = true;
@@ -190,69 +205,93 @@ fn serve(
     client: &Arc<UnixStream>,
     accepted_at: Instant,
 ) -> Result<(), Reason> {
-    let budgets = shared.budgets;
     if let Some(vault) = &shared.vault {
-        slot.initiator = match vault.origins.receive(client) {
-            Ok(Some(initiator)) => initiator,
-            Ok(None) => {
-                slot.no_request();
-                return Ok(());
-            }
-            // Stop shuts the socket down under a reader, too.
-            Err(_) if shared.is_stopping() => return Err(Reason::Stopping),
-            Err(reason) => return Err(reason),
+        let Some(initiator) = claim_initiator(shared, vault, client)? else {
+            slot.no_request();
+            return Ok(());
         };
+        slot.initiator = initiator;
     }
-    let Some(transport) = socks::detect(client, accepted_at + budgets.header_deadline)? else {
+    let header_deadline = accepted_at + shared.budgets.header_deadline;
+    let Some((head, request)) = read_request(shared, slot, client, header_deadline)? else {
         slot.no_request();
         return Ok(());
-    };
-    slot.transport = transport;
-    let (head, request) = if transport == Transport::Socks5 {
-        let destination = match socks::request(client, accepted_at + budgets.header_deadline) {
-            Ok(destination) => destination,
-            Err(e) => {
-                slot.replied = true;
-                return Err(e);
-            }
-        };
-        (
-            http::Head::empty(),
-            http::Request {
-                destination,
-                framing: http::Framing::Tunnel,
-                forward_head: Vec::new(),
-            },
-        )
-    } else {
-        let head = match http::read_head(
-            client,
-            budgets.max_header_bytes,
-            accepted_at + budgets.header_deadline,
-        ) {
-            Ok(head) => head,
-            Err(http::HeadError::NoBytes) => {
-                slot.no_request();
-                return Ok(());
-            }
-            Err(http::HeadError::Reject(reason)) => {
-                return Err(if shared.is_stopping() {
-                    Reason::Stopping
-                } else {
-                    reason
-                });
-            }
-        };
-        let request = http::parse_request(head.head())?;
-        (head, request)
     };
     slot.kind = request.kind();
     slot.destination = Some(request.destination.clone());
     if shared.is_stopping() {
         return Err(Reason::Stopping);
     }
+    let approved = approve(shared, &request)?;
+    if shared.is_stopping() {
+        return Err(Reason::Stopping);
+    }
+    connect_and_relay(shared, slot, client, &request, &approved, &head)
+}
+
+/// Reads the sealed bridge's preamble and claims the process that initiated
+/// the connection. `None`: the connection closed before its preamble, so
+/// there was no request.
+fn claim_initiator(
+    shared: &Shared,
+    vault: &crate::vault::Vault,
+    client: &UnixStream,
+) -> Result<Option<crate::vault::origin::Initiator>, Reason> {
+    match vault.origins.receive(client) {
+        Ok(initiator) => Ok(initiator),
+        // Stop shuts the socket down under a reader, too.
+        Err(_) if shared.is_stopping() => Err(Reason::Stopping),
+        Err(reason) => Err(reason),
+    }
+}
+
+/// Reads one request in the client's protocol before `deadline`: a SOCKS5
+/// CONNECT, which becomes a tunnel request with an empty head, or an HTTP
+/// request head and its parse. `None`: the client closed without sending a
+/// byte, so there was no request.
+fn read_request(
+    shared: &Shared,
+    slot: &mut ResultSlot<'_>,
+    client: &UnixStream,
+    deadline: Instant,
+) -> Result<Option<(http::Head, http::Request)>, Reason> {
+    let Some(transport) = socks::detect(client, deadline)? else {
+        return Ok(None);
+    };
+    slot.transport = transport;
+    if transport == Transport::Socks5 {
+        let destination = socks::request(client, deadline).inspect_err(|_| {
+            // The SOCKS exchange answered the client itself.
+            slot.replied = true;
+        })?;
+        let request = http::Request {
+            destination,
+            framing: http::Framing::Tunnel,
+            forward_head: Vec::new(),
+        };
+        return Ok(Some((http::Head::empty(), request)));
+    }
+    let head = match http::read_head(client, shared.budgets.max_header_bytes, deadline) {
+        Ok(head) => head,
+        Err(http::HeadError::NoBytes) => return Ok(None),
+        Err(http::HeadError::Reject(reason)) => {
+            return Err(if shared.is_stopping() {
+                Reason::Stopping
+            } else {
+                reason
+            });
+        }
+    };
+    let request = http::parse_request(head.head())?;
+    Ok(Some((head, request)))
+}
+
+/// Steps 1 to 4: the host rule, one resolution on the host, and every
+/// answer it returned. The addresses an upstream connect may use.
+fn approve(shared: &Shared, request: &http::Request) -> Result<Vec<IpAddr>, Reason> {
+    let destination = &request.destination;
     // Step 1: the host rule.
-    if !shared.rules.permits_destination(&request.destination) {
+    if !shared.rules.permits_destination(destination) {
         return Err(Reason::HostNotAllowed);
     }
     // Audit 2026-10-08 L21: plaintext HTTP requires a grant that named its
@@ -262,17 +301,15 @@ fn serve(
     // serves whatever scheme its operator named the port for. The host rule
     // did permit the destination, so the refusal says which part did not.
     if request.kind() == RequestKind::Http
-        && !shared
-            .rules
-            .permits_destination_explicit(&request.destination)
+        && !shared.rules.permits_destination_explicit(destination)
     {
         return Err(Reason::PlaintextNotGranted);
     }
     // Step 2: resolve on the host, once.
-    let answers = match &request.destination.host {
+    let answers = match &destination.host {
         Host::Ip(address) => vec![*address],
         Host::Name(name) => {
-            let deadline = Instant::now() + budgets.resolve_deadline;
+            let deadline = Instant::now() + shared.budgets.resolve_deadline;
             match shared.resolver.resolve(name, deadline) {
                 Ok(answers) => answers,
                 Err(ResolveError::Timeout) => return Err(Reason::ResolveTimeout),
@@ -284,18 +321,14 @@ fn serve(
         }
     };
     // Steps 3 and 4: every answer passes, or none is used.
-    let approved = shared
+    shared
         .rules
-        .check_answers(request.destination.port, &answers)
+        .check_answers(destination.port, &answers)
         .map_err(|denial| match denial {
             AnswerDenial::Empty => Reason::ResolveEmpty,
             AnswerDenial::Forbidden => Reason::ForbiddenAddress,
             AnswerDenial::Mixed => Reason::MixedAnswers,
-        })?;
-    if shared.is_stopping() {
-        return Err(Reason::Stopping);
-    }
-    connect_and_relay(shared, slot, client, &request, &approved, &head)
+        })
 }
 
 /// Whether a connect error is this process running out of a resource
@@ -340,6 +373,16 @@ fn connect_upstream(
     Err(last)
 }
 
+/// The connected destination: its socket, registered so stop can close it,
+/// and the approved address it reached.
+struct Upstream {
+    stream: Arc<TcpStream>,
+    address: SocketAddr,
+}
+
+/// Steps 5 to 7 for an approved request: its first flight when it is a
+/// tunnel, its vault credentials, the upstream connect, then the relay.
+/// Emits the connection's result.
 fn connect_and_relay(
     shared: &Shared,
     slot: &mut ResultSlot<'_>,
@@ -348,51 +391,160 @@ fn connect_and_relay(
     approved: &[IpAddr],
     head: &http::Head,
 ) -> Result<(), Reason> {
-    let budgets = shared.budgets;
-    let reply_budget = budgets.header_deadline;
-    let mut flight = if request.framing == http::Framing::Tunnel {
-        if matches!(request.destination.host, Host::Name(_)) {
-            slot.transport.establish(client)?;
-            slot.replied = true;
-        }
-        Some(origin::inspect(
-            client,
-            head.leftover(),
-            &request.destination,
-        )?)
-    } else {
-        None
+    let mut flight = first_flight(shared, slot, client, request, head)?;
+    let (mut forwarded, lease) = substitute(shared, slot, request, flight.as_mut())?;
+    slot.origin_verification = Some(
+        flight
+            .as_ref()
+            .map_or(Verification::HttpHost, |f| f.mechanism),
+    );
+    let Some(upstream) = open_upstream(shared, slot, client, approved, forwarded.destination.port)
+    else {
+        return Ok(());
     };
+    let _ = upstream.stream.set_nodelay(true);
+    if forwarded.framing == http::Framing::Tunnel && !slot.replied {
+        slot.transport.establish(client)?;
+        slot.replied = true;
+    }
+    // Whether the client has heard anything yet: a tunnel has its
+    // establishment reply, a plain request nothing. A relay that cannot
+    // start writes to neither side, so that request can still be refused.
+    let answered = slot.replied;
+    // From here the client may receive relayed bytes; an error response can
+    // no longer follow.
+    slot.replied = true;
+    if let Some(vault) = &shared.vault
+        && let Some(flight) = &flight
+        && flight.http.is_none()
+    {
+        relay_tls_lane(
+            shared,
+            slot,
+            vault,
+            client,
+            &upstream,
+            &forwarded.destination,
+            &flight.bytes,
+        );
+        return Ok(());
+    }
+    let watch = crate::vault::lifecycle::Watch::start(
+        Arc::new(lease),
+        client.clone(),
+        upstream.stream.clone(),
+    )?;
+    let relayed = start_relay(
+        client,
+        &upstream.stream,
+        &forwarded,
+        flight.as_ref(),
+        head,
+        shared.budgets.relay_chunk(),
+    );
+    if shared.vault.is_some() {
+        use zeroize::Zeroize as _;
+        forwarded.forward_head.zeroize();
+        if let Some(inner) = flight.as_mut().and_then(|f| f.http.as_mut()) {
+            inner.forward_head.zeroize();
+        }
+    }
+    let Ok(outcome) = relayed else {
+        // The relay could not start; nothing was written to either side.
+        let _ = upstream.stream.shutdown(Shutdown::Both);
+        // A tunnel already answered with its establishment reply; a plain
+        // request has heard nothing yet and still gets its refusal.
+        if !answered {
+            slot.transport.refuse(
+                client,
+                Reason::ResourceExhausted,
+                socks::Reply::GeneralFailure,
+                shared.budgets.header_deadline,
+            );
+        }
+        slot.emit(slot.allowed(Reason::ResourceExhausted, Some(upstream.address)));
+        return Ok(());
+    };
+    let end = if watch.revoked() {
+        EndReason::CredentialRevoked
+    } else if shared.is_stopping() {
+        EndReason::Stopped
+    } else {
+        outcome.end
+    };
+    slot.emit(slot.relayed(upstream.address, &outcome, end));
+    Ok(())
+}
+
+/// Step 6 for a tunnel: answers a tunnel to a name, then reads the client's
+/// first flight (bounded) and checks that it names the destination, all
+/// before connecting. A plain request has none.
+fn first_flight(
+    shared: &Shared,
+    slot: &mut ResultSlot<'_>,
+    client: &UnixStream,
+    request: &http::Request,
+    head: &http::Head,
+) -> Result<Option<origin::Flight>, Reason> {
+    if request.framing != http::Framing::Tunnel {
+        return Ok(None);
+    }
+    if matches!(request.destination.host, Host::Name(_)) {
+        slot.transport.establish(client)?;
+        slot.replied = true;
+    }
+    let flight = origin::inspect(client, head.leftover(), &request.destination)?;
     // A tunnel whose first flight is HTTP carries plaintext HTTP, which the
     // TLS shape of an omitted-port grant does not admit any more than an
-    // absolute-form request (above). A tunnel to an address is not inspected
-    // (`explicit_ip`), so this holds for named destinations only.
-    if flight.as_ref().is_some_and(|flight| flight.http.is_some())
+    // absolute-form request (`approve`). A tunnel to an address is not
+    // inspected (`explicit_ip`), so this holds for named destinations only.
+    if flight.http.is_some()
         && !shared
             .rules
             .permits_destination_explicit(&request.destination)
     {
         return Err(Reason::PlaintextNotGranted);
     }
+    Ok(Some(flight))
+}
+
+/// The request as it is forwarded, with the vault's placeholders
+/// substituted where their credentials declare (in a plain request's head,
+/// and in a tunnel's HTTP first flight), and the lease on what was
+/// substituted. Without a vault, the request as it came and an empty lease.
+fn substitute(
+    shared: &Shared,
+    slot: &ResultSlot<'_>,
+    request: &http::Request,
+    flight: Option<&mut origin::Flight>,
+) -> Result<(http::Request, crate::vault::lifecycle::Lease), Reason> {
     let mut forwarded = request.clone();
     let mut lease = crate::vault::lifecycle::Lease::default();
     if let Some(vault) = &shared.vault {
         if forwarded.framing != http::Framing::Tunnel {
             lease.extend(vault.inject_bound("http", &mut forwarded, &slot.initiator)?);
         }
-        if let Some(inner) = flight.as_mut().and_then(|f| f.http.as_mut()) {
+        if let Some(inner) = flight.and_then(|f| f.http.as_mut()) {
             lease.extend(vault.inject_bound("http", inner, &slot.initiator)?);
         }
     }
-    let request = &forwarded;
-    slot.origin_verification = Some(
-        flight
-            .as_ref()
-            .map_or(Verification::HttpHost, |f| f.mechanism),
-    );
-    let deadline = Instant::now() + budgets.connect_deadline;
-    let (upstream, connected) = match connect_upstream(approved, request.destination.port, deadline)
-    {
+    Ok((forwarded, lease))
+}
+
+/// Connects to the first approved address that accepts within the connect
+/// deadline and registers the socket, so stop can close it. `None` when the
+/// connection already settled: no address accepted (an allowed result with
+/// the connect's failure), or stop began meanwhile.
+fn open_upstream(
+    shared: &Shared,
+    slot: &mut ResultSlot<'_>,
+    client: &UnixStream,
+    approved: &[IpAddr],
+    port: u16,
+) -> Option<Upstream> {
+    let reply_budget = shared.budgets.header_deadline;
+    let deadline = Instant::now() + shared.budgets.connect_deadline;
+    let (stream, address) = match connect_upstream(approved, port, deadline) {
         Ok(pair) => pair,
         Err((reason, errno)) => {
             // Allowed by policy; the connection itself was not made.
@@ -408,15 +560,15 @@ fn connect_and_relay(
                 );
             }
             slot.replied = true;
-            return Ok(());
+            return None;
         }
     };
-    let upstream = Arc::new(upstream);
-    if !shared.register(slot.id, Closer::Tcp(Arc::clone(&upstream))) {
+    let stream = Arc::new(stream);
+    if !shared.register(slot.id, Closer::Tcp(Arc::clone(&stream))) {
         // Stop began while connecting: the connection was made, nothing
         // was relayed.
-        let _ = upstream.shutdown(Shutdown::Both);
-        let mut result = slot.allowed(Reason::Stopping, Some(connected));
+        let _ = stream.shutdown(Shutdown::Both);
+        let mut result = slot.allowed(Reason::Stopping, Some(address));
         result.end = Some(EndReason::Stopped);
         slot.emit(result);
         if !slot.replied {
@@ -428,133 +580,99 @@ fn connect_and_relay(
             );
         }
         slot.replied = true;
-        return Ok(());
+        return None;
     }
-    let _ = upstream.set_nodelay(true);
-    let chunk = budgets.relay_chunk();
-    if request.framing == http::Framing::Tunnel && !slot.replied {
-        slot.transport.establish(client)?;
-        slot.replied = true;
-    }
-    // Whether the client has heard anything yet: a tunnel has its
-    // establishment reply, a plain request nothing. A relay that cannot
-    // start writes to neither side, so that request can still be refused.
-    let answered = slot.replied;
-    // From here the client may receive relayed bytes; an error response can
-    // no longer follow.
-    slot.replied = true;
-    if let Some(vault) = &shared.vault
-        && let Some(flight) = &flight
-        && flight.http.is_none()
-    {
-        let result = tls::relay(
-            vault,
-            client,
-            &upstream,
-            &request.destination,
-            &flight.bytes,
-            chunk,
-            &slot.initiator,
-        );
-        let mut event = match result {
-            Ok(outcome) => {
-                slot.origin_verification = Some(Verification::MitmHttpHost);
-                let mut event = slot.allowed(Reason::Relayed, Some(connected));
-                event.bytes_in = outcome.bytes_in;
-                event.bytes_out = outcome.bytes_out;
-                event.discarded_bytes = outcome.discarded;
-                event.end = Some(outcome.end);
-                event
-            }
-            Err(failure) => {
-                let mut event = denial(
-                    slot.id,
-                    slot.destination.clone(),
-                    slot.kind,
-                    failure.reason,
-                    slot.accepted_at,
-                );
-                event.connected = Some(connected);
-                event.bytes_in = failure.progress.bytes_in;
-                event.bytes_out = failure.progress.bytes_out;
-                event.discarded_bytes = failure.progress.discarded;
-                if event.bytes_in != 0 || event.bytes_out != 0 {
-                    event.end = Some(failure.progress.end);
-                }
-                event.transport = slot.transport;
-                event
-            }
-        };
-        if shared.is_stopping() {
-            event.end = Some(EndReason::Stopped);
+    Some(Upstream { stream, address })
+}
+
+/// Step 7 through the vault's TLS lane, for a tunnel whose first flight is
+/// TLS: one request, terminated, checked and re-originated with certificate
+/// validation. Emits the connection's result.
+fn relay_tls_lane(
+    shared: &Shared,
+    slot: &mut ResultSlot<'_>,
+    vault: &crate::vault::Vault,
+    client: &Arc<UnixStream>,
+    upstream: &Upstream,
+    destination: &Destination,
+    early: &[u8],
+) {
+    let relayed = tls::relay(
+        vault,
+        client,
+        &upstream.stream,
+        destination,
+        early,
+        shared.budgets.relay_chunk(),
+        &slot.initiator,
+    );
+    let mut event = match relayed {
+        Ok(outcome) => {
+            slot.origin_verification = Some(Verification::MitmHttpHost);
+            slot.relayed(upstream.address, &outcome, outcome.end)
         }
-        slot.emit(event);
-        return Ok(());
+        Err(failure) => {
+            let mut event = denial(
+                slot.id,
+                slot.destination.clone(),
+                slot.kind,
+                failure.reason,
+                slot.accepted_at,
+            );
+            event.connected = Some(upstream.address);
+            event.bytes_in = failure.progress.bytes_in;
+            event.bytes_out = failure.progress.bytes_out;
+            event.discarded_bytes = failure.progress.discarded;
+            if event.bytes_in != 0 || event.bytes_out != 0 {
+                event.end = Some(failure.progress.end);
+            }
+            event.transport = slot.transport;
+            event
+        }
+    };
+    if shared.is_stopping() {
+        event.end = Some(EndReason::Stopped);
     }
-    let watch =
-        crate::vault::lifecycle::Watch::start(Arc::new(lease), client.clone(), upstream.clone())?;
-    let relayed = match request.framing {
+    slot.emit(event);
+}
+
+/// Step 7 outside the TLS lane: a tunnel's first flight (its rewritten
+/// request when it was HTTP, its bytes as they came otherwise) or a plain
+/// request's rewritten head and whatever the client sent after it, then
+/// both directions until the connection ends.
+fn start_relay(
+    client: &Arc<UnixStream>,
+    upstream: &Arc<TcpStream>,
+    request: &http::Request,
+    flight: Option<&origin::Flight>,
+    head: &http::Head,
+    chunk: usize,
+) -> Result<relay::RelayOutcome, relay::SetupFailed> {
+    match request.framing {
         http::Framing::Tunnel => {
-            let flight = flight.as_ref().expect("tunnel inspected before connecting");
+            let flight = flight.expect("tunnel inspected before connecting");
             if let Some(inner) = &flight.http {
                 relay::http(
                     client,
-                    &upstream,
+                    upstream,
                     &inner.forward_head,
                     inner.framing,
                     &flight.bytes,
                     chunk,
                 )
             } else {
-                relay::tunnel(client, &upstream, &flight.bytes, chunk)
+                relay::tunnel(client, upstream, &flight.bytes, chunk)
             }
         }
         framing => relay::http(
             client,
-            &upstream,
+            upstream,
             &request.forward_head,
             framing,
             head.leftover(),
             chunk,
         ),
-    };
-    if shared.vault.is_some() {
-        use zeroize::Zeroize as _;
-        forwarded.forward_head.zeroize();
-        if let Some(inner) = flight.as_mut().and_then(|f| f.http.as_mut()) {
-            inner.forward_head.zeroize();
-        }
     }
-    let Ok(outcome) = relayed else {
-        // The relay could not start; nothing was written to either side.
-        let _ = upstream.shutdown(Shutdown::Both);
-        // A tunnel already answered with its establishment reply; a plain
-        // request has heard nothing yet and still gets its refusal.
-        if !answered {
-            slot.transport.refuse(
-                client,
-                Reason::ResourceExhausted,
-                socks::Reply::GeneralFailure,
-                reply_budget,
-            );
-        }
-        slot.emit(slot.allowed(Reason::ResourceExhausted, Some(connected)));
-        return Ok(());
-    };
-    let end = if watch.revoked() {
-        EndReason::CredentialRevoked
-    } else if shared.is_stopping() {
-        EndReason::Stopped
-    } else {
-        outcome.end
-    };
-    let mut result = slot.allowed(Reason::Relayed, Some(connected));
-    result.bytes_in = outcome.bytes_in;
-    result.bytes_out = outcome.bytes_out;
-    result.discarded_bytes = outcome.discarded;
-    result.end = Some(end);
-    slot.emit(result);
-    Ok(())
 }
 
 #[cfg(test)]
