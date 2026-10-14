@@ -1,5 +1,5 @@
-//! J5-C review item 12: the observer's failure paths write receipts that
-//! satisfy the frozen contract.
+//! The observer's failure paths write receipts that satisfy the frozen
+//! contract.
 //!
 //! §11.4 (jail-v1.md:1555-1558, :1636-1637): a degraded class states its
 //! missing interval, and the frozen receipt schema requires a degraded class

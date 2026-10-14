@@ -351,8 +351,8 @@ pub fn run_one(name: &str, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
 /// [`run_one`] with the backend as the platform resolved it.
 #[must_use]
 pub fn run_one_backend(name: &str, jail_exe: &Path, bwrap: Backend<'_>) -> ProbeResult {
-    // J5-D: the test seam can only add an architecture refusal, never lift
-    // one; the refusal's evidence names the seam.
+    // The test seam can only add an architecture refusal, never lift one;
+    // the refusal's evidence names the seam.
     if let Some(refusal) = seam_architecture_refusal(name) {
         return refusal;
     }
@@ -965,8 +965,8 @@ fn seccomp_result(captured: &exec::Captured) -> ProbeResult {
 /// run a command — which is what the `agent` profile needs and a bare
 /// `unshare` does not establish.
 fn nested_bwrap_argv(bwrap: &Path) -> Vec<OsString> {
-    // J5-D: the same resolved file, as the sandbox sees it through the
-    // read-only runtime roots (review F1: nothing but it runs).
+    // The same resolved file, as the sandbox sees it through the read-only
+    // runtime roots (review F1: nothing but it runs).
     let mut argv = vec![
         bwrap.as_os_str().to_owned(),
         OsString::from("--unshare-user"),

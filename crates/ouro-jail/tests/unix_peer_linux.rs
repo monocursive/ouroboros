@@ -2,13 +2,14 @@
 //! Live N05 for the unix-peer mediator, plus unit tests of its pure logic.
 //!
 //! jail-v1 §10, §15 N05/S03, CONTRACT §3.4. The mechanism was proved in the
-//! J3 spike (`unixpeer-spike-2026-09-2x-ouro-ci.txt`); these tests exercise the
-//! *shipped module* — the real [`filter_bytes`], [`take_from_launcher`] and
-//! [`spawn`] — rather than a reimplementation. A small C program stands in for
-//! the trusted launcher: it installs the filter this crate produces (read from
-//! a file, never a second copy), opens a `NETLINK_SOCK_DIAG` socket in the
-//! attempt's netns, hands both to the supervisor, and connects on command. The
-//! supervisor is this test process, running the module's mediator.
+//! unix-peer spike (`unixpeer-spike-2026-09-22-ouro-ci.txt`); these tests
+//! exercise the *shipped module* — the real [`filter_bytes`],
+//! [`take_from_launcher`] and [`spawn`] — rather than a reimplementation. A
+//! small C program stands in for the trusted launcher: it installs the filter
+//! this crate produces (read from a file, never a second copy), opens a
+//! `NETLINK_SOCK_DIAG` socket in the attempt's netns, hands both to the
+//! supervisor, and connects on command. The supervisor is this test process,
+//! running the module's mediator.
 //!
 //! One bubblewrap layer provides the namespaces (an unconfined process cannot
 //! make its own on the reference host — the same AppArmor policy that denies
@@ -989,7 +990,7 @@ fn a_connect_fails_closed_when_the_mediator_stops() {
     );
 }
 
-/// J3 agent: `stop()` is bounded however the pool was woken. RECV ignores
+/// `stop()` is bounded however the pool was woken. RECV ignores
 /// `O_NONBLOCK`, so a worker that lost the race for a notification used to
 /// sleep inside it where the stop pipe could not reach it, and joining it
 /// hung (measured: this binary hung in the test above). Attempted: bursts of
@@ -1260,7 +1261,7 @@ fn mutation_id_revalidation_drops_a_stale_notification() {
 /// in a nested netns are host-conditional. This asserts the honest measurement
 /// and is gated on the capability, not on a skip: a host that permits nested
 /// user namespaces would take the `else` branch and exercise the real nested
-/// path (left to wave 2's `agent` end-to-end, which owns the inner sandbox).
+/// path (left to the `agent` end-to-end tests, which own the inner sandbox).
 #[test]
 fn nested_user_namespace_is_unavailable_here() {
     if !common::live() {
@@ -1274,7 +1275,7 @@ fn nested_user_namespace_is_unavailable_here() {
         NestedUserns::Works => {
             harness::skip_or_fail(
                 "this host permits nested user namespaces; the nested IPC and \
-                 proxy-replacement cases belong to wave 2's agent end-to-end",
+                 proxy-replacement cases belong to the agent end-to-end tests",
             );
         }
         NestedUserns::Unknown(reason) => panic!("could not measure nested userns: {reason}"),
@@ -1293,7 +1294,8 @@ enum NestedUserns {
 /// userns is not enough: it must map a uid and create a mount+net namespace,
 /// which is `unshare -Urmn`. On a stock host with
 /// `apparmor_restrict_unprivileged_userns=1` this is EPERM; on a permissive
-/// host it succeeds, and the nested cases become live (owned by wave 2).
+/// host it succeeds, and the nested cases become live (owned by the `agent`
+/// end-to-end tests).
 fn measure_nested_userns() -> NestedUserns {
     let bwrap = common::bwrap_path();
     let out = Command::new(bwrap)
