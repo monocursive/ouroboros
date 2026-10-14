@@ -479,7 +479,8 @@ simulation leaves out.
   control transcript and complete trace a live test reads through `Run` or
   `Spawned` has passed its frozen schema and the semantic rules, and a binary
   that installed no contract cannot read one. A trace cut short by design is
-  held to what a prefix can keep (`common::assert_trace_prefix`), and a
+  held to what a prefix can keep (`common::assert_trace_prefix`, or
+  `common::check_trace` without a final receipt for a local trace), and a
   receipt a test reads from disk itself to assert on goes through
   `common::read_receipt` or `common::checked_receipt`; the crash matrices
   that parse every record file after a crash check `jail.json` with

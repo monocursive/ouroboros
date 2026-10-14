@@ -333,6 +333,12 @@ fn local_trace(run: &Run) -> (PathBuf, ouro_fixture::harness::Readback, u64) {
     let mut traces = run.local_traces();
     assert_eq!(traces.len(), 1, "one attempt, one local trace");
     let (path, readback) = traces.remove(0);
+    // A trace whose write failed ends wherever the failure left it, so the
+    // harness holds it to nothing; its whole frames keep the stream's rules
+    // up to the cut all the same.
+    if let Err(error) = common::check_trace(&readback.frames, None) {
+        panic!("the local trace's frames fail their contract: {error}");
+    }
     let size = std::fs::metadata(&path).unwrap().len();
     (path, readback, size)
 }
