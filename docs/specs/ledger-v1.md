@@ -530,7 +530,15 @@ last segment's length and reads its manifest and `run.json`. The connection
 that asked then re-reads and re-hashes those segments up to the noted lengths,
 so live owners keep the writer while one large run is verified, and records
 appended meanwhile are neither read nor reported. A clean re-read must match
-the published projection and end at the head the writer had accepted. A run
+the published projection and end at the head the writer had accepted. A writer
+that has not poisoned a stream wrote nothing after the history it accepted, so
+bytes there are someone else's. When the re-read reaches exactly that history
+(its byte count, chaining to its head), the frame refused after it is reported
+as `N canonical bytes follow what this writer accepted; it never wrote or
+acknowledged them`, and every other finding stands. When the re-read reaches
+that byte count under another head, the report says the history on disk differs
+from what this writer accepted. Readers label such a stream `corrupt`, never
+`incomplete`, which stays the label of this writer's own interrupted write. A run
 whose re-read found problems is planned and re-read once more if a GC ran in
 between; if one ran again, the report says so. A page waits up to 300 s; the
 connection stops re-reading after 280 s and reports, as not consistent, how many
@@ -673,9 +681,19 @@ The page reports the run state, snapshot chain head, bounded coverage summary,
 selection with unsupported or unobserved coverage says unobserved; it does not
 say that no action occurred. A `none` run remains unprotected. These local
 reader labels do not establish external custody or managed project authorization.
-The coverage summary includes `selection_status`: it is `unobserved` if any
-selected class lacks active coverage, including a mix of active and unsupported
-classes. This label does not erase known records returned by the query.
+The coverage summary includes `selection_status`, the weakest status of the
+selected classes. A class is `degraded` when the run's coverage is degraded or
+has gaps, when its `ledger` entry is degraded or has gaps, or when the class
+itself is degraded or has gaps. Otherwise it is `active` only when the summary
+is per class (top-level status `by_class` or `active`) and the class's own
+entry is active, and `unobserved` in every other case, including a mix of
+active and unsupported classes and an owner's coverage whose top-level status
+is unrecognised. `diff` reads each class's coverage by the same rule before
+adding its own reasons. This label does not
+erase known records returned by the query. A snapshot keeps the label it was
+issued under: a checkpoint saved by an earlier writer, whose rule did not
+degrade a selection for a degraded `ledger` entry without gaps and called a
+selected class active under any top-level status, restores with that label.
 
 `local_consistency` covers accepted records in the pinned snapshot checked so
 far. It is not a fresh check of the entire current file. Retrying the most recent

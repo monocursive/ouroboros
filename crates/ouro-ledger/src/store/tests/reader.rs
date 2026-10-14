@@ -260,6 +260,69 @@ fn reader_cursor_cannot_change_scope_and_survives_restart() {
 }
 
 #[test]
+fn a_checkpoint_an_earlier_writer_saved_under_its_selection_rule_still_restores() {
+    let (temp, mut store, run) = create();
+    for n in 0..40 {
+        note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
+    }
+    // An owner's unresolved outcome whose coverage calls every class active
+    // under a top-level status no selection rule recognises. The rule before
+    // class_coverage selected it as active; the current one as unobserved.
+    let active = json!({"status":"active","sources":["audit"],"gaps":[]});
+    let mut coverage = json!({"status":"complete"});
+    for class in ["exec", "fs.write", "fs.deny", "net", "limits", "proxy.net"] {
+        coverage[class] = active.clone();
+    }
+    store
+        .append_owner(
+            &run.run_id,
+            "unresolved",
+            "outcome_unknown",
+            None,
+            &json!({"outcome":{"kind":"unknown","unknown":true},"coverage":coverage}),
+            &peer(),
+            TOKEN,
+        )
+        .unwrap();
+    let mut request = read_request(&run, crate::protocol::ReadSelector::All);
+    request.limit = 10;
+    let first = store.read(&request).unwrap();
+    assert_eq!(first.coverage["selection_status"], "unobserved");
+    request.cursor = first.next_cursor;
+    let cursor = request.cursor.as_ref().unwrap();
+    let checkpoint_path = store
+        .root()
+        .join("readers")
+        .join(format!("{}.json", &cursor[..32]));
+    drop(store);
+    // As the earlier writer saved it: the same snapshot, labelled by its rule.
+    let mut envelope: Value = serde_json::from_slice(&fs::read(&checkpoint_path).unwrap()).unwrap();
+    envelope["checkpoint"]["template"]["coverage"]["selection_status"] = json!("active");
+    envelope["digest"] = json!(digest(&envelope["checkpoint"]).unwrap());
+    fs::write(&checkpoint_path, canonical(&envelope).unwrap()).unwrap();
+    let mut upgraded = Store::open(&temp.path().join("data")).unwrap();
+    let next = upgraded.read(&request).unwrap();
+    // The snapshot keeps the label it was issued under.
+    assert_eq!(next.coverage["selection_status"], "active");
+    assert_eq!(next.snapshot, first.snapshot);
+    // A label neither rule gives is still refused.
+    let mut forged = request.clone();
+    forged.cursor = next.next_cursor;
+    let cursor = forged.cursor.as_ref().unwrap();
+    let checkpoint_path = upgraded
+        .root()
+        .join("readers")
+        .join(format!("{}.json", &cursor[..32]));
+    drop(upgraded);
+    let mut envelope: Value = serde_json::from_slice(&fs::read(&checkpoint_path).unwrap()).unwrap();
+    envelope["checkpoint"]["template"]["coverage"]["selection_status"] = json!("degraded");
+    envelope["digest"] = json!(digest(&envelope["checkpoint"]).unwrap());
+    fs::write(&checkpoint_path, canonical(&envelope).unwrap()).unwrap();
+    let mut reopened = Store::open(&temp.path().join("data")).unwrap();
+    assert!(reopened.read(&forged).is_err());
+}
+
+#[test]
 fn durable_reader_refuses_rechecksummed_forged_snapshot_labels() {
     for field in ["state", "child_protection", "coverage", "zero_head"] {
         let temp = tempfile::tempdir().unwrap();

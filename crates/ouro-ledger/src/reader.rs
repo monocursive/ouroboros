@@ -217,8 +217,12 @@ fn parse_checkpoint(file: &mut File, id: &str) -> Result<Checkpoint> {
     }
     validate_request(&checkpoint.request)?;
     let terminal = checkpoint.template.state.is_terminal();
-    if checkpoint.template.coverage["selection_status"]
-        != selection_status(&checkpoint.request.filter, &checkpoint.template.coverage)
+    let (filter, coverage) = (&checkpoint.request.filter, &checkpoint.template.coverage);
+    // A snapshot keeps the selection label it was issued under, including
+    // one an earlier writer issued by its own rule.
+    let issued = &coverage["selection_status"];
+    if (*issued != selection_status(filter, coverage)
+        && *issued != earlier_selection_status(filter, coverage))
         || (checkpoint.template.local_consistency
             && (checkpoint.template.stream_status != if terminal { "complete" } else { "active" }
                 || !checkpoint.template.problems.is_empty()))
@@ -507,22 +511,52 @@ pub(crate) fn class_coverage(summary: &Value, class: &str) -> SelectionStatus {
     }
 }
 
-/// The weakest class coverage among the classes `filter` selects.
-pub(crate) fn selection_status(filter: &ReadFilter, coverage: &Value) -> SelectionStatus {
-    let classes: &[&str] = match filter.selector {
+/// The classes `filter` selects.
+fn selected_classes(filter: &ReadFilter) -> &'static [&'static str] {
+    match filter.selector {
         ReadSelector::All => &["exec", "fs.write", "fs.deny", "net", "limits", "proxy.net"],
         ReadSelector::Execs => &["exec"],
         ReadSelector::Paths => &["fs.write", "fs.deny"],
         ReadSelector::Hosts => &["net", "proxy.net"],
         ReadSelector::Denials => &["exec", "fs.write", "fs.deny", "net", "proxy.net"],
-    };
-    let statuses: Vec<_> = classes
+    }
+}
+
+/// The weakest class coverage among the classes `filter` selects.
+pub(crate) fn selection_status(filter: &ReadFilter, coverage: &Value) -> SelectionStatus {
+    let statuses: Vec<_> = selected_classes(filter)
         .iter()
         .map(|class| class_coverage(coverage, class))
         .collect();
     if statuses.contains(&SelectionStatus::Degraded) {
         SelectionStatus::Degraded
     } else if statuses.contains(&SelectionStatus::Unobserved) {
+        SelectionStatus::Unobserved
+    } else {
+        SelectionStatus::Active
+    }
+}
+
+/// The selection rule readers applied before [`class_coverage`]: a degraded
+/// ledger entry without gaps did not degrade a selection, and a selected
+/// class was active under any top-level status. Only to restore a snapshot
+/// an earlier writer labelled; nothing new is labelled by it.
+fn earlier_selection_status(filter: &ReadFilter, coverage: &Value) -> SelectionStatus {
+    let classes = selected_classes(filter);
+    let entries = &coverage["classes"];
+    let gaps = |entry: &Value| entry["gap_count"].as_u64().is_some_and(|count| count > 0);
+    if coverage["status"] == "degraded"
+        || gaps(coverage)
+        || gaps(&entries["ledger"])
+        || classes
+            .iter()
+            .any(|class| entries[*class]["status"] == "degraded" || gaps(&entries[*class]))
+    {
+        SelectionStatus::Degraded
+    } else if classes
+        .iter()
+        .any(|class| entries[*class]["status"] != "active")
+    {
         SelectionStatus::Unobserved
     } else {
         SelectionStatus::Active
