@@ -176,27 +176,61 @@ pub fn resolved_bwrap() -> Result<&'static Path, &'static str> {
         .map_err(String::as_str)
 }
 
-/// Whether the resolved bubblewrap is new enough for the rendered argv,
-/// computed once per process from the backend every run resolves anyway:
-/// `Ok(())`, or a message naming the version it reports and the floor it
-/// misses.
-static BWRAP_MEETS_MINIMUM: std::sync::LazyLock<Result<(), String>> =
-    std::sync::LazyLock::new(|| {
-        let bwrap = resolved_bwrap().map_err(str::to_owned)?;
-        match bwrap::bwrap_version(bwrap, clock::Deadline::after(probe::PROBE_DEADLINE)) {
-            Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => Ok(()),
-            Ok(version) => Err(format!(
-                "the resolved bubblewrap ({}) reports {}; every contained run renders \
-                 --bind-fd/--ro-bind-fd, which need bubblewrap >= 0.10.0",
-                bwrap.display(),
-                version.raw
-            )),
-            Err(e) => Err(format!(
-                "the resolved bubblewrap ({}) could not be asked for its version: {e}",
-                bwrap.display()
-            )),
-        }
-    });
+/// Whether the resolved bubblewrap is new enough for the rendered argv
+/// (`--bind-fd` and `--ro-bind-fd` arrived in 0.10.0): `Ok(())`, or a refusal
+/// naming the version it reports and the floor it misses.
+///
+/// Asked once per process, within the preparation budget it runs in (§8.2)
+/// and at most a probe's deadline. The answer is kept; a question the budget
+/// ended is not an answer, so it refuses as the budget's timeout and is asked
+/// again next time.
+fn bwrap_meets_minimum(deadline: clock::Deadline) -> Result<(), JailError> {
+    static ANSWER: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    let refusal = |reason: &String| {
+        error(
+            ErrorCode::BackendUnavailable,
+            ErrorStage::Preparing,
+            Remediation::HostSetup,
+            reason.clone(),
+        )
+    };
+    if let Some(answer) = ANSWER.get() {
+        return answer.as_ref().map_err(refusal).copied();
+    }
+    let bwrap = resolved_bwrap().map_err(|reason| refusal(&reason.to_owned()))?;
+    let answer = ask_minimum(bwrap, deadline)?;
+    ANSWER
+        .get_or_init(|| answer)
+        .as_ref()
+        .map_err(refusal)
+        .copied()
+}
+
+/// [`bwrap_meets_minimum`]'s answer for `bwrap`, asked within `deadline`
+/// and at most a probe's deadline.
+///
+/// # Errors
+/// The budget's timeout when `deadline` ended the question: that is no
+/// answer about the backend.
+fn ask_minimum(bwrap: &Path, deadline: clock::Deadline) -> Result<Result<(), String>, JailError> {
+    let asked = clock::Deadline::after(probe::PROBE_DEADLINE.min(deadline.remaining()));
+    match bwrap::bwrap_version(bwrap, asked) {
+        Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => Ok(Ok(())),
+        Ok(version) => Ok(Err(format!(
+            "the resolved bubblewrap ({}) reports {}; every contained run renders \
+             --bind-fd/--ro-bind-fd, which need bubblewrap >= 0.10.0",
+            bwrap.display(),
+            version.raw
+        ))),
+        Err(e) if deadline.expired() => Err(prepare_timeout(&format!(
+            "preparation did not complete within its budget: {e}"
+        ))),
+        Err(e) => Ok(Err(format!(
+            "the resolved bubblewrap ({}) could not be asked for its version: {e}",
+            bwrap.display()
+        ))),
+    }
+}
 
 pub(super) fn error(
     code: ErrorCode,
@@ -298,18 +332,10 @@ impl Platform for LinuxPlatform {
                 format!("bubblewrap is not available: {reason}"),
             )
         })?;
-        // A backend too old for the rendered argv (`--bind-fd` and
-        // `--ro-bind-fd` arrived in 0.10.0) refuses here with the version it
-        // reports, instead of exiting 125 during setup behind an empty
-        // diagnostic.
-        if let Err(reason) = BWRAP_MEETS_MINIMUM.clone() {
-            return Err(error(
-                ErrorCode::BackendUnavailable,
-                ErrorStage::Preparing,
-                Remediation::HostSetup,
-                reason,
-            ));
-        }
+        // A backend too old for the rendered argv refuses here with the
+        // version it reports, instead of exiting 125 during setup behind an
+        // empty diagnostic.
+        bwrap_meets_minimum(deadline)?;
         let pin = self
             .backend_pin
             .as_ref()
@@ -396,6 +422,43 @@ pub(super) mod tests {
                 .unwrap_err()
                 .contains("PATH is unset")
         );
+    }
+
+    /// §8.2: the version question spends what is left of the preparation
+    /// budget, never a fresh probe deadline: a backend that does not answer
+    /// refuses as the budget's timeout once the budget is spent.
+    #[test]
+    fn the_minimum_version_is_asked_within_the_preparation_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let slow = dir.path().join("bwrap");
+        std::fs::write(&slow, b"#!/bin/sh\nexec sleep 30\n").unwrap();
+        executable_mode(&slow);
+        let started = std::time::Instant::now();
+        let refusal =
+            ask_minimum(&slow, clock::Deadline::after(Duration::from_millis(200))).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "asked for {:?}",
+            started.elapsed()
+        );
+        assert_eq!(refusal.code, ErrorCode::PrepareTimeout);
+        assert_eq!(refusal.remediation, Remediation::Retry);
+
+        let old = dir.path().join("old-bwrap");
+        std::fs::write(&old, b"#!/bin/sh\necho bubblewrap 0.9.0\n").unwrap();
+        executable_mode(&old);
+        let answer = ask_minimum(&old, clock::Deadline::after(Duration::from_secs(10))).unwrap();
+        assert!(
+            answer
+                .as_ref()
+                .is_err_and(|reason| reason.contains("0.9.0")),
+            "{answer:?}"
+        );
+    }
+
+    fn executable_mode(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
