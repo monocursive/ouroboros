@@ -1,5 +1,5 @@
 //! Bounded owner journal. This is pending evidence, never a second canonical writer.
-use crate::protocol::{LedgerError, MAX_FRAME_BYTES, Peer, Result, RunRecord};
+use crate::protocol::{LedgerError, MAX_FRAME_BYTES, Peer, Result, RunRecord, read_bounded};
 use ouro_records::canonical::{sha256_prefixed, to_jcs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,7 +7,7 @@ use std::{
     collections::BTreeMap,
     ffi::CStr,
     fs::File,
-    io::{Read, Write},
+    io::Write,
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::fs::MetadataExt,
@@ -170,13 +170,11 @@ impl Journal {
         if file.metadata()?.len() > JOURNAL_BYTES as u64 {
             return Err(invalid("size limit exceeded"));
         }
-        let mut bytes = Vec::new();
-        (&mut file)
-            .take(JOURNAL_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > JOURNAL_BYTES {
-            return Err(invalid("size limit exceeded"));
-        }
+        let bytes = read_bounded(
+            &mut file,
+            JOURNAL_BYTES as u64,
+            "owner pending journal: size limit exceeded",
+        )?;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Envelope {

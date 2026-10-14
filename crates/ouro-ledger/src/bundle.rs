@@ -3,7 +3,7 @@ use crate::{
     daemon::Client,
     protocol::{
         CAPTURE_STREAMS, LedgerError, MAX_CAPTURE_BYTES, ReadFilter, ReadPage, ReadRequest,
-        ReadSelector, Result, RunRecord,
+        ReadSelector, Result, RunRecord, read_bounded,
     },
     schemas, store,
 };
@@ -65,11 +65,7 @@ fn canonical_json(value: &impl Serialize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 fn read_json(file: impl Read) -> Result<Value> {
-    let mut bytes = Vec::new();
-    file.take(MAX_JSON_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_JSON_BYTES {
-        return Err(error("bundle JSON exceeds 4 MiB"));
-    }
+    let bytes = read_bounded(file, MAX_JSON_BYTES, "bundle JSON exceeds 4 MiB")?;
     let value: Value = serde_json::from_slice(&bytes)?;
     if canonical_json(&value)? != bytes {
         return Err(error("bundle JSON is not canonical with one LF"));

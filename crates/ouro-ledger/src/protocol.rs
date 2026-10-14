@@ -37,6 +37,22 @@ impl From<serde_json::Error> for LedgerError {
 
 pub type Result<T> = std::result::Result<T, LedgerError>;
 
+/// All of `reader`, or the `refusal` once it holds more than `max` bytes. One
+/// byte past the bound is read, so an oversized input is refused rather than
+/// truncated into something that looks complete.
+///
+/// # Errors
+/// The read's own error, or `refusal` for an oversized input.
+pub fn read_bounded(reader: impl io::Read, max: u64, refusal: &str) -> Result<Vec<u8>> {
+    use io::Read as _;
+    let mut bytes = Vec::new();
+    reader.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(LedgerError(refusal.into()));
+    }
+    Ok(bytes)
+}
+
 /// A `sha256:` digest in lower-case hexadecimal, as every ledger record
 /// writes one.
 pub(crate) fn sha256_digest(value: &str) -> bool {

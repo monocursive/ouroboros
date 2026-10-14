@@ -83,7 +83,6 @@ mod linux {
     use std::{
         ffi::OsString,
         fs,
-        io::Read,
         os::{
             fd::{AsRawFd, FromRawFd, OwnedFd},
             unix::{
@@ -133,18 +132,18 @@ mod linux {
         let deadline = Instant::now() + COMMAND_TIMEOUT;
         loop {
             if let Some(status) = child.try_wait()? {
-                let mut text = String::new();
-                child
+                const REFUSAL: &str =
+                    "systemd user-manager command failed or exceeded its output bound";
+                let stdout = child
                     .stdout
                     .take()
-                    .unwrap()
-                    .take(16_385)
-                    .read_to_string(&mut text)?;
-                if !status.success() || text.len() > 16_384 {
-                    return Err(LedgerError(
-                        "systemd user-manager command failed or exceeded its output bound".into(),
-                    ));
+                    .ok_or_else(|| LedgerError("systemd user-manager output unavailable".into()))?;
+                let bytes = crate::protocol::read_bounded(stdout, 16_384, REFUSAL)?;
+                if !status.success() {
+                    return Err(LedgerError(REFUSAL.into()));
                 }
+                let text = String::from_utf8(bytes)
+                    .map_err(|_| LedgerError("systemd user-manager output is not UTF-8".into()))?;
                 return Ok(text.trim().to_owned());
             }
             if Instant::now() >= deadline {

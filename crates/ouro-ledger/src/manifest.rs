@@ -3,7 +3,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
 };
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    protocol::{LedgerError, Result, sha256_digest},
+    protocol::{LedgerError, Result, read_bounded, sha256_digest},
     schemas,
 };
 
@@ -107,11 +107,9 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
         Err(e) => return Err(e.into()),
         Ok(_) => {}
     }
-    let mut bytes = Vec::new();
-    safe_file(&path)?
-        .take(MAX_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_BYTES || bytes.last() != Some(&b'\n') {
+    const REFUSAL: &str = "oversized or interrupted segment manifest";
+    let mut bytes = read_bounded(safe_file(&path)?, MAX_BYTES, REFUSAL)?;
+    if bytes.last() != Some(&b'\n') {
         return Err(LedgerError(
             "oversized or interrupted segment manifest".into(),
         ));

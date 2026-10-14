@@ -10,8 +10,8 @@ use clap::{Args, Parser, Subcommand};
 use ouro_ledger::{
     daemon,
     protocol::{
-        CatalogRequest, DiscoveryRequest, LedgerError, OperatorIntent, ReadFilter, ReadRequest,
-        ReadSelector, ReadStage, Result, RunFilter, TailRequest,
+        CatalogRequest, DiscoveryRequest, LedgerError, MAX_FRAME_BYTES, OperatorIntent, ReadFilter,
+        ReadRequest, ReadSelector, ReadStage, Result, RunFilter, TailRequest, read_bounded,
     },
     runner, schemas, service,
 };
@@ -223,16 +223,13 @@ struct TailArgs {
 }
 
 fn append_command(data: &std::path::Path, args: AppendArgs) -> Result<i32> {
-    use std::io::Read as _;
     let result = (|| -> Result<()> {
         // Validate input size before bootstrapping a writer or making a mutation.
-        let mut bytes = Vec::new();
-        std::fs::File::open(&args.body_file)?
-            .take(65_537)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > 65_536 {
-            return Err(LedgerError("operator body exceeds 64 KiB bound".into()));
-        }
+        let bytes = read_bounded(
+            std::fs::File::open(&args.body_file)?,
+            65_536,
+            "operator body exceeds 64 KiB bound",
+        )?;
         let body = serde_json::from_slice(&bytes)?;
         let mut client = runner::connect_or_start(data)?;
         let receipt = client.append(&OperatorIntent {
@@ -1044,13 +1041,11 @@ fn execute(cli: Cli) -> Result<i32> {
                     body_file,
                     json,
                 } => {
-                    let file = std::fs::File::open(body_file)?;
-                    use std::io::Read as _;
-                    let mut bytes = Vec::new();
-                    file.take(1_048_577).read_to_end(&mut bytes)?;
-                    if bytes.len() > 1_048_576 {
-                        return Err(LedgerError("prepare metadata exceeds frame bound".into()));
-                    }
+                    let bytes = read_bounded(
+                        std::fs::File::open(body_file)?,
+                        MAX_FRAME_BYTES as u64,
+                        "prepare metadata exceeds frame bound",
+                    )?;
                     let payload: Value = serde_json::from_slice(&bytes)?;
                     output(
                         &serde_json::to_value(client.prepare(&request_id, &payload)?)?,

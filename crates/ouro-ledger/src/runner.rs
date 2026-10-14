@@ -258,13 +258,11 @@ fn plan(options: &RunOptions, image: &File) -> Result<Value> {
 fn image_digest(image: &File) -> Result<String> {
     let mut file = image.try_clone()?;
     file.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    std::io::Read::by_ref(&mut file)
-        .take(256 * 1_048_576 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > 256 * 1_048_576 {
-        return Err(error("jail executable exceeds image bound"));
-    }
+    let bytes = crate::protocol::read_bounded(
+        file,
+        256 * 1_048_576,
+        "jail executable exceeds image bound",
+    )?;
     Ok(canonical::sha256_prefixed(&bytes))
 }
 
@@ -440,12 +438,11 @@ fn read_receipt(path: &Path, phase: &str) -> Result<Value> {
     if !file.metadata()?.is_file() {
         return Err(error("receipt is not a regular file"));
     }
-    let mut bytes = Vec::new();
-    file.take((MAX_FRAME_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_FRAME_BYTES {
-        return Err(error("receipt exceeded frame bound"));
-    }
+    let bytes = crate::protocol::read_bounded(
+        file,
+        MAX_FRAME_BYTES as u64,
+        "receipt exceeded frame bound",
+    )?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 

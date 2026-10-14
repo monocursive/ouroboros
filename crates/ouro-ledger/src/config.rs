@@ -3,7 +3,6 @@ use crate::protocol::{LedgerError, Result};
 use ouro_records::retention::LedgerRetention;
 use std::{
     fs::OpenOptions,
-    io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
 };
@@ -50,11 +49,9 @@ pub fn load_path(path: &Path) -> Result<LedgerRetention> {
                 .into(),
         ));
     }
-    let mut text = String::new();
-    file.take(65_537).read_to_string(&mut text)?;
-    if text.len() > 65_536 {
-        return Err(LedgerError("retention config exceeds 64 KiB".into()));
-    }
+    let bytes = crate::protocol::read_bounded(file, 65_536, "retention config exceeds 64 KiB")?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| LedgerError("retention config is not UTF-8".into()))?;
     let config: Config =
         toml::from_str(&text).map_err(|e| LedgerError(format!("invalid operator config: {e}")))?;
     let Config {

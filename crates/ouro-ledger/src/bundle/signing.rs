@@ -9,11 +9,7 @@ use ring::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    fs::File,
-    io::{Read, Write},
-    path::Path,
-};
+use std::{fs::File, io::Write, path::Path};
 
 pub(super) const DOMAIN: &[u8] = b"ouro.ledger.bundle-signature/1\0";
 const MAX_KEY_BYTES: u64 = 4096;
@@ -110,12 +106,7 @@ fn open_key(path: &Path, secret: bool) -> Result<File> {
 }
 
 fn key_bytes(file: File) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    file.take(MAX_KEY_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_KEY_BYTES {
-        return Err(error("key file exceeds 4 KiB"));
-    }
-    Ok(bytes)
+    crate::protocol::read_bounded(file, MAX_KEY_BYTES, "key file exceeds 4 KiB")
 }
 
 pub(super) fn trusted_key(path: &Path) -> Result<PublicKey> {

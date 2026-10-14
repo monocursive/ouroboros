@@ -1249,16 +1249,11 @@ impl Store {
         }
         if stream.poisoned.is_empty() {
             let projection = (|| -> Result<Value> {
-                use std::io::Read as _;
-                let file = private_file(&self.root.join(id).join("run.json"), false, false)?;
-                let mut bytes = Vec::new();
-                file.take((crate::projection::MAX_RUN_BYTES + 1) as u64)
-                    .read_to_end(&mut bytes)?;
-                if bytes.len() > crate::projection::MAX_RUN_BYTES {
-                    return Err(LedgerError(
-                        "run projection exceeds its bounded read limit".into(),
-                    ));
-                }
+                let bytes = crate::protocol::read_bounded(
+                    private_file(&self.root.join(id).join("run.json"), false, false)?,
+                    crate::projection::MAX_RUN_BYTES as u64,
+                    "run projection exceeds its bounded read limit",
+                )?;
                 let value: Value = serde_json::from_slice(&bytes)?;
                 validate_frozen("run", &value)?;
                 Ok(value)

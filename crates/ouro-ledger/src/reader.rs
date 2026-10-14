@@ -195,12 +195,11 @@ fn load_checkpoint(directory: &Path, id: &str) -> Result<(Checkpoint, File)> {
 }
 
 fn parse_checkpoint(file: &mut File, id: &str) -> Result<Checkpoint> {
-    let mut bytes = Vec::new();
-    file.take(MAX_CHECKPOINT_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
-        return Err(LedgerError("reader checkpoint exceeds bounded size".into()));
-    }
+    let bytes = crate::protocol::read_bounded(
+        file,
+        MAX_CHECKPOINT_BYTES,
+        "reader checkpoint exceeds bounded size",
+    )?;
     let envelope: Envelope = serde_json::from_slice(&bytes)
         .map_err(|_| LedgerError("reader checkpoint is corrupt".into()))?;
     let checkpoint = envelope.checkpoint;

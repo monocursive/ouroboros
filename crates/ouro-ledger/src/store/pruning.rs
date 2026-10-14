@@ -178,12 +178,10 @@ pub(super) fn check_member(root: &Path, entry: &RemovedFile) -> Result<(File, CS
 }
 
 pub(super) fn read_json(path: &Path, max: usize) -> Result<Value> {
-    let mut bytes = Vec::new();
-    safe_file(path)?
-        .take(max as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > max || bytes.pop() != Some(b'\n') {
-        return Err(LedgerError("oversized or interrupted GC metadata".into()));
+    const REFUSAL: &str = "oversized or interrupted GC metadata";
+    let mut bytes = crate::protocol::read_bounded(safe_file(path)?, max as u64, REFUSAL)?;
+    if bytes.pop() != Some(b'\n') {
+        return Err(LedgerError(REFUSAL.into()));
     }
     let value: Value = serde_json::from_slice(&bytes)?;
     if canonical(&value)? != bytes {
