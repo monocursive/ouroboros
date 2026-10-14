@@ -26,6 +26,10 @@ struct Sim {
     probe_delay: Duration,
     /// What `prepare` saw of the preparation budget.
     prepare_left: Arc<Mutex<Option<Duration>>>,
+    /// A state root whose attempts get a directory planted at
+    /// `trace.ndjson` while the supervisor claims them: a trace file that
+    /// can no longer be created once the claim exists.
+    plant_trace_dir_under: Option<PathBuf>,
 }
 
 impl Platform for Sim {
@@ -38,6 +42,14 @@ impl Platform for Sim {
     }
 
     fn owner_identity(&self) -> Option<OwnerIdentity> {
+        // The claim reads the owner's identity just before it publishes.
+        if let Some(data) = &self.plant_trace_dir_under
+            && let Ok(entries) = std::fs::read_dir(data.join("attempts"))
+        {
+            for entry in entries.flatten() {
+                let _ = std::fs::create_dir(entry.path().join("trace.ndjson"));
+            }
+        }
         Some(OwnerIdentity {
             pid: std::process::id(),
             boot_id: "00000000-0000-4000-8000-000000000001".into(),
@@ -125,6 +137,12 @@ impl Fixture {
         };
         supervisor::run(&context, &args)
     }
+
+    fn attempts(&self) -> Vec<PathBuf> {
+        std::fs::read_dir(self.data().join("attempts"))
+            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default()
+    }
 }
 
 /// §8.2: the 30-second preparation budget covers steps 1 to 5. The
@@ -138,6 +156,7 @@ fn the_platform_prepares_within_what_is_left_of_the_supervisors_budget() {
     let report = fixture.run(Sim {
         probe_delay,
         prepare_left: Arc::clone(&prepare_left),
+        ..Sim::default()
     });
     assert_eq!(
         report.error.as_ref().map(|error| error.code),
@@ -155,4 +174,35 @@ fn the_platform_prepares_within_what_is_left_of_the_supervisors_budget() {
         left > supervisor::PREPARE_BUDGET / 2,
         "the budget is the supervisor's, not an expired one: {left:?}"
     );
+}
+
+/// I01: an attempt that is claimed always ends with a receipt. The output
+/// channels a refusal needs are opened before the claim, so a trace file
+/// that cannot be created at the claim's moment can no longer leave a
+/// claimed attempt with nothing to say what became of it.
+#[test]
+fn a_claimed_attempt_always_has_a_receipt() {
+    let fixture = Fixture::new();
+    let report = fixture.run(Sim {
+        plant_trace_dir_under: Some(fixture.data()),
+        ..Sim::default()
+    });
+    let attempts = fixture.attempts();
+    assert_eq!(attempts.len(), 1, "{attempts:?}");
+    let attempt = &attempts[0];
+    if !attempt.join("jail-state.json").exists() {
+        // Refused before the claim: nothing was claimed, nothing is owed.
+        assert!(report.receipt.is_none());
+        return;
+    }
+    let receipt_path = attempt.join("jail.json");
+    assert!(
+        receipt_path.exists(),
+        "a claimed attempt has no receipt; the run reported {:?}",
+        report.error
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["phase"], "refused", "{receipt:#}");
+    common::assert_semantic_receipt(&receipt);
 }

@@ -7,8 +7,10 @@
 //! transition, every receipt and every budget.
 //!
 //! I01 is the shape of this file: nothing reaches `release` until resolution,
-//! state, probing, preparation and the gate have all succeeded, and every early
-//! exit goes through [`refuse`], which writes a `refused` receipt.
+//! state, probing, preparation and the gate have all succeeded. A failure
+//! before the attempt is claimed returns its error and leaves no claim; from
+//! the claim on, every early exit goes through [`refuse`], which writes a
+//! `refused` receipt.
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -1002,16 +1004,18 @@ fn first_unsatisfied(requirements: &[String], capabilities: &[Capability]) -> Op
 
 /// Runs one attempt, or refuses before the target executes (§8.1).
 ///
-/// Every path that does not reach `release` writes a `refused` receipt with the
-/// §13.2 tuple for the stage it failed at. The return value carries the exit
-/// status; the caller prints diagnostics.
+/// Every path that claims the attempt and does not reach `release` writes a
+/// `refused` receipt with the §13.2 tuple for the stage it failed at; a
+/// refusal before the claim (usage, resolution, the state root, the output
+/// channels) has no attempt to write one for. The return value carries the
+/// exit status; the caller prints diagnostics.
 #[must_use]
 pub fn run(ctx: &Context, args: &RunArgs) -> RunReport {
     match run_inner(ctx, args) {
         Ok(report) => report,
-        // Every early return of `run_inner` happens before release; after it,
-        // every path builds its own report. J4-R, S5: so a persistence failure
-        // here (the claim) refuses with 125.
+        // Every early return of `run_inner` happens before the claim; after
+        // it, every path builds its own report. J4-R, S5: so a persistence
+        // failure here (the claim itself) refuses with 125.
         Err(error) => RunReport {
             exit_code: error.refusal_exit_code(),
             error: Some(error),
@@ -1136,6 +1140,15 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // attempt's records under a rename that may still land.
     persister.hold_lease(lease);
     let _forwarding = state::install(persister.forwarding());
+    // I01: the channels that carry a refusal are opened before the claim,
+    // so once an attempt is claimed, every exit can write its receipt.
+    let mut control = open_control(args)?;
+    let trace = open_trace(ctx, args, &attempt_dir)?;
+    // Review item 15, a loss note names what this attempt covers
+    if let Ok(mut writer) = trace.lock() {
+        writer.set_stream_classes(&stream_classes(&plan));
+    }
+    let mut journal = Journal::new(attempt_id.as_str(), Arc::clone(&trace));
     // J4-R: S9 — every OURO_JAIL_TEST_* variable in force, read once at the
     // attempt's start and recorded in jail state and in every receipt that
     // has native details (lifetime.native.details.test_seams).
@@ -1143,7 +1156,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     claim_attempt(&attempt_dir, &attempt_id, ctx, test_seams.as_ref())?;
     // J4-R: N6 — a failed policy.json write is a refusal like every other
     // failure before exec: it is reported through `refuse` below, once the
-    // record and the sinks that carry a refusal exist.
+    // record that carries a refusal exists.
     let policy_written = write_policy_file(&attempt_dir, &plan);
 
     let now = SystemTime::now();
@@ -1190,13 +1203,6 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         credentials: Vec::new(),
     };
 
-    let mut control = open_control(args)?;
-    let trace = open_trace(ctx, args, &attempt_dir)?;
-    // Review item 15, a loss note names what this attempt covers
-    if let Ok(mut writer) = trace.lock() {
-        writer.set_stream_classes(&stream_classes(&plan));
-    }
-    let mut journal = Journal::new(attempt_id.as_str(), Arc::clone(&trace));
     // N6
     if let Err(error) = policy_written {
         return Ok(refuse(
