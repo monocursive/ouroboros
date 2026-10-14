@@ -576,3 +576,66 @@ fn an_unresolved_run_exported_now_verifies_under_projection_rule_two() {
     });
     assert_eq!(verify(&path).unwrap()["projection_rule"], 1);
 }
+
+/// Run projection rule 1's outcome for an unresolved run whose last
+/// outcome_unknown record reported `reported`.
+fn rule_one(reported: Value) -> Value {
+    json!({"kind":"unknown","unknown":true,
+        "unknown_reason":"owner or reconciliation reported an unresolved run outcome",
+        "observed_child_outcome":reported})
+}
+
+#[test]
+fn only_an_unresolved_run_may_carry_its_rule_one_outcome() {
+    // A denied run's known outcome relabelled to rule 1's unresolved form.
+    let mut f = Fixture::new();
+    let path = f.bundle(&[]);
+    assert_eq!(verify(&path).unwrap()["state"], "denied");
+    alter_manifest(&path, |value| {
+        value["run"]["outcome"] = rule_one(Value::Null)
+    });
+    assert_eq!(
+        verify(&path).unwrap_err().message(),
+        "bundle run labels differ from canonical replay"
+    );
+}
+
+#[test]
+fn rule_one_follows_the_last_outcome_unknown_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let mut store = Store::open(&data).unwrap();
+    let run = store
+        .prepare("twice-unknown", &crate::test_support::request(), &peer())
+        .unwrap();
+    store.claim_owner(&run.run_id, &peer()).unwrap();
+    let unknown = |reason: &str| json!({"kind":"unknown","unknown":true,"unknown_reason":reason});
+    for (request, reason) in [("unknown-1", "first"), ("unknown-2", "second")] {
+        store
+            .append_owner(
+                &run.run_id,
+                request,
+                "outcome_unknown",
+                None,
+                &json!({"outcome":unknown(reason)}),
+                &peer(),
+                TOKEN,
+            )
+            .unwrap();
+    }
+    let path = temp.path().join("bundle");
+    create_with_reader(&data, &run.run_id, &path, &[], |q| store.read(q)).unwrap();
+    assert_eq!(verify(&path).unwrap()["projection_rule"], 2);
+    // Exported under rule 1, the run carried what its last record reported.
+    alter_manifest(&path, |value| {
+        value["run"]["outcome"] = rule_one(unknown("second"))
+    });
+    assert_eq!(verify(&path).unwrap()["projection_rule"], 1);
+    alter_manifest(&path, |value| {
+        value["run"]["outcome"] = rule_one(unknown("first"))
+    });
+    assert_eq!(
+        verify(&path).unwrap_err().message(),
+        "bundle run labels differ from canonical replay"
+    );
+}
