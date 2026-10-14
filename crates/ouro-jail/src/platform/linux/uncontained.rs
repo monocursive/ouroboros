@@ -601,11 +601,15 @@ impl Uncontained {
             )
         })?;
         drop(fds);
-        let pid = libc::pid_t::try_from(child.id()).unwrap_or(-1);
         // Opened while the launcher is this process's unreaped child, so the
-        // descriptor names it and nothing that inherits the number later.
-        let launcher_fd = match identity::pidfd_open(pid) {
-            Ok(fd) => fd,
+        // descriptor names it and nothing that inherits the number later. A
+        // pid that does not fit `pid_t` names no process: refuse, never a
+        // stand-in number.
+        let opened = libc::pid_t::try_from(child.id())
+            .map_err(|_| std::io::Error::other("the launcher's pid does not fit pid_t"))
+            .and_then(|pid| identity::pidfd_open(pid).map(|fd| (pid, fd)));
+        let (pid, launcher_fd) = match opened {
+            Ok(opened) => opened,
             Err(err) => {
                 let _ = child.kill();
                 reap_until(&mut child, clock::Deadline::after(TREE_BUDGET));
