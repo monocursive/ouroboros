@@ -142,6 +142,13 @@ fn launcher_failure(exit_code: Option<i32>, errno_bytes: &[u8], diagnostic: &str
                  ({errno})"
             ),
         ),
+        Some(super::launch::EXIT_NOFILE_FAILED) => preparing(
+            ErrorCode::InternalError,
+            format!(
+                "the launcher could not put the operator's soft RLIMIT_NOFILE back for the \
+                 target ({errno}), so it refused before the release; the target never ran"
+            ),
+        ),
         _ => preparing(
             ErrorCode::BackendUnavailable,
             format!("bubblewrap exited before the launcher blocked: {diagnostic}"),
@@ -2955,6 +2962,16 @@ mod tests {
             mediation.message
         );
         assert!(mediation.message.contains("EBUSY"), "{}", mediation.message);
+        let nofile = launcher_failure(
+            Some(super::super::launch::EXIT_NOFILE_FAILED),
+            &libc::EINVAL.to_le_bytes(),
+            "",
+        );
+        assert_eq!(nofile.code, ErrorCode::InternalError);
+        assert_eq!(nofile.stage, ErrorStage::Preparing);
+        for part in ["RLIMIT_NOFILE", "EINVAL", "never ran"] {
+            assert!(nofile.message.contains(part), "{}", nofile.message);
+        }
         let bridge = launcher_failure(Some(super::super::launch::EXIT_BRIDGE_FAILED), &[], "");
         assert!(
             bridge.message.contains("`agent` bridge"),

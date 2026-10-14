@@ -81,6 +81,10 @@ pub const EXIT_MEDIATION_FAILED: i32 = 120;
 /// The in-namespace bridge could not be started; the errno is on the error
 /// pipe. The target did not run.
 pub const EXIT_BRIDGE_FAILED: i32 = 121;
+/// The operator's soft `RLIMIT_NOFILE` could not be put back for the target
+/// before the release; the errno is on the error pipe. The target did not
+/// run.
+pub const EXIT_NOFILE_FAILED: i32 = 122;
 
 /// Parsed `__launch` arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -485,6 +489,29 @@ pub fn launch_main(args: &[OsString]) -> ! {
 
     // ---- no allocation past this line ----
 
+    // The operator's descriptor limit: the supervisor may have raised its
+    // own soft limit to hand descriptors on above their targets, and this
+    // launcher inherited that. The target gets what the operator set. It is
+    // put back before the release, so that a failure is a refusal before
+    // anything was released, never an exec failure: lowering a soft limit
+    // under its hard one cannot fail on Linux, and if it does the target
+    // never runs with the raised one. Nothing from here on opens a
+    // descriptor.
+    if let Some(soft) = parsed.nofile_soft {
+        // SAFETY: `limit` is plain stack data getrlimit fills and setrlimit
+        // reads; both are single async-signal-safe syscalls.
+        unsafe {
+            let mut limit: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) != 0 {
+                report_and_exit(parsed.error_fd, errno(), EXIT_NOFILE_FAILED);
+            }
+            limit.rlim_cur = soft.min(limit.rlim_max);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) != 0 {
+                report_and_exit(parsed.error_fd, errno(), EXIT_NOFILE_FAILED);
+            }
+        }
+    }
+
     let mut byte = [0u8; 1];
     let released = loop {
         // SAFETY: the buffer is one live byte and the length matches.
@@ -539,25 +566,6 @@ pub fn launch_main(args: &[OsString]) -> ! {
                 }
             }
             if libc::sigprocmask(libc::SIG_SETMASK, &raw const set, std::ptr::null_mut()) != 0 {
-                report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
-            }
-        }
-    }
-
-    // The operator's descriptor limit: the supervisor may have raised its
-    // own soft limit to hand descriptors on above their targets, and this
-    // launcher inherited that. The target gets what the operator set. Lowering a soft limit under its hard one cannot fail on
-    // Linux; if it does, the target does not run with the raised one.
-    if let Some(soft) = parsed.nofile_soft {
-        // SAFETY: `limit` is plain stack data getrlimit fills and setrlimit
-        // reads; both are single async-signal-safe syscalls.
-        unsafe {
-            let mut limit: libc::rlimit = std::mem::zeroed();
-            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) != 0 {
-                report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
-            }
-            limit.rlim_cur = soft.min(limit.rlim_max);
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) != 0 {
                 report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
             }
         }
