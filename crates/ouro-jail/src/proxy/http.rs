@@ -660,6 +660,20 @@ mod tests {
             assert!(parse(&bad).is_err());
         }
     }
+    /// A CONNECT's Host without a port names the target's port, not
+    /// HTTP's default: `Host: fixture.test` agrees with
+    /// `CONNECT fixture.test:8443`, and another port disagrees.
+    #[test]
+    fn a_connect_host_without_a_port_takes_the_target_port() {
+        let request = parse("CONNECT fixture.test:8443 HTTP/1.1\r\nHost: fixture.test\r\n\r\n")
+            .expect("the Host names the target");
+        assert_eq!(request.destination.port, 8443);
+        assert_eq!(request.framing, Framing::Tunnel);
+        assert_eq!(
+            parse("CONNECT fixture.test:8443 HTTP/1.1\r\nHost: fixture.test:443\r\n\r\n").err(),
+            Some(Reason::HostMismatch)
+        );
+    }
     #[test]
     fn head_lines_split_fields_at_the_first_colon() {
         let head = b"GET /a:b HTTP/1.1\r\nX-Key:  v:w \r\nBare\nNoColon\r\n\r\n";
