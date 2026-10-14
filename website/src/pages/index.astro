@@ -1,5 +1,6 @@
 ---
 import Site from '../layouts/Site.astro';
+import { jailReleaseUrl, vmReleaseUrl, vmVersion } from '../release';
 const command = `curl --proto '=https' --tlsv1.2 -fsSL https://ouroboros.monocursive.com/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 # Linux: ouro-jail doctor --profile tool
@@ -44,7 +45,7 @@ const benchmark = 'https://github.com/monocursive/ouroboros/blob/dev/docs/benchm
       <pre tabindex="0"><code>{command}</code></pre>
     </div>
     <div class="example-notes"><p>Linux: glibc 2.39+ and bubblewrap. Mac: Apple Silicon, macOS 27+, and 8 GiB free APFS storage. SHA-256 hashes are pinned in the installer. No compiler or sudo needed.</p><a href="/guide/#install-the-developer-preview">Install &amp; host requirements ↗</a></div>
-    <div class="workflow-note"><h3>New: Ouro VM for Mac</h3><p>The signed, notarized <a href="https://github.com/monocursive/ouroboros/releases/tag/ouro-vm-v0.1.0-preview.1">0.1.0-preview.1 release</a> runs offline Linux ARM64 commands with <code>tool</code> and <code>build</code> profiles. It copies inputs into a disposable VM and returns files and receipts for review. Native Mac programs, Xcode and online agents are outside this preview.</p><a class="text-link" href="/guide/#macos-vm-preview">Mac quickstart and preview limits <span aria-hidden="true">↗</span></a></div>
+    <div class="workflow-note"><h3>New: Ouro VM for Mac</h3><p>The signed, notarized <a href={vmReleaseUrl}>{vmVersion} release</a> runs offline Linux ARM64 commands with <code>tool</code> and <code>build</code> profiles. It copies inputs into a disposable VM and returns files and receipts for review. Native Mac programs, Xcode and online agents are outside this preview.</p><a class="text-link" href="/guide/#macos-vm-preview">Mac quickstart and preview limits <span aria-hidden="true">↗</span></a></div>
   </section>
 
   <section class="section" id="security" aria-labelledby="security-heading">
@@ -96,7 +97,7 @@ const benchmark = 'https://github.com/monocursive/ouroboros/blob/dev/docs/benchm
     <div class="container status-grid">
       <div><p class="eyebrow section-eyebrow">Availability</p><h2 id="status-heading">Choose your host.</h2></div>
       <div class="status-copy">
-        <p><strong>Signed developer packages are available for Linux x86_64 and ARM64.</strong> Read the <a href="https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1">Linux release notes</a> and use <code>ouro-jail doctor</code> to check your host.</p>
+        <p><strong>Signed developer packages are available for Linux x86_64 and ARM64.</strong> Read the <a href={jailReleaseUrl}>Linux release notes</a> and use <code>ouro-jail doctor</code> to check your host.</p>
         <p><strong>Apple Silicon Macs have a separate offline VM preview.</strong> Follow the <a href="/guide/#macos-vm-preview">Mac quickstart</a> for <code>ouro-vm</code>. Native macOS execution remains research; this preview runs Linux inside a VM and does not require Endpoint Security approval.</p>
         <p>On Linux, fourteen starter launch profiles are included. OpenCode has recorded live runs; other agent and version combinations still need testing.</p>
         <p>When a command needs more access, <code>learn</code> can propose missing read and network permissions from an observed run. You review the proposal before applying it.</p>

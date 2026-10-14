@@ -47,3 +47,24 @@ jobs:
           python3 -m unittest discover -s crates/ouro-jail/dist -p test_versions.py
           python3 -m unittest discover -s crates/ouro-jail/dist -p test_bootstrap.py
           python3 -m unittest discover -s crates/ouro-jail/dist -p test_publish.py
+  website:
+    # Builds the site the way it is deployed (deployment stays a manual step)
+    # and checks that it serves the reviewed installer and key byte for byte.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '22.22.3'
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - name: The site serves the repository's installer and release key
+        run: |
+          cmp dist/install.sh ../install.sh
+          cmp dist/release.pub ../crates/ouro-jail/dist/release.pub

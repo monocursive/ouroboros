@@ -16,6 +16,11 @@ repository's `docs/guide.md` and `docs/roadmap.md` directly, so those documents
 have one source. The shared layout and styles retain the archived site's
 branding and locally hosted fonts.
 
+`/install.sh` and `/release.pub` are the repository's root `install.sh` and
+`crates/ouro-jail/dist/release.pub`, imported at build time, so the served
+installer cannot drift from the reviewed one. Release links and versions come
+from `crates/ouro-jail/dist/release.json`.
+
 The documentation layout generates its section index from Markdown headings.
 `/guide.md` and `/roadmap.md` serve the exact source text. `/llms.txt` is a
 short discovery index following the [llms.txt proposal](https://llmstxt.org/),
