@@ -453,6 +453,53 @@ impl Placeholder {
     }
 }
 
+/// The placeholders one preparation created, until a boundary owns them.
+///
+/// A placeholder is a directory created in the operator's workspace. The
+/// boundary removes its placeholders itself, once the tree is known dead
+/// (§9.1); before a boundary exists every refusal of the preparation would
+/// otherwise leave an empty `.git` or `.ouroboros` behind. So until
+/// [`PlaceholderSet::hand_over`] passes them on, dropping the set removes
+/// each placeholder that is unchanged and empty, and keeps any other.
+#[derive(Debug, Default)]
+pub struct PlaceholderSet {
+    placeholders: Vec<Placeholder>,
+}
+
+impl PlaceholderSet {
+    /// Holds one more placeholder.
+    pub fn push(&mut self, placeholder: Placeholder) {
+        self.placeholders.push(placeholder);
+    }
+
+    /// How many placeholders are held.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.placeholders.len()
+    }
+
+    /// Whether none are held.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.placeholders.is_empty()
+    }
+
+    /// Passes the placeholders to an owner that removes them itself; this
+    /// set then removes nothing.
+    #[must_use]
+    pub fn hand_over(mut self) -> Vec<Placeholder> {
+        std::mem::take(&mut self.placeholders)
+    }
+}
+
+impl Drop for PlaceholderSet {
+    fn drop(&mut self) {
+        for placeholder in &self.placeholders {
+            let _ = placeholder.remove_if_unchanged();
+        }
+    }
+}
+
 /// Open one entry of a directory as a directory, without following a symlink.
 fn open_entry(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<OwnedFd, i32> {
     // SAFETY: `parent` is a live directory descriptor and `name` is a
@@ -1353,6 +1400,43 @@ mod tests {
             }
         );
         assert_eq!(parse_json_status("{}"), BwrapStatus::default());
+    }
+
+    #[test]
+    fn a_dropped_placeholder_set_removes_only_what_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut set = PlaceholderSet::default();
+        for name in ["kept", "removed"] {
+            set.push(
+                Placeholder::create(&root.join(format!("holder-{name}")), &root.join(name))
+                    .unwrap(),
+            );
+        }
+        assert_eq!(set.len(), 2);
+        // Something the run put inside: a placeholder that is not empty is
+        // not ours to remove.
+        std::fs::write(root.join("kept").join("work"), b"x").unwrap();
+        drop(set);
+        assert!(
+            !root.join("removed").exists(),
+            "unchanged and empty: removed"
+        );
+        assert!(!root.join("holder-removed").exists());
+        assert!(root.join("kept").join("work").exists(), "changed: kept");
+
+        // Handed over, the placeholders are their new owner's to remove.
+        let mut set = PlaceholderSet::default();
+        set.push(Placeholder::create(&root.join("holder-owned"), &root.join("owned")).unwrap());
+        let owned = set.hand_over();
+        assert!(
+            root.join("owned").is_dir(),
+            "a handed-over set removes nothing"
+        );
+        assert_eq!(
+            owned[0].remove_if_unchanged(),
+            PlaceholderOutcome::Removed(root.join("owned"))
+        );
     }
 
     fn sample_plan() -> BwrapPlan {

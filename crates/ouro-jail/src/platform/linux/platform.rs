@@ -45,7 +45,7 @@ use crate::records::{
 use crate::supervisor::TREE_BUDGET;
 
 use super::audit::AuditWriter;
-use super::bwrap::{self, BwrapPlan, Placeholder, PlaceholderOutcome};
+use super::bwrap::{self, BwrapPlan, Placeholder, PlaceholderOutcome, PlaceholderSet};
 use super::cgroup::ExecutionCgroup;
 use super::clock::{self, boottime_ns};
 use super::exec::{self, BootstrapChild, BootstrapSpawn, FdMap};
@@ -1101,6 +1101,8 @@ impl Boundary {
         refuse_pseudo_fs_grants(&bplan.extra_ro_binds, "filesystem.read_only")?;
         refuse_pseudo_fs_grants(&bplan.extra_rw_binds, "filesystem.read_write")?;
 
+        // Until the boundary owns them, every refusal drops `placeholders`,
+        // which removes the directories it made in the operator's workspace.
         let (scan, pins, pinned_fds, placeholders) = prepare_mounts(
             &mut bplan,
             &plan.attempt_dir,
@@ -1461,7 +1463,7 @@ impl Boundary {
             status: StatusReader::new(status_r),
             tracer: None,
             tracer_summary: None,
-            placeholders,
+            placeholders: placeholders.hand_over(),
             placeholder_outcomes: Vec::new(),
             applied: Applied {
                 filesystem: None,
@@ -3220,7 +3222,7 @@ type MountPreparation = (
     jfs::ProtectedScan,
     Vec<jfs::PinnedPath>,
     Vec<(OwnedFd, RawFd)>,
-    Vec<Placeholder>,
+    PlaceholderSet,
 );
 
 /// `OURO_JAIL_TEST_MOUNT_SWAP=<dir>`: a test seam (J5-B2) that opens a
@@ -3473,180 +3475,170 @@ fn prepare_mounts(
         entries_seen: 0,
         max_depth_seen: 0,
     };
-    let mut placeholders = Vec::new();
-    let result = (|| {
-        for (root_index, (source, destination)) in roots.iter().enumerate() {
-            let pin = jfs::PinnedPath::open(source).map_err(failure)?;
-            if !pin.is_dir().map_err(failure)? {
-                pins.insert(source.clone(), pin);
-                continue;
+    // Every refusal below drops the set, which removes what it created.
+    let mut placeholders = PlaceholderSet::default();
+    for (root_index, (source, destination)) in roots.iter().enumerate() {
+        let pin = jfs::PinnedPath::open(source).map_err(failure)?;
+        if !pin.is_dir().map_err(failure)? {
+            pins.insert(source.clone(), pin);
+            continue;
+        }
+        if coverage == ProtectedCoverage::None {
+            pins.insert(source.clone(), pin);
+            continue;
+        }
+        let mut scan = jfs::scan_pinned(
+            &pin,
+            names,
+            jfs::ScanLimits {
+                max_entries: jfs::ScanLimits::DEFAULT
+                    .max_entries
+                    .saturating_sub(aggregate.entries_seen),
+                ..jfs::ScanLimits::DEFAULT
+            },
+        )
+        .map_err(|err| preparing(ErrorCode::MissingCapability, err.to_string()))?;
+        pins.insert(source.clone(), pin);
+        if coverage == ProtectedCoverage::ExistingAndRoot && !scan.skipped_symlinks.is_empty() {
+            return Err(preparing(
+                ErrorCode::MissingCapability,
+                "existing_and_root coverage cannot cover protected symlinks",
+            ));
+        }
+        for segment in &scan.segments {
+            let pinned = jfs::PinnedPath::open(&segment.path).map_err(failure)?;
+            if pinned.identity() != (segment.dev, segment.ino) {
+                return Err(preparing(
+                    ErrorCode::BackendUnavailable,
+                    "a protected object changed between scan and pin",
+                ));
             }
-            if coverage == ProtectedCoverage::None {
-                pins.insert(source.clone(), pin);
-                continue;
-            }
-            let mut scan = jfs::scan_pinned(
-                &pin,
+            pins.insert(segment.path.clone(), pinned);
+            plan.extra_ro_binds.push((
+                segment.path.clone(),
+                destination.join(
+                    segment
+                        .path
+                        .strip_prefix(source)
+                        .expect("scan beneath root"),
+                ),
+            ));
+        }
+        for directory in &scan.directories {
+            directory
+                .verify()
+                .map_err(|e| preparing(ErrorCode::MissingCapability, e.to_string()))?;
+        }
+        let added_placeholders = !scan.absent_root_literals().is_empty();
+        for literal in scan.absent_root_literals() {
+            let holders = attempt_dir.join("placeholders");
+            create_private_dir(&holders)?;
+            let holder = holders.join(format!("holder-{root_index}-{}", placeholders.len()));
+            let placeholder = Placeholder::create(&holder, &source.join(&literal))
+                .map_err(|err| preparing(ErrorCode::BackendUnavailable, err.to_string()))?;
+            let mut mount = placeholder.mount().clone();
+            mount.destination = destination.join(&literal);
+            plan.placeholders.push(mount);
+            placeholders.push(placeholder);
+        }
+        // Our placeholders mutate the root. Re-scan, rather than merely
+        // accepting a new timestamp that could hide a concurrent mutation.
+        if added_placeholders {
+            let checked = jfs::scan_pinned(
+                &pins[source],
                 names,
                 jfs::ScanLimits {
+                    // The placeholders this pass just created add one
+                    // entry each inside the root; the re-scan must be
+                    // able to see them without tripping the bound a
+                    // first scan at the cap would trip.
                     max_entries: jfs::ScanLimits::DEFAULT
                         .max_entries
-                        .saturating_sub(aggregate.entries_seen),
+                        .saturating_sub(aggregate.entries_seen)
+                        .saturating_add(scan.absent_root_literals().len()),
                     ..jfs::ScanLimits::DEFAULT
                 },
             )
-            .map_err(|err| preparing(ErrorCode::MissingCapability, err.to_string()))?;
-            pins.insert(source.clone(), pin);
-            if coverage == ProtectedCoverage::ExistingAndRoot && !scan.skipped_symlinks.is_empty() {
-                return Err(preparing(
-                    ErrorCode::MissingCapability,
-                    "existing_and_root coverage cannot cover protected symlinks",
-                ));
-            }
-            for segment in &scan.segments {
-                let pinned = jfs::PinnedPath::open(&segment.path).map_err(failure)?;
-                if pinned.identity() != (segment.dev, segment.ino) {
-                    return Err(preparing(
-                        ErrorCode::BackendUnavailable,
-                        "a protected object changed between scan and pin",
-                    ));
-                }
-                pins.insert(segment.path.clone(), pinned);
-                plan.extra_ro_binds.push((
-                    segment.path.clone(),
-                    destination.join(
-                        segment
-                            .path
-                            .strip_prefix(source)
-                            .expect("scan beneath root"),
-                    ),
-                ));
-            }
-            for directory in &scan.directories {
-                directory
-                    .verify()
-                    .map_err(|e| preparing(ErrorCode::MissingCapability, e.to_string()))?;
-            }
-            let added_placeholders = !scan.absent_root_literals().is_empty();
-            for literal in scan.absent_root_literals() {
-                let holders = attempt_dir.join("placeholders");
-                create_private_dir(&holders)?;
-                let holder = holders.join(format!("holder-{root_index}-{}", placeholders.len()));
-                let placeholder = Placeholder::create(&holder, &source.join(&literal))
-                    .map_err(|err| preparing(ErrorCode::BackendUnavailable, err.to_string()))?;
-                let mut mount = placeholder.mount().clone();
-                mount.destination = destination.join(&literal);
-                plan.placeholders.push(mount);
-                placeholders.push(placeholder);
-            }
-            // Our placeholders mutate the root. Re-scan, rather than merely
-            // accepting a new timestamp that could hide a concurrent mutation.
-            if added_placeholders {
-                let checked = jfs::scan_pinned(
-                    &pins[source],
-                    names,
-                    jfs::ScanLimits {
-                        // The placeholders this pass just created add one
-                        // entry each inside the root; the re-scan must be
-                        // able to see them without tripping the bound a
-                        // first scan at the cap would trip.
-                        max_entries: jfs::ScanLimits::DEFAULT
-                            .max_entries
-                            .saturating_sub(aggregate.entries_seen)
-                            .saturating_add(scan.absent_root_literals().len()),
-                        ..jfs::ScanLimits::DEFAULT
-                    },
-                )
-                .map_err(|e| preparing(ErrorCode::MissingCapability, e.to_string()))?;
-                let expected: std::collections::BTreeSet<_> = scan
-                    .absent_root_literals()
-                    .iter()
-                    .map(|name| source.join(name))
-                    .collect();
-                let remaining: std::collections::BTreeSet<_> = checked
+            .map_err(|e| preparing(ErrorCode::MissingCapability, e.to_string()))?;
+            let expected: std::collections::BTreeSet<_> = scan
+                .absent_root_literals()
+                .iter()
+                .map(|name| source.join(name))
+                .collect();
+            let remaining: std::collections::BTreeSet<_> = checked
+                .segments
+                .iter()
+                .filter(|s| !expected.contains(&s.path))
+                .map(|s| (&s.path, s.dev, s.ino))
+                .collect();
+            if remaining
+                != scan
                     .segments
                     .iter()
-                    .filter(|s| !expected.contains(&s.path))
                     .map(|s| (&s.path, s.dev, s.ino))
-                    .collect();
-                if remaining
-                    != scan
-                        .segments
-                        .iter()
-                        .map(|s| (&s.path, s.dev, s.ino))
-                        .collect()
-                    || checked
-                        .skipped_symlinks
-                        .iter()
-                        .collect::<std::collections::BTreeSet<_>>()
-                        != scan.skipped_symlinks.iter().collect()
-                {
-                    return Err(preparing(
-                        ErrorCode::MissingCapability,
-                        "protected paths changed while placeholders were prepared",
-                    ));
-                }
-                scan.directories = checked.directories;
+                    .collect()
+                || checked
+                    .skipped_symlinks
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    != scan.skipped_symlinks.iter().collect()
+            {
+                return Err(preparing(
+                    ErrorCode::MissingCapability,
+                    "protected paths changed while placeholders were prepared",
+                ));
             }
-            aggregate.directories.extend(scan.directories);
-            aggregate.entries_seen += scan.entries_seen;
-            aggregate.max_depth_seen = aggregate.max_depth_seen.max(scan.max_depth_seen);
-            aggregate.segments.extend(scan.segments);
-            aggregate.skipped_symlinks.extend(scan.skipped_symlinks);
+            scan.directories = checked.directories;
         }
-        // Bind ancestors before descendants, and never expose a second writable
-        // alias of a protected source after applying its protection.
-        let mut fds = Vec::new();
-        for row in plan.mount_table() {
-            if row.kind == "file-mask" {
-                // EOF supplies an empty file to bubblewrap; no host content
-                // or writable source descriptor is exposed to the child.
-                let (reader, writer) = exec::pipe().map_err(failure)?;
-                drop(writer);
-                let target = PINNED_FD_BASE + fds.len() as RawFd;
-                fds.push((reader, target));
-                plan.mount_fds.push(Some(target));
-                continue;
-            }
-            if !matches!(row.kind, "bind" | "ro-bind" | "ro-bind-fd" | "placeholder") {
-                plan.mount_fds.push(None);
-                continue;
-            }
-            let source = PathBuf::from(row.source.expect("bind source"));
-            if !pins.contains_key(&source) {
-                // Distribution-owned runtime aliases may be resolved here;
-                // workspace/operator sources must never follow symlinks.
-                let runtime = plan.etc_paths.contains(&source)
-                    || plan
-                        .roots
-                        .iter()
-                        .any(|r| matches!(r, jfs::RootSpec::RoBind(p) if p == &source))
-                    || source == plan.jail_exe;
-                let path = if runtime {
-                    std::fs::canonicalize(&source).map_err(failure)?
-                } else {
-                    source.clone()
-                };
-                pins.insert(
-                    source.clone(),
-                    jfs::PinnedPath::open(&path).map_err(failure)?,
-                );
-            }
-            let target = PINNED_FD_BASE + fds.len() as RawFd;
-            fds.push((pins[&source].try_clone_fd().map_err(failure)?, target));
-            plan.mount_fds.push(Some(target));
-        }
-        Ok(fds)
-    })();
-    match result {
-        Ok(fds) => Ok((aggregate, pins.into_values().collect(), fds, placeholders)),
-        Err(err) => {
-            for placeholder in &placeholders {
-                let _ = placeholder.remove_if_unchanged();
-            }
-            Err(err)
-        }
+        aggregate.directories.extend(scan.directories);
+        aggregate.entries_seen += scan.entries_seen;
+        aggregate.max_depth_seen = aggregate.max_depth_seen.max(scan.max_depth_seen);
+        aggregate.segments.extend(scan.segments);
+        aggregate.skipped_symlinks.extend(scan.skipped_symlinks);
     }
+    // Bind ancestors before descendants, and never expose a second writable
+    // alias of a protected source after applying its protection.
+    let mut fds = Vec::new();
+    for row in plan.mount_table() {
+        if row.kind == "file-mask" {
+            // EOF supplies an empty file to bubblewrap; no host content
+            // or writable source descriptor is exposed to the child.
+            let (reader, writer) = exec::pipe().map_err(failure)?;
+            drop(writer);
+            let target = PINNED_FD_BASE + fds.len() as RawFd;
+            fds.push((reader, target));
+            plan.mount_fds.push(Some(target));
+            continue;
+        }
+        if !matches!(row.kind, "bind" | "ro-bind" | "ro-bind-fd" | "placeholder") {
+            plan.mount_fds.push(None);
+            continue;
+        }
+        let source = PathBuf::from(row.source.expect("bind source"));
+        if !pins.contains_key(&source) {
+            // Distribution-owned runtime aliases may be resolved here;
+            // workspace/operator sources must never follow symlinks.
+            let runtime = plan.etc_paths.contains(&source)
+                || plan
+                    .roots
+                    .iter()
+                    .any(|r| matches!(r, jfs::RootSpec::RoBind(p) if p == &source))
+                || source == plan.jail_exe;
+            let path = if runtime {
+                std::fs::canonicalize(&source).map_err(failure)?
+            } else {
+                source.clone()
+            };
+            pins.insert(
+                source.clone(),
+                jfs::PinnedPath::open(&path).map_err(failure)?,
+            );
+        }
+        let target = PINNED_FD_BASE + fds.len() as RawFd;
+        fds.push((pins[&source].try_clone_fd().map_err(failure)?, target));
+        plan.mount_fds.push(Some(target));
+    }
+    Ok((aggregate, pins.into_values().collect(), fds, placeholders))
 }
 
 fn absent_runtime_candidate(reference: &PathRef, host: &Path) -> bool {
@@ -5428,9 +5420,7 @@ mod tests {
                 assert!(fd.is_some());
             }
         }
-        for placeholder in placeholders {
-            let _ = placeholder.remove_if_unchanged();
-        }
+        drop(placeholders);
     }
 
     #[test]
@@ -5469,9 +5459,7 @@ mod tests {
             root.join("workspace/.ouroboros").is_dir(),
             "the placeholder does not exist at the root"
         );
-        for placeholder in placeholders {
-            let _ = placeholder.remove_if_unchanged();
-        }
+        drop(placeholders);
         assert!(
             !root.join("workspace/.ouroboros").exists(),
             "placeholder removal left the literal behind"
@@ -5515,9 +5503,7 @@ mod tests {
         for (fd, target) in fds {
             map.add(fd, target).unwrap();
         }
-        for placeholder in placeholders {
-            let _ = placeholder.remove_if_unchanged();
-        }
+        drop(placeholders);
     }
 
     #[test]
