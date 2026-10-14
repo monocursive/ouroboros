@@ -32,7 +32,7 @@
 //! - Durable, resumable: the traversal is idempotent, the directory removal is
 //!   followed by an `fsync` of the attempt directory, and only then is
 //!   `complete` recorded (`jail-state.json` through the durable replacement).
-//!   A crash at any point leaves `pending`, and [`resume`] (`gc`) finishes it.
+//!   A crash at any point leaves `pending`, and [`resume_with`] (`gc`) finishes it.
 //! - Bounded: one pass visits at most [`Limits::max_entries`] entries and holds
 //!   at most [`Limits::max_depth`] directory descriptors. A deeper directory
 //!   is renamed up to the vendor-state root and visited from there, so an
@@ -87,15 +87,6 @@ pub const REASON_IDENTITY_UNRECORDED: &str = "vendor_state_identity_unrecorded";
 #[must_use]
 pub fn not_needed() -> StateCleanup {
     StateCleanup::NotNeeded
-}
-
-/// Whether this build can remove vendor state at all.
-///
-/// True since J3: [`remove_vendor_state`] performs the anchored removal and
-/// records `complete` only after it and the directory sync succeeded.
-#[must_use]
-pub fn vendor_state_removal_implemented() -> bool {
-    true
 }
 
 /// How much one pass may do.
@@ -781,6 +772,15 @@ fn present_managed_dirs(attempt_dir: &AttemptDir) -> Scratch {
     Scratch::Managed(present)
 }
 
+/// What [`resume_with`] did, and what it spent.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Resumed {
+    /// The outcome.
+    pub outcome: Resume,
+    /// Entries the removals charged against the given bound.
+    pub visited: usize,
+}
+
 /// Resumes an interrupted vendor-state cleanup from jail state (§12, §14.2).
 ///
 /// With no vendor state registered, a receipt that permits the cleanup and
@@ -806,30 +806,13 @@ fn present_managed_dirs(attempt_dir: &AttemptDir) -> Scratch {
 /// the same traversal, and only when `policy.json` says scratch was managed;
 /// a `policy.json` that cannot be read keeps the cleanup pending.
 ///
+/// It runs within `limits` (gc passes what is left of its per-invocation
+/// bound, and charges `visited` to it), and with gc's own verification of
+/// the registered leaf (`gc_verified_leaf`, see [`permitted`]).
+///
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when jail state or the receipt
 /// cannot be read or replaced.
-pub fn resume(attempt_dir: &AttemptDir, dry_run: bool) -> Result<Resume, JailError> {
-    resume_with(attempt_dir, dry_run, Limits::DEFAULT, false).map(|resumed| resumed.outcome)
-}
-
-// S7 and gc's verification
-/// What [`resume_with`] did, and what it spent.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Resumed {
-    /// The outcome.
-    pub outcome: Resume,
-    /// Entries the removals charged against the given bound (S7).
-    pub visited: usize,
-}
-
-/// [`resume`] within `limits` (S7: gc passes what is left of its
-/// per-invocation bound, and charges `visited` to it), and with gc's own
-/// verification of the registered leaf (`gc_verified_leaf`, see
-/// [`permitted`]).
-///
-/// # Errors
-/// As [`resume`].
 pub fn resume_with(
     attempt_dir: &AttemptDir,
     dry_run: bool,
@@ -1290,9 +1273,8 @@ mod tests {
     }
 
     #[test]
-    fn removal_is_implemented_and_the_empty_case_is_not_needed() {
+    fn the_empty_case_is_not_needed() {
         assert_eq!(not_needed(), StateCleanup::NotNeeded);
-        assert!(vendor_state_removal_implemented());
     }
 
     #[test]
