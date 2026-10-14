@@ -1546,9 +1546,10 @@ mod tests {
             skip_decision(false, "bubblewrap is absent").expect("plain mode records the skip");
         assert_eq!(noted, "skipped: bubblewrap is absent");
 
-        // And the wrapper really panics on the Err branch, and only there.
+        // And the wrapper really panics in conformance mode. (Its other
+        // branch prints a skip note, which a conformance log counts as a
+        // skipped live test, so it is not called here.)
         assert!(std::panic::catch_unwind(|| skip_or_fail_with(true, "x")).is_err());
-        assert!(std::panic::catch_unwind(|| skip_or_fail_with(false, "x")).is_ok());
     }
 
     #[test]
