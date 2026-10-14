@@ -43,30 +43,36 @@ impl Volume {
             ))
         } else {
             let value = stat(&self.file)?;
-            // Audit 2026-10-08 L3: the tmpfs capacity is re-verified every
-            // sample, like the quota path above. A host-side remount to a
-            // smaller size is an enforcement loss, never a hit.
-            let block_size = u64::try_from(value.f_bsize).map_err(io::Error::other)?;
-            let capacity = if value.f_blocks == 0 {
-                None
-            } else {
-                Some(
-                    value
-                        .f_blocks
-                        .checked_mul(block_size)
-                        .ok_or_else(|| io::Error::other("storage capacity overflow"))?,
-                )
-            };
-            if capacity != self.bytes {
-                return Err(io::Error::other("tmpfs capacity changed after admission"));
-            }
-            let files = value.f_files;
-            if files != self.inodes.unwrap_or(0) {
+            // The tmpfs capacity is re-verified every sample, like the quota
+            // path above. A host-side remount to a smaller size is an
+            // enforcement loss, never a hit.
+            if tmpfs_capacity(&value)? != (self.bytes, self.inodes) {
                 return Err(io::Error::other("tmpfs capacity changed after admission"));
             }
             Ok((value.f_bavail == 0, value.f_ffree == 0))
         }
     }
+}
+
+/// A tmpfs's hard capacity as `(bytes, inodes)`: blocks times block size,
+/// and the inode count, each `None` where the tmpfs has no bound (a count of
+/// zero).
+///
+/// # Errors
+/// A capacity that cannot be a byte count.
+fn tmpfs_capacity(value: &libc::statfs) -> io::Result<(Option<u64>, Option<u64>)> {
+    let block_size = u64::try_from(value.f_bsize).map_err(io::Error::other)?;
+    let bytes = if value.f_blocks == 0 {
+        None
+    } else {
+        Some(
+            value
+                .f_blocks
+                .checked_mul(block_size)
+                .ok_or_else(|| io::Error::other("storage capacity overflow"))?,
+        )
+    };
+    Ok((bytes, (value.f_files != 0).then_some(value.f_files)))
 }
 
 fn stat(file: &File) -> io::Result<libc::statfs> {
@@ -115,19 +121,11 @@ enum CeilingRefusal {
 /// calling user's ext4/XFS hard quota.
 fn ceiling(file: &File, value: &libc::statfs) -> Result<Ceiling, CeilingRefusal> {
     if value.f_type == libc::TMPFS_MAGIC {
-        let block_size = u64::try_from(value.f_bsize)
-            .map_err(|err| CeilingRefusal::Overflow(io::Error::other(err)))?;
-        let bytes = if value.f_blocks == 0 {
-            None
-        } else {
-            Some(value.f_blocks.checked_mul(block_size).ok_or_else(|| {
-                CeilingRefusal::Overflow(io::Error::other("storage capacity overflow"))
-            })?)
-        };
+        let (bytes, inodes) = tmpfs_capacity(value).map_err(CeilingRefusal::Overflow)?;
         return Ok(Ceiling {
             uid: None,
             bytes,
-            inodes: (value.f_files != 0).then_some(value.f_files),
+            inodes,
         });
     }
     if [libc::EXT4_SUPER_MAGIC, libc::XFS_SUPER_MAGIC].contains(&value.f_type) {
@@ -232,6 +230,12 @@ pub(super) fn probe_ceiling(path: &Path) -> CeilingProbe {
     }
 }
 
+/// The character devices bubblewrap binds individually into `/dev`, by
+/// (major, minor): `null`, `zero`, `full`, `random`, `urandom` and `tty`.
+/// Writing to them cannot allocate filesystem data or create sibling files.
+/// No other device is exempt: an operator-granted device is not vouched for.
+const ALLOCATION_FREE_DEVICES: [(u32, u32); 6] = [(1, 3), (1, 5), (1, 7), (1, 8), (1, 9), (5, 0)];
+
 pub(super) fn requested(limits: &LimitsSnapshot) -> bool {
     limits.storage.is_some() || limits.inodes.is_some()
 }
@@ -294,14 +298,9 @@ impl Storage {
                 .open(PathBuf::from(std::ffi::OsString::from_vec(path)))?;
             let value = stat(&file)?;
             let metadata = file.metadata()?;
-            // Bubblewrap binds these device inodes individually. Writing to
-            // them cannot allocate filesystem data or create sibling files.
-            // Never exempt an arbitrary operator-granted device.
             if metadata.file_type().is_char_device()
-                && matches!(
-                    (libc::major(metadata.rdev()), libc::minor(metadata.rdev())),
-                    (1, 3 | 5 | 7 | 8 | 9) | (5, 0)
-                )
+                && ALLOCATION_FREE_DEVICES
+                    .contains(&(libc::major(metadata.rdev()), libc::minor(metadata.rdev())))
             {
                 continue;
             }
@@ -517,7 +516,7 @@ mod tests {
         let result = unsafe {
             libc::ioctl(
                 file.as_raw_fd(),
-                0x8100_587e as libc::c_ulong,
+                quota::XFS_IOC_FSGEOMETRY,
                 geometry.as_mut_ptr(),
             )
         };
@@ -568,8 +567,9 @@ mod tests {
 
     /// A volume whose admitted tmpfs capacity matches its filesystem, or
     /// `offset_blocks` blocks larger — the stale, larger admission a
-    /// host-side remount shrink leaves behind (audit 2026-10-08 L3).
-    fn tmpfs_volume(offset_blocks: u64) -> Option<Volume> {
+    /// host-side remount shrink leaves behind — with the directory it lives
+    /// in, which must outlive it.
+    fn tmpfs_volume(offset_blocks: u64) -> Option<(tempfile::TempDir, Volume)> {
         let dir = tempfile::tempdir().ok()?;
         let file = File::open(dir.path()).ok()?;
         let value = stat(&file).ok()?;
@@ -577,41 +577,57 @@ mod tests {
             // Unit coverage needs a bounded tmpfs to stand in for the mount.
             return None;
         }
-        let capacity = value.f_blocks * u64::try_from(value.f_bsize).unwrap();
-        std::mem::forget(dir);
-        Some(Volume {
+        let block = u64::try_from(value.f_bsize).unwrap();
+        let volume = Volume {
             file,
             uid: None,
-            bytes: Some(capacity + offset_blocks * u64::try_from(value.f_bsize).unwrap()),
+            bytes: Some((value.f_blocks + offset_blocks) * block),
             inodes: Some(value.f_files),
-        })
+        };
+        Some((dir, volume))
     }
 
     #[test]
     fn tmpfs_capacity_shrink_after_admission_is_a_loss_not_a_hit() {
-        let Some(mut volume) = tmpfs_volume(0) else {
+        let Some((_dir, mut volume)) = tmpfs_volume(0) else {
             return;
         };
         // An honest admission samples saturation, not a loss.
         assert_eq!(volume.full().unwrap(), (false, false));
         // A remount to a smaller size (the admitted capacity is now stale and
         // larger) is an enforcement loss, never a saturation hit.
-        volume.bytes = tmpfs_volume(1).unwrap().bytes;
+        volume.bytes = tmpfs_volume(1).unwrap().1.bytes;
         assert_eq!(
             volume.full().unwrap_err().to_string(),
             "tmpfs capacity changed after admission"
         );
         // Inode capacity too.
-        let mut volume = tmpfs_volume(0).unwrap();
+        let (_dir, mut volume) = tmpfs_volume(0).unwrap();
         volume.inodes = volume.inodes.map(|files| files + 1);
         assert_eq!(
             volume.full().unwrap_err().to_string(),
             "tmpfs capacity changed after admission"
         );
         // An admitted-unbounded tmpfs that gained a bound is a change as well.
-        let mut volume = tmpfs_volume(0).unwrap();
+        let (_dir, mut volume) = tmpfs_volume(0).unwrap();
         volume.bytes = None;
         assert!(volume.full().is_err());
+    }
+
+    #[test]
+    fn tmpfs_capacity_is_blocks_times_block_size_and_zero_is_unbounded() {
+        // SAFETY: statfs is a plain C struct of integers, for which all-zero
+        // is a valid value.
+        let mut value: libc::statfs = unsafe { std::mem::zeroed() };
+        value.f_bsize = 4096;
+        value.f_blocks = 10;
+        value.f_files = 7;
+        assert_eq!(tmpfs_capacity(&value).unwrap(), (Some(40960), Some(7)));
+        value.f_blocks = 0;
+        value.f_files = 0;
+        assert_eq!(tmpfs_capacity(&value).unwrap(), (None, None));
+        value.f_blocks = u64::MAX;
+        assert!(tmpfs_capacity(&value).is_err(), "an overflow is refused");
     }
 
     #[test]
