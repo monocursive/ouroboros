@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use crate::cli::{ExecVia, PerfMode};
 use crate::ops::exec::{do_exec, image, spawn_exec};
 use crate::ops::process::sleep_ms;
-use crate::ops::{Usage, close_fd, raw_errno};
+use crate::ops::{Stop, close_fd, raw_errno};
 use crate::raw::{self, Attempt};
 use crate::report::{OpReport, Reporter, path_value};
 
@@ -30,7 +30,7 @@ use crate::report::{OpReport, Reporter, path_value};
 pub const PERF_LAUNCH_SCHEMA: &str = "ouro.fixture.perf-launch/2";
 
 /// Run one performance mode.
-pub(crate) fn run(rep: &Reporter, mode: PerfMode) -> Result<bool, Usage> {
+pub(crate) fn run(rep: &Reporter, mode: PerfMode) -> Result<bool, Stop> {
     match mode {
         PerfMode::Fileops { rounds, dir } => fileops(rep, rounds, &dir),
         PerfMode::SpawnTree { count, argv } => spawn_tree(rep, count, &argv),
@@ -354,13 +354,17 @@ fn keep_first(first: &mut Option<(&'static str, String)>, op: &'static str, a: &
     *first = Some((op, errno));
 }
 
-pub(crate) fn fileops(rep: &Reporter, rounds: u32, dir: &OsStr) -> Result<bool, Usage> {
+pub(crate) fn fileops(rep: &Reporter, rounds: u32, dir: &OsStr) -> Result<bool, Stop> {
     let name = |leaf: &[u8]| {
         let mut bytes = dir.as_bytes().to_vec();
         bytes.push(b'/');
         bytes.extend_from_slice(leaf);
-        raw::cpath(&OsString::from_vec(bytes))
-            .map_err(|e| format!("fileops DIR cannot be a syscall argument: {}", e.reason))
+        raw::cpath(&OsString::from_vec(bytes)).map_err(|e| {
+            Stop::Usage(format!(
+                "fileops DIR cannot be a syscall argument: {}",
+                e.reason
+            ))
+        })
     };
     let (a, b) = (name(b"w")?, name(b"x")?);
     let legacy = raw::has_legacy_syscalls();
@@ -429,7 +433,7 @@ pub(crate) fn fileops(rep: &Reporter, rounds: u32, dir: &OsStr) -> Result<bool, 
     Ok(ok)
 }
 
-pub(crate) fn spawn_tree(rep: &Reporter, count: u32, argv: &[OsString]) -> Result<bool, Usage> {
+pub(crate) fn spawn_tree(rep: &Reporter, count: u32, argv: &[OsString]) -> Result<bool, Stop> {
     let default = [OsString::from(DEFAULT_CHILD)];
     let argv = if argv.is_empty() { &default[..] } else { argv };
     let img = image(argv)?;
@@ -763,7 +767,7 @@ pub(crate) fn perf_launch(
     sample_ms: u64,
     deadline_ms: u64,
     argv: &[OsString],
-) -> Result<bool, Usage> {
+) -> Result<bool, Stop> {
     let img = image(argv)?;
     let out = PathBuf::from(out);
     let data_dir = data_dir.map(PathBuf::from);
@@ -837,8 +841,9 @@ pub(crate) fn perf_launch(
         attempts,
     };
     let bytes = serde_json::to_vec_pretty(&result)
-        .map_err(|e| format!("the perf-launch result cannot be serialized: {e}"))?;
-    std::fs::write(&out, bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+        .map_err(|e| Stop::Failed(format!("the perf-launch result cannot be serialized: {e}")))?;
+    std::fs::write(&out, bytes)
+        .map_err(|e| Stop::Failed(format!("cannot write {}: {e}", out.display())))?;
     Ok(true)
 }
 

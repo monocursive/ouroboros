@@ -27,7 +27,7 @@ use serde_json::Value;
 
 use crate::bounded::{self, Deadline, IoFail};
 use crate::cli::NetMode;
-use crate::ops::{Usage, finish};
+use crate::ops::{Stop, finish};
 use crate::raw;
 use crate::report::{Emitted, Expect, OpReport, Reporter};
 use crate::sockaddr::SockAddr;
@@ -40,7 +40,7 @@ pub const MAX_HEAD_BYTES: usize = 64 * 1024;
 pub const MAX_BODY_BYTES: u64 = 16 << 20;
 
 /// Run one network mode.
-pub(crate) fn run(rep: &Reporter, mode: NetMode) -> Result<bool, Usage> {
+pub(crate) fn run(rep: &Reporter, mode: NetMode) -> Result<bool, Stop> {
     match mode {
         NetMode::Connect { addr, udp, expect } => connect(rep, &addr, udp, &expect),
         NetMode::UdpSendto {
@@ -138,13 +138,8 @@ pub(crate) fn open_socket(
 
 /// Connect a socket to a numeric address, and report the socket and the
 /// connect.
-fn connect(rep: &Reporter, addr: &str, udp: bool, expect: &Expect) -> Result<bool, Usage> {
-    let sock: std::net::SocketAddr = addr.parse().map_err(|_| {
-        format!(
-            "`{addr}` is not a numeric ADDR:PORT. The fixture refuses names on purpose: \
-             resolving one would issue its own connects and pollute the trace."
-        )
-    })?;
+fn connect(rep: &Reporter, addr: &str, udp: bool, expect: &Expect) -> Result<bool, Stop> {
+    let sock = numeric(addr)?;
 
     let (domain, family) = if sock.is_ipv4() {
         (libc::AF_INET, "AF_INET")
@@ -191,12 +186,12 @@ fn sendto_line(fd: c_int, payload: &[u8], addr: &SockAddr, shown: Option<&str>) 
     finish(report, raw::sendto(fd, payload, 0, addr))
 }
 
-fn numeric(addr: &str) -> Result<SocketAddr, Usage> {
+fn numeric(addr: &str) -> Result<SocketAddr, Stop> {
     addr.parse().map_err(|_| {
-        format!(
+        Stop::Usage(format!(
             "`{addr}` is not a numeric ADDR:PORT. The fixture refuses names on purpose: \
              resolving one would issue its own connects and pollute the trace."
-        )
+        ))
     })
 }
 
@@ -207,12 +202,12 @@ pub(crate) fn udp_sendto(
     addr: &str,
     bytes: usize,
     expect: &Expect,
-) -> Result<bool, Usage> {
+) -> Result<bool, Stop> {
     let dest = numeric(addr)?;
     if bytes > MAX_UDP_BYTES {
-        return Err(format!(
+        return Err(Stop::Usage(format!(
             "--bytes {bytes} is above the fixture's {MAX_UDP_BYTES}-byte bound"
-        ));
+        )));
     }
     let sa = SockAddr::inet(dest);
     let Ok(fd) = open_socket(
@@ -374,17 +369,17 @@ fn rcode_name(rcode: u8) -> &'static str {
     }
 }
 
-fn parse_resolver(resolver: &str) -> Result<SocketAddr, Usage> {
+fn parse_resolver(resolver: &str) -> Result<SocketAddr, Stop> {
     if let Ok(sa) = resolver.parse::<SocketAddr>() {
         return Ok(sa);
     }
     if let Ok(ip) = resolver.parse::<IpAddr>() {
         return Ok(SocketAddr::new(ip, 53));
     }
-    Err(format!(
+    Err(Stop::Usage(format!(
         "`{resolver}` is not a numeric resolver (IP, IP:PORT or [IPv6]:PORT). \
          The fixture refuses names on purpose."
-    ))
+    )))
 }
 
 /// `recvfrom` one datagram and its source. `Ok(None)` source when the
@@ -446,10 +441,10 @@ pub(crate) fn dns_query(
     name: &str,
     timeout_ms: u64,
     expect: &Expect,
-) -> Result<bool, Usage> {
+) -> Result<bool, Stop> {
     let server = parse_resolver(resolver)?;
     let id = query_id();
-    let query = encode_query(id, name)?;
+    let query = encode_query(id, name).map_err(Stop::Usage)?;
     let deadline = Deadline::after_ms(timeout_ms);
     let sa = SockAddr::inet(server);
 
@@ -1081,8 +1076,8 @@ pub(crate) fn http_get(
     host_header: Option<&str>,
     timeout_ms: u64,
     expect: &Expect,
-) -> Result<bool, Usage> {
-    let parsed = parse_http_url(url)?;
+) -> Result<bool, Stop> {
+    let parsed = parse_http_url(url).map_err(Stop::Usage)?;
     let choice = if no_proxy {
         ProxyChoice::None
     } else {
@@ -1118,11 +1113,11 @@ pub(crate) fn http_get(
         }
         ProxyChoice::None => {
             let (addr, mapped) = numeric_host(&parsed.host, parsed.port).ok_or_else(|| {
-                format!(
+                Stop::Usage(format!(
                     "`{}` is a name and no proxy variable is set. The fixture refuses names \
                      on purpose: resolving one would issue its own connects and pollute the trace.",
                     parsed.host
-                )
+                ))
             })?;
             summary.set("via_proxy", false);
             summary.set("proxy_var", Value::Null);
@@ -1169,12 +1164,12 @@ pub(crate) fn http_connect(
     host_header: Option<&str>,
     timeout_ms: u64,
     expect: &Expect,
-) -> Result<bool, Usage> {
-    parse_authority(authority, None).map_err(|e| format!("HOST:PORT: {e}"))?;
+) -> Result<bool, Stop> {
+    parse_authority(authority, None).map_err(|e| Stop::Usage(format!("HOST:PORT: {e}")))?;
     if let Some(p) = then_get
         && !p.starts_with('/')
     {
-        return Err(format!("--then-get `{p}` must start with `/`"));
+        return Err(Stop::Usage(format!("--then-get `{p}` must start with `/`")));
     }
     let deadline = Deadline::after_ms(timeout_ms);
     let host = host_header.unwrap_or(authority);

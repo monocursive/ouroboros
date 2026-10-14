@@ -10,10 +10,10 @@ use crate::raw;
 use crate::report::{Expect, OpReport, Reporter, path_value};
 
 use super::exec::{do_exec, exec_and_wait, exec_replace, image};
-use super::{Session, Usage, check, cloexec_pipe, finish, raw_errno, refuse_path};
+use super::{Session, Stop, check, cloexec_pipe, finish, raw_errno, refuse_path};
 
 /// Run one process or lifetime mode.
-pub(crate) fn run(session: &Session<'_>, rep: &Reporter, mode: ProcessMode) -> Result<bool, Usage> {
+pub(crate) fn run(session: &Session<'_>, rep: &Reporter, mode: ProcessMode) -> Result<bool, Stop> {
     match mode {
         ProcessMode::Exec { via, expect, argv } => exec_and_wait(rep, via, &argv, &expect),
         ProcessMode::ExecReplace { via, expect, argv } => {
@@ -76,7 +76,7 @@ fn exit(session: &Session<'_>, rep: &Reporter, code: u8) -> ! {
     std::process::exit(i32::from(actual));
 }
 
-fn background(rep: &Reporter, ms: u64, argv: &[OsString]) -> Result<bool, Usage> {
+fn background(rep: &Reporter, ms: u64, argv: &[OsString]) -> Result<bool, Stop> {
     let img = if argv.is_empty() {
         None
     } else {
@@ -85,7 +85,8 @@ fn background(rep: &Reporter, ms: u64, argv: &[OsString]) -> Result<bool, Usage>
 
     // The child reports whether `setsid` succeeded, so `detached` is a
     // measurement rather than an assumption. One byte, no sleep.
-    let (sr, sw) = cloexec_pipe().map_err(|e| format!("could not create the detach pipe: {e}"))?;
+    let (sr, sw) = cloexec_pipe()
+        .map_err(|e| Stop::Failed(format!("could not create the detach pipe: {e}")))?;
 
     // SAFETY: single-threaded at this point; the child runs only `setsid`,
     // `write`, `close`, `nanosleep`, the exec syscall and `_exit`, all
@@ -97,7 +98,10 @@ fn background(rep: &Reporter, ms: u64, argv: &[OsString]) -> Result<bool, Usage>
             libc::close(sr);
             libc::close(sw);
         }
-        return Err(format!("fork failed: {}", std::io::Error::last_os_error()));
+        return Err(Stop::Failed(format!(
+            "fork failed: {}",
+            std::io::Error::last_os_error()
+        )));
     }
     if pid == 0 {
         // SAFETY: async-signal-safe; detaches the descendant from this session.
@@ -249,7 +253,7 @@ fn clone_untraced(rep: &Reporter, path: &OsStr, expect: &Expect) -> bool {
     emitted.satisfies(expect)
 }
 
-fn raise(rep: &Reporter, signal: &str) -> Result<bool, Usage> {
+fn raise(rep: &Reporter, signal: &str) -> Result<bool, Stop> {
     let sig = parse_signal(signal)?;
     let mut report = OpReport::new("raise");
     report.set("signal", signal.to_uppercase());
@@ -263,12 +267,14 @@ fn raise(rep: &Reporter, signal: &str) -> Result<bool, Usage> {
     Ok(r == 0)
 }
 
-fn parse_signal(s: &str) -> Result<c_int, Usage> {
+fn parse_signal(s: &str) -> Result<c_int, Stop> {
     if let Ok(n) = s.parse::<c_int>() {
         if n > 0 && n < 64 {
             return Ok(n);
         }
-        return Err(format!("`{s}` is not a signal number in 1..63"));
+        return Err(Stop::Usage(format!(
+            "`{s}` is not a signal number in 1..63"
+        )));
     }
     let upper = s.to_uppercase();
     let name = upper.strip_prefix("SIG").unwrap_or(&upper);
@@ -290,7 +296,7 @@ fn parse_signal(s: &str) -> Result<c_int, Usage> {
         "CONT" => libc::SIGCONT,
         "STOP" => libc::SIGSTOP,
         "TSTP" => libc::SIGTSTP,
-        _ => return Err(format!("unknown signal `{s}`")),
+        _ => return Err(Stop::Usage(format!("unknown signal `{s}`"))),
     };
     Ok(sig)
 }

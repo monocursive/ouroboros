@@ -23,7 +23,7 @@ use crate::cli::{ExecVia, UnixLen, UnixMode};
 use crate::net::open_socket;
 use crate::ops::exec::{image, spawn_exec, wait_report};
 use crate::ops::fs::{OpenFlags, open_keep};
-use crate::ops::{Usage, check, close_fd, finish};
+use crate::ops::{Stop, check, close_fd, finish};
 use crate::raw;
 use crate::report::{Emitted, Expect, OpReport, Reporter, path_value};
 use crate::sockaddr::SockAddr;
@@ -35,7 +35,7 @@ pub const MAX_FDS: usize = 4;
 pub const MAX_LINE: usize = 4096;
 
 /// Run one Unix-socket mode.
-pub(crate) fn run(rep: &Reporter, mode: UnixMode) -> Result<bool, Usage> {
+pub(crate) fn run(rep: &Reporter, mode: UnixMode) -> Result<bool, Stop> {
     match mode {
         UnixMode::UnixConnect {
             path,
@@ -272,7 +272,7 @@ fn listen_on(
     backlog: c_int,
     expect: &Expect,
     spawn: &[OsString],
-) -> Result<Result<Listening, bool>, Usage> {
+) -> Result<Result<Listening, bool>, Stop> {
     if seqpacket && !cfg!(target_os = "linux") {
         return Ok(Err(unsupported(
             rep,
@@ -379,7 +379,7 @@ pub(crate) fn unix_listen(
     timeout_ms: u64,
     expect: &Expect,
     spawn: &[OsString],
-) -> Result<bool, Usage> {
+) -> Result<bool, Stop> {
     let backlog = c_int::try_from(accept.clamp(16, 4096)).unwrap_or(16);
     let deadline = Deadline::after_ms(timeout_ms);
     let l = match listen_on(rep, path, seqpacket, backlog, expect, spawn)? {
@@ -723,7 +723,7 @@ pub(crate) fn scm_recv(
     timeout_ms: u64,
     expect: &Expect,
     spawn: &[OsString],
-) -> Result<bool, Usage> {
+) -> Result<bool, Stop> {
     let deadline = Deadline::after_ms(timeout_ms);
     let l = match listen_on(rep, path, false, 16, expect, spawn)? {
         Ok(l) => l,

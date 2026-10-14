@@ -47,12 +47,40 @@ pub(crate) fn raw_errno() -> c_int {
     }
 }
 
-/// Why a mode stopped without its result: a usage error, refused before
-/// any operation, or an operation the fixture needed for itself (a
-/// directory descriptor, a pipe, a fork, writing its result file) that
-/// failed, after its own report line where it has one. Exit code 2 either
-/// way: neither is the outcome of the operation under test.
-pub type Usage = String;
+/// Why a mode stopped without its result. Neither is the outcome of the
+/// operation under test, so neither is an expectation that failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stop {
+    /// The invocation is wrong (an argument, a flag combination or a script
+    /// the fixture refuses), found before anything ran.
+    /// Exit [`crate::EXIT_USAGE`].
+    Usage(String),
+    /// The fixture stopped after something ran: an operation it needed for
+    /// itself failed (a directory descriptor, a pipe, a fork, writing its
+    /// result file), after the report line of whatever it attempted, or a
+    /// script step was refused after earlier steps had acted.
+    /// Exit [`crate::EXIT_FIXTURE_FAILED`].
+    Failed(String),
+}
+
+impl Stop {
+    /// The exit code the fixture ends with.
+    #[must_use]
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Stop::Usage(_) => crate::EXIT_USAGE,
+            Stop::Failed(_) => crate::EXIT_FIXTURE_FAILED,
+        }
+    }
+}
+
+impl std::fmt::Display for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stop::Usage(why) | Stop::Failed(why) => f.write_str(why),
+        }
+    }
+}
 
 /// State shared by every step of one fixture process.
 ///
@@ -123,21 +151,21 @@ pub(crate) fn close_fd(ret: i64) {
 }
 
 /// Run one mode. `Ok(true)` when every expectation in it held.
-pub fn run(mode: Mode, rep: &Reporter) -> Result<bool, Usage> {
+pub fn run(mode: Mode, rep: &Reporter) -> Result<bool, Stop> {
     let session = Session::new(rep);
     let ok = run_in(&session, mode)?;
     Ok(ok && !session.failed_earlier())
 }
 
 /// Run one mode inside an existing session.
-pub fn run_in(session: &Session<'_>, mode: Mode) -> Result<bool, Usage> {
+pub fn run_in(session: &Session<'_>, mode: Mode) -> Result<bool, Stop> {
     let rep = session.rep;
     let ok = run_mode(session, rep, mode)?;
     Ok(session.record(ok))
 }
 
 /// Hand one mode to the module of its group.
-fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, Usage> {
+fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, Stop> {
     match mode {
         Mode::Fs(mode) => fs::run(rep, mode),
         Mode::Net(mode) => crate::net::run(rep, mode),

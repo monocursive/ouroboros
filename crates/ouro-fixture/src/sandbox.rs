@@ -27,7 +27,7 @@ use std::ffi::OsString;
 
 use crate::cli::ExecVia;
 use crate::ops::exec::{argv_report, do_exec, image};
-use crate::ops::{Session, Usage, finish};
+use crate::ops::{Session, Stop, finish};
 use crate::report::{Emitted, Expect, OpReport, Reporter};
 
 // ------------------------------------------------------------- the syscalls
@@ -277,12 +277,14 @@ pub const MAX_SECCOMP_SYSCALLS: usize = 256;
 
 /// Resolve names (or decimal numbers below 1024) to native syscall numbers,
 /// deduplicated in first-seen order.
-pub fn resolve_syscalls(names: &[String]) -> Result<Vec<(String, u32)>, Usage> {
+pub fn resolve_syscalls(names: &[String]) -> Result<Vec<(String, u32)>, Stop> {
     let mut out: Vec<(String, u32)> = Vec::new();
     for n in names {
         let nr = if let Ok(nr) = n.parse::<u32>() {
             if nr >= 1024 {
-                return Err(format!("syscall number {nr} is out of range (0..1024)"));
+                return Err(Stop::Usage(format!(
+                    "syscall number {nr} is out of range (0..1024)"
+                )));
             }
             nr
         } else {
@@ -291,9 +293,9 @@ pub fn resolve_syscalls(names: &[String]) -> Result<Vec<(String, u32)>, Usage> {
                 .find(|(name, _)| name == n)
                 .map(|(_, nr)| *nr)
                 .ok_or_else(|| {
-                    format!(
+                    Stop::Usage(format!(
                         "unknown syscall `{n}`: name one of the fixture's native table or give a number"
-                    )
+                    ))
                 })?
         };
         if !out.iter().any(|(_, seen)| *seen == nr) {
@@ -301,10 +303,10 @@ pub fn resolve_syscalls(names: &[String]) -> Result<Vec<(String, u32)>, Usage> {
         }
     }
     if out.len() > MAX_SECCOMP_SYSCALLS {
-        return Err(format!(
+        return Err(Stop::Usage(format!(
             "{} syscalls named; the fixture's filter takes at most {MAX_SECCOMP_SYSCALLS}",
             out.len()
-        ));
+        )));
     }
     Ok(out)
 }
@@ -471,7 +473,7 @@ pub(crate) fn sandbox_exec(
     session: &Session<'_>,
     rep: &Reporter,
     req: &Request<'_>,
-) -> Result<bool, Usage> {
+) -> Result<bool, Stop> {
     // Everything that can be refused is refused before the first step.
     let syscalls = resolve_syscalls(req.seccomp)?;
     let img = image(req.argv)?;
@@ -814,11 +816,10 @@ mod tests {
                 ("83".to_string(), 83)
             ]
         );
-        assert!(
-            resolve_syscalls(&["nosuchcall".into()])
-                .unwrap_err()
-                .contains("unknown syscall")
-        );
+        assert!(matches!(
+            resolve_syscalls(&["nosuchcall".into()]),
+            Err(Stop::Usage(why)) if why.contains("unknown syscall")
+        ));
         assert!(resolve_syscalls(&["1024".into()]).is_err());
         let too_many: Vec<String> = (0..=MAX_SECCOMP_SYSCALLS).map(|n| n.to_string()).collect();
         assert!(resolve_syscalls(&too_many).is_err());

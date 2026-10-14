@@ -12,10 +12,10 @@ use crate::cli::{
 use crate::raw::{self, Attempt};
 use crate::report::{Emitted, Expect, OpReport, Reporter, path_value};
 
-use super::{Usage, check, close_fd, finish, refuse_path, unavailable};
+use super::{Stop, check, close_fd, finish, refuse_path, unavailable};
 
 /// Run one filesystem mode.
-pub(crate) fn run(rep: &Reporter, mode: FsMode) -> Result<bool, Usage> {
+pub(crate) fn run(rep: &Reporter, mode: FsMode) -> Result<bool, Stop> {
     match mode {
         FsMode::Open {
             path,
@@ -27,7 +27,7 @@ pub(crate) fn run(rep: &Reporter, mode: FsMode) -> Result<bool, Usage> {
             mode,
             expect,
         } => {
-            let mode = parse_mode(&mode)?;
+            let mode = parse_mode(&mode).map_err(Stop::Usage)?;
             // clap refuses `--write` with `--rdwr`.
             let access = match (write, rdwr) {
                 (_, true) => Access::ReadWrite,
@@ -48,9 +48,9 @@ pub(crate) fn run(rep: &Reporter, mode: FsMode) -> Result<bool, Usage> {
             dirfd,
             expect,
         } => {
-            let mode = parse_mode(&mode)?;
+            let mode = parse_mode(&mode).map_err(Stop::Usage)?;
             if dirfd.is_some() && via != MkdirVia::Mkdirat {
-                return Err("--dirfd needs --via mkdirat".to_string());
+                return Err(Stop::Usage("--dirfd needs --via mkdirat".to_string()));
             }
             let dir = open_dirfd(rep, dirfd.as_deref())?;
             Ok(check(
@@ -69,7 +69,9 @@ pub(crate) fn run(rep: &Reporter, mode: FsMode) -> Result<bool, Usage> {
             expect,
         } => {
             if (dirfd.is_some() || dirfd2.is_some()) && via == RenameVia::Rename {
-                return Err("--dirfd and --dirfd2 need --via renameat or renameat2".to_string());
+                return Err(Stop::Usage(
+                    "--dirfd and --dirfd2 need --via renameat or renameat2".to_string(),
+                ));
             }
             // Owned: the first is closed even when the second cannot open.
             let dir = open_dirfd(rep, dirfd.as_deref())?;
@@ -110,7 +112,7 @@ pub(crate) fn run(rep: &Reporter, mode: FsMode) -> Result<bool, Usage> {
             } else {
                 NodeKind::Fifo
             };
-            let perm = parse_mode(&mode)?;
+            let perm = parse_mode(&mode).map_err(Stop::Usage)?;
             Ok(check(rep, mknod(&path, via, kind, perm), &expect))
         }
         FsMode::Truncate {
@@ -223,11 +225,12 @@ pub(crate) fn open_keep(path: &OsStr, via: OpenVia, flags: OpenFlags, mode: u32)
 /// the open as its own line: the descriptor is part of what the next call
 /// names, so a reader must be able to see where it came from. A read-only
 /// open is outside the closed set, so a tracer reports nothing for it.
-fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<OwnedFd>, Usage> {
+fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<OwnedFd>, Stop> {
     let Some(dir) = dir else {
         return Ok(None);
     };
-    let c = raw::cpath(dir).map_err(|e| format!("--dirfd cannot be a path: {}", e.reason))?;
+    let c = raw::cpath(dir)
+        .map_err(|e| Stop::Usage(format!("--dirfd cannot be a path: {}", e.reason)))?;
     let mut report = OpReport::new("openat");
     path_value(&mut report.args, "path", dir);
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
@@ -238,14 +241,18 @@ fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<OwnedFd>, Us
     let emitted = finish(report, raw::openat(libc::AT_FDCWD, c.as_ptr(), flags, 0));
     rep.emit(&emitted.report);
     if emitted.report.ret < 0 {
-        return Err(format!(
+        return Err(Stop::Failed(format!(
             "--dirfd {} could not be opened: {:?}",
             dir.to_string_lossy(),
             emitted.report.errno
-        ));
+        )));
     }
-    let fd = c_int::try_from(emitted.report.ret)
-        .map_err(|_| format!("openat returned {}, not a descriptor", emitted.report.ret))?;
+    let fd = c_int::try_from(emitted.report.ret).map_err(|_| {
+        Stop::Failed(format!(
+            "openat returned {}, not a descriptor",
+            emitted.report.ret
+        ))
+    })?;
     // SAFETY: `fd` was just returned by a successful `openat` and nothing
     // else owns it.
     Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
@@ -745,20 +752,26 @@ fn chdir(rep: &Reporter, path: &OsStr) -> bool {
 /// in Rust; the kernel reads it as the plain bytes it is. Because A and B
 /// differ in one byte only, whatever a tracer snapshots at the entry is
 /// literally A or B, and what the kernel then consumes may be the other one.
-fn race_mkdir(rep: &Reporter, a: &OsStr, b: &OsStr, count: u32) -> Result<bool, Usage> {
+fn race_mkdir(rep: &Reporter, a: &OsStr, b: &OsStr, count: u32) -> Result<bool, Stop> {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     let (ab, bb) = (a.as_bytes(), b.as_bytes());
     if ab.len() != bb.len() {
-        return Err("race-mkdir: A and B must have the same length".to_string());
+        return Err(Stop::Usage(
+            "race-mkdir: A and B must have the same length".to_string(),
+        ));
     }
     let differing: Vec<usize> = (0..ab.len()).filter(|i| ab[*i] != bb[*i]).collect();
     let [at] = differing.as_slice() else {
-        return Err("race-mkdir: A and B must differ in exactly one byte".to_string());
+        return Err(Stop::Usage(
+            "race-mkdir: A and B must differ in exactly one byte".to_string(),
+        ));
     };
     let at = *at;
     if ab.contains(&0) || bb.contains(&0) {
-        return Err("race-mkdir: a path cannot contain NUL".to_string());
+        return Err(Stop::Usage(
+            "race-mkdir: a path cannot contain NUL".to_string(),
+        ));
     }
     let buffer: Arc<Vec<AtomicU8>> = Arc::new(
         ab.iter()

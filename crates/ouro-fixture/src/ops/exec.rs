@@ -11,7 +11,7 @@ use crate::raw::{self, Attempt};
 use crate::report::{Emitted, Expect, OpReport, Reporter, path_value};
 
 use super::process::sleep_ms;
-use super::{Session, Usage, cloexec_pipe, finish, raw_errno, unavailable};
+use super::{Session, Stop, cloexec_pipe, finish, raw_errno, unavailable};
 
 /// Argv/envp kept alive for the duration of an exec, with their pointer arrays.
 pub(crate) struct Image {
@@ -22,14 +22,18 @@ pub(crate) struct Image {
     path: CString,
 }
 
-pub(crate) fn image(argv: &[OsString]) -> Result<Image, Usage> {
-    let path = raw::cpath(&argv[0])
-        .map_err(|e| format!("argv[0] cannot be a syscall argument: {}", e.reason))?;
+pub(crate) fn image(argv: &[OsString]) -> Result<Image, Stop> {
+    let path = raw::cpath(&argv[0]).map_err(|e| {
+        Stop::Usage(format!(
+            "argv[0] cannot be a syscall argument: {}",
+            e.reason
+        ))
+    })?;
     let mut cargv = Vec::with_capacity(argv.len());
     for a in argv {
         cargv.push(
             CString::new(a.as_bytes())
-                .map_err(|_| "an argument contains an interior NUL".to_string())?,
+                .map_err(|_| Stop::Usage("an argument contains an interior NUL".to_string()))?,
         );
     }
     let mut cenvp = Vec::new();
@@ -96,7 +100,7 @@ pub(crate) fn exec_replace(
     via: ExecVia,
     argv: &[OsString],
     expect: &Expect,
-) -> Result<bool, Usage> {
+) -> Result<bool, Stop> {
     let name = exec_name(via);
     if session.failed_earlier() {
         // A successful exec replaces this image, so the accumulated failure
@@ -131,7 +135,7 @@ pub(crate) fn exec_and_wait(
     via: ExecVia,
     argv: &[OsString],
     expect: &Expect,
-) -> Result<bool, Usage> {
+) -> Result<bool, Stop> {
     let name = exec_name(via);
     if let Some(reason) = unavailable(name) {
         let mut report = argv_report(name, argv, via);
@@ -183,13 +187,13 @@ impl Spawned {
 
 /// Fork, exec IMG in the child, and return once the exec has happened or
 /// failed. Never waits for the child to exit.
-pub(crate) fn spawn_exec(img: &Image, via: ExecVia) -> Result<Spawned, Usage> {
+pub(crate) fn spawn_exec(img: &Image, via: ExecVia) -> Result<Spawned, Stop> {
     // Both ends are close-on-exec. The write end MUST be: it used to survive
     // the target's `execve`, which handed a harness-private descriptor to the
     // target (the thing X06 rules out) and made the parent's read wait for
     // every descendant to die instead of for the exec.
-    let (pr, pw) =
-        cloexec_pipe().map_err(|e| format!("could not create the exec error pipe: {e}"))?;
+    let (pr, pw) = cloexec_pipe()
+        .map_err(|e| Stop::Failed(format!("could not create the exec error pipe: {e}")))?;
 
     // SAFETY: this process is single-threaded at this point; the child runs
     // only async-signal-safe calls (`close`, the exec syscall, `write`,
@@ -201,7 +205,10 @@ pub(crate) fn spawn_exec(img: &Image, via: ExecVia) -> Result<Spawned, Usage> {
             libc::close(pr);
             libc::close(pw);
         }
-        return Err(format!("fork failed: {}", std::io::Error::last_os_error()));
+        return Err(Stop::Failed(format!(
+            "fork failed: {}",
+            std::io::Error::last_os_error()
+        )));
     }
     if pid == 0 {
         // SAFETY: async-signal-safe only, on descriptors this child owns.
@@ -249,10 +256,10 @@ pub(crate) fn spawn_exec(img: &Image, via: ExecVia) -> Result<Spawned, Usage> {
     unsafe { libc::close(pr) };
     // A partial errno is a failed exec whose errno was cut: never success.
     if got != 0 && got != buf.len() {
-        return Err(format!(
+        return Err(Stop::Failed(format!(
             "the exec error pipe returned {got} of {} bytes",
             buf.len()
-        ));
+        )));
     }
 
     Ok(Spawned {
@@ -341,6 +348,9 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("an interior NUL in argv must be refused"),
         };
-        assert!(err.contains("interior NUL"), "{err}");
+        assert!(
+            matches!(&err, Stop::Usage(why) if why.contains("interior NUL")),
+            "{err:?}"
+        );
     }
 }
