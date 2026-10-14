@@ -1478,6 +1478,12 @@ pub struct BwrapStatus {
     pub child_pid: Option<libc::pid_t>,
     /// Exit code of the inner command, when reported.
     pub exit_code: Option<i32>,
+    /// The pid namespace bubblewrap created, by inode, when reported.
+    pub pid_namespace: Option<u64>,
+    /// The mount namespace bubblewrap created, by inode, when reported.
+    pub mnt_namespace: Option<u64>,
+    /// The network namespace bubblewrap created, by inode, when reported.
+    pub net_namespace: Option<u64>,
 }
 
 /// Parse bubblewrap's JSON status stream: a sequence of objects, read as
@@ -1501,6 +1507,10 @@ pub fn parse_json_status(raw: &str) -> BwrapStatus {
         status.exit_code = status
             .exit_code
             .or_else(|| integer("exit-code").and_then(|v| i32::try_from(v).ok()));
+        let inode = |key: &str| document.get(key).and_then(serde_json::Value::as_u64);
+        status.pid_namespace = status.pid_namespace.or_else(|| inode("pid-namespace"));
+        status.mnt_namespace = status.mnt_namespace.or_else(|| inode("mnt-namespace"));
+        status.net_namespace = status.net_namespace.or_else(|| inode("net-namespace"));
     }
     status
 }
@@ -1564,14 +1574,23 @@ mod tests {
 
     #[test]
     fn json_status_documents_parse() {
-        let raw = r#"{"child-pid": 12574, "mnt-namespace": 4026533229}
+        let raw = r#"{"child-pid": 12574, "mnt-namespace": 4026533229, "net-namespace": 4026533231, "pid-namespace": 4026533230}
 {"exit-code": 7}"#;
         assert_eq!(
             parse_json_status(raw),
             BwrapStatus {
                 child_pid: Some(12574),
                 exit_code: Some(7),
+                pid_namespace: Some(4_026_533_230),
+                mnt_namespace: Some(4_026_533_229),
+                net_namespace: Some(4_026_533_231),
             }
+        );
+        // A namespace that is not reported, or not as an inode number, is
+        // not one: nothing is compared against it.
+        assert_eq!(
+            parse_json_status(r#"{"child-pid": 1, "pid-namespace": "4026533230"}"#).pid_namespace,
+            None
         );
         assert_eq!(parse_json_status("{}"), BwrapStatus::default());
         // A status still being written: the cut-short object is not read in
@@ -1580,7 +1599,7 @@ mod tests {
             parse_json_status("{\"child-pid\": 12574}\n{\"exit-code\": 1"),
             BwrapStatus {
                 child_pid: Some(12574),
-                exit_code: None,
+                ..BwrapStatus::default()
             }
         );
         assert_eq!(

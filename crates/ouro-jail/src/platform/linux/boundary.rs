@@ -247,18 +247,6 @@ impl StatusReader {
     fn parsed(&self) -> bwrap::BwrapStatus {
         bwrap::parse_json_status(&self.text)
     }
-
-    fn namespace(&self, key: &str) -> Option<u64> {
-        let at = self.text.find(&format!("\"{key}\""))?;
-        let rest = &self.text[at..];
-        let colon = rest.find(':')?;
-        let digits: String = rest[colon + 1..]
-            .trim_start()
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect();
-        digits.parse().ok()
-    }
 }
 
 /// The namespace init: the host pid bubblewrap reported, and a pidfd opened
@@ -1916,12 +1904,12 @@ fn launcher_namespaces(
             _ => {}
         }
     }
-    for (key, seen) in [
-        ("pid-namespace", ns_ids.pid),
-        ("mnt-namespace", ns_ids.mnt),
-        ("net-namespace", ns_ids.net),
+    let status = status.parsed();
+    for (key, reported, seen) in [
+        ("pid-namespace", status.pid_namespace, ns_ids.pid),
+        ("mnt-namespace", status.mnt_namespace, ns_ids.mnt),
+        ("net-namespace", status.net_namespace, ns_ids.net),
     ] {
-        let reported = status.namespace(key);
         if let (Some(reported), Some(seen)) = (reported, seen)
             && reported != seen
         {
