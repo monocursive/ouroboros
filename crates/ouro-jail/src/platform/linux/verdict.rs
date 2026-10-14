@@ -1,4 +1,4 @@
-//! What the facts at the end of a contained run justify (§9.3, §13.2).
+//! What the facts at the end of a run justify (§9.3, §13.2).
 
 use std::time::SystemTime;
 
@@ -131,6 +131,61 @@ pub fn abort_verdict(inputs: &AbortInputs) -> bool {
         && inputs.abandoned_tracees == 0
         && !inputs.observer_panicked
         && children_accounted
+}
+
+/// The one verification scope a `none` receipt can carry (§13.2).
+pub(super) const REGISTERED_SCOPE: &str = "registered_boundary";
+
+/// What is known about a `none` tree when verification ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoneTreeInputs {
+    /// A membership escape, identity replacement or failed verification was
+    /// detected at any point of the attempt.
+    pub integrity_lost: bool,
+    /// The loop saw the boundary empty on its own, not at a spent budget.
+    pub natural_end: bool,
+    /// The target's final status was collected (it is not a live process and
+    /// not an unreaped zombie).
+    pub target_reaped: bool,
+    /// The leaf still names the pinned inode and reads unpopulated.
+    pub leaf_verified_empty: bool,
+    /// The observer's account objects to nothing (or there was no observer).
+    pub observer_clean: bool,
+}
+
+/// The tree observation those facts justify (§9.3, §13.2).
+///
+/// A detected loss wins over everything: `lost`, and neither a tree result
+/// nor a time. Otherwise `tree_empty = true` needs every fact; anything short
+/// of that is unknown (`pending`), never `false`.
+#[must_use]
+pub fn none_verdict(inputs: &NoneTreeInputs) -> TreeObservation {
+    if inputs.integrity_lost {
+        return TreeObservation {
+            tree_empty: None,
+            verified_at: None,
+            verification_scope: REGISTERED_SCOPE.to_owned(),
+            integrity: "lost".to_owned(),
+        };
+    }
+    if inputs.natural_end
+        && inputs.target_reaped
+        && inputs.leaf_verified_empty
+        && inputs.observer_clean
+    {
+        return TreeObservation {
+            tree_empty: Some(true),
+            verified_at: Some(SystemTime::now()),
+            verification_scope: REGISTERED_SCOPE.to_owned(),
+            integrity: "verified".to_owned(),
+        };
+    }
+    TreeObservation {
+        tree_empty: None,
+        verified_at: None,
+        verification_scope: REGISTERED_SCOPE.to_owned(),
+        integrity: "pending".to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +381,76 @@ mod tests {
             },
         ] {
             assert!(!abort_verdict(&broken), "{broken:?}");
+        }
+    }
+
+    fn clean() -> NoneTreeInputs {
+        NoneTreeInputs {
+            integrity_lost: false,
+            natural_end: true,
+            target_reaped: true,
+            leaf_verified_empty: true,
+            observer_clean: true,
+        }
+    }
+
+    #[test]
+    fn a_clean_none_tree_is_empty_only_in_the_registered_scope() {
+        let observed = none_verdict(&clean());
+        assert_eq!(observed.tree_empty, Some(true));
+        assert!(observed.verified_at.is_some());
+        assert_eq!(observed.integrity, "verified");
+        assert_eq!(observed.verification_scope, "registered_boundary");
+    }
+
+    #[test]
+    fn a_detected_loss_wins_over_every_other_fact() {
+        let observed = none_verdict(&NoneTreeInputs {
+            integrity_lost: true,
+            ..clean()
+        });
+        assert_eq!(observed.tree_empty, None);
+        assert_eq!(observed.verified_at, None);
+        assert_eq!(observed.integrity, "lost");
+        assert_eq!(observed.verification_scope, "registered_boundary");
+    }
+
+    #[test]
+    fn any_missing_fact_is_unknown_never_false() {
+        for (why, inputs) in [
+            (
+                "the budget ran out",
+                NoneTreeInputs {
+                    natural_end: false,
+                    ..clean()
+                },
+            ),
+            (
+                "the target was not reaped",
+                NoneTreeInputs {
+                    target_reaped: false,
+                    ..clean()
+                },
+            ),
+            (
+                "the leaf was not seen empty",
+                NoneTreeInputs {
+                    leaf_verified_empty: false,
+                    ..clean()
+                },
+            ),
+            (
+                "the observer objected",
+                NoneTreeInputs {
+                    observer_clean: false,
+                    ..clean()
+                },
+            ),
+        ] {
+            let observed = none_verdict(&inputs);
+            assert_eq!(observed.tree_empty, None, "{why}");
+            assert_eq!(observed.verified_at, None, "{why}");
+            assert_eq!(observed.integrity, "pending", "{why}");
         }
     }
 }

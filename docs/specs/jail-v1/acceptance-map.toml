@@ -2594,7 +2594,7 @@ tag = "recorded-limit"
 tests = [
   "ouro-jail/tests/conformance_j3_none.rs::r05_clean_none_evidence_stays_unprotected",
   "ouro-jail/tests/conformance_j3_none.rs::none_gate_closed_refuses_after_a_verified_teardown",
-  "ouro-jail/src/lib.rs::platform::linux::uncontained::tests::a_clean_none_tree_is_empty_only_in_the_registered_scope",
+  "ouro-jail/src/lib.rs::platform::linux::verdict::tests::a_clean_none_tree_is_empty_only_in_the_registered_scope",
 ]
 limit = "docs/specs/jail-v1/j5-authority.md § Known gaps: A test cannot migrate a descendant out of the registered cgroup without the supervisor being able to see it: an unseen migration is a race jail-v1 §9.3 declines to promise to detect."
 note = "R06's THIRD sentence, 'an unobserved migrated descendant is not certified dead by registered-boundary verification', is not producible as a deterministic live fixture on the stock host: with observation off the subreaper + zombie-cgroup checks detect every escape, and the genuinely-unseen case is a race §9.3 explicitly declines to promise. It is proved by the honest scope label on the verified path: tree_empty=true is recorded with verification_scope=registered_boundary, which by §9.3 does not certify processes outside the identity-checked cgroup dead. The listed tests assert that label (and the unit test the verdict)."
