@@ -2184,180 +2184,13 @@ pub fn merge_at(
 pub fn merge(map: &mut Map, add: &Additions, source: &str) -> Result<Vec<String>, String> {
     let mut changes = Vec::new();
     for a in &add.clause {
-        let same_text = |gate: &str| {
-            map.clause
-                .iter()
-                .find(|c| c.gate == gate && a.clause.as_ref() == Some(&c.clause))
-                .map(|c| c.id.clone())
-        };
-        let id = match &a.id {
-            // A `.new` clause whose text is already there is that clause:
-            // merging one additions file twice adds nothing.
-            Some(id) if *id == format!("{}.new", a.gate) => {
-                same_text(&a.gate).unwrap_or_else(|| id.clone())
-            }
-            Some(id) => id.clone(),
-            None => map
-                .clause
-                .iter()
-                .find(|c| c.gate == a.gate && a.clause.as_ref() == Some(&c.clause))
-                .map_or_else(|| format!("{}.new", a.gate), |c| c.id.clone()),
-        };
-        if let Some(c) = map.clause.iter().find(|c| c.id == id)
-            && c.gate != a.gate
-        {
-            return Err(format!(
-                "{source}: {} belongs to gate {}, not {}",
-                id, c.gate, a.gate
-            ));
-        }
-        let Some(kind) = map.gate.iter().find(|g| g.id == a.gate).map(|g| g.kind) else {
-            return Err(format!(
-                "{source}: {} names gate {}, which is not in the map",
-                id, a.gate
-            ));
-        };
-        if a.tag == Tag::Credential || kind == Kind::Credential {
-            return Err(format!(
-                "{source}: {}: credential clauses are recorded by hand, not merged",
-                id
-            ));
-        }
+        let id = clause_id(map, a);
+        refuse_addition(map, a, &id, source)?;
         if id == format!("{}.new", a.gate) {
-            let Some(text) = a.clause.clone().filter(|t| !t.trim().is_empty()) else {
-                return Err(format!(
-                    "{source}: {}: a new clause needs its `clause` text",
-                    id
-                ));
-            };
-            let next = 1 + map
-                .clause
-                .iter()
-                .filter(|c| c.gate == a.gate)
-                .filter_map(|c| {
-                    c.id.rsplit_once('.')
-                        .and_then(|(_, n)| n.parse::<u32>().ok())
-                })
-                .max()
-                .unwrap_or(0);
-            let id = format!("{}.{next}", a.gate);
-            let at = map
-                .clause
-                .iter()
-                .rposition(|c| c.gate == a.gate)
-                .map_or(map.clause.len(), |i| i + 1);
-            changes.push(format!(
-                "{id}: new clause from {source} ({} test(s), tag {}): {text}",
-                a.tests.len(),
-                a.tag.as_str()
-            ));
-            let open: Vec<&str> = map
-                .clause
-                .iter()
-                .filter(|c| c.gate == a.gate && c.tag == Tag::Untested)
-                .map(|c| c.id.as_str())
-                .collect();
-            if !open.is_empty() {
-                changes.push(format!(
-                    "note: {} still has untested {}; if {id} proves one of them, give that id \
-                     instead so the untested clause is closed rather than duplicated",
-                    a.gate,
-                    open.join(", ")
-                ));
-            }
-            map.clause.insert(
-                at,
-                Clause {
-                    id,
-                    gate: a.gate.clone(),
-                    clause: text,
-                    tag: a.tag,
-                    lane: a.lane.unwrap_or_default(),
-                    tests: a.tests.clone(),
-                    checks: a.checks.clone(),
-                    limit: a.limit.clone(),
-                    note: a.note.clone(),
-                },
-            );
-            continue;
-        }
-        let Some(c) = map.clause.iter_mut().find(|c| c.id == id) else {
-            return Err(format!(
-                "{source}: clause {} is not in the map (a clause the map lacks is `{}.new`)",
-                id, a.gate
-            ));
-        };
-        if a.lane.is_some_and(|l| l != c.lane) {
-            return Err(format!(
-                "{source}: {} is in the {} lane",
-                id,
-                c.lane.as_str()
-            ));
-        }
-        let added_tests: Vec<String> = a
-            .tests
-            .iter()
-            .filter(|t| !c.tests.contains(t))
-            .cloned()
-            .collect();
-        let added_checks: Vec<String> = a
-            .checks
-            .iter()
-            .filter(|k| !c.checks.contains(k))
-            .cloned()
-            .collect();
-        let raises = strength(a.tag) > strength(c.tag);
-        let leaves_limit = c.tag == Tag::RecordedLimit && raises;
-        if leaves_limit && !a.resolves_limit {
-            return Err(format!(
-                "{source}: {id} is a recorded limit; taking it out of its limit needs \
-                 `resolves_limit = true` with the new tests that prove the clause"
-            ));
-        }
-        // Recording a limit is not a proof: an untested clause may become a
-        // recorded limit without a test (its citation is checked instead).
-        let needs_test = raises && !(c.tag == Tag::Untested && a.tag == Tag::RecordedLimit);
-        if needs_test && added_tests.is_empty() {
-            return Err(format!(
-                "{source}: {id} would go from {} to {} without a new test; \
-                 a tag rises only with the test that earns it",
-                c.tag.as_str(),
-                a.tag.as_str()
-            ));
-        }
-        c.tests.extend(added_tests.iter().cloned());
-        c.checks.extend(added_checks.iter().cloned());
-        let before = c.tag;
-        if raises {
-            c.tag = a.tag;
-        }
-        if c.tag == Tag::RecordedLimit {
-            if let Some(limit) = &a.limit {
-                c.limit = Some(limit.clone());
-            }
+            insert_new_clause(map, a, source, &mut changes)?;
         } else {
-            c.limit = None;
+            add_to_clause(map, a, &id, source, &mut changes)?;
         }
-        if let Some(note) = &a.note {
-            c.note = Some(match (&c.note, before) {
-                (Some(old), tag) if tag != Tag::Untested => format!("{old} {note}"),
-                _ => note.clone(),
-            });
-        }
-        if let Some(text) = a.clause.as_ref().filter(|t| **t != c.clause) {
-            changes.push(format!(
-                "{}: {source} words the clause as `{text}`; the map's wording is kept",
-                c.id
-            ));
-        }
-        changes.push(format!(
-            "{}: +{} test(s), +{} check(s) from {source}; tag {} -> {}",
-            c.id,
-            added_tests.len(),
-            added_checks.len(),
-            before.as_str(),
-            c.tag.as_str()
-        ));
     }
     for i in &add.ignored {
         if map
@@ -2384,6 +2217,203 @@ pub fn merge(map: &mut Map, add: &Additions, source: &str) -> Result<Vec<String>
             problems.join("\n- ")
         ))
     }
+}
+
+/// The clause a contribution is for: its id, or the gate's clause with
+/// exactly its text, or `<gate>.new`. A `.new` clause whose text is already
+/// there is that clause, so merging one additions file twice adds nothing.
+fn clause_id(map: &Map, a: &AddedClause) -> String {
+    let new = format!("{}.new", a.gate);
+    let same_text = map
+        .clause
+        .iter()
+        .find(|c| c.gate == a.gate && a.clause.as_ref() == Some(&c.clause))
+        .map(|c| c.id.clone());
+    match &a.id {
+        Some(id) if *id == new => same_text.unwrap_or(new),
+        Some(id) => id.clone(),
+        None => same_text.unwrap_or(new),
+    }
+}
+
+/// A contribution no merge may take: a clause of another gate, a gate the
+/// map lacks, or a credential clause (those are recorded by hand).
+fn refuse_addition(map: &Map, a: &AddedClause, id: &str, source: &str) -> Result<(), String> {
+    if let Some(c) = map.clause.iter().find(|c| c.id == id)
+        && c.gate != a.gate
+    {
+        return Err(format!(
+            "{source}: {} belongs to gate {}, not {}",
+            id, c.gate, a.gate
+        ));
+    }
+    let Some(kind) = map.gate.iter().find(|g| g.id == a.gate).map(|g| g.kind) else {
+        return Err(format!(
+            "{source}: {} names gate {}, which is not in the map",
+            id, a.gate
+        ));
+    };
+    if a.tag == Tag::Credential || kind == Kind::Credential {
+        return Err(format!(
+            "{source}: {}: credential clauses are recorded by hand, not merged",
+            id
+        ));
+    }
+    Ok(())
+}
+
+/// Append `<gate>.new` as the gate's next clause, after its last one.
+fn insert_new_clause(
+    map: &mut Map,
+    a: &AddedClause,
+    source: &str,
+    changes: &mut Vec<String>,
+) -> Result<(), String> {
+    let Some(text) = a.clause.clone().filter(|t| !t.trim().is_empty()) else {
+        return Err(format!(
+            "{source}: {}.new: a new clause needs its `clause` text",
+            a.gate
+        ));
+    };
+    let next = 1 + map
+        .clause
+        .iter()
+        .filter(|c| c.gate == a.gate)
+        .filter_map(|c| {
+            c.id.rsplit_once('.')
+                .and_then(|(_, n)| n.parse::<u32>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    let id = format!("{}.{next}", a.gate);
+    let at = map
+        .clause
+        .iter()
+        .rposition(|c| c.gate == a.gate)
+        .map_or(map.clause.len(), |i| i + 1);
+    changes.push(format!(
+        "{id}: new clause from {source} ({} test(s), tag {}): {text}",
+        a.tests.len(),
+        a.tag.as_str()
+    ));
+    let open: Vec<&str> = map
+        .clause
+        .iter()
+        .filter(|c| c.gate == a.gate && c.tag == Tag::Untested)
+        .map(|c| c.id.as_str())
+        .collect();
+    if !open.is_empty() {
+        changes.push(format!(
+            "note: {} still has untested {}; if {id} proves one of them, give that id \
+             instead so the untested clause is closed rather than duplicated",
+            a.gate,
+            open.join(", ")
+        ));
+    }
+    map.clause.insert(
+        at,
+        Clause {
+            id,
+            gate: a.gate.clone(),
+            clause: text,
+            tag: a.tag,
+            lane: a.lane.unwrap_or_default(),
+            tests: a.tests.clone(),
+            checks: a.checks.clone(),
+            limit: a.limit.clone(),
+            note: a.note.clone(),
+        },
+    );
+    Ok(())
+}
+
+/// An existing clause gains the contribution's new tests and checks, and
+/// its tag when that is stronger and a new test earns it.
+fn add_to_clause(
+    map: &mut Map,
+    a: &AddedClause,
+    id: &str,
+    source: &str,
+    changes: &mut Vec<String>,
+) -> Result<(), String> {
+    let Some(c) = map.clause.iter_mut().find(|c| c.id == id) else {
+        return Err(format!(
+            "{source}: clause {} is not in the map (a clause the map lacks is `{}.new`)",
+            id, a.gate
+        ));
+    };
+    if a.lane.is_some_and(|l| l != c.lane) {
+        return Err(format!(
+            "{source}: {} is in the {} lane",
+            id,
+            c.lane.as_str()
+        ));
+    }
+    let added_tests: Vec<String> = a
+        .tests
+        .iter()
+        .filter(|t| !c.tests.contains(t))
+        .cloned()
+        .collect();
+    let added_checks: Vec<String> = a
+        .checks
+        .iter()
+        .filter(|k| !c.checks.contains(k))
+        .cloned()
+        .collect();
+    let raises = strength(a.tag) > strength(c.tag);
+    let leaves_limit = c.tag == Tag::RecordedLimit && raises;
+    if leaves_limit && !a.resolves_limit {
+        return Err(format!(
+            "{source}: {id} is a recorded limit; taking it out of its limit needs \
+             `resolves_limit = true` with the new tests that prove the clause"
+        ));
+    }
+    // Recording a limit is not a proof: an untested clause may become a
+    // recorded limit without a test (its citation is checked instead).
+    let needs_test = raises && !(c.tag == Tag::Untested && a.tag == Tag::RecordedLimit);
+    if needs_test && added_tests.is_empty() {
+        return Err(format!(
+            "{source}: {id} would go from {} to {} without a new test; \
+             a tag rises only with the test that earns it",
+            c.tag.as_str(),
+            a.tag.as_str()
+        ));
+    }
+    c.tests.extend(added_tests.iter().cloned());
+    c.checks.extend(added_checks.iter().cloned());
+    let before = c.tag;
+    if raises {
+        c.tag = a.tag;
+    }
+    if c.tag == Tag::RecordedLimit {
+        if let Some(limit) = &a.limit {
+            c.limit = Some(limit.clone());
+        }
+    } else {
+        c.limit = None;
+    }
+    if let Some(note) = &a.note {
+        c.note = Some(match (&c.note, before) {
+            (Some(old), tag) if tag != Tag::Untested => format!("{old} {note}"),
+            _ => note.clone(),
+        });
+    }
+    if let Some(text) = a.clause.as_ref().filter(|t| **t != c.clause) {
+        changes.push(format!(
+            "{}: {source} words the clause as `{text}`; the map's wording is kept",
+            c.id
+        ));
+    }
+    changes.push(format!(
+        "{}: +{} test(s), +{} check(s) from {source}; tag {} -> {}",
+        c.id,
+        added_tests.len(),
+        added_checks.len(),
+        before.as_str(),
+        c.tag.as_str()
+    ));
+    Ok(())
 }
 
 /// Rewrite a bare `<file>.rs::<name>` test id (the interim contribution
