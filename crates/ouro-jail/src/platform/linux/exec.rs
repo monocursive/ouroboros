@@ -351,19 +351,37 @@ const CAPTURE_TAIL: Duration = Duration::from_millis(100);
 ///
 /// # Errors
 ///
-/// A failure to poll, read or reap.
+/// A failure to poll, read or reap. A failure while the child may still run
+/// kills and reaps it first, so an error leaves no process behind.
 pub fn finish_captured(mut child: Child, deadline: Deadline) -> io::Result<Captured> {
-    let pid =
-        libc::pid_t::try_from(child.id()).map_err(|_| io::Error::other("pid out of range"))?;
-    let pidfd = pidfd_open(pid)?;
-    let mut pipes = [
+    let pipes = [
         CapturePipe::new(child.stdout.take().map(OwnedFd::from)),
         CapturePipe::new(child.stderr.take().map(OwnedFd::from)),
     ];
+    capture(child, pipes, deadline)
+}
+
+/// [`finish_captured`] over the pipes already taken from `child`.
+fn capture(
+    mut child: Child,
+    mut pipes: [CapturePipe; 2],
+    deadline: Deadline,
+) -> io::Result<Captured> {
+    let pidfd = match libc::pid_t::try_from(child.id())
+        .map_err(|_| io::Error::other("pid out of range"))
+        .and_then(pidfd_open)
+    {
+        Ok(pidfd) => pidfd,
+        Err(error) => return Err(abandon(&mut child, error)),
+    };
     let mut exited = false;
     while !(exited && pipes.iter().all(CapturePipe::is_closed)) && !deadline.expired() {
         let timeout = deadline.remaining_millis_capped(i32::MAX);
-        exited |= capture_step(&pidfd, exited, &mut pipes, timeout)?.0;
+        match capture_step(&pidfd, exited, &mut pipes, timeout) {
+            Ok(Step::Polled { exited: now, .. }) => exited |= now,
+            Ok(Step::Interrupted) => {}
+            Err(error) => return Err(abandon(&mut child, error)),
+        }
     }
     let timed_out = !exited;
     if timed_out {
@@ -372,11 +390,9 @@ pub fn finish_captured(mut child: Child, deadline: Deadline) -> io::Result<Captu
         let _ = pidfd_send_signal(pidfd.as_raw_fd(), libc::SIGKILL);
     }
     let status = child.wait()?;
-    let tail = Deadline::after(CAPTURE_TAIL);
-    while !pipes.iter().all(CapturePipe::is_closed)
-        && !tail.expired()
-        && capture_step(&pidfd, true, &mut pipes, 0)?.1
-    {}
+    drain_tail(&mut pipes, Deadline::after(CAPTURE_TAIL), |pipes| {
+        capture_step(&pidfd, true, pipes, 0)
+    })?;
     let [stdout, stderr] = pipes;
     Ok(Captured {
         status,
@@ -384,6 +400,44 @@ pub fn finish_captured(mut child: Child, deadline: Deadline) -> io::Result<Captu
         stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
         timed_out,
     })
+}
+
+/// Kills and reaps `child` after a capture failure, so the failure leaves
+/// nothing running and nothing unreaped; returns `error`.
+fn abandon(child: &mut Child, error: io::Error) -> io::Error {
+    // The child is unreaped, so its pid still names it. Either call fails
+    // only when the child has already exited or been reaped, which leaves
+    // nothing behind.
+    let _ = child.kill();
+    let _ = child.wait();
+    error
+}
+
+/// Reads what the pipes still hold once the process is gone: until both
+/// close, a poll finds neither ready, or `tail` expires. A poll a signal
+/// interrupted is polled again, never taken for "nothing ready".
+fn drain_tail(
+    pipes: &mut [CapturePipe; 2],
+    tail: Deadline,
+    mut step: impl FnMut(&mut [CapturePipe; 2]) -> io::Result<Step>,
+) -> io::Result<()> {
+    while !pipes.iter().all(CapturePipe::is_closed) && !tail.expired() {
+        match step(pipes)? {
+            Step::Interrupted | Step::Polled { ready: true, .. } => {}
+            Step::Polled { ready: false, .. } => break,
+        }
+    }
+    Ok(())
+}
+
+/// What one [`capture_step`] saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// A signal interrupted the poll before anything was ready.
+    Interrupted,
+    /// The poll returned: whether the process has now exited, and whether
+    /// any pipe was ready (and was read once).
+    Polled { exited: bool, ready: bool },
 }
 
 /// One captured pipe: open until it reads end-of-file.
@@ -423,14 +477,13 @@ impl CapturePipe {
 }
 
 /// One `poll` of the open pipes and, until the process has `exited`, its
-/// pidfd, then one read of each pipe that is ready. Returns whether the
-/// process has now exited and whether any pipe was ready.
+/// pidfd, then one read of each pipe that is ready.
 fn capture_step(
     pidfd: &OwnedFd,
     exited: bool,
     pipes: &mut [CapturePipe; 2],
     timeout_ms: i32,
-) -> io::Result<(bool, bool)> {
+) -> io::Result<Step> {
     let ready = libc::POLLIN | libc::POLLHUP | libc::POLLERR;
     let mut fds = Vec::with_capacity(3);
     for pipe in pipes.iter() {
@@ -454,7 +507,7 @@ fn capture_step(
     if unsafe { libc::poll(fds.as_mut_ptr(), count, timeout_ms) } < 0 {
         let error = io::Error::last_os_error();
         if error.kind() == io::ErrorKind::Interrupted {
-            return Ok((exited, false));
+            return Ok(Step::Interrupted);
         }
         return Err(error);
     }
@@ -467,7 +520,10 @@ fn capture_step(
         }
     }
     let now_exited = exited || polled.next().is_some_and(|fd| fd.revents & ready != 0);
-    Ok((now_exited, any_ready))
+    Ok(Step::Polled {
+        exited: now_exited,
+        ready: any_ready,
+    })
 }
 
 #[cfg(test)]
@@ -488,6 +544,71 @@ mod tests {
         assert!(captured.status.success());
         assert_eq!(captured.stdout.len(), 4_194_304);
         assert_eq!(captured.stderr.len(), 2_097_152);
+    }
+
+    /// A capture that fails while its child runs (here a read error: a
+    /// directory polls ready and refuses `read`) kills and reaps the child
+    /// before returning the error: nothing is left running or unreaped.
+    #[test]
+    fn a_failed_capture_kills_and_reaps_its_child() {
+        let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let watch = pidfd_open(libc::pid_t::try_from(child.id()).unwrap()).unwrap();
+        let directory = std::fs::File::open("/").unwrap();
+        let pipes = [
+            CapturePipe::new(Some(OwnedFd::from(directory))),
+            CapturePipe::new(None),
+        ];
+        let error = capture(child, pipes, Deadline::after(Duration::from_secs(10))).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EISDIR), "{error}");
+        assert!(
+            super::super::watch::readable(watch.as_raw_fd()),
+            "the child still runs"
+        );
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: a live pidfd and a writable siginfo; WNOHANG never blocks.
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PIDFD,
+                libc::id_t::try_from(watch.as_raw_fd()).unwrap(),
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG,
+            )
+        };
+        assert_eq!(
+            (rc, io::Error::last_os_error().raw_os_error()),
+            (-1, Some(libc::ECHILD)),
+            "the child was left unreaped"
+        );
+    }
+
+    /// After the exit, a poll a signal interrupted does not end the tail:
+    /// what the pipe still holds is read to its end.
+    #[test]
+    fn an_interrupted_tail_poll_is_polled_again() {
+        let (reader, writer) = pipe().unwrap();
+        // SAFETY: a live pipe descriptor and a buffer of the given length.
+        let written = unsafe { libc::write(writer.as_raw_fd(), b"tail".as_ptr().cast(), 4) };
+        assert_eq!(written, 4);
+        drop(writer);
+        let mut pipes = [CapturePipe::new(Some(reader)), CapturePipe::new(None)];
+        // Only polled while the process has not exited, which it has here.
+        let pidfd = pidfd_open(std::process::id().cast_signed()).unwrap();
+        let mut interrupted = false;
+        drain_tail(
+            &mut pipes,
+            Deadline::after(Duration::from_secs(5)),
+            |pipes| {
+                if !interrupted {
+                    interrupted = true;
+                    return Ok(Step::Interrupted);
+                }
+                capture_step(&pidfd, true, pipes, 0)
+            },
+        )
+        .unwrap();
+        assert!(interrupted);
+        assert_eq!(pipes[0].bytes, b"tail");
+        assert!(pipes[0].is_closed(), "read to end-of-file");
     }
 
     #[test]
