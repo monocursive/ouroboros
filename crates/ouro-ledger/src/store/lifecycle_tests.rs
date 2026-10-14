@@ -1,11 +1,20 @@
 //! Exercise real persistence operations in a test-only instrumented writer.
-use super::*;
-use crate::faults::{self, Plan, Point, Replaced, Scope, Step};
 use std::{
+    fs,
     os::unix::process::ExitStatusExt as _,
+    path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
+};
+
+use ouro_records::records;
+use serde_json::json;
+
+use super::*;
+use crate::{
+    faults::{self, Plan, Point, Replaced, Scope, Step},
+    protocol::{Peer, RunRecord},
 };
 
 const KINDS: [Scope; 5] = [

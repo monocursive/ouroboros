@@ -1,4 +1,9 @@
+use std::fs;
+
+use serde_json::json;
+
 use super::*;
+use crate::{manifest::STREAM, store::stream::Stream};
 
 #[test]
 fn redaction_is_durable_before_append_and_replay_preserves_minimized_bytes() {

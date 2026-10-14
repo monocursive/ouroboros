@@ -1,6 +1,17 @@
 //! Rebuilding a stream from its canonical bytes, at startup and for fresh
 //! verification.
-use super::*;
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{BufRead as _, BufReader},
+    path::Path,
+};
+
+use super::{Poison, PoisonKind, Stream};
+use crate::{
+    manifest,
+    protocol::{MAX_FRAME_BYTES, Result},
+    store::{capture_pruning, writer::private_file},
+};
 
 /// One run's canonical layout as it stood at one moment. A re-read never goes
 /// past it, so it is consistent with whatever the writer appends later.

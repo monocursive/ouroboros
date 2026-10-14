@@ -1,8 +1,17 @@
-use super::*;
-use crate::faults::{Plan, Point, Replaced, Step};
-use crate::protocol::{OperatorIntent, READ_CHUNK_BYTES, TailRequest};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write as _,
+};
 
-use crate::test_support::peer;
+use serde_json::json;
+
+use super::*;
+use crate::{
+    faults::{self, Plan, Point, Replaced, Step},
+    manifest::{self, STREAM},
+    protocol::{OperatorIntent, READ_CHUNK_BYTES, RunRecord, TailRequest},
+    test_support::peer,
+};
 
 fn create() -> (tempfile::TempDir, Store, RunRecord) {
     let temp = tempfile::tempdir().unwrap();

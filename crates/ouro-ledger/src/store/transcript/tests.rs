@@ -1,9 +1,13 @@
+use std::{
+    fs,
+    os::unix::fs::{PermissionsExt as _, symlink},
+};
+
 use super::*;
-use crate::protocol::MAX_FRAME_BYTES;
-use crate::store::tests::{gc_fixture, gc_fixture_captures, gc_future, peer};
-use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
-use std::os::unix::fs::symlink;
+use crate::{
+    protocol::MAX_FRAME_BYTES,
+    store::tests::{gc_fixture, gc_fixture_captures, gc_future, peer},
+};
 
 fn stream(store: &Store, run: &RunRecord) -> Value {
     store.show_with_transcript(&run.run_id).unwrap()["transcript"]["streams"]["stdout"].clone()

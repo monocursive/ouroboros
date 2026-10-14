@@ -1,5 +1,39 @@
 //! The sole writer: it owns every loaded stream and appends to them.
-use super::*;
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    io::Write as _,
+    os::fd::AsRawFd as _,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
+
+use ouro_records::{canonical::sha256_prefixed, records};
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+use super::{
+    canonical, check_run_id, digest,
+    frozen::{validate_frozen, validate_payload, validate_source},
+    pending_recovery, pruning,
+    stream::{
+        PoisonKind, Stream, initial_run,
+        load::{Layout, load_stream},
+        poison_details,
+        rules::original_payload,
+    },
+};
+use crate::{
+    discovery::valid_name,
+    faults::{self, Point, Replaced},
+    fsx,
+    manifest::{self, STREAM},
+    protocol::{
+        AppendReceipt, LedgerError, MAX_FRAME_BYTES, Peer, ReadPage, ReadRequest, Result,
+        RunRecord, StoreStatus,
+    },
+    schemas,
+};
 
 pub(super) const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 /// Canonical history one verify page re-reads, so one request's reply stays

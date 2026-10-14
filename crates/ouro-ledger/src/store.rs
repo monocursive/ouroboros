@@ -1,32 +1,20 @@
-//! The sole writer. The canonical stream is authoritative; run.json is a projection.
+//! The ledger store: the sole writer, the canonical streams it owns, and the
+//! features built on them. The canonical stream is authoritative; run.json is
+//! a projection.
+//!
+//! - `writer`: [`Store`] and the append path;
+//! - `stream`: one run's accepted state, its record rules and its re-read;
+//! - `frozen`: validation against the frozen schemas;
+//! - the features, each owning its own state and reaching the writer and
+//!   streams only through their methods: `catalog`, `tail`, `transcript`,
+//!   `operator`, `retention`, `pruning` and `capture_pruning` (over the
+//!   shared GC protocol in `gc`), `verification`, `pending_recovery` and
+//!   `bundle_replay`.
 
-use std::{
-    collections::BTreeMap,
-    fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
-    os::fd::AsRawFd,
-    path::{Path, PathBuf},
-    time::SystemTime,
-};
+use ouro_records::canonical::{sha256_prefixed, to_jcs};
+use serde_json::Value;
 
-use ouro_records::{
-    canonical::{sha256_prefixed, to_jcs},
-    records,
-};
-use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
-use uuid::Uuid;
-
-use crate::protocol::{
-    AppendReceipt, Chain, LedgerError, MAX_FRAME_BYTES, Peer, ReadPage, ReadRequest, Result,
-    RunRecord, StoreStatus,
-};
-
-use crate::discovery::valid_name;
-use crate::faults::{self, Point, Replaced};
-use crate::fsx;
-use crate::manifest::{self, STREAM};
-use crate::schemas;
+use crate::protocol::{LedgerError, Result};
 
 mod bundle_replay;
 mod capture_pruning;
@@ -47,14 +35,12 @@ mod tail;
 mod transcript;
 mod verification;
 mod writer;
-pub(crate) use frozen::{validate_payload, validate_source};
-pub(crate) use stream::{Poison, PoisonKind, poison_status};
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
+pub(crate) use frozen::validate_payload;
+pub(crate) use frozen::validate_source;
+pub(crate) use stream::{Poison, poison_status};
 pub(crate) use verification::{VerifyPlan, verify_page};
 pub use writer::Store;
-
-use frozen::*;
-use stream::{load::*, rules::*, *};
-use writer::*;
 
 fn check_run_id(id: &str) -> Result<()> {
     if !id.starts_with("run_")
