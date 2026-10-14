@@ -106,15 +106,18 @@ defmodule OuroFleet.ControllerTest do
   test "malformed input is refused without restarting the controller", context do
     controller = Process.whereis(Controller)
 
-    for message <- [
-          {:run, %{"schema" => "ouro.fleet.request/1", "request_id" => "typo", "argv" => []}},
-          {:run, "not an object"},
-          {:status, "job_not-a-digest"},
-          {:status, 7},
-          {:kill, nil},
-          {:ledger, "../escape", ["show"]}
+    for {message, detail} <- [
+          {{:run, %{"schema" => "ouro.fleet.request/1", "request_id" => "typo", "argv" => []}},
+           "invalid argv"},
+          {{:run, "not an object"}, "request must be an object"},
+          {{:run, Map.put(request("x"), "tags", ["a", "a"])}, "invalid tags list"},
+          {{:status, "job_not-a-digest"}, "invalid job id"},
+          {{:status, 7}, "invalid job id"},
+          {{:kill, nil}, "invalid job id"},
+          {{:ledger, "../escape", ["show"]}, "invalid job id"}
         ] do
-      assert {:error, "invalid_request"} = Controller.call(message)
+      assert {:error, %{"reason" => "invalid_request", "detail" => ^detail}} =
+               Controller.call(message)
     end
 
     assert Process.whereis(Controller) == controller

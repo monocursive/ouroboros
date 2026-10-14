@@ -32,8 +32,8 @@ defmodule OuroFleet.Controller do
       {:reply, dispatch(message, config, deadline), config}
     rescue
       # Malformed input wrote nothing; refusing it must not restart this node.
-      InvalidRequest ->
-        {:reply, {:error, "invalid_request"}, config}
+      error in InvalidRequest ->
+        {:reply, {:error, InvalidRequest.reply(error.message)}, config}
 
       error ->
         OuroFleet.Diagnostics.refused(error, __STACKTRACE__)

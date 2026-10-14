@@ -35,16 +35,19 @@ defmodule OuroFleet.WorkerTest do
 
     missing = Map.put(request, "dir", Path.join(context.root, "missing"))
 
-    for message <- [
-          {:plan, key, Map.delete(request, "argv")},
-          {:plan, "job_typo", request},
-          {:plan, key, missing},
-          {:submit, key, missing, %{}},
-          {:status, 7},
-          {:kill, "job_typo"},
-          {:ledger, "job_typo", ["show"]}
+    for {message, detail} <- [
+          {{:plan, key, Map.delete(request, "argv")}, "invalid argv"},
+          {{:plan, key, Map.put(request, "request_id", "")}, "invalid request_id"},
+          {{:plan, "job_typo", request}, "invalid job id"},
+          {{:plan, key, missing}, "workspace missing"},
+          {{:submit, key, missing, %{}}, "workspace missing"},
+          {{:status, 7}, "invalid job id"},
+          {{:kill, "job_typo"}, "invalid job id"},
+          {{:ledger, "job_typo", ["show"]}, "invalid job id"}
         ] do
-      assert {:error, "invalid_request"} = Worker.call(message)
+      # The reply names the check that failed, never the value that failed it.
+      assert {:error, %{"reason" => "invalid_request", "detail" => ^detail}} =
+               Worker.call(message)
     end
 
     assert Process.whereis(Worker) == worker
@@ -103,7 +106,10 @@ defmodule OuroFleet.WorkerTest do
     assert {:ok, %{"state" => "running"}} = replies[live]
     assert {:ok, %{"state" => "prepared"}} = replies[prepared]
     assert {:error, "attempt_not_reserved"} = replies[missing]
-    assert {:error, "invalid_request"} = replies["job_x"]
+
+    assert {:error, %{"reason" => "invalid_request", "detail" => "invalid job id"}} =
+             replies["job_x"]
+
     assert [settle, _, _] = ledger_calls(context.log)
     assert settle =~ " settle-orphans "
 

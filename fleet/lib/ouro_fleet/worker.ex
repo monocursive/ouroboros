@@ -34,8 +34,8 @@ defmodule OuroFleet.Worker do
       {:reply, dispatch(message, config), config}
     rescue
       # Malformed input wrote nothing; refusing it must not restart this node.
-      InvalidRequest ->
-        {:reply, {:error, "invalid_request"}, config}
+      error in InvalidRequest ->
+        {:reply, {:error, InvalidRequest.reply(error.message)}, config}
 
       error ->
         OuroFleet.Diagnostics.refused(error, __STACKTRACE__)
@@ -187,7 +187,9 @@ defmodule OuroFleet.Worker do
   defp reservation(config, key),
     do: if(Request.job?(key), do: Store.read!(checkpoint(config, key)), else: :invalid)
 
-  defp status(_config, _key, :invalid, _deadline), do: {:error, "invalid_request"}
+  defp status(_config, _key, :invalid, _deadline),
+    do: {:error, InvalidRequest.reply("invalid job id")}
+
   defp status(_config, _key, nil, _deadline), do: {:error, "attempt_not_reserved"}
 
   defp status(_config, _key, %{"run_id" => nil} = record, _deadline) do

@@ -2,10 +2,18 @@ defmodule OuroFleet.InvalidRequest do
   @moduledoc """
   Malformed caller input, refused before anything is written on its behalf.
 
-  The controller and worker answer it with `{:error, "invalid_request"}` and keep
+  The controller and worker answer it with `{:error, reply(message)}` and keep
   running. Any other exception still stops them: its persistence outcome is unknown.
   """
   defexception message: "invalid request"
+
+  @doc """
+  The error a refusal answers with: the stable reason and the check that failed.
+
+  `detail` is fixed text naming the check, never the caller's value, so a refusal
+  cannot echo argv or other request content back.
+  """
+  def reply(detail), do: %{"reason" => "invalid_request", "detail" => detail}
 end
 
 defmodule OuroFleet.Request do
@@ -35,15 +43,15 @@ defmodule OuroFleet.Request do
       end)
 
     if request["schema"] != "ouro.fleet.request/1", do: invalid!("unsupported request schema")
-    scalar!(request["request_id"], 256)
-    scalar!(request["on"], 128)
+    scalar!("request_id", request["request_id"], 256)
+    scalar!("on", request["on"], 128)
     argv = request["argv"]
     if not is_list(argv) or argv == [] or length(argv) > 4096, do: invalid!("invalid argv")
-    Enum.each(argv, &scalar!(&1, 65536, true))
+    Enum.each(argv, &scalar!("argv element", &1, 65536, true))
     if IO.iodata_length(OuroFleet.JSON.encode(input)) > 524_288, do: invalid!("request too large")
 
     for key <- ["dir", "jail", "launch"], not is_nil(request[key]) do
-      scalar!(request[key], 4096)
+      scalar!(key, request[key], 4096)
     end
 
     if request["dir"] && Path.type(request["dir"]) != :absolute,
@@ -58,9 +66,9 @@ defmodule OuroFleet.Request do
       values = request[key]
 
       if not is_list(values) or length(values) > 16 or Enum.uniq(values) != values,
-        do: invalid!("invalid option list")
+        do: invalid!("invalid #{key} list")
 
-      Enum.each(values, &scalar!(&1, 256))
+      Enum.each(values, &scalar!("#{key} entry", &1, 256))
     end
 
     if Enum.any?(request["capture"], &(&1 not in ["stdout", "stderr"])),
@@ -82,10 +90,11 @@ defmodule OuroFleet.Request do
   @doc "Refuses malformed caller input; see `OuroFleet.InvalidRequest`."
   def invalid!(message), do: raise(InvalidRequest, message)
 
-  defp scalar!(value, max, empty \\ false) do
+  # `name` is the field's own name, so the refusal says which field failed.
+  defp scalar!(name, value, max, empty \\ false) do
     unless is_binary(value) and String.valid?(value) and byte_size(value) <= max and
              (empty or value != "") and not String.contains?(value, <<0>>),
-           do: invalid!("invalid text field")
+           do: invalid!("invalid " <> name)
   end
 
   def policy(request, workspace) do
