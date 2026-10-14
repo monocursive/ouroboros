@@ -119,6 +119,13 @@ impl DirectoryStamp {
             modified: (st.st_mtime, st.st_mtime_nsec, st.st_ctime, st.st_ctime_nsec),
         })
     }
+    /// Whether the directory's pathname, resolved again with every symlink
+    /// refused ([`PinnedPath::open`]), still names the scanned directory with
+    /// the scanned timestamps.
+    ///
+    /// # Errors
+    ///
+    /// The resolution's errno, or a description of the change.
     pub fn verify(&self) -> io::Result<()> {
         let pin = PinnedPath::open(&self.path)?;
         let now = Self::read(&self.path, pin.fd.as_raw_fd())?;
@@ -175,6 +182,15 @@ pub enum ScanError {
         /// Where it happened.
         path: PathBuf,
     },
+    /// A directory the walk enumerated changed before the walk could be
+    /// confirmed, on the retry too: coverage would describe a tree that no
+    /// longer exists.
+    Changed {
+        /// The first directory that no longer matched its scan.
+        path: PathBuf,
+        /// What the confirmation found.
+        detail: String,
+    },
     /// A path could not be handed to a syscall at all.
     Path(PathError),
 }
@@ -201,6 +217,12 @@ impl fmt::Display for ScanError {
             Self::DepthLimit { limit, path } => write!(
                 f,
                 "protected scan reached depth {limit} at {}; coverage would be a partial claim",
+                path.display()
+            ),
+            Self::Changed { path, detail } => write!(
+                f,
+                "{} changed while the protected scan ran, twice ({detail}); coverage would \
+                 describe a tree that no longer exists",
                 path.display()
             ),
             Self::Path(e) => write!(f, "{e}"),
@@ -257,13 +279,29 @@ pub fn scan_protected_names(
     scan_directory(root, root_dir, names, limits)
 }
 
-/// Scan the pinned root, without resolving its pathname again.
+/// Scan the directory `root` holds, then confirm the scan.
+///
+/// The walk starts from the pinned handle, so the root is the object that
+/// was pinned whatever its pathname names now. The confirmation is by path:
+/// every directory the walk enumerated is resolved again
+/// ([`DirectoryStamp::verify`]) and must still be the same directory with
+/// the same timestamps. A tree that changed during the walk is walked once
+/// more; a second change refuses with [`ScanError::Changed`].
+///
+/// # Errors
+///
+/// As [`scan_protected`], plus [`ScanError::Changed`].
 pub fn scan_pinned(
     root: &PinnedPath,
     names: &[&str],
     limits: ScanLimits,
 ) -> Result<ProtectedScan, ScanError> {
-    for retry in 0..2 {
+    let mut retried = false;
+    loop {
+        // SAFETY: `root.fd` is a live `O_PATH` directory handle, which may
+        // serve as `openat`'s directory; `"."` is a static NUL-terminated
+        // name, and the flags open that same directory for reading without
+        // following anything.
         let fd = unsafe { libc::openat(root.fd.as_raw_fd(), c".".as_ptr(), DIR_FLAGS) };
         if fd < 0 {
             return Err(ScanError::BadRoot {
@@ -272,20 +310,23 @@ pub fn scan_pinned(
             });
         }
         let dir = DirHandle {
+            // SAFETY: `fd` was just returned by `openat` and nothing else
+            // owns it.
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
         };
         let scan = scan_directory(&root.path, dir, names, limits)?;
-        if scan.directories.iter().all(|d| d.verify().is_ok()) {
-            return Ok(scan);
-        }
-        if retry == 1 {
-            return Err(ScanError::Unreadable {
-                path: root.path.clone(),
-                errno: libc::ESTALE,
-            });
+        let changed = scan.directories.iter().find_map(|directory| {
+            directory
+                .verify()
+                .err()
+                .map(|error| (directory.path.clone(), error.to_string()))
+        });
+        match changed {
+            None => return Ok(scan),
+            Some((path, detail)) if retried => return Err(ScanError::Changed { path, detail }),
+            Some(_) => retried = true,
         }
     }
-    unreachable!()
 }
 
 fn scan_directory(
@@ -997,4 +1038,34 @@ pub fn listing(root: &Path) -> io::Result<Vec<OsString>> {
     let mut out = Vec::new();
     walk(root, Path::new(""), &mut out)?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tree_that_changes_on_both_walks_names_the_directory() {
+        let base = tempfile::tempdir().unwrap();
+        let parent = base.path().join("parent");
+        let root = parent.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let pin = PinnedPath::open(&root).unwrap();
+        // The held handle still reaches the tree, but its pathname now runs
+        // through a symlink, which no confirmation follows: every walk's
+        // confirmation fails, and the refusal says where.
+        let moved = base.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &parent).unwrap();
+        match scan_pinned(&pin, &PROTECTED_LITERALS, ScanLimits::DEFAULT) {
+            Err(ScanError::Changed { path, detail }) => {
+                assert_eq!(path, root);
+                assert!(detail.contains("symbolic links"), "{detail}");
+                let message = ScanError::Changed { path, detail }.to_string();
+                assert!(message.contains("changed while the protected scan ran"));
+                assert!(!message.contains("ESTALE"), "{message}");
+            }
+            other => panic!("expected a changed-tree refusal, got {other:?}"),
+        }
+    }
 }
