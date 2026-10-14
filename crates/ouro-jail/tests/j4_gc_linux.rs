@@ -1008,7 +1008,6 @@ fn j4_n7_a_failed_leaf_registration_refuses_and_leaves_no_leaf() {
             request: PlanRequest {
                 requirements: ouro_jail::capability::requirements(&resolved.snapshot),
                 snapshot: resolved.snapshot,
-                profile: ProfileName::None,
             },
             argv: vec![b"/bin/true".to_vec()],
             workspace,

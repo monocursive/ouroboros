@@ -282,7 +282,7 @@ impl Platform for LinuxPlatform {
         // `none` terminates its tree through the delegated leaf (§9.3)
         // Shadows the fn for this call only; the closure falls back to it.
         let probes_for = |requirement: &str| {
-            super::uncontained::probes_for(plan.profile, requirement)
+            super::uncontained::probes_for(plan.snapshot.profile, requirement)
                 .unwrap_or_else(|| probes_for(requirement))
         };
         let wanted: std::collections::BTreeSet<&str> = plan
@@ -499,7 +499,6 @@ pub(super) mod tests {
         let requirements = crate::capability::requirements(&snapshot);
         super::PlanRequest {
             snapshot,
-            profile,
             requirements,
         }
     }

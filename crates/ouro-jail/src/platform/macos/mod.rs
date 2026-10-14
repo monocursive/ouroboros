@@ -99,7 +99,6 @@ mod tests {
         let resolved = crate::policy::resolve(&inputs).expect("resolves");
         PlanRequest {
             snapshot: resolved.snapshot,
-            profile,
             requirements: resolved.requirements,
         }
     }

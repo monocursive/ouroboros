@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::capability::Capability;
-use crate::policy::{PolicySnapshot, ProfileName};
+use crate::policy::PolicySnapshot;
 use crate::records::{JailError, NativeLifetime, Os, ProcessRecord};
 use crate::trace::SharedTrace;
 
@@ -112,10 +112,8 @@ pub struct PlatformIdentity {
 /// What the supervisor asks a platform to plan for.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PlanRequest {
-    /// The resolved policy.
+    /// The resolved policy; its `profile` is the base profile.
     pub snapshot: PolicySnapshot,
-    /// The base profile.
-    pub profile: ProfileName,
     /// The capability requirements the policy derives.
     pub requirements: Vec<String>,
 }

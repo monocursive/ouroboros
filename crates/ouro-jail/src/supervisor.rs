@@ -1081,7 +1081,6 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
 fn plan_request(plan: &Plan) -> PlanRequest {
     PlanRequest {
         snapshot: plan.resolved.snapshot.clone(),
-        profile: plan.profile(),
         requirements: plan.resolved.requirements.clone(),
     }
 }

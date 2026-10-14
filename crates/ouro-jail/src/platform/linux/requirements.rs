@@ -201,7 +201,7 @@ pub(super) fn derive(
     // `none` terminates its tree through the delegated leaf (§9.3)
     // Shadows the fn for this call only; the closure falls back to it.
     let capability_for = |requirement: &str, results: &[ProbeResult], measured_at: &str| {
-        super::uncontained::capability_for(plan.profile, requirement, results, measured_at)
+        super::uncontained::capability_for(plan.snapshot.profile, requirement, results, measured_at)
             .unwrap_or_else(|| capability_for(requirement, results, measured_at))
     };
     let mut out: Vec<Capability> = plan

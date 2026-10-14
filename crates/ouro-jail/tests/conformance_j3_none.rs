@@ -1236,7 +1236,6 @@ fn the_boundary_itself_refuses_a_restriction_it_would_not_apply() {
             request: PlanRequest {
                 requirements: ouro_jail::capability::requirements(&snapshot),
                 snapshot,
-                profile: ProfileName::None,
             },
             argv: vec![
                 b"/bin/sh".to_vec(),
