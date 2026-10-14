@@ -237,7 +237,8 @@ impl Name {
         self.0.as_bytes()
     }
 
-    fn as_c(&self) -> &CStr {
+    /// The component as the C string a system call takes.
+    pub(crate) fn as_c(&self) -> &CStr {
         &self.0
     }
 }
@@ -542,9 +543,27 @@ impl Dir {
     /// and whether they are all of them.
     ///
     /// # Errors
+    /// As [`Dir::entries`].
+    pub fn names(&self, max: usize) -> io::Result<Listing> {
+        let entries = self.entries(max)?;
+        Ok(Listing {
+            names: entries
+                .entries
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect(),
+            complete: entries.complete,
+        })
+    }
+
+    /// Up to `max` entries, `.` and `..` excluded, read from the start, each
+    /// with the type `readdir` reported, and whether they are all of them.
+    /// The type lets a walk skip an ordinary file without a stat.
+    ///
+    /// # Errors
     /// The errno from `fcntl`, `fdopendir` or `readdir`, or `InvalidData`
     /// for a name the kernel returned that is not a valid component.
-    pub fn names(&self, max: usize) -> io::Result<Listing> {
+    pub fn entries(&self, max: usize) -> io::Result<Entries> {
         // `fdopendir` takes ownership of what it is given, so it gets a
         // duplicate; a duplicate shares the file offset, so the stream is
         // rewound before reading.
@@ -567,8 +586,8 @@ impl Dir {
         let mut out = Vec::new();
         let mut failure = None;
         let mut complete = false;
-        // One name past `max` is read, and not kept, to tell a directory of
-        // exactly `max` names from a larger one.
+        // One entry past `max` is read, and not kept, to tell a directory of
+        // exactly `max` entries from a larger one.
         while out.len() <= max {
             clear_errno();
             // SAFETY: `stream` is live; the returned entry stays valid until
@@ -583,13 +602,17 @@ impl Dir {
                 break;
             }
             // SAFETY: `entry` is non-null and `d_name` is a NUL-terminated
-            // array inside it.
+            // array inside it, live until the next call on this stream.
             let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
             if bytes == b"." || bytes == b".." {
                 continue;
             }
             match Name::new(bytes) {
-                Ok(name) => out.push(name),
+                Ok(name) => out.push(Entry {
+                    name,
+                    // SAFETY: as above, the entry is live until the next call.
+                    kind: unsafe { (*entry).d_type },
+                }),
                 Err(_) => {
                     failure = Some(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -605,8 +628,8 @@ impl Dir {
             return Err(error);
         }
         out.truncate(max);
-        Ok(Listing {
-            names: out,
+        Ok(Entries {
+            entries: out,
             complete,
         })
     }
@@ -831,6 +854,26 @@ pub struct Listing {
     /// The names read, at most the bound asked for.
     pub names: Vec<Name>,
     /// Whether they are every name in the directory; false when it holds
+    /// more than the bound.
+    pub complete: bool,
+}
+
+/// One entry [`Dir::entries`] read.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Entry {
+    /// Its name.
+    pub name: Name,
+    /// The `d_type` `readdir` reported (`DT_DIR`, `DT_REG`, ...;
+    /// `DT_UNKNOWN` where the filesystem does not say).
+    pub kind: u8,
+}
+
+/// What [`Dir::entries`] read.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Entries {
+    /// The entries read, at most the bound asked for.
+    pub entries: Vec<Entry>,
+    /// Whether they are every entry in the directory; false when it holds
     /// more than the bound.
     pub complete: bool,
 }
@@ -1232,6 +1275,50 @@ mod tests {
                 names: Vec::new(),
                 complete: false
             }
+        );
+    }
+
+    /// Each entry carries the type `readdir` reported, so a walk can tell a
+    /// directory from a file without a stat (where the filesystem reports
+    /// types at all), and the bound reads as in [`Dir::names`].
+    #[test]
+    fn entries_carry_the_type_readdir_reported() {
+        let (root, dir) = temp();
+        std::fs::write(root.path().join("file"), b"").unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        std::os::unix::fs::symlink("file", root.path().join("link")).unwrap();
+        let listed = dir.entries(3).unwrap();
+        assert!(listed.complete);
+        let mut kinds: Vec<(Vec<u8>, u8)> = listed
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_bytes().to_vec(), entry.kind))
+            .collect();
+        kinds.sort();
+        let expected = [
+            (b"file".to_vec(), libc::DT_REG),
+            (b"link".to_vec(), libc::DT_LNK),
+            (b"sub".to_vec(), libc::DT_DIR),
+        ];
+        for ((name, kind), (want_name, want_kind)) in kinds.iter().zip(&expected) {
+            assert_eq!(name, want_name);
+            assert!(
+                *kind == *want_kind || *kind == libc::DT_UNKNOWN,
+                "{}: d_type {kind}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        let bounded = dir.entries(2).unwrap();
+        assert_eq!(bounded.entries.len(), 2);
+        assert!(!bounded.complete);
+        assert_eq!(
+            dir.names(3).unwrap().names,
+            listed
+                .entries
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect::<Vec<_>>(),
+            "names are the entries' names, in the same order"
         );
     }
 

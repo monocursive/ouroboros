@@ -7,15 +7,15 @@
 //! partial walk that reported `existing_and_root` coverage would be a lie the
 //! receipt then repeats.
 
-use std::ffi::{CStr, CString, OsStr, OsString};
+use std::ffi::{CStr, OsStr, OsString};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::sys::{PathError, cstring_from_path, errno_name, last_errno};
-use crate::state::anchored::{Dir, Kind, Name, Stat, fstat};
+use crate::state::anchored::{Dir, Entry, Kind, Name, Stat, fstat};
 
 /// The two path segments the `tool` profile protects (north-star §4.4).
 pub const PROTECTED_LITERALS: [&str; 2] = [".git", ".ouroboros"];
@@ -436,22 +436,18 @@ fn walk(
     let ordinary_hint_safe = stable_regular_file_hints(dir, &stamp);
     state.directories.push(stamp);
     state.max_depth_seen = state.max_depth_seen.max(depth);
-    let entries = read_entries(
-        dir,
-        state.limits.max_entries.saturating_sub(state.entries_seen),
-    )
-    .map_err(|errno| {
-        if errno == libc::E2BIG {
-            ScanError::EntryLimit {
-                limit: state.limits.max_entries,
-            }
-        } else {
-            ScanError::Unreadable {
-                path: dir_path.to_owned(),
-                errno,
-            }
-        }
-    })?;
+    let listed = dir
+        .entries(state.limits.max_entries.saturating_sub(state.entries_seen))
+        .map_err(|error| ScanError::Unreadable {
+            path: dir_path.to_owned(),
+            errno: errno_of(&error),
+        })?;
+    if !listed.complete {
+        return Err(ScanError::EntryLimit {
+            limit: state.limits.max_entries,
+        });
+    }
+    let entries = listed.entries;
 
     let submodule_git_directory = names.iter().any(|name| name.as_bytes() == GIT_HOOKS)
         && is_submodule_git_directory(dir_path, &entries);
@@ -464,7 +460,7 @@ fn walk(
                 limit: state.limits.max_entries,
             });
         }
-        let name = entry.name.as_c_str();
+        let name = entry.name.as_c();
         let child = Child {
             name,
             path: dir_path.join(OsStr::from_bytes(name.to_bytes())),
@@ -638,8 +634,8 @@ fn beneath_git_modules(path: &[u8]) -> bool {
 /// Whether the directory at host path `path`, holding `entries`, is a
 /// submodule's git directory: beneath a `.git/modules/`, and holding what
 /// git requires of a git directory, `HEAD`, `objects` and `refs`.
-fn is_submodule_git_directory(path: &Path, entries: &[DirectoryEntry]) -> bool {
-    let has = |name: &[u8]| entries.iter().any(|entry| entry.name.to_bytes() == name);
+fn is_submodule_git_directory(path: &Path, entries: &[Entry]) -> bool {
+    let has = |name: &[u8]| entries.iter().any(|entry| entry.name.as_bytes() == name);
     beneath_git_modules(path.as_os_str().as_bytes())
         && has(b"HEAD")
         && has(b"objects")
@@ -707,13 +703,6 @@ fn stable_regular_file_hints(dir: &Dir, stamp: &DirectoryStamp) -> bool {
     stable_hint_clock(filesystem.f_type, stamp.modified.2, clock)
 }
 
-/// One `readdir` entry: its name and the type `readdir` reported for it.
-pub(super) struct DirectoryEntry {
-    pub(super) name: CString,
-    /// The `d_type` `readdir` reported.
-    pub(super) kind: u8,
-}
-
 /// The kind and identity a no-follow stat of one entry found.
 struct EntryMeta {
     kind: Kind,
@@ -758,66 +747,6 @@ fn stat_entry(dir: &Dir, name: &CStr) -> Result<EntryMeta, i32> {
         dev: st.st_dev,
         ino: st.st_ino,
     })
-}
-
-/// Every entry of `dir` but `.` and `..`, with the type `readdir` reports,
-/// read from the start; `E2BIG` once more than `remaining` are found.
-///
-/// [`Dir::names`] reads names alone; the walk needs the type as well, which
-/// is what lets it skip an ordinary file without a stat.
-pub(super) fn read_entries(dir: &Dir, remaining: usize) -> Result<Vec<DirectoryEntry>, i32> {
-    // `fdopendir` takes ownership of the descriptor it is given, so it gets a
-    // duplicate; a duplicate shares the file offset, so the stream is
-    // rewound before reading.
-    let duplicate = dir
-        .try_clone_fd()
-        .map_err(|error| errno_of(&error))?
-        .into_raw_fd();
-    // SAFETY: `duplicate` is a live directory descriptor owned here; on
-    // success the stream owns it and `closedir` below releases it once.
-    let dirp = unsafe { libc::fdopendir(duplicate) };
-    if dirp.is_null() {
-        let errno = last_errno();
-        // SAFETY: fdopendir failed, so the descriptor is still ours to close.
-        unsafe { libc::close(duplicate) };
-        return Err(errno);
-    }
-    // SAFETY: `dirp` is the live DIR* created above.
-    unsafe { libc::rewinddir(dirp) };
-    let mut out = Vec::new();
-    let mut result = Ok(());
-    loop {
-        super::sys::clear_errno();
-        // SAFETY: `dirp` is live; the entry it returns stays valid until the
-        // next call on this stream.
-        let entry = unsafe { libc::readdir(dirp) };
-        if entry.is_null() {
-            let err = last_errno();
-            if err != 0 {
-                result = Err(err);
-            }
-            break;
-        }
-        // SAFETY: `entry` is non-null and points at a live dirent whose
-        // `d_name` is a NUL-terminated array inside it.
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-        let bytes = name.to_bytes();
-        if bytes == b"." || bytes == b".." {
-            continue;
-        }
-        if out.len() >= remaining {
-            result = Err(libc::E2BIG);
-            break;
-        }
-        out.push(DirectoryEntry {
-            name: name.to_owned(),
-            // SAFETY: the dirent is still live until the next readdir.
-            kind: unsafe { (*entry).d_type },
-        });
-    }
-    // SAFETY: `dirp` was created above and is closed exactly once here.
-    unsafe { libc::closedir(dirp) };
-    result.map(|()| out)
 }
 
 /// `openat2(dir, path, flags, how.resolve = resolve)`, relative to `dir` or,

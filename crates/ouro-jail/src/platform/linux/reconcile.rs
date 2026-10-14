@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 use super::cgroup;
 use super::identity;
 use crate::gc::{HostFailure, LeafProbe, LeafRecord, Liveness, OwnerRecord};
+use crate::state::anchored::Name;
 
 /// How deep a child-made cgroup subtree inside a leaf may be before gc
 /// retains it rather than holding more descriptors (§14.2: 128 open
@@ -206,20 +207,22 @@ fn rmdir_at(dir: RawFd, name: &CStr) -> io::Result<()> {
 
 /// The child directories of `dir`, charging every entry read (`.` and `..`
 /// aside) to `entries`.
-fn child_dirs(dir: &File, entries: &mut usize) -> Result<Vec<CString>, HostFailure> {
+fn child_dirs(dir: &File, entries: &mut usize) -> Result<Vec<Name>, HostFailure> {
     let copy = dir
         .try_clone()
         .map_err(|error| HostFailure::os("dup", error))?;
     let dir = crate::state::anchored::Dir::from_owned(copy.into());
-    let listed = super::fs::read_entries(&dir, *entries).map_err(|errno| {
-        if errno == libc::E2BIG {
-            HostFailure::new("the per-invocation entry bound is reached")
-        } else {
-            HostFailure::os("readdir", io::Error::from_raw_os_error(errno))
-        }
-    })?;
-    *entries -= listed.len();
+    let listed = dir
+        .entries(*entries)
+        .map_err(|error| HostFailure::os("readdir", error))?;
+    if !listed.complete {
+        return Err(HostFailure::new(
+            "the per-invocation entry bound is reached",
+        ));
+    }
+    *entries -= listed.entries.len();
     Ok(listed
+        .entries
         .into_iter()
         .filter(|entry| entry.kind == libc::DT_DIR)
         .map(|entry| entry.name)
@@ -414,11 +417,15 @@ fn remove_children(dir: &File, depth: usize, entries: &mut usize) -> Result<(), 
         )));
     }
     for name in child_dirs(dir, entries)? {
-        let child = open_at(dir.as_raw_fd(), &name, libc::O_RDONLY | libc::O_DIRECTORY)
-            .map_err(|error| HostFailure::os("a child cgroup", error))?;
+        let child = open_at(
+            dir.as_raw_fd(),
+            name.as_c(),
+            libc::O_RDONLY | libc::O_DIRECTORY,
+        )
+        .map_err(|error| HostFailure::os("a child cgroup", error))?;
         remove_children(&child, depth + 1, entries)?;
         drop(child);
-        rmdir_at(dir.as_raw_fd(), &name)
+        rmdir_at(dir.as_raw_fd(), name.as_c())
             .map_err(|error| HostFailure::os("a child cgroup", error))?;
     }
     Ok(())
