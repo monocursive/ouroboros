@@ -26,6 +26,10 @@ jobs:
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_observer_pair.py
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_preview_evidence.py
       - run: python3 -m unittest discover -s docs/benchmarks -p test_retired_archives.py
+      - name: Evidence store size and bundle guard
+        run: |
+          python3 docs/benchmarks/check_evidence_store.py
+          python3 -m unittest discover -s docs/benchmarks -p test_check_evidence_store.py
       - name: VM transport boundary regressions (no live VM)
         run: python3 -m unittest discover -s crates/ouro-jail/vm -p 'test_*.py'
       - name: macOS mechanism evidence regressions (no live workloads)

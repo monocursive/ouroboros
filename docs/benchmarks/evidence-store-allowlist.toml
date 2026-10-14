@@ -1,0 +1,50 @@
+# Exceptions to docs/benchmarks/check_evidence_store.py, all predating the
+# bundle convention in docs/benchmarks/README.md. Entries only go away: the
+# check fails on an entry that no longer applies. New evidence over 5 MiB, and
+# new dated corpora, go to a release-asset bundle with a bundle.json instead.
+
+# Tracked files over 5 MiB: the comparison corpora's ouro-jail ELF builds,
+# their source snapshots, and their largest logs and diagnostics.
+large_files = [
+    "docs/benchmarks/competitors-after/2026-10-11/archives/vps-build-source.tar.gz",
+    "docs/benchmarks/competitors-after/2026-10-11/binaries/pi/ouro-jail",
+    "docs/benchmarks/competitors-after/2026-10-11/binaries/pi/ouro-jail-before",
+    "docs/benchmarks/competitors-after/2026-10-11/binaries/vps/ouro-jail",
+    "docs/benchmarks/competitors-after/2026-10-11/binaries/vps/ouro-jail-before",
+    "docs/benchmarks/competitors-after/2026-10-11/results/mac/gateway-after.log",
+    "docs/benchmarks/competitors-after/2026-10-11/results/vps/gateway-after.log",
+    "docs/benchmarks/competitors-startup/2026-10-12/archives/source-candidate-v5.tar.gz",
+    "docs/benchmarks/competitors-startup/2026-10-12/archives/source-final.tar.gz",
+    "docs/benchmarks/competitors-startup/2026-10-12/archives/source-v1.tar.gz",
+    "docs/benchmarks/competitors-startup/2026-10-12/binaries/pi/ouro-jail-after",
+    "docs/benchmarks/competitors-startup/2026-10-12/binaries/pi/ouro-jail-before",
+    "docs/benchmarks/competitors-startup/2026-10-12/binaries/pi/ouro-jail-candidate-v3",
+    "docs/benchmarks/competitors-startup/2026-10-12/binaries/pi/ouro-jail-candidate-v4",
+    "docs/benchmarks/competitors-startup/2026-10-12/binaries/pi/ouro-jail-candidate-v5",
+    "docs/benchmarks/competitors-startup/2026-10-12/binaries/vps/ouro-jail-after",
+    "docs/benchmarks/competitors-startup/2026-10-12/binaries/vps/ouro-jail-before",
+    "docs/benchmarks/competitors-startup/2026-10-12/binaries/vps/ouro-jail-candidate-v3",
+    "docs/benchmarks/competitors-startup/2026-10-12/binaries/vps/ouro-jail-candidate-v4",
+    "docs/benchmarks/competitors-startup/2026-10-12/binaries/vps/ouro-jail-candidate-v5",
+    "docs/benchmarks/competitors-startup/2026-10-12/candidates/v3/results/pi/write-diagnostic-before/diagnostic.json",
+    "docs/benchmarks/competitors-startup/2026-10-12/candidates/v4/results/vps/gateway-after.log",
+    "docs/benchmarks/competitors-startup/2026-10-12/results/mac/gateway-after.log",
+    "docs/benchmarks/competitors-startup/2026-10-12/results/vps/container-control-export/gateway-after.log",
+    "docs/benchmarks/competitors/results/2026-10-11/mac-final/import-history/33fafca05ea8e021ba3e11eebe15a25852f02f18a0b156b41dff422c7cdf1440/mac-openshell-gateway.log",
+    "docs/benchmarks/competitors/results/2026-10-11/mac-final/import-history/39b494c460bd451004cbc58dfeb1c5f9f2848d1d7b35ed155d58401efd700763/mac-openshell-gateway.log",
+    "docs/benchmarks/competitors/results/2026-10-11/mac-final/import-history/a7e30044f17b57093e84218fb27ce581222a8a637456ad29b50db3c3acf2a6dd/mac-openshell-gateway.log",
+    "docs/benchmarks/competitors/results/2026-10-11/mac-final/mac-openshell-gateway.log",
+]
+
+# Corpora committed in full before bundle.json existed.
+corpora_without_bundle = [
+    "docs/benchmarks/competitors-after/2026-10-11",
+    "docs/benchmarks/competitors-startup/2026-10-12",
+    "docs/benchmarks/competitors/results/2026-10-11",
+    "docs/benchmarks/credentials/2026-10-12",
+    "docs/benchmarks/credentials/2026-10-13",
+    "docs/benchmarks/credentials/2026-10-13-final",
+    "docs/benchmarks/credentials/2026-10-13-next",
+    "docs/benchmarks/sandboxes/results/2026-09-30",
+    "docs/benchmarks/sandboxes/results/2026-10-01",
+]
