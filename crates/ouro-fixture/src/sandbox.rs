@@ -156,8 +156,10 @@ pub const X86_64_SYSCALLS: &[(&str, u32)] = &[
     ("landlock_add_rule", 445),
     ("landlock_restrict_self", 446),
 ];
-/// asm-generic 64-bit syscall table; absent legacy calls are deliberately
-/// absent here rather than silently translated to a different syscall.
+/// aarch64 syscall numbers the filter can name, from the asm-generic 64-bit
+/// table (`include/uapi/asm-generic/unistd.h`). The legacy calls that table
+/// lacks (`open`, `stat`, `mkdir`...) are absent rather than translated to a
+/// different syscall. Checked against `libc` by a test on Linux aarch64.
 pub const AARCH64_SYSCALLS: &[(&str, u32)] = &[
     ("read", 63),
     ("write", 64),
@@ -259,6 +261,10 @@ pub const AARCH64_SYSCALLS: &[(&str, u32)] = &[
     ("landlock_add_rule", 445),
     ("landlock_restrict_self", 446),
 ];
+/// The table the filter names syscalls from, with [`NATIVE_ARCH`] and
+/// [`AUDIT_ARCH`]: aarch64 on Linux aarch64, x86_64 everywhere else. Off Linux
+/// no filter is ever installed (seccomp is absent there), so a macOS build on
+/// Apple silicon only builds and interprets x86_64 programs, in its tests.
 pub const NATIVE_SYSCALLS: &[(&str, u32)] =
     if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         AARCH64_SYSCALLS
@@ -752,8 +758,11 @@ mod linux {
 mod tests {
     use super::*;
 
+    /// The filter compares numbers, whatever the native architecture names
+    /// by them (83 and 258 are `mkdir` and `mkdirat` on x86_64, not on
+    /// aarch64).
     #[test]
-    fn the_filter_denies_exactly_the_named_numbers_on_x86_64() {
+    fn the_filter_denies_exactly_the_named_numbers() {
         let p = seccomp_program(&[83, 258]);
         assert_eq!(interpret(&p, AUDIT_ARCH, 83), RET_ERRNO | 1);
         assert_eq!(interpret(&p, AUDIT_ARCH, 258), RET_ERRNO | 1);
@@ -764,9 +773,11 @@ mod tests {
 
     #[test]
     fn a_foreign_architecture_or_an_x32_number_never_reaches_the_table() {
-        // The precondition the numbers rest on: they mean x86_64 syscalls
-        // only. Try to get around it with i386 (0x40000003) and aarch64
-        // (0xC00000B7), and with the x32 bit on a denied and an allowed nr.
+        // The precondition the numbers rest on: they mean the native
+        // architecture's syscalls only. Try to get around it with i386
+        // (0x40000003) and the other 64-bit architecture (x86_64 0xC000003E
+        // or aarch64 0xC00000B7), and with the x32 bit on a denied and an
+        // allowed nr.
         let p = seccomp_program(&[83]);
         for arch in [
             0x4000_0003,
@@ -823,11 +834,17 @@ mod tests {
         assert!(resolve_syscalls(&["1024".into()]).is_err());
         let too_many: Vec<String> = (0..=MAX_SECCOMP_SYSCALLS).map(|n| n.to_string()).collect();
         assert!(resolve_syscalls(&too_many).is_err());
-        let mut names: Vec<&str> = X86_64_SYSCALLS.iter().map(|(n, _)| *n).collect();
-        names.sort_unstable();
-        let before = names.len();
-        names.dedup();
-        assert_eq!(before, names.len(), "the table names each syscall once");
+        for (arch, table) in [("x86_64", X86_64_SYSCALLS), ("aarch64", AARCH64_SYSCALLS)] {
+            let mut names: Vec<&str> = table.iter().map(|(n, _)| *n).collect();
+            names.sort_unstable();
+            let before = names.len();
+            names.dedup();
+            assert_eq!(
+                before,
+                names.len(),
+                "the {arch} table names each syscall once"
+            );
+        }
     }
 
     #[test]
