@@ -11,8 +11,10 @@
 //! a prefix of the stream and accepts only reserve notes (the gap and receipt
 //! notes, and the `agent` profile's helper lifecycle notes, at most one per
 //! helper, because a helper's end explains a stop), so a reader never finds
-//! ordinary frames after a silent hole. An external frame torn by a drain
-//! that gave up ends the stream: nothing is written after it.
+//! ordinary frames after a silent hole; a refused reserve note ends the
+//! stream, in both sinks, so no note follows a missing one either. An
+//! external frame torn by a drain that gave up ends the stream too: nothing
+//! is written after it.
 //!
 //! The external writer queues whole frames and resumes a partially written
 //! one at its own offset, never re-sending it as a second event. The local
@@ -50,6 +52,47 @@ pub enum Priority {
     Normal,
     /// A final gap or receipt note; it may use the reserve.
     Reserve,
+}
+
+impl Priority {
+    /// Where a sink that refused a frame of this priority stands, at least.
+    /// A refused ordinary frame marks it lost: what follows is the prefix
+    /// and the reserve notes. A refused reserve note closes it: any later
+    /// note would follow a missing one, a silent hole (§13.3).
+    fn refused(self) -> SinkState {
+        match self {
+            Priority::Normal => SinkState::Lost,
+            Priority::Reserve => SinkState::Closed,
+        }
+    }
+}
+
+/// Where a sink stands after a loss (§13.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SinkState {
+    /// Every frame within budget is written.
+    Open,
+    /// Evidence was lost. Ordinary frames are refused, so what a reader
+    /// finds stays a prefix of the stream followed by reserve notes (the
+    /// gap and receipt notes): "best-effort keeps a prefix and coalesced gap
+    /// summaries", never a stream with a silent hole in the middle.
+    Lost,
+    /// Nothing more is written: a reserve note was refused, or the
+    /// destination failed (a write error, torn bytes that cannot be cut
+    /// back), so the trace stays visibly incomplete (its last frame is not
+    /// the final receipt note, or its last line is torn).
+    Closed,
+}
+
+impl SinkState {
+    /// At least `state`; a sink never reopens.
+    fn latch(self, state: SinkState) -> SinkState {
+        match (self, state) {
+            (SinkState::Closed, _) | (_, SinkState::Closed) => SinkState::Closed,
+            (SinkState::Lost, _) | (_, SinkState::Lost) => SinkState::Lost,
+            _ => SinkState::Open,
+        }
+    }
 }
 
 /// Why a sink lost evidence.
@@ -383,23 +426,6 @@ impl LocalFile for File {
     }
 }
 
-/// Where a local sink stands after a loss (§13.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FileState {
-    /// Every frame within budget is written.
-    Open,
-    /// Evidence was lost. Ordinary frames are refused, so the file stays a
-    /// prefix of the stream; reserve notes (the gap and receipt notes) are
-    /// still written. This is "best-effort keeps a prefix and coalesced gap
-    /// summaries".
-    Lost,
-    /// Nothing more is written: the reserve is exhausted or a reserve note
-    /// failed, so the trace stays visibly incomplete (its last frame is not
-    /// the final receipt note), or a failed write could not be truncated back
-    /// to its frame boundary, so its torn bytes stay the last line.
-    Closed,
-}
-
 /// The bounded local `trace.ndjson` sink (§13.3).
 ///
 /// A write that fails part-way is truncated back to the last frame boundary,
@@ -413,7 +439,7 @@ pub struct FileSink {
     written: u64,
     cap: u64,
     reserve: u64,
-    state: FileState,
+    state: SinkState,
     loss: Option<Loss>,
     lost_frames: u64,
     /// Set when [`TRACE_CAP_SEAM`] shrank the cap: every loss says so.
@@ -442,7 +468,7 @@ impl FileSink {
             written: 0,
             cap,
             reserve,
-            state: FileState::Open,
+            state: SinkState::Open,
             loss: None,
             lost_frames: 0,
             seam: None,
@@ -502,32 +528,23 @@ impl FileSink {
     }
 
     /// Latches at least `state`; a sink never reopens.
-    fn latch(&mut self, state: FileState) {
-        self.state = match (self.state, state) {
-            (FileState::Closed, _) | (_, FileState::Closed) => FileState::Closed,
-            (FileState::Lost, _) | (_, FileState::Lost) => FileState::Lost,
-            _ => FileState::Open,
-        };
+    fn latch(&mut self, state: SinkState) {
+        self.state = self.state.latch(state);
     }
 }
 
 impl TraceSink for FileSink {
     fn write_frame(&mut self, frame: &[u8], priority: Priority) -> Result<(), JailError> {
         match (self.state, priority) {
-            (FileState::Closed, _) => {
+            (SinkState::Closed, _) => {
                 return Err(self.lose("the local trace is closed after an earlier loss"));
             }
-            (FileState::Lost, Priority::Normal) => {
+            (SinkState::Lost, Priority::Normal) => {
                 return Err(self.lose("the local trace keeps only its prefix after a loss"));
             }
             _ => {}
         }
-        // A note that cannot be written closes the sink, so the notes after
-        // a loss stay a prefix too; an ordinary frame only marks it lost.
-        let on_failure = match priority {
-            Priority::Normal => FileState::Lost,
-            Priority::Reserve => FileState::Closed,
-        };
+        let on_failure = priority.refused();
         if frame.len() > EVENT_MAX {
             self.latch(on_failure);
             return Err(self.lose("serialized event exceeds the 64 KiB maximum"));
@@ -561,7 +578,7 @@ impl TraceSink for FileSink {
                 // past a frame that did not land.
                 match self.file.truncate(self.written) {
                     Ok(()) => self.latch(on_failure),
-                    Err(_) => self.latch(FileState::Closed),
+                    Err(_) => self.latch(SinkState::Closed),
                 }
                 Err(self.lose(&format!("local trace write failed: {error}")))
             }
@@ -581,21 +598,6 @@ impl TraceSink for FileSink {
 /// receipt note, can still reach a consumer that resumes reading, while the
 /// queue as a whole never exceeds its 4 MiB.
 pub const EXTERNAL_RESERVE: usize = 256 * 1024;
-
-/// Where an external sink stands (§13.3: "best-effort can continue with the
-/// sink marked lost").
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FdState {
-    /// Every frame is queued and delivered.
-    Open,
-    /// Evidence was lost. Only reserve notes are still queued, so what the
-    /// consumer reads stays a prefix of the stream followed by final notes,
-    /// never a stream with a silent hole in the middle.
-    Lost,
-    /// The descriptor failed (a consumer that closed its end, or any other
-    /// write error). Nothing more can be delivered; every frame is counted.
-    Broken,
-}
 
 /// The external `--trace-fd` sink (§13.3).
 ///
@@ -621,7 +623,11 @@ pub struct FdSink {
     reserve: usize,
     no_progress: Duration,
     last_progress: Instant,
-    state: FdState,
+    /// §13.3: "best-effort can continue with the sink marked lost". Closed
+    /// also when the descriptor failed (a consumer that closed its end, or
+    /// any other write error): nothing more can be delivered, and every
+    /// frame is counted.
+    state: SinkState,
     loss: Option<Loss>,
     lost_frames: u64,
     /// [`TRACE_FD_WRITE_SEAM`]'s cap on each write, when the seam is set.
@@ -653,7 +659,7 @@ impl FdSink {
             reserve: EXTERNAL_RESERVE,
             no_progress: EXTERNAL_NO_PROGRESS,
             last_progress: Instant::now(),
-            state: FdState::Open,
+            state: SinkState::Open,
             loss: None,
             lost_frames: 0,
             write_max: None,
@@ -724,11 +730,11 @@ impl FdSink {
                 }
             }
         }
-        if self.state == FdState::Open
+        if self.state == SinkState::Open
             && !self.frames.is_empty()
             && self.last_progress.elapsed() > self.no_progress
         {
-            self.state = FdState::Lost;
+            self.state = SinkState::Lost;
             return Err(self.lose("trace fd made no progress within its deadline", 0));
         }
         Ok(())
@@ -747,10 +753,10 @@ impl FdSink {
             return;
         }
         let stalled =
-            self.state == FdState::Lost && self.last_progress.elapsed() > self.no_progress;
-        if self.state != FdState::Broken && !stalled {
+            self.state == SinkState::Lost && self.last_progress.elapsed() > self.no_progress;
+        if self.state != SinkState::Closed && !stalled {
             let deadline = Instant::now() + self.no_progress;
-            while !self.frames.is_empty() && self.state != FdState::Broken {
+            while !self.frames.is_empty() && self.state != SinkState::Closed {
                 let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                     break;
                 };
@@ -769,18 +775,19 @@ impl FdSink {
             // frame the stream still ends on a frame boundary, so the reserve
             // notes may follow.
             let torn = self.front_written > 0;
-            // J5-C, fix wave: a reserve note dropped here (the loss note
-            // queued behind a stalled consumer's frames) would leave a silent
-            // hole if a later note were delivered after it. Like the local
-            // sink when a reserve note fails, write nothing more: the stream
-            // stays visibly incomplete (§13.3).
-            let reserve_dropped = self.priorities.contains(&Priority::Reserve);
+            // A reserve note dropped here (the loss note queued behind a
+            // stalled consumer's frames) is a refused reserve note: as in
+            // `write_frame`, nothing more is written, so no later note is
+            // delivered after the missing one (§13.3).
+            let refused = if torn {
+                SinkState::Closed
+            } else if self.priorities.contains(&Priority::Reserve) {
+                Priority::Reserve.refused()
+            } else {
+                Priority::Normal.refused()
+            };
             self.clear_queue();
-            if torn || reserve_dropped {
-                self.state = FdState::Broken;
-            } else if self.state == FdState::Open {
-                self.state = FdState::Lost;
-            }
+            self.state = self.state.latch(refused);
             let _ = self.lose(
                 "trace fd could not deliver its queued frames before settlement",
                 undelivered,
@@ -800,7 +807,7 @@ impl FdSink {
     fn break_down(&mut self, reason: &str) -> JailError {
         let undelivered = self.frames.len() as u64;
         self.clear_queue();
-        self.state = FdState::Broken;
+        self.state = SinkState::Closed;
         self.lose(reason, undelivered)
     }
 
@@ -829,29 +836,25 @@ impl FdSink {
 
 impl TraceSink for FdSink {
     fn write_frame(&mut self, frame: &[u8], priority: Priority) -> Result<(), JailError> {
-        if frame.len() > EVENT_MAX {
-            if self.state == FdState::Open {
-                self.state = FdState::Lost;
-            }
-            return Err(self.lose("serialized event exceeds the 64 KiB maximum", 1));
-        }
         match (self.state, priority) {
-            (FdState::Broken, _) => {
-                return Err(self.lose("the trace fd is broken by an earlier write failure", 1));
+            (SinkState::Closed, _) => {
+                return Err(self.lose("the trace fd writes nothing more after an earlier loss", 1));
             }
-            (FdState::Lost, Priority::Normal) => {
+            (SinkState::Lost, Priority::Normal) => {
                 return Err(self.lose("the trace fd sink is marked lost", 1));
             }
             _ => {}
+        }
+        if frame.len() > EVENT_MAX {
+            self.state = self.state.latch(priority.refused());
+            return Err(self.lose("serialized event exceeds the 64 KiB maximum", 1));
         }
         let budget = match priority {
             Priority::Normal => self.queue_max.saturating_sub(self.reserve),
             Priority::Reserve => self.queue_max,
         };
         if self.queued + frame.len() + 1 > budget {
-            if self.state == FdState::Open {
-                self.state = FdState::Lost;
-            }
+            self.state = self.state.latch(priority.refused());
             return Err(self.lose(
                 match priority {
                     Priority::Normal => "trace fd queue overflowed its 4 MiB bound",
@@ -1115,6 +1118,77 @@ mod tests {
         );
         assert_eq!(sink.written(), 302);
         assert_eq!(sink.loss().unwrap().lost_frames, Some(3));
+    }
+
+    /// A pipe nobody reads, filled to the last byte, so every frame a sink
+    /// writes into it stays queued.
+    fn full_pipe() -> (std::io::PipeReader, std::os::fd::OwnedFd) {
+        let (reader, writer) = std::io::pipe().expect("a pipe");
+        let writer = std::os::fd::OwnedFd::from(writer);
+        set_nonblocking(writer.as_raw_fd()).expect("nonblocking");
+        let mut file = File::from(writer);
+        loop {
+            match file.write(&[b'f'; 4096]) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("filling the pipe: {error}"),
+            }
+        }
+        while file.write(b"f").is_ok() {}
+        (reader, std::os::fd::OwnedFd::from(file))
+    }
+
+    /// The external sink's twin of `an_exhausted_reserve_closes_the_sink`.
+    /// A refused reserve note ends the stream there too: a smaller note
+    /// that would still fit is refused, since a reader would find it after
+    /// the missing one, a silent hole (§13.3).
+    #[test]
+    fn an_exhausted_reserve_closes_the_fd_sink() {
+        use std::os::fd::IntoRawFd as _;
+        let (reader, writer) = full_pipe();
+        // SAFETY: the write end was just created here and handed over whole.
+        let sink = unsafe { FdSink::from_raw_fd(writer.into_raw_fd()) }.expect("nonblocking");
+        // A 1000-byte queue keeps 250 bytes for the reserve.
+        let mut sink = sink.with_bounds(1000, Duration::from_secs(60));
+        for index in 0..4 {
+            sink.write_frame(&frame(index), Priority::Normal)
+                .expect("within the payload budget");
+        }
+        assert!(sink.write_frame(&frame(4), Priority::Normal).is_err());
+        sink.write_frame(&frame(5), Priority::Reserve)
+            .expect("the reserve takes a note after the loss");
+        sink.write_frame(&frame(6), Priority::Reserve)
+            .expect("and another while it fits");
+        assert_eq!(sink.queued(), 906);
+        // 906 of 1000 bytes are queued; this note does not fit.
+        assert!(sink.write_frame(&frame(7), Priority::Reserve).is_err());
+        // A smaller note would, but it would follow a missing one.
+        assert!(
+            sink.write_frame(b"{\"n\":1}", Priority::Reserve).is_err(),
+            "after a refused reserve note the stream writes nothing more"
+        );
+        assert_eq!(sink.queued(), 906);
+        assert_eq!(sink.loss().unwrap().lost_frames, Some(3));
+        drop(reader);
+    }
+
+    /// The same for a reserve note refused for its size: nothing follows it.
+    #[test]
+    fn an_oversized_reserve_note_closes_the_fd_sink() {
+        use std::os::fd::IntoRawFd as _;
+        let (reader, writer) = full_pipe();
+        // SAFETY: the write end was just created here and handed over whole.
+        let mut sink = unsafe { FdSink::from_raw_fd(writer.into_raw_fd()) }.expect("nonblocking");
+        assert!(
+            sink.write_frame(&[b'x'; EVENT_MAX + 1], Priority::Reserve)
+                .is_err()
+        );
+        assert!(
+            sink.write_frame(b"{\"n\":1}", Priority::Reserve).is_err(),
+            "a note after a refused one would hide it"
+        );
+        assert_eq!(sink.queued(), 0);
+        drop(reader);
     }
 
     // Review item 15, the loss note names what the attempt covers
