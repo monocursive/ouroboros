@@ -557,7 +557,7 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
     if let Some(launch) = &launch {
         launch_profile::check_outside_writable(
             launch,
-            &launch_forbidden_roots(&resolved, &workspace),
+            &child_writable_roots(&resolved, &workspace),
         )?;
         // The same rule for every credential source, by identity (M2 of the
         // J3 review): the child must not be able to change what it is given.
@@ -588,9 +588,10 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
     })
 }
 
-// The roots a launch profile may not lie beneath
-/// The workspace, an explicit scratch and every writable host grant.
-fn launch_forbidden_roots(resolved: &Resolved, workspace: &Path) -> Vec<PathBuf> {
+/// Every root the child can write under the resolved policy: the workspace,
+/// an explicit scratch and every writable grant. A launch profile, a
+/// credential source and an executable may lie beneath none of them.
+fn child_writable_roots(resolved: &Resolved, workspace: &Path) -> Vec<PathBuf> {
     let snapshot = &resolved.snapshot;
     let scratch = match &snapshot.roots.scratch {
         ScratchRoot::Host { path } => {
@@ -1052,14 +1053,15 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     let argv_digest = (!argv.is_empty()).then(|| crate::canonical::argv_digest(&argv));
 
     validate_channels(args)?;
-    check_state_isolation(&plan)?;
+    let roots = ChildRoots::of(&plan);
+    check_state_isolation(&plan, &roots)?;
     // Security 2026-09-27 (audit 3 A2): every run, not only a `--launch` one.
-    check_launch_isolation(&plan)?;
+    check_launch_isolation(&plan, &roots)?;
     // Security 2026-09-27 (audit 4 B1): the config directory holds the
     // trusted, widening `config.toml`, read on every run.
-    check_config_isolation(&plan)?;
-    check_binary_isolation(&plan)?;
-    validate_receipt_path(args, &plan)?;
+    check_config_isolation(&plan, &roots)?;
+    check_binary_isolation(&plan, &roots)?;
+    validate_receipt_path(args, &plan, &roots)?;
 
     if args.label_only {
         // §6.1: resolve and probe, print the label, execute nothing and copy no
@@ -2350,6 +2352,72 @@ fn child_visible_roots(plan: &Plan) -> Vec<PathBuf> {
     roots
 }
 
+/// The roots the child can reach, each canonicalized once
+/// ([`canonical_existing_prefix`]) for every isolation check of a run.
+struct ChildRoots {
+    /// [`child_visible_roots`].
+    visible: Vec<PathBuf>,
+    /// [`child_writable_roots`].
+    writable: Vec<PathBuf>,
+}
+
+impl ChildRoots {
+    fn of(plan: &Plan) -> Self {
+        let canonical = |roots: Vec<PathBuf>| {
+            roots
+                .iter()
+                .map(|root| canonical_existing_prefix(root))
+                .collect()
+        };
+        ChildRoots {
+            visible: canonical(child_visible_roots(plan)),
+            writable: canonical(child_writable_roots(&plan.resolved, &plan.workspace)),
+        }
+    }
+}
+
+/// Refuses a guarded tree a child-visible root reaches (§7, §9.1): one
+/// that overlaps a root lexically, or that a mount beneath a root reaches
+/// through a bind alias (audit 4 B4: the lexical comparison cannot see
+/// those, mountinfo can). The refusal names the tree as `noun` and carries
+/// `code` and `key`.
+///
+/// # Errors
+/// `code` at `key` for an overlap or an alias, and
+/// [`ErrorCode::InvalidConfig`] when the mounts cannot be inspected.
+fn check_isolated(
+    roots: &[PathBuf],
+    guarded: &Path,
+    code: ErrorCode,
+    key: &'static str,
+    noun: &str,
+) -> Result<(), JailError> {
+    let guarded = canonical_existing_prefix(guarded);
+    let refused = |message: String| {
+        JailError::new(
+            code,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            message,
+        )
+        .with_key_path(key)
+    };
+    if let Some(root) = roots.iter().find(|root| overlaps(&guarded, root)) {
+        return Err(refused(format!(
+            "the {noun} {} overlaps the child-visible root {}",
+            guarded.display(),
+            root.display()
+        )));
+    }
+    if let Some(alias) = alias_conflict(roots, &guarded, key)? {
+        return Err(refused(format!(
+            "a mount beneath a child-visible root reaches the {noun} through the bind alias {}",
+            alias.display()
+        )));
+    }
+    Ok(())
+}
+
 // X05.3
 static RELEASE_STDOUT_AFTER_PREPARE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -2389,44 +2457,14 @@ fn release_own_stdout() {
 /// Returns [`ErrorCode::UnsafeStatePath`] when the state root overlaps the
 /// workspace, the scratch root or any host grant, or reaches it through a
 /// bind alias (audit 4 B4).
-fn check_state_isolation(plan: &Plan) -> Result<(), JailError> {
-    let state_root = canonical_existing_prefix(&plan.data_dir);
-    let roots: Vec<PathBuf> = child_visible_roots(plan)
-        .iter()
-        .map(|root| canonical_existing_prefix(root))
-        .collect();
-    for root in &roots {
-        if overlaps(&state_root, root) {
-            return Err(JailError::new(
-                ErrorCode::UnsafeStatePath,
-                ErrorStage::Resolving,
-                Remediation::Configuration,
-                format!(
-                    "the state root {} overlaps the child-visible root {}",
-                    state_root.display(),
-                    root.display()
-                ),
-            )
-            .with_key_path("OURO_DATA_DIR"));
-        }
-    }
-    // Security 2026-09-27 (audit 4 B4): the comparison above is lexical, so a
-    // bind of the state root (or of an ancestor of it) mounted beneath a
-    // child-visible root is invisible to it. Mountinfo is not.
-    if let Some(alias) = alias_conflict(&roots, &state_root, "OURO_DATA_DIR")? {
-        return Err(JailError::new(
-            ErrorCode::UnsafeStatePath,
-            ErrorStage::Resolving,
-            Remediation::Configuration,
-            format!(
-                "a mount beneath a child-visible root reaches the state root \
-                 through the bind alias {}",
-                alias.display()
-            ),
-        )
-        .with_key_path("OURO_DATA_DIR"));
-    }
-    Ok(())
+fn check_state_isolation(plan: &Plan, roots: &ChildRoots) -> Result<(), JailError> {
+    check_isolated(
+        &roots.visible,
+        &plan.data_dir,
+        ErrorCode::UnsafeStatePath,
+        "OURO_DATA_DIR",
+        "state root",
+    )
 }
 
 /// Security 2026-09-27 (audit 3 A2): refuses a launch directory the child can
@@ -2446,63 +2484,20 @@ fn check_state_isolation(plan: &Plan) -> Result<(), JailError> {
 /// Returns [`ErrorCode::UnsafeConfigPath`] when the launch directory overlaps
 /// the workspace, the scratch root or any host grant, or reaches it through
 /// a bind alias (audit 4 B4).
-fn check_launch_isolation(plan: &Plan) -> Result<(), JailError> {
-    let launch_dir = canonical_existing_prefix(&launch_profile::launch_directory(&plan.config_dir));
-    let roots: Vec<PathBuf> = child_visible_roots(plan)
-        .iter()
-        .map(|root| canonical_existing_prefix(root))
-        .collect();
-    for root in &roots {
-        if overlaps(&launch_dir, root) {
-            return Err(JailError::new(
-                ErrorCode::UnsafeConfigPath,
-                ErrorStage::Resolving,
-                Remediation::Configuration,
-                format!(
-                    "the launch directory {} overlaps the child-visible root {}",
-                    launch_dir.display(),
-                    root.display()
-                ),
-            )
-            .with_key_path("OURO_CONFIG_DIR"));
-        }
-    }
-    // Security 2026-09-27 (audit 4 B4): as the state root above, but for the
-    // launch directory.
-    if let Some(alias) = alias_conflict(&roots, &launch_dir, "OURO_CONFIG_DIR")? {
-        return Err(JailError::new(
-            ErrorCode::UnsafeConfigPath,
-            ErrorStage::Resolving,
-            Remediation::Configuration,
-            format!(
-                "a mount beneath a child-visible root reaches the launch directory \
-                 through the bind alias {}",
-                alias.display()
-            ),
-        )
-        .with_key_path("OURO_CONFIG_DIR"));
-    }
-    Ok(())
+fn check_launch_isolation(plan: &Plan, roots: &ChildRoots) -> Result<(), JailError> {
+    check_isolated(
+        &roots.visible,
+        &launch_profile::launch_directory(&plan.config_dir),
+        ErrorCode::UnsafeConfigPath,
+        "OURO_CONFIG_DIR",
+        "launch directory",
+    )
 }
 
 /// Executable code must not be replaceable through a writable child root.
-fn check_binary_isolation(plan: &Plan) -> Result<(), JailError> {
+fn check_binary_isolation(plan: &Plan, roots: &ChildRoots) -> Result<(), JailError> {
     if plan.profile == ProfileName::None {
         return Ok(());
-    }
-    let mut roots = vec![plan.workspace.clone()];
-    let snapshot = &plan.resolved.snapshot;
-    if let ScratchRoot::Host { path } = &snapshot.roots.scratch {
-        roots.push(PathBuf::from(std::ffi::OsString::from_vec(
-            path.as_bytes().to_vec(),
-        )));
-    }
-    for reference in &snapshot.filesystem.read_write {
-        if reference.root == crate::policy::RootToken::Host {
-            roots.push(PathBuf::from(std::ffi::OsString::from_vec(
-                reference.path.as_bytes().to_vec(),
-            )));
-        }
     }
     let mut binaries = vec![std::env::current_exe().map_err(|e| usage("binaries", e.to_string()))?];
     #[cfg(target_os = "linux")]
@@ -2511,14 +2506,14 @@ fn check_binary_isolation(plan: &Plan) -> Result<(), JailError> {
     }
     #[cfg(target_os = "macos")]
     binaries.push(PathBuf::from("/usr/bin/sandbox-exec"));
-    let roots: Vec<_> = roots.iter().map(|p| canonical_existing_prefix(p)).collect();
+    let roots = &roots.writable;
     for binary in binaries {
         let binary = canonical_existing_prefix(&binary);
         let conflict = roots
             .iter()
             .find(|root| binary.starts_with(root))
             .cloned()
-            .or(alias_conflict(&roots, &binary, "binaries")?);
+            .or(alias_conflict(roots, &binary, "binaries")?);
         if let Some(root) = conflict {
             return Err(JailError::new(
                 ErrorCode::UnsafeStatePath,
@@ -2554,14 +2549,14 @@ fn check_binary_isolation(plan: &Plan) -> Result<(), JailError> {
 /// Returns [`ErrorCode::UnsafeConfigPath`] when the config directory overlaps
 /// the workspace, the scratch root or any host grant, or reaches it through
 /// a bind alias.
-fn check_config_isolation(plan: &Plan) -> Result<(), JailError> {
+fn check_config_isolation(plan: &Plan, roots: &ChildRoots) -> Result<(), JailError> {
     if plan.profile == ProfileName::None {
         let mut trusted = Vec::new();
         let config = plan.config_dir.join("config.toml");
         if config.symlink_metadata().is_ok() {
             trusted.push(config);
         }
-        match std::fs::read_dir(plan.config_dir.join("launch")) {
+        match std::fs::read_dir(launch_profile::launch_directory(&plan.config_dir)) {
             Ok(entries) => {
                 for entry in entries {
                     let entry = entry.map_err(|e| usage("OURO_CONFIG_DIR", e.to_string()))?;
@@ -2581,40 +2576,13 @@ fn check_config_isolation(plan: &Plan) -> Result<(), JailError> {
                 )).with_key_path("OURO_CONFIG_DIR"));
         }
     }
-    let config_dir = canonical_existing_prefix(&plan.config_dir);
-    let roots: Vec<PathBuf> = child_visible_roots(plan)
-        .iter()
-        .map(|root| canonical_existing_prefix(root))
-        .collect();
-    for root in &roots {
-        if overlaps(&config_dir, root) {
-            return Err(JailError::new(
-                ErrorCode::UnsafeConfigPath,
-                ErrorStage::Resolving,
-                Remediation::Configuration,
-                format!(
-                    "the config directory {} overlaps the child-visible root {}",
-                    config_dir.display(),
-                    root.display()
-                ),
-            )
-            .with_key_path("OURO_CONFIG_DIR"));
-        }
-    }
-    if let Some(alias) = alias_conflict(&roots, &config_dir, "OURO_CONFIG_DIR")? {
-        return Err(JailError::new(
-            ErrorCode::UnsafeConfigPath,
-            ErrorStage::Resolving,
-            Remediation::Configuration,
-            format!(
-                "a mount beneath a child-visible root reaches the config directory \
-                 through the bind alias {}",
-                alias.display()
-            ),
-        )
-        .with_key_path("OURO_CONFIG_DIR"));
-    }
-    Ok(())
+    check_isolated(
+        &roots.visible,
+        &plan.config_dir,
+        ErrorCode::UnsafeConfigPath,
+        "OURO_CONFIG_DIR",
+        "config directory",
+    )
 }
 
 /// Security 2026-09-27 (audit 4 B4): mountinfo's bind-alias verdict for one
@@ -2670,7 +2638,7 @@ fn canonical_existing_prefix(path: &Path) -> PathBuf {
 ///
 /// # Errors
 /// Returns [`ErrorCode::InvalidConfig`] for a path that fails any of those.
-fn validate_receipt_path(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
+fn validate_receipt_path(args: &RunArgs, plan: &Plan, roots: &ChildRoots) -> Result<(), JailError> {
     let Some(path) = &args.receipt else {
         return Ok(());
     };
@@ -2716,11 +2684,8 @@ fn validate_receipt_path(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
             ),
         ));
     }
-    let roots: Vec<PathBuf> = child_visible_roots(plan)
-        .iter()
-        .map(|root| canonical_existing_prefix(root))
-        .collect();
-    for root in &roots {
+    let roots = &roots.visible;
+    for root in roots {
         if parent.starts_with(root) {
             return Err(usage(
                 key,
@@ -3351,7 +3316,7 @@ fn forbidden_identities(
     resolved: &Resolved,
     workspace: &Path,
 ) -> Result<Vec<(u64, u64)>, JailError> {
-    state::mount_alias::forbidden_identities(&launch_forbidden_roots(resolved, workspace)).map_err(
+    state::mount_alias::forbidden_identities(&child_writable_roots(resolved, workspace)).map_err(
         |error| {
             usage(
                 "launch.credentials",
@@ -4897,7 +4862,8 @@ mod tests {
         };
         // A workspace that covers the launch directory refuses, naming the
         // config directory the launch directory hangs off.
-        let error = check_launch_isolation(&plan(root.path().to_path_buf())).unwrap_err();
+        let check = |plan: Plan| check_launch_isolation(&plan, &ChildRoots::of(&plan));
+        let error = check(plan(root.path().to_path_buf())).unwrap_err();
         assert_eq!(error.code, ErrorCode::UnsafeConfigPath);
         assert_eq!(error.key_path.as_deref(), Some("OURO_CONFIG_DIR"));
         assert!(
@@ -4906,8 +4872,7 @@ mod tests {
             error.message
         );
         // A disjoint workspace passes.
-        check_launch_isolation(&plan(root.path().join("elsewhere")))
-            .expect("a disjoint workspace passes");
+        check(plan(root.path().join("elsewhere"))).expect("a disjoint workspace passes");
     }
 
     // Security 2026-09-27 (audit 4 B1): the config directory is operator
@@ -4926,7 +4891,8 @@ mod tests {
             data_dir: root.path().join("data"),
         };
         // A workspace that covers the config directory refuses.
-        let error = check_config_isolation(&plan(root.path().to_path_buf())).unwrap_err();
+        let check = |plan: Plan| check_config_isolation(&plan, &ChildRoots::of(&plan));
+        let error = check(plan(root.path().to_path_buf())).unwrap_err();
         assert_eq!(error.code, ErrorCode::UnsafeConfigPath);
         assert_eq!(error.key_path.as_deref(), Some("OURO_CONFIG_DIR"));
         assert!(
@@ -4935,8 +4901,7 @@ mod tests {
             error.message
         );
         // A disjoint workspace passes.
-        check_config_isolation(&plan(root.path().join("elsewhere")))
-            .expect("a disjoint workspace passes");
+        check(plan(root.path().join("elsewhere"))).expect("a disjoint workspace passes");
     }
 
     #[test]
