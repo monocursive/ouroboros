@@ -850,7 +850,7 @@ fn read_only_prepared(attempts: &Path) -> Option<Value> {
             && let Ok(value) = serde_json::from_str::<Value>(&text)
             && value["phase"] == "prepared"
         {
-            return Some(value);
+            return Some(common::checked_receipt(value));
         }
     }
     None
@@ -922,15 +922,17 @@ fn x03_owner_run(mode: &str) -> (Value, bool, usize) {
         .map(|entry| entry.path())
         .find(|path| path.is_dir())
         .expect("one attempt");
-    let receipt: Value = serde_json::from_str(
-        &std::fs::read_to_string(attempt_dir.join("jail.json")).expect("the terminal receipt"),
-    )
-    .expect("valid JSON");
-    common::assert_semantic_receipt(&receipt);
-    let execs = std::fs::read_to_string(attempt_dir.join("trace.ndjson"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+    let receipt = common::read_receipt(&attempt_dir.join("jail.json"));
+    // The local trace of an attempt whose owner died: whole frames, held to
+    // what a prefix keeps, whether or not it ends on the final receipt.
+    let trace =
+        harness::read_frames(&std::fs::read(attempt_dir.join("trace.ndjson")).unwrap_or_default());
+    if let Err(error) = common::check_trace(&trace.frames, None) {
+        panic!("the local trace fails its contract: {error}");
+    }
+    let execs = trace
+        .frames
+        .iter()
         .filter(|event| event["operation"] == "proc.exec")
         .count();
     (receipt, marker.exists(), execs)
