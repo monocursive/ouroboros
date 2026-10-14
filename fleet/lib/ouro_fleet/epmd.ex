@@ -41,7 +41,7 @@ defmodule OuroFleet.Epmd do
   | Callback | Answer |
   |---|---|
   | `start_link/0` | `:ignore` — there is nothing to supervise |
-  | `register_node/2,3` | `{:ok, creation}`; nothing is registered anywhere |
+  | `register_node/2,3` | `{:ok, creation}`, drawn at random; nothing is registered anywhere |
   | `listen_port_please/2` | `OUROBOROS_DIST_PORT`, else `{:ok, 0}` (the kernel's own range, then ephemeral) |
   | `address_please/3` | `{:ok, ip, port, 5}` when the map names this node, else `{:ok, ip}` |
   | `port_please/2,3` | the map, else `OUROBOROS_DIST_PORT`, else `:noport` |
@@ -75,10 +75,12 @@ defmodule OuroFleet.Epmd do
   @dist_version 5
 
   # `register_node/2,3` must answer with a creation, which tells one incarnation of a
-  # node name from the next. With no registry to allocate it, each node draws its own
-  # from 1..3 at random, so two successive incarnations share one a third of the time,
-  # and a pid or reference held from the earlier one is then not recognised as stale.
-  @creations 1..3
+  # node name from the next: a pid or reference held from an earlier incarnation is
+  # recognised as stale only when its creation differs. With no registry to count
+  # incarnations, each node draws its own from the full 32-bit range, skipping 0..3 as
+  # `net_kernel` does when it draws one itself, so two incarnations share a creation
+  # about once in four billion restarts.
+  @lowest_creation 4
 
   @doc """
   Nothing to start; the distribution supervisor accepts `:ignore` and carries on.
@@ -100,7 +102,7 @@ defmodule OuroFleet.Epmd do
 
   @spec register_node(charlist() | String.t(), :inet.port_number(), atom()) ::
           {:ok, pos_integer()}
-  def register_node(_name, _port, _driver), do: {:ok, Enum.random(@creations)}
+  def register_node(_name, _port, _driver), do: {:ok, creation()}
 
   @doc """
   The port this node's distribution listener must bind.
@@ -259,6 +261,12 @@ defmodule OuroFleet.Epmd do
   defp normalize(host) when is_binary(host), do: host
   defp normalize(host) when is_atom(host), do: Atom.to_string(host)
   defp normalize(_other), do: ""
+
+  # Uniform over `@lowest_creation..0xFFFFFFFF`: a draw below the floor is drawn again.
+  defp creation do
+    <<value::32>> = :crypto.strong_rand_bytes(4)
+    if value < @lowest_creation, do: creation(), else: value
+  end
 
   defp env(name) do
     case System.get_env(name) do

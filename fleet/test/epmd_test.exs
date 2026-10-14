@@ -37,6 +37,14 @@ defmodule OuroFleet.EpmdTest do
     end
   end
 
+  test "each registration draws a full-width creation, so a restart is told apart" do
+    creations = for _ <- 1..64, do: elem(Epmd.register_node(~c"ouro-a", 4370, :inet), 1)
+    # 0..3 are never drawn, and 64 draws from four billion values collide with odds
+    # below one in a million.
+    assert Enum.all?(creations, &(&1 in 4..0xFFFFFFFF))
+    assert length(Enum.uniq(creations)) == 64
+  end
+
   test "a member's port is keyed by its node name, and an unnamed node falls back" do
     System.put_env(
       "OUROBOROS_DIST_PORTS",
