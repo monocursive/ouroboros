@@ -50,11 +50,12 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::network::{AnswerDenial, Destination, Host, Rules};
+use crate::sync::lock;
 
 mod event;
 pub mod http;
@@ -585,12 +586,6 @@ struct Shared {
     next_id: AtomicU64,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // A panic elsewhere must not stop accounting; the data stays consistent
-    // because every critical section is a few field updates.
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// What the accept thread does with one accepted socket.
 enum Admission {
     /// Stop began: close it without a result, like the backlog.
@@ -871,18 +866,8 @@ impl ProxyHandle {
         while accounting.missing() > 0 {
             accounting = match remaining(deadline) {
                 Some(left) if left.is_zero() => break,
-                Some(left) => {
-                    self.shared
-                        .settled
-                        .wait_timeout(accounting, left)
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .0
-                }
-                None => self
-                    .shared
-                    .settled
-                    .wait(accounting)
-                    .unwrap_or_else(PoisonError::into_inner),
+                Some(left) => crate::sync::wait_timeout(&self.shared.settled, accounting, left).0,
+                None => crate::sync::wait(&self.shared.settled, accounting),
             };
         }
         accounting.sealed = true;

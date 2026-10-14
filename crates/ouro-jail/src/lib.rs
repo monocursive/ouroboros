@@ -60,5 +60,6 @@ pub mod proxy;
 pub mod records;
 pub mod state;
 pub mod supervisor;
+pub(crate) mod sync;
 pub mod trace;
 pub mod vault;

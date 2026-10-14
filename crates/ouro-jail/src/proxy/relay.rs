@@ -23,7 +23,7 @@ use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use super::EndReason;
@@ -49,14 +49,14 @@ struct FirstEnd(Arc<Mutex<Option<EndReason>>>);
 
 impl FirstEnd {
     fn set(&self, end: EndReason) {
-        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut slot = crate::sync::lock(&self.0);
         if slot.is_none() {
             *slot = Some(end);
         }
     }
 
     fn get(&self) -> Option<EndReason> {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        *crate::sync::lock(&self.0)
     }
 }
 

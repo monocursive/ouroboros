@@ -46,7 +46,7 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
@@ -274,7 +274,7 @@ struct Progress {
 impl Progress {
     /// Records a staged credential, unless the caller has given up.
     fn report(&self, credential: &StagedCredential) {
-        let mut staged = self.staged.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut staged = crate::sync::lock(&self.staged);
         if !self.abandoned.load(Ordering::SeqCst) {
             staged.push((credential.record.clone(), credential.source));
         }
@@ -288,7 +288,7 @@ impl Progress {
     /// Gives up on the worker and returns what it reported before then;
     /// nothing it reports afterwards is recorded.
     fn abandon(&self) -> Vec<(CredentialRecord, SourceIdentity)> {
-        let staged = self.staged.lock().unwrap_or_else(PoisonError::into_inner);
+        let staged = crate::sync::lock(&self.staged);
         self.abandoned.store(true, Ordering::SeqCst);
         staged.clone()
     }

@@ -4,6 +4,7 @@ use super::{SOURCE_MAX, Secret, valid_value as valid};
 use crate::{
     credentials::{read_vault_source, read_vault_source_version, update_vault_source},
     proxy::Reason,
+    sync::{lock, wait_timeout},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -162,21 +163,17 @@ impl Runtime {
         result.current().map_err(|_| {
             format!(
                 "vault source unavailable, invalid, revoked or refresh failed ({})",
-                result
-                    .last_error
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .unwrap_or("source_refused")
+                lock(&result.last_error).unwrap_or("source_refused")
             )
         })?;
         Ok(result)
     }
     fn emit(&self, generation: u64, transition: &'static str) -> bool {
-        let audit = self.audit.lock().unwrap_or_else(|e| e.into_inner());
+        let audit = lock(&self.audit);
         if let Some((id, audit)) = audit.as_ref() {
             audit(id, generation, transition)
         } else {
-            let mut notes = self.early_notes.lock().unwrap_or_else(|e| e.into_inner());
+            let mut notes = lock(&self.early_notes);
             if notes.len() >= 8 {
                 return false;
             }
@@ -189,7 +186,7 @@ impl Runtime {
     }
     fn deny_if(&self, reason: Reason, generation: Option<u64>) -> Reason {
         let revoked = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = lock(&self.state);
             if state.denied || generation.is_some_and(|generation| generation != state.generation) {
                 None
             } else {
@@ -210,7 +207,7 @@ impl Runtime {
     }
     pub(super) fn current(&self) -> Result<(Zeroizing<Vec<u8>>, u64), Reason> {
         let Some((path, forbidden)) = &self.source else {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = lock(&self.state);
             return Ok((state.value.clone(), state.generation));
         };
         let (raw, mut epoch) = read_vault_source_version(path, forbidden, SOURCE_MAX)
@@ -225,7 +222,7 @@ impl Runtime {
                 return Err(self.deny(Reason::CredentialRevoked));
             }
             if doc.refresh_pending {
-                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                let state = lock(&self.state);
                 if !state.denied
                     && state.pending.as_ref().is_some_and(|p| {
                         p.expires_at > now()
@@ -241,7 +238,7 @@ impl Runtime {
             if doc.expires_at <= now().saturating_add(policy.refresh_before_seconds) {
                 // Only one local exchange. Other attempts contend through the
                 // source CAS + flock and observe the persisted pending marker.
-                let _guard = self.exchange.lock().unwrap_or_else(|e| e.into_inner());
+                let _guard = lock(&self.exchange);
                 let fresh = read_vault_source(path, forbidden, SOURCE_MAX)
                     .map_err(|_| self.deny(Reason::CredentialRevoked))?;
                 if fresh.as_slice() != raw.as_slice() {
@@ -261,7 +258,7 @@ impl Runtime {
             }
             raw
         };
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock(&self.state);
         if state.denied
             || state.value.as_slice() != value.as_slice()
             || state.epoch.is_some_and(|old| !old.unchanged_since(&epoch))
@@ -293,7 +290,7 @@ impl Runtime {
     ) -> Result<Zeroizing<Vec<u8>>, Reason> {
         let identity = source_epoch.identity();
         let preserve = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = lock(&self.state);
             !state.denied
                 && doc.expires_at > now()
                 && state.value.as_slice() == doc.access_token.0.as_bytes()
@@ -314,7 +311,7 @@ impl Runtime {
             return Err(self.deny(Reason::CredentialRevoked));
         }
         let generation = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = lock(&self.state);
             state.pending = preserve.then(|| Pending {
                 bytes: pending.clone(),
                 epoch: pending_epoch,
@@ -399,32 +396,24 @@ impl Runtime {
             if check.as_slice() != replacement.as_slice() {
                 return Err(self.failed("source_changed", Reason::CredentialRevoked));
             }
-            let generation = self
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .generation;
+            let generation = lock(&self.state).generation;
             if !self.emit(generation, "refreshed") {
                 return Err(unavailable("audit_unavailable"));
             }
-            *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *lock(&self.last_error) = None;
             Ok(Zeroizing::new(doc.access_token.0.as_bytes().to_vec()))
         })();
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).pending = None;
+        lock(&self.state).pending = None;
         if result.is_err() {
             self.deny(Reason::CredentialUnavailable);
-            let generation = self
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .generation;
+            let generation = lock(&self.state).generation;
             let _ = self.emit(generation, "refresh_failed");
         }
         result
     }
     /// Records `label` as the refresh's last error and returns `reason`.
     fn failed(&self, label: &'static str, reason: Reason) -> Reason {
-        *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(label);
+        *lock(&self.last_error) = Some(label);
         reason
     }
     fn live(&self, generation: u64) -> bool {
@@ -440,7 +429,7 @@ impl Runtime {
                     return false;
                 };
                 if doc.refresh_pending && !doc.revoked && doc.expires_at > now() {
-                    let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let state = lock(&self.state);
                     let permitted = !state.denied
                         && state.generation == generation
                         && state.pending.as_ref().is_some_and(|p| {
@@ -462,7 +451,7 @@ impl Runtime {
             } else {
                 raw
             };
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = lock(&self.state);
             let permitted = !state.denied
                 && state.generation == generation
                 && state.epoch.is_some_and(|old| old.unchanged_since(&epoch))
@@ -621,21 +610,19 @@ impl Ticker {
         }
         let thread = builder.spawn(move || {
             let (flag, wake) = &*stopping;
-            let stopped = || *flag.lock().unwrap_or_else(|e| e.into_inner());
+            let stopped = || *lock(flag);
             loop {
                 if stopped() || !tick(&stopped) {
                     break;
                 }
                 // The flag and its wakeup share the lock: a stop between the
                 // check and the wait cannot be slept through.
-                let lock = flag.lock().unwrap_or_else(|e| e.into_inner());
-                if *lock {
+                let stop = lock(flag);
+                if *stop {
                     break;
                 }
-                let (lock, _) = wake
-                    .wait_timeout(lock, LEASE_POLL)
-                    .unwrap_or_else(|e| e.into_inner());
-                if *lock {
+                let (stop, _) = wait_timeout(wake, stop, LEASE_POLL);
+                if *stop {
                     break;
                 }
             }
@@ -648,7 +635,7 @@ impl Ticker {
 }
 impl Drop for Ticker {
     fn drop(&mut self) {
-        *self.stop.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *lock(&self.stop.0) = true;
         self.stop.1.notify_all();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -671,30 +658,15 @@ impl Monitor {
     }
     pub(super) fn start(&self, audit: Audit) -> Result<(), String> {
         for secret in &self.secrets {
-            *secret
-                .runtime
-                .audit
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some((secret.id.clone(), audit.clone()));
-            let notes = std::mem::take(
-                &mut *secret
-                    .runtime
-                    .early_notes
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()),
-            );
+            *lock(&secret.runtime.audit) = Some((secret.id.clone(), audit.clone()));
+            let notes = std::mem::take(&mut *lock(&secret.runtime.early_notes));
             let had_notes = !notes.is_empty();
             for (generation, transition) in notes {
                 if !secret.runtime.emit(generation, transition) {
                     return Err("vault lifecycle trace unavailable".into());
                 }
             }
-            let generation = secret
-                .runtime
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .generation;
+            let generation = lock(&secret.runtime.state).generation;
             if !had_notes && !secret.runtime.emit(generation, "loaded") {
                 return Err("vault lifecycle trace unavailable".into());
             }
@@ -715,7 +687,7 @@ impl Monitor {
             true
         })
         .map_err(|_| "vault refresh worker unavailable".to_owned())?;
-        *self.ticker.lock().unwrap_or_else(|e| e.into_inner()) = Some(ticker);
+        *lock(&self.ticker) = Some(ticker);
         Ok(())
     }
 }
@@ -990,7 +962,7 @@ mod tests {
             "audited without the state lock"
         );
         let state = |runtime: &Runtime| {
-            let state = runtime.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = lock(&runtime.state);
             (state.generation, state.denied, state.value.to_vec())
         };
         let revoked = state(&runtime);
@@ -1000,8 +972,7 @@ mod tests {
         let loading = std::panic::AssertUnwindSafe(|| runtime.current());
         assert!(std::panic::catch_unwind(loading).is_err());
         assert_eq!(state(&runtime), revoked, "the failed audit changed nothing");
-        *runtime.audit.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(("api".into(), Arc::new(|_, _, _| true)));
+        *lock(&runtime.audit) = Some(("api".into(), Arc::new(|_, _, _| true)));
         let (value, generation) = runtime.current().unwrap();
         assert_eq!(
             (value.as_slice(), generation),
