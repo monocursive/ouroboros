@@ -1535,7 +1535,21 @@ impl Boundary {
             // this attempt's narrowing filter carries.
             config.trace_data = boundary.trace_data;
             config.learning = boundary.snapshot.observation.learning;
-            config.commands = boundary.snapshot.commands.clone();
+            // Resolution validated these rules; rules that no longer
+            // compile are refused, never matched in part.
+            config.commands = match boundary.snapshot.commands.compile() {
+                Ok(filter) => filter,
+                Err(reason) => {
+                    boundary.teardown();
+                    return Err(error(
+                        ErrorCode::InvalidConfig,
+                        ErrorStage::Preparing,
+                        Remediation::Configuration,
+                        format!("the command rules do not compile: {reason}"),
+                    )
+                    .with_key_path("jail.commands"));
+                }
+            };
             config.target = Some((boundary.launcher.pid, boundary.target_images.clone()));
             match Tracer::attach(boundary.launcher.pid, config) {
                 Ok(tracer) => boundary.tracer = Some(tracer),

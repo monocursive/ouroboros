@@ -304,9 +304,22 @@ impl AuditWriter {
         event
             .fields
             .insert("pattern".into(), Value::from(hit.pattern.clone()));
-        event
-            .fields
-            .insert("argv_digest".into(), Value::from(hit.digest.clone()));
+        // §11.3: the receipt's argv digest, or null with a reason when the
+        // argv was not read whole.
+        match &hit.digest {
+            Some(digest) => {
+                event
+                    .fields
+                    .insert("argv_digest".into(), Value::from(digest.clone()));
+            }
+            None => {
+                event.fields.insert("argv_digest".into(), Value::Null);
+                event.fields.insert(
+                    "argv_digest_reason".into(),
+                    Value::from(crate::commands::UNREADABLE_ARGV_REASON),
+                );
+            }
+        }
         event.fields.insert("pid".into(), Value::from(pid));
         match enforcement {
             CommandEnforcement::EntryDenied => {

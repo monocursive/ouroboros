@@ -1,7 +1,21 @@
 //! Optional argv accident filters. These do not constrain program effects.
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
+/// The most command rules one configuration carries (jail-v2 §7.2: "the
+/// rule set is capped (initial 64 rules, recorded)").
+pub const RULES_MAX: usize = 64;
+/// The longest command pattern, in bytes.
+pub const PATTERN_BYTES_MAX: usize = 4096;
+/// The pattern a hit names when the argv could not be read whole: rules are
+/// active, so an argv that cannot be judged is refused (jail-v2 §7.2).
+pub const UNREADABLE_ARGV_PATTERN: &str = "<unreadable-or-oversized-argv>";
+/// Why such a hit carries no argv digest (jail-v1 §11.3: a digest is only
+/// of an argv whose every byte was captured).
+pub const UNREADABLE_ARGV_REASON: &str = "argv_unreadable_or_oversized";
+
+/// The operator's `[jail.commands]` table, as written and as the policy
+/// snapshot records it. [`Rules::compile`] turns it into the [`Filter`] the
+/// observer matches.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rules {
@@ -10,65 +24,106 @@ pub struct Rules {
     #[serde(default)]
     pub forbid: Vec<String>,
 }
+
+/// One matched rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hit {
     pub pattern: String,
-    pub digest: String,
+    /// The argv's `argv_digest`, the receipt's own construction
+    /// ([`crate::canonical::argv_digest`]), or `None` when the argv could not
+    /// be read whole ([`UNREADABLE_ARGV_REASON`]).
+    pub digest: Option<String>,
     pub forbidden: bool,
 }
+
 impl Rules {
     pub fn is_empty(&self) -> bool {
         self.deny.is_empty() && self.forbid.is_empty()
     }
-    pub fn validate(&self) -> Result<(), String> {
-        if self.deny.len() + self.forbid.len() > 64 {
-            return Err("at most 64 command rules are supported".into());
+
+    /// Validates the rules and tokenizes every pattern once.
+    ///
+    /// # Errors
+    /// Returns why the rules are refused: more than [`RULES_MAX`], a pattern
+    /// longer than [`PATTERN_BYTES_MAX`], an unfinished quote or escape, a
+    /// NUL, no `argv[0]`, or a `**` before the last token.
+    pub fn compile(&self) -> Result<Filter, String> {
+        if self.deny.len() + self.forbid.len() > RULES_MAX {
+            return Err(format!("at most {RULES_MAX} command rules are supported"));
         }
-        for pattern in self.deny.iter().chain(&self.forbid) {
-            if pattern.len() > 4096 {
-                return Err("command pattern exceeds 4096 bytes".into());
-            }
-            let parts = tokens(pattern)?;
-            if parts.is_empty()
-                || parts.first().is_some_and(|p| p == b"**")
-                || parts.iter().take(parts.len() - 1).any(|p| p == b"**")
-            {
-                return Err(
-                    "command rules need argv[0]; ** is only allowed as the final token".into(),
-                );
+        // Forbid patterns first: a command matching both lists is forbidden.
+        let lists = [(&self.forbid, true), (&self.deny, false)];
+        let mut patterns = Vec::with_capacity(self.deny.len() + self.forbid.len());
+        for (list, forbidden) in lists {
+            for text in list {
+                if text.len() > PATTERN_BYTES_MAX {
+                    return Err(format!("command pattern exceeds {PATTERN_BYTES_MAX} bytes"));
+                }
+                let parts = tokens(text)?;
+                if parts.is_empty()
+                    || parts.first().is_some_and(|p| p == b"**")
+                    || parts.iter().take(parts.len() - 1).any(|p| p == b"**")
+                {
+                    return Err(
+                        "command rules need argv[0]; ** is only allowed as the final token".into(),
+                    );
+                }
+                patterns.push(Pattern {
+                    text: text.clone(),
+                    parts,
+                    forbidden,
+                });
             }
         }
-        Ok(())
+        Ok(Filter { patterns })
     }
+}
+
+/// Validated command rules with every pattern tokenized: what the observer
+/// matches at each exec. Only [`Rules::compile`] builds one, so a pattern
+/// that does not tokenize never reaches the matcher.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Filter {
+    /// Forbid patterns before deny patterns, each list in its written order.
+    patterns: Vec<Pattern>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Pattern {
+    text: String,
+    parts: Vec<Vec<u8>>,
+    forbidden: bool,
+}
+
+impl Filter {
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// The first rule `argv` (or, for element 0, the exec `path`) matches.
+    ///
+    /// With rules active, an argv that could not be read whole (`None`) is
+    /// a hit on [`UNREADABLE_ARGV_PATTERN`], never a pass.
     pub fn check(&self, argv: Option<&[Vec<u8>]>, path: Option<&[u8]>) -> Option<Hit> {
         if self.is_empty() {
             return None;
         }
         let Some(argv) = argv else {
             return Some(Hit {
-                pattern: "<unreadable-or-oversized-argv>".into(),
-                digest: "unavailable".into(),
+                pattern: UNREADABLE_ARGV_PATTERN.into(),
+                digest: None,
                 forbidden: false,
             });
         };
-        let mut hash = Sha256::new();
-        for arg in argv {
-            hash.update((arg.len() as u64).to_le_bytes());
-            hash.update(arg);
-        }
-        let digest = format!("sha256:{:x}", hash.finalize());
-        for (patterns, forbidden) in [(&self.forbid, true), (&self.deny, false)] {
-            for pattern in patterns {
-                if tokens(pattern).is_ok_and(|parts| matches(&parts, argv, path)) {
-                    return Some(Hit {
-                        pattern: pattern.clone(),
-                        digest,
-                        forbidden,
-                    });
-                }
-            }
-        }
-        None
+        let pattern = self
+            .patterns
+            .iter()
+            .find(|pattern| matches(&pattern.parts, argv, path))?;
+        Some(Hit {
+            pattern: pattern.text.clone(),
+            digest: Some(crate::canonical::argv_digest(argv)),
+            forbidden: pattern.forbidden,
+        })
     }
 }
 // Small quote tokenizer, with no expansions or shell syntax evaluation.
@@ -180,36 +235,37 @@ fn matches(parts: &[Vec<u8>], argv: &[Vec<u8>], path: Option<&[u8]>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(text: &str) -> Vec<Vec<u8>> {
+        text.split(' ').map(|s| s.as_bytes().to_vec()).collect()
+    }
+
     #[test]
     fn positional_and_tail() {
-        let rules = Rules {
+        let filter = Rules {
             deny: vec!["git push --force".into(), "rm -rf /*".into()],
             forbid: vec!["dangerous-tool **".into()],
-        };
-        rules.validate().unwrap();
-        let args = |s: &str| {
-            s.split(' ')
-                .map(|s| s.as_bytes().to_vec())
-                .collect::<Vec<_>>()
-        };
+        }
+        .compile()
+        .unwrap();
         assert!(
-            rules
+            filter
                 .check(Some(&args("/usr/bin/git push --force")), None)
                 .is_some()
         );
         assert!(
-            rules
+            filter
                 .check(Some(&args("git push --force main")), None)
                 .is_none()
         );
         assert!(
-            rules
+            filter
                 .check(Some(&args("fake anything")), Some(b"/bin/dangerous-tool"))
                 .unwrap()
                 .forbidden
         );
-        assert!(rules.check(Some(&args("sh -c rm")), None).is_none());
-        assert!(rules.check(None, None).is_some());
+        assert!(filter.check(Some(&args("sh -c rm")), None).is_none());
+        assert!(filter.check(None, None).is_some());
         assert_eq!(
             tokens("cmd 'two words' \"\" **").unwrap(),
             vec![
@@ -228,41 +284,60 @@ mod tests {
                 deny: vec!["**".into()],
                 forbid: Vec::new(),
             }
-            .validate()
+            .compile()
             .is_err(),
             "a lone ** has no argv[0] and must not validate"
         );
     }
 
-    /// jail-v2 K22: the documented bound is enforced, not silently ignored.
+    /// A pattern the tokenizer refuses is refused when the rules compile:
+    /// the matcher never sees it, so it can never be skipped there.
+    #[test]
+    fn a_pattern_that_does_not_tokenize_refuses_at_compile() {
+        for bad in ["git 'push", "git push\\", "tool \"open"] {
+            let error = Rules {
+                deny: vec!["ls".into(), bad.into()],
+                forbid: Vec::new(),
+            }
+            .compile()
+            .expect_err(bad);
+            assert!(error.contains("unfinished"), "{bad}: {error}");
+        }
+    }
+
+    /// jail-v2 K22: the documented bounds are enforced, not silently ignored.
     #[test]
     fn more_than_the_documented_rule_cap_refuses_at_validation() {
         let rules = |count: usize| Rules {
             deny: (0..count).map(|i| format!("tool-{i}")).collect(),
             forbid: Vec::new(),
         };
-        rules(64)
-            .validate()
+        rules(RULES_MAX)
+            .compile()
             .expect("64 rules are the documented cap");
-        let error = rules(65).validate().expect_err("65 rules refuse");
+        let error = rules(RULES_MAX + 1).compile().expect_err("65 rules refuse");
         assert!(error.contains("at most 64 command rules"), "{error}");
+        let long = Rules {
+            deny: vec![format!("tool {}", "x".repeat(PATTERN_BYTES_MAX))],
+            forbid: Vec::new(),
+        };
+        let error = long.compile().expect_err("an over-long pattern refuses");
+        assert!(error.contains("exceeds 4096 bytes"), "{error}");
     }
 
     /// A command matching both a deny and a forbid rule yields the forbid:
     /// the forbid list is evaluated first, so forbid wins.
     #[test]
     fn forbid_wins_when_a_command_matches_both_a_deny_and_a_forbid() {
-        let rules = Rules {
+        let filter = Rules {
             deny: vec!["git **".into()],
             forbid: vec!["git push --force **".into()],
-        };
-        rules.validate().unwrap();
-        let args: Vec<Vec<u8>> = "git push --force upstream"
-            .split(' ')
-            .map(|s| s.as_bytes().to_vec())
-            .collect();
-        let hit = rules
-            .check(Some(&args), None)
+        }
+        .compile()
+        .unwrap();
+        let argv = args("git push --force upstream");
+        let hit = filter
+            .check(Some(&argv), None)
             .expect("a doubly matched command still hits");
         assert!(hit.forbidden, "forbid wins over deny: {hit:?}");
         assert_eq!(hit.pattern, "git push --force **");
@@ -270,28 +345,69 @@ mod tests {
         let deny_only = Rules {
             deny: vec!["git **".into()],
             forbid: Vec::new(),
-        };
-        deny_only.validate().unwrap();
-        let hit = deny_only.check(Some(&args), None).expect("deny hits");
+        }
+        .compile()
+        .unwrap();
+        let hit = deny_only.check(Some(&argv), None).expect("deny hits");
         assert!(!hit.forbidden);
     }
 
     #[test]
     fn an_exec_with_no_argv_matches_the_exec_path_alone() {
-        let rules = Rules {
+        let filter = Rules {
             deny: Vec::new(),
             forbid: vec!["dangerous-tool **".into()],
-        };
-        rules.validate().unwrap();
-        let hit = rules
+        }
+        .compile()
+        .unwrap();
+        let hit = filter
             .check(Some(&[]), Some(b"/usr/bin/dangerous-tool"))
             .expect("argc 0 still matches through the exec path");
         assert!(hit.forbidden);
         assert!(
-            rules
+            filter
                 .check(Some(&[]), Some(b"/usr/bin/other-tool"))
                 .is_none()
         );
-        assert!(rules.check(Some(&[]), None).is_none());
+        assert!(filter.check(Some(&[]), None).is_none());
+    }
+
+    /// A hit names its argv by the receipt's own `argv_digest`, so one argv
+    /// has one digest under that field name whichever record carries it.
+    #[test]
+    fn a_hit_carries_the_canonical_argv_digest() {
+        let filter = Rules {
+            deny: vec!["git push **".into()],
+            forbid: Vec::new(),
+        }
+        .compile()
+        .unwrap();
+        let argv = vec![b"git".to_vec(), b"push".to_vec(), b"a\0b".to_vec()];
+        let hit = filter.check(Some(&argv), None).expect("a hit");
+        assert_eq!(
+            hit.digest.as_deref(),
+            Some(crate::canonical::argv_digest(&argv).as_str())
+        );
+    }
+
+    /// An argv that could not be read whole is refused with no digest at
+    /// all: a digest of what was read would not be the argv's.
+    #[test]
+    fn an_unreadable_argv_hits_with_no_digest() {
+        let filter = Rules {
+            deny: vec!["ls".into()],
+            forbid: Vec::new(),
+        }
+        .compile()
+        .unwrap();
+        let hit = filter.check(None, Some(b"/bin/ls")).expect("refused");
+        assert_eq!(hit.pattern, UNREADABLE_ARGV_PATTERN);
+        assert_eq!(hit.digest, None);
+        assert!(!hit.forbidden);
+        assert_eq!(
+            Filter::default().check(None, None),
+            None,
+            "no rules, no hit"
+        );
     }
 }

@@ -728,7 +728,7 @@ fn path_corroborated(snapshot: &[u8], resolved: &[u8], tmpfile: bool, nlink: Opt
 /// own argv into the shape of an interpreter rewrite is judged on that
 /// shape, as a `sh -c` re-spelling is.
 fn exec_recheck(
-    rules: &crate::commands::Rules,
+    rules: &crate::commands::Filter,
     entry: &[Vec<u8>],
     kernel: Option<&[Vec<u8>]>,
     claimed: Option<&[u8]>,
@@ -5295,8 +5295,9 @@ mod tests {
                 "deploy.sh --prod".into(),
             ],
             forbid: vec!["dangerous-tool **".into(), "bash **".into()],
-        };
-        rules.validate().unwrap();
+        }
+        .compile()
+        .unwrap();
         let argv = |items: &[&str]| {
             items
                 .iter()
@@ -5534,7 +5535,9 @@ mod tests {
                 commands: crate::commands::Rules {
                     deny: vec!["git push --force".into()],
                     forbid: Vec::new(),
-                },
+                }
+                .compile()
+                .unwrap(),
                 ..TracerConfig::default()
             },
             Kernel {

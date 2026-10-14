@@ -507,12 +507,13 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         None => resolved,
     };
 
-    // §6.4: `build` requires an explicit memory ceiling; the baseline leaves it
-    // absent so that this refuses rather than inventing one.
+    // jail-v2 §7.2: operator command rules, validated here so a refusal
+    // names its key; the Linux platform compiles the same rules for the
+    // observer.
     if !operator_jail.commands.is_empty() {
         operator_jail
             .commands
-            .validate()
+            .compile()
             .map_err(|e| usage("jail.commands", e))?;
         if resolved.snapshot.platform != crate::records::Os::Linux
             || profile == ProfileName::None
@@ -539,6 +540,8 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         resolved.snapshot.observation.learning = true;
         resolved.digest = resolved.snapshot.digest()?;
     }
+    // §6.4: `build` requires an explicit memory ceiling; the baseline leaves it
+    // absent so that this refuses rather than inventing one.
     if profile == ProfileName::Build && resolved.snapshot.limits.mem.is_none() {
         return Err(usage(
             "limits.mem",

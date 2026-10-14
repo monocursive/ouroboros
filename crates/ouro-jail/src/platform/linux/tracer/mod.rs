@@ -105,7 +105,7 @@ pub fn elapsed_since(epoch_boottime_ns: u64) -> u64 {
 pub struct TracerConfig {
     /// Launcher and candidate spellings whose identities are captured at exec stops.
     pub target: Option<(pid_t, Vec<Vec<u8>>)>,
-    pub commands: crate::commands::Rules,
+    pub commands: crate::commands::Filter,
     /// Capture read-only opens for opt-in learning.
     pub learning: bool,
     /// Most bytes of a pathname argument to snapshot. Beyond it the snapshot
@@ -170,7 +170,7 @@ fn event_bytes(event: &TracerEvent) -> usize {
                 + args.command.as_ref().map_or(0, |hit| {
                     size_of::<crate::commands::Hit>()
                         + hit.pattern.capacity()
-                        + hit.digest.capacity()
+                        + hit.digest.as_ref().map_or(0, String::capacity)
                 })
         }
         TracerEvent::Exec {
@@ -185,7 +185,7 @@ fn event_bytes(event: &TracerEvent) -> usize {
                 + command.as_ref().map_or(0, |hit| {
                     size_of::<crate::commands::Hit>()
                         + hit.pattern.capacity()
-                        + hit.digest.capacity()
+                        + hit.digest.as_ref().map_or(0, String::capacity)
                 })
                 + kernel_image.as_ref().map_or(0, |k| {
                     k.path.capacity()
@@ -272,7 +272,7 @@ impl Default for TracerConfig {
     fn default() -> Self {
         TracerConfig {
             target: None,
-            commands: crate::commands::Rules::default(),
+            commands: crate::commands::Filter::default(),
             learning: false,
             path_snapshot_max: 4096,
             inflight_max: 16_384,
@@ -1355,7 +1355,7 @@ mod tests {
         };
         let command = crate::commands::Hit {
             pattern: String::with_capacity(8192),
-            digest: String::with_capacity(128),
+            digest: Some(String::with_capacity(128)),
             forbidden: false,
         };
         let shebang = ShebangImage {
@@ -1371,7 +1371,7 @@ mod tests {
             + kernel.candidates[0].path.capacity()
             + size_of::<crate::commands::Hit>()
             + command.pattern.capacity()
-            + command.digest.capacity()
+            + command.digest.as_ref().map_or(0, String::capacity)
             + size_of::<Option<ShebangImage>>()
             + shebang.interpreter.capacity()
             + shebang.argument.as_ref().map_or(0, Vec::capacity)

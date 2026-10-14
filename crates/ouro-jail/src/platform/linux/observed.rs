@@ -1396,7 +1396,7 @@ mod tests {
             dirfd: None,
             command: Some(Box::new(crate::commands::Hit {
                 pattern: pattern.to_owned(),
-                digest: "sha256:x".to_owned(),
+                digest: Some("sha256:x".to_owned()),
                 forbidden,
             })),
             shebangs: Vec::new(),

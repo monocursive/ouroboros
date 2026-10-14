@@ -4,7 +4,9 @@ fn probe() {
     let rules = Rules {
         deny: vec![],
         forbid: vec!["/usr/bin/echo **".to_string()],
-    };
+    }
+    .compile()
+    .unwrap();
     let argv: Vec<Vec<u8>> = vec![b"t".to_vec(), b"SHOULD_NOT_PRINT".to_vec()];
     println!(
         "with image: {:?}",

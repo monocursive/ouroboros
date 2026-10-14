@@ -124,6 +124,12 @@ fn denied_execve_and_execveat_return_eperm_without_running_the_image() {
             });
         assert_eq!(note["fields"]["pattern"], "true blocked", "{note}");
         assert_eq!(note["fields"]["errno"], "EPERM", "{note}");
+        // The note names the denied argv by the receipt's own construction.
+        assert_eq!(
+            note["fields"]["argv_digest"],
+            ouro_jail::canonical::argv_digest(&[b"true".to_vec(), b"blocked".to_vec()]),
+            "{note}"
+        );
         assert!(
             note["fields"].get("enforcement").is_none(),
             "an entry denial is not an exec kill: {note}"
