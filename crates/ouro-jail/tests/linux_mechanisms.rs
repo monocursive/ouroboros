@@ -1708,7 +1708,8 @@ fn this_hosts_backend_version_is_the_pinned_one() {
     if !live() {
         return;
     }
-    let version = bwrap::bwrap_version(&bwrap_path()).expect("bwrap --version");
+    let version = bwrap::bwrap_version(&bwrap_path(), Deadline::after(Duration::from_secs(5)))
+        .expect("bwrap --version");
     assert_eq!(version.major, 0);
     assert!(
         version.minor >= 11,

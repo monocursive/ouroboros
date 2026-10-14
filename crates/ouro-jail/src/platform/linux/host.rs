@@ -382,7 +382,12 @@ mod linux {
         serde_json::json!({
             "path": path.to_string_lossy(),
             "sha256": file_sha256(path).ok(),
-            "version": super::super::bwrap::bwrap_version(path).ok().map(|version| version.raw),
+            "version": super::super::bwrap::bwrap_version(
+                path,
+                super::super::clock::Deadline::after(super::super::probe::PROBE_DEADLINE),
+            )
+            .ok()
+            .map(|version| version.raw),
         })
     }
 

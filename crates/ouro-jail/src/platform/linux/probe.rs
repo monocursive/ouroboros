@@ -682,7 +682,7 @@ fn run_inside_raw(
 fn probe_bwrap_present(bwrap: &Path) -> ProbeResult {
     const NAME: &str = Probe::BwrapPresent.name();
     const MECHANISM: &str = Probe::BwrapPresent.mechanism();
-    match bwrap::bwrap_version(bwrap) {
+    match bwrap::bwrap_version(bwrap, Deadline::after(PROBE_DEADLINE)) {
         Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => {
             ProbeResult::new(NAME, ProbeStatus::Available, MECHANISM, "ok", version.raw)
         }

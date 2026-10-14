@@ -227,7 +227,7 @@ pub fn resolved_bwrap() -> Result<&'static Path, &'static str> {
 static BWRAP_MEETS_MINIMUM: std::sync::LazyLock<Result<(), String>> =
     std::sync::LazyLock::new(|| {
         let bwrap = resolved_bwrap().map_err(str::to_owned)?;
-        match bwrap::bwrap_version(bwrap) {
+        match bwrap::bwrap_version(bwrap, clock::Deadline::after(probe::PROBE_DEADLINE)) {
             Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => Ok(()),
             Ok(version) => Err(format!(
                 "the resolved bubblewrap ({}) reports {}; every contained run renders \
@@ -716,7 +716,9 @@ struct Boundary {
     placeholders: Vec<Placeholder>,
     placeholder_outcomes: Vec<PlaceholderOutcome>,
     applied: Applied,
-    backend_version: String,
+    /// What the backend reported, read again for this attempt; `None` when
+    /// it could not be asked.
+    backend_version: Option<String>,
     resolv_sanitization: &'static str,
     observe_on: bool,
     /// The §11.4 bounds the observer runs with, decided once; `None` with
@@ -1457,7 +1459,7 @@ impl Boundary {
                 environment_names: Vec::new(),
                 removed_environment_names: Vec::new(),
             },
-            backend_version: String::new(),
+            backend_version: None,
             resolv_sanitization,
             observe_on,
             observer_plan: observe_on.then(super::observed::ObserverPlan::from_env),
@@ -1808,9 +1810,9 @@ impl Boundary {
 
         // Keep this fresh readback: a process can create a new platform after
         // a backend upgrade, while its minimum-version decision is cached.
-        self.backend_version = bwrap::bwrap_version(bwrap_path)
-            .map(|version| version.raw)
-            .unwrap_or_default();
+        self.backend_version = bwrap::bwrap_version(bwrap_path, deadline)
+            .ok()
+            .map(|version| version.raw);
 
         if super::storage::requested(&self.snapshot.limits) {
             self.storage = Some(
@@ -2342,8 +2344,7 @@ impl Boundary {
                 },
             }),
             backend: Some("bubblewrap".to_owned()),
-            backend_version: (!self.backend_version.is_empty())
-                .then(|| self.backend_version.clone()),
+            backend_version: self.backend_version.clone(),
         }
     }
 }

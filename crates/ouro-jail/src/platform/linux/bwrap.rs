@@ -11,8 +11,10 @@ use std::io;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
+use super::clock::Deadline;
+use super::exec::run_captured;
 use super::fs::{RootSpec, exists_resolved, resolve_runtime_root};
 use super::sys::{PathError, cstring_from_os, empty_stat, errno_name, last_errno};
 
@@ -104,13 +106,27 @@ pub fn parse_version(line: &str) -> Option<BwrapVersion> {
     })
 }
 
-/// Run `bwrap --version`.
+/// Run `bwrap --version` with an empty environment, no stdin and `deadline`.
+///
+/// The question is asked inside the preparation budget and by `doctor`, so a
+/// backend that hangs, reads its standard input or is steered by the
+/// operator's environment must not stall or colour the answer: past the
+/// deadline it is killed and the version is unknown.
 ///
 /// # Errors
 ///
-/// A failure to run the binary, or output that does not parse.
-pub fn bwrap_version(bwrap: &Path) -> io::Result<BwrapVersion> {
-    let out = Command::new(bwrap).arg("--version").output()?;
+/// A failure to run the binary, a run the deadline ended, an unsuccessful
+/// exit, or output that does not parse.
+pub fn bwrap_version(bwrap: &Path, deadline: Deadline) -> io::Result<BwrapVersion> {
+    let mut command = Command::new(bwrap);
+    command.arg("--version").env_clear().stdin(Stdio::null());
+    let out = run_captured(&mut command, deadline)?;
+    if out.timed_out {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("{} --version did not answer in time", bwrap.display()),
+        ));
+    }
     if !out.status.success() {
         return Err(io::Error::other(format!(
             "{} --version exited {:?}",
@@ -118,8 +134,8 @@ pub fn bwrap_version(bwrap: &Path) -> io::Result<BwrapVersion> {
             out.status.code()
         )));
     }
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    parse_version(&text).ok_or_else(|| io::Error::other(format!("unparsed version {text:?}")))
+    parse_version(&out.stdout)
+        .ok_or_else(|| io::Error::other(format!("unparsed version {:?}", out.stdout)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1388,6 +1404,46 @@ mod tests {
         assert_eq!(parse_version("bubblewrap 1.0").unwrap().patch, 0);
         assert!(parse_version("").is_none());
         assert!(parse_version("bubblewrap unknown").is_none());
+    }
+
+    /// A stand-in backend named `name`: a shell script that does `body`.
+    fn fake_backend(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    #[test]
+    fn the_version_question_has_a_deadline_no_environment_and_no_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let deadline = || Deadline::after(std::time::Duration::from_secs(5));
+        // A backend that never answers is killed at the deadline, and the
+        // version is unknown rather than awaited.
+        let hung = fake_backend(dir.path(), "hung", "exec sleep 60");
+        let started = std::time::Instant::now();
+        let error = bwrap_version(&hung, Deadline::after(std::time::Duration::from_millis(200)))
+            .expect_err("a hung backend has no version");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // The operator's environment does not reach it: `HOME` is set for
+        // every test process (the shell sets no default for it).
+        let environment = fake_backend(
+            dir.path(),
+            "environment",
+            "[ -z \"${HOME+set}\" ] || exit 3\necho 'bubblewrap 0.11.1'",
+        );
+        assert_eq!(bwrap_version(&environment, deadline()).unwrap().minor, 11);
+        // Its standard input is empty, never the supervisor's.
+        let stdin = fake_backend(
+            dir.path(),
+            "stdin",
+            "if read -r line; then exit 4; fi\necho 'bubblewrap 0.11.1'",
+        );
+        assert_eq!(bwrap_version(&stdin, deadline()).unwrap().patch, 1);
+        let failing = fake_backend(dir.path(), "failing", "exit 1");
+        assert!(bwrap_version(&failing, deadline()).is_err());
     }
 
     #[test]
