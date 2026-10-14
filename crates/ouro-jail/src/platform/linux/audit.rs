@@ -1939,45 +1939,22 @@ mod tests {
     #[test]
     fn an_open_ended_loss_merged_at_the_gap_bound_leaves_the_interval_open() {
         let mut writer = writer();
-        // Distinct (reason, classes) keys, so none of the 64 coalesces.
+        // Distinct (reason, classes) keys, so none of the 64 coalesces:
+        // every reason with an end, under each of three class sets.
         let ops = [
             OpSet::of(ClosedOp::Exec),
             OpSet::of(ClosedOp::Open),
             OpSet::of(ClosedOp::Connect),
         ];
-        let reasons = [
-            GapReason::QueueFull,
-            GapReason::MediationResponseUndelivered,
-            GapReason::UnmatchedExit,
-            GapReason::EntryAbandoned,
-            GapReason::InflightExhausted,
-            GapReason::PathUnreadable,
-            GapReason::SockaddrUnreadable,
-            GapReason::FlagsUnavailable,
-            GapReason::SyscallInfoUnavailable,
-            GapReason::IdentityUnavailable,
-            GapReason::FinalStatusUnknown,
-            GapReason::UnexpectedTraceStop,
-            GapReason::TraceesAbandoned,
-            GapReason::UnreapedChildren,
-            GapReason::RestartFailed,
-            GapReason::LifecycleDropped,
-            GapReason::DeathUnattributed,
-            GapReason::ForeignAbi,
-            GapReason::RestartUnresolved,
-            GapReason::ArgumentSnapshotUnstable,
-            GapReason::MemoryFlagsUnverified,
-            GapReason::ExecImageMismatch,
-            GapReason::PathClaimUnverified,
-        ];
-        for i in 0..64 {
-            writer.record_gap(
-                reasons[i % reasons.len()],
-                ops[i % 3],
-                i as u64,
-                i as u64 + 1,
-                Some(1),
-            );
+        let keys: Vec<(GapReason, OpSet)> = GapReason::ALL
+            .into_iter()
+            .filter(|reason| !reason.is_open_ended())
+            .flat_map(|reason| ops.map(|ops| (reason, ops)))
+            .take(64)
+            .collect();
+        assert_eq!(keys.len(), 64, "enough keys to reach the bound");
+        for (i, (reason, ops)) in keys.into_iter().enumerate() {
+            writer.record_gap(reason, ops, i as u64, i as u64 + 1, Some(1));
         }
         assert_eq!(writer.gaps().len(), 64);
         let bounded = writer.gaps().last().unwrap();
