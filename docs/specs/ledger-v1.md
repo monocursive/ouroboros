@@ -186,6 +186,27 @@ stops the owned tree and supplies no settlement acknowledgement. Successfully
 reconciled terminal journals are removed; invalid journals remain for inspection
 and conservatively block retention deletion.
 
+A journal is refused only for faults of the journal itself, each recorded as
+one of five classes: `journal_missing` (a nonterminal run whose owner died has
+none), `journal_unreadable` (its content, digest, run or owner binding, size or
+ownership is invalid), `not_admitted` (it cannot supply an admission the run
+never recorded), `exit_uncorroborated` (its exit record lacks corroborating
+terminal control) and `evidence_refused` (its evidence violates the source
+contract or canonical history refuses it without the stream being poisoned).
+A refused nonterminal run gains one `outcome_unknown` record whose body is
+`{reason: invalid_pending_evidence, refusal: <class>, outcome: {kind: unknown,
+unknown: true, unknown_reason: "pending evidence could not be reconciled"},
+coverage: {status: degraded, gaps: [{reason: invalid_pending_evidence}]}}`.
+Canonical history keeps only the class: a refusal's text can quote journal
+values, so it goes only to the writer's log, with control characters spelled
+out. A failure that is not the journal's own (an operating-system error such
+as EMFILE or a failed sync, a held journal lock, a failed append that poisoned
+the stream) records nothing. The background scan tries such a journal again
+after 2 s, doubling the wait up to 5 min, and logs a failure again only when
+it changes; a refused journal is tried again only once it changes.
+`settle-orphans` skips such a run, settles the other orphans and then fails,
+naming each run it skipped.
+
 Reading a valid journal also synchronizes its pinned file and run directory
 before recovery imports or clears any pending evidence. Failure of either
 barrier refuses recovery without acknowledging or deleting that snapshot.
@@ -418,7 +439,8 @@ the rules only there. A writer of rule 2 rewrites, at its next start, every
 `run.json` whose bytes differ from the replayed projection, so the projections
 of existing unresolved runs change in place then; their records do not.
 Bundles exported under rule 1 keep their embedded projection and still verify
-(§8.4).
+(§8.4). GC never prunes an unresolved run (§8), so the projection a pruned run
+retains is the same under both rules.
 
 `segments.json` version 2 anchors each segment in order: filename, committed
 byte length, first and last global sequence, SHA-256 over its exact bytes
@@ -1134,7 +1156,10 @@ unless they match canonical history. The embedded run must equal the replay
 under projection rule 2 (§4), or, for a bundle exported earlier, under rule 1:
 that is accepted only for an `outcome_unknown` run whose outcome, recomputed by
 rule 1 from the same records, is the only difference. The report names the rule
-that matched in `projection_rule`. The
+that matched in `projection_rule`. That field was added to both verification
+report schemas in place (milestone-2 re-blessing record): readers of reports
+written before it are unaffected, but a validator pinned to the earlier
+schemas, which forbid additional properties, rejects reports that carry it. The
 [verification report](ledger-v1/bundle-verification.schema.json) separates
 `local_consistency`, original coverage, and `child_protection`. A consistent
 `none` run remains `unprotected`. The

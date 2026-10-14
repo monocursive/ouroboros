@@ -36,7 +36,9 @@ fixtures and validators in one reviewable commit. Re-blessing record:
   field, `projection_rule` (1 or 2), naming the run projection rule an embedded
   run matched, so a bundle exported before the `outcome_unknown` projection
   changed still verifies and says how (ledger-v1 §4, §8.4). No shared field
-  changed meaning; a report without the field remains valid.
+  changed meaning; a report without the field remains valid. A validator
+  pinned to the schemas before this record, which forbid additional
+  properties, rejects reports that carry the field.
 
 Historical custody is still required before removal of the legacy stores
 (North Star §9), after milestone 3. New signed bundles do not satisfy that
