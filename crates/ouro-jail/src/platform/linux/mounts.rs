@@ -67,6 +67,30 @@ pub(super) fn scan_coverage(scan: &jfs::ProtectedScan) -> String {
     }
 }
 
+/// The refusal for `existing_and_root` over a writable root holding the
+/// protected symlinks `paths`, naming them (the first few when there are
+/// many) so the operator can see what to change.
+fn symlink_refusal(paths: &[PathBuf]) -> JailError {
+    const NAMED: usize = 8;
+    let mut named: Vec<String> = paths
+        .iter()
+        .take(NAMED)
+        .map(|path| path.display().to_string())
+        .collect();
+    if paths.len() > NAMED {
+        named.push(format!("and {} more", paths.len() - NAMED));
+    }
+    preparing(
+        ErrorCode::MissingCapability,
+        format!(
+            "existing_and_root coverage cannot cover protected symlinks: {}; a symlink where a \
+             protected name is, or on the path to one, is never followed, so what lies behind \
+             it cannot be claimed protected",
+            named.join(", ")
+        ),
+    )
+}
+
 /// The protected names the walk would not follow, as workspace-relative
 /// strings for the receipt.
 pub(super) fn skipped_protected_names(scan: &jfs::ProtectedScan) -> Vec<String> {
@@ -815,10 +839,7 @@ pub(super) fn prepare_mounts(
         .map_err(|err| preparing(ErrorCode::MissingCapability, err.to_string()))?;
         pins.insert(source.clone(), pin);
         if coverage == ProtectedCoverage::ExistingAndRoot && !scan.skipped_symlinks.is_empty() {
-            return Err(preparing(
-                ErrorCode::MissingCapability,
-                "existing_and_root coverage cannot cover protected symlinks",
-            ));
+            return Err(symlink_refusal(&scan.skipped_symlinks));
         }
         aggregate.entries_seen += scan.entries_seen;
         scans.push((root_index, source, destination, seen_before, scan));
@@ -1267,16 +1288,34 @@ mod tests {
         let root = temp.path();
         let mut plan = mount_plan(root);
         std::os::unix::fs::symlink("elsewhere", root.join("external/.git")).unwrap();
+        let Err(refusal) = prepare_mounts(
+            &mut plan,
+            Vec::new(),
+            &root.join("attempt"),
+            &jfs::PROTECTED_LITERALS,
+            ProtectedCoverage::ExistingAndRoot,
+        ) else {
+            panic!("a protected symlink was claimed covered");
+        };
+        let link = root.join("external/.git");
         assert!(
-            prepare_mounts(
-                &mut plan,
-                Vec::new(),
-                &root.join("attempt"),
-                &jfs::PROTECTED_LITERALS,
-                ProtectedCoverage::ExistingAndRoot
-            )
-            .is_err()
+            refusal.message.contains(&link.display().to_string()),
+            "the refusal does not name the symlink: {}",
+            refusal.message
         );
+    }
+
+    /// Past a handful, the refusal names the first symlinks and counts the
+    /// rest.
+    #[test]
+    fn a_symlink_refusal_names_the_first_paths_and_counts_the_rest() {
+        let paths: Vec<PathBuf> = (0..10)
+            .map(|index| PathBuf::from(format!("/w/r{index}/.git")))
+            .collect();
+        let message = symlink_refusal(&paths).message;
+        assert!(message.contains("/w/r0/.git, /w/r1/.git"), "{message}");
+        assert!(message.contains("/w/r7/.git, and 2 more"), "{message}");
+        assert!(!message.contains("/w/r8/.git"), "{message}");
     }
 
     #[test]
