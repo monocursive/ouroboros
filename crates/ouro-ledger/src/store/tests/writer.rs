@@ -1,5 +1,6 @@
 //! The writer: its lock, acknowledgements, replay, poison and recovery.
 use super::*;
+use crate::protocol::StreamStatus;
 
 #[test]
 fn detached_request_lifetime_is_validated_and_cannot_rebind_a_request() {
@@ -204,11 +205,15 @@ fn the_most_severe_poison_decides_a_stream_status() {
         [PoisonKind::Corrupt, PoisonKind::Incomplete],
         [PoisonKind::Incomplete, PoisonKind::Unanchored],
     ] {
-        assert_eq!(poison_status(&poison(&kinds)), Some("corrupt"), "{kinds:?}");
+        assert_eq!(
+            poison_status(&poison(&kinds)),
+            Some(StreamStatus::Corrupt),
+            "{kinds:?}"
+        );
     }
     assert_eq!(
         poison_status(&poison(&[PoisonKind::Incomplete])),
-        Some("incomplete")
+        Some(StreamStatus::Incomplete)
     );
 }
 

@@ -20,7 +20,8 @@ use super::{
     writer::private_file,
 };
 use crate::protocol::{
-    Chain, LedgerError, MAX_VERIFY_LIMIT, Result, RunRecord, VerifyPage, VerifyReport,
+    Chain, ChildProtection, HistoryState, LedgerError, MAX_VERIFY_LIMIT, Result, RunRecord,
+    VerifyPage, VerifyReport,
 };
 
 /// One page of fresh verification, as the writer planned it.
@@ -41,7 +42,7 @@ pub(crate) struct Target {
     /// The head the writer had accepted when the layout was taken.
     accepted: Chain,
     /// The labels the writer had accepted, reported when the re-read fails.
-    child_protection: String,
+    child_protection: ChildProtection,
     coverage: Value,
     /// The canonical bytes the writer had accepted, when nothing poisoned
     /// the stream. A writer that has not poisoned a stream left no bytes
@@ -142,7 +143,7 @@ impl Store {
             directory,
             poisoned: poison_details(stream.poisoned()),
             accepted: stream.run().chain.clone(),
-            child_protection: stream.run().child_protection.clone(),
+            child_protection: stream.run().child_protection,
             coverage: crate::reader::coverage_summary(&stream.run().coverage),
             accepted_bytes: (!stream.is_poisoned()).then(|| stream.accepted_bytes()),
             kind,
@@ -191,7 +192,7 @@ impl Target {
     pub(crate) fn verify(self, proceed: &mut impl FnMut() -> bool) -> VerifyReport {
         let (run_id, child_protection, coverage) = (
             self.run_id.clone(),
-            self.child_protection.clone(),
+            self.child_protection,
             self.coverage.clone(),
         );
         self.reread(proceed).unwrap_or_else(|error| VerifyReport {
@@ -250,7 +251,7 @@ impl Target {
             .run()
             .capture_history
             .as_ref()
-            .is_some_and(|h| h.state == "pruning")
+            .is_some_and(|h| h.state == HistoryState::Pruning)
         {
             problems.push("capture deletion is incomplete; retry GC or restart the writer".into());
         }
@@ -279,7 +280,7 @@ impl Target {
         Ok(VerifyReport {
             run_id: self.run_id,
             local_consistency: problems.is_empty(),
-            child_protection: stream.run().child_protection.clone(),
+            child_protection: stream.run().child_protection,
             coverage: crate::reader::coverage_summary(&stream.run().coverage),
             events: loaded.events,
             problems,

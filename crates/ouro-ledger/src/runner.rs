@@ -1,4 +1,5 @@
 //! The launch owner: durably admit before opening the jail's existing gate.
+use crate::protocol::RunState;
 
 mod argv_capture;
 #[cfg(target_os = "linux")]
@@ -809,7 +810,7 @@ fn run_linux(
     } else {
         client.prepare(&options.request_id, &payload)?
     };
-    if run.state == "settled" || run.state == "denied" {
+    if run.state == RunState::Settled || run.state == RunState::Denied {
         if let Some(notify) = notify.as_mut() {
             notify(&run);
         }
@@ -818,7 +819,7 @@ fn run_linux(
             record: run,
         });
     }
-    if run.owner.is_some() || run.state != "prepared" {
+    if run.owner.is_some() || run.state != RunState::Prepared {
         if let Some(notify) = notify.as_mut() {
             notify(&run);
             return Ok(RunResult {
@@ -885,7 +886,7 @@ fn record_unknown(
     // Only called after the owned child is stopped. Preserve terminal evidence
     // when an earlier acknowledgement was lost, and never restart the writer.
     if let Ok(current) = client.show(&run.run_id)
-        && !["prepared", "admitted"].contains(&current.state.as_str())
+        && current.state.is_terminal()
     {
         return;
     }
@@ -907,7 +908,7 @@ fn record_unknown(
     // this grants no new execution and supplies no acknowledgement if it fails.
     if let Ok(mut fresh) = Client::connect(&options.data)
         && let Ok(current) = fresh.show(&run.run_id)
-        && ["prepared", "admitted"].contains(&current.state.as_str())
+        && !current.state.is_terminal()
         && let Ok(claim) = fresh.claim_owner(&run.run_id)
     {
         let _ = fresh.append_owner(
@@ -1409,7 +1410,11 @@ pub fn record_exit(record: &RunRecord) -> i32 {
         .as_ref()
         .and_then(|o| o["code"].as_i64())
         .and_then(|n| i32::try_from(n).ok())
-        .unwrap_or(if record.state == "denied" { 125 } else { 1 })
+        .unwrap_or(if record.state == RunState::Denied {
+            125
+        } else {
+            1
+        })
 }
 
 /// Resolve the jail executable once, never constructing a shell command.
@@ -1730,7 +1735,7 @@ mod tests {
     fn prepared_gate_compares_each_identity_and_receipt_digest() {
         let receipt = crate::test_support::prepared_receipt();
         let control:ControlMessage=serde_json::from_value(json!({"schema":records::SCHEMA_CONTROL,"attempt_id":receipt["attempt_id"],"seq":1,"kind":"prepared","receipt_phase":"prepared","receipt_digest":records::semantic::receipt_digest(&receipt).unwrap(),"outcome":receipt["outcome"],"error":null})).unwrap();
-        let run:RunRecord=serde_json::from_value(json!({"schema":"ouro.ledger.run/1","run_id":"run_01234567890123456789012345678901","attempt_id":receipt["attempt_id"],"request_id":"test","payload":{"argv_digest":receipt["argv_digest"],"policy_digest":receipt["policy"]["digest"],"requirements":receipt["policy"]["requirements"]},"state":"prepared","child_protection":"pending","owner":null,"outcome":null,"coverage":{},"settlement":"pending","receipts":[],"capture":{},"chain":{"head_seq":1,"head_digest":null}})).unwrap();
+        let run:RunRecord=serde_json::from_value(json!({"schema":"ouro.ledger.run/1","run_id":"run_01234567890123456789012345678901","attempt_id":receipt["attempt_id"],"request_id":"test","payload":{"argv_digest":receipt["argv_digest"],"policy_digest":receipt["policy"]["digest"],"requirements":receipt["policy"]["requirements"]},"state":"prepared","child_protection":"unprotected","owner":null,"outcome":null,"coverage":{},"settlement":"pending","receipts":[],"capture":{},"chain":{"head_seq":1,"head_digest":null}})).unwrap();
         check_prepared(&receipt, &control, &run).unwrap();
         for path in ["attempt_id", "argv_digest"] {
             let mut changed = receipt.clone();

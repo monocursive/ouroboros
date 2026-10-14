@@ -1,4 +1,7 @@
 use std::fs;
+
+use crate::protocol::RunState;
+
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt as _;
 
@@ -183,7 +186,7 @@ impl Store {
             )));
         }
         if !self.pending_exists(id) {
-            if ["settled", "denied", "outcome_unknown"].contains(&run.state.as_str()) {
+            if run.state.is_terminal() {
                 return Ok(run);
             }
             return Err(Refused(
@@ -199,11 +202,11 @@ impl Store {
                 ))
             })?;
         let mut state = journal.read(&run).map_err(PendingFailure::unreadable)?;
-        if ["settled", "denied", "outcome_unknown"].contains(&run.state.as_str()) {
+        if run.state.is_terminal() {
             journal.remove().map_err(Other)?;
             return Ok(run);
         }
-        if run.state != "admitted" {
+        if run.state != RunState::Admitted {
             return Err(Refused(
                 NotAdmitted,
                 LedgerError::refused("pending evidence cannot supply admission"),
@@ -274,8 +277,7 @@ impl Store {
             .filter(|(id, s)| {
                 s.run().payload["evidence"] == "best-effort"
                     && !s.is_poisoned()
-                    && (self.pending_exists(id)
-                        || ["prepared", "admitted"].contains(&s.run().state.as_str()))
+                    && (self.pending_exists(id) || !s.run().state.is_terminal())
                     && s.run()
                         .owner
                         .as_ref()
@@ -328,9 +330,7 @@ impl Store {
             ));
             // Retain the failed journal for inspection. A bad local file is
             // never sufficient evidence for a successful terminal outcome.
-            if self
-                .stream(&id)
-                .is_ok_and(|s| ["prepared", "admitted"].contains(&s.run().state.as_str()))
+            if self.stream(&id).is_ok_and(|s| !s.run().state.is_terminal())
                 && let Err(error) = self.record_invalid_pending(&id, peer, refusal)
             {
                 log.push(log_line(

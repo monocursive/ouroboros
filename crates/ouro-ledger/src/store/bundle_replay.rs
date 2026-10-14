@@ -7,7 +7,7 @@ use super::{
     check_run_id,
     stream::{Stream, rules::UNRESOLVED},
 };
-use crate::protocol::{LedgerError, MAX_FRAME_BYTES, Result, RunRecord};
+use crate::protocol::{LedgerError, MAX_FRAME_BYTES, Result, RunRecord, RunState};
 
 /// A replayed snapshot. An unresolved run also carries the outcome run
 /// projection rule 1 gave it, so a bundle exported under that rule still
@@ -55,7 +55,7 @@ pub(crate) fn replay(reader: impl std::io::Read, run_id: &str) -> Result<Replaye
             ));
         }
         stream.accept_canonical(run_id, &bytes)?;
-        if stream.run().state == "outcome_unknown" {
+        if stream.run().state == RunState::OutcomeUnknown {
             let record: Value = serde_json::from_slice(&bytes)?;
             if record["kind"] == "outcome_unknown" {
                 reported = Some(record["body"].get("outcome").cloned());
@@ -65,7 +65,7 @@ pub(crate) fn replay(reader: impl std::io::Read, run_id: &str) -> Result<Replaye
     if stream.run().chain.head_seq == 0 {
         return Err(LedgerError::refused("bundle snapshot is empty"));
     }
-    let rule_one_outcome = (stream.run().state == "outcome_unknown")
+    let rule_one_outcome = (stream.run().state == RunState::OutcomeUnknown)
         .then(|| rule_one_unknown_outcome(reported.flatten().as_ref()));
     Ok(Replayed {
         run: stream.into_run(),

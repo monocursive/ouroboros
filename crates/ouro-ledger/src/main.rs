@@ -747,9 +747,7 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
         } else {
             eprintln!(
                 "ouro-ledger: export checkpoint after {bytes_written} bytes; protection {}; stream {}; local consistency {}; cursor {cursor}",
-                ouro_records::records::escape_control(&page.child_protection),
-                ouro_records::records::escape_control(&page.stream_status),
-                page.local_consistency,
+                page.child_protection, page.stream_status, page.local_consistency,
             );
         }
         request.cursor = Some(cursor);

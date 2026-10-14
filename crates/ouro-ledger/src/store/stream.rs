@@ -16,7 +16,10 @@ use super::{
 };
 use crate::{
     manifest,
-    protocol::{AppendReceipt, Chain, LedgerError, PrunedHistory, Result, RunRecord},
+    protocol::{
+        AppendReceipt, Chain, ChildProtection, LedgerError, PrunedHistory, Result, RunRecord,
+        RunState, Settlement, StreamStatus,
+    },
     schemas,
 };
 
@@ -34,7 +37,7 @@ pub(super) struct Replay {
 pub(super) struct Anchor {
     pub(super) bytes: u64,
     pub(super) digest: String,
-    pub(super) state: &'static str,
+    pub(super) state: RunState,
     pub(super) labels_digest: String,
 }
 
@@ -55,10 +58,10 @@ pub(crate) enum PoisonKind {
 }
 
 impl PoisonKind {
-    pub(crate) fn stream_status(self) -> &'static str {
+    pub(crate) fn stream_status(self) -> StreamStatus {
         match self {
-            Self::Incomplete => "incomplete",
-            Self::Corrupt | Self::Unanchored => "corrupt",
+            Self::Incomplete => StreamStatus::Incomplete,
+            Self::Corrupt | Self::Unanchored => StreamStatus::Corrupt,
         }
     }
 }
@@ -80,7 +83,7 @@ impl Poison {
 
 /// The most severe finding decides: an integrity violation is never reported
 /// as a merely incomplete stream.
-pub(crate) fn poison_status(poisoned: &[Poison]) -> Option<&'static str> {
+pub(crate) fn poison_status(poisoned: &[Poison]) -> Option<StreamStatus> {
     poisoned
         .iter()
         .map(|p| p.kind)
@@ -128,12 +131,12 @@ pub(super) fn initial_run(
         request_id: request_id.into(),
         attempt_id: attempt_id.into(),
         payload,
-        state: "prepared".into(),
-        child_protection: "unprotected".into(),
+        state: RunState::Prepared,
+        child_protection: ChildProtection::Unprotected,
         owner: None,
         outcome: None,
         coverage: json!({"status":"unobserved"}),
-        settlement: "pending".into(),
+        settlement: Settlement::Pending,
         receipts: vec![],
         capture: json!({"stdout":{"state":"not_captured"},"stderr":{"state":"not_captured"},"argv":{"state":"not_captured"}}),
         chain: Chain {
@@ -449,16 +452,9 @@ impl Stream {
         self.replay_hash
             .update((identity.len() as u64).to_le_bytes());
         self.replay_hash.update(identity);
-        let state = match self.run.state.as_str() {
-            "prepared" => "prepared",
-            "admitted" => "admitted",
-            "denied" => "denied",
-            "settled" => "settled",
-            "outcome_unknown" => "outcome_unknown",
-            _ => return Err(LedgerError::refused("unsupported canonical run state")),
-        };
+        let state = self.run.state;
         let labels_digest = crate::reader::snapshot_labels_digest(
-            &self.run.child_protection,
+            self.run.child_protection,
             &crate::reader::coverage_summary(&self.run.coverage),
         )?;
         self.anchors.insert(

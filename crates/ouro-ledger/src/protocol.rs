@@ -126,6 +126,104 @@ pub(crate) fn sha256_digest(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// A closed vocabulary of the wire: an enum whose serde spelling is its
+/// snake_case name, so records and replies keep their exact bytes. Each
+/// value also compares equal to its spelling, as a `&str` or a JSON string.
+macro_rules! vocabulary {
+    ($(#[$meta:meta])* $name:ident { $($(#[$vmeta:meta])* $variant:ident = $text:literal,)+ }) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name {
+            $($(#[$vmeta])* $variant,)+
+        }
+
+        impl $name {
+            /// The wire spelling.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text,)+
+                }
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl PartialEq<&str> for $name {
+            fn eq(&self, other: &&str) -> bool {
+                self.as_str() == *other
+            }
+        }
+
+        impl PartialEq<$name> for Value {
+            fn eq(&self, other: &$name) -> bool {
+                self.as_str() == Some(other.as_str())
+            }
+        }
+    };
+}
+
+vocabulary! {
+    /// Where a run is in its lifecycle.
+    RunState {
+        Prepared = "prepared",
+        Admitted = "admitted",
+        Denied = "denied",
+        Settled = "settled",
+        OutcomeUnknown = "outcome_unknown",
+    }
+}
+
+impl RunState {
+    /// A run with a recorded terminal outcome; nothing changes its outcome.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Denied | Self::Settled | Self::OutcomeUnknown)
+    }
+}
+
+vocabulary! {
+    /// Whether a run's terminal outcome is durably recorded.
+    Settlement {
+        Pending = "pending",
+        Recorded = "recorded",
+    }
+}
+
+vocabulary! {
+    /// Whether the jail enforced containment for a run's child.
+    ChildProtection {
+        Enforced = "enforced",
+        Unprotected = "unprotected",
+    }
+}
+
+vocabulary! {
+    /// How far a reader can trust a run's canonical stream.
+    StreamStatus {
+        /// The run is terminal and its history is whole.
+        Complete = "complete",
+        /// The run can still append.
+        Active = "active",
+        /// Only a validated prefix is readable; what follows is missing or
+        /// unacknowledged.
+        Incomplete = "incomplete",
+        /// The bytes contradict what the writer accepted.
+        Corrupt = "corrupt",
+    }
+}
+
+vocabulary! {
+    /// Whether a GC deletion of history or captures finished.
+    HistoryState {
+        Pruning = "pruning",
+        Pruned = "pruned",
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AppendReceipt {
@@ -165,12 +263,12 @@ pub struct RunRecord {
     pub attempt_id: String,
     pub request_id: String,
     pub payload: Value,
-    pub state: String,
-    pub child_protection: String,
+    pub state: RunState,
+    pub child_protection: ChildProtection,
     pub owner: Option<Peer>,
     pub outcome: Option<Value>,
     pub coverage: Value,
-    pub settlement: String,
+    pub settlement: Settlement,
     pub receipts: Vec<Value>,
     pub capture: Value,
     pub chain: Chain,
@@ -186,7 +284,7 @@ pub struct RunRecord {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PrunedHistory {
-    pub state: String,
+    pub state: HistoryState,
     pub anchor_digest: String,
     pub collected_at: String,
 }
@@ -235,8 +333,8 @@ pub struct GcResult {
 #[serde(deny_unknown_fields)]
 pub struct GcCandidate {
     pub run_id: String,
-    pub state: String,
-    pub child_protection: String,
+    pub state: RunState,
+    pub child_protection: ChildProtection,
     pub chain: Chain,
     pub last_activity_at: Option<String>,
     pub candidate: bool,
@@ -266,7 +364,7 @@ pub struct GcPlan {
 pub struct VerifyReport {
     pub run_id: String,
     pub local_consistency: bool,
-    pub child_protection: String,
+    pub child_protection: ChildProtection,
     pub coverage: Value,
     pub events: u64,
     pub problems: Vec<String>,
@@ -345,9 +443,9 @@ pub struct RunSummary {
     pub profile: String,
     pub launch: Option<String>,
     pub tags: Vec<String>,
-    pub state: String,
+    pub state: RunState,
     pub outcome: String,
-    pub child_protection: String,
+    pub child_protection: ChildProtection,
     pub coverage: Value,
     pub chain: Chain,
     pub evidence_status: String,
@@ -437,11 +535,11 @@ pub struct ReadPage {
     pub schema: String,
     pub run_id: String,
     pub snapshot: Chain,
-    pub state: String,
-    pub child_protection: String,
+    pub state: RunState,
+    pub child_protection: ChildProtection,
     pub coverage: Value,
     pub local_consistency: bool,
-    pub stream_status: String,
+    pub stream_status: StreamStatus,
     pub problems: Vec<String>,
     pub records: Vec<Value>,
     /// Exact canonical NDJSON fragments; concatenate pages of one snapshot.
@@ -475,11 +573,11 @@ pub struct TailPage {
     pub schema: String,
     pub run_id: String,
     pub head: Chain,
-    pub state: String,
-    pub child_protection: String,
+    pub state: RunState,
+    pub child_protection: ChildProtection,
     pub coverage: Value,
     pub local_consistency: bool,
-    pub stream_status: String,
+    pub stream_status: StreamStatus,
     /// Exact canonical fragments; concatenate pages, including partial records.
     pub ndjson: String,
     pub next_cursor: String,

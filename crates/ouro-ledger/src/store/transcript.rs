@@ -52,7 +52,7 @@ impl Store {
             return result;
         }
         result["state"] = json!("incomplete");
-        if !["settled", "denied", "outcome_unknown"].contains(&run.state.as_str())
+        if !run.state.is_terminal()
             || !matches!(recorded["state"].as_str(), Some("captured" | "incomplete"))
         {
             result["reason"] = json!("capture_not_finalized");

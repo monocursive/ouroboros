@@ -1,4 +1,17 @@
 //! Bounded portable evidence bundles, independently replayable without a writer.
+use std::{
+    collections::BTreeSet,
+    fs::File,
+    io::{Read, Seek, SeekFrom, Write},
+    path::Path,
+    time::{Duration, Instant},
+};
+
+use ouro_records::canonical::{sha256_prefixed, to_jcs};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
+
 use crate::{
     daemon::Client,
     protocol::{
@@ -6,17 +19,6 @@ use crate::{
         ReadSelector, Result, RunRecord, read_bounded,
     },
     schemas, store,
-};
-use ouro_records::canonical::{sha256_prefixed, to_jcs};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
-use std::{
-    collections::BTreeSet,
-    fs::File,
-    io::{Read, Seek, SeekFrom, Write},
-    path::Path,
-    time::{Duration, Instant},
 };
 
 pub(crate) mod files;
@@ -155,7 +157,7 @@ impl Read for CheckedReader {
 
 fn capture_bytes(run: &RunRecord, name: &str) -> Result<u64> {
     if !CAPTURE_STREAMS.contains(&name)
-        || !["settled", "denied", "outcome_unknown"].contains(&run.state.as_str())
+        || !run.state.is_terminal()
         || !run.payload["capture"]["streams"]
             .as_array()
             .is_some_and(|streams| streams.contains(&json!(name)))

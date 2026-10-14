@@ -1,11 +1,12 @@
 //! The record rules: what each canonical record kind may say, in which run
 //! state, and what it changes. Appends and recovery apply the same rules.
 use ouro_records::records;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Replay, Stream};
 use crate::{
-    protocol::{AppendReceipt, Chain, LedgerError, Result},
+    protocol::{AppendReceipt, Chain, ChildProtection, LedgerError, Result, RunState, Settlement},
     store::{digest, frozen::validate_receipt, operator},
 };
 
@@ -196,7 +197,7 @@ pub(in crate::store) fn validate_transition(stream: &Stream, record: &Value) -> 
     match kind {
         "evidence_gap" => {
             let body = &record["body"];
-            if stream.run.state != "admitted"
+            if stream.run.state != RunState::Admitted
                 || stream.run.payload["evidence"] != "best-effort"
                 || body["reason"] != "writer_outage"
                 || body["episode"].as_u64().is_none_or(|n| n == 0)
@@ -207,12 +208,12 @@ pub(in crate::store) fn validate_transition(stream: &Stream, record: &Value) -> 
             }
         }
         "operator_intent" => operator::validate(stream, record)?,
-        "admitted" | "denied" if stream.run.state != "prepared" => {
+        "admitted" | "denied" if stream.run.state != RunState::Prepared => {
             return Err(LedgerError::refused(
                 "admission or refusal is only valid from prepared",
             ));
         }
-        "settled" if stream.run.state != "admitted" => {
+        "settled" if stream.run.state != RunState::Admitted => {
             return Err(LedgerError::refused(
                 "settlement requires durable admission",
             ));
@@ -220,13 +221,13 @@ pub(in crate::store) fn validate_transition(stream: &Stream, record: &Value) -> 
         "owner_claimed" if stream.run.owner.is_some() => {
             return Err(LedgerError::refused("owner identity is immutable"));
         }
-        "outcome_unknown" if ["settled", "denied"].contains(&stream.run.state.as_str()) => {
+        "outcome_unknown" if matches!(stream.run.state, RunState::Settled | RunState::Denied) => {
             return Err(LedgerError::refused(
                 "a recorded terminal outcome is immutable",
             ));
         }
         "source" => {
-            if ["settled", "denied", "outcome_unknown"].contains(&stream.run.state.as_str()) {
+            if stream.run.state.is_terminal() {
                 return Err(LedgerError::refused(
                     "terminal run cannot ingest new observations",
                 ));
@@ -309,18 +310,18 @@ pub(in crate::store) fn apply_record(
         "owner_claimed" => {
             stream.run.owner = Some(serde_json::from_value(record["body"]["owner"].clone())?)
         }
-        "admitted" => stream.run.state = "admitted".into(),
+        "admitted" => stream.run.state = RunState::Admitted,
         "denied" => {
-            stream.run.state = "denied".into();
-            stream.run.settlement = "recorded".into();
+            stream.run.state = RunState::Denied;
+            stream.run.settlement = Settlement::Recorded;
         }
         "settled" => {
-            stream.run.state = "settled".into();
-            stream.run.settlement = "recorded".into();
+            stream.run.state = RunState::Settled;
+            stream.run.settlement = Settlement::Recorded;
         }
         "outcome_unknown" => {
-            stream.run.state = "outcome_unknown".into();
-            stream.run.settlement = "recorded".into();
+            stream.run.state = RunState::OutcomeUnknown;
+            stream.run.settlement = Settlement::Recorded;
         }
         "source" => {
             let source = record["body"]["source"].as_str().unwrap_or("");
@@ -352,10 +353,11 @@ pub(in crate::store) fn apply_record(
         let body = &record["body"];
         if let Some(receipt) = body.get("receipt") {
             stream.run.receipts.push(receipt.clone());
-            if let Some(protection) = receipt.get("child_protection").and_then(Value::as_str)
-                && (protection == "enforced" || protection == "unprotected")
+            if let Some(protection) = receipt
+                .get("child_protection")
+                .and_then(|label| ChildProtection::deserialize(label).ok())
             {
-                stream.run.child_protection = protection.into();
+                stream.run.child_protection = protection;
             }
             if matches!(kind, "denied" | "settled") {
                 stream.run.outcome = receipt.get("outcome").cloned();
@@ -375,7 +377,7 @@ pub(in crate::store) fn apply_record(
     }
     // none remains unprotected regardless of an owner's requested display label.
     if stream.run.payload["profile"] == "none" {
-        stream.run.child_protection = "unprotected".into();
+        stream.run.child_protection = ChildProtection::Unprotected;
     }
     if !stream.source_gaps.is_empty() {
         if !stream.run.coverage.is_object() {
@@ -410,7 +412,7 @@ pub(in crate::store) fn validate_recovery(
 ) -> Result<()> {
     if role == "recovery"
         && (stream.run.payload["evidence"] != "best-effort"
-            || stream.run.state != "admitted"
+            || stream.run.state != RunState::Admitted
             || stream.run.owner.is_none()
             || !["source", "evidence_gap", "settled", "outcome_unknown"]
                 .contains(&record["kind"].as_str().unwrap_or("")))

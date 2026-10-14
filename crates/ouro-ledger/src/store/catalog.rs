@@ -9,7 +9,8 @@ use crate::{
     discovery::{MAX_CATALOG_LIMIT, MAX_CATALOG_RUNS, MAX_POSITION_BYTES, validate_filter},
     protocol::{
         CatalogPage, CatalogRequest, DiscoveryPage, DiscoveryRequest, LedgerError,
-        READ_OUTPUT_BYTES, ReadFilter, ReadRequest, ReadSelector, Result, RunFilter, RunSummary,
+        READ_OUTPUT_BYTES, ReadFilter, ReadRequest, ReadSelector, Result, RunFilter, RunState,
+        RunSummary,
     },
     schemas,
 };
@@ -65,7 +66,8 @@ impl Stream {
                 .contains(v)
             })
             .unwrap_or(
-                if self.run().state == "prepared" || self.run().state == "admitted" {
+                if self.run().state == RunState::Prepared || self.run().state == RunState::Admitted
+                {
                     "pending"
                 } else {
                     "unknown"
@@ -133,12 +135,12 @@ impl Stream {
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect(),
             state: if ambiguous {
-                "outcome_unknown".into()
+                RunState::OutcomeUnknown
             } else {
-                self.run().state.clone()
+                self.run().state
             },
             outcome: self.catalog_outcome().into(),
-            child_protection: self.run().child_protection.clone(),
+            child_protection: self.run().child_protection,
             coverage,
             chain: self.run().chain.clone(),
             evidence_status: if ambiguous {

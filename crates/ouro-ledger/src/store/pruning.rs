@@ -17,8 +17,8 @@ use crate::{
     faults::{self, Point},
     manifest,
     protocol::{
-        GcFailure, GcReceipt, GcResult, LedgerError, Peer, PrunedHistory, Result, RunRecord,
-        VerifyReport,
+        GcFailure, GcReceipt, GcResult, HistoryState, LedgerError, Peer, PrunedHistory, Result,
+        RunRecord, RunState, Settlement, VerifyReport,
     },
     schemas,
 };
@@ -44,7 +44,11 @@ pub(super) struct Retained {
 impl Retained {
     fn history(&self, complete: bool) -> Result<PrunedHistory> {
         Ok(PrunedHistory {
-            state: if complete { "pruned" } else { "pruning" }.into(),
+            state: if complete {
+                HistoryState::Pruned
+            } else {
+                HistoryState::Pruning
+            },
             anchor_digest: self.digest()?,
             collected_at: self.collected_at.clone(),
         })
@@ -99,8 +103,8 @@ impl Authority for Retained {
             || self.run.run_id != id
             || self.run.history.is_some()
             || !self.run.holds.is_empty()
-            || !["settled", "denied"].contains(&self.run.state.as_str())
-            || self.run.settlement != "recorded"
+            || !matches!(self.run.state, RunState::Settled | RunState::Denied)
+            || self.run.settlement != Settlement::Recorded
             || self.run.outcome.as_ref().is_none_or(|outcome| {
                 !matches!(
                     outcome["kind"].as_str(),
@@ -271,9 +275,11 @@ impl Store {
         self.gc_begins();
         let retain_days = policy.retain_days;
         // Full verification and fsync must not stall a live launch's strict channel.
-        if self.streams().values().any(|s| {
-            s.run().owner.is_some() && ["prepared", "admitted"].contains(&s.run().state.as_str())
-        }) {
+        if self
+            .streams()
+            .values()
+            .any(|s| s.run().owner.is_some() && !s.run().state.is_terminal())
+        {
             return Err(LedgerError::refused(
                 "GC requires a quiescent writer; finish or reconcile active launch owners first",
             ));
@@ -298,7 +304,7 @@ impl Store {
                         .run()
                         .capture_history
                         .as_ref()
-                        .is_some_and(|h| h.state == "pruning"))
+                        .is_some_and(|h| h.state == HistoryState::Pruning))
             {
                 match self.prune_captures(
                     id,
@@ -477,7 +483,7 @@ pub(super) fn verify_pruned(
     VerifyReport {
         run_id: id.into(),
         local_consistency: checked.is_ok(),
-        child_protection: run.child_protection.clone(),
+        child_protection: run.child_protection,
         coverage: crate::reader::coverage_summary(&run.coverage),
         events: 0,
         problems: checked

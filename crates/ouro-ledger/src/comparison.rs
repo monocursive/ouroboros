@@ -1,5 +1,4 @@
 //! Bounded observation comparisons over verified, independent run snapshots.
-
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
@@ -443,6 +442,7 @@ fn compare_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ChildProtection;
 
     #[test]
     fn unsupported_gapped_and_live_classes_cannot_be_compared() {
@@ -526,7 +526,7 @@ mod tests {
             &mut |request| {
                 let mut page = test_page();
                 if request.run_id == right {
-                    page.child_protection = "unprotected".into();
+                    page.child_protection = ChildProtection::Unprotected;
                     page.coverage["classes"]["exec"]["sources"] = json!(["wrapper"]);
                 }
                 Ok(page)
@@ -666,7 +666,7 @@ mod tests {
                         .collect();
                     records[4]["fields"]["path_complete"] = json!(false);
                     page.ndjson = records.iter().map(|r| format!("{}\n", r)).collect();
-                    page.child_protection = "unprotected".into();
+                    page.child_protection = ChildProtection::Unprotected;
                 }
                 Ok(page)
             },

@@ -3,7 +3,6 @@
 //! Callers update this index after completing canonical persistence and must keep
 //! index errors separate from admission and acknowledgement results. Startup
 //! rebuilds from recovered records; no state is ever recovered from this file.
-
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
@@ -323,9 +322,9 @@ fn insert(connection: &Connection, run: &RunRecord) -> Result<()> {
             run.run_id,
             run.attempt_id,
             run.request_id,
-            run.state,
-            run.child_protection,
-            run.settlement,
+            run.state.as_str(),
+            run.child_protection.as_str(),
+            run.settlement.as_str(),
             run.chain.head_seq.to_string(),
             run.chain.head_digest,
             json,
@@ -338,6 +337,7 @@ fn insert(connection: &Connection, run: &RunRecord) -> Result<()> {
 mod tests {
     use super::*;
     use crate::protocol::Chain;
+    use crate::protocol::{ChildProtection, RunState, Settlement};
     use serde_json::json;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use tempfile::TempDir;
@@ -358,12 +358,12 @@ mod tests {
             attempt_id: format!("attempt_{id}"),
             request_id: format!("request_{id}"),
             payload: json!({"kind": "batch"}),
-            state: "prepared".into(),
-            child_protection: "unprotected".into(),
+            state: RunState::Prepared,
+            child_protection: ChildProtection::Unprotected,
             owner: None,
             outcome: None,
             coverage: json!({"mode": "none"}),
-            settlement: "pending".into(),
+            settlement: Settlement::Pending,
             receipts: vec![],
             capture: json!({}),
             chain: Chain {
@@ -386,7 +386,7 @@ mod tests {
         let mut projection = Projection::open(root.path()).unwrap();
         let mut record = run("one");
         projection.rebuild(&[record.clone(), run("stale")]).unwrap();
-        record.state = "outcome_unknown".into();
+        record.state = RunState::OutcomeUnknown;
         record.chain.head_seq = u64::MAX;
         record.coverage = json!({"loss": "explicit"});
         projection.upsert(&record).unwrap();

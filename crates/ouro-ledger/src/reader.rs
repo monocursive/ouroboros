@@ -3,7 +3,6 @@
 //! Restart restoration reads at most one maximum-sized current frame before
 //! replaying one ordinary bounded page. Checkpoint housekeeping reads at most
 //! 32 private files of at most 32 KiB each; record payloads are never checkpointed.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::CString,
@@ -19,12 +18,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::protocol::{
-    AppendReceipt, LedgerError, MAX_FRAME_BYTES, MAX_READ_LIMIT, OversizedRecord, READ_CHUNK_BYTES,
-    READ_OUTPUT_BYTES, READ_SCAN_BYTES, READ_SCAN_FRAMES, ReadFilter, ReadPage, ReadRequest,
-    ReadSelector, ReadStage, Result, RunRecord,
+use crate::{
+    faults, fsx,
+    protocol::{
+        AppendReceipt, ChildProtection, LedgerError, MAX_FRAME_BYTES, MAX_READ_LIMIT,
+        OversizedRecord, READ_CHUNK_BYTES, READ_OUTPUT_BYTES, READ_SCAN_BYTES, READ_SCAN_FRAMES,
+        ReadFilter, ReadPage, ReadRequest, ReadSelector, ReadStage, Result, RunRecord, RunState,
+        StreamStatus,
+    },
+    schemas,
 };
-use crate::{faults, fsx, schemas};
 
 const MAX_SESSIONS: usize = 32;
 const TTL: Duration = Duration::from_secs(600);
@@ -216,8 +219,7 @@ fn parse_checkpoint(file: &mut File, id: &str) -> Result<Checkpoint> {
         ));
     }
     validate_request(&checkpoint.request)?;
-    let terminal =
-        ["settled", "denied", "outcome_unknown"].contains(&checkpoint.template.state.as_str());
+    let terminal = checkpoint.template.state.is_terminal();
     if checkpoint.template.coverage["selection_status"]
         != selection_status(&checkpoint.request.filter, &checkpoint.template.coverage)
         || (checkpoint.template.local_consistency
@@ -472,7 +474,10 @@ pub(crate) fn coverage_summary(coverage: &Value) -> Value {
         "gap_count":coverage["gaps"].as_array().map_or(0, Vec::len)})
 }
 
-pub(crate) fn snapshot_labels_digest(child_protection: &str, coverage: &Value) -> Result<String> {
+pub(crate) fn snapshot_labels_digest(
+    child_protection: ChildProtection,
+    coverage: &Value,
+) -> Result<String> {
     let mut coverage = coverage.clone();
     if let Some(object) = coverage.as_object_mut() {
         object.remove("selection_status");
@@ -669,15 +674,15 @@ impl Readers {
             // its accepted prefix: bytes there are not its interrupted
             // write but someone else's.
             let health = if physical_bytes < accepted_bytes {
-                "corrupt"
+                StreamStatus::Corrupt
             } else if let Some(status) = crate::store::poison_status(poisoned) {
                 status
             } else if unexpected_tail {
-                "corrupt"
-            } else if ["settled", "denied", "outcome_unknown"].contains(&run.state.as_str()) {
-                "complete"
+                StreamStatus::Corrupt
+            } else if run.state.is_terminal() {
+                StreamStatus::Complete
             } else {
-                "active"
+                StreamStatus::Active
             };
             let mut coverage = coverage_summary(&run.coverage);
             coverage["selection_status"] = json!(selection_status(&request.filter, &coverage));
@@ -686,14 +691,14 @@ impl Readers {
                 run_id: run.run_id.clone(),
                 snapshot: run.chain.clone(),
                 state: if poisoned.is_empty() {
-                    run.state.clone()
+                    run.state
                 } else {
-                    "outcome_unknown".into()
+                    RunState::OutcomeUnknown
                 },
-                child_protection: run.child_protection.clone(),
+                child_protection: run.child_protection,
                 coverage,
                 local_consistency: poisoned.is_empty() && !unexpected_tail,
-                stream_status: health.into(),
+                stream_status: health,
                 problems: if physical_bytes > accepted_bytes && poisoned.is_empty() {
                     vec![
                         "canonical bytes follow the accepted prefix; this writer never wrote or \
@@ -1080,11 +1085,11 @@ impl Session {
 
     fn corrupt(&mut self, page: &mut ReadPage, reason: &str) {
         page.local_consistency = false;
-        page.stream_status = "corrupt".into();
+        page.stream_status = StreamStatus::Corrupt;
         page.problems.push(reason.into());
         page.done = true;
         self.template.local_consistency = false;
-        self.template.stream_status = "corrupt".into();
+        self.template.stream_status = StreamStatus::Corrupt;
     }
 
     fn advance(&mut self) {

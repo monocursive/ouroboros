@@ -1,9 +1,13 @@
-use super::*;
-use crate::{protocol::OperatorIntent, store::Store};
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
     path::PathBuf,
+};
+
+use super::*;
+use crate::{
+    protocol::{ChildProtection, OperatorIntent},
+    store::Store,
 };
 
 struct Fixture {
@@ -322,7 +326,7 @@ fn multi_page_snapshot_excludes_later_appends_and_rejects_changed_labels() {
             let mut page = f.store.read(q)?;
             count += 1;
             if count == 2 {
-                page.child_protection = "enforced".into();
+                page.child_protection = ChildProtection::Enforced;
             }
             Ok(page)
         })

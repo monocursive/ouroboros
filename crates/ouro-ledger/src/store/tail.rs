@@ -11,7 +11,7 @@ use crate::{
     manifest::STREAM,
     protocol::{
         Chain, LedgerError, MAX_FRAME_BYTES, READ_CHUNK_BYTES, READ_SCAN_BYTES, READ_SCAN_FRAMES,
-        Result, TailPage, TailRequest,
+        Result, StreamStatus, TailPage, TailRequest,
     },
     schemas,
 };
@@ -186,18 +186,15 @@ impl Store {
             schema: schemas::TAIL.into(),
             run_id: request.run_id.clone(),
             head: stream.run().chain.clone(),
-            state: stream.run().state.clone(),
-            child_protection: stream.run().child_protection.clone(),
+            state: stream.run().state,
+            child_protection: stream.run().child_protection,
             coverage,
             local_consistency: true,
-            stream_status: if ["settled", "denied", "outcome_unknown"]
-                .contains(&stream.run().state.as_str())
-            {
-                "complete"
+            stream_status: if stream.run().state.is_terminal() {
+                StreamStatus::Complete
             } else {
-                "active"
-            }
-            .into(),
+                StreamStatus::Active
+            },
             ndjson,
             next_cursor: serde_json::to_string(&cursor)?,
             caught_up,

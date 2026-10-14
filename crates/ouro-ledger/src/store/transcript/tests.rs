@@ -5,7 +5,7 @@ use std::{
 
 use super::*;
 use crate::{
-    protocol::MAX_FRAME_BYTES,
+    protocol::{MAX_FRAME_BYTES, RunState},
     store::tests::{gc_fixture, gc_fixture_captures, gc_future, peer},
 };
 
@@ -79,11 +79,15 @@ fn transcript_keeps_capture_loss_separate_from_display_limits() {
 
 #[test]
 fn transcript_never_opens_live_unfinalized_or_unselected_artifacts() {
-    for state in ["prepared", "owned", "admitted", "outcome_unknown"] {
+    for state in [
+        RunState::Prepared,
+        RunState::Admitted,
+        RunState::OutcomeUnknown,
+    ] {
         let (_temp, mut store, run) = gc_fixture();
         let r = &mut store.streams_mut().get_mut(&run.run_id).unwrap().run_mut();
-        r.state = state.into();
-        if state == "outcome_unknown" {
+        r.state = state;
+        if state == RunState::OutcomeUnknown {
             r.capture["stdout"] = json!({"state":"not_captured"});
         }
         let shown = stream(&store, &run);

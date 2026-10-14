@@ -2,17 +2,18 @@
 //!
 //! The unit command contains only bootstrap metadata. Launch arguments and the
 //! caller's environment cross a bounded private socket and are never spooled.
+use std::path::Path;
+
+use serde_json::{Value, json};
 
 use crate::{
     daemon::Client,
     protocol::{LedgerError, Result, RunRecord},
     runner,
 };
-use serde_json::{Value, json};
-use std::path::Path;
 
 pub fn terminal(run: &RunRecord) -> bool {
-    matches!(run.state.as_str(), "settled" | "denied" | "outcome_unknown")
+    run.state.is_terminal()
 }
 
 pub fn wait(data: &Path, run_id: &str, timeout: std::time::Duration) -> Result<RunRecord> {

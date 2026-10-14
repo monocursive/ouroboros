@@ -1,5 +1,6 @@
 //! Holds, retention previews, capture expiry and whole-run GC.
 use super::*;
+use crate::protocol::RunState;
 
 #[test]
 fn retention_holds_replay_without_reapplying_an_old_intent_after_release() {
@@ -523,7 +524,7 @@ fn capture_expiry_keeps_holds_unknown_outcomes_active_runs_and_reader_pins() {
                     .get_mut(&run.run_id)
                     .unwrap()
                     .run_mut()
-                    .state = "outcome_unknown".into()
+                    .state = RunState::OutcomeUnknown
             }
             "active_run" => {
                 store
@@ -531,7 +532,7 @@ fn capture_expiry_keeps_holds_unknown_outcomes_active_runs_and_reader_pins() {
                     .get_mut(&run.run_id)
                     .unwrap()
                     .run_mut()
-                    .state = "admitted".into()
+                    .state = RunState::Admitted
             }
             "reader_snapshot" => {
                 let request = ReadRequest {

@@ -29,8 +29,8 @@ use crate::{
     fsx,
     manifest::{self, STREAM},
     protocol::{
-        AppendReceipt, LedgerError, MAX_FRAME_BYTES, Peer, ReadPage, ReadRequest, Result,
-        RunRecord, StoreStatus,
+        AppendReceipt, HistoryState, LedgerError, MAX_FRAME_BYTES, Peer, ReadPage, ReadRequest,
+        Result, RunRecord, RunState, Settlement, StoreStatus,
     },
     schemas,
 };
@@ -555,7 +555,7 @@ impl Store {
             .run()
             .capture_history
             .as_ref()
-            .is_some_and(|h| h.state == "pruning")
+            .is_some_and(|h| h.state == HistoryState::Pruning)
         {
             return Err(LedgerError::refused(
                 "capture pruning is incomplete; retry GC or restart before mutations",
@@ -691,8 +691,8 @@ impl Store {
         let stream = self.stream(run_id)?;
         let mut run = stream.run().clone();
         if stream.is_poisoned() {
-            run.state = "outcome_unknown".into();
-            run.settlement = "pending".into();
+            run.state = RunState::OutcomeUnknown;
+            run.settlement = Settlement::Pending;
             run.outcome = Some(
                 json!({"kind":"unknown","unknown":true,"unknown_reason":"stream persistence or recovery is ambiguous"}),
             );
@@ -769,9 +769,9 @@ impl Store {
                                 && page.is_none_or(|page| {
                                     (page.state == anchor.state
                                         || (!page.local_consistency
-                                            && page.state == "outcome_unknown"))
+                                            && page.state == RunState::OutcomeUnknown))
                                         && crate::reader::snapshot_labels_digest(
-                                            &page.child_protection,
+                                            page.child_protection,
                                             &page.coverage,
                                         )
                                         .is_ok_and(|digest| digest == anchor.labels_digest)
@@ -791,9 +791,7 @@ impl Store {
             .streams
             .iter()
             .filter_map(|(id, stream)| {
-                if ["settled", "denied", "outcome_unknown"].contains(&stream.run().state.as_str())
-                    || stream.is_poisoned()
-                {
+                if stream.run().state.is_terminal() || stream.is_poisoned() {
                     return None;
                 }
                 stream
@@ -811,7 +809,7 @@ impl Store {
                 // Corrupt or incomplete local evidence must never imply
                 // settlement; its refusal is recorded with the unknown outcome.
                 let result = self.reconcile(&id, peer, &alive);
-                if !["prepared", "admitted"].contains(&self.stream(&id)?.run().state.as_str()) {
+                if self.stream(&id)?.run().state.is_terminal() {
                     reconciled.push(self.show(&id)?);
                     continue;
                 }
@@ -870,7 +868,7 @@ impl Store {
                 [&stream.run().history, &stream.run().capture_history]
                     .into_iter()
                     .flatten()
-                    .any(|history| history.state == "pruning"),
+                    .any(|history| history.state == HistoryState::Pruning),
             );
         }
         status

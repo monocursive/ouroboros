@@ -14,7 +14,9 @@ use super::{Store, check_run_id, stream::Stream};
 use crate::{
     discovery::valid_name,
     manifest::{self, STREAM},
-    protocol::{AppendReceipt, GcCandidate, GcPlan, LedgerError, Peer, Result},
+    protocol::{
+        AppendReceipt, GcCandidate, GcPlan, LedgerError, Peer, Result, RunState, Settlement,
+    },
     schemas,
 };
 
@@ -151,11 +153,11 @@ impl Store {
             if stream.is_poisoned() {
                 reasons.push("poisoned_stream");
             }
-            if stream.run().state == "outcome_unknown" {
+            if stream.run().state == RunState::OutcomeUnknown {
                 reasons.push("outcome_unknown");
-            } else if !["settled", "denied"].contains(&stream.run().state.as_str()) {
+            } else if !matches!(stream.run().state, RunState::Settled | RunState::Denied) {
                 reasons.push("active_run");
-            } else if stream.run().settlement != "recorded" {
+            } else if stream.run().settlement != Settlement::Recorded {
                 reasons.push("settlement_pending");
             } else if stream.run().outcome.as_ref().is_none_or(|outcome| {
                 !matches!(
@@ -220,8 +222,8 @@ impl Store {
             }
             runs.push(GcCandidate {
                 run_id: id.clone(),
-                state: stream.run().state.clone(),
-                child_protection: stream.run().child_protection.clone(),
+                state: stream.run().state,
+                child_protection: stream.run().child_protection,
                 chain: stream.run().chain.clone(),
                 last_activity_at: stream.last_activity_at().map(str::to_owned),
                 candidate: reasons.is_empty(),

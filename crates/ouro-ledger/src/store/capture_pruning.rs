@@ -12,7 +12,10 @@ use super::{
 };
 use crate::{
     faults::{self, Point},
-    protocol::{CaptureGcReceipt, Chain, LedgerError, Peer, PrunedHistory, Result, RunRecord},
+    protocol::{
+        CaptureGcReceipt, Chain, HistoryState, LedgerError, Peer, PrunedHistory, Result, RunRecord,
+        RunState,
+    },
     schemas,
 };
 
@@ -34,7 +37,11 @@ struct Retained {
 impl Retained {
     fn history(&self, complete: bool) -> Result<PrunedHistory> {
         Ok(PrunedHistory {
-            state: if complete { "pruned" } else { "pruning" }.into(),
+            state: if complete {
+                HistoryState::Pruned
+            } else {
+                HistoryState::Pruning
+            },
             anchor_digest: self.digest()?,
             collected_at: self.collected_at.clone(),
         })
@@ -165,7 +172,7 @@ pub(super) fn apply(root: &Path, stream: &mut Stream) -> Result<()> {
         || retained.capture != stream.run().capture
         || !stream.anchor(retained.chain.head_seq).is_some_and(|a| {
             Some(&a.digest) == retained.chain.head_digest.as_ref()
-                && ["settled", "denied"].contains(&a.state)
+                && matches!(a.state, RunState::Settled | RunState::Denied)
         })
     {
         return Err(LedgerError::refused(
