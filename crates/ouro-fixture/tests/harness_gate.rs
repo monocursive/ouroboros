@@ -1,10 +1,9 @@
 //! The harness, proved against a stand-in for `ouro-jail`.
 //!
-//! `crates/ouro-jail` does not exist in this worktree: the core and linux
-//! slices own it. So the pipe plumbing, the gate owner and the frame variants
-//! are proved here against `stand-in-jail`, a test binary that writes a
-//! prepared receipt, announces `prepared`, reads the gate to EOF, validates it
-//! against jail-v1 §8.2 and execs the target.
+//! The pipe plumbing, the gate owner and the frame variants are proved here
+//! without the real jail, against `stand-in-jail`, a test binary that writes
+//! a prepared receipt, announces `prepared`, reads the gate to EOF, validates
+//! it with the records crate's §8.2 parser and execs the target.
 //!
 //! What this proves: the harness passes descriptor numbers with the right
 //! direction, only the jail inherits them, the target inherits only stdio, the
@@ -12,8 +11,8 @@
 //! each `Release` variant is genuinely rejectable by a conforming parser.
 //!
 //! What this does NOT prove: anything about `ouro-jail`'s own gate parser,
-//! containment, observation or receipts. The stand-in's parser is part of this
-//! crate, not the product.
+//! containment, observation or receipts: the jail's own gate tests are in
+//! `crates/ouro-jail/tests`.
 
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -128,24 +127,38 @@ fn the_run_exposes_the_receipt_the_trace_and_the_private_state() {
     let case = Case::new();
     let (run, _) = release_with(&case, &Release::Valid, &plan_matching(&case));
 
+    // jail.json and the --receipt copy hold the latest receipt only (§7):
+    // the enforced one written before the exec.
     let receipts = run.receipts();
-    assert!(
-        receipts.len() >= 2,
-        "one from --receipt and one from jail.json: {receipts:?}"
+    assert_eq!(
+        receipts.len(),
+        2,
+        "one from jail.json and one from --receipt: {receipts:?}"
     );
-    let prepared = run
-        .receipt_phase("prepared")
-        .expect("a prepared receipt must be readable");
-    assert_eq!(prepared["schema"], "ouro.jail.receipt/1");
-    assert!(prepared["argv_digest"].is_string());
+    let enforced = run
+        .receipt_phase("enforced")
+        .expect("the final receipt must be readable");
+    assert_eq!(enforced["schema"], "ouro.jail.receipt/1");
+    assert!(enforced["argv_digest"].is_string());
+    // The stand-in contains nothing, and says so.
+    assert_eq!(enforced["containment"], "none");
+    // Every receipt the control channel announced is named by its digest.
+    let digests: Vec<&Value> = run
+        .control_messages()
+        .iter()
+        .map(|m| &m["receipt_digest"])
+        .collect();
+    assert!(digests.iter().all(|d| d.is_string()), "{digests:?}");
 
-    // §13.3: the lifecycle note, then the note of the final receipt, whose
-    // phase and digest the guarded accessor has checked against jail.json.
+    // §13.3: the lifecycle note, the prepared receipt's note, then the note
+    // of the final receipt, whose phase, attempt and digest the guarded
+    // accessor has checked against jail.json.
     let events = run.trace_events();
-    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events.len(), 3, "{events:?}");
     assert_eq!(events[0]["schema"], "ouro.event/1");
-    assert_eq!(events[1]["operation"], "jail.receipt");
     assert_eq!(events[1]["fields"]["phase"], "prepared");
+    assert_eq!(events[2]["operation"], "jail.receipt");
+    assert_eq!(events[2]["fields"]["phase"], "enforced");
 
     assert!(run.data_dir.join("attempts").is_dir());
     assert!(

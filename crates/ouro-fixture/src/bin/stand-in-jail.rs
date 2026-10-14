@@ -1,33 +1,37 @@
-//! A stand-in for `ouro-jail`, for testing the harness before the real jail
-//! exists.
+//! A stand-in for `ouro-jail`, for testing the harness without the real jail.
 //!
-//! It does the four things the harness plumbs: it writes a prepared receipt,
+//! It does the things the harness plumbs: it writes a prepared receipt,
 //! announces `prepared` on the control channel, reads the gate to EOF and
-//! validates it against jail-v1 §8.2, then execs the target argv. It contains
-//! no containment, no observation and no policy: it proves the *harness*, and
-//! a test that uses it must not claim anything about the jail.
+//! validates it with the product's own §8.2 parser (`ouro_records`), then
+//! writes the next receipt, announces it and execs the target argv. Every
+//! receipt, control message, trace note and error it writes is built from
+//! the `ouro_records` types, so it cannot drift from the wire vocabulary.
+//!
+//! It contains no containment, no observation and no policy, and its
+//! receipts say so (`containment: none`, every coverage class unsupported).
+//! It proves the *harness*: a test that uses it must not claim anything about
+//! the jail. It announces the exec before replacing its image, because after
+//! the exec nothing of it is left to announce anything.
 //!
 //! It is a separate binary of the test-only `ouro-fixture` crate and is never
-//! packaged. The integrator may delete it once `crates/ouro-jail` lands, at
-//! the cost of the §8.2 frame-rejection coverage it carries.
+//! packaged.
 
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::os::fd::{FromRawFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use clap::Parser;
-use serde::Deserialize;
-use serde_json::{Value, json};
-
-const GATE_SCHEMA: &str = "ouro.jail.gate/1";
-const CONTROL_SCHEMA: &str = "ouro.jail.control/1";
-const RECEIPT_SCHEMA: &str = "ouro.jail.receipt/1";
-const GATE_MAX_BYTES: usize = 1024;
-
-/// Exit code for a refusal before the target ran, jail-v1 §6.4.
-const EXIT_REFUSED: i32 = 125;
-const EXIT_TOOL_ERROR: i32 = 1;
+use ouro_records::records::semantic::receipt_digest;
+use ouro_records::records::{
+    Applied, AppliedNetwork, AttemptRecord, Containment, ControlKind, ControlMessage, Coverage,
+    ErrorCode, ErrorStage, EvidenceMode, GateExpectation, JailError, JailRecord, Lifetime,
+    ObserveMode, ObserverRecord, Os, Outcome, OutcomeKind, Phase, PlatformRecord, PolicyRecord,
+    Receipt, Remediation, SCHEMA_CONTROL, SCHEMA_EVENT, SourceHealth, SourceStatus, StateCleanup,
+    read_release,
+};
+use serde_json::json;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -66,83 +70,192 @@ struct Cli {
     argv: Vec<OsString>,
 }
 
-/// The §8.2 frame, strictly. `deny_unknown_fields` rejects extra keys and
-/// serde's own derived code rejects a duplicate key.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Frame {
-    schema: String,
-    action: String,
-    attempt_id: String,
-    policy_digest: String,
+/// The attempt's account: no boundary, no observer, nothing applied.
+fn attempt(cli: &Cli) -> AttemptRecord {
+    let now = SystemTime::now();
+    AttemptRecord {
+        attempt_id: cli.attempt_id.clone(),
+        revision: 1,
+        platform: PlatformRecord {
+            os: if cfg!(target_os = "linux") {
+                Os::Linux
+            } else {
+                Os::Macos
+            },
+            arch: std::env::consts::ARCH.to_owned(),
+            kernel: "unknown".to_owned(),
+        },
+        jail: JailRecord {
+            component: "stand-in-jail".to_owned(),
+            version: "0.0.0-test".to_owned(),
+            backend: None,
+            backend_version: None,
+        },
+        policy: PolicyRecord {
+            name: "stand-in".to_owned(),
+            digest: cli.policy_digest.clone(),
+            observe: ObserveMode::Off,
+            evidence: EvidenceMode::BestEffort,
+            requirements: Vec::new(),
+            grants: Vec::new(),
+        },
+        containment: Containment::None,
+        exec_observed: false,
+        argv_digest: Some(cli.argv_digest.clone()),
+        applied: Applied {
+            filesystem: None,
+            network: AppliedNetwork {
+                mode: "none".to_owned(),
+                mechanism: None,
+                allowed_hosts: Vec::new(),
+            },
+            syscalls: None,
+            limits: Vec::new(),
+            environment_names: Vec::new(),
+            removed_environment_names: Vec::new(),
+        },
+        observer: ObserverRecord {
+            backend: None,
+            set: None,
+            attached: false,
+            sources: SourceHealth {
+                wrapper: SourceStatus::Unsupported,
+                audit: SourceStatus::Unsupported,
+                proxy: SourceStatus::Unsupported,
+            },
+            gaps: Vec::new(),
+        },
+        coverage: Coverage::all_unsupported(),
+        process: None,
+        lifetime: Lifetime::pending(),
+        outcome: Outcome::pending(),
+        state_cleanup: StateCleanup::NotNeeded,
+        cleanup_error: None,
+        created_at: now,
+        updated_at: now,
+        errors: Vec::new(),
+        credentials: Vec::new(),
+    }
+}
+
+/// Where the stand-in reports: the receipt files, the control channel and
+/// the trace, each written as the real jail writes it.
+struct Reporter<'a> {
+    cli: &'a Cli,
+    record: AttemptRecord,
+    control: Option<std::fs::File>,
+    trace: Option<std::fs::File>,
+    seq: u64,
+}
+
+impl Reporter<'_> {
+    /// Write the receipt for `phase` to every receipt file, then announce it
+    /// with `kind` and end the trace (so far) on its `jail.receipt` note
+    /// (§13.3). A receipt that cannot be written is fatal, as it is for the
+    /// jail; a closed control or trace reader is the harness's business.
+    fn record(&mut self, phase: Phase, kind: ControlKind) -> Result<(), JailError> {
+        let receipt = self.record.receipt(phase);
+        let state_write = |what: &str, error: &dyn std::fmt::Display| {
+            JailError::new(
+                ErrorCode::StateWriteFailed,
+                ErrorStage::Preparing,
+                Remediation::InspectState,
+                format!("{what}: {error}"),
+            )
+        };
+        if let Some(path) = &self.cli.receipt {
+            write_receipt(path, &receipt).map_err(|e| state_write("--receipt", &e))?;
+        }
+        if let Some(dir) = std::env::var_os("OURO_DATA_DIR") {
+            let path = PathBuf::from(dir)
+                .join("attempts")
+                .join(&self.cli.attempt_id)
+                .join("jail.json");
+            write_receipt(&path, &receipt).map_err(|e| state_write("jail.json", &e))?;
+        }
+        let value = serde_json::to_value(&receipt).map_err(|e| state_write("receipt", &e))?;
+        let digest = receipt_digest(&value).map_err(|e| state_write("receipt digest", &e))?;
+        if let Some(w) = self.control.as_mut() {
+            let message = ControlMessage {
+                schema: SCHEMA_CONTROL.to_owned(),
+                attempt_id: self.cli.attempt_id.clone(),
+                seq: self.seq,
+                kind,
+                receipt_phase: phase,
+                receipt_digest: digest.clone(),
+                outcome: receipt.outcome.clone(),
+                error: receipt.outcome.error.clone(),
+            };
+            self.seq += 1;
+            if let Ok(frame) = message.to_frame() {
+                let _ = w.write_all(&frame);
+                let _ = w.flush();
+            }
+        }
+        if let Some(w) = self.trace.as_mut() {
+            let note = json!({
+                "schema": SCHEMA_EVENT,
+                "source": "wrapper",
+                "operation": "jail.receipt",
+                "stage": "result",
+                "attempt_id": self.cli.attempt_id,
+                "fields": { "phase": receipt.phase, "receipt_digest": digest },
+            });
+            let _ = writeln!(w, "{note}");
+            let _ = w.flush();
+        }
+        Ok(())
+    }
+
+    /// Refuse before the target ran: the refused receipt, its message, and
+    /// the jail's one-line diagnostic.
+    fn refuse(&mut self, error: &JailError) -> std::process::ExitCode {
+        self.record.outcome = Outcome::refused(error);
+        self.record.errors.push(error.to_object());
+        self.record.revision += 1;
+        if let Err(written) = self.record(Phase::Refused, ControlKind::Refused) {
+            return fail(&written);
+        }
+        fail(error)
+    }
 }
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-
-    let control = match cli.control_fd.map(checked_writer) {
-        Some(Ok(w)) => Some(w),
-        Some(Err(e)) => return fail(&format!("invalid_fd: --control-fd: {e}")),
-        None => None,
+    let invalid_fd = |flag: &str, why: String| {
+        JailError::new(
+            ErrorCode::InvalidFd,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            format!("{flag}: {why}"),
+        )
     };
-    let trace = match cli.trace_fd.map(checked_writer) {
-        Some(Ok(w)) => Some(w),
-        Some(Err(e)) => return fail(&format!("invalid_fd: --trace-fd: {e}")),
-        None => None,
+    let control = match cli.control_fd.map(checked_writer).transpose() {
+        Ok(w) => w,
+        Err(why) => return fail(&invalid_fd("--control-fd", why)),
     };
-    let gate = match cli.gate_fd.map(checked_reader) {
-        Some(Ok(r)) => Some(r),
-        Some(Err(e)) => return fail(&format!("invalid_fd: --gate-fd: {e}")),
-        None => None,
+    let trace = match cli.trace_fd.map(checked_writer).transpose() {
+        Ok(w) => w,
+        Err(why) => return fail(&invalid_fd("--trace-fd", why)),
+    };
+    let gate = match cli.gate_fd.map(checked_reader).transpose() {
+        Ok(r) => r,
+        Err(why) => return fail(&invalid_fd("--gate-fd", why)),
     };
 
-    let receipt = json!({
-        "schema": RECEIPT_SCHEMA,
-        "attempt_id": cli.attempt_id,
-        "revision": 1,
-        "phase": "prepared",
-        "jail": { "component": "stand-in-jail", "version": "0.0.0-test" },
-        "policy": { "name": "stand-in", "digest": cli.policy_digest },
-        "argv_digest": cli.argv_digest,
-        "argc": cli.argv.len(),
-    });
-    if let Some(path) = &cli.receipt
-        && let Err(e) = write_json(path, &receipt)
-    {
-        return fail(&format!("state_write_failed: --receipt: {e}"));
-    }
-    if let Some(dir) = std::env::var_os("OURO_DATA_DIR") {
-        let attempt = PathBuf::from(dir).join("attempts").join(&cli.attempt_id);
-        if std::fs::create_dir_all(&attempt).is_ok() {
-            let _ = write_json(&attempt.join("jail.json"), &receipt);
-        }
-    }
-
-    let mut control = control;
+    let mut reporter = Reporter {
+        record: attempt(&cli),
+        cli: &cli,
+        control,
+        trace,
+        seq: 0,
+    };
     if cli.malformed_control
-        && let Some(file) = &mut control
+        && let Some(w) = reporter.control.as_mut()
     {
-        writeln!(file, "not-json").expect("malformed control write");
+        writeln!(w, "not-json").expect("malformed control write");
     }
-    let mut seq = 0u64;
-    if let Some(w) = control.as_mut() {
-        let msg = json!({
-            "schema": CONTROL_SCHEMA,
-            "attempt_id": cli.attempt_id,
-            "seq": seq,
-            "kind": "prepared",
-            "receipt_phase": "prepared",
-            "receipt_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            "outcome": Value::Null,
-            "error": Value::Null,
-        });
-        seq += 1;
-        if writeln!(w, "{msg}").is_err() {
-            return std::process::ExitCode::from(EXIT_TOOL_ERROR as u8);
-        }
-        let _ = w.flush();
-    }
-    if let Some(mut w) = trace {
+    if let Some(w) = reporter.trace.as_mut() {
         for _ in 0..cli.trace_lines {
             writeln!(w, "{{\"padding\":\"{}\"}}", "x".repeat(1024)).expect("trace pressure write");
         }
@@ -150,172 +263,64 @@ fn main() -> std::process::ExitCode {
             writeln!(w, "not-json").expect("malformed trace write");
         }
         let event = json!({
-            "schema": "ouro.event/1",
+            "schema": SCHEMA_EVENT,
             "source": "wrapper",
             "stage": "attempt",
             "attempt_id": cli.attempt_id,
             "fields": { "kind": "lifecycle", "note": "stand-in prepared" },
         });
         let _ = writeln!(w, "{event}");
-        // jail-v1 §13.3: a complete trace ends on the `jail.receipt` note of
-        // the attempt's final receipt, which for this stand-in is the one
-        // prepared receipt it writes. Named as the real jail names it.
-        if let Ok((phase, digest)) =
-            ouro_fixture::harness::receipt_note_of(receipt_bytes(&receipt).as_bytes())
-        {
-            let note = json!({
-                "schema": "ouro.event/1",
-                "source": "wrapper",
-                "operation": "jail.receipt",
-                "stage": "result",
-                "attempt_id": cli.attempt_id,
-                "fields": { "phase": phase, "receipt_digest": digest },
-            });
-            let _ = writeln!(w, "{note}");
-        }
-        let _ = w.flush();
+    }
+    if let Err(error) = reporter.record(Phase::Prepared, ControlKind::Prepared) {
+        return fail(&error);
     }
 
-    if let Some(gate) = gate
-        && let Err(reason) = read_and_check_gate(gate, &cli.attempt_id, &cli.policy_digest)
-    {
-        if let Some(w) = control.as_mut() {
-            let msg = json!({
-                "schema": CONTROL_SCHEMA,
-                "attempt_id": cli.attempt_id,
-                "seq": seq,
-                "kind": "refused",
-                "receipt_phase": "refused",
-                "receipt_digest": Value::Null,
-                "outcome": Value::Null,
-                "error": {
-                    "code": reason.code,
-                    "stage": "gating",
-                    "message": reason.message,
-                    "remediation_category": "configuration",
-                },
-            });
-            let _ = writeln!(w, "{msg}");
-            let _ = w.flush();
+    if let Some(gate) = gate {
+        let expected = GateExpectation {
+            attempt_id: cli.attempt_id.clone(),
+            policy_digest: cli.policy_digest.clone(),
+        };
+        if let Err(error) = read_release(&mut std::fs::File::from(gate), &expected) {
+            return reporter.refuse(&error);
         }
-        eprintln!(
-            "stand-in-jail: error {} at gating [configuration]: {}",
-            reason.code, reason.message
-        );
-        return std::process::ExitCode::from(EXIT_REFUSED as u8);
     }
 
+    reporter.record.revision += 1;
     if cli.argv.is_empty() {
-        if let Some(w) = control.as_mut() {
-            let msg = json!({
-                "schema": CONTROL_SCHEMA,
-                "attempt_id": cli.attempt_id,
-                "seq": seq,
-                "kind": "settled",
-                "receipt_phase": "settled",
-                "receipt_digest": Value::Null,
-                "outcome": { "kind": "exited", "code": 0 },
-                "error": Value::Null,
-            });
-            let _ = writeln!(w, "{msg}");
+        // Nothing to run: settled at once, with nothing that ran.
+        reporter.record.outcome = Outcome {
+            kind: OutcomeKind::Exited,
+            code: Some(0),
+            signal: None,
+            cause: None,
+            error: None,
+        };
+        if let Err(error) = reporter.record(Phase::Settled, ControlKind::Settled) {
+            return fail(&error);
         }
         return std::process::ExitCode::SUCCESS;
     }
 
     // The gate and control channels never reach the target: announce the exec
-    // and drop both descriptors before replacing this image.
+    // and drop every descriptor before replacing this image.
     //
     // §8.3: "All other fds close before exec". The real jail owns that rule;
     // this stand-in has to mirror it, because a descriptor the *environment*
     // handed to the test process (a CI runner routinely does) would otherwise
     // reach the target through this process and look like a harness leak.
-    if let Some(w) = control.as_mut() {
-        let msg = json!({
-            "schema": CONTROL_SCHEMA,
-            "attempt_id": cli.attempt_id,
-            "seq": seq,
-            "kind": "exec_confirmed",
-            "receipt_phase": "enforced",
-            "receipt_digest": Value::Null,
-            "outcome": Value::Null,
-            "error": Value::Null,
-        });
-        let _ = writeln!(w, "{msg}");
-        let _ = w.flush();
+    if let Err(error) = reporter.record(Phase::Enforced, ControlKind::ExecConfirmed) {
+        return fail(&error);
     }
-    drop(control);
+    drop(reporter);
     close_extra_descriptors();
 
     let err = exec(&cli.argv);
-    eprintln!("stand-in-jail: error exec_failed at launching [configuration]: {err}");
-    std::process::ExitCode::from(EXIT_REFUSED as u8)
-}
-
-struct Refusal {
-    code: &'static str,
-    message: String,
-}
-
-fn read_and_check_gate(fd: OwnedFd, attempt_id: &str, policy_digest: &str) -> Result<(), Refusal> {
-    use std::io::Read as _;
-    let mut file = std::fs::File::from(fd);
-    let mut buf = Vec::new();
-    // Read through EOF before deciding, so a second frame or trailing bytes
-    // cannot be accepted after the first line looked fine (§8.2).
-    if let Err(e) = file.read_to_end(&mut buf) {
-        return Err(Refusal {
-            code: "gate_invalid",
-            message: format!("gate could not be read: {e}"),
-        });
-    }
-
-    let invalid = |message: String| {
-        Err(Refusal {
-            code: "gate_invalid",
-            message,
-        })
-    };
-
-    if buf.is_empty() {
-        return Err(Refusal {
-            code: "gate_closed",
-            message: "gate closed with no frame".into(),
-        });
-    }
-    if buf.len() > GATE_MAX_BYTES {
-        return invalid(format!(
-            "frame is {} bytes, over the {GATE_MAX_BYTES}-byte cap",
-            buf.len()
-        ));
-    }
-    if buf.contains(&b'\r') {
-        return invalid("frame contains CR".into());
-    }
-    if buf.last() != Some(&b'\n') {
-        return invalid("frame does not end in LF".into());
-    }
-    if buf.iter().filter(|b| **b == b'\n').count() != 1 {
-        return invalid("frame is not exactly one line".into());
-    }
-
-    let body = &buf[..buf.len() - 1];
-    let frame: Frame = match serde_json::from_slice(body) {
-        Ok(f) => f,
-        Err(e) => return invalid(format!("frame is not a valid gate object: {e}")),
-    };
-    if frame.schema != GATE_SCHEMA {
-        return invalid(format!("wrong schema `{}`", frame.schema));
-    }
-    if frame.action != "release" {
-        return invalid(format!("wrong action `{}`", frame.action));
-    }
-    if frame.attempt_id != attempt_id {
-        return invalid("frame names a different attempt".into());
-    }
-    if frame.policy_digest != policy_digest {
-        return invalid("frame names a different policy digest".into());
-    }
-    Ok(())
+    fail(&JailError::new(
+        ErrorCode::ExecFailed,
+        ErrorStage::Released,
+        Remediation::Configuration,
+        err.to_string(),
+    ))
 }
 
 /// Close every descriptor above stderr, so the target inherits only validated
@@ -325,11 +330,10 @@ fn close_extra_descriptors() {
     #[cfg(target_os = "linux")]
     {
         // `close_range` is one syscall and cannot miss a descriptor.
-        const SYS_CLOSE_RANGE: libc::c_long = 436;
         // SAFETY: closing a range of descriptor numbers this process owns;
         // stdio is excluded and nothing below is used afterwards except the
         // exec itself.
-        let rc = unsafe { libc::syscall(SYS_CLOSE_RANGE, 3u32, u32::MAX, 0u32) };
+        let rc = unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) };
         if rc == 0 {
             return;
         }
@@ -408,19 +412,22 @@ fn check_access(fd: i32, want_write: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// The bytes a receipt file of this stand-in holds.
-fn receipt_bytes(value: &Value) -> String {
-    format!("{value}\n")
-}
-
-fn write_json(path: &std::path::Path, value: &Value) -> std::io::Result<()> {
+/// Replace a receipt file, one JSON document, through a sibling temporary
+/// file and a rename, as §7 replaces `jail.json`.
+fn write_receipt(path: &Path, receipt: &Receipt) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, receipt_bytes(value))
+    let mut bytes = serde_json::to_vec(receipt)?;
+    bytes.push(b'\n');
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".new");
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(&temporary, path)
 }
 
-fn fail(message: &str) -> std::process::ExitCode {
-    eprintln!("stand-in-jail: {message}");
-    std::process::ExitCode::from(EXIT_REFUSED as u8)
+/// The jail's one-line diagnostic for `error`, and its exit status.
+fn fail(error: &JailError) -> std::process::ExitCode {
+    eprintln!("stand-in-jail: {error}");
+    std::process::ExitCode::from(u8::try_from(error.refusal_exit_code()).unwrap_or(1))
 }

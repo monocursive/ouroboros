@@ -20,10 +20,6 @@ pub mod pipes;
 // not depend on `ouro-jail`.
 #[path = "../../../ouro-jail/src/trace/readback.rs"]
 pub mod readback;
-// The product's RFC 8785 serializer, included by path for the same reason:
-// the receipt digest a trace note carries is over these canonical bytes.
-#[path = "../../../ouro-records/src/canonical/jcs.rs"]
-pub mod jcs;
 pub mod tempdir;
 pub mod unix_probe;
 
@@ -929,30 +925,16 @@ impl Spawned {
 
         // Receipts are read once, now, so a read or parse error is a recorded
         // fact rather than a silently empty list that makes every negative
-        // assertion pass.
+        // assertion pass. The bytes are kept too, for §13.3's completeness
+        // rule: a trace ends on the note of the final receipt, which names it
+        // by the digest of its bytes. Read after exit, so the values are
+        // exactly the files' contents.
         let data_dir = self.root.path().join("data");
-        let mut receipts = Vec::new();
-        let mut receipt_errors = Vec::new();
-        collect_receipts(&data_dir, &mut receipts, &mut receipt_errors);
-        if let Some(p) = &self.receipt {
-            match std::fs::read_to_string(p) {
-                Ok(text) => push_json(&text, p, &mut receipts, &mut receipt_errors),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => receipt_errors.push(format!("{}: {e}", p.display())),
-            }
-        }
-        // The bytes too, for §13.3's completeness rule: a trace ends on the
-        // note of the final receipt, which names it by the digest of its
-        // bytes. Read after exit, so they are the files the values came from.
-        let mut receipt_files = Vec::new();
-        let mut canonical = Vec::new();
-        collect_named(&data_dir, OsStr::new("jail.json"), &mut canonical);
-        canonical.extend(self.receipt.clone());
-        for path in canonical {
-            if let Ok(bytes) = std::fs::read(&path) {
-                receipt_files.push((path, bytes));
-            }
-        }
+        let ReadReceipts {
+            values: receipts,
+            files: receipt_files,
+            errors: receipt_errors,
+        } = read_receipts(&data_dir, self.receipt.as_deref());
 
         Ok(Run {
             status,
@@ -1052,14 +1034,14 @@ impl Run {
         }
     }
 
-    /// Every receipt read from the private data directory, once, at `wait`.
+    /// Every receipt read from the private data directory, once, at `wait`,
+    /// then the `--receipt` copy.
     ///
-    /// `jail.json` is read as one JSON document when it parses that way and as
-    /// NDJSON otherwise, because jail-v1 §7 fixes the file name but the J1
-    /// core slice chooses between the two encodings. A file that exists and
-    /// cannot be read or parsed panics: an unreadable receipt used to come
-    /// back as an empty list, which made "the run produced no refused receipt"
-    /// pass without reading anything.
+    /// Each file is one JSON document (jail-v1 §7: `jail.json` is the latest
+    /// receipt, atomically replaced). A file that exists and cannot be read
+    /// or parsed panics: an unreadable receipt used to come back as an empty
+    /// list, which made "the run produced no refused receipt" pass without
+    /// reading anything.
     #[must_use]
     pub fn receipts(&self) -> Vec<Value> {
         assert!(
@@ -1202,14 +1184,16 @@ impl Run {
 ///
 /// Syntax first: every line one complete frame. Then §13.3's rule: "A trace
 /// is complete only if its last frame is the `jail.receipt` note of the
-/// attempt's final receipt", so the last frame must be that note, and its
-/// phase and digest must be the ones [`receipt_note_of`] computes from the
-/// final receipt's bytes. A sink that lost evidence keeps a prefix that can
-/// end on a frame boundary; so does one that lost the final note, or a
-/// receipt rewritten after its note. Only this comparison tells them apart
-/// from a whole trace. No trace asked for is `Ok`; so is an empty trace from
-/// a run that left no receipt at all, which attempted nothing to be
-/// incomplete about.
+/// attempt's final receipt", checked by the records crate's own
+/// [`trace_ends_with`](ouro_records::records::semantic::trace_ends_with): the
+/// last frame is a wrapper `jail.receipt` note of the same attempt naming
+/// the final receipt's phase and canonical digest, and the stream's loss
+/// note agrees with the receipt's loss gaps. A sink that lost evidence keeps
+/// a prefix that can end on a frame boundary; so does one that lost the
+/// final note, or a receipt rewritten after its note. Only this comparison
+/// tells them apart from a whole trace. No trace asked for is `Ok`; so is an
+/// empty trace from a run that left no receipt at all, which attempted
+/// nothing to be incomplete about.
 pub fn trace_guard(
     readback: Option<&Readback>,
     final_receipt: Option<&[u8]>,
@@ -1243,75 +1227,54 @@ pub fn trace_guard(
              to compare it with"
         ));
     };
-    match receipt_note_of(receipt) {
-        Ok((want_phase, want_digest)) if want_phase == phase && want_digest == digest => Ok(()),
-        Ok((want_phase, want_digest)) => partial(format!(
-            "the trace ends on the {phase} note {digest}, but the final receipt is \
-             {want_phase} {want_digest}"
-        )),
-        Err(error) => partial(format!("the final receipt cannot be read: {error}")),
+    let receipt = match receipt_document(receipt) {
+        Ok(receipt) => receipt,
+        Err(error) => return partial(format!("the final receipt cannot be read: {error}")),
+    };
+    let violations = ouro_records::records::semantic::trace_ends_with(&readback.frames, &receipt);
+    if violations.is_empty() {
+        return Ok(());
     }
+    let found = receipt_note_of_value(&receipt).map_or_else(
+        |error| error,
+        |(want_phase, want_digest)| format!("the final receipt is {want_phase} {want_digest}"),
+    );
+    partial(format!(
+        "the trace ends on the {phase} note {digest}, but {found}: {}",
+        violations
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))
+}
+
+/// A receipt file's one JSON document (jail-v1 §7: `jail.json` is the
+/// latest receipt, atomically replaced).
+fn receipt_document(bytes: &[u8]) -> Result<Value, String> {
+    serde_json::from_slice(bytes).map_err(|error| format!("not one JSON document: {error}"))
 }
 
 /// The `(phase, receipt_digest)` a `jail.receipt` note carries for a
-/// receipt file's bytes.
-///
-/// The product names a receipt by `sha256:` and the lowercase hex SHA-256 of
-/// its RFC 8785 canonical bytes (canonicalization.md), whatever layout the
-/// file uses. An NDJSON file's last document is its latest receipt.
+/// receipt file's bytes: the receipt's phase, and `sha256:` over its RFC
+/// 8785 canonical bytes (canonicalization.md, "A receipt digest"), computed
+/// by the records crate, so the file's layout does not matter.
 ///
 /// # Errors
 /// Why the bytes hold no receipt with a phase.
 pub fn receipt_note_of(bytes: &[u8]) -> Result<(String, String), String> {
-    use sha2::{Digest as _, Sha256};
-    let document: &[u8] = if serde_json::from_slice::<Value>(bytes).is_ok() {
-        bytes
-    } else {
-        bytes
-            .split(|byte| *byte == b'\n')
-            .rfind(|line| !line.iter().all(u8::is_ascii_whitespace))
-            .ok_or("an empty receipt file")?
-    };
-    let value: Value =
-        serde_json::from_slice(document).map_err(|error| format!("not JSON: {error}"))?;
-    let phase = value
+    receipt_note_of_value(&receipt_document(bytes)?)
+}
+
+fn receipt_note_of_value(receipt: &Value) -> Result<(String, String), String> {
+    let phase = receipt
         .get("phase")
         .and_then(Value::as_str)
         .ok_or("a receipt without a phase")?
         .to_owned();
-    let canonical = jcs::to_jcs(&value).map_err(|error| error.to_string())?;
-    let mut digest = String::from("sha256:");
-    for byte in Sha256::digest(canonical) {
-        digest.push_str(&format!("{byte:02x}"));
-    }
+    let digest = ouro_records::records::semantic::receipt_digest(receipt)
+        .map_err(|error| error.to_string())?;
     Ok((phase, digest))
-}
-
-/// Valid JSON with every whitespace byte outside a string removed: what
-/// `serde_json::to_vec` writes for what `to_vec_pretty` wrote.
-#[must_use]
-pub fn compact_json(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut in_string = false;
-    let mut escaped = false;
-    for &byte in bytes {
-        if in_string {
-            out.push(byte);
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-        } else if byte == b'"' {
-            in_string = true;
-            out.push(byte);
-        } else if !matches!(byte, b' ' | b'\n' | b'\r' | b'\t') {
-            out.push(byte);
-        }
-    }
-    out
 }
 
 fn collect_named(dir: &Path, name: &OsStr, out: &mut Vec<PathBuf>) {
@@ -1346,7 +1309,43 @@ pub fn channel_guard(timed_out: &[String], controls: usize, traces: usize) -> Re
     ))
 }
 
-fn collect_receipts(dir: &Path, out: &mut Vec<Value>, errors: &mut Vec<String>) {
+/// The receipts a run left, each file read once.
+struct ReadReceipts {
+    values: Vec<Value>,
+    files: Vec<(PathBuf, Vec<u8>)>,
+    errors: Vec<String>,
+}
+
+/// Every `jail.json` under `data_dir`, then the `--receipt` copy when one
+/// was written, each read once and parsed as one JSON document.
+fn read_receipts(data_dir: &Path, copy: Option<&Path>) -> ReadReceipts {
+    let mut paths = Vec::new();
+    let mut read = ReadReceipts {
+        values: Vec::new(),
+        files: Vec::new(),
+        errors: Vec::new(),
+    };
+    collect_receipts(data_dir, &mut paths, &mut read.errors);
+    paths.extend(copy.map(Path::to_path_buf));
+    for path in paths {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                match receipt_document(&bytes) {
+                    Ok(value) => read.values.push(value),
+                    Err(e) => read.errors.push(format!("{}: {e}", path.display())),
+                }
+                read.files.push((path, bytes));
+            }
+            // The copy is written only when the jail got that far.
+            Err(e) if e.kind() == io::ErrorKind::NotFound && Some(path.as_path()) == copy => {}
+            Err(e) => read.errors.push(format!("{}: {e}", path.display())),
+        }
+    }
+    read
+}
+
+/// Every `jail.json` under `dir`, in path order.
+fn collect_receipts(dir: &Path, out: &mut Vec<PathBuf>, errors: &mut Vec<String>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         // An absent data directory is not an error: a refusal before state
@@ -1357,45 +1356,13 @@ fn collect_receipts(dir: &Path, out: &mut Vec<Value>, errors: &mut Vec<String>) 
             return;
         }
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+    for path in paths {
         if path.is_dir() {
             collect_receipts(&path, out, errors);
         } else if path.file_name() == Some(OsStr::new("jail.json")) {
-            match std::fs::read_to_string(&path) {
-                Ok(text) => push_json(&text, &path, out, errors),
-                Err(e) => errors.push(format!("{}: {e}", path.display())),
-            }
-        }
-    }
-}
-
-/// One receipt file: a single JSON document, or NDJSON. A file that is
-/// neither is an error, not an empty result.
-fn push_json(text: &str, from: &Path, out: &mut Vec<Value>, errors: &mut Vec<String>) {
-    match serde_json::from_str::<Value>(text) {
-        Ok(v) => out.push(v),
-        Err(whole) => {
-            let mut lines = 0usize;
-            let mut parsed = Vec::new();
-            for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                lines += 1;
-                match serde_json::from_str::<Value>(line) {
-                    Ok(v) => parsed.push(v),
-                    Err(e) => {
-                        errors.push(format!(
-                            "{}: neither one JSON document ({whole}) nor NDJSON ({e})",
-                            from.display()
-                        ));
-                        return;
-                    }
-                }
-            }
-            if lines == 0 {
-                errors.push(format!("{}: empty receipt file", from.display()));
-                return;
-            }
-            out.extend(parsed);
+            out.push(path);
         }
     }
 }
@@ -1554,24 +1521,20 @@ mod tests {
         std::fs::create_dir_all(&attempt).unwrap();
         std::fs::write(attempt.join("jail.json"), b"{ half written").unwrap();
 
-        let mut out = Vec::new();
-        let mut errors = Vec::new();
-        collect_receipts(dir.path(), &mut out, &mut errors);
-        assert!(out.is_empty());
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("jail.json"), "{errors:?}");
+        let read = read_receipts(dir.path(), None);
+        assert!(read.values.is_empty());
+        assert_eq!(read.errors.len(), 1, "{:?}", read.errors);
+        assert!(read.errors[0].contains("jail.json"), "{:?}", read.errors);
 
         // An empty file is an error too, not zero receipts.
         std::fs::write(attempt.join("jail.json"), b"").unwrap();
-        let (mut out, mut errors) = (Vec::new(), Vec::new());
-        collect_receipts(dir.path(), &mut out, &mut errors);
+        let errors = read_receipts(dir.path(), None).errors;
         assert_eq!(errors.len(), 1, "{errors:?}");
 
         // An absent data directory is not an error: a refusal before state
         // creation leaves none.
-        let (mut out, mut errors) = (Vec::new(), Vec::new());
-        collect_receipts(&dir.path().join("nothing-here"), &mut out, &mut errors);
-        assert!(out.is_empty() && errors.is_empty());
+        let read = read_receipts(&dir.path().join("nothing-here"), None);
+        assert!(read.values.is_empty() && read.errors.is_empty());
     }
 
     #[test]
@@ -1601,11 +1564,26 @@ mod tests {
     }
 
     #[test]
-    fn receipts_read_both_a_single_document_and_ndjson() {
+    fn receipts_are_one_document_each_and_anything_else_is_an_error() {
         let dir = TempDir::new("ouro-receipts-test").unwrap();
         let nested = dir.path().join("attempts/att_1");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("jail.json"), r#"{"phase":"prepared"}"#).unwrap();
+        let copy = dir.path().join("copy.json");
+        std::fs::write(&copy, "{\n  \"phase\": \"settled\"\n}\n").unwrap();
+
+        let read = read_receipts(dir.path(), Some(&copy));
+        assert!(read.errors.is_empty(), "{:?}", read.errors);
+        let phases: Vec<&str> = read
+            .values
+            .iter()
+            .filter_map(|v| v.get("phase").and_then(Value::as_str))
+            .collect();
+        assert_eq!(phases, ["prepared", "settled"]);
+        assert_eq!(read.files.len(), 2);
+        assert_eq!(read.files[1].0, copy);
+
+        // A copy that was never written is not an error; NDJSON is.
         let other = dir.path().join("attempts/att_2");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(
@@ -1613,17 +1591,10 @@ mod tests {
             "{\"phase\":\"prepared\"}\n{\"phase\":\"settled\"}\n",
         )
         .unwrap();
-
-        let mut out = Vec::new();
-        let mut errors = Vec::new();
-        collect_receipts(dir.path(), &mut out, &mut errors);
-        assert!(errors.is_empty(), "{errors:?}");
-        let phases: Vec<&str> = out
-            .iter()
-            .filter_map(|v| v.get("phase").and_then(Value::as_str))
-            .collect();
-        assert_eq!(phases.len(), 3, "got {phases:?}");
-        assert!(phases.contains(&"settled"));
+        let read = read_receipts(dir.path(), Some(&dir.path().join("absent.json")));
+        assert_eq!(read.values.len(), 1, "{:?}", read.values);
+        assert_eq!(read.errors.len(), 1, "{:?}", read.errors);
+        assert!(read.errors[0].contains("att_2"), "{:?}", read.errors);
     }
 
     /// A stand-in "jail" that writes one complete frame and a torn one to the
@@ -1636,7 +1607,7 @@ mod tests {
     }
 
     #[test]
-    fn j4_r03_a_torn_last_trace_line_is_reported_not_a_failed_run() {
+    fn a_torn_last_trace_line_is_reported_not_a_failed_run() {
         let run = torn_trace_writer().run().expect(
             "a torn last line is a recognisable fact about the trace, not a harness failure",
         );
@@ -1724,7 +1695,6 @@ mod tests {
     /// A pretty-printed receipt and the frame naming it, as the product
     /// writes them: the note's digest is over the canonical bytes.
     fn receipt_and_note(phase: &str) -> (Vec<u8>, Vec<u8>) {
-        use sha2::{Digest as _, Sha256};
         let receipt = serde_json::json!({
             "schema": "ouro.jail.receipt/1",
             "attempt_id": "att_1",
@@ -1735,10 +1705,10 @@ mod tests {
             "nested": {"list": [1, -25, null, true, {"k": "v w"}]},
         });
         let pretty = serde_json::to_vec_pretty(&receipt).unwrap();
-        let mut digest = String::from("sha256:");
-        for byte in Sha256::digest(jcs::to_jcs(&receipt).unwrap()) {
-            digest.push_str(&format!("{byte:02x}"));
-        }
+        // The digest by its definition, independently of `receipt_digest`.
+        let digest = ouro_records::canonical::sha256_prefixed(
+            &ouro_records::canonical::to_jcs(&receipt).unwrap(),
+        );
         let note = serde_json::json!({
             "schema": "ouro.event/1",
             "attempt_id": "att_1",
@@ -1750,14 +1720,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pretty_receipt_compacts_to_the_bytes_its_digest_is_over() {
-        let value = serde_json::json!({
-            "a": [], "b": {}, "c": "x y\n\"z\" \\", "d": [1, {"e": " "}], "f": "\u{e9}"
-        });
-        assert_eq!(
-            compact_json(&serde_json::to_vec_pretty(&value).unwrap()),
-            serde_json::to_vec(&value).unwrap()
-        );
+    fn a_receipt_is_named_by_its_canonical_bytes_whatever_its_layout() {
         let (pretty, note) = receipt_and_note("settled");
         let (phase, digest) = receipt_note_of(&pretty).unwrap();
         assert_eq!(phase, "settled");
@@ -1765,12 +1728,15 @@ mod tests {
             read_frames(&note).last_receipt_note(),
             Some(("settled", digest.as_str()))
         );
-        // NDJSON: the last document is the latest receipt.
-        let mut ndjson = b"{\"phase\":\"prepared\"}\n".to_vec();
-        ndjson.extend(compact_json(&pretty));
-        ndjson.push(b'\n');
-        assert_eq!(receipt_note_of(&ndjson).unwrap(), (phase, digest));
+        let value: Value = serde_json::from_slice(&pretty).unwrap();
+        let compact = serde_json::to_vec(&value).unwrap();
+        assert_eq!(receipt_note_of(&compact).unwrap(), (phase, digest));
         assert!(receipt_note_of(b"{}").is_err(), "a receipt has a phase");
+        // jail.json is one document: NDJSON is not a receipt file.
+        let mut ndjson = b"{\"phase\":\"prepared\"}\n".to_vec();
+        ndjson.extend(compact);
+        ndjson.push(b'\n');
+        assert!(receipt_note_of(&ndjson).is_err());
     }
 
     #[test]
@@ -1805,6 +1771,14 @@ mod tests {
         // A note of another receipt: a receipt rewritten after its note, or
         // an earlier phase's note last.
         refused(&whole, Some(&enforced), "but the final receipt is enforced");
+        // The note of the right receipt, but from another attempt.
+        let other_attempt = String::from_utf8(note.clone())
+            .unwrap()
+            .replace("\"attempt_id\":\"att_1\"", "\"attempt_id\":\"att_2\"");
+        assert_ne!(other_attempt.as_bytes(), note.as_slice());
+        let mut foreign = b"{\"n\":1}\n".to_vec();
+        foreign.extend_from_slice(other_attempt.as_bytes());
+        refused(&foreign, Some(&settled), "trace_final_receipt");
         // Whitespace outside strings is not the receipt's content; inside a
         // string it is.
         let mut respaced = settled.clone();

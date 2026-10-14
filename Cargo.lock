@@ -815,9 +815,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "libc",
+ "ouro-records",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
 ]
 

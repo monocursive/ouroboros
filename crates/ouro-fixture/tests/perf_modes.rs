@@ -396,20 +396,22 @@ fn receipt_with_leaf(leaf: &Path) -> Value {
     receipt
 }
 
-/// A trace whose last frame is the note of `receipt`, as the product ends one.
+/// A trace whose last frame is the note of `receipt`, as the product ends one:
+/// every frame of the receipt's own attempt.
 fn trace_ending_on(receipt: &[u8]) -> Vec<u8> {
     let (phase, digest) = ouro_fixture::harness::receipt_note_of(receipt).unwrap();
+    let attempt = serde_json::from_slice::<Value>(receipt).unwrap()["attempt_id"].clone();
     let event = json!({
-        "schema": "ouro.event/1", "attempt_id": "att_x", "source": "audit",
+        "schema": "ouro.event/1", "attempt_id": attempt, "source": "audit",
         "source_seq": 1, "operation": "fs.write", "stage": "result",
     });
     let note = json!({
-        "schema": "ouro.event/1", "attempt_id": "att_x", "source": "wrapper",
+        "schema": "ouro.event/1", "attempt_id": attempt, "source": "wrapper",
         "source_seq": 1, "operation": "jail.receipt", "stage": "result",
         "fields": { "phase": phase, "receipt_digest": digest },
     });
     let exit = json!({
-        "schema": "ouro.event/1", "attempt_id": "att_x", "source": "wrapper",
+        "schema": "ouro.event/1", "attempt_id": attempt, "source": "wrapper",
         "source_seq": 0, "operation": "note", "stage": "result",
         "fields": { "kind": "coverage_gap" },
     });

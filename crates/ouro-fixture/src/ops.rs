@@ -1686,15 +1686,19 @@ fn echo_args(rep: &Reporter, argv: &[OsString]) {
     rep.emit(&report);
 }
 
+/// How much of the pattern one write carries: a multiple of 256, so the
+/// chunks tile the stream exactly.
+const STREAM_CHUNK: usize = 64 * 1024;
+const _: () = assert!(STREAM_CHUNK.is_multiple_of(256));
+
 /// Byte `i` of the stream is `i % 256`, so every byte value including NUL
 /// appears and any truncation or re-encoding is visible.
 fn stream_bytes(rep: &Reporter, fd: c_int, count: u64, name: &str) -> bool {
-    const CHUNK: usize = 64 * 1024; // a multiple of 256, so chunks tile exactly
-    let pattern: Vec<u8> = (0..CHUNK).map(|i| (i % 256) as u8).collect();
+    let pattern = crate::bounded::pattern(STREAM_CHUNK);
     let mut left = count;
     let mut ok = true;
     while left > 0 {
-        let n = std::cmp::min(left, CHUNK as u64) as usize;
+        let n = std::cmp::min(left, STREAM_CHUNK as u64) as usize;
         if !write_all(fd, &pattern[..n]) {
             ok = false;
             break;
@@ -2204,13 +2208,19 @@ mod tests {
 
     #[test]
     fn the_byte_pattern_covers_every_byte_value() {
-        let pattern: Vec<u8> = (0..512).map(|i| (i % 256) as u8).collect();
+        // The chunk `stream_bytes` writes, twice over: the stream it makes.
+        let chunk = crate::bounded::pattern(STREAM_CHUNK);
+        let stream: Vec<u8> = chunk.iter().chain(&chunk).copied().collect();
         let mut seen = [false; 256];
-        for b in &pattern[..256] {
+        for b in &stream[..256] {
             seen[*b as usize] = true;
         }
         assert!(seen.iter().all(|s| *s));
-        assert_eq!(pattern[0], 0, "NUL is in the stream");
-        assert_eq!(pattern[256], pattern[0], "chunks of 64 KiB tile exactly");
+        assert_eq!(stream[0], 0, "NUL is in the stream");
+        assert_eq!(
+            stream,
+            crate::bounded::pattern(2 * STREAM_CHUNK),
+            "chunks tile the stream exactly"
+        );
     }
 }
