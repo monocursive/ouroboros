@@ -532,7 +532,8 @@ fn k04_bootstrap_executes_the_descriptor_without_pathname_fallback() {
     if !common::live() {
         return;
     }
-    use ouro_jail::platform::linux::{exec, fs::PinnedPath, watch};
+    use ouro_jail::platform::linux::fs::{PinError, PinnedPath};
+    use ouro_jail::platform::linux::{exec, watch};
     let root = common::private_tempdir();
     let backend = root.path().join("backend");
     std::fs::copy(PYTHON, &backend).unwrap();
@@ -540,7 +541,18 @@ fn k04_bootstrap_executes_the_descriptor_without_pathname_fallback() {
     let replacement = root.path().join("replacement");
     std::fs::copy("/usr/bin/false", &replacement).unwrap();
     std::fs::rename(replacement, &backend).unwrap();
-    assert!(pin.verify_executable().is_err());
+    let error = pin
+        .verify_executable()
+        .expect_err("a backend replaced after pinning is refused");
+    assert!(
+        matches!(
+            error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<PinError>()),
+            Some(PinError::Replaced { .. })
+        ),
+        "the refusal is not the replacement: {error}"
+    );
     let (start_r, start_w) = exec::pipe().unwrap();
     let mut fds = exec::FdMap::new();
     fds.add(start_r, watch::START_FD).unwrap();

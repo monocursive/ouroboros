@@ -112,8 +112,15 @@ fn real_launch_bundles_verify_offline_with_selected_truncated_captures() {
             report
         );
         assert!(!fixture.data.exists());
+        // Same size, other bytes: only the inventory's digest can tell.
         fs::write(moved.join("stdout.bin"), b"fake").unwrap();
-        assert!(ouro_ledger::bundle::verify(&moved).is_err());
+        let error = ouro_ledger::bundle::verify(&moved)
+            .expect_err("a tampered member is refused")
+            .to_string();
+        assert!(
+            error.contains("bundle member size or digest mismatch"),
+            "{error}"
+        );
     }
 }
 

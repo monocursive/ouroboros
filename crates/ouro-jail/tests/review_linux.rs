@@ -75,6 +75,10 @@ fn audit_events(run: &Run) -> Vec<&Value> {
 }
 
 /// A recursive listing of `root` as `path\tmode\tsize` lines, sorted.
+///
+/// `-printf` is GNU find's: a find without it fails, and an empty listing
+/// would make every before/after comparison pass, so the status is checked
+/// and the root itself must be listed.
 fn snapshot_tree(root: &Path) -> Vec<String> {
     let out = Command::new("find")
         .arg(root)
@@ -82,6 +86,17 @@ fn snapshot_tree(root: &Path) -> Vec<String> {
         .arg("%P\t%m\t%s\t%y\n")
         .output()
         .expect("find runs");
+    assert!(
+        out.status.success(),
+        "find {} failed: {}",
+        root.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.starts_with(b"\t"),
+        "find did not list {} itself",
+        root.display()
+    );
     let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(ToOwned::to_owned)
@@ -1833,6 +1848,10 @@ fn r7_doctor_is_read_only_and_its_exit_code_follows_readiness() {
     }
     let exe = harness::jail_path();
     let jail = Jail::new().expect("harness");
+    let before = (
+        snapshot_tree(&jail.data_dir()),
+        snapshot_tree(&jail.config_dir()),
+    );
     let out = Command::new(&exe)
         .arg("doctor")
         .arg("--json")
@@ -1842,7 +1861,17 @@ fn r7_doctor_is_read_only_and_its_exit_code_follows_readiness() {
         .expect("doctor");
     let text = String::from_utf8_lossy(&out.stdout);
     let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
-    let ready = value.get("ready").and_then(Value::as_bool).unwrap_or(false);
+    let errors: Vec<String> = common::validators()["jail-doctor"]
+        .iter_errors(&value)
+        .map(|error| format!("{error} at {}", error.instance_path()))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "doctor's report fails its schema: {errors:?}\n{value:#}"
+    );
+    let ready = value["ready"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("doctor's report says nothing of readiness: {value:#}"));
     eprintln!("ready={ready} code={:?}", out.status.code());
     for capability in value
         .get("capabilities")
@@ -1870,20 +1899,13 @@ fn r7_doctor_is_read_only_and_its_exit_code_follows_readiness() {
         Some(if ready { 0 } else { 125 }),
         "doctor's exit code does not follow its own readiness"
     );
-    // The state directory must hold nothing after a doctor run.
-    let attempts = jail.data_dir().join("attempts");
-    let left: Vec<String> = std::fs::read_dir(&attempts)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    assert!(
-        left.is_empty(),
-        "doctor left attempt state behind: {left:?}"
+    // Read-only: the data and config directories are exactly as they were,
+    // entry for entry, mode and size included.
+    let after = (
+        snapshot_tree(&jail.data_dir()),
+        snapshot_tree(&jail.config_dir()),
     );
+    assert_eq!(after, before, "doctor changed the operator's state");
 }
 
 // ===========================================================================

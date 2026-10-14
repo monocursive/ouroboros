@@ -417,7 +417,16 @@ fn durable_cursor_refuses_changed_checkpoint_and_replaced_canonical_inode() {
         }
 
         let mut recovered = Store::open(&fixture.data).unwrap();
-        assert!(recovered.read(&request).is_err());
+        let error = recovered
+            .read(&request)
+            .expect_err("a durable cursor over changed state is refused")
+            .to_string();
+        let expected = if replace_canonical {
+            "reader canonical snapshot is corrupt: identity or length changed"
+        } else {
+            "reader checkpoint is corrupt or unavailable"
+        };
+        assert!(error.contains(expected), "{error}");
         assert!(first_run_consistent(&recovered));
     }
 }
