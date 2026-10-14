@@ -267,8 +267,14 @@ fn a_failure_that_is_not_the_journals_backs_off_and_is_logged_once() {
 
 #[test]
 fn settling_orphans_skips_a_run_it_cannot_reconcile_now_and_settles_the_rest() {
-    // A dead owner's journal whose lock another open description holds.
-    let (_temp, mut store, stuck) = admitted_with_journal("pending-stuck");
+    // A dead owner's journal whose lock another open description holds. Its
+    // run id sorts in the lower half, so orphans soon sort after it.
+    let (_temp, mut store, stuck) = loop {
+        let fixture = admitted_with_journal("pending-stuck");
+        if fixture.2.run_id.as_str() < "run_8" {
+            break fixture;
+        }
+    };
     let _held = Journal::open(&store.run_dir(&stuck.run_id)).unwrap();
     // Dead owners without journals, at least one after it in settlement order.
     let mut settled = Vec::new();
@@ -309,16 +315,23 @@ fn settling_orphans_records_every_other_run_when_recording_one_fails() {
     if crate::fsx::euid() == 0 {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
-    let mut store = Store::open(&temp.path().join("data")).unwrap();
     // Two orphans whose records cannot be published: a refused journal's
-    // unknown outcome, and a lost owner's. Their run directories accept no
-    // new entry, so each append fails after its record reaches the segment.
-    let refused = admit_with_journal(&mut store, "refused");
+    // unknown outcome, and a lost owner's. The first of them in run order
+    // sorts in the lower half, so other orphans soon sort after it.
+    let (_temp, mut store, refused, lost) = loop {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let refused = admit_with_journal(&mut store, "refused");
+        let lost = store.prepare("lost", &request(), &peer()).unwrap();
+        if refused.run_id.as_str().min(lost.run_id.as_str()) < "run_8" {
+            break (temp, store, refused, lost);
+        }
+    };
     let journal = store.run_dir(&refused.run_id).join(crate::pending::STATE);
     fs::write(journal, b"{\"damaged\":true}").unwrap();
-    let lost = store.prepare("lost", &request(), &peer()).unwrap();
     store.claim_owner(&lost.run_id, &peer()).unwrap();
+    // Their run directories accept no new entry, so each append fails after
+    // its record reaches the segment.
     let failing = [refused.run_id.clone(), lost.run_id.clone()];
     for id in &failing {
         fs::set_permissions(store.run_dir(id), fs::Permissions::from_mode(0o500)).unwrap();
