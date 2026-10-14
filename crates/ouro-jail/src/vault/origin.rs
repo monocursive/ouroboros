@@ -1297,4 +1297,59 @@ mod linux_tests {
         thread.join().unwrap();
         assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
     }
+
+    #[test]
+    fn a_full_table_evicts_its_oldest_outcome_and_never_escalates_the_evicted() {
+        let origins = configured(true, Duration::from_millis(50));
+        let oldest = connection();
+        origins.publish(oldest.key, authority(pinned(&origins), &oldest.client));
+        // Strictly older than everything published after it.
+        std::thread::sleep(Duration::from_millis(2));
+        let keys: Vec<Key> = (1..=MAX_ENTRIES)
+            .map(|port| loopback(u16::try_from(port).unwrap(), 3129))
+            .collect();
+        let (last, rest) = keys.split_last().unwrap();
+        for key in rest {
+            origins.publish(*key, refused());
+        }
+        assert_eq!(origins.table().entries.len(), MAX_ENTRIES);
+        assert_eq!(origins.pins.load(Ordering::SeqCst), 1);
+        origins.publish(*last, refused());
+        {
+            let table = origins.table();
+            assert_eq!(table.entries.len(), MAX_ENTRIES);
+            assert!(!table.entries.contains_key(&oldest.key), "the oldest went");
+            assert!(keys.iter().all(|key| table.entries.contains_key(key)));
+        }
+        // Its pin went with it, and its connection, still live, is not
+        // authorized by anything else: it waits out the rendezvous.
+        assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
+        let (_bridge, proxy) = bridged(oldest.key);
+        assert_eq!(
+            seen(origins.receive(&proxy)),
+            Ok(Seen::Unverified(Reason::CredentialProcessUnverified))
+        );
+    }
+
+    #[test]
+    fn a_waiter_receives_its_authority_when_its_publication_evicts_another() {
+        let origins = configured(true, RENDEZVOUS);
+        for port in 1..=MAX_ENTRIES {
+            origins.publish(loopback(u16::try_from(port).unwrap(), 3129), refused());
+        }
+        let connection = connection();
+        let (_bridge, proxy) = bridged(connection.key);
+        let (rx, thread) = receiving(&origins, proxy);
+        origins.publish(
+            connection.key,
+            authority(pinned(&origins), &connection.client),
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok(Seen::Pinned(me()))
+        );
+        thread.join().unwrap();
+        assert_eq!(origins.table().entries.len(), MAX_ENTRIES - 1);
+        assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
+    }
 }
