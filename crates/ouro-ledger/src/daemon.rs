@@ -68,7 +68,7 @@ impl Client {
     }
 
     /// An authenticated connection whose protocol has not been checked yet.
-    pub(crate) fn open(data: &Path) -> Result<Self> {
+    pub fn open(data: &Path) -> Result<Self> {
         let path = data.join("ledger/serve.sock");
         let meta = fs::symlink_metadata(&path)?;
         if meta.uid() != crate::os::euid() || meta.mode() & 0o077 != 0 {
@@ -92,15 +92,18 @@ impl Client {
     /// A writer of another version could misread or refuse every request;
     /// say so once, instead of failing later on an undecodable reply.
     pub(crate) fn check_protocol(&mut self) -> Result<()> {
-        let writer = self.ping()?;
-        if writer["protocol"] != PROTOCOL_VERSION {
-            return Err(LedgerError(format!(
-                "ledger writer speaks protocol {}, this client speaks {PROTOCOL_VERSION}; \
-                 restart the writer with this version once its runs settle",
-                writer["protocol"]
-            )));
-        }
-        Ok(())
+        protocol_mismatch(&self.ping()?).map_or(Ok(()), Err)
+    }
+
+    /// The writer that answers for `data` in this protocol, or `None` when
+    /// none answers. One that answers in another protocol is a refusal, never
+    /// an absence: starting a second writer would only fail on the store lock.
+    pub(crate) fn reachable(data: &Path) -> Result<Option<Self>> {
+        let Ok(mut client) = Self::open(data) else {
+            return Ok(None);
+        };
+        client.check_protocol()?;
+        Ok(Some(client))
     }
 
     fn request<T: DeserializeOwned>(&mut self, request: Request) -> Result<T> {
@@ -295,6 +298,22 @@ impl Client {
             limit,
         })
     }
+}
+
+/// Why a writer that answered `ping` with `writer` cannot serve this client.
+/// A writer older than protocol versioning names no protocol at all.
+pub fn protocol_mismatch(writer: &Value) -> Option<LedgerError> {
+    if writer["protocol"] == PROTOCOL_VERSION {
+        return None;
+    }
+    let spoken = match writer["protocol"].as_u64() {
+        Some(version) => format!("protocol {version}"),
+        None => "an unversioned protocol".into(),
+    };
+    Some(LedgerError(format!(
+        "ledger writer speaks {spoken}, this client speaks protocol {PROTOCOL_VERSION}; \
+         restart the writer once its runs settle"
+    )))
 }
 
 pub fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<()> {
@@ -1069,6 +1088,44 @@ mod tests {
         // The acceptor survived and serves the next connection.
         Client::connect(&data).unwrap();
         assert_eq!(STARTS.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn a_writer_of_another_protocol_is_refused_with_its_version_never_restarted() {
+        let temp = tempfile::tempdir().unwrap();
+        let (data, _) = listening(temp.path());
+        fs::remove_file(data.join("ledger/serve.sock")).unwrap();
+        // No writer answers: the caller may start one.
+        assert!(Client::reachable(&data).unwrap().is_none());
+        for (writer, spoken) in [
+            (
+                json!({"protocol":PROTOCOL_VERSION + 1}),
+                format!("protocol {}", PROTOCOL_VERSION + 1),
+            ),
+            (
+                json!({"writer":"available"}),
+                "an unversioned protocol".into(),
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (data, listener) = listening(temp.path());
+            let (sender, receiver) = mpsc::sync_channel(MAX_CONNECTIONS);
+            answer_requests(receiver, writer);
+            thread::spawn(move || accept_connections(listener, sender, spawn_thread));
+            let expected = format!(
+                "ledger writer speaks {spoken}, this client speaks protocol {PROTOCOL_VERSION}; \
+                 restart the writer once its runs settle"
+            );
+            assert_eq!(Client::connect(&data).err().unwrap().0, expected);
+            // Reachable but incompatible is a refusal, not an absent writer.
+            assert_eq!(Client::reachable(&data).err().unwrap().0, expected);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (data, listener) = listening(temp.path());
+        let (sender, receiver) = mpsc::sync_channel(MAX_CONNECTIONS);
+        answer_requests(receiver, json!({"protocol":PROTOCOL_VERSION}));
+        thread::spawn(move || accept_connections(listener, sender, spawn_thread));
+        assert!(Client::reachable(&data).unwrap().is_some());
     }
 
     #[test]

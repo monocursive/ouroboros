@@ -899,19 +899,27 @@ fn execute(cli: Cli) -> Result<i32> {
             // A readiness read must not create a session-bound writer which
             // would subsequently prevent independent service ownership.
             let detached_owner = service::probe();
-            let mut client = match daemon::Client::connect(&data) {
-                Ok(client) => client,
-                Err(error) => {
-                    output(
-                        &json!({"component":"ouro-ledger","ready":false,"writer":"unreachable","reason":error.to_string(),"store":null,"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
-                        json,
-                    )?;
-                    return Ok(1);
-                }
+            let not_ready = |writer: &str, reason: String| {
+                output(
+                    &json!({"component":"ouro-ledger","ready":false,"writer":writer,"reason":reason,"store":null,"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
+                    json,
+                )
+                .map(|()| 1)
             };
+            let (mut client, writer) = match daemon::Client::open(&data).and_then(|mut client| {
+                let writer = client.ping()?;
+                Ok((client, writer))
+            }) {
+                Ok(answered) => answered,
+                Err(error) => return not_ready("unreachable", error.to_string()),
+            };
+            // A writer that answers in another protocol is there, but cannot
+            // serve this client until it is restarted.
+            if let Some(mismatch) = daemon::protocol_mismatch(&writer) {
+                return not_ready("incompatible", mismatch.to_string());
+            }
             // The writer's accepted state only: re-hashing every stream here
             // would stall live owners' heartbeats. `verify` is the fresh check.
-            let writer = client.ping()?;
             let store = client.status()?;
             let ready = store.ready();
             output(

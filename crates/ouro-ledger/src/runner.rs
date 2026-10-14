@@ -136,10 +136,7 @@ fn error(message: impl Into<String>) -> LedgerError {
 
 /// Start a writer on demand. The writer has no terminal or child-stream fds.
 pub fn connect_or_start(data: &Path) -> Result<Client> {
-    // A reachable writer of another protocol is an answer, not an absence:
-    // starting a second writer would only fail on the store lock.
-    if let Ok(mut client) = Client::open(data) {
-        client.check_protocol()?;
+    if let Some(client) = Client::reachable(data)? {
         return Ok(client);
     }
     let mut command = Command::new(std::env::current_exe()?);

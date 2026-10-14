@@ -243,7 +243,7 @@ mod linux {
             fs::canonicalize(data)?.as_os_str().as_bytes(),
         );
         let unit = format!("ouro-ledger-writer-{}.service", &digest[7..39]);
-        if Client::connect(data).is_err() {
+        if Client::reachable(data)?.is_none() {
             let mut command = unit_command(&unit);
             if let Some(config) = std::env::var_os("OURO_CONFIG_DIR") {
                 let config = PathBuf::from(config);

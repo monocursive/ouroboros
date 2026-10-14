@@ -148,6 +148,45 @@ fn doctor_does_not_start_a_session_writer() {
 }
 
 #[test]
+fn doctor_reports_a_writer_of_another_protocol_as_incompatible() {
+    use ouro_ledger::{
+        daemon::{read_frame, write_frame},
+        protocol::{PROTOCOL_VERSION, Request, Response},
+    };
+    let mut cli = LocalCli::new();
+    let ledger = cli.data.join("ledger");
+    fs::create_dir(&ledger).unwrap();
+    fs::set_permissions(&ledger, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = ledger.join("serve.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    // A writer from another release: it answers, in another protocol.
+    thread::spawn(move || {
+        for mut connection in listener.incoming().flatten() {
+            while let Ok(Request::Ping) = read_frame::<Request>(&mut connection) {
+                let value = json!({"protocol": PROTOCOL_VERSION + 1});
+                if write_frame(&mut connection, &Response::Ok { value }).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let output = cli.invoke(&["doctor", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["ready"], false);
+    assert_eq!(value["writer"], "incompatible");
+    assert_eq!(
+        value["reason"],
+        format!(
+            "ledger writer speaks protocol {}, this client speaks protocol {PROTOCOL_VERSION}; \
+             restart the writer once its runs settle",
+            PROTOCOL_VERSION + 1
+        )
+    );
+}
+
+#[test]
 fn retention_cli_persists_holds_and_preview_never_starts_or_mutates_a_writer() {
     let mut cli = LocalCli::new();
     assert!(!cli.invoke(&["gc", "--dry-run", "--json"]).status.success());

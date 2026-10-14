@@ -81,6 +81,19 @@ The daemon allows at most 32 live connection handlers and a 32-entry bounded
 writer queue. The writer serializes requests; a full queue refuses and a timed-out
 reply does not roll back a persisted request.
 
+The writer names its wire protocol version in its `ping` answer (`protocol`,
+currently 1). Every client checks it once per connection and refuses a writer
+of another version with `ledger writer speaks protocol N, this client speaks
+protocol M; restart the writer once its runs settle` (a writer older than
+versioning speaks "an unversioned protocol"). `doctor` reports such a writer as
+`writer: incompatible` rather than unreachable, and neither on-demand start nor
+`serve --detach` starts a second writer beside it. A writer is never restarted
+implicitly, so the upgrade rule is: after upgrading `ouro-ledger`, restart the
+writer once its runs settle. Clients from before versioning do not check; against
+a newer writer they fail on the first reply whose shape changed, for example
+`verify`, which answers with pages since protocol 1. A request a writer cannot
+decode is refused with `unsupported_request` before the connection closes.
+
 A caller that loses a reply retries the same request id and exact immutable
 payload. Success returns the original `{seq, digest}`; conflicting payloads
 refuse. Socket timeout means an unknown request outcome until the caller retries
