@@ -771,78 +771,54 @@ fn version() -> Value {
 }
 
 fn execute(cli: Cli) -> Result<i32> {
-    // Announcing the build needs no data directory, HOME or writer.
-    if let Action::Version { json } = &cli.command {
-        output(&version(), *json)?;
-        return Ok(0);
-    }
-    if let Action::VerifyBundle {
-        path,
-        trusted_key,
-        json,
-    } = &cli.command
-    {
-        output(
-            &ouro_ledger::bundle::verify_with_key(path, trusted_key.as_deref())?,
-            *json,
-        )?;
-        return Ok(0);
-    }
-    if let Action::BundleKeygen {
-        output: destination,
-        json,
-    } = &cli.command
-    {
-        output(&ouro_ledger::bundle::keygen(destination)?, *json)?;
-        return Ok(0);
-    }
-    // Claim the handed-over fd before any invocation files or subprocesses open.
-    let control = if let Action::Run(args) = &cli.command {
-        // SAFETY: this raw fd comes exclusively from the operator at process entry.
-        args.control_fd
-            .map(|fd| unsafe { control_output::ControlOutput::take(fd) })
-            .transpose()?
-    } else {
-        None
-    };
-    let data = data_dir(cli.data_dir)?;
-    match cli.command {
-        Action::Serve { detach } => {
-            if detach {
-                service::start_writer(&data)?;
-                output(
-                    &json!({"writer":"ready","owner_lifetime":"systemd_user_service"}),
-                    true,
-                )?;
-            } else {
-                daemon::serve(&data)?;
-            }
+    let Cli {
+        data_dir: explicit,
+        command,
+    } = cli;
+    match command {
+        // Announcing the build, verifying a bundle and provisioning a key need
+        // no data directory, HOME or writer.
+        Action::Version { json } => {
+            output(&version(), json)?;
             Ok(0)
         }
+        Action::VerifyBundle {
+            path,
+            trusted_key,
+            json,
+        } => {
+            output(
+                &ouro_ledger::bundle::verify_with_key(&path, trusted_key.as_deref())?,
+                json,
+            )?;
+            Ok(0)
+        }
+        Action::BundleKeygen {
+            output: destination,
+            json,
+        } => {
+            output(&ouro_ledger::bundle::keygen(&destination)?, json)?;
+            Ok(0)
+        }
+        Action::Run(args) => run_command(explicit, *args),
+        Action::Serve { detach } => serve_command(&data_dir(explicit)?, detach),
         Action::Bundle {
             run_id,
             output: destination,
             capture,
             signing_key,
             json,
-        } => {
-            let mut client = daemon::Client::connect(&data)?;
-            let report = if let Some(key) = signing_key {
-                ouro_ledger::bundle::create_signed(
-                    &mut client,
-                    &data,
-                    &run_id,
-                    &destination,
-                    &capture,
-                    &key,
-                )?
-            } else {
-                ouro_ledger::bundle::create(&mut client, &data, &run_id, &destination, &capture)?
-            };
-            output(&report, json)?;
-            Ok(0)
-        }
+        } => bundle_command(
+            &data_dir(explicit)?,
+            &run_id,
+            &destination,
+            &capture,
+            signing_key.as_deref(),
+            json,
+        ),
         Action::Owner { bootstrap, unit } => {
+            // A malformed data directory refuses even the hidden owner entry.
+            data_dir(explicit)?;
             // SAFETY: this hidden entry point has not created any threads.
             unsafe {
                 service::serve(&bootstrap, &unit)?;
@@ -854,18 +830,22 @@ fn execute(cli: Cli) -> Result<i32> {
             timeout,
             json,
         } => {
-            let record = service::wait(&data, &run_id, std::time::Duration::from_secs(timeout))?;
+            let record = service::wait(
+                &data_dir(explicit)?,
+                &run_id,
+                std::time::Duration::from_secs(timeout),
+            )?;
             output(&serde_json::to_value(&record)?, json)?;
             Ok(runner::record_exit(&record))
         }
         Action::Cancel { run_id, json } => {
-            output(&service::cancel(&data, &run_id)?, json)?;
+            output(&service::cancel(&data_dir(explicit)?, &run_id)?, json)?;
             Ok(0)
         }
-        Action::Hold(args) => retention_command(&data, args, true),
-        Action::Append(args) => append_command(&data, args),
-        Action::Tail(args) => tail_command(&data, args),
-        Action::Release(args) => retention_command(&data, args, false),
+        Action::Hold(args) => retention_command(&data_dir(explicit)?, args, true),
+        Action::Release(args) => retention_command(&data_dir(explicit)?, args, false),
+        Action::Append(args) => append_command(&data_dir(explicit)?, args),
+        Action::Tail(args) => tail_command(&data_dir(explicit)?, args),
         Action::Gc {
             dry_run,
             retain_days,
@@ -873,276 +853,358 @@ fn execute(cli: Cli) -> Result<i32> {
             after,
             limit,
             json,
+        } => gc_command(
+            &data_dir(explicit)?,
+            dry_run,
+            retain_days,
+            capture_retain_days,
+            after.as_deref(),
+            limit,
+            json,
+        ),
+        Action::Doctor { json } => doctor_command(&data_dir(explicit)?, json),
+        Action::Prepare {
+            request_id,
+            body_file,
+            json,
+        } => prepare_command(&data_dir(explicit)?, &request_id, &body_file, json),
+        Action::Runs(args) => runs_command(&data_dir(explicit)?, *args),
+        Action::Show {
+            run_id,
+            with_transcript,
+            json,
         } => {
-            // A dry run must not bootstrap recovery, rebuild projections, or expire readers.
-            let mut client = daemon::Client::connect(&data)?;
-            if dry_run {
-                output(
-                    &serde_json::to_value(client.gc_plan_policy(
-                        retain_days,
-                        capture_retain_days,
-                        after.as_deref(),
-                        limit,
-                    )?)?,
-                    json,
-                )?;
-                Ok(0)
+            let mut client = runner::connect_or_start(&data_dir(explicit)?)?;
+            let value = if with_transcript {
+                client.show_with_transcript(&run_id)?
             } else {
-                let result =
-                    client.gc_policy(retain_days, capture_retain_days, after.as_deref(), limit)?;
-                let passed = result.failed.is_empty();
-                output(&serde_json::to_value(result)?, json)?;
-                Ok(if passed { 0 } else { 1 })
-            }
-        }
-        Action::Doctor { json } => {
-            // A readiness read must not create a session-bound writer which
-            // would subsequently prevent independent service ownership.
-            let detached_owner = service::probe();
-            let not_ready = |writer: &str, reason: String| {
-                output(
-                    &json!({"component":"ouro-ledger","ready":false,"writer":writer,"reason":reason,"store":null,"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
-                    json,
-                )
-                .map(|()| 1)
+                serde_json::to_value(client.show(&run_id)?)?
             };
-            let (mut client, writer) = match daemon::Client::open(&data).and_then(|mut client| {
-                let writer = client.ping()?;
-                Ok((client, writer))
-            }) {
-                Ok(answered) => answered,
-                Err(error) => return not_ready("unreachable", error.to_string()),
-            };
-            // A writer that answers in another protocol is there, but cannot
-            // serve this client until it is restarted.
-            if let Some(mismatch) = daemon::protocol_mismatch(&writer) {
-                return not_ready("incompatible", mismatch.to_string());
-            }
-            // The writer's accepted state only: re-hashing every stream here
-            // would stall live owners' heartbeats. `verify` is the fresh check.
-            let store = client.status()?;
-            let ready = store.ready();
-            output(
-                &json!({"component":"ouro-ledger","ready":ready,"writer":"reachable","store":store,"index":writer["index"],"retention":writer["retention"],"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
-                json,
-            )?;
-            Ok(if ready { 0 } else { 1 })
+            output(&value, json)?;
+            Ok(0)
         }
-        Action::Run(args) => {
-            ouro_ledger::discovery::validate_tags(&args.tag)?;
-            if args.detach && args.io != "batch" {
-                return Err(LedgerError::refused("--detach requires --io batch"));
-            }
-            if args.json && args.io != "batch" && control.is_none() {
-                return Err(LedgerError::refused(
-                    "run --json requires --io batch or --control-fd so child output has an independent sink",
-                ));
-            }
-            let mut policy: Vec<OsString> = vec![
-                "--profile".into(),
-                args.jail.into(),
-                "--observe".into(),
-                args.observe.into(),
-                "--evidence".into(),
-                args.evidence.clone().into(),
-            ];
-            for (name, path) in [("--workspace", args.workspace), ("--scratch", args.scratch)] {
-                if let Some(path) = path {
-                    policy.push(name.into());
-                    policy.push(path.into_os_string());
-                }
-            }
-            for (name, paths) in [
-                ("--ro", args.ro),
-                ("--rw", args.rw),
-                ("--deny-read", args.deny_read),
-            ] {
-                for path in paths {
-                    policy.push(name.into());
-                    policy.push(path.into_os_string());
-                }
-            }
-            if let Some(launch) = &args.launch {
-                policy.push("--launch".into());
-                policy.push(launch.into());
-            }
-            for (name, values) in [("--allow-host", args.allow_host), ("--limit", args.limit)] {
-                for value in values {
-                    policy.push(name.into());
-                    policy.push(value.into());
-                }
-            }
-            let options = runner::RunOptions {
-                data,
-                jail: runner::jail_binary(args.jail_bin)?,
-                request_id: args
-                    .request_id
-                    .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4())),
-                prepared: args.prepared,
-                policy_args: policy,
-                argv: args.argv,
-                batch: args.io == "batch",
-                separate_control: control.is_some(),
-                detached: args.detach,
-                captures: args.capture,
-                redact: args.redact,
-                capture_limit: args.capture_limit,
-                best_effort: args.evidence == "best-effort",
-                launch: args.launch,
-                tags: args.tag,
-            };
-            if args.plan_only {
-                output(&runner::resolve_request(&options)?, args.json)?;
-                return Ok(0);
-            }
-            if args.prepare_only {
-                output(
-                    &serde_json::to_value(service::prepare(&options)?)?,
-                    args.json,
-                )?;
-                return Ok(0);
-            }
-            if args.detach {
-                let record = service::launch(&options).map_err(|error| {
-                    let message = format!(
-                        "detached request {}: {}; inspect or replay this same request id, never \
-                         invent a replacement",
-                        options.request_id, error
-                    );
-                    error.with_message(message)
-                })?;
-                output(&serde_json::to_value(&record)?, args.json)?;
-                return Ok(0);
-            }
-            let result = runner::run(&options)?;
-            if let Some(control) = control {
-                control.deliver(&result.record).map_err(|problem| {
-                    let message = format!(
-                        "run {} (request {}): {problem}; result delivery failed; inspect or \
-                         replay this same request id",
-                        result.record.run_id, result.record.request_id
-                    );
-                    problem.with_message(message)
-                })?;
-            } else if args.json {
-                output(&serde_json::to_value(&result.record)?, true)?;
-            } else {
-                eprintln!(
-                    "{}: {} (settlement {}, protection {})",
-                    result.record.run_id,
-                    result.record.state,
-                    result.record.settlement,
-                    result.record.child_protection
-                );
-            }
-            for name in ["stdout", "stderr"] {
-                if let Some(warning) =
-                    runner::forwarding_warning(name, &result.record.capture[name])
-                {
-                    eprintln!("ouro-ledger: {warning}");
-                }
-            }
-            Ok(result.exit_code)
+        Action::Query(args) => query(&mut runner::connect_or_start(&data_dir(explicit)?)?, *args),
+        Action::Diff {
+            left,
+            right,
+            by,
+            after,
+            limit,
+            json,
+        } => diff_command(
+            &data_dir(explicit)?,
+            &left,
+            &right,
+            &by,
+            after.as_deref(),
+            limit,
+            json,
+        ),
+        Action::Export(args) => {
+            let data = data_dir(explicit)?;
+            export(&mut runner::connect_or_start(&data)?, &data, *args)
         }
-        command => {
-            let mut client = runner::connect_or_start(&data)?;
-            match command {
-                Action::Prepare {
-                    request_id,
-                    body_file,
-                    json,
-                } => {
-                    let bytes = read_bounded(
-                        std::fs::File::open(body_file)?,
-                        MAX_FRAME_BYTES as u64,
-                        "prepare metadata exceeds frame bound",
-                    )?;
-                    let payload: Value = serde_json::from_slice(&bytes)?;
-                    output(
-                        &serde_json::to_value(client.prepare(&request_id, &payload)?)?,
-                        json,
-                    )?;
-                }
-                Action::Runs(args) => {
-                    let page = client.catalog(&CatalogRequest {
-                        filter: RunFilter {
-                            since: args.since,
-                            until: args.until,
-                            launch: args.launch,
-                            tags: args.tag,
-                            outcome: args.outcome,
-                        },
-                        after: args.after,
-                        limit: args.limit,
-                    })?;
-                    output(&serde_json::to_value(page)?, args.json)?;
-                }
-                Action::Show {
-                    run_id,
-                    with_transcript,
-                    json,
-                } => {
-                    let value = if with_transcript {
-                        client.show_with_transcript(&run_id)?
-                    } else {
-                        serde_json::to_value(client.show(&run_id)?)?
-                    };
-                    output(&value, json)?
-                }
-                Action::Query(args) => return query(&mut client, *args),
-                Action::Diff {
-                    left,
-                    right,
-                    by,
-                    after,
-                    limit,
-                    json,
-                } => {
-                    let report = ouro_ledger::comparison::compare_mode(
-                        &mut client,
-                        &left,
-                        &right,
-                        after.as_deref(),
-                        limit,
-                        if by == "targets" {
-                            ouro_ledger::comparison::ComparisonMode::TargetCounts
-                        } else {
-                            ouro_ledger::comparison::ComparisonMode::EventCounts
-                        },
-                    )?;
-                    let passed = report["complete"] == true;
-                    output(&report, json)?;
-                    return Ok(if passed { 0 } else { 1 });
-                }
-                Action::Export(args) => return export(&mut client, &data, *args),
-                Action::Verify { run_id, json } => {
-                    let reports = client.verify(run_id.as_deref())?;
-                    let passed = reports.iter().all(|r| r.local_consistency);
-                    output(&serde_json::to_value(reports)?, json)?;
-                    return Ok(if passed { 0 } else { 1 });
-                }
-                Action::SettleOrphans { json } => {
-                    output(&serde_json::to_value(client.settle_orphans()?)?, json)?
-                }
-                Action::Serve { .. }
-                | Action::Run(_)
-                | Action::Doctor { .. }
-                | Action::Version { .. }
-                | Action::Owner { .. }
-                | Action::Wait { .. }
-                | Action::Cancel { .. } => unreachable!(),
-                Action::Append(_)
-                | Action::Tail(_)
-                | Action::Hold(_)
-                | Action::Release(_)
-                | Action::Gc { .. }
-                | Action::Bundle { .. }
-                | Action::VerifyBundle { .. }
-                | Action::BundleKeygen { .. } => unreachable!(),
-            }
+        Action::Verify { run_id, json } => {
+            let reports =
+                runner::connect_or_start(&data_dir(explicit)?)?.verify(run_id.as_deref())?;
+            let passed = reports.iter().all(|r| r.local_consistency);
+            output(&serde_json::to_value(reports)?, json)?;
+            Ok(if passed { 0 } else { 1 })
+        }
+        Action::SettleOrphans { json } => {
+            let settled = runner::connect_or_start(&data_dir(explicit)?)?.settle_orphans()?;
+            output(&serde_json::to_value(settled)?, json)?;
             Ok(0)
         }
     }
+}
+
+fn serve_command(data: &std::path::Path, detach: bool) -> Result<i32> {
+    if detach {
+        service::start_writer(data)?;
+        output(
+            &json!({"writer":"ready","owner_lifetime":"systemd_user_service"}),
+            true,
+        )?;
+    } else {
+        daemon::serve(data)?;
+    }
+    Ok(0)
+}
+
+fn bundle_command(
+    data: &std::path::Path,
+    run_id: &str,
+    destination: &std::path::Path,
+    capture: &[String],
+    signing_key: Option<&std::path::Path>,
+    json: bool,
+) -> Result<i32> {
+    let mut client = daemon::Client::connect(data)?;
+    let report = if let Some(key) = signing_key {
+        ouro_ledger::bundle::create_signed(&mut client, data, run_id, destination, capture, key)?
+    } else {
+        ouro_ledger::bundle::create(&mut client, data, run_id, destination, capture)?
+    };
+    output(&report, json)?;
+    Ok(0)
+}
+
+fn gc_command(
+    data: &std::path::Path,
+    dry_run: bool,
+    retain_days: Option<u32>,
+    capture_retain_days: Option<u32>,
+    after: Option<&str>,
+    limit: u32,
+    json: bool,
+) -> Result<i32> {
+    // A dry run must not bootstrap recovery, rebuild projections, or expire readers.
+    let mut client = daemon::Client::connect(data)?;
+    if dry_run {
+        output(
+            &serde_json::to_value(client.gc_plan_policy(
+                retain_days,
+                capture_retain_days,
+                after,
+                limit,
+            )?)?,
+            json,
+        )?;
+        return Ok(0);
+    }
+    let result = client.gc_policy(retain_days, capture_retain_days, after, limit)?;
+    let passed = result.failed.is_empty();
+    output(&serde_json::to_value(result)?, json)?;
+    Ok(if passed { 0 } else { 1 })
+}
+
+fn doctor_command(data: &std::path::Path, json: bool) -> Result<i32> {
+    // A readiness read must not create a session-bound writer which would
+    // subsequently prevent independent service ownership.
+    let detached_owner = service::probe();
+    let not_ready = |writer: &str, reason: String| {
+        output(
+            &json!({"component":"ouro-ledger","ready":false,"writer":writer,"reason":reason,"store":null,"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
+            json,
+        )
+        .map(|()| 1)
+    };
+    let (mut client, writer) = match daemon::Client::open(data).and_then(|mut client| {
+        let writer = client.ping()?;
+        Ok((client, writer))
+    }) {
+        Ok(answered) => answered,
+        Err(error) => return not_ready("unreachable", error.to_string()),
+    };
+    // A writer that answers in another protocol is there, but cannot serve
+    // this client until it is restarted.
+    if let Some(mismatch) = daemon::protocol_mismatch(&writer) {
+        return not_ready("incompatible", mismatch.to_string());
+    }
+    // The writer's accepted state only: re-hashing every stream here would
+    // stall live owners' heartbeats. `verify` is the fresh check.
+    let store = client.status()?;
+    let ready = store.ready();
+    output(
+        &json!({"component":"ouro-ledger","ready":ready,"writer":"reachable","store":store,"index":writer["index"],"retention":writer["retention"],"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
+        json,
+    )?;
+    Ok(if ready { 0 } else { 1 })
+}
+
+/// The jail policy arguments a run request names, in the order the jail
+/// takes them.
+fn policy_args(args: &RunArgs) -> Vec<OsString> {
+    let mut policy: Vec<OsString> = vec![
+        "--profile".into(),
+        args.jail.clone().into(),
+        "--observe".into(),
+        args.observe.clone().into(),
+        "--evidence".into(),
+        args.evidence.clone().into(),
+    ];
+    for (name, path) in [
+        ("--workspace", &args.workspace),
+        ("--scratch", &args.scratch),
+    ] {
+        if let Some(path) = path {
+            policy.push(name.into());
+            policy.push(path.clone().into_os_string());
+        }
+    }
+    for (name, paths) in [
+        ("--ro", &args.ro),
+        ("--rw", &args.rw),
+        ("--deny-read", &args.deny_read),
+    ] {
+        for path in paths {
+            policy.push(name.into());
+            policy.push(path.clone().into_os_string());
+        }
+    }
+    if let Some(launch) = &args.launch {
+        policy.push("--launch".into());
+        policy.push(launch.into());
+    }
+    for (name, values) in [("--allow-host", &args.allow_host), ("--limit", &args.limit)] {
+        for value in values {
+            policy.push(name.into());
+            policy.push(value.into());
+        }
+    }
+    policy
+}
+
+fn run_command(explicit: Option<PathBuf>, args: RunArgs) -> Result<i32> {
+    // Claim the handed-over fd before any invocation files or subprocesses open.
+    // SAFETY: this raw fd comes exclusively from the operator at process entry.
+    let control = args
+        .control_fd
+        .map(|fd| unsafe { control_output::ControlOutput::take(fd) })
+        .transpose()?;
+    let data = data_dir(explicit)?;
+    ouro_ledger::discovery::validate_tags(&args.tag)?;
+    if args.detach && args.io != "batch" {
+        return Err(LedgerError::refused("--detach requires --io batch"));
+    }
+    if args.json && args.io != "batch" && control.is_none() {
+        return Err(LedgerError::refused(
+            "run --json requires --io batch or --control-fd so child output has an independent sink",
+        ));
+    }
+    let options = runner::RunOptions {
+        data,
+        jail: runner::jail_binary(args.jail_bin.clone())?,
+        request_id: args
+            .request_id
+            .clone()
+            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4())),
+        prepared: args.prepared.clone(),
+        policy_args: policy_args(&args),
+        argv: args.argv,
+        batch: args.io == "batch",
+        separate_control: control.is_some(),
+        detached: args.detach,
+        captures: args.capture,
+        redact: args.redact,
+        capture_limit: args.capture_limit,
+        best_effort: args.evidence == "best-effort",
+        launch: args.launch,
+        tags: args.tag,
+    };
+    if args.plan_only {
+        output(&runner::resolve_request(&options)?, args.json)?;
+        return Ok(0);
+    }
+    if args.prepare_only {
+        output(
+            &serde_json::to_value(service::prepare(&options)?)?,
+            args.json,
+        )?;
+        return Ok(0);
+    }
+    if args.detach {
+        let record = service::launch(&options).map_err(|error| {
+            let message = format!(
+                "detached request {}: {}; inspect or replay this same request id, never \
+                 invent a replacement",
+                options.request_id, error
+            );
+            error.with_message(message)
+        })?;
+        output(&serde_json::to_value(&record)?, args.json)?;
+        return Ok(0);
+    }
+    let result = runner::run(&options)?;
+    if let Some(control) = control {
+        control.deliver(&result.record).map_err(|problem| {
+            let message = format!(
+                "run {} (request {}): {problem}; result delivery failed; inspect or \
+                 replay this same request id",
+                result.record.run_id, result.record.request_id
+            );
+            problem.with_message(message)
+        })?;
+    } else if args.json {
+        output(&serde_json::to_value(&result.record)?, true)?;
+    } else {
+        eprintln!(
+            "{}: {} (settlement {}, protection {})",
+            result.record.run_id,
+            result.record.state,
+            result.record.settlement,
+            result.record.child_protection
+        );
+    }
+    for name in ["stdout", "stderr"] {
+        if let Some(warning) = runner::forwarding_warning(name, &result.record.capture[name]) {
+            eprintln!("ouro-ledger: {warning}");
+        }
+    }
+    Ok(result.exit_code)
+}
+
+fn prepare_command(
+    data: &std::path::Path,
+    request_id: &str,
+    body_file: &std::path::Path,
+    json: bool,
+) -> Result<i32> {
+    let mut client = runner::connect_or_start(data)?;
+    let bytes = read_bounded(
+        std::fs::File::open(body_file)?,
+        MAX_FRAME_BYTES as u64,
+        "prepare metadata exceeds frame bound",
+    )?;
+    let payload: Value = serde_json::from_slice(&bytes)?;
+    output(
+        &serde_json::to_value(client.prepare(request_id, &payload)?)?,
+        json,
+    )?;
+    Ok(0)
+}
+
+fn runs_command(data: &std::path::Path, args: RunsArgs) -> Result<i32> {
+    let page = runner::connect_or_start(data)?.catalog(&CatalogRequest {
+        filter: RunFilter {
+            since: args.since,
+            until: args.until,
+            launch: args.launch,
+            tags: args.tag,
+            outcome: args.outcome,
+        },
+        after: args.after,
+        limit: args.limit,
+    })?;
+    output(&serde_json::to_value(page)?, args.json)?;
+    Ok(0)
+}
+
+fn diff_command(
+    data: &std::path::Path,
+    left: &str,
+    right: &str,
+    by: &str,
+    after: Option<&str>,
+    limit: u32,
+    json: bool,
+) -> Result<i32> {
+    let report = ouro_ledger::comparison::compare_mode(
+        &mut runner::connect_or_start(data)?,
+        left,
+        right,
+        after,
+        limit,
+        if by == "targets" {
+            ouro_ledger::comparison::ComparisonMode::TargetCounts
+        } else {
+            ouro_ledger::comparison::ComparisonMode::EventCounts
+        },
+    )?;
+    let passed = report["complete"] == true;
+    output(&report, json)?;
+    Ok(if passed { 0 } else { 1 })
 }
 
 fn main() -> ExitCode {
