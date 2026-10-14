@@ -12,12 +12,10 @@
 
 use crate::capability::{Capability, CapabilityScope, CapabilityStatus};
 use crate::platform::{
-    PlanRequest, Platform, PlatformIdentity, PreparedExecution, PreparedPlan, Sinks, kernel_release,
+    PlanRequest, Platform, PlatformIdentity, PreparedExecution, PreparedPlan,
+    REASON_UNSUPPORTED_PLATFORM, Sinks, kernel_release,
 };
 use crate::records::{ErrorCode, ErrorStage, JailError, Os, Remediation};
-
-/// The reason code every macOS execution capability carries.
-pub const REASON_UNSUPPORTED_PLATFORM: &str = "unsupported_platform";
 
 /// The macOS platform implementation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

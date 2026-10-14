@@ -945,50 +945,40 @@ fn satisfied(requirement: &str, capabilities: &[Capability]) -> bool {
 
 /// The first requirement no capability satisfies, as a typed refusal.
 fn first_unsatisfied(requirements: &[String], capabilities: &[Capability]) -> Option<JailError> {
-    for requirement in requirements {
-        if satisfied(requirement, capabilities) {
-            continue;
-        }
-        let measured = capabilities
-            .iter()
-            .find(|capability| &capability.name == requirement);
-        let reason = measured
-            .and_then(|capability| capability.reason_code.clone())
-            .unwrap_or_else(|| "not_measured".to_owned());
-        let code = if reason == crate::platform::macos::REASON_UNSUPPORTED_PLATFORM {
-            ErrorCode::UnsupportedPlatform
-        } else {
-            ErrorCode::MissingCapability
-        };
-        let message = if code == ErrorCode::UnsupportedPlatform {
-            "execution is not implemented for this platform".to_owned()
-        } else {
-            format!("the host does not provide `{requirement}` ({reason})")
-        };
-        let remediation = if code == ErrorCode::UnsupportedPlatform {
-            Remediation::Unsupported
-        } else {
-            Remediation::HostSetup
-        };
-        // A restriction `none` cannot apply is the policy's to drop
-        let (message, remediation) = if reason == crate::capability::REASON_NOT_APPLIED_BY_NONE {
-            (
-                format!(
-                    "the uncontained profile cannot apply `{requirement}`; a contained profile can"
-                ),
-                Remediation::Configuration,
-            )
-        } else {
-            (message, remediation)
-        };
-        return Some(JailError::new(
-            code,
-            ErrorStage::Probing,
-            remediation,
-            message,
-        ));
-    }
-    None
+    let requirement = requirements
+        .iter()
+        .find(|requirement| !satisfied(requirement, capabilities))?;
+    let reason = capabilities
+        .iter()
+        .find(|capability| &capability.name == requirement)
+        .and_then(|capability| capability.reason_code.as_deref())
+        .unwrap_or("not_measured");
+    let (code, remediation, message) = match reason {
+        crate::platform::REASON_UNSUPPORTED_PLATFORM => (
+            ErrorCode::UnsupportedPlatform,
+            Remediation::Unsupported,
+            "execution is not implemented for this platform".to_owned(),
+        ),
+        // A restriction `none` cannot apply is the policy's to drop.
+        crate::capability::REASON_NOT_APPLIED_BY_NONE => (
+            ErrorCode::MissingCapability,
+            Remediation::Configuration,
+            format!(
+                "the uncontained profile cannot apply `{requirement}`; a contained profile can"
+            ),
+        ),
+        _ => (
+            ErrorCode::MissingCapability,
+            Remediation::HostSetup,
+            format!("the host does not provide `{requirement}` ({reason})"),
+        ),
+    };
+    Some(JailError::new(
+        code,
+        ErrorStage::Probing,
+        remediation,
+        message,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -4696,6 +4686,64 @@ mod tests {
             errors: Vec::new(),
             credentials: Vec::new(),
         }
+    }
+
+    /// An unsatisfied requirement refuses with the code, remediation and
+    /// message its capability's reason calls for (§13.2, §3.2).
+    #[test]
+    fn an_unsatisfied_requirement_refuses_by_its_reason() {
+        use crate::capability::{CapabilityScope, CapabilityStatus};
+        let capability = |status, reason: Option<&str>| Capability {
+            name: "tree_termination".to_owned(),
+            status,
+            scope: CapabilityScope::Tree,
+            mechanism: None,
+            reason_code: reason.map(str::to_owned),
+            measured_at: None,
+            evidence_ref: None,
+        };
+        let requirements = ["tree_termination".to_owned()];
+        let refusal = |capabilities: &[Capability]| {
+            let error = first_unsatisfied(&requirements, capabilities).expect("a refusal");
+            (error.code, error.remediation, error.message)
+        };
+        let (code, remediation, message) = refusal(&[capability(
+            CapabilityStatus::Unsupported,
+            Some(crate::platform::REASON_UNSUPPORTED_PLATFORM),
+        )]);
+        assert_eq!(
+            (code, remediation),
+            (ErrorCode::UnsupportedPlatform, Remediation::Unsupported)
+        );
+        assert_eq!(message, "execution is not implemented for this platform");
+        let (code, remediation, message) = refusal(&[capability(
+            CapabilityStatus::Unsupported,
+            Some(crate::capability::REASON_NOT_APPLIED_BY_NONE),
+        )]);
+        assert_eq!(
+            (code, remediation),
+            (ErrorCode::MissingCapability, Remediation::Configuration)
+        );
+        assert!(
+            message.contains("uncontained profile cannot apply"),
+            "{message}"
+        );
+        let (code, remediation, message) =
+            refusal(&[capability(CapabilityStatus::Unavailable, Some("no_cgroup"))]);
+        assert_eq!(
+            (code, remediation),
+            (ErrorCode::MissingCapability, Remediation::HostSetup)
+        );
+        assert!(message.ends_with("(no_cgroup)"), "{message}");
+        let (_, _, message) = refusal(&[]);
+        assert!(message.ends_with("(not_measured)"), "{message}");
+        assert!(
+            first_unsatisfied(
+                &requirements,
+                &[capability(CapabilityStatus::Available, None)]
+            )
+            .is_none()
+        );
     }
 
     /// SUP-10: a stop records the cause of the very reason it sends, a

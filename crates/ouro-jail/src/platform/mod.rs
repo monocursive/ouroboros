@@ -92,6 +92,10 @@ impl ContinuousDeadline {
 // everything that touches Linux is gated inside `platform/linux/mod.rs`.
 pub mod linux;
 
+/// The reason code of a capability this platform has no backend for (§3.2):
+/// a fact about the implementation, never a measurement of the host.
+pub const REASON_UNSUPPORTED_PLATFORM: &str = "unsupported_platform";
+
 /// Who this binary is running as, for the receipt's `platform` group.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PlatformIdentity {
