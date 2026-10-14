@@ -238,6 +238,92 @@ fn hard_links_are_denied_under_a_storage_ceiling_and_allowed_without_it() {
     }
 }
 
+/// The `agent` profile under a storage ceiling. Its unprivileged variant
+/// admits the ceiling, and then the baseline bubblewrap installs carries the
+/// hard-link denials: the link fails with EPERM, the receipt names that one
+/// program in both places it names one (`applied.syscalls.digest` and the
+/// agent detail), never the plain baseline, and the storage evidence states
+/// the denial. A host whose nested user namespaces select the
+/// namespace-inner variant, which permits new mounts, refuses the ceiling
+/// instead, and the check says so rather than pass vacuously.
+#[test]
+fn an_agent_storage_ceiling_installs_and_names_the_hard_link_denials() {
+    if !common::live() {
+        return;
+    }
+    let jail = Jail::new().unwrap();
+    let ws = jail.root().join("workspace");
+    std::fs::create_dir(&ws).unwrap();
+    let path = CString::new(ws.as_os_str().as_bytes()).unwrap();
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: terminated path and writable statfs output.
+    assert_eq!(
+        unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) },
+        0
+    );
+    // SAFETY: successful statfs initialized the structure.
+    let stats = unsafe { stats.assume_init() };
+    if stats.f_type != libc::TMPFS_MAGIC || stats.f_blocks == 0 || stats.f_files == 0 {
+        harness::skip_or_fail("a storage ceiling needs a bounded tmpfs test directory");
+        return;
+    }
+    let fixture = ws.join("ouro-fixture");
+    std::fs::copy(harness::fixture_path(), &fixture).unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(ws.join("from"), b"hard link source").unwrap();
+    let bytes = stats.f_blocks * u64::try_from(stats.f_bsize).unwrap();
+    let run = jail
+        .arg("run")
+        .arg("--profile")
+        .arg("agent")
+        .arg("--workspace")
+        .arg(&ws)
+        .args(["--limit", &format!("storage={bytes}")])
+        .receipt()
+        .target([
+            fixture.as_os_str(),
+            std::ffi::OsStr::new("link"),
+            std::ffi::OsStr::new("from"),
+            std::ffi::OsStr::new("to"),
+            std::ffi::OsStr::new("--via"),
+            std::ffi::OsStr::new("linkat"),
+            std::ffi::OsStr::new("--expect"),
+            std::ffi::OsStr::new("EPERM"),
+        ])
+        .run()
+        .unwrap();
+    if run.code() == Some(125)
+        && run
+            .stderr_text()
+            .contains("storage ceilings require a profile that cannot create new mounts")
+    {
+        harness::skip_or_fail(
+            "this host's `agent` variant permits new mounts, so it refuses a storage ceiling",
+        );
+        return;
+    }
+    assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
+    let receipt = common::checked_receipt(run.receipt_phase("settled").unwrap());
+    let details = &receipt["lifetime"]["native"]["details"];
+    assert_eq!(details["agent"]["filter_variant"], "unprivileged_inner");
+    let installed = receipt["applied"]["syscalls"]["digest"].as_str().unwrap();
+    assert_eq!(details["agent"]["baseline_filter_digest"], installed);
+    let plain = ouro_jail::platform::linux::seccomp::agent_baseline(
+        ouro_jail::platform::linux::seccomp::AgentVariant::UnprivilegedInner,
+    )
+    .unwrap()
+    .digest();
+    assert_ne!(
+        installed, plain,
+        "the installed program carries the storage rules"
+    );
+    assert_eq!(
+        details["storage_ceiling"]["hard_links"], "denied",
+        "{details:#}"
+    );
+    assert!(!ws.join("to").exists(), "the hard link was made");
+}
+
 /// Mutation-M03 guard: a requested ceiling over a writable filesystem the
 /// runtime cannot bound — an unbounded tmpfs, `f_blocks == 0` — refuses
 /// before exec instead of admitting an unbounded volume. The condition

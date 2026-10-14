@@ -729,6 +729,9 @@ struct Boundary {
     ns_ids: identity::NsIds,
     cgroup: Option<ExecutionCgroup>,
     storage: Option<super::storage::Storage>,
+    /// Whether the installed baseline denies `link` and `linkat`, read from
+    /// the program itself; the storage ceiling's evidence states it.
+    hard_links_denied: bool,
     cgroup_lost: bool,
     /// Why no execution cgroup exists, when preferred ceilings run unenforced.
     cgroup_unavailable: Option<String>,
@@ -908,7 +911,6 @@ impl Boundary {
                 handoff,
                 &exe,
                 bwrap_path,
-                bplan.bounded_storage,
             )?;
             bplan.proxy_dir = Some(agent.dir_path().to_path_buf());
             bplan.proxy_dir_fd = Some(super::agent::PROXY_DIR_FD);
@@ -1144,6 +1146,30 @@ impl Boundary {
             })?,
         };
         let filter_digest = filter.digest();
+        // A storage ceiling rests on the hard-link denials (a link could
+        // charge a foreign inode to the bounded tree), and its receipt
+        // evidence states them. Both read the program that is installed, so
+        // neither can claim a rule it lacks.
+        let variant = agent.as_ref().map(super::agent::AgentNet::variant);
+        let hard_links_denied = match installed_hard_link_rule(&filter, variant) {
+            Ok(denied) if denied == bplan.bounded_storage => denied,
+            Ok(denied) => {
+                return Err(preparing(
+                    ErrorCode::InternalError,
+                    format!(
+                        "the syscall filter {} hard links while a storage ceiling is {}",
+                        if denied { "denies" } else { "permits" },
+                        if denied { "not requested" } else { "requested" }
+                    ),
+                ));
+            }
+            Err(reason) => {
+                return Err(preparing(
+                    ErrorCode::InternalError,
+                    format!("the syscall filter's hard-link rule cannot be read: {reason}"),
+                ));
+            }
+        };
 
         let target: Vec<OsString> = plan
             .argv
@@ -1467,6 +1493,7 @@ impl Boundary {
             cgroup_lost: false,
             cgroup_unavailable,
             storage: None,
+            hard_links_denied,
             stdio_relays,
             watcher,
             agent: agent.take(),
@@ -2240,7 +2267,10 @@ impl Boundary {
             Value::from(i64::from(self.bwrap_pid)),
         );
         if let Some(storage) = &self.storage {
-            details.insert("storage_ceiling".to_owned(), storage.evidence());
+            details.insert(
+                "storage_ceiling".to_owned(),
+                storage.evidence(self.hard_links_denied),
+            );
         }
         details.insert(
             "readonly_open_fast_path".to_owned(),
@@ -2907,6 +2937,34 @@ fn pump_stdio_relays(relays: &mut [StdioRelay]) -> std::io::Result<bool> {
         }
     }
     failure.map_or(Ok(progress), Err)
+}
+
+/// Whether `filter`, the baseline bubblewrap installs, denies `link` and
+/// `linkat`, read from the program itself: it is matched against its
+/// profile's baseline (`tool`'s, or `agent`'s in `variant`) built with and
+/// without the storage rules.
+///
+/// # Errors
+/// Why the answer is unknown: a baseline that cannot be built, or a program
+/// that is neither of the two, which no preparation installs.
+fn installed_hard_link_rule(
+    filter: &super::bpf::Program,
+    variant: Option<seccomp::AgentVariant>,
+) -> Result<bool, String> {
+    let baseline = |storage| {
+        match variant {
+            Some(variant) => seccomp::agent_baseline_with_storage(variant, storage),
+            None => seccomp::tool_baseline_with_storage(storage),
+        }
+        .map_err(|err| format!("its baseline cannot be built: {err}"))
+    };
+    if *filter == baseline(true)? {
+        Ok(true)
+    } else if *filter == baseline(false)? {
+        Ok(false)
+    } else {
+        Err("it is not its profile's baseline".to_owned())
+    }
 }
 
 /// The coverage the plan actually obtained, derived from the walk.
@@ -4321,7 +4379,10 @@ impl RunningExecution for LinuxRunning {
     fn final_native_details(&self) -> serde_json::Map<String, Value> {
         let mut details = serde_json::Map::new();
         if let Some(storage) = &self.boundary.storage {
-            details.insert("storage_ceiling".to_owned(), storage.evidence());
+            details.insert(
+                "storage_ceiling".to_owned(),
+                storage.evidence(self.boundary.hard_links_denied),
+            );
         }
         if let Some(agent) = self.boundary.agent.as_ref() {
             details.insert("helpers".to_owned(), agent.details().1);
@@ -6197,19 +6258,34 @@ mod tests {
         assert!(!init_alive(None, -1), "no init named: none alive");
     }
 
-    /// A storage ceiling adds the hard-link denials to the `agent` baseline
-    /// bubblewrap installs. The receipt's agent detail names that program —
-    /// the one `applied.syscalls.digest` names — never the plain baseline,
-    /// which does not run.
+    /// A storage or inode ceiling in the snapshot adds the hard-link denials
+    /// to the `agent` baseline bubblewrap installs: the network reads the
+    /// ceiling from the snapshot itself, so no caller can build it without
+    /// them. The receipt's agent detail names that program — the one
+    /// `applied.syscalls.digest` names — never the plain baseline, which does
+    /// not run.
     #[test]
     fn the_agent_detail_names_the_installed_baseline_with_its_storage_rules() {
         use super::super::agent::AgentNet;
         use super::super::seccomp::{AgentVariant, agent_baseline_with_storage};
-        let snapshot = plan_for(ProfileName::Agent, false).snapshot;
         let root = tempfile::tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
-        for bounded_storage in [false, true] {
-            let proxy = root.join(format!("proxy-{bounded_storage}"));
+        let ceiling = || {
+            Some(crate::policy::LimitCeiling {
+                value: "1048576".to_owned(),
+                required: true,
+            })
+        };
+        for (name, storage, inodes) in [
+            ("unbounded", None, None),
+            ("storage", ceiling(), None),
+            ("inodes", None, ceiling()),
+        ] {
+            let mut snapshot = plan_for(ProfileName::Agent, false).snapshot;
+            snapshot.limits.storage = storage;
+            snapshot.limits.inodes = inodes;
+            let bounded_storage = name != "unbounded";
+            let proxy = root.join(format!("proxy-{name}"));
             std::fs::create_dir(&proxy).unwrap();
             let dir = crate::state::anchored::Dir::open_trusted(&proxy).unwrap();
             let identity = dir.stat().unwrap().identity();
@@ -6228,18 +6304,22 @@ mod tests {
                 &handoff,
                 Path::new("/nonexistent/ouro-jail"),
                 Path::new("bwrap"),
-                bounded_storage,
             )
             .unwrap();
             assert_eq!(agent.variant(), AgentVariant::UnprivilegedInner);
             let installed =
                 agent_baseline_with_storage(AgentVariant::UnprivilegedInner, bounded_storage)
                     .unwrap();
-            assert_eq!(agent.baseline(), &installed);
+            assert_eq!(agent.baseline(), &installed, "{name}");
             assert_eq!(
                 agent.details().0["baseline_filter_digest"],
                 installed.digest().as_str(),
-                "storage {bounded_storage}"
+                "{name}"
+            );
+            assert_eq!(
+                super::installed_hard_link_rule(agent.baseline(), Some(agent.variant())),
+                Ok(bounded_storage),
+                "{name}"
             );
         }
         assert_ne!(
@@ -6250,6 +6330,53 @@ mod tests {
                 .unwrap()
                 .digest(),
             "the storage rules change the installed program"
+        );
+    }
+
+    /// The storage evidence's hard-link claim is read from the installed
+    /// program: each profile's baseline says whether it carries the storage
+    /// rules, and a program that is not its profile's baseline has no answer.
+    #[test]
+    fn the_hard_link_rule_is_read_from_the_installed_program() {
+        use super::super::seccomp::{
+            AgentVariant, agent_baseline_with_storage, tool_baseline_with_storage,
+        };
+        for storage in [false, true] {
+            assert_eq!(
+                super::installed_hard_link_rule(
+                    &tool_baseline_with_storage(storage).unwrap(),
+                    None
+                ),
+                Ok(storage)
+            );
+            for variant in [
+                AgentVariant::UnprivilegedInner,
+                AgentVariant::NamespaceInner,
+            ] {
+                assert_eq!(
+                    super::installed_hard_link_rule(
+                        &agent_baseline_with_storage(variant, storage).unwrap(),
+                        Some(variant)
+                    ),
+                    Ok(storage),
+                    "{variant:?}"
+                );
+            }
+        }
+        // `tool`'s program is no `agent` baseline, and the reverse.
+        assert!(
+            super::installed_hard_link_rule(
+                &tool_baseline_with_storage(true).unwrap(),
+                Some(AgentVariant::UnprivilegedInner)
+            )
+            .is_err()
+        );
+        assert!(
+            super::installed_hard_link_rule(
+                &agent_baseline_with_storage(AgentVariant::NamespaceInner, true).unwrap(),
+                None
+            )
+            .is_err()
         );
     }
 

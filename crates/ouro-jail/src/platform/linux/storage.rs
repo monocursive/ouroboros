@@ -423,7 +423,10 @@ impl Storage {
         self.failure.as_deref()
     }
 
-    pub(super) fn evidence(&self) -> serde_json::Value {
+    /// The ceiling's receipt evidence. `hard_links_denied` is what the
+    /// installed syscall filter does with `link` and `linkat`, read from that
+    /// program by the caller, never assumed here.
+    pub(super) fn evidence(&self, hard_links_denied: bool) -> serde_json::Value {
         serde_json::json!({
             "mechanism": if self.volumes.iter().any(|volume| volume.uid.is_some()) {
                 "filesystem-user-quota"
@@ -434,8 +437,8 @@ impl Storage {
                 "capacity_bytes": volume.bytes,
                 "capacity_inodes": volume.inodes,
             })).collect::<Vec<_>>(),
-            "hard_links": "denied",
-            "hard_link_denials": "seccomp_errno_not_observed",
+            "hard_links": if hard_links_denied { "denied" } else { "permitted" },
+            "hard_link_denials": hard_links_denied.then_some("seccomp_errno_not_observed"),
             "filesystems": self.volumes.len(),
             "capacity_bytes": self.capacity_bytes,
             "capacity_inodes": self.capacity_inodes,

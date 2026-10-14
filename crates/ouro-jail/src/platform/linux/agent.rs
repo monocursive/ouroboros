@@ -297,8 +297,8 @@ impl Drop for AgentNet {
 
 impl AgentNet {
     /// Step 1: the variant, its baseline filter (with the storage rules when
-    /// `bounded_storage`), the proxy socket and its pin. Runs before the
-    /// backend starts.
+    /// the snapshot bounds storage or inodes), the proxy socket and its pin.
+    /// Runs before the backend starts.
     ///
     /// # Errors
     /// A refusal naming the syscall filter or the proxy when the filter, the
@@ -310,13 +310,15 @@ impl AgentNet {
         handoff: &ProxyDirHandoff,
         jail_exe: &Path,
         bwrap: &Path,
-        bounded_storage: bool,
     ) -> Result<AgentNet, JailError> {
         // §9.2: probe the real nesting sequence and record it; its result
         // picks the baseline, and "unavailable" never refuses `agent`.
         let nested = probe::run_one("nested_user_namespace", jail_exe, bwrap);
         let variant =
             AgentVariant::for_nested_user_namespace(nested.status == ProbeStatus::Available);
+        // Read from the snapshot here, where the program is built, so no
+        // caller can hand in a storage answer the ceiling does not share.
+        let bounded_storage = super::storage::requested(&snapshot.limits);
         let baseline = seccomp::agent_baseline_with_storage(variant, bounded_storage)
             .map_err(|error| refusal("syscall filter", error))?;
         let mediation_digest = unixpeer::filter_digest();
