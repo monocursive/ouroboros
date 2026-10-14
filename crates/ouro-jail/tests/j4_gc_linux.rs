@@ -24,49 +24,26 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ouro_fixture::harness::{self, Jail, Run, Spawned};
-use ouro_jail::platform::linux::{identity, probe, watch};
+use ouro_jail::platform::linux::{identity, watch};
 use serde_json::{Value, json};
 
 mod common;
 
-const PYTHON: &str = "/usr/bin/python3";
+use common::PYTHON;
 
 // ---------------------------------------------------------------------------
 // Preconditions and helpers
 // ---------------------------------------------------------------------------
 
-/// A delegated user scope with a usable leaf, and the fixture interpreter.
+/// A delegated leaf (`common::delegated_leaf`) and the interpreter the
+/// fixtures are written in.
 fn live() -> bool {
-    let leaf = probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != probe::ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "slice G needs a delegated user scope with a usable leaf: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    if !Path::new(PYTHON).is_file() {
-        harness::skip_or_fail("the orphan fixtures are python3 scripts");
-        return false;
-    }
-    true
-}
-
-fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    common::delegated_leaf() && common::python()
 }
 
 fn receipt_in_phase(spawned: &Spawned, phase: &str) -> Value {
     let mut latest = Value::Null;
-    wait_for(&format!("a {phase} receipt"), || {
+    common::eventually(&format!("a {phase} receipt"), common::SETTLE_BOUND, || {
         latest = spawned.receipt_value().unwrap_or(Value::Null);
         latest["phase"] == phase
     });
@@ -148,7 +125,9 @@ fn remove_cgroup_tree(dir: &Path) {
 
 /// Reads a pid a fixture published with an atomic rename.
 fn written_pid(path: &Path) -> i32 {
-    wait_for(&format!("{}", path.display()), || path.exists());
+    common::eventually(&path.display().to_string(), common::SETTLE_BOUND, || {
+        path.exists()
+    });
     std::fs::read_to_string(path)
         .unwrap()
         .trim()
@@ -364,7 +343,9 @@ fn j4_c03_a_populated_orphan_leaf_of_this_boot_is_killed_verified_and_removed() 
         "{report:#}"
     );
     assert!(text(&report, "owner").starts_with("dead"), "{report:#}");
-    wait_for("the orphan's end", || orphan.orphan_dead());
+    common::eventually("the orphan's end", common::SETTLE_BOUND, || {
+        orphan.orphan_dead()
+    });
     assert_eq!(
         inode(&orphan.leaf),
         None,
@@ -417,7 +398,9 @@ fn j4_c03_a_replaced_leaf_is_never_touched() {
     let mut orphan = Orphan::new();
     // Replace the leaf: end what it holds, remove it, make a look-alike.
     std::fs::write(orphan.leaf.join("cgroup.kill"), "1").unwrap();
-    wait_for("the old leaf to empty", || !populated(&orphan.leaf));
+    common::eventually("the old leaf to empty", common::SETTLE_BOUND, || {
+        !populated(&orphan.leaf)
+    });
     std::fs::remove_dir(&orphan.leaf).unwrap();
     std::fs::create_dir(&orphan.leaf).unwrap();
     let replacement = inode(&orphan.leaf).unwrap();
@@ -469,7 +452,7 @@ fn j4_c03_a_simulated_reboot_never_targets_a_reused_cgroup() {
     assert_ne!(state["owner"]["boot_id"], other_boot);
     state["owner"]["boot_id"] = json!(other_boot);
     write_json(&attempt.join("jail-state.json"), &state);
-    let mut receipt = read_json(&attempt.join("jail.json"));
+    let mut receipt = common::read_receipt(&attempt.join("jail.json"));
     receipt["process"]["identity"]["value"]["boot_id"] = json!(other_boot);
     write_json(&attempt.join("jail.json"), &receipt);
 
@@ -527,7 +510,7 @@ impl Bystander {
             .arg(&ready)
             .spawn()
             .unwrap();
-        wait_for("the bystander", || ready.exists());
+        common::eventually("the bystander", common::SETTLE_BOUND, || ready.exists());
         Bystander { child, marker }
     }
 
@@ -601,7 +584,9 @@ fn j4_c03_a_stale_owner_pid_never_signals_an_unrelated_process() {
         "terminated_orphan_and_removed",
         "{report:#}"
     );
-    wait_for("the orphan's end", || orphan.orphan_dead());
+    common::eventually("the orphan's end", common::SETTLE_BOUND, || {
+        orphan.orphan_dead()
+    });
     assert_eq!(inode(&orphan.leaf), None);
     bystander.assert_untouched("recycled pid");
 }
@@ -627,7 +612,7 @@ fn j4_c03_a_receipt_naming_another_cgroup_is_never_acted_on() {
     let mut bystander = Command::new("sleep").arg("120").spawn().unwrap();
     std::fs::write(other.join("cgroup.procs"), bystander.id().to_string()).unwrap();
     let meta = std::fs::metadata(&other).unwrap();
-    let mut receipt = read_json(&attempt.join("jail.json"));
+    let mut receipt = common::read_receipt(&attempt.join("jail.json"));
     let registration = &mut receipt["lifetime"]["native"]["details"]["execution_cgroup"];
     registration["path"] = json!(other);
     registration["device"] = json!(meta.dev());
@@ -687,7 +672,9 @@ fn j4_c03_child_cgroups_inside_an_orphan_leaf_are_ended_and_removed() {
         "terminated_orphan_and_removed",
         "{report:#}"
     );
-    wait_for("the nested orphan's end", || orphan.orphan_dead());
+    common::eventually("the nested orphan's end", common::SETTLE_BOUND, || {
+        orphan.orphan_dead()
+    });
     assert_eq!(
         inode(&orphan.leaf),
         None,
@@ -733,7 +720,7 @@ fn j4_c03_contained_crash_leaves_an_empty_leaf_that_gc_removes() {
     let _guard = LeafGuard::new(&leaf, leaf_inode);
     let attempt = attempt_of(&spawned.root().join("data"));
     let scratch = attempt.join("scratch");
-    wait_for("the child's scratch file", || {
+    common::eventually("the child's scratch file", common::SETTLE_BOUND, || {
         scratch.join("left-behind").exists()
     });
     assert!(populated(&leaf));
@@ -742,12 +729,17 @@ fn j4_c03_contained_crash_leaves_an_empty_leaf_that_gc_removes() {
         .expect("the harness kills its own supervisor");
     let run = spawned.wait().expect("the dead supervisor is collected");
     assert_eq!(run.signal(), Some(libc::SIGKILL), "{}", run.stderr_text());
-    wait_for("the contained tree to die with its supervisor", || {
-        !populated(&leaf)
-    });
+    common::eventually(
+        "the contained tree to die with its supervisor",
+        common::SETTLE_BOUND,
+        || !populated(&leaf),
+    );
     assert_eq!(inode(&leaf), Some(leaf_inode), "nothing removed the leaf");
     let receipt = std::fs::read(attempt.join("jail.json")).unwrap();
-    assert_eq!(read_json(&attempt.join("jail.json"))["phase"], "enforced");
+    assert_eq!(
+        common::read_receipt(&attempt.join("jail.json"))["phase"],
+        "enforced"
+    );
 
     let (code, report, stderr) = gc(&run, &["--dry-run"]);
     assert_eq!(code, Some(0), "{stderr}\n{report:#}");
@@ -802,7 +794,7 @@ fn leaves(root: &Path) -> Vec<(String, u64)> {
 }
 
 /// One `tool` attempt aborted by `OURO_JAIL_TEST_ABORT_AT=<point>` (S9),
-/// exactly as `j4_records_linux` crashes one: no core file, the release
+/// exactly as `records_linux`'s `replacement` crashes one: no core file, the release
 /// binary, the harness's own private state root.
 fn crashed_tool_run(point: &str) -> Run {
     let jail = Jail::with_program("/bin/sh")
@@ -906,7 +898,11 @@ fn j4_n7_a_crash_between_mkdir_and_the_receipt_leaves_a_leaf_gc_removes() {
             problems.push(format!("{point}: registered inode {recorded}, found {now}"));
         }
         if exists {
-            wait_for("the dead supervisor's leaf to empty", || !populated(&path));
+            common::eventually(
+                "the dead supervisor's leaf to empty",
+                common::SETTLE_BOUND,
+                || !populated(&path),
+            );
         }
         let (code, report, stderr) = gc(&run, &[]);
         if code != Some(0) {
@@ -1122,7 +1118,7 @@ fn j4_w3_g2_each_execution_leaf_is_named_for_its_attempt() {
             Some(format!("ouro-{id}.leaf").as_str()),
             "{profile}: the registered leaf does not carry its attempt"
         );
-        let receipt = read_json(&attempt.join("jail.json"));
+        let receipt = common::read_receipt(&attempt.join("jail.json"));
         assert_eq!(
             receipt["lifetime"]["native"]["details"]["execution_cgroup"]["path"],
             json!(path),
@@ -1159,7 +1155,9 @@ fn j4_w3_g2_a_forged_registration_of_a_live_attempts_leaf_is_never_acted_on() {
     let enforced = receipt_in_phase(&spawned, "enforced");
     let (leaf, leaf_inode) = leaf_of(&enforced);
     let _guard = LeafGuard::new(&leaf, leaf_inode);
-    wait_for("B's leaf to be populated", || populated(&leaf));
+    common::eventually("B's leaf to be populated", common::SETTLE_BOUND, || {
+        populated(&leaf)
+    });
     let b = attempt_of(&data);
     let b_state = read_json(&b.join("jail-state.json"));
     let supervisor = spawned.pid() as i32;
@@ -1283,9 +1281,11 @@ fn j4_w3_g1_gc_never_rewrites_a_dead_supervisors_enforced_receipt() {
         .expect("the harness kills its own supervisor");
     let run = spawned.wait().expect("the dead supervisor is collected");
     assert_eq!(run.signal(), Some(libc::SIGKILL), "{}", run.stderr_text());
-    wait_for("the contained tree to die with its supervisor", || {
-        !populated(&leaf)
-    });
+    common::eventually(
+        "the contained tree to die with its supervisor",
+        common::SETTLE_BOUND,
+        || !populated(&leaf),
+    );
     let before = std::fs::read(attempt.join("jail.json")).unwrap();
     let receipt: Value = serde_json::from_slice(&before).unwrap();
     assert_eq!(receipt["phase"], "enforced");
@@ -1326,14 +1326,9 @@ fn j4_w3_g1_gc_never_rewrites_a_dead_supervisors_enforced_receipt() {
 fn j4_w3_p1c_a_zombie_leader_with_a_live_thread_is_alive() {
     let tmp = common::private_tempdir();
     let ready = tmp.path().join("ready");
-    let mut helper = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "j4_w3_zombie_leader_helper",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
+    // The helper never finishes (its leader thread exits first), so it never
+    // reports; the ready file it writes is what proves it ran.
+    let mut helper = common::helper_command("j4_w3_zombie_leader_helper")
         .env("OURO_W3G_ZOMBIE_READY", &ready)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1345,9 +1340,11 @@ fn j4_w3_p1c_a_zombie_leader_with_a_live_thread_is_alive() {
             .ok()
             .and_then(|raw| identity::parse_state(&raw).ok())
     };
-    wait_for("the helper's leader to exit alone", || {
-        ready.exists() && state() == Some('Z')
-    });
+    common::eventually(
+        "the helper's leader to exit alone",
+        common::SETTLE_BOUND,
+        || ready.exists() && state() == Some('Z'),
+    );
     let threads = std::fs::read_dir(format!("/proc/{pid}/task"))
         .unwrap()
         .count();
@@ -1432,9 +1429,10 @@ fn j4_w3_zombie_leader_helper() {
         // SAFETY: exit(2) of the calling thread only; async-signal-safe.
         unsafe { libc::syscall(libc::SYS_exit, 0) };
     }
-    let Some(ready) = std::env::var_os("OURO_W3G_ZOMBIE_READY") else {
+    if !common::running_helper("j4_w3_zombie_leader_helper") {
         return;
-    };
+    }
+    let ready = std::env::var_os("OURO_W3G_ZOMBIE_READY").expect("the parent names the ready file");
     // SAFETY: getpid and gettid take no arguments and cannot fail.
     let (pid, tid) = unsafe { (libc::getpid(), libc::gettid()) };
     if tid == pid {
@@ -1532,9 +1530,11 @@ fn j4_w3_g3_a_crash_at_gcs_first_record_never_strands_the_attempt() {
             continue;
         };
         let _guard = inode(&leaf).map(|now| LeafGuard::new(&leaf, now));
-        wait_for("the dead supervisor's leaf to empty", || {
-            inode(&leaf).is_none() || !populated(&leaf)
-        });
+        common::eventually(
+            "the dead supervisor's leaf to empty",
+            common::SETTLE_BOUND,
+            || inode(&leaf).is_none() || !populated(&leaf),
+        );
         let scratch = attempt.join("scratch");
         let vendor = attempt.join("vendor-state");
         if !scratch.is_dir() || !vendor.is_dir() {

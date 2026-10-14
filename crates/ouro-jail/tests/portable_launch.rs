@@ -16,16 +16,14 @@
 //! What this file does not prove: that a real bubblewrap boundary binds the
 //! staged objects. `conformance_j3_credentials.rs` does that on Linux.
 
-use std::collections::BTreeMap;
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use clap::Parser as _;
-use jsonschema::{Registry, Resource, Validator};
-use ouro_jail::capability::{Capability, CapabilityScope, CapabilityStatus};
+use ouro_jail::capability::Capability;
 use ouro_jail::cli::{self, PolicyArgs};
 use ouro_jail::config::EnvSettings;
 use ouro_jail::credentials::LaunchHandoff;
@@ -36,12 +34,13 @@ use ouro_jail::platform::{
 };
 use ouro_jail::policy::{EnvValue, ProfileName, RootToken};
 use ouro_jail::records::{
-    ErrorCode, JailError, NativeLifetime, Os, Receipt, Remediation, StateCleanup, rfc3339_utc,
+    ErrorCode, JailError, NativeLifetime, Os, Receipt, Remediation, StateCleanup,
 };
 use ouro_jail::{cleanup, launch_profile, supervisor};
 use sha2::{Digest as _, Sha256};
 
 mod common;
+use common::sim;
 
 // ---------------------------------------------------------------------------
 // Fixture layout
@@ -203,57 +202,10 @@ fn receipt_json(report: &supervisor::RunReport) -> serde_json::Value {
 // The checked-in schemas
 // ---------------------------------------------------------------------------
 
-fn specs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/specs/jail-v1")
-        .canonicalize()
-        .unwrap()
-}
-
-fn validators() -> &'static BTreeMap<String, Validator> {
-    static ONCE: std::sync::OnceLock<BTreeMap<String, Validator>> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| {
-        let mut schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        for entry in std::fs::read_dir(specs_dir()).unwrap() {
-            let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if let Some(stem) = name.strip_suffix(".schema.json") {
-                schemas.insert(
-                    stem.to_owned(),
-                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap(),
-                );
-            }
-        }
-        let pairs: Vec<(String, Resource)> = schemas
-            .values()
-            .map(|schema| {
-                (
-                    schema["$id"].as_str().unwrap().to_owned(),
-                    Resource::from_contents(schema.clone()),
-                )
-            })
-            .collect();
-        let registry: &'static Registry = Box::leak(Box::new(
-            Registry::new().extend(pairs).unwrap().prepare().unwrap(),
-        ));
-        schemas
-            .into_iter()
-            .map(|(name, schema)| {
-                let validator = jsonschema::options()
-                    .with_registry(registry)
-                    .should_validate_formats(true)
-                    .build(&schema)
-                    .unwrap();
-                (name, validator)
-            })
-            .collect()
-    })
-}
-
 /// Schema validation; a receipt also keeps the rules the schema cannot state
 /// (`common::semantic_receipt`).
 fn assert_schema(name: &str, value: &serde_json::Value) {
-    let validator = &validators()[name];
+    let validator = &common::validators()[name];
     let errors: Vec<String> = validator
         .iter_errors(value)
         .map(|e| e.to_string())
@@ -322,28 +274,15 @@ struct Sim {
 }
 
 fn verified_tree() -> TreeObservation {
-    TreeObservation {
-        tree_empty: Some(true),
-        verified_at: Some(SystemTime::now()),
-        verification_scope: "attempt_tree".into(),
-        integrity: "verified".into(),
-    }
+    sim::verified_tree("attempt_tree")
 }
 
 impl Platform for Sim {
     fn owner_identity(&self) -> Option<OwnerIdentity> {
-        Some(OwnerIdentity {
-            pid: std::process::id(),
-            boot_id: "00000000-0000-4000-8000-000000000001".into(),
-            start_time_ticks: 1,
-        })
+        Some(sim::owner())
     }
     fn identity(&self) -> PlatformIdentity {
-        PlatformIdentity {
-            os: Os::Linux,
-            arch: "simulation".into(),
-            kernel: "simulated".into(),
-        }
+        sim::identity()
     }
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
         if let Some(data) = &self.plant_vendor_state {
@@ -356,18 +295,7 @@ impl Platform for Sim {
             std::fs::create_dir(attempt.join("vendor-state")).unwrap();
             std::fs::write(attempt.join("vendor-state/precious"), b"not this attempt's").unwrap();
         }
-        plan.requirements
-            .iter()
-            .map(|name| Capability {
-                name: name.clone(),
-                status: CapabilityStatus::Available,
-                scope: CapabilityScope::Tree,
-                mechanism: Some("simulation".into()),
-                reason_code: Some("ok".into()),
-                measured_at: Some(rfc3339_utc(SystemTime::now())),
-                evidence_ref: Some("J3 launch simulation".into()),
-            })
-            .collect()
+        sim::available(plan, "launch simulation")
     }
     fn prepare(
         &self,
@@ -425,7 +353,7 @@ impl PreparedExecution for SimPrepared {
                 identity: ouro_jail::records::ProcessIdentity {
                     kind: "linux_boot_start".into(),
                     value: serde_json::from_value(serde_json::json!({
-                        "boot_id": "00000000-0000-4000-8000-000000000001",
+                        "boot_id": sim::BOOT_ID,
                         "start_time_ticks": 1
                     }))
                     .unwrap(),
@@ -1591,11 +1519,17 @@ fn c02_a_replaced_vendor_state_directory_is_never_deleted() {
     assert!(attempt.join("parked/a").is_dir());
 }
 
+/// A launch profile that stages credentials is refused, when the platform
+/// refuses before any boundary, exactly as a plain `--profile agent` run is,
+/// and stages nothing first.
+///
+/// The real platform for this OS refuses here: macOS because execution is
+/// not implemented there, Linux because its capability probes run the
+/// current executable, which in this test is the test binary rather than
+/// `ouro-jail`, so `tree_termination` is reported missing at probing. Both
+/// refusals come before staging.
 #[test]
-fn an_agent_launch_profile_resolves_and_then_refuses_exactly_as_agent_does_today() {
-    // The real platform for this OS: macOS refuses execution as unsupported,
-    // Linux refuses `agent` before any boundary (wave 2 enables it). Either
-    // way nothing is staged and no vendor state is created.
+fn an_agent_launch_profile_is_refused_before_staging_as_plain_agent_is() {
     let fixture = Fixture::new();
     let auth = fixture.credential("auth.json", b"a");
     let config = fixture.credential("config.toml", b"b");
@@ -1643,12 +1577,21 @@ fn an_agent_launch_profile_resolves_and_then_refuses_exactly_as_agent_does_today
             &args,
         )
     };
-    assert_eq!(launched.exit_code, 125);
-    assert_eq!(launched.exit_code, plain.exit_code);
-    assert_eq!(
-        launched.error.as_ref().map(|error| error.code),
-        plain.error.as_ref().map(|error| error.code)
-    );
+    let code = if cfg!(target_os = "linux") {
+        ErrorCode::MissingCapability
+    } else {
+        ErrorCode::UnsupportedPlatform
+    };
+    let stage = ouro_jail::records::ErrorStage::Probing;
+    for (label, report) in [("plain", &plain), ("launched", &launched)] {
+        assert_eq!(report.exit_code, 125, "{label}");
+        let error = report.error.as_ref().expect("a refusal");
+        assert_eq!(
+            (error.code, error.stage),
+            (code, stage),
+            "{label}: {error:?}"
+        );
+    }
     let receipt = receipt_json(&launched);
     assert_eq!(receipt["phase"], "refused");
     assert_eq!(receipt["state_cleanup"], "not_needed");
@@ -1659,7 +1602,7 @@ fn an_agent_launch_profile_resolves_and_then_refuses_exactly_as_agent_does_today
 }
 
 // ---------------------------------------------------------------------------
-// Staging, directly (the API the platform and wave 2 call)
+// Staging, directly (the API the platforms call)
 // ---------------------------------------------------------------------------
 
 fn stage_one_source(fixture: &Fixture, source: &Path) -> Result<(), (JailError, usize)> {

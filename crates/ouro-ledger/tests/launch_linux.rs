@@ -3,15 +3,14 @@
 
 use std::{
     fs,
-    io::Read,
     os::{
-        fd::{FromRawFd as _, OwnedFd},
+        fd::AsFd as _,
         unix::{fs::PermissionsExt as _, net::UnixStream},
     },
     path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    process::{Command, Output, Stdio},
     sync::OnceLock,
-    thread::{self, JoinHandle},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -22,6 +21,9 @@ use ouro_ledger::{
 };
 use ouro_records::records;
 use serde_json::Value;
+
+mod common;
+use common::Process;
 
 #[path = "launch_linux/argv_capture.rs"]
 mod argv_capture;
@@ -35,6 +37,8 @@ mod transcript;
 mod vendor_state;
 
 const COMMAND_LIMIT: Duration = Duration::from_secs(20);
+/// How long an on-demand writer may take to exit after each cleanup signal.
+const STOP_BOUND: Duration = Duration::from_secs(2);
 
 #[test]
 fn real_launch_bundles_verify_offline_with_selected_truncated_captures() {
@@ -101,7 +105,7 @@ fn real_launch_bundles_verify_offline_with_selected_truncated_captures() {
                 .arg("--json"),
             true,
         )
-        .finish();
+        .finish(COMMAND_LIMIT);
         assert!(
             output.status.success(),
             "{}",
@@ -112,8 +116,15 @@ fn real_launch_bundles_verify_offline_with_selected_truncated_captures() {
             report
         );
         assert!(!fixture.data.exists());
+        // Same size, other bytes: only the inventory's digest can tell.
         fs::write(moved.join("stdout.bin"), b"fake").unwrap();
-        assert!(ouro_ledger::bundle::verify(&moved).is_err());
+        let error = ouro_ledger::bundle::verify(&moved)
+            .expect_err("a tampered member is refused")
+            .to_string();
+        assert!(
+            error.contains("bundle member size or digest mismatch"),
+            "{error}"
+        );
     }
 }
 
@@ -193,7 +204,7 @@ fn live_jail() -> Option<PathBuf> {
         command.args(["doctor", "--json"]);
         let output = Process::try_spawn(&mut command, true)
             .map_err(|error| format!("real ouro-jail doctor unavailable: {error}"))?
-            .finish();
+            .finish(COMMAND_LIMIT);
         let doctor: Value = serde_json::from_slice(&output.stdout)
             .map_err(|error| format!("real ouro-jail doctor did not return JSON: {error}"))?;
         if !output.status.success() || doctor["component"] != "ouro-jail" || doctor["ready"] != true
@@ -209,87 +220,6 @@ fn live_jail() -> Option<PathBuf> {
         Err(reason) => {
             harness::skip_or_fail(reason);
             None
-        }
-    }
-}
-
-struct Process {
-    child: Child,
-    stdout: Option<JoinHandle<Vec<u8>>>,
-    stderr: Option<JoinHandle<Vec<u8>>>,
-}
-
-fn collect(reader: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut bytes = Vec::new();
-        reader.take(2 * 1_048_576).read_to_end(&mut bytes).unwrap();
-        bytes
-    })
-}
-
-impl Process {
-    fn spawn(command: &mut Command, drain_stdout: bool) -> Self {
-        Self::try_spawn(command, drain_stdout).unwrap()
-    }
-
-    fn try_spawn(command: &mut Command, drain_stdout: bool) -> std::io::Result<Self> {
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        Ok(Self::from_child(child, drain_stdout))
-    }
-
-    fn from_child(mut child: Child, drain_stdout: bool) -> Self {
-        let stdout = drain_stdout.then(|| collect(child.stdout.take().unwrap()));
-        let stderr = Some(collect(child.stderr.take().unwrap()));
-        Self {
-            child,
-            stdout,
-            stderr,
-        }
-    }
-
-    fn finish(&mut self) -> Output {
-        let deadline = Instant::now() + COMMAND_LIMIT;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                break status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "ledger command did not terminate within {COMMAND_LIMIT:?}"
-            );
-            thread::sleep(Duration::from_millis(10));
-        };
-        let stdout = if let Some(reader) = self.stdout.take() {
-            reader.join().unwrap()
-        } else if let Some(stdout) = self.child.stdout.take() {
-            let mut bytes = Vec::new();
-            stdout.take(2 * 1_048_576).read_to_end(&mut bytes).unwrap();
-            bytes
-        } else {
-            Vec::new()
-        };
-        Output {
-            status,
-            stdout,
-            stderr: self.stderr.take().unwrap().join().unwrap(),
-        }
-    }
-
-    fn kill(&mut self) {
-        self.child.kill().unwrap();
-        self.child.wait().unwrap();
-    }
-}
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
         }
     }
 }
@@ -394,7 +324,7 @@ impl Fixture {
     }
 
     fn run(&self, command: &mut Command) -> (Output, RunRecord) {
-        let output = Process::spawn(command, true).finish();
+        let output = Process::spawn(command, true).finish(COMMAND_LIMIT);
         let record = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
             panic!(
                 "run did not return a record ({error}): status {} stderr {}",
@@ -459,7 +389,7 @@ impl Fixture {
                 return runs.into_iter().next().unwrap();
             }
             if process.child.try_wait().unwrap().is_some() {
-                let output = process.finish();
+                let output = process.finish(COMMAND_LIMIT);
                 panic!(
                     "launch exited before its target marker: {} stdout {} stderr {}",
                     output.status,
@@ -536,40 +466,24 @@ fn stop_on_demand_writer(data: &Path) -> Result<(), String> {
         ]));
     assert_eq!(argv.last().copied(), Some(b"serve".as_slice()));
     // Pin the live server before signaling; never signal a cached/recycled numeric PID.
-    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, peer.pid as libc::pid_t, 0) };
-    if raw < 0 {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+    let fd = harness::pidfd::open(peer.pid as libc::pid_t).map_err(|error| error.to_string())?;
     if !daemon::peer_alive(&peer) {
         return Err("on-demand writer birth changed before cleanup".into());
     }
-    use std::os::fd::AsRawFd as _;
-    unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            fd.as_raw_fd(),
-            libc::SIGTERM,
-            std::ptr::null::<libc::siginfo_t>(),
-            0,
-        );
+    // ESRCH: it exited after the birth check; the pidfd still names it, so
+    // no other process was signalled, and the wait below sees the exit.
+    match harness::pidfd::send_signal(fd.as_fd(), libc::SIGTERM) {
+        Err(error) if error.raw_os_error() != Some(libc::ESRCH) => return Err(error.to_string()),
+        _ => {}
     }
-    let mut poll = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    if unsafe { libc::poll(&mut poll, 1, 2000) } != 1 {
-        unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_send_signal,
-                fd.as_raw_fd(),
-                libc::SIGKILL,
-                std::ptr::null::<libc::siginfo_t>(),
-                0,
-            );
+    if !harness::pidfd::wait_exit(fd.as_fd(), STOP_BOUND).map_err(|error| error.to_string())? {
+        match harness::pidfd::send_signal(fd.as_fd(), libc::SIGKILL) {
+            Err(error) if error.raw_os_error() != Some(libc::ESRCH) => {
+                return Err(error.to_string());
+            }
+            _ => {}
         }
-        if unsafe { libc::poll(&mut poll, 1, 2000) } != 1 {
+        if !harness::pidfd::wait_exit(fd.as_fd(), STOP_BOUND).map_err(|error| error.to_string())? {
             return Err("on-demand writer did not stop within its cleanup bound".into());
         }
     }
@@ -663,7 +577,7 @@ fn contained_child_cannot_read_or_mutate_the_ledger_or_connect_to_its_writer() {
         format!("{}\n", receipt.display()),
     )
     .unwrap();
-    let output = owner.finish();
+    let output = owner.finish(COMMAND_LIMIT);
     let run: RunRecord = serde_json::from_slice(&output.stdout).unwrap();
     assert!(output.status.success(), "{run:?}");
     assert_eq!(run.state, "settled");
@@ -771,7 +685,7 @@ fn invalid_inherited_stdout_is_denied_before_admission_and_never_executes() {
         .stdin(Stdio::null())
         .stdout(Stdio::from(invalid))
         .stderr(Stdio::piped());
-    let first = Process::from_child(command.spawn().unwrap(), false).finish();
+    let first = Process::from_child(command.spawn().unwrap(), false).finish(COMMAND_LIMIT);
     assert_eq!(first.status.code(), Some(125));
     let runs = fixture.runs();
     assert_eq!(runs.len(), 1);
@@ -788,7 +702,7 @@ fn invalid_inherited_stdout_is_denied_before_admission_and_never_executes() {
             .any(|event| event["kind"] == "admitted")
     );
     assert!(!fixture.workspace.join("must-not-execute").exists());
-    let replay = Process::from_child(command.spawn().unwrap(), false).finish();
+    let replay = Process::from_child(command.spawn().unwrap(), false).finish(COMMAND_LIMIT);
     assert_eq!(replay.status.code(), first.status.code());
     assert_eq!(
         fixture.client().show(&run.run_id).unwrap().chain.head_seq,
@@ -850,7 +764,7 @@ fn owner_death_is_reconciled_as_unknown_and_never_relaunched() {
     fixture.assert_tree_stopped(&run);
     fixture.client().settle_orphans().unwrap();
     fixture.assert_unknown(&run.run_id);
-    let retry = Process::spawn(&mut command, true).finish();
+    let retry = Process::spawn(&mut command, true).finish(COMMAND_LIMIT);
     assert!(!retry.status.success());
     assert_eq!(
         fs::read(fixture.workspace.join("executions")).unwrap(),
@@ -874,12 +788,12 @@ fn writer_death_stops_the_owner_and_recovery_remains_unknown() {
     let mut owner = Process::spawn(&mut command, true);
     let run = fixture.wait_started(&mut owner);
     fixture.writer.kill();
-    assert!(!owner.finish().status.success());
+    assert!(!owner.finish(COMMAND_LIMIT).status.success());
     fixture.assert_tree_stopped(&run);
     fixture.writer = Fixture::start_writer(&fixture.data);
     fixture.client().settle_orphans().unwrap();
     fixture.assert_unknown(&run.run_id);
-    let retry = Process::spawn(&mut command, true).finish();
+    let retry = Process::spawn(&mut command, true).finish(COMMAND_LIMIT);
     assert!(!retry.status.success());
     assert_eq!(
         fs::read(fixture.workspace.join("executions")).unwrap(),
@@ -995,7 +909,7 @@ fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() 
             let tail = canonical.rsplit(|b| *b == b'\n').next().unwrap();
             assert!(!tail.is_empty());
             assert!(tail.len() <= ouro_ledger::protocol::MAX_FRAME_BYTES);
-            assert!(!owner.finish().status.success());
+            assert!(!owner.finish(COMMAND_LIMIT).status.success());
             fixture.assert_tree_stopped(&run);
             let unknown = fixture.assert_unknown(&run.run_id);
             assert_eq!(unknown.coverage["status"], "degraded");
@@ -1007,7 +921,12 @@ fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() 
                     "unprotected"
                 }
             );
-            assert!(!Process::spawn(&mut command, true).finish().status.success());
+            assert!(
+                !Process::spawn(&mut command, true)
+                    .finish(COMMAND_LIMIT)
+                    .status
+                    .success()
+            );
             let replay = fixture.assert_unknown(&run.run_id);
             assert_eq!(replay.attempt_id, run.attempt_id);
             assert_eq!(replay.chain, unknown.chain);
@@ -1027,7 +946,7 @@ fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() 
         }
         wait_pending(&fixture, &run, |s| s["active"] == false);
         fs::write(fixture.workspace.join("release"), b"").unwrap();
-        let output = owner.finish();
+        let output = owner.finish(COMMAND_LIMIT);
         assert!(
             output.status.success(),
             "{}",
@@ -1112,7 +1031,7 @@ fn pending_exit(tamper: bool) {
     fixture.writer.kill();
     wait_pending(&fixture, &run, |s| s["active"] == true);
     fs::write(fixture.workspace.join("release"), b"").unwrap();
-    let output = owner.finish();
+    let output = owner.finish(COMMAND_LIMIT);
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("canonical reconciliation is pending"),
@@ -1153,7 +1072,7 @@ fn pending_exit(tamper: bool) {
         fs::read(fixture.workspace.join("executions")).unwrap(),
         b"x"
     );
-    let result = Process::spawn(&mut command, true).finish();
+    let result = Process::spawn(&mut command, true).finish(COMMAND_LIMIT);
     assert!(result.status.success());
     assert_eq!(
         fs::read(fixture.workspace.join("executions")).unwrap(),
@@ -1186,7 +1105,7 @@ fn best_effort_local_journal_failure_stops_the_tree_and_never_settles() {
         .join("owner-pending.next");
     fs::create_dir(&next).unwrap();
     fixture.writer.kill();
-    assert!(!owner.finish().status.success());
+    assert!(!owner.finish(COMMAND_LIMIT).status.success());
     fixture.assert_tree_stopped(&run);
     fixture.writer = Fixture::start_writer(&fixture.data);
     fixture.assert_unknown(&run.run_id);
@@ -1215,6 +1134,8 @@ fn best_effort_local_exit_file_limit_never_fabricates_settlement() {
     // in-flight source snapshot can hit the limit and stop the child before
     // this test reaches the intended post-exit evidence failure.
     let pid = owner.child.id() as libc::pid_t;
+    // SAFETY: plain integers; `pid` is this test's own unreaped child, so the
+    // number cannot have been reused.
     assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
     let deadline = Instant::now() + COMMAND_LIMIT;
     loop {
@@ -1247,6 +1168,8 @@ fn best_effort_local_exit_file_limit_never_fabricates_settlement() {
         rlim_cur: 4096,
         rlim_max: 4096,
     };
+    // SAFETY: `limit` is a live rlimit and the old-limit pointer is null;
+    // the pid is this test's own unreaped (stopped) child.
     assert_eq!(
         unsafe {
             libc::prlimit(
@@ -1258,8 +1181,9 @@ fn best_effort_local_exit_file_limit_never_fabricates_settlement() {
         },
         0
     );
+    // SAFETY: as for the SIGSTOP above.
     assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
-    let output = owner.finish();
+    let output = owner.finish(COMMAND_LIMIT);
     assert!(!output.status.success());
     assert!(fixture.workspace.join("finished").exists());
     fixture.writer = Fixture::start_writer(&fixture.data);
@@ -1291,7 +1215,12 @@ fn best_effort_dead_owner_without_exit_record_stays_unknown() {
     owner.kill();
     fixture.writer = Fixture::start_writer(&fixture.data);
     fixture.assert_unknown(&run.run_id);
-    assert!(!Process::spawn(&mut command, true).finish().status.success());
+    assert!(
+        !Process::spawn(&mut command, true)
+            .finish(COMMAND_LIMIT)
+            .status
+            .success()
+    );
     assert_eq!(
         fs::read(fixture.workspace.join("executions")).unwrap(),
         b"x"
@@ -1316,7 +1245,7 @@ fn an_unread_foreground_terminal_stops_forwarding_but_not_the_run() {
         "head -c 2097152 /dev/zero",
     ]);
     let started = Instant::now();
-    let output = Process::spawn(&mut command, false).finish();
+    let output = Process::spawn(&mut command, false).finish(COMMAND_LIMIT);
     assert!(
         output.status.success(),
         "{}",
@@ -1378,24 +1307,12 @@ fn wait_for_file(path: &Path) {
     }
 }
 
+/// Signal the process `peer` names, pinned first so the signal cannot reach
+/// a process that reused its number.
 fn signal_birth(peer: &ouro_ledger::protocol::Peer, signal: i32) {
-    use std::os::fd::AsRawFd as _;
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, peer.pid as libc::pid_t, 0) };
-    assert!(fd >= 0);
-    let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    let fd = harness::pidfd::open(peer.pid as libc::pid_t).expect("the peer is alive to pin");
     assert!(daemon::peer_alive(peer));
-    assert_eq!(
-        unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_send_signal,
-                fd.as_raw_fd(),
-                signal,
-                std::ptr::null::<libc::siginfo_t>(),
-                0,
-            )
-        },
-        0
-    );
+    harness::pidfd::send_signal(fd.as_fd(), signal).expect("the pinned peer is signalled");
 }
 
 #[test]
@@ -1517,7 +1434,7 @@ fn detached_submitter_exit_preserves_owner_output_and_one_execution() {
         .arg("wait")
         .arg(&first.run_id)
         .args(["--timeout", "15", "--json"]);
-    let output = Process::spawn(&mut wait, true).finish();
+    let output = Process::spawn(&mut wait, true).finish(COMMAND_LIMIT);
     assert!(
         output.status.success(),
         "{}",
@@ -1589,7 +1506,7 @@ fn detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt() {
         .spawn()
         .unwrap();
     drop(child.stdout.take()); // The submitting terminal cannot receive the run id.
-    let output = Process::from_child(child, false).finish();
+    let output = Process::from_child(child, false).finish(COMMAND_LIMIT);
     assert!(!output.status.success());
     let (_, replay) = fixture.run(&mut make());
     let settled = ouro_ledger::service::wait(&fixture.data, &replay.run_id, COMMAND_LIMIT).unwrap();
@@ -1623,7 +1540,7 @@ fn detached_cancel_requests_stop_then_waits_for_verified_settlement() {
         .arg("cancel")
         .arg(&run.run_id)
         .arg("--json");
-    let output = Process::spawn(&mut cancel, true).finish();
+    let output = Process::spawn(&mut cancel, true).finish(COMMAND_LIMIT);
     assert!(
         output.status.success(),
         "{}",
@@ -1690,7 +1607,7 @@ fn detached_mode_refuses_a_session_bound_existing_writer() {
     let fixture = Fixture::new(&jail);
     let mut command = fixture.command("unsafe-writer", true);
     command.args(["--detach", "--", "/bin/sh", "-c", "touch must-not-execute"]);
-    let output = Process::spawn(&mut command, true).finish();
+    let output = Process::spawn(&mut command, true).finish(COMMAND_LIMIT);
     assert!(!output.status.success());
     assert!(!fixture.workspace.join("must-not-execute").exists());
     assert!(fixture.runs().is_empty());
@@ -1773,7 +1690,7 @@ fn operator_intents_and_live_tail_preserve_real_jail_ownership_and_source_bytes(
         }
     }
     fs::write(fixture.workspace.join("release"), b"go").unwrap();
-    let output = process.finish();
+    let output = process.finish(COMMAND_LIMIT);
     assert!(
         output.status.success(),
         "{}",
@@ -1853,7 +1770,7 @@ fn real_run_diff_keeps_none_unprotected_and_separates_unobserved_coverage() {
         &right.run_id,
         "--json",
     ]);
-    let output = Process::spawn(&mut command, true).finish();
+    let output = Process::spawn(&mut command, true).finish(COMMAND_LIMIT);
     assert!(
         output.status.success(),
         "{}",
@@ -1952,7 +1869,7 @@ fn real_launch_labels_drive_filtered_discovery_without_changing_replay_identity(
         "exited",
         "--json",
     ]);
-    let output = Process::spawn(&mut command, true).finish();
+    let output = Process::spawn(&mut command, true).finish(COMMAND_LIMIT);
     assert!(
         output.status.success(),
         "{}",
@@ -2027,7 +1944,7 @@ fn real_target_diff_distinguishes_created_paths_and_preserves_producer_reference
         "targets",
         "--json",
     ]);
-    let output = Process::spawn(&mut command, true).finish();
+    let output = Process::spawn(&mut command, true).finish(COMMAND_LIMIT);
     assert!(
         output.status.success(),
         "{}",

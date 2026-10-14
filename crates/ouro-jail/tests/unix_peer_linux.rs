@@ -5,7 +5,8 @@
 //! unix-peer spike (`unixpeer-spike-2026-09-22-ouro-ci.txt`); these tests
 //! exercise the *shipped module* — the real [`filter_bytes`],
 //! [`take_from_launcher`] and [`spawn`] — rather than a reimplementation. A
-//! small C program stands in for the trusted launcher: it installs the filter
+//! small C program (`fixtures/unix_peer.c`) stands in for the trusted
+//! launcher: it installs the filter
 //! this crate produces (read from a file, never a second copy), opens a
 //! `NETLINK_SOCK_DIAG` socket in the attempt's netns, hands both to the
 //! supervisor, and connects on command. The supervisor is this test process,
@@ -17,20 +18,22 @@
 //! `OURO_CONFORMANCE=1` a skip is a failure.
 //!
 //! Nested cases (bwrap-in-bwrap IPC, proxy replacement in a nested netns) are
-//! host-conditional: a user-namespace inner sandbox is EPERM on a stock host
-//! (CONTRACT §3.5). [`nested_user_namespace_is_unavailable_here`] asserts that
-//! honest measurement rather than skipping, and is written so a host that does
-//! permit nested userns would exercise the real nested path.
+//! host-conditional: a user-namespace inner sandbox is EPERM on the reference
+//! host, under Ubuntu's AppArmor userns restriction (CONTRACT §3.5).
+//! [`nested_user_namespace_is_unavailable_here`] asserts that measurement
+//! where it is a claim, on the reference host under `OURO_CONFORMANCE=1`.
 
 mod common;
 
-use std::os::fd::{AsFd as _, AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::Read as _;
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
 use std::process::Command;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ouro_fixture::harness;
+use common::observer::Fixture;
+
 use ouro_jail::platform::linux::identity::pidfd_open;
 use ouro_jail::platform::linux::unixpeer::{
     CollectingSink, Decision, Delivery, LauncherFds, filter_bytes, spawn, take_from_launcher,
@@ -137,270 +140,29 @@ fn nlmsg_done(seq: u32) -> Vec<u8> {
 
 // ---------------------------------------------------------------- the launcher
 
-/// The trusted-launcher stand-in. It installs the filter this crate produces
-/// (from a file), opens `NETLINK_SOCK_DIAG` in this netns, binds the attempt's
-/// listeners, announces the two fd numbers, then connects on command.
-const HELPER_C: &str = r##"
-#define _GNU_SOURCE
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <sys/syscall.h>
-#include <sys/prctl.h>
-#include <sys/un.h>
-#include <sys/wait.h>
-#include <arpa/inet.h>
-#include <signal.h>
-#include <unistd.h>
-#include <linux/seccomp.h>
-#include <linux/filter.h>
-
-#ifndef SECCOMP_FILTER_FLAG_NEW_LISTENER
-#define SECCOMP_FILTER_FLAG_NEW_LISTENER (1UL<<3)
-#endif
-#ifndef SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
-#define SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (1UL<<5)
-#endif
-#define NETLINK_SOCK_DIAG 4
-
-static int connect_un_type(int type, const char *name, int abstract) {
-    int s = socket(AF_UNIX, type|SOCK_CLOEXEC, 0);
-    if (s < 0) return errno;
-    struct sockaddr_un a; memset(&a,0,sizeof a); a.sun_family=AF_UNIX;
-    size_t n = strlen(name);
-    socklen_t len;
-    if (abstract) { a.sun_path[0]=0; memcpy(a.sun_path+1,name,n); len=2+1+n; }
-    else { memcpy(a.sun_path,name,n); len=2+n+1; }
-    int r = connect(s,(void*)&a,len);
-    int e = r==0?0:errno;
-    close(s);
-    return e;
-}
-
-static int bind_listen(int type, const char *name, int abstract) {
-    int s = socket(AF_UNIX, type|SOCK_CLOEXEC, 0);
-    if (s < 0) return -1;
-    struct sockaddr_un a; memset(&a,0,sizeof a); a.sun_family=AF_UNIX;
-    size_t n = strlen(name);
-    socklen_t len;
-    if (abstract) { a.sun_path[0]=0; memcpy(a.sun_path+1,name,n); len=2+1+n; }
-    else { unlink(name); memcpy(a.sun_path,name,n); len=2+n+1; }
-    if (bind(s,(void*)&a,len)) return -1;
-    if (listen(s,64)) return -1;
-    return s;
-}
-
-/* fill a pathname sockaddr_un for `path`; returns the length. */
-static socklen_t fill_un(struct sockaddr_un *a, const char *path) {
-    memset(a,0,sizeof *a); a->sun_family=AF_UNIX;
-    size_t n = strlen(path);
-    memcpy(a->sun_path, path, n);
-    return (socklen_t)(2+n+1);
-}
-
-/* one stream connect to a pathname socket; returns 0 or errno. */
-static int connect_stream(const char *path) {
-    int s = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
-    if (s < 0) return errno;
-    struct sockaddr_un a; socklen_t len = fill_un(&a, path);
-    int r = connect(s,(void*)&a,len);
-    int e = r==0?0:errno;
-    close(s);
-    return e;
-}
-
-/* an x32 connect: shares the x86_64 audit arch but sets the x32 syscall bit,
-   so the mediation filter must deny it (EPERM). __X32_SYSCALL_BIT | connect. */
-static int x32_connect(const char *path) {
-    int s = socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0);
-    if (s < 0) return errno;
-    struct sockaddr_un a; socklen_t len = fill_un(&a, path);
-    long r = syscall((long)(0x40000000L | 42L), (long)s, (long)&a, (long)len);
-    int e = r==0?0:(int)(r<0?-r:r);
-    close(s);
-    return e;
-}
-
-/* does the i386 int-0x80 ABI work here? i386 getpid == 20. Only an x86 host
-   can even ask; elsewhere the ABI does not exist and the probe says so. */
-#if defined(__x86_64__) || defined(__i386__)
-static long i386_call0(long nr){ long ret; __asm__ volatile("int $0x80":"=a"(ret):"a"(nr):"memory"); return ret; }
-static long i386_socketcall(long call, unsigned long *args){ long ret; __asm__ volatile("int $0x80":"=a"(ret):"a"(102),"b"(call),"c"(args):"memory"); return ret; }
-#else
-static long i386_call0(long nr){ (void)nr; return -ENOSYS; }
-static long i386_socketcall(long call, unsigned long *args){ (void)call; (void)args; return -ENOSYS; }
-#endif
-
-int main(int argc, char **argv) {
-    const char *coord_path = argv[1];
-    const char *attempt_dir = argv[2];
-    const char *filter_file = argv[3];
-
-    int coord = socket(AF_UNIX, SOCK_SEQPACKET|SOCK_CLOEXEC, 0);
-    struct sockaddr_un ca; memset(&ca,0,sizeof ca); ca.sun_family=AF_UNIX;
-    strncpy(ca.sun_path, coord_path, sizeof(ca.sun_path)-1);
-    if (connect(coord,(void*)&ca,sizeof ca)) { return 3; }
-
-    char p[512];
-    snprintf(p,sizeof p,"%s/attempt.sock",attempt_dir);
-    if (bind_listen(SOCK_STREAM,p,0) < 0) { dprintf(coord,"FATAL bind attempt"); return 1; }
-    snprintf(p,sizeof p,"%s/attempt_seq.sock",attempt_dir);
-    if (bind_listen(SOCK_SEQPACKET,p,0) < 0) { dprintf(coord,"FATAL bind seq"); return 1; }
-    if (bind_listen(SOCK_STREAM,"ouro-attempt-abstract",1) < 0) { dprintf(coord,"FATAL bind abs"); return 1; }
-
-    /* a TCP listener in this netns (for the domain-check test). lo may be down
-       under bwrap; the port is reported and the connect result is what matters. */
-    int tcpl = socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, 0);
-    struct sockaddr_in ta; memset(&ta,0,sizeof ta); ta.sin_family=AF_INET; ta.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-    bind(tcpl,(void*)&ta,sizeof ta); listen(tcpl,16);
-    socklen_t tl=sizeof ta; getsockname(tcpl,(void*)&ta,&tl);
-    int tcp_port = ntohs(ta.sin_port);
-
-    /* i386 int-0x80 availability probe (getpid). */
-    long ip = i386_call0(20);
-    int ia32_ok = (ip == getpid());
-
-    /* read the filter file into a sock_filter array */
-    /* The sock_diag socket before the filter, as the real launcher opens it:
-       the mediation filter refuses every netlink socket once installed. */
-    int diag = socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
-    FILE *f = fopen(filter_file,"rb");
-    if (!f) { dprintf(coord,"FATAL open filter"); return 1; }
-    static struct sock_filter prog[256];
-    size_t got = fread(prog,8,256,f); fclose(f);
-    struct sock_fprog fp = { (unsigned short)got, prog };
-    prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0);
-    long listener = syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER,
-        SECCOMP_FILTER_FLAG_NEW_LISTENER|SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, &fp);
-    if (listener < 0) { dprintf(coord,"FATAL seccomp %d", errno); return 1; }
-
-    dprintf(coord,"HELLO %ld %d %d %d", listener, diag, tcp_port, ia32_ok);
-
-    char buf[512];
-    for (;;) {
-        ssize_t k = read(coord, buf, sizeof(buf)-1);
-        if (k <= 0) return 0;
-        buf[k]=0;
-        if (buf[0]=='Q') return 0;
-        /* GO: the supervisor has taken both fds with pidfd_getfd, so close our
-           copies (as the real launcher closes them before exec). Only then does
-           the supervisor closing its copy fully close the listener, which is
-           what makes a later connect fail ENOSYS (fail-closed). */
-        if (!strncmp(buf,"GO",2)) { close((int)listener); close(diag); continue; }
-        /* "L <n>": loop n stream connects to attempt.sock (backlog stress). */
-        if (buf[0]=='L') { int n=atoi(buf+2); snprintf(p,sizeof p,"%s/attempt.sock",attempt_dir); for(int i=0;i<n;i++) connect_stream(p); dprintf(coord,"done"); continue; }
-        /* "K <path>": fork a child that connects `path` (blocks in mediation),
-           then kill it mid-mediation. With the id revalidation, the mediator
-           must drop the now-stale notification silently. */
-        if (buf[0]=='K') {
-            char *path = buf+2;
-            pid_t c = fork();
-            if (c==0) { connect_stream(path); _exit(0); }
-            usleep(50*1000);
-            kill(c, SIGKILL);
-            int st; waitpid(c,&st,0);
-            dprintf(coord,"killed"); continue;
-        }
-        /* "F <n>": fork n children that each connect concurrently, then wait. */
-        if (buf[0]=='F') {
-            int n=atoi(buf+2); snprintf(p,sizeof p,"%s/attempt.sock",attempt_dir);
-            for(int i=0;i<n;i++){ pid_t c=fork(); if(c==0){ connect_stream(p); _exit(0);} }
-            int done=0,st; while(wait(&st)>0) done++;
-            dprintf(coord,"done %d", done); continue;
-        }
-        /* "C <t> <arg>" : p stream / s seqpacket / a abstract / d dgram / r raw
-           / t tcp(port) / b bind-nolisten / w cwd-relative / x x32 / i i386
-           / n connect on a descriptor that is not a socket */
-        char t=buf[2];
-        char *path = buf+4;
-        int e;
-        if (t=='d') { int s=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0); e=s<0?errno:0; if(s>=0)close(s); }
-        else if (t=='r') { int s=socket(AF_UNIX,SOCK_RAW|SOCK_CLOEXEC,0); e=s<0?errno:0; if(s>=0)close(s); }
-        else if (t=='a') e=connect_un_type(SOCK_STREAM,path,1);
-        else if (t=='s') e=connect_un_type(SOCK_SEQPACKET,path,0);
-        else if (t=='w') {
-            if (chdir("/attempt/sub") != 0) e=errno;
-            else { e=connect_stream(path); if (chdir("/") != 0) return 1; }
-        }
-        else if (t=='t') { int port=atoi(path); int s=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0);
-            struct sockaddr_in d; memset(&d,0,sizeof d); d.sin_family=AF_INET; d.sin_addr.s_addr=htonl(INADDR_LOOPBACK); d.sin_port=htons(port);
-            int r=connect(s,(void*)&d,sizeof d); e=r==0?0:errno; close(s); }
-        else if (t=='b') { int s=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0); struct sockaddr_un a; socklen_t len=fill_un(&a,path); unlink(path); e=bind(s,(void*)&a,len)?errno:0; /* keep fd open, no listen */ }
-        else if (t=='x') e=x32_connect(path);
-        else if (t=='n') { int f=open("/attempt", O_RDONLY|O_DIRECTORY|O_CLOEXEC);
-            struct sockaddr_un na; socklen_t len=fill_un(&na,path);
-            int r=connect(f,(void*)&na,len); e=r==0?0:errno; close(f); }
-        else if (t=='i') {
-            if (!ia32_ok) { e=-1; }
-            else { int s=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);
-                static struct sockaddr_un la; socklen_t len=fill_un(&la,path);
-                unsigned long args[3]; args[0]=(unsigned long)s; args[1]=(unsigned long)&la; args[2]=len;
-                long r=i386_socketcall(3 /*SYS_CONNECT*/, args); e=r==0?0:(int)(r<0?-r:r); close(s); }
-        }
-        else e=connect_un_type(SOCK_STREAM,path,0);
-        dprintf(coord,"%d", e);
-    }
-}
-"##;
-
-fn build() -> Result<&'static (PathBuf, PathBuf), String> {
-    static BUILD: OnceLock<Result<(PathBuf, PathBuf), String>> = OnceLock::new();
-    BUILD
-        .get_or_init(|| {
-            // Hygiene (review fix 5): before creating this run's directory,
-            // remove any this test left behind on earlier runs, so /tmp does not
-            // accumulate one per invocation.
-            let mine = format!("ouro-j3-unixpeer-{}", std::process::id());
-            if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
-                for e in entries.flatten() {
-                    let name = e.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("ouro-j3-unixpeer-") && name != mine {
-                        let _ = std::fs::remove_dir_all(e.path());
-                    }
-                }
-            }
-            let dir = std::env::temp_dir().join(&mine);
-            std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-            let source = dir.join("helper.c");
-            std::fs::write(&source, HELPER_C).map_err(|e| format!("write helper.c: {e}"))?;
-            let helper = dir.join("helper");
-            let out = Command::new("/usr/bin/gcc")
-                .args(["-O1", "-Wall", "-B/usr/bin", "-o"])
-                .arg(&helper)
-                .arg(&source)
-                .output()
-                .map_err(|e| format!("run gcc: {e}"))?;
-            if !out.status.success() {
-                return Err(format!(
-                    "gcc failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                ));
-            }
-            let filter = dir.join("filter.bin");
-            std::fs::write(&filter, filter_bytes())
-                .map_err(|e| format!("write filter.bin: {e}"))?;
-            Ok((helper, filter))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
-}
+/// The trusted-launcher stand-in (`fixtures/unix_peer.c`). It installs the
+/// filter this crate produces (from a file), opens `NETLINK_SOCK_DIAG` in
+/// this netns, binds the attempt's listeners, announces the two fd numbers,
+/// then connects on command.
+static FIXTURE: Fixture = Fixture {
+    name: "unix_peer",
+    source: include_str!("fixtures/unix_peer.c"),
+    pthread: false,
+    filter: filter_bytes,
+};
 
 // ---------------------------------------------------------------- the harness
 
 /// One running sandbox: the launcher inside bwrap and the mediator in-process.
 struct Rig {
-    coord: RawFd,
+    /// The coordination connection to the launcher, open until the rig is
+    /// dropped.
+    coord: Option<OwnedFd>,
     // bwrap's --info-fd read end, held open for bwrap's lifetime: bwrap keeps
     // writing its info JSON after the child pid, and closing the read end
-    // early made those writes fail EPIPE and bwrap exit 1 before the launcher
-    // connected (the unix_peer_linux flake).
-    _info: OwnedFd,
+    // early would make those writes fail EPIPE and bwrap exit 1 before the
+    // launcher connected.
+    _info: File,
     _coord_listener: OwnedFd,
     _host_listeners: Vec<OwnedFd>,
     child: libc::pid_t,
@@ -416,19 +178,25 @@ impl Rig {
     fn attempt_host(&self, name: &str) -> std::path::PathBuf {
         self.tmp.path().join("attempt").join(name)
     }
+
+    fn coord(&self) -> BorrowedFd<'_> {
+        self.coord
+            .as_ref()
+            .expect("open until the rig is dropped")
+            .as_fd()
+    }
 }
 
 impl Rig {
     /// Connect (mediated) and return the child's observed errno string.
     fn run(&self, t: char, path: &str) -> String {
-        send(self.coord, &format!("C {t} {path}"));
-        recv(self.coord)
+        self.run_raw(&format!("C {t} {path}"))
     }
 
     /// Send a raw coordination command (e.g. `L 300`, `F 40`) and read the reply.
     fn run_raw(&self, cmd: &str) -> String {
-        send(self.coord, cmd);
-        recv(self.coord)
+        send(self.coord(), cmd).expect("send a command to the launcher");
+        recv(self.coord())
     }
 
     fn deliveries(&self) -> Vec<Delivery> {
@@ -461,7 +229,12 @@ impl KillOnDrop {
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if let Some(pid) = self.0 {
-            // SAFETY: pid is the bwrap child this test forked and has not reaped.
+            // SAFETY: kill and waitpid take scalars and a pointer to a live
+            // local. `pid` is the bwrap child this test forked and has not
+            // reaped (whatever reaps it disarms the guard first), so the
+            // number is still that child's. Nothing is left to do about a
+            // failure in a drop on a failure path, so the results are not
+            // read.
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
                 let mut st = 0;
@@ -473,72 +246,117 @@ impl Drop for KillOnDrop {
 
 impl Drop for Rig {
     fn drop(&mut self) {
-        send(self.coord, "Q");
-        // SAFETY: closing our coord fd, then reaping bwrap (the child we
-        // started). A helper stuck in a blocked syscall would never read "Q",
-        // so give it a short grace and then SIGKILL bwrap (--die-with-parent
-        // takes the sandbox with it) rather than block the test forever.
-        unsafe {
-            libc::close(self.coord);
-            let mut st = 0;
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                if libc::waitpid(self.child, &raw mut st, libc::WNOHANG) == self.child {
-                    break;
-                }
-                if Instant::now() >= deadline {
+        // "Q" asks the launcher to exit, and closing the connection tells one
+        // that missed it. A launcher already gone makes the send EPIPE, and
+        // there is nothing to ask.
+        if let Some(coord) = self.coord.take() {
+            let _ = send(coord.as_fd(), "Q");
+        }
+        // Reap bwrap (the child this test started). A helper stuck in a
+        // blocked syscall would never read "Q", so give it a short grace and
+        // then SIGKILL bwrap (--die-with-parent takes the sandbox with it)
+        // rather than block the test forever.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut st = 0;
+        loop {
+            // SAFETY: a non-blocking waitpid on the child this test forked,
+            // with a pointer to a live local.
+            let reaped = unsafe { libc::waitpid(self.child, &raw mut st, libc::WNOHANG) };
+            // Reaped, or not this process's child to wait for at all (-1):
+            // either way, signalling the number now could reach a stranger.
+            if reaped != 0 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                // SAFETY: as above, and the waitpid just said the child is
+                // not reaped, so the number is still its. As in
+                // `KillOnDrop`, a drop has nothing to do about a failure, so
+                // the results are not read.
+                unsafe {
                     libc::kill(self.child, libc::SIGKILL);
                     libc::waitpid(self.child, &raw mut st, 0);
-                    break;
                 }
-                libc::usleep(20_000);
+                break;
             }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        let _ = &self.tmp;
     }
 }
 
-fn send(fd: RawFd, s: &str) {
-    // SAFETY: writing a byte slice to a connected socket fd.
-    unsafe {
-        libc::send(fd, s.as_ptr().cast(), s.len(), 0);
+/// Send one coordination message: a SEQPACKET record, sent whole or not at
+/// all.
+fn send(fd: BorrowedFd<'_>, s: &str) -> std::io::Result<()> {
+    // SAFETY: `fd` is a live socket for the call, and the buffer is `s`,
+    // valid for `s.len()` bytes. MSG_NOSIGNAL: a peer that is gone is EPIPE
+    // here, never a SIGPIPE.
+    let sent = unsafe {
+        libc::send(
+            fd.as_raw_fd(),
+            s.as_ptr().cast(),
+            s.len(),
+            libc::MSG_NOSIGNAL,
+        )
+    };
+    if sent < 0 {
+        return Err(std::io::Error::last_os_error());
     }
+    if usize::try_from(sent).ok() != Some(s.len()) {
+        return Err(std::io::Error::other(format!(
+            "sent {sent} of {} bytes",
+            s.len()
+        )));
+    }
+    Ok(())
 }
 
-fn recv(fd: RawFd) -> String {
+/// The next coordination message, or an empty string once the launcher hung
+/// up. Fails the test after fifteen seconds of silence.
+fn recv(fd: BorrowedFd<'_>) -> String {
     let mut b = [0u8; 512];
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let mut pfd = libc::pollfd {
-            fd,
+            fd: fd.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };
-        // SAFETY: single live pollfd.
+        // SAFETY: one live pollfd, and a count of one.
         let rc = unsafe { libc::poll(&raw mut pfd, 1, 500) };
-        if rc == 0 {
+        if rc < 0 {
+            let error = std::io::Error::last_os_error();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(libc::EINTR),
+                "poll the launcher: {error}"
+            );
+        }
+        if rc <= 0 {
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for a launcher reply"
             );
             continue;
         }
-        // SAFETY: reading into a live buffer of known length.
-        let n = unsafe { libc::recv(fd, b.as_mut_ptr().cast(), b.len(), 0) };
+        // SAFETY: `fd` is a live socket for the call, and `b` a live buffer of
+        // `b.len()` bytes.
+        let n = unsafe { libc::recv(fd.as_raw_fd(), b.as_mut_ptr().cast(), b.len(), 0) };
         if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
             continue;
         }
-        if n <= 0 {
+        let Ok(n @ 1..) = usize::try_from(n) else {
             return String::new();
-        }
-        return String::from_utf8_lossy(&b[..n as usize]).into_owned();
+        };
+        return String::from_utf8_lossy(&b[..n]).into_owned();
     }
 }
 
 /// Start the sandbox and the mediator. Returns `None` only on a genuine setup
 /// failure (reported), never to hide a missing capability.
 fn start_rig() -> Option<Rig> {
-    let (helper, filter) = build().unwrap_or_else(|e| panic!("build helper: {e}"));
+    let built = FIXTURE
+        .build()
+        .unwrap_or_else(|e| panic!("build helper: {e}"));
+    let (helper, filter) = (&built.helper, &built.filter);
     let tmp = common::private_tempdir();
     let host_dir = tmp.path().join("host");
     let attempt_dir = tmp.path().join("attempt");
@@ -549,23 +367,15 @@ fn start_rig() -> Option<Rig> {
 
     // Host-netns sockets, bound by this process (the supervisor). Kept alive in
     // the Rig for the whole run so a real listener is present in the host netns.
-    let mut host_listeners = Vec::new();
     let host_sock = host_dir.join("host.sock");
-    if let Some(l) = bind_listen(host_sock.to_str().unwrap(), false) {
-        host_listeners.push(l);
-    }
-    let host_hardlink = host_dir.join("host-hardlink.sock");
-    // SAFETY: link() of two live C strings. A failure here just means the
-    // hardlink case resolves to a missing path (still denied), so it is not
-    // fatal to the test.
-    {
-        let a = cstr(host_sock.to_str().unwrap());
-        let b = cstr(host_hardlink.to_str().unwrap());
-        unsafe { libc::link(a.as_ptr(), b.as_ptr()) };
-    }
-    if let Some(l) = bind_listen("ouro-host-abstract", true) {
-        host_listeners.push(l);
-    }
+    let mut host_listeners =
+        vec![bind_listen(host_sock.to_str().unwrap(), false).expect("bind the host socket")];
+    // Its hardlink alias. Without it that case would connect to a missing
+    // path, which is denied too, and say nothing about aliases.
+    std::fs::hard_link(&host_sock, host_dir.join("host-hardlink.sock"))
+        .expect("hardlink the host socket");
+    host_listeners
+        .push(bind_listen("ouro-host-abstract", true).expect("bind the host abstract socket"));
 
     // Coordination socket (SEQPACKET, to match the launcher), bind-mounted
     // read-only into the sandbox at /coord.
@@ -574,49 +384,69 @@ fn start_rig() -> Option<Rig> {
         bind_listen_ty(coord_path.to_str().unwrap(), false, libc::SOCK_SEQPACKET).expect("coord");
 
     let mut info = [0i32; 2];
-    // SAFETY: two-element array for pipe2.
-    assert_eq!(
-        unsafe { libc::pipe2(info.as_mut_ptr(), libc::O_CLOEXEC) },
-        0
-    );
-    let (info_r, info_w) = (info[0], info[1]);
+    // SAFETY: pipe2 writes two descriptors into the two-element array it is
+    // given, and reads nothing.
+    let rc = unsafe { libc::pipe2(info.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2: {}", std::io::Error::last_os_error());
+    // SAFETY: pipe2 just created both descriptors; nothing else owns them.
+    let (info_r, info_w) =
+        unsafe { (OwnedFd::from_raw_fd(info[0]), OwnedFd::from_raw_fd(info[1])) };
+    let (info_r_raw, info_w_raw) = (info_r.as_raw_fd(), info_w.as_raw_fd());
 
     // Build the argv before forking: after fork() in this multi-threaded test
     // process, only async-signal-safe calls are allowed, so no allocation.
-    let args = bwrap_args(helper, &host_dir, &attempt_dir, &coord_dir, filter, info_w);
+    let args = bwrap_args(
+        helper,
+        &host_dir,
+        &attempt_dir,
+        &coord_dir,
+        filter,
+        info_w_raw,
+    );
     let cargs: Vec<std::ffi::CString> = args.iter().map(|a| cstr(a)).collect();
     let mut ptrs: Vec<*const libc::c_char> = cargs.iter().map(|c| c.as_ptr()).collect();
     ptrs.push(std::ptr::null());
-    // SAFETY: fork; the child execs bwrap and never returns to Rust on success.
-    // Everything after fork is async-signal-safe (close, fcntl, execv).
+    // SAFETY: fork has no memory preconditions; what the child may do after
+    // it in a multi-threaded process is the block below.
     let child = unsafe { libc::fork() };
+    // Before any guard holds it: a guard of -1 would SIGKILL every process
+    // this user may signal.
+    assert!(child >= 0, "fork: {}", std::io::Error::last_os_error());
     if child == 0 {
+        // SAFETY: only async-signal-safe calls (close, fcntl, execv, _exit),
+        // on descriptors and a NUL-terminated argv prepared before the fork;
+        // the child never returns to Rust, so no destructor runs here.
+        // Clearing FD_CLOEXEC hands bwrap the write end for --info-fd; a
+        // child that cannot do that exits instead of running bwrap blind.
         unsafe {
-            libc::close(info_r);
-            libc::fcntl(info_w, libc::F_SETFD, 0);
+            libc::close(info_r_raw);
+            if libc::fcntl(info_w_raw, libc::F_SETFD, 0) != 0 {
+                libc::_exit(126);
+            }
             libc::execv(cargs[0].as_ptr(), ptrs.as_ptr());
             libc::_exit(127);
         }
     }
-    // SAFETY: closing the write end we own in the parent.
-    unsafe { libc::close(info_w) };
+    // The parent's copy of the write end: bwrap holds its own.
+    drop(info_w);
 
     // Kill and reap bwrap if anything below panics before the Rig (whose
     // Drop does the orderly shutdown) exists; otherwise a failed setup leaves
     // bwrap and its sandbox running with the helper waiting for "GO".
     let mut setup_guard = KillOnDrop(Some(child));
-    // SAFETY: info_r is the pipe read end we own; nothing else closes it.
-    let info = unsafe { OwnedFd::from_raw_fd(info_r) };
-    let init_pid = read_child_pid(info.as_raw_fd());
+    let info = File::from(info_r);
+    let init_pid = read_child_pid(&info);
 
     // Accept the launcher's coordination connection.
-    accept_with_timeout(coord_listener.as_raw_fd(), &mut setup_guard);
-    // SAFETY: accept on a listening socket we own; readiness confirmed above.
+    accept_with_timeout(coord_listener.as_fd(), &mut setup_guard);
+    // SAFETY: accept4 on a listening socket we own, with null address
+    // pointers: the peer's address is not wanted.
     let coord = unsafe {
-        libc::accept(
+        libc::accept4(
             coord_listener.as_raw_fd(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
+            libc::SOCK_CLOEXEC,
         )
     };
     assert!(
@@ -624,8 +454,10 @@ fn start_rig() -> Option<Rig> {
         "accept coord: {}",
         std::io::Error::last_os_error()
     );
+    // SAFETY: accept4 just created this descriptor; nothing else owns it.
+    let coord = unsafe { OwnedFd::from_raw_fd(coord) };
 
-    let hello = recv(coord);
+    let hello = recv(coord.as_fd());
     let parts: Vec<&str> = hello.split_whitespace().collect();
     if parts.first() != Some(&"HELLO") {
         panic!("launcher did not announce itself: {hello:?}");
@@ -646,11 +478,11 @@ fn start_rig() -> Option<Rig> {
     .expect("take_from_launcher");
     let sink = Arc::new(CollectingSink::default());
     let mediator = spawn(authority, sink.clone() as Arc<_>).expect("spawn mediator");
-    send(coord, "GO");
+    send(coord.as_fd(), "GO").expect("release the launcher");
     setup_guard.disarm();
 
     Some(Rig {
-        coord,
+        coord: Some(coord),
         _info: info,
         _coord_listener: coord_listener,
         _host_listeners: host_listeners,
@@ -727,26 +559,37 @@ fn bwrap_args(
 
 /// Poll for the coord connection, and if bwrap dies first, reap it and report
 /// its status so a startup failure is a clear panic, not an accept() hang.
-fn accept_with_timeout(listener: RawFd, guard: &mut KillOnDrop) {
+fn accept_with_timeout(listener: BorrowedFd<'_>, guard: &mut KillOnDrop) {
     let child = guard.0.expect("armed guard");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let mut pfd = libc::pollfd {
-            fd: listener,
+            fd: listener.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };
-        // SAFETY: single live pollfd.
+        // SAFETY: one live pollfd, and a count of one.
         let rc = unsafe { libc::poll(&raw mut pfd, 1, 200) };
+        if rc < 0 {
+            let error = std::io::Error::last_os_error();
+            assert_eq!(error.raw_os_error(), Some(libc::EINTR), "poll: {error}");
+        }
         if rc > 0 && pfd.revents & libc::POLLIN != 0 {
             return;
         }
         let mut st = 0;
-        // SAFETY: waitpid on the child we started, non-blocking.
+        // SAFETY: a non-blocking waitpid on the child this test forked, with
+        // a pointer to a live local.
         let w = unsafe { libc::waitpid(child, &raw mut st, libc::WNOHANG) };
-        if w == child {
-            // Reaped: the guard must not signal a pid that may be reused.
+        if w != 0 {
+            // Reaped, or no child of ours to wait for: either way the guard
+            // must not signal a number that may be someone else's now.
             guard.0 = None;
+            assert!(
+                w == child,
+                "waitpid bwrap: {}",
+                std::io::Error::last_os_error()
+            );
             panic!(
                 "bwrap exited before the launcher connected (status {st:#x}); \
                  no coordination connection"
@@ -759,28 +602,31 @@ fn accept_with_timeout(listener: RawFd, guard: &mut KillOnDrop) {
     }
 }
 
-fn read_child_pid(fd: RawFd) -> libc::pid_t {
+/// The pid of bwrap's child, from the JSON bwrap writes on `--info-fd`; 0
+/// when none arrived within ten seconds.
+fn read_child_pid(info: &File) -> libc::pid_t {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut buf = Vec::new();
     let mut b = [0u8; 4096];
     while Instant::now() < deadline {
-        // SAFETY: reading into a live buffer.
-        let n = unsafe { libc::read(fd, b.as_mut_ptr().cast(), b.len()) };
-        if n > 0 {
-            buf.extend_from_slice(&b[..n as usize]);
-            let s = String::from_utf8_lossy(&buf);
-            if let Some(p) = s.find("\"child-pid\":") {
-                let num: String = s[p + 12..]
-                    .chars()
-                    .skip_while(|c| !c.is_ascii_digit())
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                if let Ok(v) = num.parse() {
-                    return v;
+        match (&*info).read(&mut b) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&b[..n]);
+                let s = String::from_utf8_lossy(&buf);
+                if let Some(p) = s.find("\"child-pid\":") {
+                    let num: String = s[p + 12..]
+                        .chars()
+                        .skip_while(|c| !c.is_ascii_digit())
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect();
+                    if let Ok(v) = num.parse() {
+                        return v;
+                    }
                 }
             }
-        } else if n == 0 {
-            break;
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => panic!("read bwrap's info: {error}"),
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -821,35 +667,44 @@ fn bind_listen(name: &str, abstract_: bool) -> Option<OwnedFd> {
 }
 
 fn bind_listen_ty(name: &str, abstract_: bool, ty: libc::c_int) -> Option<OwnedFd> {
-    // SAFETY: socket()/bind()/listen() with a locally-built sockaddr_un.
-    unsafe {
-        let s = libc::socket(libc::AF_UNIX, ty | libc::SOCK_CLOEXEC, 0);
-        if s < 0 {
-            return None;
-        }
-        let mut a: libc::sockaddr_un = std::mem::zeroed();
-        a.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        let bytes = name.as_bytes();
-        let len = if abstract_ {
-            for (i, b) in bytes.iter().enumerate() {
-                a.sun_path[i + 1] = *b as libc::c_char;
-            }
-            2 + 1 + bytes.len()
-        } else {
-            let _ = libc::unlink(cstr(name).as_ptr());
-            for (i, b) in bytes.iter().enumerate() {
-                a.sun_path[i] = *b as libc::c_char;
-            }
-            2 + bytes.len() + 1
-        };
-        if libc::bind(s, (&raw const a).cast(), len as libc::socklen_t) != 0
-            || libc::listen(s, 64) != 0
-        {
-            libc::close(s);
-            return None;
-        }
-        Some(OwnedFd::from_raw_fd(s))
+    // SAFETY: socket takes three scalars and returns a new descriptor or -1.
+    let s = unsafe { libc::socket(libc::AF_UNIX, ty | libc::SOCK_CLOEXEC, 0) };
+    if s < 0 {
+        return None;
     }
+    // SAFETY: socket just created this descriptor; nothing else owns it.
+    let s = unsafe { OwnedFd::from_raw_fd(s) };
+    // SAFETY: sockaddr_un is plain data, and all zeroes is a valid value
+    // (AF_UNSPEC, an empty path) that the lines below fill in.
+    let mut a: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    a.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let bytes = name.as_bytes();
+    let len = if abstract_ {
+        for (i, b) in bytes.iter().enumerate() {
+            a.sun_path[i + 1] = *b as libc::c_char;
+        }
+        2 + 1 + bytes.len()
+    } else {
+        // A socket left by an earlier run would make the bind EADDRINUSE;
+        // none is the usual answer.
+        let _ = std::fs::remove_file(name);
+        for (i, b) in bytes.iter().enumerate() {
+            a.sun_path[i] = *b as libc::c_char;
+        }
+        2 + bytes.len() + 1
+    };
+    assert!(
+        len <= std::mem::size_of::<libc::sockaddr_un>(),
+        "{name:?} does not fit a sockaddr_un"
+    );
+    // SAFETY: `a` is a live sockaddr_un and the kernel reads `len` bytes of
+    // it, at most its size (asserted above).
+    let bound = unsafe { libc::bind(s.as_raw_fd(), (&raw const a).cast(), len as libc::socklen_t) };
+    // SAFETY: listen takes two scalars.
+    if bound != 0 || unsafe { libc::listen(s.as_raw_fd(), 64) } != 0 {
+        return None;
+    }
+    Some(s)
 }
 
 fn cstr(s: &str) -> std::ffi::CString {
@@ -991,9 +846,9 @@ fn a_connect_fails_closed_when_the_mediator_stops() {
 }
 
 /// `stop()` is bounded however the pool was woken. RECV ignores
-/// `O_NONBLOCK`, so a worker that lost the race for a notification used to
-/// sleep inside it where the stop pipe could not reach it, and joining it
-/// hung (measured: this binary hung in the test above). Attempted: bursts of
+/// `O_NONBLOCK`, so a worker that lost the race for a notification can
+/// sleep inside it where the stop pipe cannot reach it, and joining it would
+/// hang (the binary hung in the test above when it did). Attempted: bursts of
 /// concurrent mediated connects, which wake several workers per
 /// notification, then `stop()` on its own thread. Verdict: every connect is
 /// answered, and `stop()` returns within a few seconds every time.
@@ -1061,8 +916,8 @@ fn non_native_abi_connects_are_refused() {
 /// A connect on a descriptor that is not a socket: its `SO_DOMAIN` cannot be
 /// read, which says nothing about the family, so the mediator refuses with
 /// the kernel's own answer and a named reason instead of performing a
-/// connect of its own on the duplicate (the branch an unknown domain used to
-/// take).
+/// connect of its own on the duplicate, as an unknown domain otherwise
+/// would.
 #[test]
 fn a_connect_on_a_non_socket_is_refused_before_any_mediated_connect() {
     if !common::live() {
@@ -1213,7 +1068,7 @@ fn concurrent_connects_are_serviced_and_stop_is_bounded() {
     // Fire another wave and stop the mediator while it is in flight; stop() must
     // return within a bound. The helper reply for the wave may or may not
     // arrive; we only require the stop to be prompt.
-    send(rig.coord, "F 40");
+    send(rig.coord(), "F 40").expect("send the second wave");
     let m = rig._mediator.take().expect("mediator");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -1225,7 +1080,7 @@ fn concurrent_connects_are_serviced_and_stop_is_bounded() {
         "stop() must return within a bound even with connects in flight"
     );
     // Drain whatever the helper replied so Drop's teardown is clean.
-    let _ = recv(rig.coord);
+    let _ = recv(rig.coord());
 }
 
 /// Review fix 3, mutation M1 (notification-id revalidation). A forked child
@@ -1256,28 +1111,28 @@ fn mutation_id_revalidation_drops_a_stale_notification() {
     );
 }
 
-/// The stock-host measurement (CONTRACT §3.5): a user-namespace inner sandbox
-/// (bwrap-in-bwrap) is EPERM here, so nested-userns IPC and proxy replacement
-/// in a nested netns are host-conditional. This asserts the honest measurement
-/// and is gated on the capability, not on a skip: a host that permits nested
-/// user namespaces would take the `else` branch and exercise the real nested
-/// path (left to the `agent` end-to-end tests, which own the inner sandbox).
+/// The reference host's measurement (CONTRACT §3.5): a user-namespace inner
+/// sandbox (bwrap-in-bwrap) is EPERM there, under Ubuntu's AppArmor
+/// restriction of unprivileged user namespaces, so nested-userns IPC and
+/// proxy replacement in a nested netns are host-conditional. That is a
+/// property of the provisioned host, not of Linux, so it is judged under
+/// `OURO_CONFORMANCE=1` and skipped elsewhere, whatever the measurement would
+/// say there. A host that permits nested user namespaces leaves the nested
+/// cases to the `agent` end-to-end tests, which own the inner sandbox.
 #[test]
 fn nested_user_namespace_is_unavailable_here() {
-    if !common::live() {
+    if !common::live() || !common::reference_host("Ubuntu's AppArmor userns restriction") {
         return;
     }
     match measure_nested_userns() {
-        NestedUserns::Denied => {
-            // The expected result on a stock host; the inner sandbox's failure
-            // must be visible, never hidden or claimed as running.
-        }
-        NestedUserns::Works => {
-            harness::skip_or_fail(
-                "this host permits nested user namespaces; the nested IPC and \
-                 proxy-replacement cases belong to the agent end-to-end tests",
-            );
-        }
+        // The inner sandbox's failure is visible, never hidden or claimed as
+        // running.
+        NestedUserns::Denied => {}
+        NestedUserns::Works => panic!(
+            "a nested user namespace works on the reference host: its AppArmor \
+             userns restriction is not in force, so the nested IPC and \
+             proxy-replacement cases are not host-conditional there"
+        ),
         NestedUserns::Unknown(reason) => panic!("could not measure nested userns: {reason}"),
     }
 }

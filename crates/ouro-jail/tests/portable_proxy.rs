@@ -16,7 +16,6 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use jsonschema::{Registry, Resource, Validator};
 use ouro_jail::network::Rules;
 use ouro_jail::observer::CoverageClass;
 use ouro_jail::proxy::{
@@ -26,8 +25,14 @@ use ouro_jail::proxy::{
 };
 use ouro_jail::records::{Completion, Decision};
 
+mod common;
+
 /// Upper bound for any wait. Never reached when the behaviour is correct.
 const WAIT: Duration = Duration::from_secs(20);
+/// How long a second lookup must stay queued, from its start, while the
+/// first holds the only slot: far longer than a refusal or a lookup takes to
+/// show, short enough to keep the test quick.
+const QUEUED_WINDOW: Duration = Duration::from_millis(200);
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -504,35 +509,6 @@ fn n02_chunked_body_is_forwarded_exactly_and_nothing_after_it() {
 
 const ATTEMPT: &str = "att_12345678-1234-4123-8123-123456789abc";
 
-fn specs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1")
-}
-
-fn jail_event_validator() -> Validator {
-    let mut pairs = Vec::new();
-    let mut jail_event = None;
-    for name in ["event.schema.json", "jail-event.schema.json"] {
-        let text = std::fs::read_to_string(specs_dir().join(name)).expect("readable schema");
-        let schema: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
-        let id = schema["$id"].as_str().expect("an $id").to_owned();
-        if name == "jail-event.schema.json" {
-            jail_event = Some(schema.clone());
-        }
-        pairs.push((id, Resource::from_contents(schema)));
-    }
-    let registry = Registry::new()
-        .extend(pairs)
-        .expect("valid identifiers")
-        .prepare()
-        .expect("the registry resolves");
-    let registry: &'static Registry = Box::leak(Box::new(registry));
-    jsonschema::options()
-        .with_registry(registry)
-        .should_validate_formats(true)
-        .build(&jail_event.expect("the producer schema"))
-        .expect("compiles")
-}
-
 #[test]
 fn n02_results_are_valid_distinct_proxy_source_events() {
     let (listener, port) = loopback();
@@ -573,7 +549,7 @@ fn n02_results_are_valid_distinct_proxy_source_events() {
     server.join().expect("the server ran");
 
     let results = harness.sink.wait_for(3);
-    let validator = jail_event_validator();
+    let validator = &common::validators()["jail-event"];
     let mut events = Vec::new();
     for (index, result) in results.iter().enumerate() {
         let seq = u64::try_from(index).expect("fits") + 1;
@@ -1683,20 +1659,40 @@ fn n04_system_resolver_looks_up_the_absolute_name_and_keeps_its_deadline() {
     assert_eq!(resolver.in_flight(), 1);
     // ... and a second lookup now WAITS for the slot (issue draft 04:
     // queueing bounded by the deadline) instead of being refused ...
+    let (started, waiting) = mpsc::channel();
     let waiter = {
         let resolver = Arc::clone(&resolver);
         thread::spawn(move || {
+            let _ = started.send(());
             resolver.resolve("other.test", Instant::now() + Duration::from_secs(30))
         })
     };
-    thread::sleep(Duration::from_millis(200));
+    waiting
+        .recv_timeout(WAIT)
+        .expect("the second lookup starts");
+    // Once it has started, a refusal comes back at once and a slot taken past
+    // the cap runs the lookup, which records the name: over a window measured
+    // from its start, neither may happen while the first lookup holds the
+    // slot. (The window bounds how long a wrong answer could hide; it orders
+    // nothing.)
+    thread::sleep(QUEUED_WINDOW);
     assert!(
         !waiter.is_finished(),
         "the second lookup is queued behind the held slot"
     );
+    assert_eq!(
+        *held.names.lock().unwrap_or_else(PoisonError::into_inner),
+        vec!["example.test.".to_owned()],
+        "the queued lookup ran while the slot was held"
+    );
     // ... and proceeds once the held lookup releases its slot.
     held.release();
     assert!(waiter.join().unwrap().is_ok(), "the queued lookup resolves");
+    assert_eq!(
+        *held.names.lock().unwrap_or_else(PoisonError::into_inner),
+        vec!["example.test.".to_owned(), "other.test.".to_owned()],
+        "the queued lookup ran once the slot was free"
+    );
     wait_until("the second lookup ends", || resolver.in_flight() == 0);
 }
 
@@ -2401,7 +2397,7 @@ fn n02_a_resource_failure_event_is_truthful() {
     assert_eq!(event.fields["reason"], "resource_exhausted");
     assert_eq!(event.fields["end"], serde_json::Value::Null);
     let value = serde_json::to_value(&event).expect("serializes");
-    let errors: Vec<String> = jail_event_validator()
+    let errors: Vec<String> = common::validators()["jail-event"]
         .iter_errors(&value)
         .map(|e| e.to_string())
         .collect();
@@ -2425,19 +2421,14 @@ fn run_helper(mode: &str, ulimits: &str, port: Option<u16>) -> String {
         .arg("-c")
         .arg(format!("{ulimits} && exec \"$0\" \"$@\""))
         .arg(exe)
-        .args(["--ignored", "--exact", "proxy_limits_helper", "--nocapture"])
+        .args(common::helper_args("proxy_limits_helper"))
+        .env(common::HELPER_VAR, "proxy_limits_helper")
         .env(HELPER_MODE, mode);
     if let Some(port) = port {
         command.env(HELPER_PORT, port.to_string());
     }
     let output = command.output().expect("the helper runs");
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert!(
-        output.status.success(),
-        "helper {mode} failed: {stdout}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    stdout
+    common::assert_helper_ran("proxy_limits_helper", &output)
 }
 
 fn helper_value<'a>(stdout: &'a str, key: &str) -> &'a str {
@@ -2544,6 +2535,9 @@ fn helper_connect(path: &Path) -> std::io::Result<UnixStream> {
 #[test]
 #[ignore = "child helper invoked by the n04 descriptor tests"]
 fn proxy_limits_helper() {
+    if !common::running_helper("proxy_limits_helper") {
+        return;
+    }
     let mode = std::env::var(HELPER_MODE).expect("the helper needs a mode");
     let port: Option<u16> = std::env::var(HELPER_PORT)
         .ok()

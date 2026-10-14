@@ -17,12 +17,15 @@
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
-use ouro_fixture::harness::{ExpectedPlan, Jail, Release, Run, TempDir};
+use ouro_fixture::harness::{self, ExpectedPlan, Jail, RecordContract, Release, Run, TempDir};
 use serde_json::Value;
 
 const EXIT_REFUSED: i32 = 125;
 
+/// The stand-in's records imitate the product's shape only, so the harness
+/// is told not to hold them to the product's contract.
 fn stand_in() -> &'static str {
+    harness::hold_records_to(RecordContract::STAND_IN);
     env!("CARGO_BIN_EXE_stand-in-jail")
 }
 

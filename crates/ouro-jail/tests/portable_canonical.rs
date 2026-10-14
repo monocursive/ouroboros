@@ -18,6 +18,8 @@ use ouro_jail::policy::{
 use ouro_jail::profiles;
 use ouro_jail::records::{NativeString, Os};
 
+mod common;
+
 fn specs_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/specs/jail-v1")
@@ -505,9 +507,7 @@ fn p01_whether_a_grant_named_its_port_is_digest_input() {
         serde_json::json!(["a.example.test:443", "b.example.test:443"])
     );
 
-    let schema: serde_json::Value = serde_json::from_str(&read_text("policy-snapshot.schema.json"))
-        .expect("the snapshot schema is JSON");
-    let validator = jsonschema::validator_for(&schema).expect("the schema compiles");
+    let validator = &common::validators()["policy-snapshot"];
     for resolved in [&implied, &explicit, &both, &shuffled] {
         let value = canonical(resolved);
         assert!(validator.is_valid(&value), "{value}");

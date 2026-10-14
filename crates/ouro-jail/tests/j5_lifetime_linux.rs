@@ -1,8 +1,6 @@
 #![cfg(target_os = "linux")]
-#![allow(clippy::too_many_lines)]
-//! J5 milestone proof: the lifetime clauses of jail-v1 §15 (L01, L02, L03,
-//! L04, X07, C02) that J1 to J4 left without a test that can fail (slice
-//! J5-B3, after the J5 acceptance-map review and the J5-B1 review).
+//! The lifetime clauses of jail-v1 §15 (L01, L02, L03, L04, X07, C02), each
+//! with a live test that can fail.
 //!
 //! Every test drives the real `ouro-jail run` (or `gc`) on the reference host
 //! and observes the tree itself, never only the receipt's word for it: the
@@ -22,7 +20,9 @@
 //! gate above it), so parallel tests never cross-wire channels and a test
 //! can wait for any control message kind while the run is still going.
 //!
-//! Live tests need `OURO_CONFORMANCE=1` on the reference host.
+//! Live tests run where `common::live()` (and, for `none`, a delegated leaf)
+//! says the host can, skip elsewhere with the reason, and fail instead of
+//! skipping under `OURO_CONFORMANCE=1`.
 
 use std::io::Write as _;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
@@ -141,11 +141,9 @@ impl Attempt {
 
     /// The durable receipt the latest control message acknowledged, checked.
     fn receipt(&self) -> Value {
-        common::checked_receipt(
-            self.spawned()
-                .receipt_value()
-                .expect("the --receipt copy is durable"),
-        )
+        self.spawned()
+            .receipt_value()
+            .expect("the --receipt copy is durable")
     }
 
     /// Stop here and fail, leaving nothing of this attempt on the shared
@@ -323,26 +321,11 @@ fn limit_row<'a>(receipt: &'a Value, key: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no `{key}` limit row: {receipt:#}"))
 }
 
-/// The receipt with the highest revision, every receipt of the run held to
-/// its contract.
-fn last_receipt(run: &Run) -> Value {
-    let receipts = run.receipts();
-    for receipt in &receipts {
-        if let Err(error) = common::check_receipt(receipt) {
-            panic!("a product receipt fails its contract: {error}\n{receipt:#}");
-        }
-    }
-    receipts
-        .into_iter()
-        .max_by_key(|r| r["revision"].as_u64().unwrap_or(0))
-        .unwrap_or_else(|| panic!("no receipt; stderr: {}", run.stderr_text()))
-}
-
 /// The final receipt of a run that ended normally: receipts and the whole
 /// trace held to their contracts (the trace must be complete, §13.3).
 fn final_receipt(run: &Run) -> Value {
     common::assert_run_records(run);
-    last_receipt(run)
+    common::last_receipt(run)
 }
 
 /// The wrapper notes of a finished run whose trace is complete.
@@ -1543,7 +1526,7 @@ fn l02_kill_link(link: &str) {
             assert_eq!(run.signal(), Some(libc::SIGKILL));
             // The trace ends where the supervisor died; only the receipts
             // are complete records.
-            let last = last_receipt(&run);
+            let last = common::last_receipt(&run);
             assert_ne!(last["phase"], "settled");
             assert_eq!(last["outcome"]["kind"], "pending", "{last:#}");
             let (output, report) = gc(&run);

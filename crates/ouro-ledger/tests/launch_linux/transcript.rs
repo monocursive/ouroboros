@@ -13,7 +13,7 @@ fn show(fixture: &Fixture, run: &RunRecord, transcript: bool, json: bool) -> Val
     if json {
         command.arg("--json");
     }
-    let output = Process::spawn(&mut command, true).finish();
+    let output = Process::spawn(&mut command, true).finish(COMMAND_LIMIT);
     assert!(
         output.status.success(),
         "{}",

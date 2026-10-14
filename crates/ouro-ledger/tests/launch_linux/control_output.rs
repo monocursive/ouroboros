@@ -1,4 +1,9 @@
 use super::*;
+
+use std::io::Read;
+use std::os::fd::{FromRawFd as _, OwnedFd};
+
+use common::drain;
 use std::{
     fs::File,
     io::Write,
@@ -23,7 +28,9 @@ fn attach(command: &mut Command, fd: RawFd) {
 }
 fn pipe() -> (File, File) {
     let mut fds = [-1; 2];
+    // SAFETY: `fds` is a live array of the two ints pipe2 writes.
     assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    // SAFETY: pipe2 succeeded, so both are new descriptors nothing else owns.
     unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
 }
 fn parse(bytes: &[u8]) -> RunRecord {
@@ -60,10 +67,10 @@ fn real_control_separates_child_streams_closes_inherited_fds_and_preserves_exit_
             };
             attach(&mut command, send.as_raw_fd());
             command.args(["--", "/bin/sh", "-c", "test ! -e /proc/self/fd/198 || exit 99; printf 'out\\033\\377'; printf 'err\\000' >&2; exit 7"]);
-            let reader = receive.map(collect);
+            let reader = receive.map(drain);
             let mut process = Process::spawn(&mut command, true);
             drop(send);
-            let output = process.finish();
+            let output = process.finish(COMMAND_LIMIT);
             assert_eq!(
                 output.status.code(),
                 Some(7),
@@ -109,6 +116,7 @@ fn real_control_disconnect_and_backpressure_do_not_rewrite_outcome_or_repeat_exe
             let fixture = Fixture::new(&jail);
             let (reader, mut sender) = pipe();
             if fault != "disconnect" {
+                // SAFETY: an open descriptor `sender` owns; no pointers.
                 assert_eq!(
                     unsafe { libc::fcntl(sender.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
                     0
@@ -121,6 +129,7 @@ fn real_control_disconnect_and_backpressure_do_not_rewrite_outcome_or_repeat_exe
                     }
                 }
                 if fault == "stalled" {
+                    // SAFETY: as above.
                     assert_eq!(
                         unsafe { libc::fcntl(sender.as_raw_fd(), libc::F_SETFL, 0) },
                         0
@@ -145,7 +154,7 @@ fn real_control_disconnect_and_backpressure_do_not_rewrite_outcome_or_repeat_exe
             };
             fs::write(fixture.workspace.join("finish"), b"").unwrap();
             let start = Instant::now();
-            let output = process.finish();
+            let output = process.finish(COMMAND_LIMIT);
             assert_eq!(output.status.code(), Some(1));
             assert!(start.elapsed() < Duration::from_secs(6));
             assert_eq!(output.stdout, b"child-done");
@@ -159,7 +168,7 @@ fn real_control_disconnect_and_backpressure_do_not_rewrite_outcome_or_repeat_exe
             drop(retained_reader);
             let result = fixture._temp.path().join("retry.json");
             let file = File::create(&result).unwrap();
-            let replay = Process::spawn(&mut make(file.as_raw_fd()), true).finish();
+            let replay = Process::spawn(&mut make(file.as_raw_fd()), true).finish(COMMAND_LIMIT);
             assert!(replay.status.success());
             assert!(replay.stdout.is_empty());
             assert!(replay.stderr.is_empty());
@@ -188,7 +197,7 @@ fn real_control_implies_json_and_batch_control_has_no_stdout_response() {
         let mut command = fixture.command("control-mode", batch);
         attach(&mut command, file.as_raw_fd());
         command.args(["--", "/bin/sh", "-c", "printf child-output"]);
-        let result = Process::spawn(&mut command, true).finish();
+        let result = Process::spawn(&mut command, true).finish(COMMAND_LIMIT);
         assert!(
             result.status.success(),
             "{}",

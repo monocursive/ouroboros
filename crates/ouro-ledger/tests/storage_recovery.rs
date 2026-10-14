@@ -26,6 +26,7 @@ fn first_run_consistent(store: &Store) -> bool {
 
 fn peer() -> Peer {
     Peer {
+        // SAFETY: geteuid takes no arguments and cannot fail.
         uid: unsafe { libc::geteuid() },
         pid: std::process::id(),
         birth: "storage-recovery-fixture".into(),
@@ -419,7 +420,16 @@ fn durable_cursor_refuses_changed_checkpoint_and_replaced_canonical_inode() {
         }
 
         let mut recovered = Store::open(&fixture.data).unwrap();
-        assert!(recovered.read(&request).is_err());
+        let error = recovered
+            .read(&request)
+            .expect_err("a durable cursor over changed state is refused")
+            .to_string();
+        let expected = if replace_canonical {
+            "reader canonical snapshot is corrupt: identity or length changed"
+        } else {
+            "reader checkpoint is corrupt or unavailable"
+        };
+        assert!(error.contains(expected), "{error}");
         assert!(first_run_consistent(&recovered));
     }
 }
@@ -471,7 +481,14 @@ fn history_lost_below_its_manifest_anchor_refuses_every_snapshot() {
         ["canonical stream truncated before its segment manifest anchor"]
     );
     // Without a durable anchor even the surviving prefix cannot be resumed.
-    assert!(store.read(&request).is_err());
+    let error = store
+        .read(&request)
+        .expect_err("no resume without an anchor")
+        .to_string();
+    assert!(
+        error.contains("canonical snapshot was truncated"),
+        "{error}"
+    );
     request.cursor = None;
     assert_eq!(store.read(&request).unwrap().stream_status, "corrupt");
 }

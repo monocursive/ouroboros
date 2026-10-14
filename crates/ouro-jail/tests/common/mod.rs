@@ -12,6 +12,15 @@ use std::os::unix::fs::PermissionsExt as _;
 
 use tempfile::TempDir;
 
+/// Simulated platforms for the in-process supervisor tests.
+pub mod sim;
+
+/// The bare-tracer scaffolding the observer suites share: the C fixtures
+/// under `tests/fixtures/`, built once per binary, and the launcher the
+/// tracer seizes.
+#[cfg(target_os = "linux")]
+pub mod observer;
+
 /// A temporary directory created mode 0700, whatever the umask is.
 ///
 /// `tempfile::tempdir()` creates with 0777 masked by the process umask, so the
@@ -22,15 +31,123 @@ use tempfile::TempDir;
 /// their own. The check stays strict; the tests stop handing it a directory
 /// that fails it for reasons that have nothing to do with what they test.
 ///
-/// Every test file uses this, not only the ones that build a state root today:
-/// which temporary directory ends up as a state-root ancestor is a detail that
-/// changes when a test is edited, and the umask of the machine running it is
-/// not something a test should depend on either way.
+/// Use it for every temporary directory a test makes, not only for one that
+/// builds a state root: which directory ends up a state-root ancestor is a
+/// detail that changes when a test is edited, and the umask of the machine
+/// running it is not something a test should depend on either way.
 pub fn private_tempdir() -> TempDir {
     tempfile::Builder::new()
         .permissions(Permissions::from_mode(0o700))
         .tempdir()
         .expect("a temporary directory")
+}
+
+// ---------------------------------------------------------------------------
+// Bounded waits
+// ---------------------------------------------------------------------------
+
+/// How often a bounded wait looks again.
+pub const POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// How long a live run may take to reach a state a test waits for (a
+/// receipt phase, a cgroup emptying, a helper's ready file). Generous on
+/// purpose: it only turns a hang into a failure under load, it never orders
+/// two events.
+pub const SETTLE_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Wait until `ready` holds, looking every [`POLL`]; fail the test naming
+/// `what` when `bound` passes first.
+pub fn eventually(what: &str, bound: std::time::Duration, ready: impl FnMut() -> bool) {
+    assert!(
+        within(bound, ready),
+        "timed out after {bound:?} waiting for {what}"
+    );
+}
+
+/// Whether `ready` came to hold within `bound`, looking every [`POLL`]: for a
+/// caller that reports the timeout itself (a cleanup in `Drop`, a crash
+/// matrix that collects problems) rather than failing on the spot.
+#[must_use]
+pub fn within(bound: std::time::Duration, mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + bound;
+    loop {
+        if ready() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-exec helpers
+// ---------------------------------------------------------------------------
+
+/// The variable a parent test sets to the name of the helper it runs.
+pub const HELPER_VAR: &str = "OURO_TEST_HELPER";
+
+/// Whether this process is running helper `name` for a parent test.
+///
+/// A self-exec helper is an `#[ignore]`d test of its own binary that a parent
+/// test runs in a child process. `--include-ignored` runs it too, with no
+/// parent and none of its inputs, so every helper calls this first and
+/// returns when it is false: it then does nothing, rather than panicking or
+/// acting on a host it was not set up for.
+#[must_use]
+pub fn running_helper(name: &str) -> bool {
+    std::env::var_os(HELPER_VAR).is_some_and(|value| value == name)
+}
+
+/// The arguments that run exactly the `#[ignore]`d test `name` of a test
+/// binary, uncaptured. (One test runs on one thread either way; with
+/// `--test-threads=1` libtest would print the test's name on the line its
+/// output starts on, and a helper's report lines would no longer start the
+/// line.)
+#[must_use]
+pub fn helper_args(name: &str) -> [&str; 4] {
+    ["--ignored", "--exact", name, "--nocapture"]
+}
+
+/// The command that runs helper `name` of this test binary in a child
+/// process, with [`HELPER_VAR`] naming it ([`running_helper`]).
+#[must_use]
+pub fn helper_command(name: &str) -> std::process::Command {
+    let mut command =
+        std::process::Command::new(std::env::current_exe().expect("this test binary"));
+    command.args(helper_args(name)).env(HELPER_VAR, name);
+    command
+}
+
+/// The helper's output, after checking that it ran and passed.
+///
+/// libtest exits 0 both when the helper passed and when the filter matched
+/// nothing (a renamed helper), printing "1 passed" or "0 passed": a parent
+/// that only reads the exit status passes over a helper that never ran.
+pub fn assert_helper_ran(name: &str, output: &std::process::Output) -> String {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "helper {name} failed:\n{text}");
+    assert!(
+        text.contains("test result: ok. 1 passed"),
+        "helper {name} did not run:\n{text}"
+    );
+    text
+}
+
+/// Run helper `name` of this test binary to completion with `env` and
+/// return its output ([`helper_command`], [`assert_helper_ran`]).
+pub fn rerun_self(name: &str, env: &[(&str, &std::ffi::OsStr)]) -> String {
+    let mut command = helper_command(name);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("the helper starts");
+    assert_helper_ran(name, &output)
 }
 
 // ---------------------------------------------------------------------------
@@ -43,7 +160,7 @@ pub fn private_tempdir() -> TempDir {
 // backend and a user namespace says so and skips where it cannot have them,
 // and under `OURO_CONFORMANCE=1` — the provisioned host — the same call fails
 // instead, because there a missing capability is a real result. One answer to
-// "can this host run these?", shared by all three Linux test binaries.
+// "can this host run these?", shared by every live suite.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -70,6 +187,7 @@ fn preconditions() -> &'static Preconditions {
 /// test that needs the backend, and return when it is false.
 #[must_use]
 pub fn live() -> bool {
+    hold_records();
     match preconditions().reason.as_deref() {
         None => true,
         Some(reason) => {
@@ -101,12 +219,98 @@ pub fn bwrap_path() -> PathBuf {
 /// check that cannot fail.
 #[must_use]
 pub fn reference_host(what: &str) -> bool {
+    hold_records();
     if harness::live_required() {
         return true;
     }
     harness::skip_or_fail(&format!(
         "{what} is a property of the provisioned reference host; \
          set OURO_CONFORMANCE=1 on that host to check it"
+    ));
+    false
+}
+
+/// Whether this host's product probe `name` reports the capability
+/// available, measured once per test binary by the product's own probe
+/// (`ouro-jail`'s `platform::linux::probe`, the one `doctor` and preparation
+/// run) against the backend [`live`] found.
+///
+/// Composed with [`live`]: a probe is only asked on a host that can run the
+/// live checks at all. When the capability is missing, prints `skipped:` with
+/// `why` and the probe's evidence, or fails under `OURO_CONFORMANCE=1`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn probe_available(name: &'static str, why: &str) -> bool {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use ouro_jail::platform::linux::probe;
+
+    static MEASURED: Mutex<BTreeMap<&'static str, Result<(), String>>> =
+        Mutex::new(BTreeMap::new());
+    if !live() {
+        return false;
+    }
+    let measured = MEASURED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(name)
+        .or_insert_with(|| {
+            let result = probe::run_one(name, &harness::jail_path(), &bwrap_path());
+            if result.status == probe::ProbeStatus::Available {
+                Ok(())
+            } else {
+                Err(result.evidence)
+            }
+        })
+        .clone();
+    match measured {
+        Ok(()) => true,
+        Err(evidence) => {
+            harness::skip_or_fail(&format!("{why}: {name} is unavailable: {evidence}"));
+            false
+        }
+    }
+}
+
+/// Whether this host can run a live check that needs a delegated cgroup
+/// leaf: `none`'s tree termination rests on one (§9.3), and so do the
+/// lifecycle, scope and GC checks. [`live`], then the product's
+/// `cgroup_delegated_leaf` probe ([`probe_available`]).
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn delegated_leaf() -> bool {
+    probe_available(
+        "cgroup_delegated_leaf",
+        "this check needs a delegated user scope with a usable leaf \
+         (run it under `systemd-run --user --scope -p Delegate=yes`)",
+    )
+}
+
+/// Whether this host can run a live check of `profile`: [`live`], and for
+/// `none` a delegated leaf ([`delegated_leaf`]).
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn profile_live(profile: ouro_jail::policy::ProfileName) -> bool {
+    if profile == ouro_jail::policy::ProfileName::None {
+        delegated_leaf()
+    } else {
+        live()
+    }
+}
+
+/// The interpreter the `none` and orphan fixtures are written in.
+pub const PYTHON: &str = "/usr/bin/python3";
+
+/// Whether [`PYTHON`] is installed; prints `skipped:` or fails under
+/// `OURO_CONFORMANCE=1` when it is not.
+#[must_use]
+pub fn python() -> bool {
+    if std::path::Path::new(PYTHON).is_file() {
+        return true;
+    }
+    harness::skip_or_fail(&format!(
+        "these fixtures are scripts for {PYTHON}, which is absent"
     ));
     false
 }
@@ -197,11 +401,11 @@ fn which(program: &str) -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// J4-R, J5-C: the record checks the schema cannot express (R01)
+// The record checks the schema cannot express (R01)
 // ---------------------------------------------------------------------------
 
 /// The rules a receipt's schema cannot state, as the library checks them
-/// (`ouro_jail::records::semantic::receipt`, J5-C): canonical native byte
+/// (`ouro_jail::records::semantic::receipt`): canonical native byte
 /// strings, unique credential ids and limit keys, a counted class's source
 /// not unsupported, and gap intervals in order. `validate_contract.py` holds
 /// the port of the same rules, over the same corpus.
@@ -233,7 +437,7 @@ pub fn native_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
 
 /// Every `*.schema.json` in `dir`, by stem.
 ///
-/// J5-C review item 1: a second file declaring an `$id` that another file
+/// A second file declaring an `$id` that another file
 /// already declares is refused. The registry keeps one resource per `$id`, so
 /// an unfrozen file could otherwise silently replace a frozen schema, with no
 /// frozen sha256 changing and the winner decided by directory order.
@@ -349,8 +553,20 @@ pub fn checked_receipt(receipt: serde_json::Value) -> serde_json::Value {
     receipt
 }
 
+/// A receipt a test reads from disk itself (a `jail.json` it is about to
+/// compare, or to tamper with), held to its contract like one the harness
+/// hands out ([`checked_receipt`]).
+#[must_use]
+pub fn read_receipt(path: &std::path::Path) -> serde_json::Value {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    checked_receipt(
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("{} is not one JSON document: {error}", path.display())),
+    )
+}
+
 // ---------------------------------------------------------------------------
-// J5-C: traces, control transcripts and whole runs (R01, §8.2, §13.1, §13.3)
+// Traces, control transcripts and whole runs (R01, §8.2, §13.1, §13.3)
 // ---------------------------------------------------------------------------
 
 fn schema_errors(schema: &str, value: &serde_json::Value) -> Vec<String> {
@@ -406,6 +622,21 @@ pub fn check_control(messages: &[serde_json::Value]) -> Result<(), String> {
         .map_err(|error| format!("semantic: {error}"))
 }
 
+/// Hold every record the harness hands this test binary to the frozen
+/// schemas and the semantic rules: each receipt ([`check_receipt`]), control
+/// transcript ([`check_control`]) and complete trace ([`check_trace`]) a
+/// `Run` or `Spawned` returns has passed them, or the read panics with the
+/// finding. [`live`] installs it, so a live test cannot read a product record
+/// that was not checked; the harness refuses to hand out records at all in a
+/// binary that installed nothing. Idempotent.
+pub fn hold_records() {
+    harness::hold_records_to(harness::RecordContract {
+        receipt: check_receipt,
+        control: check_control,
+        trace: check_trace,
+    });
+}
+
 /// Everything a run wrote, held to its contract: every receipt
 /// ([`check_receipt`]), the trace when one was asked for ([`check_trace`],
 /// against the attempt's final receipt) and the control transcript
@@ -415,27 +646,75 @@ pub fn check_control(messages: &[serde_json::Value]) -> Result<(), String> {
 /// The trace is read through `Run::trace_events`, which already refuses a
 /// transcript that is not complete in the §13.3 sense; a test about an
 /// incomplete trace reads `trace_readback` itself and does not call this.
+///
+/// The accessors hold what a test reads ([`hold_records`]); this holds what
+/// it does not read too, so a run whose trace or transcript breaks a rule
+/// fails even when the test only asks about its receipt.
 pub fn assert_run_records(run: &harness::Run) {
-    for receipt in run.receipts() {
-        if let Err(error) = check_receipt(&receipt) {
-            panic!("a product receipt fails its contract: {error}\n{receipt:#}");
-        }
-    }
+    hold_records();
+    let _ = run.receipts();
     if run.trace_readback.is_some() {
-        let final_receipt = run
-            .final_receipt()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok());
-        if let Err(error) = check_trace(run.trace_events(), final_receipt.as_ref()) {
-            panic!(
-                "a product trace fails its contract: {error}\n{:#}",
-                serde_json::Value::from(run.trace_events().to_vec())
-            );
-        }
+        let _ = run.trace_events();
     }
-    if let Err(error) = check_control(run.control_messages()) {
+    let _ = run.control_messages();
+}
+
+/// The complete frames of a trace cut short by design (a killed supervisor,
+/// a consumer that left), held to what a prefix can keep: every event
+/// schema-valid and the stream's rules up to the cut ([`check_trace`] with no
+/// final receipt). `Run::trace_events` rightly refuses such a trace, since
+/// it does not end on the final receipt's note (§13.3).
+pub fn assert_trace_prefix(run: &harness::Run) -> &[serde_json::Value] {
+    let readback = run.trace_readback.as_ref().expect("a trace was requested");
+    if let Err(error) = check_trace(&readback.frames, None) {
         panic!(
-            "a product control transcript fails its contract: {error}\n{:#}",
-            serde_json::Value::from(run.control_messages().to_vec())
+            "the frames of a product trace fail their contract: {error}\n{:#}",
+            serde_json::Value::from(readback.frames.clone())
         );
     }
+    &readback.frames
+}
+
+/// The settled receipt of a run that ended normally, after everything the
+/// run wrote passed its contract ([`assert_run_records`]). Called for its
+/// assertions alone, it says the run settled with records that hold.
+pub fn settled(run: &harness::Run) -> serde_json::Value {
+    phase_receipt(run, "settled")
+}
+
+/// The last receipt of `phase` a run left, after everything the run wrote
+/// passed its contract ([`assert_run_records`]).
+#[must_use]
+pub fn phase_receipt(run: &harness::Run, phase: &str) -> serde_json::Value {
+    assert_run_records(run);
+    run.receipt_phase(phase).unwrap_or_else(|| {
+        panic!(
+            "no {phase} receipt: exit {:?}, phases {:?}, stderr {}",
+            run.code(),
+            run.receipts()
+                .iter()
+                .map(|receipt| receipt["phase"].clone())
+                .collect::<Vec<_>>(),
+            run.stderr_text()
+        )
+    })
+}
+
+/// The receipt the run ended with: the highest revision among the receipts
+/// it left, each held to its contract. For a run whose trace or transcript
+/// is not whole by design (a consumer that left, a killed supervisor); a run
+/// that ended normally reads [`settled`], which holds all of them.
+#[must_use]
+pub fn last_receipt(run: &harness::Run) -> serde_json::Value {
+    hold_records();
+    run.receipts()
+        .into_iter()
+        .max_by_key(|receipt| receipt["revision"].as_u64().unwrap_or(0))
+        .unwrap_or_else(|| {
+            panic!(
+                "no receipt: exit {:?}, stderr {}",
+                run.code(),
+                run.stderr_text()
+            )
+        })
 }

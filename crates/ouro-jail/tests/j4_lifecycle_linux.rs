@@ -17,30 +17,11 @@ use std::time::{Duration, Instant};
 
 use ouro_fixture::harness::{self, Jail};
 use ouro_jail::platform::linux::cgroup::ExecutionCgroup;
-use ouro_jail::platform::linux::{exec, identity, probe};
+use ouro_jail::platform::linux::{exec, identity};
 use ouro_jail::policy::LimitsSnapshot;
 use serde_json::Value;
 
 mod common;
-
-fn live() -> bool {
-    if !common::live() {
-        return false;
-    }
-    let leaf = probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != probe::ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "J4 lifecycle needs a delegated user scope with a usable leaf: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    true
-}
 
 fn sleeper() -> Child {
     Command::new("/usr/bin/sleep")
@@ -184,7 +165,7 @@ impl Stand {
 
 #[test]
 fn j4_supervisor_death_kills_everything_in_the_execution_cgroup() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let mut stand = Stand::start();
@@ -209,7 +190,7 @@ fn j4_supervisor_death_kills_everything_in_the_execution_cgroup() {
 /// instant. Deterministic: the watcher is stopped while both die.
 #[test]
 fn j4_a_supervisor_and_backend_dying_together_still_kill_the_leaf() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let mut stand = Stand::start();
@@ -239,7 +220,7 @@ fn j4_a_supervisor_and_backend_dying_together_still_kill_the_leaf() {
 /// the supervisor itself is gone or releases it.
 #[test]
 fn j4_a_backend_that_ends_before_its_supervisor_dies_still_gets_its_leaf_killed() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let mut stand = Stand::start();
@@ -266,7 +247,7 @@ fn j4_a_backend_that_ends_before_its_supervisor_dies_still_gets_its_leaf_killed(
 /// test, which ended the backend first, and cost every run 500 ms).
 #[test]
 fn j4_a_released_watcher_leaves_without_killing() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let mut stand = Stand::start();
@@ -288,7 +269,7 @@ fn j4_a_released_watcher_leaves_without_killing() {
 /// without killing (and the observer's wait for its last child ends).
 #[test]
 fn j4_an_unreleased_watcher_leaves_after_its_grace_when_the_supervisor_lives() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let mut stand = Stand::start();
@@ -308,7 +289,7 @@ fn j4_an_unreleased_watcher_leaves_after_its_grace_when_the_supervisor_lives() {
 /// descriptors close before its pidfd reports the death): kill.
 #[test]
 fn j4_a_release_pipe_closed_unreleased_kills_the_leaf() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let mut stand = Stand::start();
@@ -325,7 +306,7 @@ fn j4_a_release_pipe_closed_unreleased_kills_the_leaf() {
 /// `cgroup.kill`, and killing the supervisor empties the leaf.
 #[test]
 fn j4_a_contained_runs_watcher_holds_its_leafs_kill_file() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let jail = Jail::new().unwrap();
@@ -347,7 +328,7 @@ fn j4_a_contained_runs_watcher_holds_its_leafs_kill_file() {
         .spawn()
         .unwrap();
     let prepared = spawned.owner().await_prepared().unwrap();
-    let receipt = common::checked_receipt(spawned.receipt_value().unwrap());
+    let receipt = spawned.receipt_value().unwrap();
     let details = &receipt["lifetime"]["native"]["details"];
     let leaf = PathBuf::from(
         details["execution_cgroup"]["path"]
@@ -401,11 +382,7 @@ fn j4_a_contained_runs_watcher_holds_its_leafs_kill_file() {
         left.is_empty(),
         "processes in the leaf outlived the killed supervisor: {left:?}"
     );
-    let mut receipts: Vec<Value> = run
-        .receipts()
-        .into_iter()
-        .map(common::checked_receipt)
-        .collect();
+    let mut receipts = run.receipts();
     let last: Option<Value> = receipts.pop();
     assert_eq!(
         last.as_ref().map(|r| r["phase"].clone()),

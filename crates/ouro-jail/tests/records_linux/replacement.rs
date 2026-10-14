@@ -1,5 +1,5 @@
-//! J4 slice R, live: a crash at each named point of each persistence site
-//! leaves valid records (jail-v1 §7, §13.2; R02).
+//! R02, the run's own records: a crash at each named point of each
+//! persistence site leaves valid records (jail-v1 §7, §13.2).
 //!
 //! The release binary runs a real `tool` attempt with
 //! `OURO_JAIL_TEST_ABORT_AT=<site>:<point>` (S9), which aborts the supervisor
@@ -7,17 +7,14 @@
 //! temporary file is written, after it is synced, after the rename (or the
 //! claim's link), after the directory sync. No timing is involved, so every
 //! case is the crash it names, and a case whose point is never reached fails
-//! instead of passing without having checked anything (N10: the sleep-timed
-//! `r8_receipts_are_never_left_truncated` it replaces could).
+//! instead of passing without having checked anything.
 //!
 //! After each crash: every record file present parses, `jail.json` is a
 //! schema- and semantically valid receipt showing the prior phase before the
 //! rename and the new phase after it, the seam is recorded in the receipt and
 //! in jail state, the temporary files the crash left are exactly the ones
 //! named by `state::leftover_temp_files`, and a following `gc` keeps every
-//! record. Needs `OURO_CONFORMANCE=1` and the reference host.
-
-#![cfg(target_os = "linux")]
+//! record.
 
 use std::path::{Path, PathBuf};
 
@@ -25,41 +22,8 @@ use ouro_fixture::harness::{self, Jail};
 use ouro_jail::state::{self, AttemptDir, AttemptId};
 use serde_json::Value;
 
-mod common;
-use common::live;
-
-/// A crash point and what the records must show after it.
-#[derive(Clone, Copy)]
-struct Point {
-    name: &'static str,
-    /// The new content is visible under the target name.
-    published: bool,
-    /// The temporary name is still there.
-    temp_left: bool,
-}
-
-const POINTS: [Point; 4] = [
-    Point {
-        name: "temp_written",
-        published: false,
-        temp_left: true,
-    },
-    Point {
-        name: "temp_synced",
-        published: false,
-        temp_left: true,
-    },
-    Point {
-        name: "renamed",
-        published: true,
-        temp_left: false,
-    },
-    Point {
-        name: "dir_synced",
-        published: true,
-        temp_left: false,
-    },
-];
+use super::{POINTS, Point, parse};
+use crate::common::{self, live};
 
 /// A site, how a run reaches it, and what it replaces.
 struct Site {
@@ -161,16 +125,6 @@ const SITES: [Site; 12] = [
         phases: (Some("settled"), Some("settled")),
     },
 ];
-
-fn parse(path: &Path) -> Result<Option<Value>, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| format!("{} does not parse: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("{} cannot be read: {error}", path.display())),
-    }
-}
 
 /// One crash, and every problem it left.
 fn crash(site: &Site, point: Point) -> Vec<String> {
@@ -658,7 +612,7 @@ fn j4_w3_p6_control_messages_name_receipts_by_their_canonical_digest() {
     let messages = run.control_messages();
     let kinds: Vec<&Value> = messages.iter().map(|message| &message["kind"]).collect();
     assert_eq!(kinds, ["prepared", "exec_confirmed", "settled"]);
-    let settled = common::checked_receipt(run.receipt_phase("settled").expect("settled"));
+    let settled = run.receipt_phase("settled").expect("settled");
     let (_, canonical) =
         harness::receipt_note_of(&serde_json::to_vec(&settled).unwrap()).expect("a receipt");
     assert_eq!(

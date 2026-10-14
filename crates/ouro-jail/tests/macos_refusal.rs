@@ -1,28 +1,27 @@
 //! M01–M03: the macOS build runs the shared tests, refuses execution, and gets
 //! its inspection exit codes right.
 //!
-//! §3.2 and §3.3: this milestone ships no macOS backend, so `run` refuses with
-//! exit 125 before exec — including `--profile none`, because the tree-lifetime
+//! §3.2 and §3.3: jail-v1 ships no macOS backend, so `run` refuses with exit
+//! 125 before exec — including `--profile none`, because the tree-lifetime
 //! guarantees `none` needs are not proved on this platform either. `explain`
 //! and `version` still succeed; `doctor` and `run --label-only` report every
 //! capability and exit 125.
 //!
-//! The whole file is gated to macOS: on Linux the execution slice makes these
+//! The whole file is gated to macOS: on Linux `run` executes, which makes these
 //! expectations wrong, and a test that asserts a refusal where execution works
-//! would be a lie about the platform rather than a check of it.
+//! would be a lie about the platform rather than a check of it. The grammar,
+//! configuration and `explain` tests, whose claims hold on every platform, are
+//! in `portable_cli_config.rs`.
 #![cfg(target_os = "macos")]
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-use jsonschema::{Registry, Resource, Validator};
 
 mod common;
 
 /// A private state root, a private config directory and an empty workspace.
 struct Harness {
-    _temp: tempfile::TempDir,
+    temp: tempfile::TempDir,
     data: PathBuf,
     config: PathBuf,
     work: PathBuf,
@@ -43,30 +42,23 @@ impl Harness {
             data: make("data", 0o700),
             config: make("config", 0o700),
             work: make("work", 0o755),
-            _temp: temp,
+            temp,
         }
     }
 
     /// Runs the built binary with a cleared environment, so the developer's own
     /// `OURO_*` settings and `HOME` cannot reach it.
     fn run(&self, arguments: &[&str]) -> Output {
-        self.run_with_env(arguments, &[])
-    }
-
-    fn run_with_env(&self, arguments: &[&str], extra: &[(&str, &str)]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ouro-jail"));
-        command
+        Command::new(env!("CARGO_BIN_EXE_ouro-jail"))
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env("HOME", self._temp.path())
+            .env("HOME", self.temp.path())
             .env("OURO_DATA_DIR", &self.data)
             .env("OURO_CONFIG_DIR", &self.config)
             .current_dir(&self.work)
-            .args(arguments);
-        for (name, value) in extra {
-            command.env(name, value);
-        }
-        command.output().expect("the binary runs")
+            .args(arguments)
+            .output()
+            .expect("the binary runs")
     }
 
     /// Runs the binary with extra descriptors opened by a shell, which is the
@@ -96,7 +88,7 @@ impl Harness {
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env("HOME", self._temp.path())
+            .env("HOME", self.temp.path())
             .env("OURO_DATA_DIR", &self.data)
             .env("OURO_CONFIG_DIR", &self.config)
             .current_dir(&self.work)
@@ -134,51 +126,6 @@ impl Harness {
         }
         out
     }
-}
-
-fn specs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/specs/jail-v1")
-        .canonicalize()
-        .expect("the specification directory exists")
-}
-
-fn receipt_validator() -> Validator {
-    let mut schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    for entry in std::fs::read_dir(specs_dir()).expect("readable") {
-        let path = entry.expect("an entry").path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.ends_with(".schema.json") {
-            let text = std::fs::read_to_string(&path).expect("readable");
-            schemas.insert(
-                name.to_owned(),
-                serde_json::from_str(&text).expect("valid JSON"),
-            );
-        }
-    }
-    let pairs: Vec<(String, Resource)> = schemas
-        .values()
-        .map(|schema| {
-            (
-                schema["$id"].as_str().expect("an $id").to_owned(),
-                Resource::from_contents(schema.clone()),
-            )
-        })
-        .collect();
-    let registry: &'static Registry = Box::leak(Box::new(
-        Registry::new()
-            .extend(pairs)
-            .expect("valid URIs")
-            .prepare()
-            .expect("the registry resolves"),
-    ));
-    jsonschema::options()
-        .with_registry(registry)
-        .should_validate_formats(true)
-        .build(&schemas["jail-receipt.schema.json"])
-        .expect("the receipt schema compiles")
 }
 
 fn assert_refusal_tuple(receipt: &serde_json::Value, containment: &str, protection: &str) {
@@ -258,7 +205,7 @@ fn m01_run_refuses_before_exec_and_the_marker_never_appears() {
     let receipts = harness.receipts();
     assert_eq!(receipts.len(), 1, "exactly one attempt was recorded");
     let receipt = &receipts[0];
-    receipt_validator()
+    common::validators()["jail-receipt"]
         .validate(receipt)
         .expect("the refusal receipt satisfies the checked-in schema");
     common::assert_semantic_receipt(receipt);
@@ -294,7 +241,7 @@ fn m01_none_also_refuses_and_stays_unprotected() {
     let receipts = harness.receipts();
     assert_eq!(receipts.len(), 1);
     let receipt = &receipts[0];
-    receipt_validator()
+    common::validators()["jail-receipt"]
         .validate(receipt)
         .expect("the refusal receipt satisfies the checked-in schema");
     common::assert_semantic_receipt(receipt);
@@ -461,586 +408,8 @@ fn m03_doctor_reports_every_requirement_as_unsupported_and_unmeasured() {
 }
 
 // ---------------------------------------------------------------------------
-// Usage errors (§6.1, §6.4)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn usage_errors_exit_two() {
-    let harness = Harness::new();
-    let attempt = "att_00000000-0000-4000-8000-000000000001";
-    for arguments in [
-        // PROGRAM is mandatory without --label-only.
-        vec!["run"],
-        // --label-only rejects the gate and the attempt id.
-        vec!["run", "--label-only", "--gate-fd", "9"],
-        vec!["run", "--label-only", "--attempt-id", attempt],
-        // --attempt-id is only valid with --gate-fd.
-        vec!["run", "--attempt-id", attempt, "--", "/usr/bin/true"],
-        // Limit grammar.
-        vec!["run", "--limit", "wall=0s", "--", "/usr/bin/true"],
-        vec!["run", "--limit", "wall=300", "--", "/usr/bin/true"],
-        vec!["run", "--limit", "disk=1", "--", "/usr/bin/true"],
-        vec![
-            "run",
-            "--limit",
-            "mem=18446744073709551615GiB",
-            "--",
-            "/usr/bin/true",
-        ],
-        vec![
-            "run",
-            "--limit",
-            "wall=1m",
-            "--limit",
-            "wall=2m",
-            "--",
-            "/usr/bin/true",
-        ],
-        // Unknown flag values.
-        vec!["run", "--observe", "maybe", "--", "/usr/bin/true"],
-        vec!["run", "--evidence", "loose", "--", "/usr/bin/true"],
-        // An unknown subcommand.
-        vec!["frobnicate"],
-    ] {
-        let output = harness.run(&arguments);
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "{arguments:?} must be a usage error, stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    assert!(
-        !harness.data.join("attempts").exists(),
-        "a usage error never allocates attempt state"
-    );
-}
-
-/// §6.1 spells `doctor [--profile NAME|FILE] [--launch NAME] [--json]`, and
-/// issue draft 05 adds the same `--workspace`/`--scratch` roots `run`
-/// accepts; the other policy override flags belong to `run` and `explain`,
-/// so doctor rejects them as usage errors instead of silently probing a
-/// different plan than the one the operator meant to name. The flags it
-/// does spell still parse.
-#[test]
-fn doctor_takes_no_policy_override_flags() {
-    let harness = Harness::new();
-    for override_flag in [
-        vec!["doctor", "--rw", "/tmp"],
-        vec!["doctor", "--ro", "/tmp"],
-        vec!["doctor", "--deny-read", "/tmp"],
-        vec!["doctor", "--allow-host", "example.com"],
-        vec!["doctor", "--limit", "wall=1m"],
-        vec!["doctor", "--observe", "off"],
-        vec!["doctor", "--evidence", "best-effort"],
-    ] {
-        let output = harness.run(&override_flag);
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "{override_flag:?} must be a usage error, stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    // The spelled grammar including the workspace roots still parses.
-    for spelled in [
-        vec!["doctor", "--json", "--profile", "tool"],
-        vec!["doctor", "--workspace", "/tmp"],
-        vec!["doctor", "--scratch", "/tmp", "--profile", "tool"],
-    ] {
-        let output = harness.run(&spelled);
-        assert_ne!(
-            output.status.code(),
-            Some(2),
-            "{spelled:?} is spelled grammar, stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    // On this platform doctor runs its probes and reports not-ready (125),
-    // never a usage error.
-    let output = harness.run(&["doctor", "--json", "--profile", "tool"]);
-    assert_eq!(
-        output.status.code(),
-        Some(125),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(report["component"], serde_json::json!("ouro-jail"));
-}
-
-#[test]
-fn a_malformed_attempt_id_is_a_usage_error_not_a_path() {
-    let harness = Harness::new();
-    for id in [
-        "att_00000000-0000-0000-8000-000000000001",
-        "att_../../escape",
-        "not-an-attempt",
-    ] {
-        // Supplied together with a gate fd so that the grammar, not the flag
-        // combination, is what refuses.
-        let output = harness.run(&[
-            "run",
-            "--gate-fd",
-            "0",
-            "--attempt-id",
-            id,
-            "--",
-            "/usr/bin/true",
-        ]);
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "`{id}` must refuse as a usage error"
-        );
-    }
-    assert!(!harness.data.join("attempts").exists());
-}
-
-#[test]
-fn an_accepted_limit_reaches_the_snapshot() {
-    let harness = Harness::new();
-    let output = harness.run(&[
-        "explain", "--json", "--limit", "wall=90s", "--limit", "pids=8",
-    ]);
-    assert_eq!(output.status.code(), Some(0));
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    let limits = &report["policy"]["snapshot"]["limits"];
-    assert_eq!(limits["wall"]["value"], serde_json::json!("90000"));
-    assert_eq!(limits["wall"]["required"], serde_json::json!(true));
-    assert_eq!(limits["pids"]["value"], serde_json::json!("8"));
-    assert_eq!(
-        limits["pids"]["required"],
-        serde_json::json!(true),
-        "an explicit ceiling is required even when it is lower than the preferred one"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Configuration (§6.2, §6.3)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn an_unknown_or_duplicate_configuration_key_refuses() {
-    let harness = Harness::new();
-    std::fs::write(
-        harness.config.join("config.toml"),
-        "[jail]\nfuture_key = true\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain"]);
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "an unknown key is never silently ignored"
-    );
-
-    std::fs::write(
-        harness.config.join("config.toml"),
-        "[jail.limits]\nwall = \"1m\"\nwall = \"2m\"\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain"]);
-    assert_eq!(output.status.code(), Some(2), "a duplicate key refuses");
-}
-
-#[test]
-fn a_project_file_may_narrow_but_may_not_select_a_profile() {
-    let harness = Harness::new();
-
-    std::fs::write(
-        harness.work.join("ouro.toml"),
-        "[jail.limits]\nwall = \"1m\"\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain", "--json"]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "narrowing is allowed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(
-        report["policy"]["snapshot"]["limits"]["wall"]["value"],
-        serde_json::json!("60000")
-    );
-
-    std::fs::write(
-        harness.work.join("ouro.toml"),
-        "[jail]\nprofile = \"none\"\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain"]);
-    assert_eq!(
-        output.status.code(),
-        Some(125),
-        "a project file may not select a profile"
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("jail.profile"),
-        "the refusal names the exact key path"
-    );
-
-    std::fs::write(
-        harness.work.join("ouro.toml"),
-        "[jail]\nextends = \"tool\"\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain"]);
-    assert_eq!(output.status.code(), Some(125));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("jail.extends"));
-
-    std::fs::write(
-        harness.work.join("ouro.toml"),
-        "[jail.limits]\nwall = \"10h\"\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain"]);
-    assert_eq!(output.status.code(), Some(125), "widening refuses");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("jail.limits.wall"));
-}
-
-#[test]
-fn only_the_documented_environment_variables_are_read() {
-    let harness = Harness::new();
-
-    // An allowed variable is applied.
-    let output = harness.run_with_env(&["explain", "--json"], &[("OURO_JAIL_OBSERVE", "off")]);
-    assert_eq!(output.status.code(), Some(0));
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(
-        report["policy"]["snapshot"]["observation"]["mode"],
-        serde_json::json!("off")
-    );
-    assert!(
-        !report["requirements"]
-            .as_array()
-            .expect("requirements")
-            .iter()
-            .any(|requirement| requirement["name"] == "closed_set_observation"),
-        "observation off drops the observer requirement"
-    );
-
-    // An invalid value for an allowed variable is a usage error rather than a
-    // silent fallback.
-    let output = harness.run_with_env(&["explain"], &[("OURO_JAIL_OBSERVE", "maybe")]);
-    assert_eq!(output.status.code(), Some(2));
-
-    // Variables outside the allow-list are ignored.
-    let baseline = harness.run(&["explain", "--json"]);
-    let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).expect("JSON");
-    let output = harness.run_with_env(
-        &["explain", "--json"],
-        &[
-            ("OURO_JAIL_PROFILE", "none"),
-            ("OURO_RW", "/"),
-            ("OURO_ALLOW_HOST", "example.com"),
-            ("OURO_JAIL_EVIDENCE_MODE", "best-effort"),
-        ],
-    );
-    assert_eq!(output.status.code(), Some(0));
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(
-        report["policy"]["digest"], baseline["policy"]["digest"],
-        "no environment variable outside the allow-list changes the policy"
-    );
-}
-
-#[test]
-fn a_profile_file_narrows_its_base_and_may_not_extend_none() {
-    let harness = Harness::new();
-    let profile = harness.config.join("tight.toml");
-    std::fs::write(
-        &profile,
-        "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n[limits]\nwall = \"90s\"\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain", "--json", "--profile", profile.to_str().unwrap()]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(
-        report["policy"]["snapshot"]["limits"]["wall"]["value"],
-        serde_json::json!("90000")
-    );
-    assert_eq!(
-        report["policy"]["snapshot"]["profile"],
-        serde_json::json!("tool")
-    );
-
-    std::fs::write(
-        &profile,
-        "schema = \"ouro.jail.policy/1\"\nextends = \"none\"\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain", "--profile", profile.to_str().unwrap()]);
-    assert_eq!(
-        output.status.code(),
-        Some(125),
-        "only --profile none selects none"
-    );
-
-    std::fs::write(
-        &profile,
-        "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n[limits]\nwall = \"10h\"\n",
-    )
-    .expect("the file is written");
-    // Issue draft 07: an operator profile file may RAISE a resource ceiling
-    // exactly like the operator's own --limit flag, so this resolves.
-    let output = harness.run(&["explain", "--json", "--profile", profile.to_str().unwrap()]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(
-        report["policy"]["snapshot"]["limits"]["wall"]["value"],
-        serde_json::json!("36000000")
-    );
-}
-
-/// §6.1: `--profile none` is the only way to select `none`; files cannot
-/// select it. `config.toml` is a defaults file, so `jail.profile = "none"`
-/// refuses instead of silently dropping the operator onto the uncontained
-/// profile, while the explicit flag and a contained configured profile work.
-#[test]
-fn config_toml_may_not_select_the_none_profile() {
-    let harness = Harness::new();
-    std::fs::write(
-        harness.config.join("config.toml"),
-        "[jail]\nprofile = \"none\"\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain"]);
-    assert_eq!(
-        output.status.code(),
-        Some(125),
-        "a defaults file cannot select the uncontained profile: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("jail.profile"),
-        "the refusal names the exact key path"
-    );
-
-    // The explicit act still selects it.
-    let output = harness.run(&["explain", "--json", "--profile", "none"]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(
-        report["policy"]["snapshot"]["profile"],
-        serde_json::json!("none")
-    );
-
-    // A contained profile from the defaults file still applies.
-    std::fs::write(
-        harness.config.join("config.toml"),
-        "[jail]\nprofile = \"tool\"\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain", "--json"]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(
-        report["policy"]["snapshot"]["profile"],
-        serde_json::json!("tool")
-    );
-}
-
-/// §6.2: paths apply relative to the file containing them, and `config.toml`
-/// lives in the config directory itself. `./reference` must resolve beside
-/// the file, not one directory above it.
-#[test]
-fn config_toml_paths_anchor_to_the_config_directory() {
-    let harness = Harness::new();
-    std::fs::write(
-        harness.config.join("config.toml"),
-        "[jail.filesystem]\nread_only = [\"./reference\"]\n",
-    )
-    .expect("the file is written");
-    let output = harness.run(&["explain", "--json"]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    let read_only = report["policy"]["snapshot"]["filesystem"]["read_only"].clone();
-    let expected = harness.config.join("reference");
-    assert_eq!(
-        read_only,
-        serde_json::json!([{
-            "root": "host",
-            "path": expected.to_string_lossy().into_owned(),
-        }]),
-        "the anchor is the directory containing config.toml"
-    );
-}
-
-#[test]
-fn a_profile_selected_in_config_is_resolved_beside_config() {
-    let harness = Harness::new();
-    std::fs::write(
-        harness.config.join("config.toml"),
-        "[jail]\nprofile = \"selected.toml\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        harness.config.join("selected.toml"),
-        "schema = \"ouro.jail.policy/1\"\nextends = \"tool\"\n",
-    )
-    .unwrap();
-    let output = harness.run(&["explain", "--json"]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["policy"]["snapshot"]["profile"], "tool");
-}
-
-/// §6.2/§6.3: `[jail_host.network] translation_prefixes` is merged into proxy
-/// policy before digest creation, so equivalent spellings must render as one
-/// canonical RFC 5952 form — and text that is not an IPv6 CIDR refuses with
-/// the exact key path instead of entering the snapshot as opaque input.
-#[test]
-fn translation_prefixes_are_canonicalized_before_the_digest() {
-    let harness = Harness::new();
-    let write_config = |prefixes: &str| {
-        // Prefixes merge into proxy policy only, so the trusted defaults file
-        // also selects `agent`, the one profile with a proxy.
-        std::fs::write(
-            harness.config.join("config.toml"),
-            format!(
-                "[jail]\nprofile = \"agent\"\n\n[jail_host.network]\ntranslation_prefixes = [{prefixes}]\n"
-            ),
-        )
-        .expect("the file is written");
-    };
-
-    write_config("\"2001:0db8::/96\"");
-    let output = harness.run(&["explain", "--json"]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(
-        report["policy"]["snapshot"]["network"]["translation_prefixes"],
-        serde_json::json!(["2001:db8::/96"]),
-        "the leading zero group is compressed and lowercased"
-    );
-    let canonical_digest = report["policy"]["digest"].clone();
-
-    // An equivalent spelling of the same prefix produces the same digest.
-    write_config("\"2001:db8:0:0:0:0:0:0/96\"");
-    let output = harness.run(&["explain", "--json"]);
-    assert_eq!(output.status.code(), Some(0));
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(
-        report["policy"]["digest"], canonical_digest,
-        "equivalent spellings have one digest"
-    );
-
-    // Anything that is not an IPv6 CIDR refuses, naming the key.
-    write_config("\"banana\"");
-    let output = harness.run(&["explain"]);
-    assert_eq!(output.status.code(), Some(2), "a non-CIDR entry refuses");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("jail_host.network.translation_prefixes"),
-        "the refusal names the exact key path"
-    );
-}
-
-#[test]
-fn the_build_profile_requires_an_explicit_memory_ceiling() {
-    let harness = Harness::new();
-    let output = harness.run(&["explain", "--profile", "build"]);
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "the defaults table makes mem required for build"
-    );
-    let output = harness.run(&["explain", "--profile", "build", "--limit", "mem=512MiB"]);
-    assert_eq!(output.status.code(), Some(0));
-}
-
-#[test]
-fn a_contained_profile_rejects_a_host_grant() {
-    let harness = Harness::new();
-    let output = harness.run(&["explain", "--allow-host", "example.com"]);
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "`tool` has no proxy and accepts no host grants"
-    );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("network.allow"));
-}
-
-// ---------------------------------------------------------------------------
 // Channels (§8.2, §13.3)
 // ---------------------------------------------------------------------------
-
-fn event_validator() -> Validator {
-    let mut schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    for entry in std::fs::read_dir(specs_dir()).expect("readable") {
-        let path = entry.expect("an entry").path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.ends_with(".schema.json") {
-            let text = std::fs::read_to_string(&path).expect("readable");
-            schemas.insert(
-                name.to_owned(),
-                serde_json::from_str(&text).expect("valid JSON"),
-            );
-        }
-    }
-    let pairs: Vec<(String, Resource)> = schemas
-        .values()
-        .map(|schema| {
-            (
-                schema["$id"].as_str().expect("an $id").to_owned(),
-                Resource::from_contents(schema.clone()),
-            )
-        })
-        .collect();
-    let registry: &'static Registry = Box::leak(Box::new(
-        Registry::new()
-            .extend(pairs)
-            .expect("valid URIs")
-            .prepare()
-            .expect("the registry resolves"),
-    ));
-    jsonschema::options()
-        .with_registry(registry)
-        .should_validate_formats(true)
-        .build(&schemas["jail-event.schema.json"])
-        .expect("the jail event schema compiles")
-}
 
 fn ndjson(path: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(path)
@@ -1059,7 +428,7 @@ fn the_local_trace_records_the_wrapper_events_of_a_refusal() {
 
     let events = ndjson(&harness.attempt_dir().join("trace.ndjson"));
     assert_eq!(events.len(), 2, "a lifecycle note and the receipt event");
-    let validator = event_validator();
+    let validator = &common::validators()["jail-event"];
     for event in &events {
         validator
             .validate(event)
@@ -1085,7 +454,7 @@ fn the_local_trace_records_the_wrapper_events_of_a_refusal() {
 #[test]
 fn a_control_descriptor_receives_the_refused_message() {
     let harness = Harness::new();
-    let control = harness._temp.path().join("control.ndjson");
+    let control = harness.temp.path().join("control.ndjson");
     let output = harness.run_with_fds(
         Some(&control),
         None,
@@ -1124,7 +493,7 @@ fn a_control_descriptor_receives_the_refused_message() {
 #[test]
 fn a_trace_descriptor_replaces_the_local_stream_rather_than_duplicating_it() {
     let harness = Harness::new();
-    let trace = harness._temp.path().join("trace.ndjson");
+    let trace = harness.temp.path().join("trace.ndjson");
     let output = harness.run_with_fds(
         None,
         Some(&trace),
@@ -1143,7 +512,7 @@ fn a_trace_descriptor_replaces_the_local_stream_rather_than_duplicating_it() {
         2,
         "the stream went to the supplied descriptor"
     );
-    let validator = event_validator();
+    let validator = &common::validators()["jail-event"];
     for event in &events {
         validator
             .validate(event)
@@ -1156,36 +525,9 @@ fn a_trace_descriptor_replaces_the_local_stream_rather_than_duplicating_it() {
 }
 
 #[test]
-fn an_invalid_channel_descriptor_refuses_before_preparation() {
-    let harness = Harness::new();
-    for arguments in [
-        // stdio is never a private channel.
-        vec!["run", "--control-fd", "1", "--", "/usr/bin/true"],
-        // A descriptor that is not open at all.
-        vec!["run", "--control-fd", "9", "--", "/usr/bin/true"],
-    ] {
-        let output = harness.run(&arguments);
-        assert_eq!(
-            output.status.code(),
-            Some(125),
-            "{arguments:?} must refuse: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("invalid_fd"),
-            "{arguments:?} names the fd problem"
-        );
-    }
-    assert!(
-        !harness.data.join("attempts").exists(),
-        "fd validation happens before any attempt state exists"
-    );
-}
-
-#[test]
 fn the_receipt_flag_writes_an_additional_copy() {
     let harness = Harness::new();
-    let copy = harness._temp.path().join("copy.json");
+    let copy = harness.temp.path().join("copy.json");
     let output = harness.run(&[
         "run",
         "--receipt",
@@ -1208,103 +550,11 @@ fn the_receipt_flag_writes_an_additional_copy() {
 // The review's HIGH findings, each as the exploit that found it
 // ---------------------------------------------------------------------------
 
-/// H2: only absence means "no project file".
-///
-/// An unreadable file, a directory, a dangling symlink or an I/O error used to
-/// discard the whole narrowing layer and exit 0 with the wider policy. §2 makes
-/// that file untrusted input, and silently ignoring a tightening the operator
-/// or the project asked for is the one outcome that must not happen.
-#[test]
-fn h2_an_unusable_project_file_refuses_instead_of_being_ignored() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let narrowing = "[jail.limits]\nwall = \"1m\"\n";
-    let harness = Harness::new();
-    std::fs::write(harness.work.join("ouro.toml"), narrowing).expect("written");
-    let baseline = harness.run(&["explain", "--json"]);
-    assert_eq!(baseline.status.code(), Some(0));
-    let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).expect("JSON");
-    assert_eq!(
-        baseline["policy"]["snapshot"]["limits"]["wall"]["value"],
-        serde_json::json!("60000"),
-        "the readable file narrows, so the unreadable cases below are the change"
-    );
-
-    // Unreadable.
-    let harness = Harness::new();
-    let path = harness.work.join("ouro.toml");
-    std::fs::write(&path, narrowing).expect("written");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("mode");
-    let output = harness.run(&["explain"]);
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "an unreadable project file must refuse: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid_config"));
-
-    // A directory.
-    let harness = Harness::new();
-    std::fs::create_dir(harness.work.join("ouro.toml")).expect("a directory");
-    assert_eq!(harness.run(&["explain"]).status.code(), Some(2));
-
-    // A dangling symlink.
-    let harness = Harness::new();
-    std::os::unix::fs::symlink("nowhere", harness.work.join("ouro.toml")).expect("a symlink");
-    assert_eq!(harness.run(&["explain"]).status.code(), Some(2));
-
-    // A symlink to a real file is also refused: the open is `O_NOFOLLOW`, so
-    // the contained party cannot point the policy file anywhere it likes.
-    let harness = Harness::new();
-    let real = harness.work.join("real.toml");
-    std::fs::write(&real, narrowing).expect("written");
-    std::os::unix::fs::symlink(&real, harness.work.join("ouro.toml")).expect("a symlink");
-    assert_eq!(harness.run(&["explain"]).status.code(), Some(2));
-}
-
-/// H3: the project file read is bounded, and a fifo cannot hang the supervisor.
-#[test]
-fn h3_the_project_file_read_is_bounded_and_never_blocks() {
-    let harness = Harness::new();
-    let path = harness.work.join("ouro.toml");
-    // A fifo: `read_to_string` on this never returned.
-    let status = Command::new("/usr/bin/mkfifo")
-        .arg(&path)
-        .status()
-        .expect("mkfifo runs");
-    assert!(status.success());
-    let start = std::time::Instant::now();
-    let output = harness.run(&["explain"]);
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(10),
-        "the read must not block on a fifo"
-    );
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("regular file"),
-        "the refusal names the reason: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // A file past the cap is refused rather than read into memory.
-    let harness = Harness::new();
-    let big = vec![b'#'; 512 * 1024];
-    std::fs::write(harness.work.join("ouro.toml"), &big).expect("written");
-    let output = harness.run(&["explain"]);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("maximum"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 /// H5: a control consumer that stops reading must not stall the supervisor.
 #[test]
 fn h5_a_control_consumer_that_stops_reading_cannot_stall_the_supervisor() {
     let harness = Harness::new();
-    let control = harness._temp.path().join("control.fifo");
+    let control = harness.temp.path().join("control.fifo");
     let status = Command::new("/usr/bin/mkfifo")
         .arg(&control)
         .status()
@@ -1349,152 +599,56 @@ fn h5_a_control_consumer_that_stops_reading_cannot_stall_the_supervisor() {
     );
 }
 
-/// H7: the state root may not live inside anything the child can see.
+/// H8: a `--receipt` path outside the state root and every child-visible
+/// root is written, and the next run with the same path replaces that copy
+/// instead of refusing it as an existing file: the help promises atomic
+/// replacement. A copy needs a receipt, which on this platform only the
+/// refusal writes; the path validation itself is
+/// `portable_cli_config.rs::h8_the_receipt_copy_path_is_validated`.
 #[test]
-fn h7_a_state_root_inside_a_grant_refuses() {
-    use std::os::unix::fs::PermissionsExt as _;
-
+fn h8_a_safe_receipt_copy_path_is_written_and_then_replaced() {
     let harness = Harness::new();
-    let inside = harness.work.join("state");
-    std::fs::create_dir(&inside).expect("a directory");
-    std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o700)).expect("mode");
-
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ouro-jail"));
-    let output = command
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", harness._temp.path())
-        .env("OURO_DATA_DIR", &inside)
-        .env("OURO_CONFIG_DIR", &harness.config)
-        .current_dir(&harness.work)
-        .args(["run", "--", "/usr/bin/true"])
-        .output()
-        .expect("the binary runs");
-    assert_eq!(
-        output.status.code(),
-        Some(125),
-        "state inside the workspace must refuse"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unsafe_state_path"), "{stderr}");
-    assert!(stderr.contains("overlaps"), "{stderr}");
+    let fresh = harness.temp.path().join("fresh.json");
+    let copy_of_run = || {
+        let output = harness.run(&[
+            "run",
+            "--receipt",
+            fresh.to_str().expect("a UTF-8 path"),
+            "--",
+            "/usr/bin/true",
+        ]);
+        assert_eq!(
+            output.status.code(),
+            Some(125),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let copy: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&fresh).expect("the copy exists"))
+                .expect("a receipt");
+        assert_eq!(copy["schema"], "ouro.jail.receipt/1");
+        copy["attempt_id"].clone()
+    };
+    let first = copy_of_run();
+    let second = copy_of_run();
+    assert_ne!(first, second, "the prior receipt copy was replaced");
     assert!(
-        !inside.join("attempts").exists(),
-        "nothing is allocated under an unsafe state root"
+        harness
+            .receipts()
+            .iter()
+            .any(|receipt| receipt["attempt_id"] == second),
+        "the copy is the second attempt's receipt"
     );
 }
 
-/// H8: `--receipt PATH` is validated before anything is written.
+/// H9 on macOS: a gated run whose gate is held open but never written
+/// refuses at probing, before it ever reaches the gate wait, with one refused
+/// receipt and exit 125. No signal is sent: on this platform the gate wait is
+/// unreachable, so what holds is that nothing past probing ran.
 #[test]
-fn h8_the_receipt_copy_path_is_validated() {
+fn h9_a_gated_run_refuses_at_probing_before_the_gate_wait() {
     let harness = Harness::new();
-
-    // Inside the workspace, which the child can see.
-    let output = harness.run(&[
-        "run",
-        "--receipt",
-        harness
-            .work
-            .join("copy.json")
-            .to_str()
-            .expect("a UTF-8 path"),
-        "--",
-        "/usr/bin/true",
-    ]);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("child-visible"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // Inside the state root, where the canonical receipt already lives.
-    let output = harness.run(&[
-        "run",
-        "--receipt",
-        harness
-            .data
-            .join("copy.json")
-            .to_str()
-            .expect("a UTF-8 path"),
-        "--",
-        "/usr/bin/true",
-    ]);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("state root"));
-
-    // An existing file is never replaced.
-    let existing = harness._temp.path().join("important.json");
-    std::fs::write(&existing, b"someone else's file").expect("written");
-    let output = harness.run(&[
-        "run",
-        "--receipt",
-        existing.to_str().expect("a UTF-8 path"),
-        "--",
-        "/usr/bin/true",
-    ]);
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        std::fs::read(&existing).expect("readable"),
-        b"someone else's file",
-        "the file is untouched"
-    );
-
-    // A symlink is never followed.
-    let link = harness._temp.path().join("link.json");
-    std::os::unix::fs::symlink(&existing, &link).expect("a symlink");
-    let output = harness.run(&[
-        "run",
-        "--receipt",
-        link.to_str().expect("a UTF-8 path"),
-        "--",
-        "/usr/bin/true",
-    ]);
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        std::fs::read(&existing).expect("readable"),
-        b"someone else's file"
-    );
-
-    // And a fresh path outside everything still works. Issue 06: running the
-    // same command again with the same receipt path must replace the prior
-    // receipt copy instead of refusing (the help promises atomic replacement).
-    let fresh = harness._temp.path().join("fresh.json");
-    let output = harness.run(&[
-        "run",
-        "--receipt",
-        fresh.to_str().expect("a UTF-8 path"),
-        "--",
-        "/usr/bin/true",
-    ]);
-    assert_eq!(output.status.code(), Some(125));
-    assert!(fresh.exists(), "a safe copy path is still honoured");
-    let output = harness.run(&[
-        "run",
-        "--receipt",
-        fresh.to_str().expect("a UTF-8 path"),
-        "--",
-        "/usr/bin/true",
-    ]);
-    assert_eq!(
-        output.status.code(),
-        Some(125),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let replaced: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&fresh).expect("readable")).expect("a receipt");
-    assert_eq!(
-        replaced["schema"], "ouro.jail.receipt/1",
-        "the prior receipt copy was replaced"
-    );
-}
-
-/// H9: a signal during the gate wait refuses rather than killing the process.
-#[test]
-fn h9_a_signal_during_the_gate_wait_is_handled() {
-    let harness = Harness::new();
-    let gate = harness._temp.path().join("gate.fifo");
+    let gate = harness.temp.path().join("gate.fifo");
     let status = Command::new("/usr/bin/mkfifo")
         .arg(&gate)
         .status()
@@ -1515,7 +669,7 @@ fn h9_a_signal_during_the_gate_wait_is_handled() {
     let mut child = Command::new("/bin/sh")
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", harness._temp.path())
+        .env("HOME", harness.temp.path())
         .env("OURO_DATA_DIR", &harness.data)
         .env("OURO_CONFIG_DIR", &harness.config)
         .current_dir(&harness.work)
@@ -1538,10 +692,6 @@ fn h9_a_signal_during_the_gate_wait_is_handled() {
         .spawn()
         .expect("the supervisor starts");
 
-    // On macOS the attempt refuses at probing before it ever reaches the gate,
-    // so this asserts the property that holds on this platform: the signal
-    // handlers are installed before step 1, and the process never dies from
-    // the default disposition with state half-written.
     let status = child.wait().expect("the supervisor exits");
     let _ = holder.kill();
     let _ = holder.wait();
@@ -1559,59 +709,6 @@ fn h9_a_signal_during_the_gate_wait_is_handled() {
 // The review's MEDIUM findings
 // ---------------------------------------------------------------------------
 
-/// M2: one directory has one digest, however it is spelled.
-#[test]
-fn m2_equivalent_workspace_spellings_have_one_digest() {
-    let harness = Harness::new();
-    let canonical = std::fs::canonicalize(&harness.work).expect("canonical");
-    let digest_of = |workspace: &str| {
-        let output = harness.run(&["explain", "--json", "--workspace", workspace]);
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "{workspace}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-        report["policy"]["digest"]
-            .as_str()
-            .expect("a digest")
-            .to_owned()
-    };
-    let expected = digest_of(canonical.to_str().expect("a UTF-8 path"));
-    for spelling in [
-        format!("{}/", harness.work.display()),
-        format!("{}/.", harness.work.display()),
-        format!("{}//", harness.work.display()),
-        format!("{}/../{}", harness.work.display(), "work"),
-        // The uncanonicalized `/var/...` spelling of the same directory.
-        harness.work.display().to_string(),
-    ] {
-        assert_eq!(digest_of(&spelling), expected, "`{spelling}`");
-    }
-}
-
-/// L2: `--workspace` must name a directory.
-#[test]
-fn l2_a_workspace_that_is_not_a_directory_refuses() {
-    let harness = Harness::new();
-    let file = harness._temp.path().join("a-file");
-    std::fs::write(&file, b"x").expect("written");
-    let output = harness.run(&[
-        "explain",
-        "--workspace",
-        file.to_str().expect("a UTF-8 path"),
-    ]);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("not a directory"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let output = harness.run(&["explain", "--workspace", "/nonexistent/anywhere"]);
-    assert_eq!(output.status.code(), Some(2));
-}
-
 /// M4: the local trace file is state, so it is private.
 #[test]
 fn m4_the_local_trace_file_is_created_private() {
@@ -1628,92 +725,11 @@ fn m4_the_local_trace_file_is_created_private() {
     assert_eq!(mode, 0o600, "§6.2: files under the state root are 0600");
 }
 
-/// M6: a `schema` this build does not implement is never interpreted.
-#[test]
-fn m6_an_unknown_policy_schema_refuses() {
-    for (file, body) in [
-        ("config", "[jail]\nschema = \"ouro.jail.policy/999\"\n"),
-        ("project", "[jail]\nschema = \"ouro.jail.policy/999\"\n"),
-    ] {
-        let harness = Harness::new();
-        if file == "config" {
-            std::fs::write(harness.config.join("config.toml"), body).expect("written");
-        } else {
-            std::fs::write(harness.work.join("ouro.toml"), body).expect("written");
-        }
-        let output = harness.run(&["explain"]);
-        assert_eq!(output.status.code(), Some(2), "{file}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("jail.schema"), "{file}: {stderr}");
-    }
-    // The right schema is accepted, so the check is about the value.
-    let harness = Harness::new();
-    std::fs::write(
-        harness.work.join("ouro.toml"),
-        "[jail]\nschema = \"ouro.jail.policy/1\"\n[jail.limits]\nwall = \"1m\"\n",
-    )
-    .expect("written");
-    assert_eq!(harness.run(&["explain"]).status.code(), Some(0));
-}
-
-/// M7: `gc` validates the state root it is about to enumerate.
-#[test]
-fn m7_gc_refuses_a_state_root_that_is_not_private() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let harness = Harness::new();
-    std::fs::set_permissions(&harness.data, std::fs::Permissions::from_mode(0o755)).expect("mode");
-    let output = harness.run(&["gc", "--json"]);
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "§6.4: gc uses 1 for failed state access"
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("unsafe_state_path"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "no clean scan is printed for a root that failed its checks"
-    );
-}
-
-/// M13: inspection output carries environment names, never values.
-#[test]
-fn m13_explain_prints_environment_names_only() {
-    let harness = Harness::new();
-    let output = harness.run_with_env(&["explain", "--json"], &[("PATH", "/usr/bin:/secret-dir")]);
-    assert_eq!(output.status.code(), Some(0));
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !text.contains("/secret-dir"),
-        "an environment value reached inspection output"
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
-    let bindings = report["policy"]["snapshot"]["environment"]["bindings"]
-        .as_array()
-        .expect("bindings");
-    assert!(!bindings.is_empty(), "the names are still there");
-    for binding in bindings {
-        assert!(binding["name"].is_string());
-        assert!(
-            binding.get("value").is_none(),
-            "no binding carries a value: {binding}"
-        );
-    }
-    assert_eq!(
-        report["policy"]["environment_values"],
-        serde_json::json!("omitted"),
-        "and the omission is stated rather than left to be inferred"
-    );
-}
-
 /// A2: the receipt records the operator's explicit grants, not the baseline.
 #[test]
 fn a2_explicit_operator_grants_reach_the_receipt() {
     let harness = Harness::new();
-    let granted = harness._temp.path().join("granted");
+    let granted = harness.temp.path().join("granted");
     std::fs::create_dir(&granted).expect("a directory");
     let output = harness.run(&[
         "run",
@@ -1728,7 +744,7 @@ fn a2_explicit_operator_grants_reach_the_receipt() {
     assert_eq!(grants.len(), 1, "one flag, one grant: {grants:?}");
     assert_eq!(grants[0]["kind"], serde_json::json!("read_only"));
     assert_eq!(grants[0]["by"], serde_json::json!("operator"));
-    receipt_validator()
+    common::validators()["jail-receipt"]
         .validate(receipt)
         .expect("the receipt with grants still satisfies the schema");
     common::assert_semantic_receipt(receipt);

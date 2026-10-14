@@ -2,6 +2,7 @@
 #![cfg(target_os = "linux")]
 
 use ouro_fixture::harness::{Jail, Run};
+use ouro_jail::commands::Rules;
 use std::os::unix::fs::PermissionsExt as _;
 
 mod common;
@@ -56,6 +57,30 @@ fn assert_no_entry_abandoned_gap(run: &Run) {
     assert!(
         abandoned.is_empty(),
         "the killed exec was accounted an abandoned entry: {abandoned:#?}"
+    );
+}
+
+/// A forbid rule naming an absolute image path matches the exec whose image
+/// is that file, whatever argv[0] claims, and a call naming some other path
+/// does not match it: the rule is about what runs, which the caller cannot
+/// rename.
+#[test]
+fn a_forbid_rule_on_an_image_path_matches_the_image_not_the_claimed_name() {
+    let rules = Rules {
+        deny: Vec::new(),
+        forbid: vec!["/usr/bin/echo **".to_owned()],
+    }
+    .compile()
+    .unwrap();
+    let argv = vec![b"t".to_vec(), b"SHOULD_NOT_PRINT".to_vec()];
+    let hit = rules
+        .check(Some(&argv), Some(b"/usr/bin/echo"))
+        .expect("the image path matches the rule");
+    assert_eq!(hit.pattern, "/usr/bin/echo **");
+    assert!(hit.forbidden);
+    assert!(
+        rules.check(Some(&argv), Some(b"t")).is_none(),
+        "neither the claimed name nor the named path is the forbidden image"
     );
 }
 
@@ -257,10 +282,8 @@ fn a_deny_rule_that_only_the_kernel_copy_hits_kills_the_exec_and_the_run_complet
     assert_eq!(note["fields"]["kind"], "command_denied", "{note}");
     assert_eq!(note["fields"]["signal"], "SIGKILL", "{note}");
     assert_no_entry_abandoned_gap(&result);
-    let receipt = common::checked_receipt(
-        result
-            .receipt_phase("settled")
-            .expect("the run settles after the kill"),
-    );
+    let receipt = result
+        .receipt_phase("settled")
+        .expect("the run settles after the kill");
     assert_eq!(receipt["lifetime"]["tree_empty"], true);
 }

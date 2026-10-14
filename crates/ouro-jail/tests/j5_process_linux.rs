@@ -1,12 +1,13 @@
 #![cfg(target_os = "linux")]
-//! J5 milestone proof: the process, gate-protocol and lifetime clauses that
-//! J1 and J2 left without a live test (gap analysis §1.2, slice J5-B1).
+//! The process, gate-protocol and lifetime clauses of jail-v1 §15, each with
+//! a live test.
 //!
 //! Each test names the §15 row and clause it closes and drives the real
 //! `ouro-jail` binary on the reference host through the harness. Every run
 //! uses private state; every process a test signals is one it started (the
 //! jail it spawned, or a pid the jail's own receipt names for that attempt).
-//! Live tests need `OURO_CONFORMANCE=1` on the reference host.
+//! Live tests run where `common::live()` says the host can, skip elsewhere
+//! with the reason, and fail instead of skipping under `OURO_CONFORMANCE=1`.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -59,39 +60,6 @@ fn case(profile: &str) -> Case {
     }
 }
 
-/// Every receipt the run left, each checked against the schema and the rules
-/// it cannot state.
-fn checked(run: &Run) -> Vec<Value> {
-    assert!(
-        run.receipt_errors().is_empty(),
-        "{:?}",
-        run.receipt_errors()
-    );
-    run.receipts()
-        .into_iter()
-        .map(common::checked_receipt)
-        .collect()
-}
-
-/// The receipt with the highest revision.
-fn last(run: &Run) -> Value {
-    checked(run)
-        .into_iter()
-        .max_by_key(|receipt| receipt["revision"].as_u64().unwrap_or(0))
-        .unwrap_or_else(|| panic!("no receipt; stderr: {}", run.stderr_text()))
-}
-
-fn settled(run: &Run) -> Value {
-    let _ = checked(run);
-    run.receipt_phase("settled").unwrap_or_else(|| {
-        panic!(
-            "no settled receipt (exit {:?}): {}",
-            run.code(),
-            run.stderr_text()
-        )
-    })
-}
-
 fn write_script(path: &Path, steps: &Value) {
     std::fs::write(path, serde_json::to_vec(steps).expect("JSON")).expect("the script");
 }
@@ -128,11 +96,9 @@ fn prepared_binding(spawned: &mut Spawned) -> (String, String) {
         .as_str()
         .expect("an attempt id")
         .to_owned();
-    let receipt = common::checked_receipt(
-        spawned
-            .receipt_value()
-            .expect("the prepared receipt is durable when `prepared` arrives"),
-    );
+    let receipt = spawned
+        .receipt_value()
+        .expect("the prepared receipt is durable when `prepared` arrives");
     let digest = receipt["policy"]["digest"]
         .as_str()
         .expect("a digest")
@@ -142,7 +108,7 @@ fn prepared_binding(spawned: &mut Spawned) -> (String, String) {
 
 /// The first error code among a run's receipts' errors.
 fn error_code(run: &Run) -> Option<String> {
-    for receipt in checked(run) {
+    for receipt in run.receipts() {
         if let Some(errors) = receipt["errors"].as_array() {
             for error in errors {
                 if let Some(code) = error["code"].as_str() {
@@ -179,7 +145,7 @@ fn exec_case(
     let c = case(profile);
     let argv = build(&c.workspace);
     let run = c.jail.target(&argv).run().expect("the jail runs");
-    let receipt = last(&run);
+    let receipt = common::last_receipt(&run);
     let terminal_control = run
         .control_messages()
         .iter()
@@ -359,10 +325,9 @@ fn x02_every_malformed_release_refuses_without_running_the_target() {
             !marker.exists(),
             "{label}: the target ran on a malformed release"
         );
-        let refused = common::checked_receipt(
-            run.receipt_phase("refused")
-                .unwrap_or_else(|| panic!("{label}: no refused receipt")),
-        );
+        let refused = run
+            .receipt_phase("refused")
+            .unwrap_or_else(|| panic!("{label}: no refused receipt"));
         assert_eq!(refused["exec_observed"], false, "{label}");
         assert_eq!(refused["outcome"]["kind"], "refused", "{label}");
         // Not one target exec reached the trace.
@@ -588,7 +553,7 @@ fn open_marker(marker: &Path) -> Vec<String> {
 /// closes the gate. Returns the mismatches it found (empty: it released).
 fn owner_decides(owned: &mut Owned) -> Vec<String> {
     let control = owned.spawned.owner().await_prepared().expect("prepared");
-    let receipt = common::checked_receipt(owned.spawned.receipt_value().expect("a receipt"));
+    let receipt = owned.spawned.receipt_value().expect("a receipt");
     match owned
         .spawned
         .owner()
@@ -700,7 +665,7 @@ fn i03_untrusted_request_fields_cannot_mutate_the_owners_operator_inputs() {
     );
     let run = owned.spawned.wait().expect("the jail finishes");
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    let settled = settled(&run);
+    let settled = common::settled(&run);
     assert_eq!(settled["policy"]["name"], "tool");
     assert_eq!(settled["policy"]["observe"], "on");
     assert_eq!(settled["policy"]["grants"], serde_json::json!([]));
@@ -773,6 +738,9 @@ fn i03_untrusted_request_fields_cannot_mutate_the_owners_operator_inputs() {
 fn j5_x03_owner_helper() {
     use std::os::unix::process::CommandExt as _;
 
+    if !common::running_helper("j5_x03_owner_helper") {
+        return;
+    }
     let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is set"));
     let data = PathBuf::from(var("OURO_J5_X03_DATA"));
     let config = PathBuf::from(var("OURO_J5_X03_CONFIG"));
@@ -786,6 +754,7 @@ fn j5_x03_owner_helper() {
     // The gate: the read end goes to the jail as fd 3, the write end stays
     // here and closes when this process exits.
     let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` is a live array of the two ints pipe2 writes.
     assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
     let (gate_read, gate_write) = (fds[0], fds[1]);
 
@@ -821,7 +790,9 @@ fn j5_x03_owner_helper() {
     let child = command.spawn().expect("ouro-jail starts");
     std::fs::write(&pidfile, child.id().to_string()).expect("the pid file");
     // The read end belongs to the jail now.
-    unsafe { libc::close(gate_read) };
+    // SAFETY: `gate_read` is this process's own descriptor from pipe2, open
+    // until here and used by nothing after.
+    assert_eq!(unsafe { libc::close(gate_read) }, 0);
 
     // Wait for the durable prepared receipt of this attempt.
     let attempts = data.join("attempts");
@@ -849,6 +820,8 @@ fn j5_x03_owner_helper() {
         let bytes = frame.as_bytes();
         let mut written = 0;
         while written < bytes.len() {
+            // SAFETY: `gate_write` is this process's open pipe end, and the
+            // slice outlives the call with exactly that many bytes.
             let n = unsafe {
                 libc::write(
                     gate_write,
@@ -877,7 +850,7 @@ fn read_only_prepared(attempts: &Path) -> Option<Value> {
             && let Ok(value) = serde_json::from_str::<Value>(&text)
             && value["phase"] == "prepared"
         {
-            return Some(value);
+            return Some(common::checked_receipt(value));
         }
     }
     None
@@ -903,8 +876,9 @@ fn x03_owner_run(mode: &str) -> (Value, bool, usize) {
     let marker = workspace.join("target-ran");
     let pidfile = root.path().join("jail.pid");
 
-    let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "j5_x03_owner_helper"])
+    // The owner's jail outlives it, so its output is not waited for; the jail
+    // pid it records is what proves it ran.
+    let mut owner = common::helper_command("j5_x03_owner_helper")
         .env("OURO_J5_X03_DATA", &data)
         .env("OURO_J5_X03_CONFIG", &config)
         .env("OURO_J5_X03_WORKSPACE", &workspace)
@@ -948,15 +922,17 @@ fn x03_owner_run(mode: &str) -> (Value, bool, usize) {
         .map(|entry| entry.path())
         .find(|path| path.is_dir())
         .expect("one attempt");
-    let receipt: Value = serde_json::from_str(
-        &std::fs::read_to_string(attempt_dir.join("jail.json")).expect("the terminal receipt"),
-    )
-    .expect("valid JSON");
-    common::assert_semantic_receipt(&receipt);
-    let execs = std::fs::read_to_string(attempt_dir.join("trace.ndjson"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+    let receipt = common::read_receipt(&attempt_dir.join("jail.json"));
+    // The local trace of an attempt whose owner died: whole frames, held to
+    // what a prefix keeps, whether or not it ends on the final receipt.
+    let trace =
+        harness::read_frames(&std::fs::read(attempt_dir.join("trace.ndjson")).unwrap_or_default());
+    if let Err(error) = common::check_trace(&trace.frames, None) {
+        panic!("the local trace fails its contract: {error}");
+    }
+    let execs = trace
+        .frames
+        .iter()
         .filter(|event| event["operation"] == "proc.exec")
         .count();
     (receipt, marker.exists(), execs)
@@ -1165,7 +1141,7 @@ fn p03_the_child_truncating_its_selected_profile_and_project_file_does_not_widen
         "a denial did not hold: {}",
         run.stdout_text()
     );
-    let settled = settled(&run);
+    let settled = common::settled(&run);
     assert_eq!(
         settled["policy"]["digest"].as_str(),
         Some(prepared_digest.as_str())
@@ -1275,7 +1251,7 @@ fn observe_off_run(profile: &str, target: &[&str]) -> (Option<i32>, Vec<String>,
         .filter(|line| !line.trim().is_empty())
         .map(ToOwned::to_owned)
         .collect();
-    (run.code(), lines, last(&run))
+    (run.code(), lines, common::last_receipt(&run))
 }
 
 /// With observation off, a target that ends before the supervisor can see
@@ -1421,7 +1397,7 @@ fn p01_a_non_utf8_policy_path_survives_execution_into_the_receipt() {
         "the masked read was not ENOENT: {}",
         run.stdout_text()
     );
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let want = denied.clone().into_os_string().into_vec();
     let decodes_to =
         |value: &Value| common::native_bytes(value).ok().as_deref() == Some(want.as_slice());

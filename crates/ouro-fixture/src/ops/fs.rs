@@ -817,9 +817,17 @@ fn race_mkdir(rep: &Reporter, a: &OsStr, b: &OsStr, count: u32) -> Result<bool, 
             flips
         })
     };
+    // The legacy call where the architecture has one, else its `*at` form
+    // against `AT_FDCWD`, which names the same file the same way: the race
+    // is about the buffer, not the spelling, and a call this build cannot
+    // make would race nothing.
+    let legacy = raw::has_legacy_syscalls();
     let mut all = true;
     for _ in 0..count {
-        let mut report = OpReport::new("mkdir");
+        let mut report = OpReport::new(if legacy { "mkdir" } else { "mkdirat" });
+        if !legacy {
+            report.set("dirfd", "AT_FDCWD");
+        }
         path_value(&mut report.args, "path_a", a);
         path_value(&mut report.args, "path_b", b);
         report.set("racing", true);
@@ -827,7 +835,12 @@ fn race_mkdir(rep: &Reporter, a: &OsStr, b: &OsStr, count: u32) -> Result<bool, 
         // `AtomicU8` has the size and alignment of `u8`, so the array is the
         // NUL-terminated byte string the kernel reads.
         let ptr = buffer.as_ptr().cast::<c_char>();
-        let emitted = finish(report, raw::mkdir(ptr, 0o700));
+        let attempt = if legacy {
+            raw::mkdir(ptr, 0o700)
+        } else {
+            raw::mkdirat(libc::AT_FDCWD, ptr, 0o700)
+        };
+        let emitted = finish(report, attempt);
         all &= !emitted.unusable;
         rep.emit(&emitted.report);
     }

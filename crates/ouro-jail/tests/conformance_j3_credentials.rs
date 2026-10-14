@@ -594,12 +594,9 @@ fn attempt_of(run: &Run) -> PathBuf {
     found.pop().unwrap()
 }
 
-/// The attempt's receipt, checked against the schema and the rules it
-/// cannot state (`common::check_receipt`).
+/// The attempt's receipt, held to its contract.
 fn jail_json(attempt: &Path) -> Value {
-    common::checked_receipt(
-        serde_json::from_slice(&std::fs::read(attempt.join("jail.json")).unwrap()).unwrap(),
-    )
+    common::read_receipt(&attempt.join("jail.json"))
 }
 
 fn state_json(attempt: &Path) -> Value {
@@ -721,7 +718,7 @@ fn withheld(jail: Jail, marker: &Path) -> Run {
         .owner()
         .await_prepared()
         .expect("a prepared message");
-    let prepared = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
+    let prepared = spawned.receipt_value().expect("a prepared receipt");
     assert_eq!(prepared["phase"], "prepared");
     assert_eq!(
         prepared["state_cleanup"], "pending",
@@ -825,7 +822,7 @@ fn c02_a_release_failure_after_the_backend_died_verifies_the_teardown_and_cleans
         .owner()
         .await_prepared()
         .expect("a prepared message");
-    let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
+    let receipt = spawned.receipt_value().expect("a prepared receipt");
     assert_eq!(
         receipt["state_cleanup"], "pending",
         "vendor state exists now"
@@ -1113,31 +1110,18 @@ fn run_inner_test(name: &str, binds: &[(&str, &Path, &str)], env: &[(&str, &Path
     for (key, value) in env {
         command.env(key, value);
     }
-    command.args([
-        "/testbin",
-        "--ignored",
-        "--exact",
-        name,
-        "--nocapture",
-        "--test-threads=1",
-    ]);
+    command.env(common::HELPER_VAR, name);
+    command.arg("/testbin").args(common::helper_args(name));
     let output = command.output().unwrap();
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.status.success(),
-        "{name} failed inside bubblewrap:\n{text}"
-    );
-    assert!(text.contains("1 passed"), "{name} did not run:\n{text}");
-    text
+    common::assert_helper_ran(name, &output)
 }
 
 #[test]
 #[ignore = "runs inside bubblewrap from c01_bind_alias_of_writable_source_refuses"]
 fn c01_inner_bind_alias_of_writable_source_refuses() {
+    if !common::running_helper("c01_inner_bind_alias_of_writable_source_refuses") {
+        return;
+    }
     let forbidden = ouro_jail::state::mount_alias::forbidden_identities(&[PathBuf::from("/w")])
         .expect("mount aliases inspected");
     let chain = credentials::source_chain(b"/alias/token").expect("source walks");
@@ -1182,6 +1166,11 @@ fn c01_bind_alias_of_writable_source_refuses() {
 #[test]
 #[ignore = "runs inside bubblewrap from m1_a_read_only_bind_of_a_writable_filesystem_gets_no_digest"]
 fn m1_inner_bind_ro_digest_on_a_read_only_bind_of_a_writable_filesystem() {
+    if !common::running_helper(
+        "m1_inner_bind_ro_digest_on_a_read_only_bind_of_a_writable_filesystem",
+    ) {
+        return;
+    }
     // Reviewer's R4: `/r` is a read-only bind of the writable directory that
     // is also mounted writable at `/w`. ST_RDONLY holds at `/r`, yet the
     // inode changes through `/w`, so no digest may be recorded.
@@ -1236,6 +1225,9 @@ fn m1_a_read_only_bind_of_a_writable_filesystem_gets_no_digest() {
 #[ignore = "runs inside bubblewrap from foreign_owners_and_same_device_mounts_are_refused"]
 fn foreign_inner_owner_and_mount_checks() {
     use ouro_jail::state::anchored::fstat;
+    if !common::running_helper("foreign_inner_owner_and_mount_checks") {
+        return;
+    }
     // Inside an unprivileged user namespace, anything root owns shows as the
     // overflow uid: a foreign owner a same-UID test can actually produce.
     let passwd = std::fs::File::open("/own/rootfile").unwrap();
