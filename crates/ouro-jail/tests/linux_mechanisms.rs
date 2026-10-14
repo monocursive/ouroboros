@@ -1203,10 +1203,7 @@ fn run_tool_profile(long_options: bool, narrow: bool) -> ToolRun {
     let mut plan = BwrapPlan::tool(&workspace, &scratch, &jail_exe());
     plan.set_backend(&bwrap_path());
     for segment in &scan.segments {
-        plan.protect(bwrap::ProtectedBind {
-            source: segment.path.clone(),
-            fd: None,
-        });
+        plan.bind_read_only(segment.path.clone(), segment.path.clone());
     }
     let mut placeholders = Vec::new();
     for (index, literal) in scan.absent_root_literals().iter().enumerate() {

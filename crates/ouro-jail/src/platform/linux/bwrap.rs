@@ -538,8 +538,6 @@ fn birth_time(handle: &OwnedFd) -> Option<(i64, u32)> {
 pub enum MountKind {
     /// A host path bound read-only over the destination.
     RoBind,
-    /// A protected segment bound read-only by its pin's descriptor.
-    RoBindFd,
     /// A host path bound writable.
     Bind,
     /// A recreated merged-`/usr` symlink; the source is its target.
@@ -586,7 +584,6 @@ impl MountKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RoBind => "ro-bind",
-            Self::RoBindFd => "ro-bind-fd",
             Self::Bind => "bind",
             Self::Symlink => "symlink",
             Self::Proc => "proc",
@@ -606,9 +603,7 @@ impl MountKind {
     #[must_use]
     pub fn preparation(self) -> MountPreparation {
         match self {
-            Self::RoBind | Self::RoBindFd | Self::Bind | Self::Placeholder => {
-                MountPreparation::PinSource
-            }
+            Self::RoBind | Self::Bind | Self::Placeholder => MountPreparation::PinSource,
             Self::FileMask => MountPreparation::EmptyData,
             Self::Symlink
             | Self::Proc
@@ -692,7 +687,7 @@ impl MountRow {
             })
         };
         match self.kind {
-            MountKind::RoBind | MountKind::RoBindFd | MountKind::Placeholder => {
+            MountKind::RoBind | MountKind::Placeholder => {
                 out.extend(bind("--ro-bind", "--ro-bind-fd")?);
             }
             MountKind::Bind => out.extend(bind("--bind", "--bind-fd")?),
@@ -729,18 +724,6 @@ impl MountRow {
         }
         Ok(())
     }
-}
-
-/// One protected segment in the plan: the source path to bind read-only over
-/// itself, and the fixed descriptor number its pinned `O_PATH` handle was
-/// installed at, when it has one.
-#[derive(Clone, Debug)]
-pub struct ProtectedBind {
-    /// The source path, as scanned.
-    pub source: PathBuf,
-    /// Descriptor number, valid in the bubblewrap process, holding the pinned
-    /// source object (`--ro-bind-fd`); `None` binds by path.
-    pub fd: Option<RawFd>,
 }
 
 /// A denial overlays the destination after every grant. Files need a private
@@ -814,16 +797,11 @@ pub struct BwrapPlan {
     pub(crate) bounded_storage: bool,
     /// Environment to set after `--clearenv`.
     pub(crate) env: Vec<(OsString, OsString)>,
-    /// Protected segments bound read-only over themselves, for a caller that
-    /// builds a plan without the mount preparation (the mechanisms suite).
-    /// A run's segments are not here: the preparation pins each one and
-    /// binds it into [`BwrapPlan::extra_ro_binds`], at its destination
-    /// inside the sandbox, which for the scratch is not its host path. A pin
-    /// whose `O_PATH` handle was handed to the spawn map is bound by
-    /// descriptor (`--ro-bind-fd`); the rest are bound by path.
-    pub(crate) protected: Vec<ProtectedBind>,
-    /// Extra read-only binds with a destination of their own, used by the
-    /// doctor probes and by operator `--ro` grants (§6.1).
+    /// Extra read-only binds with a destination of their own: operator
+    /// `--ro` grants (§6.1), the protected segments the preparation pinned
+    /// (each at its destination inside the sandbox, which for the scratch is
+    /// not its host path), the vault CA, and the doctor probes' binds. A row
+    /// whose pin was handed to the spawn map renders as `--ro-bind-fd`.
     pub(crate) extra_ro_binds: Vec<(PathBuf, PathBuf)>,
     /// Extra writable binds from operator `--rw` grants, applied after the
     /// workspace bind so a grant inside it stays writable (§6.1).
@@ -1039,7 +1017,6 @@ impl BwrapPlan {
                     OsString::from(SCRATCH_INSIDE_PATH),
                 ),
             ],
-            protected: Vec::new(),
             extra_ro_binds: Vec::new(),
             extra_rw_binds: Vec::new(),
             extra_dev_binds: Vec::new(),
@@ -1094,11 +1071,6 @@ impl BwrapPlan {
     /// Bind `source` read-only at `destination`.
     pub fn bind_read_only(&mut self, source: PathBuf, destination: PathBuf) {
         self.extra_ro_binds.push((source, destination));
-    }
-
-    /// Bind a protected segment read-only over itself.
-    pub fn protect(&mut self, segment: ProtectedBind) {
-        self.protected.push(segment);
     }
 
     /// Mount a placeholder over an absent protected literal.
@@ -1204,8 +1176,7 @@ impl BwrapPlan {
         rows
     }
 
-    /// Device nodes, read-only grants (ancestors first), protected segments
-    /// and placeholders.
+    /// Device nodes, read-only binds (ancestors first) and placeholders.
     fn grant_rows(&self) -> Vec<MountRow> {
         let mut rows: Vec<MountRow> = self
             .extra_dev_binds
@@ -1226,15 +1197,6 @@ impl BwrapPlan {
                 Some(source.as_os_str()),
                 destination.as_os_str(),
             )
-        }));
-        rows.extend(self.protected.iter().map(|protected| {
-            let kind = if protected.fd.is_some() {
-                MountKind::RoBindFd
-            } else {
-                MountKind::RoBind
-            };
-            let path = protected.source.as_os_str();
-            MountRow::new(kind, Some(path), path).with_fd(protected.fd)
         }));
         rows.extend(self.placeholders.iter().map(|placeholder| {
             MountRow::new(
@@ -1691,10 +1653,10 @@ mod tests {
             },
         ];
         plan.etc_paths = vec![PathBuf::from("/etc/passwd")];
-        plan.protected = vec![ProtectedBind {
-            source: PathBuf::from("/work/space/.git"),
-            fd: None,
-        }];
+        plan.bind_read_only(
+            PathBuf::from("/work/space/.git"),
+            PathBuf::from("/work/space/.git"),
+        );
         plan.seccomp_fd = Some(10);
         plan.json_status_fd = Some(11);
         plan.inner = super::super::launch::LaunchArgs {
@@ -1898,7 +1860,6 @@ mod tests {
         // Every kind has one spelling and one preparation.
         for (kind, spelling) in [
             (MountKind::RoBind, "ro-bind"),
-            (MountKind::RoBindFd, "ro-bind-fd"),
             (MountKind::Bind, "bind"),
             (MountKind::Symlink, "symlink"),
             (MountKind::Proc, "proc"),
@@ -1951,7 +1912,7 @@ mod tests {
         let mut plan = sample_plan();
         plan.workspace = PathBuf::from("/tmp/work/space");
         plan.workspace_access = WorkspaceAccess::Hidden;
-        plan.protected.clear();
+        plan.extra_ro_binds.clear();
         plan.extra_ro_binds.push((
             PathBuf::from("/tmp/work/space/input"),
             PathBuf::from("/tmp/work/space/input"),
@@ -1980,7 +1941,7 @@ mod tests {
     fn a_read_only_workspace_sits_under_writable_grants_inside_it() {
         let mut plan = sample_plan();
         plan.workspace_access = WorkspaceAccess::ReadOnly;
-        plan.protected.clear();
+        plan.extra_ro_binds.clear();
         plan.extra_rw_binds.push((
             PathBuf::from("/work/space/out"),
             PathBuf::from("/work/space/out"),
