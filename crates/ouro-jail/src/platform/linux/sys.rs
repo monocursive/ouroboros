@@ -115,6 +115,96 @@ pub const fn trace_data_from_bytes(bytes: [u8; 2]) -> u16 {
     u16::from_le_bytes(bytes)
 }
 
+/// A 200 microsecond pause between polls that have no one descriptor to
+/// wait on: a `/proc` read, or several sources checked together (the
+/// backend's status pipe and its exit). Every such loop is bounded by a
+/// deadline.
+pub fn nap() {
+    std::thread::sleep(std::time::Duration::from_micros(200));
+}
+
+pub fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    // SAFETY: F_GETFL and F_SETFL take scalars and dereference nothing.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: as above.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn write_all(fd: std::os::fd::RawFd, bytes: &[u8]) -> std::io::Result<()> {
+    let mut written = 0usize;
+    while written < bytes.len() {
+        // SAFETY: the pointer and length address the remaining bytes of a live
+        // slice.
+        let n = unsafe {
+            libc::write(
+                fd,
+                bytes.as_ptr().add(written).cast::<libc::c_void>(),
+                bytes.len() - written,
+            )
+        };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        written += usize::try_from(n).unwrap_or(0);
+    }
+    Ok(())
+}
+
+/// Setup channels obey the preparation deadline even if a helper stops
+/// reading while retaining its descriptor.
+pub fn write_until(
+    fd: std::os::fd::RawFd,
+    bytes: &[u8],
+    deadline: super::clock::Deadline,
+) -> std::io::Result<()> {
+    set_nonblocking(fd)?;
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        if deadline.expired() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "backend argument delivery timed out",
+            ));
+        }
+        // SAFETY: the descriptor is owned by the caller, and this slice is live.
+        let n = unsafe { libc::write(fd, remaining.as_ptr().cast(), remaining.len()) };
+        if n > 0 {
+            remaining = &remaining[n as usize..];
+            continue;
+        }
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            std::io::ErrorKind::Interrupted => continue,
+            std::io::ErrorKind::WouldBlock => {
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                // SAFETY: one initialized pollfd, bounded by the deadline.
+                unsafe {
+                    libc::poll(&raw mut pfd, 1, deadline.remaining_millis_capped(10));
+                }
+            }
+            _ => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// Every errno Linux defines, by its symbolic name, in number order (the
 /// asm-generic numbering x86_64 and aarch64 share). Aliases (`EWOULDBLOCK`,
 /// `EDEADLOCK`, `ENOTSUP`) name a number already here and are left out.
@@ -284,6 +374,16 @@ pub fn errno_from_name(name: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stalled_backend_argument_delivery_has_a_deadline() {
+        use std::os::fd::AsRawFd;
+        let (_reader, writer) = super::super::exec::pipe().unwrap();
+        let deadline = super::super::clock::Deadline::after(std::time::Duration::from_millis(20));
+        let error =
+            super::write_until(writer.as_raw_fd(), &vec![0; 1024 * 1024], deadline).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn interior_nul_is_refused_before_the_syscall() {

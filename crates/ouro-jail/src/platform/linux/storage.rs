@@ -378,7 +378,7 @@ fn writable_mount_points(raw: &[u8]) -> io::Result<Vec<Vec<u8>>> {
                 "storage ceilings do not support idmapped writable mounts",
             ));
         }
-        let point = super::platform::decode_mountinfo_path(point);
+        let point = super::mounts::decode_mountinfo_path(point);
         if !point.starts_with(b"/") || point.contains(&0) {
             return Err(io::Error::other("invalid storage mount point"));
         }

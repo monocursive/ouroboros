@@ -27,6 +27,8 @@ pub mod agent;
 #[cfg(target_os = "linux")]
 pub mod audit;
 #[cfg(target_os = "linux")]
+mod boundary;
+#[cfg(target_os = "linux")]
 pub mod bwrap;
 #[cfg(target_os = "linux")]
 pub mod cgroup;
@@ -40,6 +42,8 @@ pub mod fs;
 pub mod identity;
 #[cfg(target_os = "linux")]
 pub mod launch;
+#[cfg(target_os = "linux")]
+mod mounts;
 // Observer event consumption shared by both boundaries
 #[cfg(target_os = "linux")]
 pub mod observed;
@@ -52,9 +56,15 @@ mod storage;
 // `gc` reconciliation of a dead supervisor's execution cgroup
 #[cfg(target_os = "linux")]
 pub mod reconcile;
+#[cfg(target_os = "linux")]
+mod requirements;
+#[cfg(target_os = "linux")]
+mod running;
 // N05 mechanism modules
 #[cfg(target_os = "linux")]
 pub mod sockdiag;
+#[cfg(target_os = "linux")]
+mod stdio;
 #[cfg(target_os = "linux")]
 pub mod sys;
 #[cfg(target_os = "linux")]
@@ -64,5 +74,7 @@ pub mod unixpeer;
 // The uncontained `none` boundary (§9.3)
 #[cfg(target_os = "linux")]
 pub mod uncontained;
+#[cfg(target_os = "linux")]
+mod verdict;
 #[cfg(target_os = "linux")]
 pub mod watch;

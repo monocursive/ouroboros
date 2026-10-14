@@ -758,7 +758,7 @@ clause = "A missing root-level .ouroboros is protected"
 tag = "live-lib"
 tests = [
   "ouro-jail/tests/linux_mechanisms.rs::the_tool_profile_grants_what_it_says_and_nothing_else",
-  "ouro-jail/src/lib.rs::platform::linux::platform::tests::a_missing_root_ouroboros_gets_a_real_placeholder_from_the_scan",
+  "ouro-jail/src/lib.rs::platform::linux::mounts::tests::a_missing_root_ouroboros_gets_a_real_placeholder_from_the_scan",
 ]
 note = "Through the product's tool plan below the command line, and through the product's own scan/placeholder path (prepare_mounts): the scan reports the absent root literal, the holder is created under the attempt's placeholder directory, the placeholder object exists at the root, and removal takes it away."
 
@@ -840,7 +840,7 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::f04_a_source_identity_swap_at_the_mount_handoff_refuses",
 ]
-note = "A real workspace-source swap between pinning and the mount handoff (the OURO_JAIL_TEST_MOUNT_SWAP rendezvous seam opens the window; the rename is real) makes pin.verify refuse before exec, no marker, refused receipt claiming no boundary. Enforcement: the pin.verify() refusal loop in platform.rs; iterating no pins reddens it."
+note = "A real workspace-source swap between pinning and the mount handoff (the OURO_JAIL_TEST_MOUNT_SWAP rendezvous seam opens the window; the rename is real) makes pin.verify refuse before exec, no marker, refused receipt claiming no boundary. Enforcement: the pin.verify() refusal loop in boundary.rs; iterating no pins reddens it."
 
 [[clause]]
 id = "F04.3"
@@ -1060,7 +1060,7 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::s04_agent_and_build_refuse_every_io_uring_interface",
 ]
-note = "build shares the tool filter (inferred, platform.rs). Owned by J5-B2."
+note = "build shares the tool filter (inferred, boundary.rs). Owned by J5-B2."
 
 [[clause]]
 id = "S04.4"
@@ -3286,7 +3286,7 @@ gate = "K06"
 clause = "An unreadable or unparseable resolv.conf ships an empty file and records the failure instead of host bytes"
 tag = "simulated"
 tests = [
-  "ouro-jail/src/lib.rs::platform::linux::platform::tests::resolver_sanitizer_never_falls_back_to_host_bytes",
+  "ouro-jail/src/lib.rs::platform::linux::mounts::tests::resolver_sanitizer_never_falls_back_to_host_bytes",
 ]
 
 # ------------------------------------------------------------------ K07

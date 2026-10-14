@@ -447,6 +447,27 @@ pub fn parse_blocked_in_read(raw: &str, fd: RawFd) -> bool {
             == Some(i64::from(fd))
 }
 
+/// The environment names the launcher actually has, read from `/proc`.
+///
+/// I09: names only, never values.
+///
+/// # Errors
+/// The read's error: an unreadable environment is not an empty one.
+pub fn read_environment_names(pid: libc::pid_t) -> std::io::Result<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/environ"))?;
+    let mut names: Vec<String> = raw
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let at = entry.iter().position(|byte| *byte == b'=')?;
+            Some(String::from_utf8_lossy(&entry[..at]).into_owned())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
