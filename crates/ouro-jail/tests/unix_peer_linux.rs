@@ -225,9 +225,15 @@ static int x32_connect(const char *path) {
     return e;
 }
 
-/* does the i386 int-0x80 ABI work here? i386 getpid == 20. */
+/* does the i386 int-0x80 ABI work here? i386 getpid == 20. Only an x86 host
+   can even ask; elsewhere the ABI does not exist and the probe says so. */
+#if defined(__x86_64__) || defined(__i386__)
 static long i386_call0(long nr){ long ret; __asm__ volatile("int $0x80":"=a"(ret):"a"(nr):"memory"); return ret; }
 static long i386_socketcall(long call, unsigned long *args){ long ret; __asm__ volatile("int $0x80":"=a"(ret):"a"(102),"b"(call),"c"(args):"memory"); return ret; }
+#else
+static long i386_call0(long nr){ (void)nr; return -ENOSYS; }
+static long i386_socketcall(long call, unsigned long *args){ (void)call; (void)args; return -ENOSYS; }
+#endif
 
 int main(int argc, char **argv) {
     const char *coord_path = argv[1];
