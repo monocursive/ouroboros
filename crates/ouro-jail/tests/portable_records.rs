@@ -465,6 +465,74 @@ fn r01_the_semantic_corpus_gets_the_verdicts_it_expects() {
     );
 }
 
+/// The checks `tests/common` installs as the harness's record contract
+/// (`common::check_receipt`, `check_trace` and `check_control`, through
+/// `common::hold_records`) apply the semantic rules, not only the schemas.
+/// Every corpus case is schema-valid (the test above holds it to that), so a
+/// contract that ran only the schemas would accept every case: each negative
+/// case must be refused by its check, naming each rule it breaks, and each
+/// positive case accepted. Among them: a silent `source_seq` hole in a trace,
+/// a control message number that goes back, and a receipt that breaks a
+/// rule its schema cannot state.
+#[test]
+fn the_installed_record_contract_refuses_every_semantic_violation_in_the_corpus() {
+    let corpus = read_json(&specs_dir().join("fixtures/semantic-cases.json"));
+    let mut refused: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
+    for case in corpus["cases"].as_array().expect("the cases") {
+        let name = case["name"].as_str().expect("a case name");
+        let check = case["check"].as_str().expect("a check");
+        let record = corpus_instance(case, "base");
+        let verdict = match check {
+            "receipt" => common::check_receipt(&record),
+            "trace" => {
+                let receipt = case
+                    .get("receipt")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|receipt| read_json(&specs_dir().join(receipt)));
+                common::check_trace(record.as_array().expect("a trace"), receipt.as_ref())
+            }
+            "control" => common::check_control(record.as_array().expect("a transcript")),
+            other => panic!("case `{name}`: unknown check {other}"),
+        };
+        let expected: Vec<&str> = case["violations"]
+            .as_array()
+            .expect("the expected violations")
+            .iter()
+            .map(|rule| rule.as_str().expect("a rule id"))
+            .collect();
+        if expected.is_empty() {
+            verdict.unwrap_or_else(|error| panic!("case `{name}` is valid: {error}"));
+            continue;
+        }
+        let error = verdict.expect_err(&format!(
+            "case `{name}` breaks {expected:?}, and common::check_{check} accepted it"
+        ));
+        assert!(
+            error.starts_with("semantic: "),
+            "case `{name}`: refused for something other than its semantic rules: {error}"
+        );
+        for rule in expected {
+            assert!(
+                error.contains(&format!("{rule} at ")),
+                "case `{name}`: the refusal does not name {rule}: {error}"
+            );
+            refused.insert((check.to_owned(), rule.to_owned()));
+        }
+    }
+    for (check, rule) in [
+        ("trace", "source_seq_gap"),
+        ("control", "control_seq_order"),
+        ("control", "control_kind_order"),
+        ("receipt", "credential_id_unique"),
+    ] {
+        assert!(
+            refused.contains(&(check.to_owned(), rule.to_owned())),
+            "no corpus case had common::check_{check} refuse {rule}"
+        );
+    }
+}
+
 /// J5-C review item 1: a second schema file declaring an `$id` another file
 /// already declares would silently replace it in the registry (a frozen
 /// schema shadowed by an unfrozen one, with no frozen sha256 changing). Both

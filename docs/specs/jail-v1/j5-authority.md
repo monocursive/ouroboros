@@ -477,11 +477,16 @@ simulation leaves out.
   that has not passed the contract `tests/common` installs
   (`harness::hold_records_to`, from `common::live()`): every receipt,
   control transcript and complete trace a live test reads through `Run` or
-  `Spawned` has passed its frozen schema and the semantic rules, and a binary
-  that installed no contract cannot read one. A trace cut short by design is
-  held to what a prefix can keep (`common::assert_trace_prefix`, or
-  `common::check_trace` without a final receipt for a local trace), and a
-  receipt a test reads from disk itself to assert on goes through
-  `common::read_receipt` or `common::checked_receipt`; the crash matrices
-  that parse every record file after a crash check `jail.json` with
-  `common::check_receipt`.
+  `Spawned`, and every control message its gate owner reads, has passed its
+  frozen schema and the semantic rules, and a binary that installed no
+  contract cannot read one. `Run` keeps its transcripts private, so the
+  checked accessors are the only way to them, and a harness test with a
+  refusing contract proves each accessor applies it. A trace cut short by
+  design, or one a test collects itself, is held to what its frames can keep
+  (`common::assert_trace_prefix`, or `common::check_trace`, with the final
+  receipt when the trace is whole); a control transcript a test reads
+  itself is checked message by message (`common::check_control`); and a
+  receipt a live test reads from disk itself to assert on is checked with
+  `common::read_receipt`, `common::checked_receipt` or
+  `common::check_receipt`, which the crash matrices that parse every record
+  file after a crash also use for `jail.json`.
