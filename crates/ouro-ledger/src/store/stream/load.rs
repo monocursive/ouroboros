@@ -51,6 +51,10 @@ pub(in crate::store) struct Loaded {
     pub(in crate::store) events: u64,
     /// The canonical bytes re-read before `proceed` stopped the load, if it did.
     pub(in crate::store) stopped: Option<u64>,
+    /// The poison recorded when a frame was refused, by its index in the
+    /// stream's poisons. The load stops at a refused frame, so that frame
+    /// began at the stream's accepted bytes.
+    pub(in crate::store) refused_frame: Option<usize>,
 }
 
 /// Re-read and re-validate one run's canonical history within `layout`.
@@ -85,6 +89,7 @@ pub(in crate::store) fn load_stream(
                 stream,
                 events: 0,
                 stopped: None,
+                refused_frame: None,
             });
         }
     };
@@ -101,6 +106,7 @@ pub(in crate::store) fn load_stream(
     }
     let mut events = 0;
     let mut stopped = None;
+    let mut refused_frame = None;
     'segments: for (index, name) in names.iter().enumerate() {
         stream.begin_segment(index + 1);
         let anchor = manifest.as_ref().and_then(|m| m.segments.get(index));
@@ -142,6 +148,7 @@ pub(in crate::store) fn load_stream(
             let bytes = match next_frame(&mut reader)? {
                 Frame::End => break,
                 Frame::Oversized => {
+                    refused_frame = Some(stream.poisoned.len());
                     stream.poisoned.push(Poison::new(
                         PoisonKind::Corrupt,
                         "oversized canonical frame; bytes retained",
@@ -149,6 +156,7 @@ pub(in crate::store) fn load_stream(
                     break;
                 }
                 Frame::Interrupted => {
+                    refused_frame = Some(stream.poisoned.len());
                     stream.poisoned.push(Poison::new(
                         PoisonKind::Incomplete,
                         "interrupted canonical frame; bytes retained",
@@ -160,6 +168,7 @@ pub(in crate::store) fn load_stream(
             // Every refusal of a complete frame is an integrity violation:
             // this writer validates the same rules before it appends.
             if let Err(error) = stream.accept_canonical(run_id, &bytes) {
+                refused_frame = Some(stream.poisoned.len());
                 stream
                     .poisoned
                     .push(Poison::new(PoisonKind::Corrupt, error.to_string()));
@@ -219,5 +228,6 @@ pub(in crate::store) fn load_stream(
         stream,
         events,
         stopped,
+        refused_frame,
     })
 }

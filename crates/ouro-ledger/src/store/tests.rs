@@ -53,7 +53,7 @@ fn prepared(run: &RunRecord) -> Value {
     receipt
 }
 
-fn create() -> (tempfile::TempDir, Store, RunRecord) {
+pub(super) fn create() -> (tempfile::TempDir, Store, RunRecord) {
     let temp = tempfile::tempdir().unwrap();
     let mut store = Store::open(&temp.path().join("data")).unwrap();
     let run = store.prepare("test-prepare", &payload(), &peer()).unwrap();
@@ -61,7 +61,12 @@ fn create() -> (tempfile::TempDir, Store, RunRecord) {
     (temp, store, run)
 }
 
-fn note(store: &mut Store, run: &RunRecord, key: &str, body: Value) -> Result<AppendReceipt> {
+pub(super) fn note(
+    store: &mut Store,
+    run: &RunRecord,
+    key: &str,
+    body: Value,
+) -> Result<AppendReceipt> {
     store.append_owner(&run.run_id, key, "note", None, &body, &peer(), TOKEN)
 }
 

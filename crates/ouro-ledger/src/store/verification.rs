@@ -228,18 +228,27 @@ impl Target {
         let loaded = load_stream(&self.directory, &self.run_id, layout, &|_| Ok(()), proceed)?;
         let stream = loaded.stream;
         let mut problems = poison_details(stream.poisoned());
-        // The re-read failed only in bytes the writer never wrote: what it
-        // found there is not this writer's interrupted or damaged write.
+        // The re-read reached exactly as many bytes as this writer accepted.
+        // If they chain to another head, the accepted prefix was rewritten
+        // and every finding stands. If they are the accepted history, a frame
+        // refused right after it is not this writer's interrupted or damaged
+        // write: it never wrote those bytes, and only that finding is restated.
         if let (Some(accepted), Some(on_disk)) = (self.accepted_bytes, on_disk)
-            && on_disk > accepted
-            && stream.is_poisoned()
-            && stream.accepted_bytes() >= accepted
+            && stream.accepted_bytes() == accepted
         {
-            problems = vec![format!(
-                "{} canonical bytes follow what this writer accepted; it never wrote or \
-                 acknowledged them",
-                on_disk - accepted
-            )];
+            if stream.run().chain != self.accepted {
+                problems.push(
+                    "canonical history on disk differs from what this writer accepted".into(),
+                );
+            } else if let Some(refused) = loaded.refused_frame
+                && on_disk > accepted
+            {
+                problems[refused] = format!(
+                    "{} canonical bytes follow what this writer accepted; it never wrote or \
+                     acknowledged them",
+                    on_disk - accepted
+                );
+            }
         }
         if let Some(read) = loaded.stopped {
             problems.push(format!(
@@ -338,7 +347,7 @@ pub(crate) fn verify_page(
 mod tests {
     use std::fs;
 
-    use super::super::tests::{gc_fixture, gc_future, payload, peer};
+    use super::super::tests::{create, gc_fixture, gc_future, note, payload, peer};
     use super::*;
     use crate::manifest::{self, STREAM};
 
@@ -391,6 +400,94 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn a_rewritten_accepted_record_is_reported_even_when_foreign_bytes_follow_it() {
+        let (_temp, mut store, run) = create();
+        note(
+            &mut store,
+            &run,
+            "note",
+            serde_json::json!({"message":"hello"}),
+        )
+        .unwrap();
+        let segment = store.run_dir(&run.run_id).join(STREAM);
+        let accepted = String::from_utf8(fs::read(&segment).unwrap()).unwrap();
+        assert_eq!(accepted.matches("\"hello\"").count(), 1);
+        // The accepted prefix keeps its length but not its bytes, and an
+        // unterminated frame follows it.
+        let rewritten = accepted.replace("\"hello\"", "\"jello\"");
+        fs::write(&segment, rewritten + "{\"foreign\":").unwrap();
+        let report = store.verify(None).unwrap().remove(0);
+        assert!(!report.local_consistency);
+        assert_eq!(
+            report.problems,
+            [
+                "canonical history on disk differs from what this writer accepted",
+                "segment manifest committed prefix mismatch",
+            ],
+            "the rewrite is reported, never hidden behind the foreign tail"
+        );
+    }
+
+    #[test]
+    fn foreign_bytes_after_a_consistent_history_this_writer_never_accepted_hide_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let (mut store, run) = {
+            let mut store = Store::open(&data).unwrap();
+            let run = store.prepare("forged", &payload(), &peer()).unwrap();
+            store.claim_owner(&run.run_id, &peer()).unwrap();
+            (store, run)
+        };
+        let directory = store.root().join(&run.run_id);
+        let files = [STREAM, "run.json", manifest::NAME];
+        let snapshot = || files.map(|name| fs::read(directory.join(name)).unwrap());
+        let claimed = snapshot();
+        note(
+            &mut store,
+            &run,
+            "note",
+            serde_json::json!({"message":"jello"}),
+        )
+        .unwrap();
+        // A whole history, with its projection and manifest, of the same
+        // length as the one the writer will accept, but not that one.
+        let other = snapshot();
+        drop(store);
+        for (name, bytes) in files.iter().zip(&claimed) {
+            fs::write(directory.join(name), bytes).unwrap();
+        }
+        let mut store = Store::open(&data).unwrap();
+        note(
+            &mut store,
+            &run,
+            "note",
+            serde_json::json!({"message":"hello"}),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(directory.join(STREAM)).unwrap().len(),
+            other[0].len()
+        );
+        for (name, bytes) in files.iter().zip(&other) {
+            fs::write(directory.join(name), bytes).unwrap();
+        }
+        fs::OpenOptions::new()
+            .append(true)
+            .open(directory.join(STREAM))
+            .and_then(|mut file| std::io::Write::write_all(&mut file, b"{\"foreign\":"))
+            .unwrap();
+        let report = store.verify(None).unwrap().remove(0);
+        assert!(!report.local_consistency);
+        assert_eq!(
+            report.problems,
+            [
+                "canonical history on disk differs from what this writer accepted",
+                "interrupted canonical frame; bytes retained",
+            ]
+        );
     }
 
     #[test]
