@@ -8,11 +8,9 @@ defmodule OuroFleet.Controller do
   # Remote work stops this long before the caller gives up, leaving time to persist what
   # was observed and to reply.
   @reply_margin 10_000
-  # No single worker call waits longer than this, whatever budget remains.
+  # No single worker call waits longer than this, whatever budget remains. The worker
+  # bounds its own work by the same timeout (`OuroFleet.Worker.call/2`).
   @rpc_timeout 125_000
-  # A worker's status batch ends this long before the call carrying it would time out,
-  # so its reply, with whatever it read, still arrives.
-  @worker_margin 5_000
 
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)
 
@@ -171,14 +169,14 @@ defmodule OuroFleet.Controller do
     end
   end
 
-  # Each key's reply from one worker; a failed batch is that failure for every key.
+  # Each key's reply from one worker; a failed batch is that failure for every key. The
+  # worker ends its batch in time for the reply to arrive before the call times out.
   defp statuses(member, keys, deadline) do
-    left = min(deadline - System.monotonic_time(:millisecond), @rpc_timeout)
-
     replies =
-      case rpc(member, {:statuses, keys, left - @worker_margin}, deadline) do
+      case rpc(member, {:statuses, keys}, deadline) do
         {:ok, replies} when is_map(replies) -> replies
         {:error, _} = failure -> Map.new(keys, &{&1, failure})
+        _ -> %{}
       end
 
     Enum.map(keys, &{&1, Map.get(replies, &1, {:error, "worker_reply_incomplete"})})
@@ -232,7 +230,7 @@ defmodule OuroFleet.Controller do
       case min(deadline - System.monotonic_time(:millisecond), @rpc_timeout) do
         left when left <= 0 -> throw(:budget_exhausted)
         left when remote == node() -> Worker.call(operation, left)
-        left -> :erpc.call(remote, Worker, :call, [operation], left)
+        left -> :erpc.call(remote, Worker, :call, [operation, left], left)
       end
     end
 

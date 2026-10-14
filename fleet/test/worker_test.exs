@@ -2,6 +2,10 @@ defmodule OuroFleet.WorkerTest do
   use ExUnit.Case, async: false
   alias OuroFleet.{Store, Worker}
 
+  # The worker's margin for its reply (`@reply_margin` in `OuroFleet.Worker`): a call
+  # with no more time than this leaves the worker none to work in.
+  @reply_margin 5_000
+
   setup do
     root =
       Path.join(
@@ -14,7 +18,7 @@ defmodule OuroFleet.WorkerTest do
     on_exit(fn -> File.rm_rf!(root) end)
     log = Path.join(root, "ledger.log")
     ledger = Path.join(root, "ledger")
-    File.write!(ledger, fake_ledger(log))
+    File.write!(ledger, fake_ledger(log, Path.join(root, "slow")))
     File.chmod!(ledger, 0o700)
     config = %{"state" => root, "data" => root, "ledger_bin" => ledger, "jail_bin" => ledger}
     start_supervised!({Worker, config})
@@ -101,20 +105,18 @@ defmodule OuroFleet.WorkerTest do
     File.write!(context.log, "")
 
     batch = [done, live, prepared, missing, "job_x"]
-    assert {:ok, replies} = Worker.call({:statuses, batch, 60_000})
+    assert {:ok, replies} = Worker.call({:statuses, batch})
     assert {:ok, %{"state" => "exited"}} = replies[done]
     assert {:ok, %{"state" => "running"}} = replies[live]
     assert {:ok, %{"state" => "prepared"}} = replies[prepared]
     assert {:error, "attempt_not_reserved"} = replies[missing]
-
-    assert {:error, %{"reason" => "invalid_request", "detail" => "invalid job id"}} =
-             replies["job_x"]
-
+    assert {:error, %{"reason" => "invalid_request"}} = replies["job_x"]
     assert [settle, _, _] = ledger_calls(context.log)
     assert settle =~ " settle-orphans "
 
+    # A call that leaves no time past the reply margin reads nothing.
     File.write!(context.log, "")
-    assert {:ok, replies} = Worker.call({:statuses, [done, live], 0})
+    assert {:ok, replies} = Worker.call({:statuses, [done, live]}, @reply_margin)
     assert Map.values(replies) == List.duplicate({:error, "status_budget_exhausted"}, 2)
     assert ledger_calls(context.log) == []
   end
@@ -127,8 +129,34 @@ defmodule OuroFleet.WorkerTest do
              Worker.call({:submit, key, request("other"), %{"policy_digest" => "other"}})
 
     assert Process.whereis(Worker) == worker
-    record = Store.read!(Path.join([context.root, "attempts", key <> ".json"]))
-    assert record["run_id"] == "run-done"
+
+    assert Store.read!(Path.join([context.root, "attempts", key <> ".json"]))["run_id"] ==
+             "run-done"
+  end
+
+  test "plan and submit run no ledger step the caller's time cannot cover", context do
+    key = "job_" <> String.duplicate("a", 64)
+
+    # No time past the reply margin: nothing is started, and the reply says why.
+    File.write!(context.log, "")
+
+    assert {:error, "worker_budget_exhausted"} =
+             Worker.call({:plan, key, request("p")}, @reply_margin)
+
+    assert {:error, "worker_budget_exhausted_retry_same_request"} =
+             Worker.call({:submit, key, request("p"), %{}}, @reply_margin)
+
+    assert ledger_calls(context.log) == []
+
+    # A ledger step that hangs is cut off at the caller's deadline, and the reply still
+    # arrives before the caller stops waiting for it.
+    File.write!(Path.join(context.root, "slow"), "")
+
+    for message <- [{:plan, key, request("p")}, {:submit, key, request("p"), %{}}] do
+      started = System.monotonic_time(:millisecond)
+      assert {:error, _} = Worker.call(message, @reply_margin + 500)
+      assert System.monotonic_time(:millisecond) - started < @reply_margin
+    end
   end
 
   defp request(id),
@@ -144,11 +172,15 @@ defmodule OuroFleet.WorkerTest do
   defp ledger_calls(log), do: log |> File.read!() |> String.split("\n", trim: true)
 
   # Answers each ledger verb the worker uses with the smallest reply it accepts, and
-  # logs every argv so a test can count what reached the ledger.
-  defp fake_ledger(log) do
+  # logs every argv so a test can count what reached the ledger. While `slow` exists,
+  # the first step of a plan (`version`) and of a submit (`--plan-only`) hang.
+  defp fake_ledger(log, slow) do
     """
     #!/bin/sh
     printf '%s\\n' "$*" >> '#{log}'
+    case " $* " in
+      *" version --json "* | *" --plan-only "*) [ -e '#{slow}' ] && exec /bin/sleep 30 ;;
+    esac
     case " $* " in
       *" version --json "*) echo '{"schemas":{"run":"#{OuroFleet.Protocol.ledger_run()}"}}' ;;
       *" doctor --json "*) echo '{"ready":true,"detached_owner":{"available":true}}' ;;

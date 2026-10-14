@@ -11,7 +11,10 @@ defmodule OuroFleet.ControllerTest do
     end
 
     def init(state), do: {:ok, state}
-    def handle_call(message, _, state), do: reply(message, state)
+
+    # `OuroFleet.Worker.call/2` wraps each message with the deadline the worker works to.
+    def handle_call({:call, message, deadline}, _, state),
+      do: reply(message, %{state | budget: deadline - System.monotonic_time(:millisecond)})
 
     defp reply(:version, %{incompatible: true} = state),
       do: {:reply, {:ok, Map.put(Protocol.version(), "schema", "ouro.fleet.rpc/999")}, state}
@@ -19,10 +22,10 @@ defmodule OuroFleet.ControllerTest do
     defp reply(:version, state), do: {:reply, {:ok, Protocol.version()}, state}
     defp reply({:status, job}, state), do: {:reply, observed(job, state), state}
 
-    defp reply({:statuses, jobs, budget}, state) do
+    defp reply({:statuses, jobs}, state) do
       Process.sleep(Map.get(state, :delay, 0))
       replies = Map.new(jobs, &{&1, observed(&1, state)})
-      {:reply, {:ok, replies}, %{state | batches: state.batches + 1, budget: budget}}
+      {:reply, {:ok, replies}, %{state | batches: state.batches + 1}}
     end
 
     defp reply({:plan, _, _}, state),
@@ -170,7 +173,10 @@ defmodule OuroFleet.ControllerTest do
   end
 
   test "worker calls never outlast the caller's deadline", context do
+    # Placement and submission carry the call's time too, less the worker's margin.
     assert {:ok, _} = Controller.call({:run, request("late")})
+    assert %{submits: 1, budget: budget} = :sys.get_state(context.worker)
+    assert budget in 100_000..120_000
     :sys.replace_state(context.worker, &Map.put(&1, :observed, %{}))
 
     # Past the deadline, no worker call is made at all.
@@ -179,7 +185,7 @@ defmodule OuroFleet.ControllerTest do
     assert %{"stale" => true, "reason" => "controller_budget_exhausted"} = row
     assert :sys.get_state(context.worker).batches == 0
 
-    # With time left, the worker is told to end its batch a margin before the call ends.
+    # With time left, the worker is given a deadline a margin before the call ends.
     soon = System.monotonic_time(:millisecond) + 8_000
     assert {:ok, [%{"stale" => false}]} = GenServer.call(Controller, {:call, :status, soon})
     assert %{batches: 1, budget: budget} = :sys.get_state(context.worker)
