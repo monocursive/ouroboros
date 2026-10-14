@@ -1,5 +1,6 @@
-//! The bubblewrap plan for the `tool` profile: argv, mount table, and the
-//! placeholder mount points an absent protected literal needs.
+//! The bubblewrap plan every contained profile (`tool`, `build`, `agent`)
+//! renders: argv, mount table, and the placeholder mount points an absent
+//! protected literal needs.
 //!
 //! jail-v1 §9.1 and §9.2, north-star §4.3. The plan is data; rendering it is
 //! a pure function, so the argv and the mount table the receipt records come
@@ -23,13 +24,11 @@ use crate::state::anchored::{Dir, Kind, Name, fstat};
 pub const JAIL_INSIDE_PATH: &str = "/run/ouro/jail";
 /// Where the scratch directory appears inside the sandbox.
 pub const SCRATCH_INSIDE_PATH: &str = "/tmp";
-// The in-sandbox location of vendor state
 /// Where vendor state appears inside the sandbox. jail-v1 §9.1 fixes no
 /// location; this is beside [`JAIL_INSIDE_PATH`], under the sandbox's own
 /// read-only `/run/ouro`, so its parent (the attempt directory) is never
-/// visible and no operator grant can shadow it (J3 contract §3.2).
+/// visible and no operator grant can shadow it.
 pub const VENDOR_STATE_INSIDE_PATH: &str = "/run/ouro/state";
-// The proxy's dedicated directory inside the sandbox
 /// Where the attempt's proxy directory appears inside the sandbox, read-only
 /// (jail-v1 §10: "Expose only its dedicated directory at `/run/ouro/proxy`,
 /// read-only to the child").
@@ -55,8 +54,8 @@ pub const ETC_PATHS: [&str; 7] = [
 ];
 
 /// Total rendered argv bytes past which the plan is handed over `--args FD`
-/// instead of the command line. ARG_MAX is normally 2 MiB; this is the
-/// "comfort" bound CONTRACT §3.6 asks for.
+/// instead of the command line: ARG_MAX is normally 2 MiB, and this keeps a
+/// wide margin below it.
 pub const ARGS_FD_THRESHOLD: usize = 128 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -1263,28 +1262,29 @@ pub struct BwrapStatus {
     pub exit_code: Option<i32>,
 }
 
-/// Parse bubblewrap's JSON status stream.
+/// Parse bubblewrap's JSON status stream: a sequence of objects, read as
+/// far as it is complete.
 ///
-/// The documents are flat objects with integer values, so this reads the two
-/// keys the supervisor needs without pulling a JSON parser into the platform
-/// layer. Anything it does not recognise is left `None` rather than guessed.
+/// The stream is read while bubblewrap still writes it, so its last object
+/// may be cut short; that object, and anything after a malformed one, is
+/// not read at all rather than read in part. A key that never arrived, or
+/// whose value is not an integer in range, is `None` rather than guessed.
 #[must_use]
 pub fn parse_json_status(raw: &str) -> BwrapStatus {
-    fn integer_after(raw: &str, key: &str) -> Option<i64> {
-        let at = raw.find(&format!("\"{key}\""))?;
-        let rest = &raw[at + key.len() + 2..];
-        let colon = rest.find(':')?;
-        let value: String = rest[colon + 1..]
-            .trim_start()
-            .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == '-')
-            .collect();
-        value.parse().ok()
+    let mut status = BwrapStatus::default();
+    let documents = serde_json::Deserializer::from_str(raw)
+        .into_iter::<serde_json::Map<String, serde_json::Value>>();
+    for document in documents {
+        let Ok(document) = document else { break };
+        let integer = |key: &str| document.get(key).and_then(serde_json::Value::as_i64);
+        status.child_pid = status
+            .child_pid
+            .or_else(|| integer("child-pid").and_then(|v| libc::pid_t::try_from(v).ok()));
+        status.exit_code = status
+            .exit_code
+            .or_else(|| integer("exit-code").and_then(|v| i32::try_from(v).ok()));
     }
-    BwrapStatus {
-        child_pid: integer_after(raw, "child-pid").and_then(|v| libc::pid_t::try_from(v).ok()),
-        exit_code: integer_after(raw, "exit-code").and_then(|v| i32::try_from(v).ok()),
-    }
+    status
 }
 
 #[cfg(test)]
@@ -1356,6 +1356,20 @@ mod tests {
             }
         );
         assert_eq!(parse_json_status("{}"), BwrapStatus::default());
+        // A status still being written: the cut-short object is not read in
+        // part (a half-written `12` is not an exit code of `1`).
+        assert_eq!(
+            parse_json_status("{\"child-pid\": 12574}\n{\"exit-code\": 1"),
+            BwrapStatus {
+                child_pid: Some(12574),
+                exit_code: None,
+            }
+        );
+        assert_eq!(
+            parse_json_status("{\"child-pid\": \"12574\"}"),
+            BwrapStatus::default(),
+            "a value that is not an integer is not one"
+        );
     }
 
     #[test]

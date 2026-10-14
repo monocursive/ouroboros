@@ -1,7 +1,7 @@
 //! The inside launcher: `ouro-jail __launch`.
 //!
-//! jail-v1 §8.3 and CONTRACT §3.6. This is the process bubblewrap starts
-//! inside the namespaces. It is the jail's own binary, bound read-only at
+//! jail-v1 §8.3. This is the process bubblewrap starts inside the
+//! namespaces. It is the jail's own binary, bound read-only at
 //! `/run/ouro/jail`, re-executed with a hidden subcommand — a re-exec rather
 //! than work in `pre_exec`, so that nothing but the target's own code runs
 //! after the boundary is closed.
