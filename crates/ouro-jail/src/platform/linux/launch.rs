@@ -20,7 +20,7 @@
 //! EOF with no bytes.
 //!
 //! The narrowing filter it installs is the observer's own
-//! ([`tracer::install_narrowing_filter`](super::tracer::install_narrowing_filter)),
+//! ([`tracer::filter::install_narrowing_filter_for`](super::tracer::filter::install_narrowing_filter_for)),
 //! so the syscalls the launcher narrows to and the syscalls the tracer
 //! expects to be stopped on cannot drift apart.
 

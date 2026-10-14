@@ -1846,7 +1846,9 @@ impl Session {
         pending.args.flags = flags;
         pending.flags_unavailable = flags_unavailable;
         if entry.op == ClosedOp::Exec && !self.config.commands.is_empty() {
-            let argv = sys::argv(tid, info.args[if entry.name == "execveat" { 2 } else { 1 }]);
+            let argv = entry
+                .argv
+                .and_then(|index| sys::argv(tid, info.args[usize::from(index)]));
             pending.args.command = self
                 .config
                 .commands
@@ -4160,7 +4162,12 @@ mod tests {
                 // of this address space.
                 unsafe {
                     libc::close(fds[1]);
-                    if super::super::install_narrowing_filter().is_err() {
+                    if super::super::filter::install_narrowing_filter_for(
+                        super::super::NARROWING_TRACE_DATA,
+                        true,
+                    )
+                    .is_err()
+                    {
                         libc::_exit(3);
                     }
                     let mut byte = 0u8;

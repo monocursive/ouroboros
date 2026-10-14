@@ -78,8 +78,8 @@ use libc::pid_t;
 pub use closed_set::ClosedOp;
 pub use filter::{
     CLONE_SYSCALL, CLONE_UNTRACED, CLONE3_SYSCALL, LISTENER_SYSCALL, NARROWING_TRACE_DATA,
-    SECCOMP_FILTER_FLAG_NEW_LISTENER, install_narrowing_filter, narrowing_filter,
-    narrowing_filter_bytes, narrowing_filter_digest, narrowing_filter_digest_with,
+    SECCOMP_FILTER_FLAG_NEW_LISTENER, narrowing_filter, narrowing_filter_bytes,
+    narrowing_filter_digest,
 };
 pub use proc::{children, cmdline, descendants, nspid, ppid, start_ticks, tgid, tracer_pid};
 pub use table::closed_set_table;
@@ -1157,18 +1157,6 @@ impl Tracer {
     #[must_use]
     pub fn events(&self) -> &Events {
         &self.events
-    }
-
-    /// The filter the launcher must install. See [`narrowing_filter`].
-    #[must_use]
-    pub fn narrowing_filter() -> Vec<libc::sock_filter> {
-        filter::narrowing_filter()
-    }
-
-    /// `sha256:<hex>` of the bytes of [`Tracer::narrowing_filter`].
-    #[must_use]
-    pub fn narrowing_filter_digest() -> String {
-        filter::narrowing_filter_digest()
     }
 
     /// Stop the tracer thread, join it and take its counters, within

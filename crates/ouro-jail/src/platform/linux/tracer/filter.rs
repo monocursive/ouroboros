@@ -5,12 +5,13 @@
 //! is installed separately and decides what is allowed; this one decides
 //! what stops, and it refuses exactly one call, `clone3`, with the `ENOSYS` a
 //! kernel without it would give. Four kinds of call return
-//! `SECCOMP_RET_TRACE` (with [`NARROWING_TRACE_DATA`] in its data bits):
+//! `SECCOMP_RET_TRACE`, with the attempt's trace data in its data bits
+//! ([`NARROWING_TRACE_DATA`] in the canonical program):
 //!
 //! * every number in `linux-closed-v1`, compared only after the architecture
 //!   has been checked, because a number means nothing without it;
 //! * every syscall under another architecture or with the x32 bit (J4 D2).
-//!   The tracer never decodes these from the x86_64 table; it labels them
+//!   The tracer never decodes these from the native table; it labels them
 //!   foreign. In a contained profile the baseline's `EPERM` for those ABIs
 //!   outranks the trace, so only `none` ever stops on one;
 //! * `seccomp(2)` whose flags ask for `SECCOMP_FILTER_FLAG_NEW_LISTENER`
@@ -28,6 +29,16 @@
 //! contained baselines already refuse it, and glibc falls back to `clone`
 //! (jail-v1 §9.2). Everything else returns `SECCOMP_RET_ALLOW`.
 //!
+//! The program comes in two modes. Learning traces every open-family call.
+//! The ordinary mode settles a read-only open in the kernel when the row's
+//! flags are a register (`open`, `openat`): the kernel copies registers into
+//! `seccomp_data`, so the filter reads the flags the call will use, and a
+//! read-only open is outside the closed set. Every row the fast path covers
+//! comes from the table ([`fast_path_flags`]); `openat2`'s flags are memory
+//! the filter cannot read and the tracee could race, so it is always traced.
+//! The canonical program — the one the evidence table and the freeze digest
+//! name — is the learning one with the canonical trace data.
+//!
 //! The filter is also the fail-closed property the supervisor relies on:
 //! `SECCOMP_RET_TRACE` with no tracer attached does not run the syscall, it
 //! fails it with `ENOSYS`. If the observer dies, closed-set operations stop
@@ -35,7 +46,7 @@
 //! The same holds for a descendant created with `CLONE_UNTRACED`: its
 //! closed-set calls fail with `ENOSYS`, because nothing traces it.
 
-use crate::platform::linux::tracer::closed_set::CLOSED_SET;
+use crate::platform::linux::tracer::closed_set::{CLOSED_SET, ClosedOp, Entry, FlagSource};
 use crate::platform::linux::tracer::sys;
 use crate::platform::linux::{abi, bpf, seccomp};
 
@@ -83,10 +94,45 @@ pub const ARM_CLONE_SYSCALL: u32 = 120;
 pub const X32_LISTENER_SYSCALL: u32 = 317;
 pub const X32_CLONE_SYSCALL: u32 = 56;
 
-/// Instruction count: architecture check (2), x32 check (2), one comparison
-/// per closed-set number, the listener check (3), the untraced-clone check
-/// (3), the `clone3` check (1) and the three returns.
-const FILTER_LEN: usize = CLOSED_SET.len() + 21;
+/// The flags register of a row whose read-only opens the ordinary mode lets
+/// through in the kernel: an open-family call whose flags are a register
+/// argument. `openat2` (flags in memory) and `creat` (flags implied) are not.
+const fn fast_path_flags(entry: &Entry) -> Option<u8> {
+    match (entry.op, entry.flags) {
+        (ClosedOp::Open, FlagSource::Arg(index)) => Some(index),
+        _ => None,
+    }
+}
+
+/// How many rows the read-only fast path covers.
+const FAST_PATH_ROWS: usize = {
+    let mut count = 0;
+    let mut i = 0;
+    while i < CLOSED_SET.len() {
+        if fast_path_flags(&CLOSED_SET[i]).is_some() {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+};
+
+/// The longest program, the ordinary mode's: the up-front `clone3` refusal
+/// (3: load the number, compare the native and the x32 spelling), the
+/// architecture check (2), the x32 check (2), one comparison per closed-set
+/// number, the listener check (3), the untraced-clone check (3), the `clone3`
+/// check (1), two instructions per fast-path row and the three returns.
+/// Learning mode is the same without the fast-path rows.
+const FILTER_LEN: usize = CLOSED_SET.len() + 17 + 2 * FAST_PATH_ROWS;
+
+// Every jump goes forward from instruction 1 or later to the `ENOSYS` return
+// at most, which is the last instruction, so no offset exceeds
+// `FILTER_LEN - 3`. A jump offset is one byte: past that the program would
+// be silently wrong, so the table may not grow that far.
+const _: () = assert!(
+    FILTER_LEN - 3 <= u8::MAX as usize,
+    "the closed set no longer fits the narrowing filter's one-byte jumps"
+);
 
 const ZERO: libc::sock_filter = libc::sock_filter {
     code: 0,
@@ -108,53 +154,78 @@ const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
     libc::sock_filter { code, jt, jf, k }
 }
 
+/// The offset of a jump at `from` that lands on `to`: the interpreter counts
+/// it from the instruction after the jump. The bound on [`FILTER_LEN`] keeps
+/// it in a byte.
+const fn skip(from: usize, to: usize) -> u8 {
+    (to - from - 1) as u8
+}
+
 /// Write the program into `out` and return its length.
 ///
-/// Allocation-free by construction, so [`install_narrowing_filter`] can run
-/// between `fork` and `execve`.
-/// Audit 2026-09-25-2, S14: `data` is the per-attempt `SECCOMP_RET_DATA`
-/// the tracer expects; the canonical builder below keeps the frozen
-/// evidence value.
+/// Allocation-free by construction, so [`install_narrowing_filter_for`] can
+/// run between `fork` and `execve`. `data` is the `SECCOMP_RET_DATA` the
+/// tracer expects (audit 2026-09-25-2, S14: chosen per attempt).
 fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16, learning: bool) -> usize {
     let n = CLOSED_SET.len();
     let listener = n + 7;
     let clone = n + 10;
     let clone3 = n + 13;
-    let open = n + 14;
-    let openat = open + 2;
-    let allow = n + 14 + if learning { 0 } else { 4 };
+    let fast_path = n + 14;
+    let allow = fast_path + if learning { 0 } else { 2 * FAST_PATH_ROWS };
     let trace = allow + 1;
     let enosys = allow + 2;
-    debug_assert!(n <= 235);
     // clone3's flags live behind a pointer on native, i386 and x32 alike.
     // Refuse it before the architecture branch, including the x32 spelling.
     out[0] = stmt(bpf::CODE_LD_W_ABS, seccomp::SD_NR);
-    out[1] = jump(bpf::CODE_JEQ_K, CLONE3_SYSCALL.1, (enosys - 2) as u8, 0);
+    out[1] = jump(bpf::CODE_JEQ_K, CLONE3_SYSCALL.1, skip(1, enosys), 0);
     out[2] = jump(
         bpf::CODE_JEQ_K,
         CLONE3_SYSCALL.1 | seccomp::X32_SYSCALL_BIT,
-        (enosys - 3) as u8,
+        skip(2, enosys),
         0,
     );
     out[3] = stmt(bpf::CODE_LD_W_ABS, seccomp::SD_ARCH);
-    out[4] = jump(bpf::CODE_JEQ_K, abi::AUDIT_ARCH, 0, (trace - 5) as u8);
+    out[4] = jump(bpf::CODE_JEQ_K, abi::AUDIT_ARCH, 0, skip(4, trace));
     out[5] = stmt(bpf::CODE_LD_W_ABS, seccomp::SD_NR);
     out[6] = jump(
         bpf::CODE_JSET_K,
         seccomp::X32_SYSCALL_BIT,
-        (trace - 7) as u8,
+        skip(6, trace),
         0,
     );
+    // One comparison per row. In the ordinary mode a fast-path row goes to
+    // its own flags check, in table order, instead of straight to the trace.
+    let mut next_check = fast_path;
     for (i, entry) in CLOSED_SET.iter().enumerate() {
-        let destination = match (learning, entry.nr) {
-            (false, _) if entry.name == "open" => open,
-            (false, _) if entry.name == "openat" => openat,
+        let destination = match fast_path_flags(entry) {
+            Some(index) if !learning => {
+                let check = next_check;
+                next_check += 2;
+                // open/openat flags are int arguments copied into
+                // seccomp_data by the kernel. Unlike openat2's mutable
+                // open_how, there is no tracee memory to race. Keep every
+                // write/create/truncate/tmpfile intent, including invalid
+                // combinations. O_DIRECTORY alone is read-only.
+                let writes = (libc::O_ACCMODE
+                    | libc::O_CREAT
+                    | libc::O_TRUNC
+                    | (libc::O_TMPFILE & !libc::O_DIRECTORY)) as u32;
+                out[check] = stmt(bpf::CODE_LD_W_ABS, seccomp::sd_arg_low(index as u32));
+                out[check + 1] = jump(
+                    bpf::CODE_JSET_K,
+                    writes,
+                    skip(check + 1, trace),
+                    skip(check + 1, allow),
+                );
+                check
+            }
             _ => trace,
         };
         out[7 + i] = jump(
             bpf::CODE_JEQ_K,
             entry.nr as u32,
-            (destination - 8 - i) as u8,
+            skip(7 + i, destination),
             0,
         );
     }
@@ -166,59 +237,34 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16, learning: bo
         bpf::CODE_JEQ_K,
         LISTENER_SYSCALL.1,
         0,
-        (clone - listener - 1) as u8,
+        skip(listener, clone),
     );
     out[listener + 1] = stmt(bpf::CODE_LD_W_ABS, seccomp::sd_arg_low(1));
     out[listener + 2] = jump(
         bpf::CODE_JSET_K,
         SECCOMP_FILTER_FLAG_NEW_LISTENER,
-        (trace - listener - 3) as u8,
-        (allow - listener - 3) as u8,
+        skip(listener + 2, trace),
+        skip(listener + 2, allow),
     );
     // clone(2) with CLONE_UNTRACED. Every clone flag lives in the low word
-    // of the first argument on x86_64.
-    out[clone] = jump(
-        bpf::CODE_JEQ_K,
-        CLONE_SYSCALL.1,
-        0,
-        (clone3 - clone - 1) as u8,
-    );
+    // of the first argument on both native ABIs.
+    out[clone] = jump(bpf::CODE_JEQ_K, CLONE_SYSCALL.1, 0, skip(clone, clone3));
     out[clone + 1] = stmt(bpf::CODE_LD_W_ABS, seccomp::sd_arg_low(0));
     out[clone + 2] = jump(
         bpf::CODE_JSET_K,
         CLONE_UNTRACED,
-        (trace - clone - 3) as u8,
-        (allow - clone - 3) as u8,
+        skip(clone + 2, trace),
+        skip(clone + 2, allow),
     );
-    // clone3(2): its flags are behind a pointer. ENOSYS, and glibc falls back.
+    // clone3(2): its flags are behind a pointer. ENOSYS, and glibc falls
+    // back. The up-front refusal already caught every spelling, so this
+    // comparison never matches; it stays because the frozen program has it.
     out[clone3] = jump(
         bpf::CODE_JEQ_K,
         CLONE3_SYSCALL.1,
-        (enosys - clone3 - 1) as u8,
-        (allow - clone3 - 1) as u8,
+        skip(clone3, enosys),
+        skip(clone3, allow),
     );
-    if !learning {
-        // open/openat flags are int arguments copied into seccomp_data by
-        // the kernel. Unlike openat2's mutable open_how, there is no tracee
-        // memory to race. Keep every write/create/truncate/tmpfile intent,
-        // including invalid combinations. O_DIRECTORY alone is read-only.
-        let writes = (libc::O_ACCMODE
-            | libc::O_CREAT
-            | libc::O_TRUNC
-            | (libc::O_TMPFILE & !libc::O_DIRECTORY)) as u32;
-        for (offset, arg) in [
-            (open, seccomp::sd_arg_low(1)),
-            (openat, seccomp::sd_arg_low(2)),
-        ] {
-            out[offset] = stmt(bpf::CODE_LD_W_ABS, arg);
-            out[offset + 1] = jump(
-                bpf::CODE_JSET_K,
-                writes,
-                (trace - offset - 2) as u8,
-                (allow - offset - 2) as u8,
-            );
-        }
-    }
     out[allow] = stmt(bpf::CODE_RET_K, seccomp::SECCOMP_RET_ALLOW);
     out[trace] = stmt(
         bpf::CODE_RET_K,
@@ -231,25 +277,19 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16, learning: bo
     enosys + 1
 }
 
-/// The narrowing filter, as classic BPF.
-///
-/// Canonical full-observation (learning) program. Normal contained runs use
-/// the read-only-open fast path; their receipt records the installed digest.
+/// The canonical narrowing filter, as classic BPF: the learning-mode program
+/// with the canonical trace data, which the published closed-set table and
+/// the freeze digest name. What an attempt installs is
+/// [`narrowing_filter_for`] its own data and mode; its receipt records that
+/// program's digest beside this one.
 #[must_use]
 pub fn narrowing_filter() -> Vec<libc::sock_filter> {
-    narrowing_filter_with(NARROWING_TRACE_DATA)
+    narrowing_filter_for(NARROWING_TRACE_DATA, true)
 }
 
-/// The narrowing filter carrying `data`, the value a per-attempt install
-/// chose (audit 2026-09-25-2, S14). The canonical form above is what the
-/// evidence table and the freeze digest name.
-#[must_use]
-pub fn narrowing_filter_with(data: u16) -> Vec<libc::sock_filter> {
-    narrowing_filter_for(data, true)
-}
-
-/// The installed program for a particular observation mode. Learning keeps
-/// read-only opens; ordinary observation handles them entirely in the kernel.
+/// The program for `data` (the attempt's `SECCOMP_RET_DATA`) and a mode:
+/// `learning` traces read-only opens too; otherwise the fast-path rows
+/// settle them in the kernel.
 #[must_use]
 pub fn narrowing_filter_for(data: u16, learning: bool) -> Vec<libc::sock_filter> {
     let mut prog = [ZERO; FILTER_LEN];
@@ -257,21 +297,26 @@ pub fn narrowing_filter_for(data: u16, learning: bool) -> Vec<libc::sock_filter>
     prog[..len].to_vec()
 }
 
-/// The bytes the digest is taken over: each instruction as
-/// `code` (little-endian u16), `jt`, `jf`, `k` (little-endian u32).
+/// The bytes a filter digest is taken over: each instruction as `code`
+/// (little-endian u16), `jt`, `jf`, `k` (little-endian u32).
 ///
 /// Written out rather than reinterpreted from the struct so the digest names
 /// the same bytes on any host, not the padding of one ABI.
-#[must_use]
-pub fn narrowing_filter_bytes() -> Vec<u8> {
-    let mut out = Vec::with_capacity(FILTER_LEN * 8);
-    for insn in narrowing_filter_with(NARROWING_TRACE_DATA) {
+fn to_bytes(prog: &[libc::sock_filter]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prog.len() * 8);
+    for insn in prog {
         out.extend_from_slice(&insn.code.to_le_bytes());
         out.push(insn.jt);
         out.push(insn.jf);
         out.extend_from_slice(&insn.k.to_le_bytes());
     }
     out
+}
+
+/// The bytes of the canonical program ([`narrowing_filter`]).
+#[must_use]
+pub fn narrowing_filter_bytes() -> Vec<u8> {
+    to_bytes(&narrowing_filter())
 }
 
 /// `sha256:<hex>` over [`narrowing_filter_bytes`].
@@ -280,40 +325,14 @@ pub fn narrowing_filter_digest() -> String {
     sha256(&narrowing_filter_bytes())
 }
 
-/// Security 2026-09-27 (audit 4 B9): the bytes of the filter carrying
-/// `data` — the same layout with that one immediate differing. The receipt
-/// must name the bytes the launcher **installed**, and since audit
+/// Security 2026-09-27 (audit 4 B9): `sha256:<hex>` of the program an
+/// attempt installed, [`narrowing_filter_for`] the same `data` and mode. The
+/// receipt must name the bytes the launcher **installed**, and since audit
 /// 2026-09-25-2 (S14) those carry a per-attempt value, so the canonical
-/// digest alone no longer identifies the installed program.
-#[must_use]
-pub fn narrowing_filter_bytes_with(data: u16) -> Vec<u8> {
-    let mut out = Vec::with_capacity(FILTER_LEN * 8);
-    for insn in narrowing_filter_with(data) {
-        out.extend_from_slice(&insn.code.to_le_bytes());
-        out.push(insn.jt);
-        out.push(insn.jf);
-        out.extend_from_slice(&insn.k.to_le_bytes());
-    }
-    out
-}
-
-/// `sha256:<hex>` over [`narrowing_filter_bytes_with`]: the digest of the
-/// program an attempt actually installed (audit 4 B9).
-#[must_use]
-pub fn narrowing_filter_digest_with(data: u16) -> String {
-    sha256(&narrowing_filter_bytes_with(data))
-}
-
-/// Digest of the exact mode-specific installed instructions.
+/// digest alone does not identify them.
 #[must_use]
 pub fn narrowing_filter_digest_for(data: u16, learning: bool) -> String {
-    let mut bytes = Vec::new();
-    for insn in narrowing_filter_for(data, learning) {
-        bytes.extend_from_slice(&insn.code.to_le_bytes());
-        bytes.extend_from_slice(&[insn.jt, insn.jf]);
-        bytes.extend_from_slice(&insn.k.to_le_bytes());
-    }
-    sha256(&bytes)
+    sha256(&to_bytes(&narrowing_filter_for(data, learning)))
 }
 
 /// `sha256:<hex>` of `bytes`, the form every filter digest in a receipt takes.
@@ -322,7 +341,11 @@ fn sha256(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-/// Install the narrowing filter on the calling thread group.
+/// Install the narrowing filter for `data` and a mode (see
+/// [`narrowing_filter_for`]) on the calling thread group. Audit 2026-09-25-2,
+/// S14: `data` is chosen per attempt by the supervisor and read by the
+/// launcher from a pipe, so neither the public constant nor any inherited
+/// argument names it.
 ///
 /// Async-signal-safe: it allocates nothing, takes no lock and touches no
 /// global state. The program is built into a stack array from a `const`
@@ -339,25 +362,6 @@ fn sha256(bytes: &[u8]) -> String {
 /// After this returns, every closed-set syscall made by this process or any
 /// descendant fails with `ENOSYS` until a tracer is attached. Install it and
 /// then block; do not open a file in between.
-pub fn install_narrowing_filter() -> Result<(), i32> {
-    install_narrowing_filter_with(NARROWING_TRACE_DATA)
-}
-
-/// Install the narrowing filter carrying `data` (audit 2026-09-25-2, S14:
-/// the value is chosen per attempt by the supervisor and read by the
-/// launcher from a pipe, so neither the public constant nor any inherited
-/// argument names it). Same guarantees as [`install_narrowing_filter`].
-///
-/// # Errors
-/// The `errno` of whichever of the two calls failed.
-pub fn install_narrowing_filter_with(data: u16) -> Result<(), i32> {
-    install_narrowing_filter_for(data, true)
-}
-
-/// Install the mode-specific filter without allocating after fork.
-///
-/// # Errors
-/// Returns the errno of the failed no_new_privs or seccomp call.
 pub fn install_narrowing_filter_for(data: u16, learning: bool) -> Result<(), i32> {
     let mut prog = [ZERO; FILTER_LEN];
     let len = build_into(&mut prog, data, learning);
@@ -397,23 +401,23 @@ mod tests {
 
     /// Security 2026-09-27 (audit 4 B9): the installed-bytes digest names
     /// the program an attempt ran, which is the canonical program only when
-    /// the attempt drew the canonical trace data.
+    /// the attempt drew the canonical trace data in learning mode.
     #[test]
     fn audit4_installed_digest_differs_with_the_trace_data() {
         assert_eq!(
-            narrowing_filter_digest_with(NARROWING_TRACE_DATA),
+            narrowing_filter_digest_for(NARROWING_TRACE_DATA, true),
             narrowing_filter_digest(),
             "the canonical data digests the canonical program"
         );
         let other = NARROWING_TRACE_DATA ^ 0xa5a5;
         assert_ne!(
-            narrowing_filter_digest_with(other),
+            narrowing_filter_digest_for(other, true),
             narrowing_filter_digest(),
             "a per-attempt value changes the installed bytes"
         );
         // Exactly one immediate differs between the two byte images.
         let canonical = narrowing_filter_bytes();
-        let installed = narrowing_filter_bytes_with(other);
+        let installed = to_bytes(&narrowing_filter_for(other, true));
         assert_eq!(canonical.len(), installed.len());
         let mut words = 0usize;
         for (left, right) in canonical.chunks(8).zip(installed.chunks(8)) {
@@ -544,10 +548,24 @@ mod tests {
             narrowing_filter_digest_for(42, false),
             narrowing_filter_digest_for(42, true)
         );
+        // The fast path is the table's register-flag open rows, each one
+        // load and one test, and nothing else changes length.
+        let fast_path: Vec<&str> = CLOSED_SET
+            .iter()
+            .filter(|entry| fast_path_flags(entry).is_some())
+            .map(|entry| entry.name)
+            .collect();
+        let expected: &[&str] = if abi::AARCH64 {
+            &["openat"]
+        } else {
+            &["open", "openat"]
+        };
+        assert_eq!(fast_path, expected);
         assert_eq!(
-            narrowing_filter_digest_for(42, true),
-            narrowing_filter_digest_with(42)
+            narrowing_filter_for(42, false).len(),
+            narrowing_filter_for(42, true).len() + 2 * expected.len()
         );
+        assert_eq!(narrowing_filter_for(42, false).len(), FILTER_LEN);
     }
 
     /// J4 D2: without a containment baseline (`none`) nothing else refuses

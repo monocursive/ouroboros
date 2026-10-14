@@ -140,6 +140,17 @@ pub struct Entry {
     pub flags: FlagSource,
     /// `(pointer argument, length argument)` of a socket address.
     pub sockaddr: Option<(u8, u8)>,
+    /// Argument index of an exec's `argv` vector, which the command rules
+    /// judge.
+    pub argv: Option<u8>,
+}
+
+impl Entry {
+    /// This row with an exec's `argv` vector at argument `index`.
+    const fn with_argv(mut self, index: u8) -> Entry {
+        self.argv = Some(index);
+        self
+    }
 }
 
 /// `(directory fd argument, pathname argument)`, either of which a given
@@ -164,10 +175,13 @@ const fn row(
         path2: second.1,
         flags,
         sockaddr: None,
+        argv: None,
     }
 }
 
-/// The closed set on x86_64.
+/// The closed set of this build's native table: 22 rows on x86_64, 13 on
+/// aarch64, which has none of the legacy pathname calls (`open`, `creat`,
+/// `rename`, `unlink`, `rmdir`, `mkdir`, `mknod`, `link`, `symlink`).
 ///
 /// The `flags` of `creat` are implied and the `mode` arguments of `mkdir`,
 /// `mkdirat`, `open`-family and `openat2` are deliberately not recorded:
@@ -179,8 +193,8 @@ const fn row(
 #[rustfmt::skip]
 pub const CLOSED_SET: &[Entry] = &[
     // proc.exec
-    row(abi::nr(59, 221) as u64, "execve", ClosedOp::Exec, (None, Some(0)), (None, None), FlagSource::None),
-    row(abi::nr(322, 281) as u64, "execveat", ClosedOp::Exec, (Some(0), Some(1)), (None, None), FlagSource::Arg(4)),
+    row(abi::nr(59, 221) as u64, "execve", ClosedOp::Exec, (None, Some(0)), (None, None), FlagSource::None).with_argv(1),
+    row(abi::nr(322, 281) as u64, "execveat", ClosedOp::Exec, (Some(0), Some(1)), (None, None), FlagSource::Arg(4)).with_argv(2),
     // fs.create / fs.write, decided from the flags by the consumer
     #[cfg(not(target_arch = "aarch64"))]
     row(2, "open", ClosedOp::Open, (None, Some(0)), (None, None), FlagSource::Arg(1)),
@@ -232,6 +246,7 @@ pub const CLOSED_SET: &[Entry] = &[
         path2: None,
         flags: FlagSource::None,
         sockaddr: Some((1, 2)),
+        argv: None,
     },
 ];
 
@@ -266,7 +281,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn the_set_has_exactly_the_twenty_two_rows_of_the_spec() {
+    fn the_set_has_exactly_the_rows_of_the_spec_for_this_table() {
         let count = if abi::AARCH64 { 13 } else { 22 };
         assert_eq!(CLOSED_SET.len(), count);
         let numbers: BTreeSet<u64> = CLOSED_SET.iter().map(|e| e.nr).collect();
@@ -284,6 +299,21 @@ mod tests {
         assert_eq!(numbers, expected);
         let names: BTreeSet<&str> = CLOSED_SET.iter().map(|e| e.name).collect();
         assert_eq!(names.len(), count, "no syscall name may appear twice");
+    }
+
+    /// The command rules read the argv vector of the two exec rows, and of
+    /// nothing else.
+    #[test]
+    fn only_the_exec_rows_name_an_argv() {
+        for entry in CLOSED_SET {
+            let expected = match entry.name {
+                "execve" => Some(1),
+                "execveat" => Some(2),
+                _ => None,
+            };
+            assert_eq!(entry.argv, expected, "{}", entry.name);
+            assert_eq!(entry.argv.is_some(), entry.op == ClosedOp::Exec);
+        }
     }
 
     /// `ftruncate` names a descriptor rather than a pathname, so it is
