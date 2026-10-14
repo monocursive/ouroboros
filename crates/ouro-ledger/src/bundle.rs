@@ -86,45 +86,22 @@ fn write_json(dir: &File, name: &str, value: &impl Serialize) -> Result<Member> 
     })
 }
 
+/// Copy a member while hashing exactly the bytes copied.
 fn copy_hash(
-    input: &mut File,
+    input: File,
     output: &mut impl Write,
     name: &str,
     max: u64,
     start: Instant,
 ) -> Result<Member> {
-    let before = input.metadata()?;
-    if before.len() > max {
-        return Err(error("bundle member exceeds its byte bound"));
-    }
-    let mut hash = Sha256::new();
-    let mut bytes = 0;
-    let mut buffer = [0u8; 65_536];
-    loop {
-        check_time(start)?;
-        let n = input.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        bytes += n as u64;
-        if bytes > max {
-            return Err(error("bundle member grew beyond its byte bound"));
-        }
-        hash.update(&buffer[..n]);
-        output.write_all(&buffer[..n])?;
-    }
-    let after = input.metadata()?;
-    if bytes != before.len() || bytes != after.len() || before.modified()? != after.modified()? {
-        return Err(error("bundle member changed while being read"));
-    }
-    Ok(Member {
-        name: name.into(),
-        bytes,
-        digest: format!("sha256:{:x}", hash.finalize()),
-    })
+    let mut reader = CheckedReader::new(input, max, start)?;
+    std::io::copy(&mut reader, output)?;
+    reader.finish(name)
 }
 
-// Hash precisely the bytes consumed by semantic replay, on the same descriptor.
+/// Hash precisely the bytes consumed, on the same descriptor, within the
+/// member's byte bound and the bundle's work budget, and refuse a member
+/// that changed while it was read.
 struct CheckedReader {
     file: File,
     before: std::fs::Metadata,
@@ -337,7 +314,7 @@ fn assemble(
     events.seek(SeekFrom::Start(0))?;
     let mut members = vec![
         copy_hash(
-            &mut events,
+            events,
             &mut std::io::sink(),
             "events.ndjson",
             MAX_STREAM_BYTES,
@@ -357,10 +334,10 @@ fn assemble(
         for name in selected {
             let expected = capture_bytes(&run, name)?;
             let leaf = format!("{name}.bin");
-            let mut input = files::member(&artifacts, &leaf, false)?;
+            let input = files::member(&artifacts, &leaf, false)?;
             files::private(&input)?;
             let mut output = files::member(&stage.dir, &leaf, true)?;
-            let member = copy_hash(&mut input, &mut output, &leaf, MAX_CAPTURE_BYTES, start)?;
+            let member = copy_hash(input, &mut output, &leaf, MAX_CAPTURE_BYTES, start)?;
             if member.bytes != expected {
                 return Err(error("capture differs from its recorded size"));
             }

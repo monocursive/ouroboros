@@ -11,6 +11,19 @@ use std::{
     path::Path,
 };
 
+/// Every file a bundle directory may contain; verification refuses others.
+const MEMBERS: [&str; 7] = [
+    "bundle.json",
+    "signature.json",
+    "events.ndjson",
+    "receipts.json",
+    "stdout.bin",
+    "stderr.bin",
+    "argv.bin",
+];
+/// The key files keygen publishes through the same staging directory.
+const KEYS: [&str; 2] = ["private-key.pk8", "public-key.json"];
+
 fn name(value: &str) -> Result<CString> {
     if value.is_empty() || value == "." || value == ".." || value.contains('/') {
         return Err(LedgerError("unsafe bundle member name".into()));
@@ -143,10 +156,10 @@ pub(super) fn names(parent: &File) -> Result<BTreeSet<String>> {
         if leaf == "." || leaf == ".." {
             continue;
         }
-        result.insert(leaf.to_owned());
-        if result.len() > 7 {
+        if !MEMBERS.contains(&leaf) {
             return Err(LedgerError("unexpected bundle members".into()));
         }
+        result.insert(leaf.to_owned());
     }
     Ok(result)
 }
@@ -239,17 +252,11 @@ impl Drop for Staging {
         if self.published {
             return;
         }
-        for leaf in [
-            c"bundle.json",
-            c"events.ndjson",
-            c"receipts.json",
-            c"stdout.bin",
-            c"stderr.bin",
-            c"argv.bin",
-            c"signature.json",
-            c"private-key.pk8",
-            c"public-key.json",
-        ] {
+        for leaf in MEMBERS
+            .iter()
+            .chain(&KEYS)
+            .filter_map(|leaf| name(leaf).ok())
+        {
             // SAFETY: only fixed members of our pinned temporary directory are removed.
             unsafe {
                 libc::unlinkat(self.dir.as_raw_fd(), leaf.as_ptr(), 0);
