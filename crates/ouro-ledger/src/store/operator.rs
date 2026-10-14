@@ -22,23 +22,7 @@ fn validate_body(kind: &str, effect: Option<&str>, body: &Value) -> Result<()> {
     {
         return Err(LedgerError("operator intent needs a supported kind, object body and an effect id for lifecycle decisions".into()));
     }
-    for key in [
-        "actor",
-        "role",
-        "provenance",
-        "run_id",
-        "attempt_id",
-        "seq",
-        "prev",
-        "received_at",
-        "token_id",
-    ] {
-        if body.get(key).is_some() {
-            return Err(LedgerError(format!(
-                "operator body cannot supply reserved identity {key}"
-            )));
-        }
-    }
+    check_reserved(body, "operator")?;
     if canonical(body)?.len() > 65_536 {
         return Err(LedgerError("operator body exceeds 64 KiB bound".into()));
     }

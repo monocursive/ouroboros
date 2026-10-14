@@ -69,7 +69,6 @@ impl Store {
         }
         if let Some(completion) = &state.completion {
             let record = json!({"kind":completion.kind,"request_id":"settlement","effect_id":null,"body":completion.body});
-            validate_intent(self.stream(id)?, &record)?;
             self.append(id, record, "recovery", peer, None)?;
             journal.remove()?;
         } else if !alive(owner) {

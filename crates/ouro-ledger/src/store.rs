@@ -584,27 +584,10 @@ impl Store {
         {
             return Err(LedgerError("invalid owner intent".into()));
         }
-        for key in [
-            "actor",
-            "provenance",
-            "run_id",
-            "seq",
-            "prev",
-            "received_at",
-        ] {
-            if body.get(key).is_some() {
-                return Err(LedgerError(format!(
-                    "body cannot supply reserved identity {key}"
-                )));
-            }
-        }
         if self.stream(run_id)?.run.owner.as_ref() != Some(peer) {
             return Err(LedgerError(
                 "owner identity does not match the durable claim".into(),
             ));
-        }
-        if self.stream(run_id)?.pruned.is_none() {
-            validate_intent(self.stream(run_id)?, &json!({"kind":kind,"body":body}))?;
         }
         self.append(
             run_id,
@@ -746,8 +729,11 @@ impl Store {
                 "capture pruning is incomplete; retry GC or restart before mutations".into(),
             ));
         }
+        // Exactly the checks recovery repeats: anything acknowledged here must
+        // also be accepted from the canonical stream at the next start.
         validate_recovery(stream, &record, role)?;
         validate_transition(stream, &record)?;
+        validate_intent(stream, &record)?;
         let seq = stream
             .run
             .chain
@@ -1530,26 +1516,39 @@ fn original_payload(record: &Value) -> Value {
     value
 }
 
+/// Identity the writer assigns. No intent body may supply it, so a body can
+/// never be read as the record's own provenance.
+const RESERVED_BODY_KEYS: [&str; 9] = [
+    "actor",
+    "role",
+    "provenance",
+    "run_id",
+    "attempt_id",
+    "seq",
+    "prev",
+    "received_at",
+    "token_id",
+];
+
+fn check_reserved(body: &Value, what: &str) -> Result<()> {
+    match RESERVED_BODY_KEYS
+        .iter()
+        .find(|key| body.get(**key).is_some())
+    {
+        Some(key) => Err(LedgerError(format!(
+            "{what} body cannot supply reserved identity {key}"
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn validate_intent(stream: &Stream, record: &Value) -> Result<()> {
     let kind = record["kind"].as_str().unwrap_or("");
     if !["admitted", "denied", "settled", "note", "outcome_unknown"].contains(&kind) {
         return Ok(());
     }
     let body = &record["body"];
-    for key in [
-        "actor",
-        "provenance",
-        "run_id",
-        "seq",
-        "prev",
-        "received_at",
-    ] {
-        if body.get(key).is_some() {
-            return Err(LedgerError(format!(
-                "intent body cannot supply reserved identity {key}"
-            )));
-        }
-    }
+    check_reserved(body, "intent")?;
     if kind == "note"
         && ["receipt", "coverage", "outcome", "capture"]
             .iter()
@@ -3790,6 +3789,29 @@ mod tests {
             .unwrap();
         assert!(!page.local_consistency);
         assert_eq!(page.stream_status, "incomplete");
+    }
+
+    #[test]
+    fn append_refuses_every_intent_that_recovery_would_refuse() {
+        let (temp, mut store, run) = create();
+        for (forged, refusal) in [
+            (
+                json!({"kind":"note","request_id":"note","body":{"receipt":prepared(&run)}}),
+                "notes cannot replace receipt or state projections",
+            ),
+            (
+                json!({"kind":"outcome_unknown","request_id":"unknown","body":{"token_id":"x"}}),
+                "intent body cannot supply reserved identity token_id",
+            ),
+        ] {
+            let refused = store
+                .append(&run.run_id, forged, "owner", &peer(), None)
+                .unwrap_err();
+            assert!(refused.to_string().contains(refusal), "{refused}");
+        }
+        drop(store);
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        assert!(store.verify(None).unwrap()[0].local_consistency);
     }
 
     #[test]
