@@ -313,8 +313,8 @@ impl Store {
                 continue;
             }
             let collected = (|| -> Result<GcReceipt> {
-                let retained = if let Some(retained) = self.stream(id)?.pruned().cloned() {
-                    retained
+                let retained = if let Some(retained) = self.stream(id)?.pruned() {
+                    (**retained).clone()
                 } else {
                     self.begin_pruning(id, retain_days, &plan.evaluated_at, &plan.cutoff, peer)?
                 };

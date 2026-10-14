@@ -1,8 +1,10 @@
 //! Fresh verification in two halves. The writer plans a page from its
-//! accepted state, which costs a directory listing, one stat and two small
-//! bounded reads per run. A verifier then re-reads and re-hashes the canonical
-//! bytes off the writer thread, never past the layout the plan saw, so one
-//! large run never stalls the owners and producers waiting on the writer.
+//! accepted state: for each stream that costs a directory listing, a stat
+//! per segment and two small bounded reads, and for each pruned run a copy
+//! of its terminal projection (its retained authority is shared, not
+//! copied). A verifier then re-reads and re-hashes the canonical bytes off
+//! the writer thread, never past the layout the plan saw, so one large run
+//! never stalls the owners and producers waiting on the writer.
 use super::*;
 
 /// One page of fresh verification, as the writer planned it.
@@ -31,7 +33,7 @@ pub(crate) struct Target {
 
 enum TargetKind {
     Pruned {
-        retained: Box<pruning::Retained>,
+        retained: std::sync::Arc<pruning::Retained>,
         run: Box<RunRecord>,
     },
     Stream {
@@ -100,7 +102,7 @@ impl Store {
         let directory = self.run_dir(id);
         let kind = match stream.pruned() {
             Some(retained) => TargetKind::Pruned {
-                retained: Box::new(retained.clone()),
+                retained: retained.clone(),
                 run: Box::new(stream.run().clone()),
             },
             None => TargetKind::Stream {

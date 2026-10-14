@@ -94,7 +94,9 @@ pub(super) struct Stream {
     anchors: BTreeMap<u64, Anchor>,
     last_activity_at: Option<String>,
     retention_time_valid: bool,
-    pruned: Option<pruning::Retained>,
+    /// Shared, so planning a verification of a pruned run does not copy
+    /// its retained replay identities.
+    pruned: Option<std::sync::Arc<pruning::Retained>>,
 }
 
 pub(super) fn initial_run(
@@ -177,7 +179,7 @@ impl Stream {
             stream.source_gaps = vec![json!({"reason":"retained_source_loss"})];
         }
         stream.last_activity_at = Some(last_activity_at);
-        stream.pruned = Some(retained);
+        stream.pruned = Some(std::sync::Arc::new(retained));
         stream
     }
 
@@ -221,7 +223,7 @@ impl Stream {
     }
 
     /// The retained authority of a pruned run.
-    pub(super) fn pruned(&self) -> Option<&pruning::Retained> {
+    pub(super) fn pruned(&self) -> Option<&std::sync::Arc<pruning::Retained>> {
         self.pruned.as_ref()
     }
 
@@ -258,7 +260,7 @@ impl Stream {
     /// GC published this run's authority: until deletion completes the run
     /// projects `run`, and its history is never appended to again.
     pub(super) fn begin_pruning(&mut self, retained: pruning::Retained, run: RunRecord) {
-        self.pruned = Some(retained);
+        self.pruned = Some(std::sync::Arc::new(retained));
         self.run = run;
     }
 
