@@ -417,10 +417,63 @@ pub fn parse(
     source: LaunchSource,
     home: Option<&[u8]>,
 ) -> Result<LaunchProfile, JailError> {
+    let mut file = read_file(text)?;
+    merge_fragments(&mut file)?;
+    if file
+        .filesystem
+        .read_only
+        .iter()
+        .any(|path| file.filesystem.read_write.contains(path))
+    {
+        return Err(invalid(
+            "launch.filesystem",
+            "conflicting read-only and writable grants",
+        ));
+    }
+    if file.name != expected_name {
+        return Err(invalid(
+            "launch.name",
+            format!(
+                "`name = \"{}\"` does not match the file `{expected_name}.toml`",
+                file.name
+            ),
+        ));
+    }
+    let jail = contained_jail(&file.jail)?;
+    let state_var = match file.state_var.take() {
+        Some(name) => {
+            check_env_name(&name, "launch.state_var")?;
+            Some(name)
+        }
+        None => None,
+    };
+    let subdirs = state_subdirs(&file.state_subdirs)?;
+    let environment = environment(&file.environment, state_var.as_deref())?;
     let base_dir = source
         .directory()
         .map(|directory| directory.as_os_str().as_bytes().to_vec());
-    let mut file: LaunchFile = toml::from_str(text).map_err(|error| {
+    let credentials = credentials(&file, &subdirs, base_dir.as_deref(), home)?;
+    Ok(LaunchProfile {
+        name: file.name,
+        source,
+        bundles: file.bundles,
+        filesystem: file.filesystem,
+        jail,
+        state_var,
+        home_is_state: file.home_is_state,
+        state_subdirs: subdirs.into_iter().map(|subdir| subdir.text).collect(),
+        environment,
+        credentials,
+        network_allow: file
+            .network
+            .map(|network| network.allow)
+            .unwrap_or_default(),
+    })
+}
+
+/// The file's grammar, and no narrowing key in it.
+fn read_file(text: &str) -> Result<LaunchFile, JailError> {
+    let file: LaunchFile = toml::from_str(text).map_err(|error| {
         invalid(
             "launch",
             format!(
@@ -433,21 +486,36 @@ pub fn parse(
     // forwards grants only), so a declared narrowing key must refuse here
     // rather than parse into silence: the operator would believe a
     // `deny_read` that never applied.
-    if file.filesystem.protected_coverage.is_some() || !file.filesystem.deny_read.is_empty() {
+    if narrows(&file.filesystem) {
         return Err(invalid(
             "launch.filesystem",
             "launch profiles contribute grants only; narrowing belongs to the policy file",
         ));
     }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Fragment {
-        #[serde(default)]
-        environment: BTreeMap<String, EnvEntry>,
-        #[serde(default)]
-        filesystem: crate::config::FilesystemSection,
-        network: Option<LaunchNetwork>,
-    }
+    Ok(file)
+}
+
+/// Whether `filesystem` asks for a narrowing, which a launch profile and its
+/// fragments never carry.
+fn narrows(filesystem: &crate::config::FilesystemSection) -> bool {
+    filesystem.protected_coverage.is_some() || !filesystem.deny_read.is_empty()
+}
+
+/// One bundled fragment's grammar.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Fragment {
+    #[serde(default)]
+    environment: BTreeMap<String, EnvEntry>,
+    #[serde(default)]
+    filesystem: crate::config::FilesystemSection,
+    network: Option<LaunchNetwork>,
+}
+
+/// Merges the bundled fragments `file` names into it: their environment
+/// (a binding the file already has is a conflict), their grants and their
+/// network rules.
+fn merge_fragments(file: &mut LaunchFile) -> Result<(), JailError> {
     let mut fragments = BTreeSet::new();
     for name in &file.bundles {
         if !fragments.insert(name.clone()) {
@@ -472,9 +540,7 @@ pub fn parse(
                 ));
             }
         }
-        if fragment.filesystem.protected_coverage.is_some()
-            || !fragment.filesystem.deny_read.is_empty()
-        {
+        if narrows(&fragment.filesystem) {
             return Err(invalid(
                 "launch.bundles",
                 "fragments contribute grants only",
@@ -493,85 +559,76 @@ pub fn parse(
                 .extend(network.allow);
         }
     }
-    if file
-        .filesystem
-        .read_only
-        .iter()
-        .any(|path| file.filesystem.read_write.contains(path))
-    {
-        return Err(invalid(
-            "launch.filesystem",
-            "conflicting read-only and writable grants",
-        ));
+    Ok(())
+}
+
+/// `jail`: a contained built-in profile. §6.1: `--profile none` is the only
+/// way to select `none`.
+fn contained_jail(jail: &str) -> Result<ProfileName, JailError> {
+    match ProfileName::parse(jail) {
+        Some(ProfileName::None) => Err(JailError::new(
+            ErrorCode::PolicyWidening,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            "a launch profile may not select `none`; only `--profile none` does".to_owned(),
+        )
+        .with_key_path("launch.jail")),
+        Some(contained) => Ok(contained),
+        None => Err(invalid(
+            "launch.jail",
+            format!("`{jail}` is not a contained built-in profile"),
+        )),
     }
-    if file.name != expected_name {
-        return Err(invalid(
-            "launch.name",
-            format!(
-                "`name = \"{}\"` does not match the file `{expected_name}.toml`",
-                file.name
-            ),
-        ));
+}
+
+/// An environment name a launch profile may bind: well formed, and not one
+/// the jail reserves.
+fn check_env_name(name: &str, key: &str) -> Result<(), JailError> {
+    if !valid_env_name(name) {
+        return Err(invalid(key, format!("`{name}` is not an environment name")));
     }
-    let jail = match ProfileName::parse(&file.jail) {
-        Some(ProfileName::None) => {
-            // §6.1: `--profile none` is the only way to select `none`.
-            return Err(JailError::new(
-                ErrorCode::PolicyWidening,
-                ErrorStage::Resolving,
-                Remediation::Configuration,
-                "a launch profile may not select `none`; only `--profile none` does".to_owned(),
-            )
-            .with_key_path("launch.jail"));
-        }
-        Some(contained) => contained,
-        None => {
-            return Err(invalid(
-                "launch.jail",
-                format!("`{}` is not a contained built-in profile", file.jail),
-            ));
-        }
-    };
+    if let Some(reason) = reserved_reason(name) {
+        return Err(invalid(key, format!("`{name}` is {reason}")));
+    }
+    Ok(())
+}
 
-    let check_name = |name: &str, key: &str| -> Result<(), JailError> {
-        if !valid_env_name(name) {
-            return Err(invalid(key, format!("`{name}` is not an environment name")));
-        }
-        if let Some(reason) = reserved_reason(name) {
-            return Err(invalid(key, format!("`{name}` is {reason}")));
-        }
-        Ok(())
-    };
+/// One `state_subdirs` entry: its spelling, and its components for the
+/// credential destination checks.
+struct StateSubdir {
+    text: NativeString,
+    components: Vec<Vec<u8>>,
+}
 
-    let state_var = match file.state_var {
-        Some(name) => {
-            check_name(&name, "launch.state_var")?;
-            Some(name)
-        }
-        None => None,
-    };
-
-    // state_subdirs: a set of relative directories, no duplicates.
-    let mut subdir_components: Vec<Vec<Vec<u8>>> = Vec::new();
-    let mut state_subdirs: Vec<NativeString> = Vec::new();
-    let mut seen_subdirs = BTreeSet::new();
-    for subdir in &file.state_subdirs {
+/// `state_subdirs`: a set of relative directories, no duplicates.
+fn state_subdirs(subdirs: &[String]) -> Result<Vec<StateSubdir>, JailError> {
+    let mut out: Vec<StateSubdir> = Vec::new();
+    for subdir in subdirs {
         let components = relative_components(subdir, "launch.state_subdirs", false)?;
-        if !seen_subdirs.insert(components.clone()) {
+        if out.iter().any(|seen| seen.components == components) {
             return Err(invalid(
                 "launch.state_subdirs",
                 format!("`{subdir}` is listed twice"),
             ));
         }
-        subdir_components.push(components);
-        state_subdirs.push(NativeString::Text(subdir.clone()));
+        out.push(StateSubdir {
+            text: NativeString::Text(subdir.clone()),
+            components,
+        });
     }
+    Ok(out)
+}
 
+/// `environment`: literal values, or paths under vendor state.
+fn environment(
+    entries: &BTreeMap<String, EnvEntry>,
+    state_var: Option<&str>,
+) -> Result<Vec<EnvBinding>, JailError> {
     let mut environment: Vec<EnvBinding> = Vec::new();
-    for (name, entry) in &file.environment {
+    for (name, entry) in entries {
         let key = format!("launch.environment.{name}");
-        check_name(name, &key)?;
-        if state_var.as_deref() == Some(name.as_str()) {
+        check_env_name(name, &key)?;
+        if state_var == Some(name.as_str()) {
             return Err(invalid(
                 &key,
                 format!("`{name}` is already the state variable"),
@@ -597,10 +654,21 @@ pub fn parse(
             value,
         });
     }
+    Ok(environment)
+}
 
+/// `credentials`: each declaration with its mode, its vault policy, a
+/// destination that conflicts with no other and no state subdirectory, and
+/// an absolute source.
+fn credentials(
+    file: &LaunchFile,
+    subdirs: &[StateSubdir],
+    base_dir: Option<&[u8]>,
+    home: Option<&[u8]>,
+) -> Result<Vec<CredentialDecl>, JailError> {
     let mut credentials: Vec<CredentialDecl> = Vec::new();
     let mut destinations: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
-    let mut vault_names = std::collections::BTreeSet::new();
+    let mut vault_names = BTreeSet::new();
     for (id, entry) in &file.credentials {
         let key = format!("launch.credentials.{id}");
         if !valid_credential_id(id) {
@@ -619,25 +687,7 @@ pub fn parse(
                     "vault ids collide as environment variable names",
                 ));
             }
-            if !entry.dest.is_empty() {
-                return Err(invalid(&key, "vault credentials have no destination file"));
-            }
-            let policy = crate::vault::Policy {
-                hosts: entry.hosts.clone(),
-                paths: entry.paths.clone(),
-                binaries: entry.binaries.clone(),
-                refresh: entry.refresh.clone(),
-                allow_plaintext: entry.allow_plaintext,
-                header: entry.header.as_ref().map(|header| crate::vault::Header {
-                    name: header
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| "authorization".to_owned()),
-                    prefix: header.prefix.clone(),
-                }),
-            };
-            policy.validate().map_err(|e| invalid(&key, e))?;
-            Some(policy)
+            Some(vault_policy(entry, &key)?)
         } else {
             if !entry.hosts.is_empty()
                 || entry.allow_plaintext
@@ -667,10 +717,10 @@ pub fn parse(
                 ));
             }
         }
-        for (subdir, components) in file.state_subdirs.iter().zip(&subdir_components) {
+        for (subdir, state) in file.state_subdirs.iter().zip(subdirs) {
             // A subdirectory may contain a credential file; it may not be one,
             // nor lie beneath one.
-            if is_prefix(&dest, components) {
+            if is_prefix(&dest, &state.components) {
                 return Err(invalid(
                     "launch.state_subdirs",
                     format!("`{subdir}` conflicts with the destination of credential `{id}`"),
@@ -680,7 +730,7 @@ pub fn parse(
         destinations.push((id.clone(), dest));
 
         let source_key = format!("{key}.source");
-        let source = credential_source(&entry.source, base_dir.as_deref(), home, &source_key)?;
+        let source = credential_source(&entry.source, base_dir, home, &source_key)?;
         credentials.push(CredentialDecl {
             id: id.clone(),
             source: native(source, &source_key)?,
@@ -689,23 +739,31 @@ pub fn parse(
             mode,
         });
     }
+    Ok(credentials)
+}
 
-    Ok(LaunchProfile {
-        name: file.name,
-        source,
-        bundles: file.bundles,
-        filesystem: file.filesystem,
-        jail,
-        state_var,
-        home_is_state: file.home_is_state,
-        state_subdirs,
-        environment,
-        credentials,
-        network_allow: file
-            .network
-            .map(|network| network.allow)
-            .unwrap_or_default(),
-    })
+/// A `vault` credential's HTTP policy: no destination file, and a policy
+/// that validates.
+fn vault_policy(entry: &CredentialEntry, key: &str) -> Result<crate::vault::Policy, JailError> {
+    if !entry.dest.is_empty() {
+        return Err(invalid(key, "vault credentials have no destination file"));
+    }
+    let policy = crate::vault::Policy {
+        hosts: entry.hosts.clone(),
+        paths: entry.paths.clone(),
+        binaries: entry.binaries.clone(),
+        refresh: entry.refresh.clone(),
+        allow_plaintext: entry.allow_plaintext,
+        header: entry.header.as_ref().map(|header| crate::vault::Header {
+            name: header
+                .name
+                .clone()
+                .unwrap_or_else(|| "authorization".to_owned()),
+            prefix: header.prefix.clone(),
+        }),
+    };
+    policy.validate().map_err(|e| invalid(key, e))?;
+    Ok(policy)
 }
 
 // ---------------------------------------------------------------------------
