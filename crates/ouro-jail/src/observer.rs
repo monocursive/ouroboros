@@ -15,6 +15,10 @@ use crate::records::{
     CLOSED_SET_LINUX_V1, Coverage, CoverageEntry, Gap, ObserverRecord, SourceHealth, SourceStatus,
 };
 
+/// `fields.kind` of the note a learning run writes for a read-only open
+/// (`--learn`): not a closed-set result, so it is counted in no class.
+pub const LEARNING_READ_KIND: &str = "learning_read";
+
 /// One operation in the closed set (§11.2).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum ClosedOperation {
@@ -48,6 +52,16 @@ impl ClosedOperation {
         ClosedOperation::FsDeny,
         ClosedOperation::NetConnect,
     ];
+
+    /// The operation an event envelope names, or `None` for a name outside
+    /// the closed set. The inverse of [`ClosedOperation::as_str`], derived
+    /// from it, so the two cannot disagree; there is no fallback operation.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<ClosedOperation> {
+        ClosedOperation::ALL
+            .into_iter()
+            .find(|operation| operation.as_str() == name)
+    }
 
     /// The operation name used in the event envelope.
     #[must_use]
@@ -108,6 +122,15 @@ impl CoverageClass {
         CoverageClass::Net,
         CoverageClass::ProxyNet,
         CoverageClass::Limits,
+    ];
+
+    /// The classes the audit source counts (§11.4), in [`CoverageClass::ALL`]
+    /// order: the ones a closed-set result can be counted under.
+    pub const AUDIT: [CoverageClass; 4] = [
+        CoverageClass::Exec,
+        CoverageClass::FsWrite,
+        CoverageClass::FsDeny,
+        CoverageClass::Net,
     ];
 
     /// The receipt key.
@@ -271,6 +294,9 @@ impl CoverageSummary {
 mod tests {
     use super::*;
 
+    /// The audit writer counts every result under the class this mapping
+    /// gives (`AuditWriter::record_syscall`): a refused connect is emitted as
+    /// `fs.deny`, so it lands in `fs.deny` and never in `net`.
     #[test]
     fn a_denied_connect_counts_only_under_fs_deny() {
         assert_eq!(
@@ -281,6 +307,23 @@ mod tests {
             ClosedOperation::NetConnect.coverage_class(),
             CoverageClass::Net
         );
+    }
+
+    #[test]
+    fn every_operation_name_reads_back_and_no_other_name_does() {
+        for operation in ClosedOperation::ALL {
+            assert_eq!(
+                ClosedOperation::from_name(operation.as_str()),
+                Some(operation)
+            );
+            assert!(
+                CoverageClass::AUDIT.contains(&operation.coverage_class()),
+                "{operation:?} is counted outside the audit classes"
+            );
+        }
+        for name in ["", "fs", "fs.read", "FS.WRITE", "net.connect ", "proc"] {
+            assert_eq!(ClosedOperation::from_name(name), None, "{name:?}");
+        }
     }
 
     #[test]

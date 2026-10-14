@@ -11,7 +11,9 @@ use std::time::SystemTime;
 
 use serde_json::{Map, Value};
 
-use crate::observer::{ClassSummary, CoverageClass, CoverageSummary};
+use crate::observer::{
+    ClassSummary, ClosedOperation, CoverageClass, CoverageSummary, LEARNING_READ_KIND,
+};
 use crate::records::{
     CLOSED_SET_LINUX_V1, Completion, Event, EventOutcome, Gap, SourceHealth, SourceStatus,
 };
@@ -374,7 +376,7 @@ impl AuditWriter {
                 return;
             };
             let mut fields = Map::new();
-            fields.insert("kind".into(), Value::from("learning_read"));
+            fields.insert("kind".into(), Value::from(LEARNING_READ_KIND));
             fields.insert(
                 "path".into(),
                 serde_json::to_value(
@@ -401,15 +403,22 @@ impl AuditWriter {
             self.emit(&event, CoverageClass::FsDeny);
             return;
         }
+        let Some(base) = base_operation(op, args.flags) else {
+            self.record_unmapped();
+            return;
+        };
         // A write refused by the filesystem itself — EROFS on a read-only
         // grant, EBUSY on a rename or unlink across one — is a denial of a
         // mutation just like EACCES/EPERM (issue draft 09); the receipt's
         // fs.deny must not read 0 while the trace shows refused writes.
-        let base = op.audit_operation(args.flags);
         let denied = matches!(errno, Some(libc::EACCES | libc::EPERM))
-            || (matches!(base, "fs.write" | "fs.create" | "fs.rename" | "fs.unlink")
+            || (base.coverage_class() == CoverageClass::FsWrite
                 && matches!(errno, Some(libc::EROFS | libc::EBUSY)));
-        let operation = if denied { "fs.deny" } else { base };
+        let operation = if denied {
+            ClosedOperation::FsDeny
+        } else {
+            base
+        };
 
         let mut fields = Map::new();
         fields.insert("syscall".to_owned(), Value::from(syscall.to_owned()));
@@ -439,11 +448,8 @@ impl AuditWriter {
             );
         }
         if denied {
-            fields.insert(
-                "attempted_operation".to_owned(),
-                Value::from(base.to_owned()),
-            );
-        } else if operation == "fs.write" {
+            fields.insert("attempted_operation".to_owned(), Value::from(base.as_str()));
+        } else if operation == ClosedOperation::FsWrite {
             // §11.2: a field named `fs.write` always carries its precise
             // action, so a consumer cannot present it as a content diff. An
             // open says it was opened for mutation; a `truncate` says the
@@ -485,14 +491,14 @@ impl AuditWriter {
             seq,
             SystemTime::now(),
             crate::platform::elapsed_since_start_ns(),
-            operation,
+            operation.as_str(),
             outcome,
             fields,
         );
         // An undelivered frame is not an observed result (§13.2): it
         // degrades the class and adds nothing to its count.
-        if self.emit(&event, class_of(operation)) {
-            self.bump(class_of(operation));
+        if self.emit(&event, operation.coverage_class()) {
+            self.bump(operation.coverage_class());
         }
     }
 
@@ -594,12 +600,13 @@ impl AuditWriter {
             seq,
             SystemTime::now(),
             crate::platform::elapsed_since_start_ns(),
-            "net.connect",
+            ClosedOperation::NetConnect.as_str(),
             outcome,
             fields,
         );
-        if self.emit(&event, class_of("net.connect")) {
-            self.bump(class_of("net.connect"));
+        let class = ClosedOperation::NetConnect.coverage_class();
+        if self.emit(&event, class) {
+            self.bump(class);
         }
     }
 
@@ -628,6 +635,24 @@ impl AuditWriter {
             at_ns,
             Some(1),
         );
+    }
+
+    /// A result whose operation the closed set does not name. It is never
+    /// counted under a guessed class: it could have been any audit result,
+    /// so it is a one-result gap in every audit class.
+    fn record_unmapped(&mut self) {
+        let now = now_ns();
+        self.push_gap(Gap {
+            classes: CoverageClass::AUDIT
+                .iter()
+                .map(|class| class.as_str().to_owned())
+                .collect(),
+            source: "audit".to_owned(),
+            start_ns: now.to_string(),
+            end_ns: Some(now.to_string()),
+            reason: OPERATION_UNMAPPED.to_owned(),
+            lost_count: Some(1),
+        });
     }
 
     /// A confirmed exec transition (`PTRACE_EVENT_EXEC`).
@@ -679,12 +704,13 @@ impl AuditWriter {
             seq,
             SystemTime::now(),
             crate::platform::elapsed_since_start_ns(),
-            "proc.exec",
+            ClosedOperation::ProcExec.as_str(),
             outcome,
             fields,
         );
-        if self.emit(&event, CoverageClass::Exec) {
-            self.bump(CoverageClass::Exec);
+        let class = ClosedOperation::ProcExec.coverage_class();
+        if self.emit(&event, class) {
+            self.bump(class);
         }
     }
 
@@ -736,12 +762,13 @@ impl AuditWriter {
             seq,
             SystemTime::now(),
             crate::platform::elapsed_since_start_ns(),
-            "proc.exit",
+            ClosedOperation::ProcExit.as_str(),
             outcome,
             fields,
         );
-        if self.emit(&event, CoverageClass::Exec) {
-            self.bump(CoverageClass::Exec);
+        let class = ClosedOperation::ProcExit.coverage_class();
+        if self.emit(&event, class) {
+            self.bump(class);
         }
     }
 
@@ -1117,6 +1144,8 @@ impl AuditWriter {
 const TRACE_WRITER_POISONED: &str = "trace_writer_poisoned";
 /// The gap reason of an observer whose tracer thread panicked.
 const OBSERVER_PANICKED: &str = "observer_panicked";
+/// The gap reason of a result whose operation the closed set does not name.
+const OPERATION_UNMAPPED: &str = "operation_unmapped";
 
 /// Now, in the gap intervals' unit: nanoseconds since supervisor start.
 fn now_ns() -> u64 {
@@ -1162,19 +1191,12 @@ fn strip_root(path: &[u8], root: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The operation a successful closed-set call is reported as (§11.2): the
-/// observer's own mapping, which the published table uses too.
-fn base_operation(op: ClosedOp, flags: Option<u64>) -> &'static str {
-    op.audit_operation(flags)
-}
-
-/// The coverage class an emitted operation is counted under (§11.4).
-fn class_of(operation: &str) -> CoverageClass {
-    match operation {
-        "proc.exec" | "proc.exit" => CoverageClass::Exec,
-        "fs.deny" => CoverageClass::FsDeny,
-        "net.connect" => CoverageClass::Net,
-        _ => CoverageClass::FsWrite,
-    }
+/// observer's own mapping, which the published table uses too, read into the
+/// closed set. `None` would mean that mapping named an operation outside the
+/// closed set; a test holds every row to it, and the writer turns it into a
+/// gap rather than guess a class.
+fn base_operation(op: ClosedOp, flags: Option<u64>) -> Option<ClosedOperation> {
+    ClosedOperation::from_name(op.audit_operation(flags))
 }
 
 /// The classes a gap affects, from the operations it swallowed.
@@ -1187,7 +1209,13 @@ fn class_of(operation: &str) -> CoverageClass {
 fn classes_for(ops: OpSet) -> Vec<CoverageClass> {
     let mut classes: BTreeSet<CoverageClass> = BTreeSet::new();
     for op in ops.iter() {
-        classes.insert(class_of(base_operation(op, None)));
+        match base_operation(op, None) {
+            Some(operation) => {
+                classes.insert(operation.coverage_class());
+            }
+            // An operation without a class could have been any result.
+            None => classes.extend(CoverageClass::AUDIT),
+        }
         classes.insert(CoverageClass::FsDeny);
     }
     classes.into_iter().collect()
@@ -1229,30 +1257,85 @@ mod tests {
     fn a_create_open_is_fs_create_and_a_mutating_open_is_fs_write() {
         assert_eq!(
             base_operation(ClosedOp::Open, Some(O_CREAT | 1)),
-            "fs.create"
+            Some(ClosedOperation::FsCreate)
         );
-        assert_eq!(base_operation(ClosedOp::Open, Some(1)), "fs.write");
-        assert_eq!(base_operation(ClosedOp::Open, None), "fs.write");
+        assert_eq!(
+            base_operation(ClosedOp::Open, Some(1)),
+            Some(ClosedOperation::FsWrite)
+        );
+        assert_eq!(
+            base_operation(ClosedOp::Open, None),
+            Some(ClosedOperation::FsWrite)
+        );
     }
 
     #[test]
     fn every_directory_entry_creation_is_fs_create() {
         for op in [ClosedOp::Mkdir, ClosedOp::Link, ClosedOp::Symlink] {
-            assert_eq!(base_operation(op, None), "fs.create");
+            assert_eq!(base_operation(op, None), Some(ClosedOperation::FsCreate));
         }
         for op in [ClosedOp::Unlink, ClosedOp::Rmdir] {
-            assert_eq!(base_operation(op, None), "fs.unlink");
+            assert_eq!(base_operation(op, None), Some(ClosedOperation::FsUnlink));
         }
-        assert_eq!(base_operation(ClosedOp::Rename, None), "fs.rename");
-        assert_eq!(base_operation(ClosedOp::Connect, None), "net.connect");
+        assert_eq!(
+            base_operation(ClosedOp::Rename, None),
+            Some(ClosedOperation::FsRename)
+        );
+        assert_eq!(
+            base_operation(ClosedOp::Connect, None),
+            Some(ClosedOperation::NetConnect)
+        );
+    }
+
+    /// The tracer's §11.2 mapping names only closed-set operations, whatever
+    /// the flags, so no result reaches the unmapped gap.
+    #[test]
+    fn every_tracer_operation_is_in_the_closed_set() {
+        for op in ClosedOp::ALL {
+            for flags in [None, Some(0), Some(1), Some(O_CREAT | 1)] {
+                assert!(
+                    base_operation(op, flags).is_some(),
+                    "{op:?} with {flags:?} names an operation outside the closed set"
+                );
+            }
+        }
     }
 
     #[test]
     fn a_denied_connect_counts_under_fs_deny_only() {
-        assert_eq!(class_of("fs.deny"), CoverageClass::FsDeny);
-        assert_eq!(class_of("net.connect"), CoverageClass::Net);
-        assert_eq!(class_of("fs.create"), CoverageClass::FsWrite);
-        assert_eq!(class_of("proc.exit"), CoverageClass::Exec);
+        let mut writer = writer();
+        let connect = |writer: &mut AuditWriter, ret: i64| {
+            writer.record_syscall(
+                10,
+                Some(1),
+                10,
+                ClosedOp::Connect,
+                "connect",
+                &Args::default(),
+                ret,
+            );
+        };
+        connect(&mut writer, -i64::from(libc::EACCES));
+        assert_eq!(writer.count(CoverageClass::FsDeny), 1);
+        assert_eq!(writer.count(CoverageClass::Net), 0);
+        connect(&mut writer, 0);
+        assert_eq!(writer.count(CoverageClass::FsDeny), 1);
+        assert_eq!(writer.count(CoverageClass::Net), 1);
+    }
+
+    #[test]
+    fn an_unmapped_operation_is_a_gap_in_every_audit_class_never_a_count() {
+        let mut writer = writer();
+        writer.record_unmapped();
+        let summary = writer.summary(&TracerSummary::default(), true);
+        assert_degraded_classes_name_their_gaps(&summary);
+        for class in CoverageClass::AUDIT {
+            let entry = &summary.classes[&class];
+            assert_eq!(entry.status, SourceStatus::Degraded, "{class:?}");
+            assert_eq!(entry.observed_count, None, "{class:?}");
+            assert_eq!(entry.gaps[0].reason, "operation_unmapped");
+            assert_eq!(entry.gaps[0].lost_count, Some(1));
+        }
     }
 
     #[test]
@@ -1717,8 +1800,14 @@ mod tests {
 
     #[test]
     fn the_two_operations_revision_eight_added_are_classified() {
-        assert_eq!(base_operation(ClosedOp::Mknod, None), "fs.create");
-        assert_eq!(base_operation(ClosedOp::Truncate, None), "fs.write");
+        assert_eq!(
+            base_operation(ClosedOp::Mknod, None),
+            Some(ClosedOperation::FsCreate)
+        );
+        assert_eq!(
+            base_operation(ClosedOp::Truncate, None),
+            Some(ClosedOperation::FsWrite)
+        );
         assert_eq!(
             base_operation(ClosedOp::Truncate, None),
             base_operation(ClosedOp::Open, Some(1)),
