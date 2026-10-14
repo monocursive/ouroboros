@@ -1088,10 +1088,17 @@ pub fn timings(rec: &LaunchRecord) -> Option<Timings> {
 
 // ---------------------------------------------------------------- statistics
 
-/// The middle value of sorted data; the mean of the two middle values for
-/// an even count.
+/// `values`, sorted (NaN last).
+fn sorted(values: &[f64]) -> Vec<f64> {
+    let mut v = values.to_vec();
+    v.sort_by(f64::total_cmp);
+    v
+}
+
+/// The middle value; the mean of the two middle values for an even count.
 #[must_use]
-pub fn median(sorted: &[f64]) -> Option<f64> {
+pub fn median(values: &[f64]) -> Option<f64> {
+    let sorted = sorted(values);
     let n = sorted.len();
     if n == 0 {
         return None;
@@ -1104,16 +1111,23 @@ pub fn median(sorted: &[f64]) -> Option<f64> {
 }
 
 /// The 95th percentile by nearest rank: the ⌈0.95·n⌉-th smallest value.
-/// Always an observed value; for n = 30 it is the 29th smallest.
+/// Always an observed value; for n = 30 it is the 29th smallest. The Python
+/// harnesses under `docs/benchmarks/jail` interpolate between ranks instead,
+/// so their p95s and these are not comparable value for value.
 #[must_use]
-pub fn p95(sorted: &[f64]) -> Option<f64> {
+pub fn p95(values: &[f64]) -> Option<f64> {
+    let sorted = sorted(values);
     let n = sorted.len();
     if n == 0 {
         return None;
     }
-    // ⌈0.95·n⌉ in integers: ⌈95n/100⌉.
-    let rank = (95 * n).div_ceil(100).max(1);
-    Some(sorted[rank - 1])
+    Some(sorted[p95_rank(n) - 1])
+}
+
+/// The rank [`p95`] takes of `n` values: ⌈0.95·n⌉ in integers, ⌈95n/100⌉.
+#[must_use]
+pub fn p95_rank(n: usize) -> usize {
+    (95 * n).div_ceil(100).max(1)
 }
 
 /// A distribution's summary.
@@ -1863,13 +1877,49 @@ fn med_range(d: Option<&Dist>) -> String {
     )
 }
 
-fn verdict_text(v: Option<Verdict>, value: Option<f64>, unit: &str) -> String {
+/// A measured value with its unit, or `n/a` (never with a unit).
+fn with_unit(value: Option<f64>, unit: &str) -> String {
+    value.map_or_else(|| "n/a".to_owned(), |x| format!("{x:.1}{unit}"))
+}
+
+/// The budget a verdict was judged against, with the value's margin to it.
+fn margin(value: Option<f64>, budget: f64, unit: &str) -> String {
+    match value {
+        None => format!("budget {budget:.0}{unit}"),
+        Some(x) if x < budget => {
+            format!("{:.1}{unit} under the {budget:.0}{unit} budget", budget - x)
+        }
+        Some(x) => format!("{:.1}{unit} over the {budget:.0}{unit} budget", x - budget),
+    }
+}
+
+/// A verdict with the value it judged and its margin to `budget`; `n/a`
+/// without a verdict.
+fn verdict_text(v: Option<Verdict>, value: Option<f64>, unit: &str, budget: f64) -> String {
+    let value_text = with_unit(value, unit);
+    let margin = margin(value, budget, unit);
     match v {
         None => "n/a".to_owned(),
-        Some(Verdict::Loaded) => format!("loaded (no verdict; {}{unit})", num(value, 1)),
-        Some(Verdict::Insufficient) => format!("insufficient ({}{unit})", num(value, 1)),
-        Some(v) => format!("{} ({}{unit})", enum_name(&v), num(value, 1)),
+        Some(Verdict::Loaded) => format!("loaded (no verdict; {value_text}; {margin})"),
+        Some(v) => format!("{} ({value_text}; {margin})", enum_name(&v)),
     }
+}
+
+/// [`verdict_text`], or only the measured value where no verdict applies.
+fn verdict_or_value(v: Option<Verdict>, value: Option<f64>, unit: &str, budget: f64) -> String {
+    match v {
+        None => with_unit(value, unit),
+        Some(_) => verdict_text(v, value, unit, budget),
+    }
+}
+
+/// The column heads of the two budgets, from their constants.
+fn startup_budget_head() -> String {
+    format!("p95 added startup < {STARTUP_BUDGET_MS:.0} ms")
+}
+
+fn overhead_budget_head(what: &str) -> String {
+    format!("{what} < {OVERHEAD_BUDGET_PCT:.0}%")
 }
 
 fn reasons_text(map: &BTreeMap<String, usize>) -> String {
@@ -1908,7 +1958,10 @@ fn host_line(host: &Value) -> String {
     )
 }
 
-const DEFINITIONS: &str = "\
+/// The definitions section, with the spec's numbers from their constants.
+fn definitions() -> String {
+    format!(
+        "\
 ## Definitions
 
 - **Launcher.** `ouro-fixture perf-launch`, outside the jail, forks the arm's \
@@ -1941,8 +1994,9 @@ of every arm.
 baseline arm's median, minus one. The median of these is the ratio of \
 medians minus one.
 - **Median / p95.** The middle value (mean of the two middle values for an \
-even count); p95 by nearest rank, the ⌈0.95·n⌉-th smallest value (the 29th of \
-30).
+even count); p95 by nearest rank, the ⌈0.95·n⌉-th smallest value (the {rank}th of \
+{min}); the Python harnesses interpolate, so their p95s are not comparable \
+value for value.
 - **Peak RSS.** Launched HWM: the launched process's own `VmHWM` (the \
 supervisor for a jailed arm), last sample (a lower bound). Reaped tree: \
 `wait4`'s `ru_maxrss`, the largest resident set of the launched process and \
@@ -1966,7 +2020,7 @@ audit frames equal to the receipt's closed-set counts; no audit frame with \
 observation off), and a trace that is complete and ends on the final \
 receipt's note (§13.3). Everything else is excluded, counted by reason, never \
 averaged, and its attempt, stdout and stderr are kept under `kept/`.
-- **Verdicts.** Against direct execution only. `insufficient`: fewer than 30 \
+- **Verdicts.** Against direct execution only. `insufficient`: fewer than {min} \
 valid launches on either side, any excluded launch on either side (no verdict \
 over survivors), or a raw-data problem. `loaded`: the host was not shown \
 quiet (a counted launch of either side above `--max-load` or with no load \
@@ -1980,7 +2034,11 @@ verdict. The direct target's cgroup is recorded per launch.
 - **Sessions.** The plain and scope passes run one after the other, so a \
 difference between them is confounded by time; each pass's load is in \
 `passes.ndjson`.
-";
+",
+        rank = p95_rank(SPEC_MIN_LAUNCHES),
+        min = SPEC_MIN_LAUNCHES
+    )
+}
 
 /// How the verdicts of several cells combine: pass only if all pass.
 fn roll_up(verdicts: &[Verdict]) -> (Option<Verdict>, String) {
@@ -2147,8 +2205,11 @@ pub fn render_markdown(summary: &Summary) -> String {
          end; the integrator's current reading of §5), **post-start** (work + teardown: \
          everything after entry, so startup + post-start cover the whole run), and \
          **end-to-end wall** (startup included).\n\n\
-         | Profile | Comparison | p95 added startup < 250 ms | Work phase < 20% | \
-         Post-start < 20% | End-to-end wall < 20% |\n|---|---|---|---|---|---|"
+         | Profile | Comparison | {} | {} | {} | {} |\n|---|---|---|---|---|---|",
+        startup_budget_head(),
+        overhead_budget_head("Work phase"),
+        overhead_budget_head("Post-start"),
+        overhead_budget_head("End-to-end wall"),
     );
     let profiles: Vec<Profile> = {
         let mut v: Vec<Profile> = summary.comparisons.iter().map(|c| c.profile).collect();
@@ -2368,21 +2429,27 @@ pub fn render_markdown(summary: &Summary) -> String {
                 verdict_text(
                     c.startup_verdict,
                     c.added_startup_ms.as_ref().map(|d| d.p95),
-                    " ms"
+                    " ms",
+                    STARTUP_BUDGET_MS
                 ),
-                verdict_text(c.work_verdict, median(&c.work_overhead_pct), "%")
-                    .replace("n/a", &format!("{}%", num(median(&c.work_overhead_pct), 1))),
-                verdict_text(
+                verdict_or_value(
+                    c.work_verdict,
+                    median(&c.work_overhead_pct),
+                    "%",
+                    OVERHEAD_BUDGET_PCT
+                ),
+                verdict_or_value(
                     c.post_start_verdict,
                     median(&c.post_start_overhead_pct),
-                    "%"
-                )
-                .replace(
-                    "n/a",
-                    &format!("{}%", num(median(&c.post_start_overhead_pct), 1))
+                    "%",
+                    OVERHEAD_BUDGET_PCT
                 ),
-                verdict_text(c.wall_verdict, median(&c.wall_overhead_pct), "%")
-                    .replace("n/a", &format!("{}%", num(median(&c.wall_overhead_pct), 1))),
+                verdict_or_value(
+                    c.wall_verdict,
+                    median(&c.wall_overhead_pct),
+                    "%",
+                    OVERHEAD_BUDGET_PCT
+                ),
                 cell.and_then(|x| x.launched_hwm_kib.as_ref()).map_or_else(
                     || "n/a".to_owned(),
                     |d| format!("{:.0} / {:.0}", d.median, d.p95)
@@ -2405,7 +2472,7 @@ pub fn render_markdown(summary: &Summary) -> String {
         }
         let _ = writeln!(md);
     }
-    md.push_str(DEFINITIONS);
+    md.push_str(&definitions());
     md
 }
 
@@ -2435,8 +2502,11 @@ fn comparison_table(
     if verdicts {
         let _ = write!(
             md,
-            " p95 added startup < 250 ms | Work phase < 20% (integrator's reading) | Post-start \
-             (work + teardown) < 20% | End-to-end wall < 20% |"
+            " {} | {} | {} | {} |",
+            startup_budget_head(),
+            overhead_budget_head("Work phase").replace('%', "% (integrator's reading)"),
+            overhead_budget_head("Post-start (work + teardown)"),
+            overhead_budget_head("End-to-end wall"),
         );
     }
     let _ = writeln!(md);
@@ -2483,15 +2553,27 @@ fn comparison_table(
                 verdict_text(
                     c.startup_verdict,
                     c.added_startup_ms.as_ref().map(|d| d.p95),
-                    " ms"
+                    " ms",
+                    STARTUP_BUDGET_MS
                 ),
-                verdict_text(c.work_verdict, median(&c.work_overhead_pct), "%"),
+                verdict_text(
+                    c.work_verdict,
+                    median(&c.work_overhead_pct),
+                    "%",
+                    OVERHEAD_BUDGET_PCT
+                ),
                 verdict_text(
                     c.post_start_verdict,
                     median(&c.post_start_overhead_pct),
-                    "%"
+                    "%",
+                    OVERHEAD_BUDGET_PCT
                 ),
-                verdict_text(c.wall_verdict, median(&c.wall_overhead_pct), "%"),
+                verdict_text(
+                    c.wall_verdict,
+                    median(&c.wall_overhead_pct),
+                    "%",
+                    OVERHEAD_BUDGET_PCT
+                ),
             );
         }
         let _ = writeln!(md);
@@ -3072,20 +3154,17 @@ fn run_pass(plan: &Plan, session: Session) -> Result<(), String> {
             } else {
                 round - plan.args.warmup
             };
+            let ctx = PassCtx {
+                plan,
+                session,
+                workload: *workload,
+                target_argv: &target_argv,
+                ws: &ws,
+                scratch: &scratch,
+            };
             for arm in round_order(&arm_list, seed, round) {
                 let st = states.get_mut(&arm).ok_or("an arm without state")?;
-                let mut rec = launch(
-                    plan,
-                    session,
-                    *workload,
-                    arm,
-                    index,
-                    warmup,
-                    &target_argv,
-                    &ws,
-                    &scratch,
-                    st,
-                )?;
+                let mut rec = launch(&ctx, arm, index, warmup, st)?;
                 rec.predecessor = previous;
                 previous = Some(arm);
                 progress(&rec);
@@ -3135,19 +3214,31 @@ fn progress(rec: &LaunchRecord) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn launch(
-    plan: &Plan,
+/// What every launch of one (session, workload) cell shares.
+struct PassCtx<'a> {
+    plan: &'a Plan,
     session: Session,
     workload: Workload,
+    target_argv: &'a [OsString],
+    ws: &'a Path,
+    scratch: &'a Path,
+}
+
+fn launch(
+    ctx: &PassCtx<'_>,
     arm: Arm,
     round: u32,
     warmup: bool,
-    target_argv: &[OsString],
-    ws: &Path,
-    scratch: &Path,
     state: &mut ArmState,
 ) -> Result<LaunchRecord, String> {
+    let PassCtx {
+        plan,
+        session,
+        workload,
+        target_argv,
+        ws,
+        scratch,
+    } = *ctx;
     let mut rec = LaunchRecord::new(session, workload, arm, round, warmup);
     rec.load1_before = load1();
     let pressure_before = cpu_pressure();
@@ -3155,7 +3246,12 @@ fn launch(
     let result_path = scratch.join("result.json");
     let stdout_path = scratch.join("stdout");
     let stderr_path = scratch.join("stderr");
-    let _ = std::fs::remove_file(&result_path);
+    // A result left by the previous launch must not be read as this one's.
+    match std::fs::remove_file(&result_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", result_path.display())),
+    }
     let stdout = std::fs::File::create(&stdout_path).map_err(|e| e.to_string())?;
     let stderr = std::fs::File::create(&stderr_path).map_err(|e| e.to_string())?;
 
@@ -3255,9 +3351,17 @@ fn launch(
             round
         ));
         std::fs::create_dir_all(&kept).map_err(|e| format!("{}: {e}", kept.display()))?;
-        let _ = std::fs::copy(&stdout_path, kept.join("stdout"));
-        let _ = std::fs::copy(&stderr_path, kept.join("stderr"));
-        let _ = std::fs::copy(&result_path, kept.join("perf-launch.json"));
+        // The report says excluded launches keep this evidence: a copy that
+        // fails ends the run rather than leave the claim false. The
+        // launcher's result exists only when it wrote one.
+        let mut copies = vec![(&stdout_path, "stdout"), (&stderr_path, "stderr")];
+        if result_path.exists() {
+            copies.push((&result_path, "perf-launch.json"));
+        }
+        for (from, name) in copies {
+            std::fs::copy(from, kept.join(name))
+                .map_err(|e| format!("keeping {}: {e}", kept.join(name).display()))?;
+        }
     }
     if !attempts.is_empty() {
         if keep_attempt(&rec) || attempts.len() != 1 {
@@ -3548,6 +3652,10 @@ mod tests {
         assert_eq!(median(&[5.0]), Some(5.0));
         assert_eq!(median(&[1.0, 2.0, 9.0]), Some(2.0));
         assert_eq!(median(&[1.0, 2.0, 4.0, 9.0]), Some(3.0));
+        // Unsorted input is sorted first (review XT25).
+        assert_eq!(median(&[9.0, 1.0, 4.0, 2.0]), Some(3.0));
+        let reversed: Vec<f64> = (1..=30).rev().map(f64::from).collect();
+        assert_eq!(p95(&reversed), Some(29.0));
     }
 
     #[test]
@@ -4113,8 +4221,9 @@ mod tests {
             "## Observation cost: `--observe on` against `--observe off`",
             "tool/off / direct",
             "tool/on / tool/off",
-            "fail (100.0%)",
+            "fail (100.0%; 80.0% over the 20% budget)",
             "pass (",
+            "under the 250 ms budget)",
             "Work phase < 20% (integrator's reading)",
             "Post-start (work + teardown) < 20%",
             "End-to-end wall < 20%",
@@ -4126,6 +4235,25 @@ mod tests {
         assert!(
             !md.contains("Not the §5 measurement"),
             "30 valid everywhere"
+        );
+        // The spec's numbers come from their constants, never stale prose.
+        assert!(md.contains("(the 29th of 30)"), "{md}");
+        assert!(md.contains("fewer than 30 valid launches"), "{md}");
+        assert!(!md.contains("%%") && !md.contains("n/a%"), "{md}");
+    }
+
+    /// Review XT18: no verdict and no value reads `n/a`, never `n/a%%`.
+    #[test]
+    fn a_missing_value_reads_n_a_without_a_unit() {
+        assert_eq!(verdict_or_value(None, None, "%", 20.0), "n/a");
+        assert_eq!(verdict_or_value(None, Some(3.25), "%", 20.0), "3.2%");
+        assert_eq!(
+            verdict_text(Some(Verdict::Insufficient), None, "%", 20.0),
+            "insufficient (n/a; budget 20%)"
+        );
+        assert_eq!(
+            verdict_text(Some(Verdict::Pass), Some(130.6), " ms", 250.0),
+            "pass (130.6 ms; 119.4 ms under the 250 ms budget)"
         );
     }
 
