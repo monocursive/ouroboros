@@ -55,16 +55,35 @@ use super::probe::{self, ProbeResult, ProbeStatus};
 use super::seccomp;
 use super::tracer::{Tracer, TracerEvent, TracerSummary};
 
+// Fixed descriptor numbers (§8.3). The backend's descriptor map installs
+// the channels below `PINNED_FD_BASE`, beside `watch::BACKEND_FD` (8),
+// `watch::START_FD` (15) and `agent::PROXY_DIR_FD` (17), and the pinned binds
+// and credential views from `PINNED_FD_BASE` up. Bubblewrap consumes the
+// binds before it runs the launcher, which keeps `RELEASE_FD`, `ERROR_FD`
+// and `TRACE_DATA_FD` and places the `agent` descriptors (18 to 20) itself,
+// refusing any number still open. `agent::BRIDGE_REPORT_FD` therefore shares
+// 20 with `PINNED_FD_BASE` in a different table; the numbers that share a
+// table are checked distinct by a test.
+
+/// Where the attempt's narrowing `SECCOMP_RET_DATA` reaches the launcher:
+/// two bytes, written before the spawn.
+const TRACE_DATA_FD: RawFd = 9;
 /// Descriptor the seccomp program is handed to bubblewrap on.
 pub(crate) const SECCOMP_FD: RawFd = 10;
 /// Descriptor bubblewrap writes its JSON status to.
 pub(crate) const STATUS_FD: RawFd = 11;
 /// Descriptor the launcher blocks reading.
 const RELEASE_FD: RawFd = 12;
-/// Audit 2026-09-25-2, S14: where the attempt's narrowing `SECCOMP_RET_DATA`
-/// reaches the launcher (two bytes, written before the spawn). Below the
-/// pinned-mount range (20 up) and every named channel (10-19, 15).
-const TRACE_DATA_FD: RawFd = 9;
+/// Descriptor the launcher writes a failed exec's errno to.
+const ERROR_FD: RawFd = 13;
+/// Descriptor a long argument list is handed over.
+pub(crate) const ARGS_FD: RawFd = 14;
+/// Descriptor the vendor-state directory is handed to bubblewrap on
+/// (`--bind-fd`). The `bind_ro` credential views follow the pinned binds.
+pub(crate) const VENDOR_STATE_FD: RawFd = 16;
+/// First descriptor of the pinned binds (`--ro-bind-fd`, `--bind-fd`); every
+/// fixed channel of the backend's map is below it.
+const PINNED_FD_BASE: RawFd = 20;
 
 /// Audit 2026-09-25-2, S14; reworded by audit 3 (A5): a per-attempt value for
 /// the narrowing filter's `SECCOMP_RET_DATA`, unpredictable to the child. The
@@ -87,17 +106,6 @@ fn random_trace_data() -> u16 {
         value => value,
     }
 }
-/// Descriptor the launcher writes a failed exec's errno to.
-const ERROR_FD: RawFd = 13;
-/// Descriptor a long argument list is handed over.
-pub(crate) const ARGS_FD: RawFd = 14;
-/// First fixed descriptor number used for pinned protected binds
-/// (`--ro-bind-fd`); the fixed channel descriptors live below it.
-const PINNED_FD_BASE: RawFd = 20;
-// The vendor-state directory's descriptor in bubblewrap
-/// Descriptor the vendor-state directory is handed to bubblewrap on
-/// (`--bind-fd`). The `bind_ro` credential views follow the pinned binds.
-pub(crate) const VENDOR_STATE_FD: RawFd = 16;
 
 /// Preparation budget (§8.2).
 const PREPARE_BUDGET: Duration = Duration::from_secs(30);
@@ -5392,6 +5400,44 @@ mod tests {
                 "{profile:?} observe_off={observe_off}"
             );
         }
+    }
+
+    /// The fixed descriptors that share a table are distinct (see the
+    /// layout note at the constants). The backend's map: stdio and every
+    /// channel below `PINNED_FD_BASE`. The launcher's: the channels it keeps
+    /// and the `agent` descriptors it places. `agent::BRIDGE_REPORT_FD` and
+    /// `PINNED_FD_BASE` are both 20, in different tables.
+    #[test]
+    fn fixed_descriptors_that_share_a_table_are_distinct() {
+        use super::super::{agent, watch};
+        let backend = [
+            watch::BACKEND_FD,
+            TRACE_DATA_FD,
+            SECCOMP_FD,
+            STATUS_FD,
+            RELEASE_FD,
+            ERROR_FD,
+            ARGS_FD,
+            watch::START_FD,
+            VENDOR_STATE_FD,
+            agent::PROXY_DIR_FD,
+        ];
+        let launcher = [
+            RELEASE_FD,
+            ERROR_FD,
+            TRACE_DATA_FD,
+            agent::LISTENER_FD,
+            agent::SOCKDIAG_FD,
+            agent::BRIDGE_REPORT_FD,
+        ];
+        for (table, fds) in [("backend", &backend[..]), ("launcher", &launcher[..])] {
+            let mut sorted = fds.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), fds.len(), "{table}: {fds:?}");
+            assert!(fds.iter().all(|fd| *fd > 2), "{table} spares stdio");
+        }
+        assert!(backend.iter().all(|fd| *fd < PINNED_FD_BASE));
     }
 
     #[test]
