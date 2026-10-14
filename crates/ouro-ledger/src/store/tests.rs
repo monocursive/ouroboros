@@ -1500,7 +1500,7 @@ fn reader_refuses_filtered_corruption_and_reports_extra_tails_without_mutation()
     assert!(
         pages
             .iter()
-            .all(|p| !p.local_consistency && p.stream_status == "incomplete")
+            .all(|p| !p.local_consistency && p.stream_status == "corrupt")
     );
     assert!(fs::read_to_string(&path).unwrap().ends_with("{\"torn\":"));
 }

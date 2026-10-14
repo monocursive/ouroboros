@@ -22,6 +22,10 @@ pub(crate) struct Target {
     poisoned: Vec<String>,
     /// The head the writer had accepted when the layout was taken.
     accepted: Chain,
+    /// The canonical bytes the writer had accepted, when nothing poisoned
+    /// the stream. A writer that has not poisoned a stream left no bytes
+    /// beyond them: any there are someone else's.
+    accepted_bytes: Option<u64>,
     kind: TargetKind,
 }
 
@@ -117,6 +121,7 @@ impl Store {
             directory,
             poisoned: poison_details(stream.poisoned()),
             accepted: stream.run().chain.clone(),
+            accepted_bytes: (!stream.is_poisoned()).then(|| stream.accepted_bytes()),
             kind,
         })
     }
@@ -170,6 +175,7 @@ impl Target {
             }
             TargetKind::Stream { layout, projection } => (layout, projection),
         };
+        let on_disk = layout.total_bytes;
         let proceed = &mut || {
             crate::faults::verify_frame();
             proceed()
@@ -177,6 +183,19 @@ impl Target {
         let loaded = load_stream(&self.directory, &self.run_id, layout, &|_| Ok(()), proceed)?;
         let stream = loaded.stream;
         let mut problems = poison_details(stream.poisoned());
+        // The re-read failed only in bytes the writer never wrote: what it
+        // found there is not this writer's interrupted or damaged write.
+        if let (Some(accepted), Some(on_disk)) = (self.accepted_bytes, on_disk)
+            && on_disk > accepted
+            && stream.is_poisoned()
+            && stream.accepted_bytes() >= accepted
+        {
+            problems = vec![format!(
+                "{} canonical bytes follow what this writer accepted; it never wrote or \
+                 acknowledged them",
+                on_disk - accepted
+            )];
+        }
         if let Some(read) = loaded.stopped {
             problems.push(format!(
                 "fresh verification stopped at its time limit after re-reading {read} canonical \
@@ -274,6 +293,57 @@ pub(crate) fn verify_page(
 mod tests {
     use super::super::tests::{gc_fixture, gc_future, payload, peer};
     use super::*;
+
+    #[test]
+    fn bytes_after_a_live_streams_accepted_prefix_are_foreign_not_an_interrupted_write() {
+        use std::io::Write as _;
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let run = store.prepare("foreign", &payload(), &peer()).unwrap();
+        let segment = store.run_dir(&run.run_id).join(STREAM);
+        let mut foreign = 0;
+        // An unterminated frame, then garbage completing it to a whole line.
+        for tail in [&b"{\"foreign\":"[..], b"1}\n"] {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&segment)
+                .unwrap()
+                .write_all(tail)
+                .unwrap();
+            foreign += tail.len();
+            let report = store.verify(None).unwrap().remove(0);
+            assert!(!report.local_consistency);
+            assert_eq!(
+                report.problems,
+                [format!(
+                    "{foreign} canonical bytes follow what this writer accepted; it never wrote \
+                     or acknowledged them"
+                )]
+            );
+            let page = store
+                .read(&crate::protocol::ReadRequest {
+                    run_id: run.run_id.clone(),
+                    filter: crate::protocol::ReadFilter {
+                        selector: crate::protocol::ReadSelector::All,
+                        stage: None,
+                        since: None,
+                        until: None,
+                    },
+                    cursor: None,
+                    limit: 10,
+                })
+                .unwrap();
+            assert!(!page.local_consistency);
+            assert_eq!(page.stream_status, "corrupt");
+            assert_eq!(
+                page.problems,
+                [
+                    "canonical bytes follow the accepted prefix; this writer never wrote or \
+                  acknowledged them"
+                ]
+            );
+        }
+    }
 
     fn planned(store: &Store, run_id: &str) -> Target {
         let mut plan = store.plan_verify(Some(run_id), None, 1).unwrap();

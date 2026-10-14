@@ -524,7 +524,7 @@ fn live_writer_detects_unexpected_tail_before_export() {
     let status = statuses.last().expect("incomplete live export status");
     assert_eq!(status["snapshot"], fixture.snapshot);
     assert_eq!(status["local_consistency"], false);
-    assert_eq!(status["stream_status"], "incomplete");
+    assert_eq!(status["stream_status"], "corrupt");
     assert!(!status["problems"].as_array().unwrap().is_empty());
     assert_eq!(status["bytes_written"], fixture.bytes.len());
     assert_eq!(fs::read(&fixture.stream).unwrap(), damaged);
@@ -1037,7 +1037,7 @@ fn discovered_query_reports_corrupt_history_and_empty_selection_separately() {
     let corrupt: Value = serde_json::from_slice(&corrupt.stdout).unwrap();
     assert_eq!(corrupt["matched_runs"], 1);
     assert_eq!(corrupt["page"]["local_consistency"], false);
-    assert_eq!(corrupt["page"]["stream_status"], "incomplete");
+    assert_eq!(corrupt["page"]["stream_status"], "corrupt");
 }
 
 #[test]

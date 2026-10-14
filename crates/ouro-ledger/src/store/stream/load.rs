@@ -10,22 +10,26 @@ pub(in crate::store) struct Layout {
     /// The last segment's length at that moment: appends only ever grow the
     /// last segment, and a rotation seals it at or beyond this length.
     pub(in crate::store) last_bytes: Option<u64>,
+    /// Every segment's length at that moment, summed.
+    pub(in crate::store) total_bytes: Option<u64>,
 }
 
 impl Layout {
     pub(in crate::store) fn read(directory: &Path, run_id: &str) -> Self {
         let manifest = crate::manifest::read(directory, run_id).map_err(|error| error.to_string());
         let names = manifest::names(directory).map_err(|error| error.to_string());
-        let last_bytes = names
-            .as_ref()
-            .ok()
-            .and_then(|names| names.last())
-            .and_then(|name| fs::symlink_metadata(directory.join(name)).ok())
-            .map(|metadata| metadata.len());
+        let length = |name: &String| {
+            fs::symlink_metadata(directory.join(name))
+                .ok()
+                .map(|metadata| metadata.len())
+        };
+        let names_found = names.as_ref().ok();
         Self {
+            last_bytes: names_found.and_then(|names| names.last()).and_then(length),
+            total_bytes: names_found
+                .and_then(|names| names.iter().map(length).sum::<Option<u64>>()),
             manifest,
             names,
-            last_bytes,
         }
     }
 }

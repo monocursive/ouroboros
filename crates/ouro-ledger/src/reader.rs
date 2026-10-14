@@ -665,12 +665,15 @@ impl Readers {
             // Missing accepted bytes are lost history. A poisoned stream
             // retains the bytes it refused beyond its validated prefix, so
             // their presence never softens the poison's own classification.
+            // A writer that has not poisoned a stream left nothing beyond
+            // its accepted prefix: bytes there are not its interrupted
+            // write but someone else's.
             let health = if physical_bytes < accepted_bytes {
                 "corrupt"
             } else if let Some(status) = crate::store::poison_status(poisoned) {
                 status
             } else if unexpected_tail {
-                "incomplete"
+                "corrupt"
             } else if ["settled", "denied", "outcome_unknown"].contains(&run.state.as_str()) {
                 "complete"
             } else {
@@ -691,7 +694,13 @@ impl Readers {
                 coverage,
                 local_consistency: poisoned.is_empty() && !unexpected_tail,
                 stream_status: health.into(),
-                problems: if unexpected_tail {
+                problems: if physical_bytes > accepted_bytes && poisoned.is_empty() {
+                    vec![
+                        "canonical bytes follow the accepted prefix; this writer never wrote or \
+                         acknowledged them"
+                            .into(),
+                    ]
+                } else if unexpected_tail {
                     vec!["canonical file length differs from its validated accepted prefix".into()]
                 } else if poisoned.is_empty() {
                     vec![]
