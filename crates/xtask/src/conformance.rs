@@ -12,14 +12,16 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::Value;
 
 use ouro_jail::records::{OutcomeKind, Phase};
 
-use crate::gates;
+use crate::gates::{self, TestLog};
 use crate::manifest::{self, Manifest};
+use crate::proc;
+pub use crate::proc::CommandResult;
+use crate::revision::Revision;
 use crate::stamp;
 use crate::util::wire;
 
@@ -99,37 +101,70 @@ pub fn rsh_string(target: &Target) -> String {
     s
 }
 
-/// List tracked and visible untracked source files without ignored caches or
-/// secrets. Credential material (`.env`, `*.pem`) is excluded by pathspec
-/// even when untracked and unignored, because the list itself is the only
-/// defence: macOS openrsync ignores `--exclude` next to `--files-from`.
-/// Comparison result corpora are not build or conformance inputs and can be
-/// gigabytes. Keep the `benchmarks/jail` fixtures required by release tests.
-/// NUL framing preserves whitespace and newlines in file names.
-fn source_inventory(local: &Path, destination: &Path) -> std::io::Result<()> {
-    let result = Command::new("git")
-        .arg("-C")
-        .arg(local)
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            ":(exclude)*.pem",
-            ":(exclude)*.env",
-            ":(exclude)docs/benchmarks/competitors/**",
-            ":(exclude)docs/benchmarks/competitors-after/**",
-            ":(exclude)docs/benchmarks/competitors-startup/**",
-            ":(exclude)docs/benchmarks/credentials/**",
-        ])
-        .output()?;
-    if !result.status.success() || result.stdout.is_empty() {
-        return Err(std::io::Error::other(
-            "git could not enumerate the source files",
-        ));
+/// What the remote suite needs from the tree, as git pathspecs: the
+/// workspace, the specifications its tests read, and the benchmark scripts
+/// and fixtures the release tests run. Everything else (comparison corpora,
+/// retained results, the website, the fleet) stays local: the tree is copied
+/// on every run.
+pub const SOURCE_PATHSPECS: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo",
+    "crates",
+    "docs/specs",
+    ":(glob)docs/benchmarks/jail/*",
+    "docs/benchmarks/jail/fixtures",
+];
+
+/// The index naming the retained release-preview evidence the release
+/// tests replay (K11, K27); that one results directory is copied too.
+pub const PREVIEW_INDEX: &str = "docs/benchmarks/jail/release-preview-current.json";
+
+/// List the files [`SOURCE_PATHSPECS`] selects, tracked or visible and
+/// untracked, plus the retained preview evidence [`PREVIEW_INDEX`] names,
+/// NUL-framed (which preserves whitespace and newlines in file names).
+/// Credential material (`.env`, `*.pem`) is excluded by pathspec even when
+/// untracked and unignored, because the list itself is the only defence:
+/// macOS openrsync ignores `--exclude` next to `--files-from`.
+///
+/// # Errors
+/// git cannot list the files, the preview index cannot be read, or the list
+/// cannot be written.
+fn source_inventory(local: &Path, destination: &Path) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    struct PreviewIndex {
+        directory: String,
     }
-    std::fs::write(destination, result.stdout)
+    let index: PreviewIndex = std::fs::read(local.join(PREVIEW_INDEX))
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()))
+        .map_err(|e| format!("{PREVIEW_INDEX}: {e}"))?;
+    if index
+        .directory
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(format!("{PREVIEW_INDEX} names `{}`", index.directory));
+    }
+    let preview = format!("docs/benchmarks/jail/{}", index.directory);
+    let mut args = vec![
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+    ];
+    args.extend(SOURCE_PATHSPECS);
+    args.push(&preview);
+    args.extend([":(exclude)*.pem", ":(exclude)*.env"]);
+    let listing = proc::git_bytes(local, &args)
+        .map_err(|e| format!("git could not enumerate the source files: {e}"))?;
+    if listing.is_empty() {
+        return Err("git listed no source files".to_owned());
+    }
+    std::fs::write(destination, listing).map_err(|e| format!("{}: {e}", destination.display()))
 }
 
 /// A full `rsync` argv copying the enumerated source files into the run directory.
@@ -203,7 +238,7 @@ pub fn run_path_for_humans(run_dir: &str) -> String {
 /// the build-provenance environment of [`build_env`]. Compile the suite before
 /// measuring the executables: test dependency features can rebuild plain binaries.
 #[must_use]
-pub fn build_command(jobs: u32, revision: &str) -> String {
+pub fn build_command(jobs: u32, revision: &Revision) -> String {
     format!(
         "{} && env {} {REMOTE_CARGO} build --release --workspace -j{jobs} && \
          env {} {REMOTE_CARGO} test --release --workspace --no-run -j{jobs}",
@@ -225,33 +260,21 @@ fn build_space_command() -> &'static str {
 /// rule; its build.rs enforces it): the tested commit and whether the tree
 /// was dirty, from the suite's own revision marker. Cargo tracks both, so
 /// the build and test steps get identical values or the suite rebuilds the
-/// tested binary with other claims. An unknown revision passes nothing, and
-/// the binary then records the claims as unknown.
+/// tested binary with other claims.
 #[must_use]
-pub fn build_env(revision: &str) -> String {
-    let (sha, dirty) = match revision.strip_suffix("+dirty") {
-        Some(sha) => (sha, true),
-        None => (revision, false),
-    };
-    let known = sha.len() == 40
-        && sha.bytes().all(|b| b.is_ascii_hexdigit())
-        && !sha.bytes().all(|b| b == b'0');
-    if known {
-        format!("OURO_BUILD_REVISION={sha} OURO_BUILD_DIRTY={dirty}")
-    } else {
-        String::new()
-    }
+pub fn build_env(revision: &Revision) -> String {
+    format!(
+        "OURO_BUILD_REVISION={} OURO_BUILD_DIRTY={}",
+        revision.sha, revision.dirty
+    )
 }
 
 /// What `doctor --json`'s `build` object must say for a conformance run to
 /// count: the tested revision, a clean tree, and an optimised release build.
 #[must_use]
-pub fn provenance_problems(doctor: &Value, revision: &str) -> Vec<String> {
+pub fn provenance_problems(doctor: &Value, revision: &Revision) -> Vec<String> {
     let mut problems = Vec::new();
-    let (sha, dirty) = match revision.strip_suffix("+dirty") {
-        Some(sha) => (sha, true),
-        None => (revision, false),
-    };
+    let (sha, dirty) = (revision.sha.as_str(), revision.dirty);
     let build = &doctor["build"];
     if !build.is_object() {
         problems.push("doctor.json has no build object".to_string());
@@ -344,7 +367,7 @@ pub fn suite_unit(run_dir: &str) -> String {
 /// four seconds at `--test-threads=1` and never finishes at 2. This is a
 /// property of the mechanism, not a preference about speed.
 #[must_use]
-pub fn test_command(run_dir: &str, jobs: u32, revision: &str) -> String {
+pub fn test_command(run_dir: &str, jobs: u32, revision: &Revision) -> String {
     format!(
         "C=$({REMOTE_RUSTUP} which cargo) && R=$({REMOTE_RUSTUP} which rustc) \
          && D=$({REMOTE_RUSTUP} which rustdoc) && \
@@ -374,31 +397,26 @@ pub fn test_command(run_dir: &str, jobs: u32, revision: &str) -> String {
 
 /// The suite's PATH: the system directories, nothing from the account.
 pub const SUITE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-/// The first line of `test.log`, printed by the shell the suite runs in.
-pub const SUITE_PATH_MARKER: &str = "ouro-suite-path=";
-
 /// `PATH=<SUITE_PATH> /bin/sh -c "echo <marker>$PATH; exec <command>"`, to
-/// follow `env` and its other variables.
+/// follow `env` and its other variables. The markers are
+/// [`gates::MARKER_PATH`], [`gates::MARKER_REVISION`] and
+/// [`gates::MARKER_CONFORMANCE`], the first lines of `test.log`.
 ///
 /// # Panics
 /// If `command` contains a double quote, which would end the quoting.
 #[must_use]
-pub fn with_suite_path(command: &str, revision: &str) -> String {
+pub fn with_suite_path(command: &str, revision: &Revision) -> String {
     assert!(
         !command.contains('"'),
         "a suite command cannot contain a double quote: {command}"
-    );
-    let sha = revision.strip_suffix("+dirty").unwrap_or(revision);
-    assert!(
-        sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
-        "the suite's revision must be a 40-hex commit, optionally +dirty: {revision}"
     );
     // `\$PATH` survives the detached shell as `$PATH`, so the innermost shell,
     // started with the scrubbed PATH, prints the PATH it really has, and the
     // conformance flag as the suite really has it.
     format!(
-        "PATH={SUITE_PATH} /bin/sh -c \"echo {SUITE_PATH_MARKER}\\$PATH; \
+        "PATH={SUITE_PATH} /bin/sh -c \"echo {}\\$PATH; \
          echo {}{revision}; echo {}\\$OURO_CONFORMANCE; exec {command}\"",
+        gates::MARKER_PATH,
         gates::MARKER_REVISION,
         gates::MARKER_CONFORMANCE
     )
@@ -406,12 +424,8 @@ pub fn with_suite_path(command: &str, revision: &str) -> String {
 
 /// Did the suite's log print exactly the scrubbed PATH (and no other)?
 #[must_use]
-pub fn suite_ran_with_the_scrubbed_path(log: &str) -> bool {
-    let mut markers = log
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix(SUITE_PATH_MARKER))
-        .peekable();
-    markers.peek().is_some() && markers.all(|path| path == SUITE_PATH)
+pub fn suite_ran_with_the_scrubbed_path(log: &TestLog) -> bool {
+    !log.paths.is_empty() && log.paths.iter().all(|path| path == SUITE_PATH)
 }
 
 /// Names that must not be found on the suite's PATH: the rest of the
@@ -947,77 +961,45 @@ pub struct Options {
     pub worktree: PathBuf,
     pub host_manifest_script: PathBuf,
     pub jobs: u32,
+    pub config: Config,
+}
+
+/// What the operator asked of the decision, as opposed to what the run
+/// produced.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Config {
+    /// Keep the remote run directory even when the run passes.
     pub keep_remote: bool,
+    /// Judge the Linux developer release scope (`gates --linux-release`).
     pub linux_release: bool,
 }
 
-fn run(
-    program: &str,
-    args: &[String],
-    stdin_file: Option<&Path>,
-) -> std::io::Result<CommandResult> {
-    let mut cmd = Command::new(program);
-    cmd.args(args);
-    if let Some(path) = stdin_file {
-        cmd.stdin(std::fs::File::open(path)?);
-    } else {
-        cmd.stdin(std::process::Stdio::null());
-    }
-    let out = cmd.output()?;
-    Ok(CommandResult {
-        code: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    })
-}
-
-fn step(name: &str) {
+/// Print a step's heading.
+fn heading(name: &str) {
     println!("== {name}");
 }
 
-/// Everything that went wrong, in order. Empty means the run passed.
+/// What a run reports to its caller. Empty `failures` means it passed.
 pub struct Report {
     pub failures: Vec<String>,
-    pub remote_dir: String,
+    /// The remote run directory, when it was kept.
+    pub remote_kept: Option<String>,
     pub evidence: PathBuf,
 }
 
 // ------------------------------------------------------- the decision, as data
 //
 // Everything the live steps produce is recorded as plain values, and one pure
-// function turns those values into the failure list and the keep-or-remove
-// decision. Nothing tested the driver's enforcement before: deleting the
-// suite's exit-code check left `cargo test -p xtask` fully green while a live
-// run printed PASS with a panic in the uploaded evidence.
-
-/// What one shelled-out step produced.
-#[derive(Debug, Clone)]
-pub struct CommandResult {
-    pub code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-impl CommandResult {
-    #[must_use]
-    pub fn ok(&self) -> bool {
-        self.code == Some(0)
-    }
-
-    #[must_use]
-    pub fn status_text(&self) -> String {
-        match self.code {
-            Some(c) => c.to_string(),
-            None => "a signal".to_string(),
-        }
-    }
-}
+// function turns those values into the failure list, the gate verdict and the
+// keep-or-remove decision. Nothing tested the driver's enforcement before:
+// deleting the suite's exit-code check left `cargo test -p xtask` fully green
+// while a live run printed PASS with a panic in the uploaded evidence.
 
 /// Every live step's outcome. `None` means the step did not run, because an
-/// earlier one failed; that is not itself a failure.
+/// earlier one failed; whether that is itself a failure is [`decide`]'s
+/// call, step by step.
 #[derive(Debug, Default)]
 pub struct RunOutcomes {
-    pub linux_release: bool,
     pub remote_created: bool,
     pub mkdir: Option<CommandResult>,
     pub rsync: Option<CommandResult>,
@@ -1031,8 +1013,9 @@ pub struct RunOutcomes {
     pub suite: Option<CommandResult>,
     /// Why the detached suite has no exit status, when it has none.
     pub suite_wait: Option<String>,
-    /// The full `test.log`, which is the only test evidence.
-    pub test_log: Option<String>,
+    /// `test.log`, the only test evidence, parsed once: every check below
+    /// and the gate verdict read this one parse.
+    pub test_log: Option<TestLog>,
     pub host_manifest: Option<CommandResult>,
     /// Anything that went wrong writing the local evidence.
     pub evidence_errors: Vec<String>,
@@ -1044,9 +1027,9 @@ pub struct RunOutcomes {
     pub smoke: Option<Smoke>,
     /// The acceptance map and §15, loaded before the run.
     pub acceptance: Option<Result<gates::Acceptance, String>>,
-    /// The revision the driver ran (`<sha>` or `<sha>+dirty`), which the
-    /// suite prints and the verdict checks the log against.
-    pub revision: Option<String>,
+    /// The revision the driver ran, which the suite prints and the verdict
+    /// checks the log against.
+    pub revision: Option<Revision>,
 }
 
 /// The driver checks this run produced, for the gate verdict.
@@ -1054,7 +1037,8 @@ pub struct RunOutcomes {
 pub fn driver_checks(
     outcomes: &RunOutcomes,
     manifest: Option<&Manifest>,
-) -> BTreeMap<String, bool> {
+) -> BTreeMap<gates::DriverCheck, bool> {
+    use gates::DriverCheck;
     let ok = |r: &Option<CommandResult>| r.as_ref().is_some_and(CommandResult::ok);
     let doctor_manifest = ok(&outcomes.doctor)
         && match (manifest, outcomes.doctor_json.as_deref()) {
@@ -1063,14 +1047,14 @@ pub fn driver_checks(
             _ => false,
         };
     BTreeMap::from([
-        ("i02_scan".to_string(), ok(&outcomes.i02)),
+        (DriverCheck::I02Scan, ok(&outcomes.i02)),
         (
-            "contract_validation".to_string(),
+            DriverCheck::ContractValidation,
             ok(&outcomes.contract_validation),
         ),
-        ("doctor_manifest".to_string(), doctor_manifest),
+        (DriverCheck::DoctorManifest, doctor_manifest),
         (
-            "i01_absent".to_string(),
+            DriverCheck::I01Absent,
             ok(&outcomes.i01)
                 && outcomes
                     .i01
@@ -1078,14 +1062,14 @@ pub fn driver_checks(
                     .is_some_and(|r| i01_problems(&r.stdout).is_empty()),
         ),
         (
-            "i01_scrubbed_path".to_string(),
+            DriverCheck::I01ScrubbedPath,
             outcomes
                 .test_log
-                .as_deref()
+                .as_ref()
                 .is_some_and(suite_ran_with_the_scrubbed_path),
         ),
         (
-            "plain_session_smoke".to_string(),
+            DriverCheck::PlainSessionSmoke,
             outcomes
                 .smoke
                 .as_ref()
@@ -1100,28 +1084,28 @@ pub fn driver_checks(
 pub fn gate_verdict(
     outcomes: &RunOutcomes,
     manifest: Option<&Manifest>,
+    config: Config,
 ) -> Option<Result<gates::Verdict, String>> {
-    let log = outcomes.test_log.as_deref()?;
+    let log = outcomes.test_log.as_ref()?;
     Some(match &outcomes.acceptance {
         None => Err("the acceptance map was not loaded".to_string()),
         Some(Err(e)) => Err(e.clone()),
         Some(Ok(a)) => {
-            let logs = BTreeMap::from([(gates::Lane::Linux, gates::parse_log(log))]);
-            let mut v = if outcomes.linux_release {
-                gates::evaluate_linux_release(
-                    &a.map,
-                    &a.rows,
-                    &logs,
-                    &driver_checks(outcomes, manifest),
-                )
+            let logs = BTreeMap::from([(gates::Lane::Linux, log.clone())]);
+            let checks = driver_checks(outcomes, manifest);
+            let mut v = if config.linux_release {
+                gates::evaluate_linux_release(&a.map, &a.rows, &logs, &checks, &a.release)
             } else {
-                gates::evaluate(&a.map, &a.rows, &logs, &driver_checks(outcomes, manifest))
+                gates::evaluate(&a.map, &a.rows, &logs, &checks)
             };
             // The log must be this run's: the revision the driver ran, in
             // conformance mode.
-            let expected = outcomes.revision.as_deref().unwrap_or("unknown");
             v.problems
-                .extend(gates::binding_problems(&logs, Some(expected)));
+                .extend(gates::binding_problems(&logs, outcomes.revision.as_ref()));
+            if outcomes.revision.is_none() {
+                v.problems
+                    .push("the driver's revision is unknown, so the log binds to nothing".into());
+            }
             v.map_label = gates::MAP_PATH.to_string();
             v.lanes_label = gates::describe_lanes(&logs);
             Ok(v)
@@ -1133,82 +1117,108 @@ pub fn gate_verdict(
 #[derive(Debug)]
 pub struct Decision {
     pub failures: Vec<String>,
+    /// Whether the run created its remote directory.
+    pub remote_created: bool,
     pub keep_remote: bool,
+    /// The gate verdict over the suite's own log, computed once, here.
+    pub verdict: Option<Result<gates::Verdict, String>>,
 }
 
-/// Cargo prints one of these for every test binary; the process exit code
-/// alone is not enough when a run is allowed to continue past a failure.
-const FAILED_BINARY_MARKER: &str = "test result: FAILED";
-/// The harness prints this for every live test it did not run.
-const SKIP_MARKER: &str = "skipped:";
+/// A step that runs only when the earlier ones succeeded: not running is
+/// not a failure of its own. True when it ran and succeeded.
+fn passed(failures: &mut Vec<String>, name: &str, result: Option<&CommandResult>) -> bool {
+    match result {
+        None => false,
+        Some(r) if r.ok() => true,
+        Some(r) => {
+            failures.push(format!(
+                "{name} exited {}{}",
+                r.status_text(),
+                first_line(&r.stderr)
+            ));
+            false
+        }
+    }
+}
+
+/// A step every run that got this far must have: not running is a failure.
+fn require(failures: &mut Vec<String>, name: &str, result: Option<&CommandResult>) {
+    if result.is_none() {
+        failures.push(format!("{name} did not run"));
+    } else {
+        passed(failures, name, result);
+    }
+}
 
 /// Turn the step results into failures. Pure: every branch is unit-tested.
 #[must_use]
-pub fn decide(
+pub fn decide(outcomes: &RunOutcomes, manifest: Option<&Manifest>, config: Config) -> Decision {
+    let mut failures: Vec<String> = Vec::new();
+    let mut verdict = None;
+    decide_steps(outcomes, manifest, config, &mut failures, &mut verdict);
+    // Whatever stopped the run, what went wrong with its evidence is said.
+    failures.extend(
+        outcomes
+            .evidence_errors
+            .iter()
+            .map(|e| format!("evidence: {e}")),
+    );
+    let keep_remote = outcomes.remote_created && (!failures.is_empty() || config.keep_remote);
+    Decision {
+        failures,
+        remote_created: outcomes.remote_created,
+        keep_remote,
+        verdict,
+    }
+}
+
+fn decide_steps(
     outcomes: &RunOutcomes,
     manifest: Option<&Manifest>,
-    keep_remote_flag: bool,
-) -> Decision {
-    let mut failures: Vec<String> = Vec::new();
-
-    fn step(failures: &mut Vec<String>, name: &str, result: &Option<CommandResult>) -> bool {
-        match result {
-            None => false,
-            Some(r) if r.ok() => true,
-            Some(r) => {
-                failures.push(format!(
-                    "{name} exited {}{}",
-                    r.status_text(),
-                    first_line(&r.stderr)
-                ));
-                false
-            }
-        }
-    }
-
-    if !step(&mut failures, "the remote run directory", &outcomes.mkdir) && outcomes.mkdir.is_some()
-    {
-        return finish_decision(failures, outcomes, keep_remote_flag);
-    }
+    config: Config,
+    failures: &mut Vec<String>,
+    verdict: &mut Option<Result<gates::Verdict, String>>,
+) {
     if outcomes.mkdir.is_none() {
         failures.push("the run did not start".to_string());
-        return finish_decision(failures, outcomes, keep_remote_flag);
+        return;
     }
-    if !step(&mut failures, "rsync", &outcomes.rsync) {
-        return finish_decision(failures, outcomes, keep_remote_flag);
+    if !passed(
+        failures,
+        "the remote run directory",
+        outcomes.mkdir.as_ref(),
+    ) {
+        return;
+    }
+    if !passed(failures, "rsync", outcomes.rsync.as_ref()) {
+        return;
     }
     // A build with no exit status is a failure in its own right: without
     // this, a lost build would read as "did not run" and fail nothing.
     if let Some(why) = &outcomes.build_wait {
         failures.push(format!("the remote release build {why}"));
-        return finish_decision(failures, outcomes, keep_remote_flag);
+        return;
     }
-    if !step(&mut failures, "the remote release build", &outcomes.build) {
-        return finish_decision(failures, outcomes, keep_remote_flag);
+    if !passed(
+        failures,
+        "the remote release build",
+        outcomes.build.as_ref(),
+    ) {
+        return;
     }
-    step(&mut failures, "the I02 vendor-name scan", &outcomes.i02);
-    match &outcomes.contract_validation {
-        None => failures.push(format!(
-            "the contract validator did not run ({CONTRACT_VALIDATOR})"
-        )),
-        Some(r) if !r.ok() => failures.push(format!(
-            "the contract validator ({CONTRACT_VALIDATOR}) exited {}{}",
-            r.status_text(),
-            first_line(&r.stderr)
-        )),
-        Some(_) => {}
-    }
+    passed(failures, "the I02 vendor-name scan", outcomes.i02.as_ref());
+    require(
+        failures,
+        &format!("the contract validator ({CONTRACT_VALIDATOR})"),
+        outcomes.contract_validation.as_ref(),
+    );
 
     // doctor and the manifest comparison.
-    match &outcomes.doctor {
-        None => failures.push("`ouro-jail doctor --json` did not run".to_string()),
-        Some(r) if !r.ok() => failures.push(format!(
-            "`ouro-jail doctor --json` exited {}{}",
-            r.status_text(),
-            first_line(&r.stderr)
-        )),
-        Some(_) => {}
-    }
+    require(
+        failures,
+        "`ouro-jail doctor --json`",
+        outcomes.doctor.as_ref(),
+    );
     let expected = manifest.map_or(0, |m| m.expected.len());
     match (&outcomes.doctor_json, manifest) {
         (None, _) => failures.push(format!(
@@ -1229,9 +1239,14 @@ pub fn decide(
                         failures.push(format!("capability `{}`: {p}", row.name));
                     }
                 }
-                let revision = outcomes.revision.as_deref().unwrap_or("");
-                for p in provenance_problems(&doctor, revision) {
-                    failures.push(format!("build provenance: {p}"));
+                match &outcomes.revision {
+                    Some(revision) => failures.extend(
+                        provenance_problems(&doctor, revision)
+                            .into_iter()
+                            .map(|p| format!("build provenance: {p}")),
+                    ),
+                    None => failures
+                        .push("build provenance: the tested revision is unknown".to_string()),
                 }
             }
         },
@@ -1255,47 +1270,37 @@ pub fn decide(
         Some(log) => {
             // `--no-fail-fast` lets later binaries run, so a failure in any of
             // them must count, not only in the last one cargo reported.
-            let failed_binaries = log.matches(FAILED_BINARY_MARKER).count();
-            if failed_binaries > 0 {
+            if log.failed_binaries > 0 {
                 failures.push(format!(
-                    "{failed_binaries} test binar{} reported FAILED",
-                    if failed_binaries == 1 { "y" } else { "ies" }
+                    "{} test binar{} reported FAILED",
+                    log.failed_binaries,
+                    if log.failed_binaries == 1 { "y" } else { "ies" }
                 ));
             }
             // The suite runs under OURO_CONFORMANCE=1, where a skip is
-            // already a failure; a `skipped:` line therefore means the rule
-            // was bypassed, and the job must not be green.
-            let skips: Vec<&str> = log
-                .lines()
-                .map(str::trim)
-                .filter(|l| l.starts_with(SKIP_MARKER))
-                .collect();
-            if !skips.is_empty() {
+            // already a failure; a skip note therefore means the rule was
+            // bypassed, and the job must not be green.
+            if !log.skips.is_empty() {
                 failures.push(format!(
                     "{} live test(s) were skipped under OURO_CONFORMANCE=1: {}",
-                    skips.len(),
-                    skips.join(" | ")
+                    log.skips.len(),
+                    log.skips.join(" | ")
                 ));
             }
-            if !log.contains("test result:") {
+            if log.summaries == 0 {
                 failures.push("test.log contains no test result at all".to_string());
             }
         }
     }
 
     // I01 and the plain-session smoke leg.
-    match &outcomes.i01 {
-        None => failures.push("the I01 probe did not run".to_string()),
-        Some(r) if !r.ok() => failures.push(format!(
-            "the I01 probe exited {}{}",
-            r.status_text(),
-            first_line(&r.stderr)
-        )),
-        Some(r) => failures.extend(
+    require(failures, "the I01 probe", outcomes.i01.as_ref());
+    if let Some(r) = outcomes.i01.as_ref().filter(|r| r.ok()) {
+        failures.extend(
             i01_problems(&r.stdout)
                 .into_iter()
                 .map(|p| format!("I01: {p}")),
-        ),
+        );
     }
     match &outcomes.smoke {
         None => failures.push("the plain-session smoke leg did not run".to_string()),
@@ -1307,7 +1312,8 @@ pub fn decide(
     }
 
     // The per-gate verdict over the suite's own log (§15, §16 J5).
-    match gate_verdict(outcomes, manifest) {
+    *verdict = gate_verdict(outcomes, manifest, config);
+    match verdict {
         // No test.log: already a failure above, and there is nothing to judge.
         None => {}
         Some(Err(e)) => failures.push(format!(
@@ -1316,22 +1322,13 @@ pub fn decide(
         Some(Ok(v)) => failures.extend(v.failures()),
     }
 
-    step(&mut failures, "the host manifest", &outcomes.host_manifest);
+    passed(
+        failures,
+        "the host manifest",
+        outcomes.host_manifest.as_ref(),
+    );
     if outcomes.host_manifest.is_none() {
         failures.push("the host manifest was not collected".to_string());
-    }
-    for e in &outcomes.evidence_errors {
-        failures.push(format!("evidence: {e}"));
-    }
-
-    finish_decision(failures, outcomes, keep_remote_flag)
-}
-
-fn finish_decision(failures: Vec<String>, outcomes: &RunOutcomes, keep_flag: bool) -> Decision {
-    let keep_remote = outcomes.remote_created && (!failures.is_empty() || keep_flag);
-    Decision {
-        failures,
-        keep_remote,
     }
 }
 
@@ -1381,28 +1378,34 @@ pub fn scrub(text: &str) -> String {
 
 // ------------------------------------------------------------------- the run
 
-/// Drive one conformance run. Returns the report; the caller sets the exit code.
-pub fn drive(opts: &Options) -> std::io::Result<Report> {
-    let short_sha = git_short_sha(&opts.worktree);
-    let run_dir = run_dir_name(&stamp::utc_stamp_now(), &short_sha);
+/// Drive one conformance run. Every step's outcome, a step that could not
+/// even start included, is recorded and judged by [`decide`]; nothing ends
+/// the run early except a step the next ones need, so the summary, the gate
+/// verdict and the remote cleanup report are always written.
+#[must_use]
+pub fn drive(opts: &Options) -> Report {
+    let mut outcomes = RunOutcomes::default();
+    // The revision the suite prints and the verdict binds its log to.
+    // Without one, the run cannot be tied to anything: it fails, and nothing
+    // reaches the host.
+    let revision = match Revision::of_repository(&opts.worktree) {
+        Ok(revision) => Some(revision),
+        Err(e) => {
+            outcomes
+                .evidence_errors
+                .push(format!("the worktree's revision could not be read: {e}"));
+            None
+        }
+    };
+    outcomes.revision.clone_from(&revision);
+    let run_dir = run_dir_name(
+        &stamp::utc_stamp_now(),
+        revision.as_ref().map_or("", Revision::short),
+    );
     assert!(
         is_shell_safe(&run_dir),
         "run directory name `{run_dir}` is not shell safe"
     );
-
-    let mut outcomes = RunOutcomes {
-        linux_release: opts.linux_release,
-        ..RunOutcomes::default()
-    };
-    // The revision the suite prints and the verdict binds its log to.
-    // Without one (no git), the run cannot be tied to anything and fails.
-    let revision = gates::repository_revision(&opts.worktree).unwrap_or_else(|| {
-        outcomes
-            .evidence_errors
-            .push("the worktree's revision could not be read with git".to_string());
-        "0000000000000000000000000000000000000000+dirty".to_string()
-    });
-    outcomes.revision = Some(revision.clone());
     let manifest = match Manifest::load(&opts.manifest) {
         Ok(m) => Some(m),
         Err(e) => {
@@ -1423,9 +1426,9 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
 
     // The contract validator, locally, at the same revision (R01): its
     // output is evidence beside the suite's.
-    step("validate the contract (validate_contract.py)");
+    heading("validate the contract (validate_contract.py)");
     let (program, args) = contract_validation_argv();
-    let validation = run_in(&opts.worktree, &program, &args);
+    let validation = proc::run(&program, &args, None, Some(&opts.worktree));
     print!("{}", validation.stdout);
     if !validation.stderr.trim().is_empty() {
         eprint!("{}", validation.stderr);
@@ -1440,7 +1443,7 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
             validation.stdout,
             validation.stderr
         ),
-        &mut outcomes,
+        &mut outcomes.evidence_errors,
     );
     outcomes.contract_validation = Some(validation);
 
@@ -1451,9 +1454,10 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
         outcomes
             .evidence_errors
             .push("the private key named by --key does not exist".to_string());
-        let decision = decide(&outcomes, manifest.as_ref(), opts.keep_remote);
-        return report(opts, &run_dir, decision);
     }
+    let Some(revision) = revision.filter(|_| opts.target.key.is_file()) else {
+        return finish(opts, &run_dir, &outcomes, manifest.as_ref());
+    };
 
     println!(
         "conformance: {}@{} run {run_dir} at {}",
@@ -1463,23 +1467,28 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
     );
     println!("worktree: {}", opts.worktree.display());
 
-    step("create the remote run directory");
-    outcomes.mkdir = Some(ssh(opts, &format!("mkdir -p {}", run_path(&run_dir)))?);
-    outcomes.remote_created = outcomes.mkdir.as_ref().is_some_and(CommandResult::ok);
+    heading("create the remote run directory");
+    let mkdir = ssh(opts, &format!("mkdir -p {}", run_path(&run_dir)));
+    outcomes.remote_created = mkdir.ok();
+    outcomes.mkdir = Some(mkdir);
 
     if outcomes.remote_created {
-        step("rsync the worktree");
+        heading("rsync the worktree");
         let source_list = opts.evidence.join("source-files.nul");
-        source_inventory(&opts.worktree, &source_list)?;
-        outcomes.rsync = Some(run(
-            "rsync",
-            &rsync_argv(&opts.target, &opts.worktree, &run_dir, &source_list),
-            None,
-        )?);
+        // A tree that cannot be listed is a failed copy, not a failed driver.
+        outcomes.rsync = Some(match source_inventory(&opts.worktree, &source_list) {
+            Ok(()) => proc::run(
+                "rsync",
+                &rsync_argv(&opts.target, &opts.worktree, &run_dir, &source_list),
+                None,
+                None,
+            ),
+            Err(e) => CommandResult::not_run(e),
+        });
     }
 
     if outcomes.rsync.as_ref().is_some_and(CommandResult::ok) {
-        step("build the workspace, release");
+        heading("build the workspace, release");
         let build = run_detached(
             opts,
             &run_dir,
@@ -1490,7 +1499,7 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
         );
         if let Some(log) = &build.log {
             print!("{log}");
-            write_evidence(opts, "build.log", log, &mut outcomes);
+            write_evidence(opts, "build.log", log, &mut outcomes.evidence_errors);
         }
         match build.code {
             Some(code) => {
@@ -1505,128 +1514,175 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
     }
 
     if outcomes.build.as_ref().is_some_and(CommandResult::ok) {
-        step("I02 vendor-name scan");
-        let r = ssh(opts, &i02_command(&run_dir))?;
-        print!("{}", r.stdout);
-        outcomes.i02 = Some(r);
-
-        step("record the compiled executable hashes");
-        let hashes = ssh(opts, &binary_hashes_command(&run_dir, false))?;
-        write_evidence(opts, "binaries.sha256", &hashes.stdout, &mut outcomes);
-        if !hashes.ok() {
-            outcomes
-                .evidence_errors
-                .push("compiled executable hashes could not be recorded".into());
-        }
-
-        step("doctor --json");
-        let d = ssh(opts, &doctor_command(&run_dir))?;
-        if !d.stderr.trim().is_empty() {
-            eprint!("{}", d.stderr);
-        }
-        outcomes.doctor = Some(d);
-
-        let cat = ssh(opts, &format!("cat {}/doctor.json", run_path(&run_dir)))?;
-        if cat.ok() && !cat.stdout.trim().is_empty() {
-            outcomes.doctor_json = Some(cat.stdout.clone());
-            write_evidence(opts, "doctor.json", &cat.stdout, &mut outcomes);
-        }
-
-        step("compare doctor with the expected-capability manifest");
-        if let (Some(m), Some(text)) = (manifest.as_ref(), outcomes.doctor_json.as_ref())
-            && let Ok(doctor) = serde_json::from_str::<Value>(text)
-        {
-            for row in manifest::compare(m, &doctor) {
-                println!(
-                    "   {:<34} expected {:<12} got {:<12} {}",
-                    row.name,
-                    row.expected,
-                    row.actual.as_deref().unwrap_or("<absent>"),
-                    if row.ok() { "ok" } else { "MISMATCH" }
-                );
-            }
-            for name in manifest::unlisted(m, &doctor) {
-                println!("   note: doctor reports `{name}`, which the manifest does not list");
-            }
-        }
-
-        step("plain-session smoke (no systemd-run: run and doctor enter a scope themselves)");
-        let smoke = run_smoke(opts, &run_dir)?;
-        print!("{}", smoke.transcript.stdout);
-        for p in smoke_problems(&smoke) {
-            println!("   problem: {p}");
-        }
-        write_evidence(
-            opts,
-            "smoke-transcript.txt",
-            &smoke.transcript.stdout,
-            &mut outcomes,
-        );
-        for (name, body) in [
-            ("smoke-tool-receipt.json", &smoke.tool),
-            ("smoke-none-receipt.json", &smoke.none),
-            ("smoke-doctor.json", &smoke.doctor),
-        ] {
-            if let Some(body) = body {
-                write_evidence(opts, name, body, &mut outcomes);
-            }
-        }
-        outcomes.smoke = Some(smoke);
-
-        step("I01: no ledger, fleet or BEAM on the suite's PATH or installed");
-        let i01 = ssh(opts, &i01_command())?;
-        print!("{}", i01.stdout);
-        write_evidence(opts, "i01.txt", &i01.stdout, &mut outcomes);
-        outcomes.i01 = Some(i01);
-
-        step("run the conformance suite (OURO_CONFORMANCE=1)");
-        let unit = suite_unit(&run_dir);
-        let suite = run_detached(
-            opts,
-            &run_dir,
-            "test",
-            &test_command(&run_dir, opts.jobs, &revision),
-            SUITE_PATIENCE,
-            Some(&unit),
-        );
-        if let Some(log) = &suite.log {
-            print!("{log}");
-            write_evidence(opts, "test.log", log, &mut outcomes);
-        }
-        outcomes.test_log = suite.log.clone();
-        match suite.code {
-            Some(code) => {
-                outcomes.suite = Some(CommandResult {
-                    code: Some(code),
-                    stdout: suite.log.unwrap_or_default(),
-                    stderr: String::new(),
-                });
-            }
-            None => outcomes.suite_wait = suite.problem,
-        }
-        step("verify executable bytes did not change during the suite");
-        let unchanged = ssh(opts, &binary_hashes_command(&run_dir, true))?;
-        write_evidence(opts, "binaries-check.txt", &unchanged.stdout, &mut outcomes);
-        if !unchanged.ok() {
-            outcomes.evidence_errors.push(
-                "executable bytes changed after doctor measurement or could not be verified".into(),
-            );
-        }
+        run_after_build(opts, &run_dir, &revision, manifest.as_ref(), &mut outcomes);
     }
 
-    step("collect the host manifest");
-    let hm = run(
+    heading("collect the host manifest");
+    let hm = proc::run(
         "ssh",
         &ssh_argv(&opts.target, "bash -s"),
         Some(&opts.host_manifest_script),
-    )?;
+        None,
+    );
     if hm.ok() {
-        write_evidence(opts, "host-manifest.txt", &hm.stdout, &mut outcomes);
+        write_evidence(
+            opts,
+            "host-manifest.txt",
+            &hm.stdout,
+            &mut outcomes.evidence_errors,
+        );
     }
     outcomes.host_manifest = Some(hm);
 
-    step("the per-gate verdict (acceptance-map.toml)");
-    match gate_verdict(&outcomes, manifest.as_ref()) {
+    finish(opts, &run_dir, &outcomes, manifest.as_ref())
+}
+
+/// Everything that runs on the built tree: the scan, doctor, the smoke leg,
+/// the I01 probe and the suite.
+fn run_after_build(
+    opts: &Options,
+    run_dir: &str,
+    revision: &Revision,
+    manifest: Option<&Manifest>,
+    outcomes: &mut RunOutcomes,
+) {
+    heading("I02 vendor-name scan");
+    let r = ssh(opts, &i02_command(run_dir));
+    print!("{}", r.stdout);
+    outcomes.i02 = Some(r);
+
+    heading("record the compiled executable hashes");
+    let hashes = ssh(opts, &binary_hashes_command(run_dir, false));
+    write_evidence(
+        opts,
+        "binaries.sha256",
+        &hashes.stdout,
+        &mut outcomes.evidence_errors,
+    );
+    if !hashes.ok() {
+        outcomes
+            .evidence_errors
+            .push("compiled executable hashes could not be recorded".into());
+    }
+
+    heading("doctor --json");
+    let d = ssh(opts, &doctor_command(run_dir));
+    if !d.stderr.trim().is_empty() {
+        eprint!("{}", d.stderr);
+    }
+    outcomes.doctor = Some(d);
+
+    let cat = ssh(opts, &format!("cat {}/doctor.json", run_path(run_dir)));
+    if cat.ok() && !cat.stdout.trim().is_empty() {
+        write_evidence(
+            opts,
+            "doctor.json",
+            &cat.stdout,
+            &mut outcomes.evidence_errors,
+        );
+        outcomes.doctor_json = Some(cat.stdout);
+    }
+
+    heading("compare doctor with the expected-capability manifest");
+    if let (Some(m), Some(text)) = (manifest, outcomes.doctor_json.as_ref())
+        && let Ok(doctor) = serde_json::from_str::<Value>(text)
+    {
+        for row in manifest::compare(m, &doctor) {
+            println!(
+                "   {:<34} expected {:<12} got {:<12} {}",
+                row.name,
+                row.expected,
+                row.actual.as_deref().unwrap_or("<absent>"),
+                if row.ok() { "ok" } else { "MISMATCH" }
+            );
+        }
+        for name in manifest::unlisted(m, &doctor) {
+            println!("   note: doctor reports `{name}`, which the manifest does not list");
+        }
+    }
+
+    heading("plain-session smoke (no systemd-run: run and doctor enter a scope themselves)");
+    let smoke = run_smoke(opts, run_dir);
+    print!("{}", smoke.transcript.stdout);
+    for p in smoke_problems(&smoke) {
+        println!("   problem: {p}");
+    }
+    write_evidence(
+        opts,
+        "smoke-transcript.txt",
+        &smoke.transcript.stdout,
+        &mut outcomes.evidence_errors,
+    );
+    for (name, body) in [
+        ("smoke-tool-receipt.json", &smoke.tool),
+        ("smoke-none-receipt.json", &smoke.none),
+        ("smoke-doctor.json", &smoke.doctor),
+    ] {
+        if let Some(body) = body {
+            write_evidence(opts, name, body, &mut outcomes.evidence_errors);
+        }
+    }
+    outcomes.smoke = Some(smoke);
+
+    heading("I01: no ledger, fleet or BEAM on the suite's PATH or installed");
+    let i01 = ssh(opts, &i01_command());
+    print!("{}", i01.stdout);
+    write_evidence(opts, "i01.txt", &i01.stdout, &mut outcomes.evidence_errors);
+    outcomes.i01 = Some(i01);
+
+    heading("run the conformance suite (OURO_CONFORMANCE=1)");
+    let unit = suite_unit(run_dir);
+    let suite = run_detached(
+        opts,
+        run_dir,
+        "test",
+        &test_command(run_dir, opts.jobs, revision),
+        SUITE_PATIENCE,
+        Some(&unit),
+    );
+    if let Some(log) = &suite.log {
+        print!("{log}");
+        write_evidence(opts, "test.log", log, &mut outcomes.evidence_errors);
+        outcomes.test_log = Some(gates::parse_log(log));
+    }
+    match suite.code {
+        Some(code) => {
+            outcomes.suite = Some(CommandResult {
+                code: Some(code),
+                stdout: suite.log.unwrap_or_default(),
+                stderr: String::new(),
+            });
+        }
+        None => outcomes.suite_wait = suite.problem,
+    }
+    heading("verify executable bytes did not change during the suite");
+    let unchanged = ssh(opts, &binary_hashes_command(run_dir, true));
+    write_evidence(
+        opts,
+        "binaries-check.txt",
+        &unchanged.stdout,
+        &mut outcomes.evidence_errors,
+    );
+    if !unchanged.ok() {
+        outcomes.evidence_errors.push(
+            "executable bytes changed after doctor measurement or could not be verified".into(),
+        );
+    }
+}
+
+/// Decide, write the gate verdict, remove the remote directory when the
+/// decision says so, and report.
+fn finish(
+    opts: &Options,
+    run_dir: &str,
+    outcomes: &RunOutcomes,
+    manifest: Option<&Manifest>,
+) -> Report {
+    let mut decision = decide(outcomes, manifest, opts.config);
+
+    heading("the per-gate verdict (acceptance-map.toml)");
+    let mut errors = Vec::new();
+    match &decision.verdict {
         None => println!("   no test.log, so no gate verdict"),
         Some(Err(e)) => {
             println!("   {e}");
@@ -1634,78 +1690,60 @@ pub fn drive(opts: &Options) -> std::io::Result<Report> {
                 opts,
                 "gates.txt",
                 &format!("no gate verdict: {e}\n"),
-                &mut outcomes,
+                &mut errors,
             );
         }
         Some(Ok(v)) => {
             let text = v.render();
             print!("{text}");
-            write_evidence(opts, "gates.txt", &text, &mut outcomes);
+            write_evidence(opts, "gates.txt", &text, &mut errors);
             if let Some(Ok(a)) = &outcomes.acceptance {
                 let json = serde_json::to_string_pretty(&v.to_json(&a.map)).unwrap_or_default();
-                write_evidence(opts, "gates.json", &format!("{json}\n"), &mut outcomes);
+                write_evidence(opts, "gates.json", &format!("{json}\n"), &mut errors);
             }
         }
     }
-
-    let decision = decide(&outcomes, manifest.as_ref(), opts.keep_remote);
+    // The verdict's own evidence is written after the decision: its write
+    // failures are added to it.
+    decision
+        .failures
+        .extend(errors.into_iter().map(|e| format!("evidence: {e}")));
 
     if outcomes.remote_created && !decision.keep_remote {
-        step("remove the remote run directory");
-        let rm = ssh(opts, &format!("rm -rf {}", run_path(&run_dir)))?;
+        heading("remove the remote run directory");
+        let rm = ssh(opts, &format!("rm -rf {}", run_path(run_dir)));
         if !rm.ok() {
             eprintln!(
-                "conformance: the remote run directory could not be removed ({})",
-                rm.status_text()
+                "conformance: the remote run directory could not be removed ({}{})",
+                rm.status_text(),
+                first_line(&rm.stderr)
             );
         }
         prune_old_runs(opts);
     }
 
-    report(opts, &run_dir, decision)
+    report(opts, run_dir, &decision)
 }
 
-fn ssh(opts: &Options, remote_command: &str) -> std::io::Result<CommandResult> {
-    run("ssh", &ssh_argv(&opts.target, remote_command), None)
-}
-
-/// Run a local program in `dir`. A program that cannot be started is a
-/// result with no status, never an early exit of the whole run.
-fn run_in(dir: &Path, program: &str, args: &[String]) -> CommandResult {
-    match Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-    {
-        Ok(out) => CommandResult {
-            code: out.status.code(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        },
-        Err(e) => CommandResult {
-            code: None,
-            stdout: String::new(),
-            stderr: format!("could not run {program}: {e}"),
-        },
-    }
+fn ssh(opts: &Options, remote_command: &str) -> CommandResult {
+    proc::run("ssh", &ssh_argv(&opts.target, remote_command), None, None)
 }
 
 /// The plain-session smoke leg and its three records. The leg is seconds
 /// long, so it runs in one SSH session; a record that cannot be read back is
 /// absent, which `smoke_problems` reports.
-fn run_smoke(opts: &Options, run_dir: &str) -> std::io::Result<Smoke> {
-    let transcript = ssh(opts, &smoke_command(run_dir))?;
-    let read = |name: &str| -> std::io::Result<Option<String>> {
-        let r = ssh(opts, &format!("cat {}/smoke/{name}", run_path(run_dir)))?;
-        Ok((r.ok() && !r.stdout.trim().is_empty()).then_some(r.stdout))
+fn run_smoke(opts: &Options, run_dir: &str) -> Smoke {
+    let transcript = ssh(opts, &smoke_command(run_dir));
+    let read = |name: &str| {
+        let r = ssh(opts, &format!("cat {}/smoke/{name}", run_path(run_dir)));
+        (r.ok() && !r.stdout.trim().is_empty()).then_some(r.stdout)
     };
-    Ok(Smoke {
+    Smoke {
         transcript,
-        tool: read("tool.json")?,
-        none: read("none.json")?,
-        doctor: read("doctor.json")?,
-    })
+        tool: read("tool.json"),
+        none: read("none.json"),
+        doctor: read("doctor.json"),
+    }
 }
 
 /// Run one long step detached and wait for it (see [`detached_start`]).
@@ -1721,34 +1759,39 @@ fn run_detached(
     let started = ssh(opts, &detached_start(run_dir, name, command));
     // A failed start is not final: its reply may be what was lost. The first
     // status check says whether the step exists.
-    let start_note = match &started {
-        Ok(r) if r.ok() => String::new(),
-        Ok(r) => format!(
+    let start_note = if started.ok() {
+        String::new()
+    } else {
+        format!(
             " (starting it exited {}{})",
-            r.status_text(),
-            first_line(&r.stderr)
-        ),
-        Err(e) => format!(" (starting it could not run ssh: {e})"),
+            started.status_text(),
+            first_line(&started.stderr)
+        )
     };
     let began = std::time::Instant::now();
     let waited = wait_for(
         patience,
-        || ssh(opts, &detached_poll(run_dir, name)),
+        || Ok(ssh(opts, &detached_poll(run_dir, name))),
         std::thread::sleep,
         || began.elapsed(),
         |lines| println!("   ... {name}.log: {lines} lines"),
     );
     if matches!(waited, Waited::TimedOut | Waited::LostContact(_)) {
         // Best effort: when contact is lost this may not reach the host.
-        let _ = ssh(opts, &detached_stop(run_dir, name, unit));
+        let stop = ssh(opts, &detached_stop(run_dir, name, unit));
+        if !stop.ok() {
+            eprintln!(
+                "conformance: stopping {name} may not have reached the host ({})",
+                stop.status_text()
+            );
+        }
     }
     // The log, complete or partial, is evidence either way. A lost reply is
     // retried; a log that cannot be read at all is recorded as absent.
     let mut log = None;
     for _ in 0..3 {
-        if let Ok(r) = ssh(opts, &format!("cat {}/{name}.log", run_path(run_dir)))
-            && r.ok()
-        {
+        let r = ssh(opts, &format!("cat {}/{name}.log", run_path(run_dir)));
+        if r.ok() {
             log = Some(r.stdout);
             break;
         }
@@ -1771,9 +1814,9 @@ fn run_detached(
     }
 }
 
-fn write_evidence(opts: &Options, name: &str, body: &str, outcomes: &mut RunOutcomes) {
+fn write_evidence(opts: &Options, name: &str, body: &str, errors: &mut Vec<String>) {
     if let Err(e) = std::fs::write(opts.evidence.join(name), body) {
-        outcomes.evidence_errors.push(format!("{name}: {e}"));
+        errors.push(format!("{name}: {e}"));
     }
 }
 
@@ -1783,10 +1826,12 @@ fn write_evidence(opts: &Options, name: &str, body: &str, outcomes: &mut RunOutc
 /// kept failure is a few hundred megabytes. Names are listed and matched
 /// against their own timestamp prefix: no wildcard reaches the host.
 fn prune_old_runs(opts: &Options) {
-    let Ok(listing) = ssh(opts, &format!("ls -1 $HOME/{REMOTE_RUNS} 2>/dev/null")) else {
-        return;
-    };
+    let listing = ssh(opts, &format!("ls -1 $HOME/{REMOTE_RUNS} 2>/dev/null"));
     if !listing.ok() {
+        println!(
+            "   old run directories were not listed ({}), so none was pruned",
+            listing.status_text()
+        );
         return;
     }
     let cutoff = stamp::utc_stamp_from_unix(stamp::unix_now() - 7 * 86_400);
@@ -1794,8 +1839,16 @@ fn prune_old_runs(opts: &Options) {
         if !is_shell_safe(name) || !older_than(name, &cutoff) {
             continue;
         }
-        let _ = ssh(opts, &format!("rm -rf $HOME/{REMOTE_RUNS}/{name}"));
-        println!("   pruned {name}");
+        let rm = ssh(opts, &format!("rm -rf $HOME/{REMOTE_RUNS}/{name}"));
+        if rm.ok() {
+            println!("   pruned {name}");
+        } else {
+            println!(
+                "   could not prune {name} ({}{})",
+                rm.status_text(),
+                first_line(&rm.stderr)
+            );
+        }
     }
 }
 
@@ -1812,9 +1865,23 @@ pub fn older_than(name: &str, cutoff_stamp: &str) -> bool {
         && stamp < cutoff_stamp
 }
 
-fn report(opts: &Options, run_dir: &str, decision: Decision) -> std::io::Result<Report> {
-    let remote = run_path_for_humans(run_dir);
+/// What became of the run directory, for the operator.
+#[must_use]
+pub fn remote_fate(decision: &Decision, remote: &str) -> String {
+    match (decision.remote_created, decision.keep_remote) {
+        (false, _) => "no remote run directory was created".to_string(),
+        (true, true) => format!("remote run directory kept: {remote}"),
+        (true, false) => "the remote run directory was removed".to_string(),
+    }
+}
 
+fn report(opts: &Options, run_dir: &str, decision: &Decision) -> Report {
+    let remote = format!(
+        "{}@{}:{}",
+        opts.target.user,
+        opts.target.host,
+        run_path_for_humans(run_dir)
+    );
     println!();
     if decision.failures.is_empty() {
         println!("conformance: PASS");
@@ -1823,15 +1890,8 @@ fn report(opts: &Options, run_dir: &str, decision: Decision) -> std::io::Result<
         for f in &decision.failures {
             println!("  - {f}");
         }
-        if decision.keep_remote {
-            println!(
-                "remote run directory kept: {}@{}:{remote}",
-                opts.target.user, opts.target.host
-            );
-        } else {
-            println!("no remote run directory was created");
-        }
     }
+    println!("{}", remote_fate(decision, &remote));
     println!("evidence: {}", opts.evidence.display());
 
     let summary = if decision.failures.is_empty() {
@@ -1851,40 +1911,19 @@ fn report(opts: &Options, run_dir: &str, decision: Decision) -> std::io::Result<
         eprintln!("conformance: the summary could not be written: {e}");
     }
 
-    Ok(Report {
-        failures: decision.failures,
-        remote_dir: remote,
+    Report {
+        failures: decision.failures.clone(),
+        remote_kept: decision.keep_remote.then_some(remote),
         evidence: opts.evidence.clone(),
-    })
-}
-
-fn git_short_sha(worktree: &Path) -> String {
-    Command::new("git")
-        .arg("-C")
-        .arg(worktree)
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
-}
-
-/// The repository root of the current worktree.
-#[must_use]
-pub fn worktree_root() -> PathBuf {
-    Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
-        .unwrap_or_else(|| PathBuf::from("."))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
+    use crate::gates::DriverCheck;
 
     fn target() -> Target {
         Target {
@@ -2006,7 +2045,7 @@ mod tests {
 
     #[test]
     fn the_remote_commands_use_the_account_cargo_and_two_jobs() {
-        let b = build_command(2, REV);
+        let b = build_command(2, &rev());
         assert_eq!(
             b,
             format!(
@@ -2071,35 +2110,35 @@ mod tests {
     fn the_build_and_test_steps_carry_identical_provenance_claims() {
         // Cargo tracks both variables: a test step with other values (or
         // none) rebuilds the tested binary under the suite (review of J5-D, F8).
-        for revision in [REV.to_string(), format!("{REV}+dirty")] {
+        for revision in [
+            rev(),
+            Revision {
+                dirty: true,
+                ..rev()
+            },
+        ] {
             let env = build_env(&revision);
             assert!(!env.is_empty(), "{revision}");
             assert!(build_command(2, &revision).contains(&env), "{revision}");
             assert!(test_command("d", 2, &revision).contains(&env), "{revision}");
         }
         assert_eq!(
-            build_env(&format!("{REV}+dirty")),
+            build_env(&Revision {
+                dirty: true,
+                ..rev()
+            }),
             format!("OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=true")
         );
-        // An unknown revision claims nothing.
-        for unknown in [
-            "0000000000000000000000000000000000000000+dirty",
-            "abc",
-            "",
-            "g123456789abcdef0123456789abcdef01234567",
-        ] {
-            assert_eq!(build_env(unknown), "", "{unknown}");
-        }
     }
 
     #[test]
     fn doctors_build_provenance_must_name_the_tested_clean_optimised_build() {
         let good: Value = serde_json::from_str(GOOD_DOCTOR).unwrap();
-        assert!(provenance_problems(&good, REV).is_empty());
+        assert!(provenance_problems(&good, &rev()).is_empty());
         let mutate = |f: &dyn Fn(&mut Value)| {
             let mut d = good.clone();
             f(&mut d);
-            provenance_problems(&d, REV)
+            provenance_problems(&d, &rev())
         };
         assert!(!mutate(&|d| d["build"]["revision"] = "f".repeat(40).into()).is_empty());
         assert!(!mutate(&|d| d["build"]["revision"] = Value::Null).is_empty());
@@ -2108,7 +2147,16 @@ mod tests {
         assert!(!mutate(&|d| d["build"]["opt_level"] = "0".into()).is_empty());
         assert!(!mutate(&|d| d["build"]["debug_assertions"] = Value::Bool(true)).is_empty());
         assert!(!mutate(&|d| d["build"] = Value::Null).is_empty());
-        assert!(!provenance_problems(&good, &format!("{REV}+dirty")).is_empty());
+        assert!(
+            !provenance_problems(
+                &good,
+                &Revision {
+                    dirty: true,
+                    ..rev()
+                }
+            )
+            .is_empty()
+        );
         // And the decision fails the run on it.
         let mut o = a_clean_run();
         o.doctor_json = Some(GOOD_DOCTOR.replace("\"dirty\":false", "\"dirty\":true"));
@@ -2124,7 +2172,7 @@ mod tests {
 
     #[test]
     fn the_test_command_forbids_skips_and_names_both_binaries() {
-        let t = test_command("d", 2, REV);
+        let t = test_command("d", 2, &rev());
         assert!(t.contains("OURO_CONFORMANCE=1"), "{t}");
         assert!(
             t.contains("OURO_RELEASE_EVIDENCE=1"),
@@ -2370,16 +2418,34 @@ mod tests {
     /// Linux only: that is where they run, and macOS has no `setsid`.
     #[cfg(target_os = "linux")]
     mod scripts {
-        use super::super::*;
+        use std::process::Command;
 
-        struct Home(PathBuf);
+        use super::super::*;
+        use super::rev;
+
+        /// A private `$HOME` holding one run directory, removed on drop
+        /// (also when a test panics).
+        struct Home(tempfile::TempDir);
+
+        /// Check `done` until it holds or ten seconds pass: the detached step
+        /// belongs to another session, so its end can only be observed.
+        fn eventually<T>(mut done: impl FnMut() -> Option<T>) -> Option<T> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if let Some(value) = done() {
+                    return Some(value);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
 
         impl Home {
-            fn new(tag: &str) -> Home {
-                let dir = std::env::temp_dir()
-                    .join(format!("xtask-detached-{tag}-{}", std::process::id()));
-                let _ = std::fs::remove_dir_all(&dir);
-                std::fs::create_dir_all(dir.join(REMOTE_RUNS).join("d")).unwrap();
+            fn new() -> Home {
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::create_dir_all(dir.path().join(REMOTE_RUNS).join("d")).unwrap();
                 Home(dir)
             }
 
@@ -2387,7 +2453,7 @@ mod tests {
                 let out = Command::new("sh")
                     .arg("-c")
                     .arg(script)
-                    .env("HOME", &self.0)
+                    .env("HOME", self.0.path())
                     .output()
                     .unwrap();
                 String::from_utf8_lossy(&out.stdout).into_owned()
@@ -2397,34 +2463,24 @@ mod tests {
                 parse_poll(&self.sh(&detached_poll("d", name)))
             }
 
-            /// Poll until the step is no longer running, up to ten seconds.
+            /// The step's state once it no longer runs.
             fn settle(&self, name: &str) -> Option<Poll> {
-                for _ in 0..200 {
-                    match self.poll(name) {
-                        Some(Poll::Running(_)) => {
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                        }
-                        other => return other,
-                    }
-                }
-                self.poll(name)
+                eventually(|| match self.poll(name) {
+                    Some(Poll::Running(_)) => None,
+                    other => Some(other),
+                })
+                .flatten()
             }
 
             fn file(&self, name: &str) -> String {
-                std::fs::read_to_string(self.0.join(REMOTE_RUNS).join("d").join(name))
+                std::fs::read_to_string(self.0.path().join(REMOTE_RUNS).join("d").join(name))
                     .unwrap_or_default()
-            }
-        }
-
-        impl Drop for Home {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
             }
         }
 
         #[test]
         fn a_step_records_its_output_and_status_even_one_that_exits() {
-            let home = Home::new("done");
+            let home = Home::new();
             assert_eq!(home.poll("s"), Some(Poll::Absent));
             let started = home.sh(&detached_start("d", "s", "echo out; echo err 1>&2; exit 3"));
             assert_eq!(started.trim(), "started");
@@ -2438,7 +2494,7 @@ mod tests {
         /// shell and `nohup` ignores HUP, and both survive exec.
         #[test]
         fn a_step_starts_with_default_int_quit_and_hup() {
-            let home = Home::new("signals");
+            let home = Home::new();
             home.sh(&detached_start("d", "s", "grep ^SigIgn: /proc/self/status"));
             assert_eq!(home.settle("s"), Some(Poll::Done(0)));
             let line = home.file("s.log");
@@ -2455,7 +2511,7 @@ mod tests {
 
         #[test]
         fn a_second_start_does_not_run_the_step_twice() {
-            let home = Home::new("twice");
+            let home = Home::new();
             home.sh(&detached_start("d", "s", "echo once >> count; sleep 1"));
             let again = home.sh(&detached_start("d", "s", "echo once >> count; sleep 1"));
             assert_eq!(again.trim(), "", "the second start must not report started");
@@ -2465,16 +2521,11 @@ mod tests {
 
         #[test]
         fn a_step_that_dies_without_a_status_is_vanished_and_a_stop_ends_it() {
-            let home = Home::new("stop");
+            let home = Home::new();
             home.sh(&detached_start("d", "s", "sleep 30"));
             assert!(matches!(home.poll("s"), Some(Poll::Running(_))));
             // Wait for the pid file, then stop the step's process group.
-            for _ in 0..100 {
-                if !home.file("s.pid").is_empty() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
+            assert!(eventually(|| (!home.file("s.pid").is_empty()).then_some(())).is_some());
             home.sh(&detached_stop("d", "s", None));
             assert_eq!(home.settle("s"), Some(Poll::Vanished));
         }
@@ -2483,18 +2534,15 @@ mod tests {
         /// log's first line is the marker, and the command sees that PATH.
         #[test]
         fn the_scrubbed_path_reaches_the_command_through_the_detached_quoting() {
-            let home = Home::new("path");
-            let command = format!(
-                "env {}",
-                with_suite_path(
-                    "/usr/bin/printenv PATH",
-                    "0123456789abcdef0123456789abcdef01234567"
-                )
-            );
+            let home = Home::new();
+            let command = format!("env {}", with_suite_path("/usr/bin/printenv PATH", &rev()));
             home.sh(&detached_start("d", "s", &command));
             assert_eq!(home.settle("s"), Some(Poll::Done(0)));
             let log = home.file("s.log");
-            assert!(suite_ran_with_the_scrubbed_path(&log), "{log}");
+            assert!(
+                suite_ran_with_the_scrubbed_path(&gates::parse_log(&log)),
+                "{log}"
+            );
             assert!(log.lines().any(|l| l == SUITE_PATH), "{log}");
         }
 
@@ -2502,7 +2550,7 @@ mod tests {
         /// only problems it can leave are things it found.
         #[test]
         fn the_i01_probe_reports_every_name_in_a_real_shell() {
-            let home = Home::new("i01");
+            let home = Home::new();
             let out = home.sh(&i01_command());
             for p in i01_problems(&out) {
                 assert!(
@@ -2568,6 +2616,14 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     /// The revision the clean run's driver and log agree on.
     const REV: &str = "0123456789abcdef0123456789abcdef01234567";
+    const KEEP: Config = Config {
+        keep_remote: true,
+        linux_release: false,
+    };
+
+    fn rev() -> Revision {
+        Revision::parse(REV).unwrap()
+    }
 
     /// X01 by a test; each driver check on the one clause it may prove, so
     /// each check's wiring into the verdict is exercised by the decision
@@ -2650,6 +2706,10 @@ checks = ["i02_scan"]
         gates::Acceptance {
             map: gates::Map::parse(MINI_MAP).unwrap(),
             rows: gates::spec_rows(MINI_SPEC).unwrap(),
+            release: gates::ReleaseScope {
+                name: "linux-preview".to_owned(),
+                unsupported: Vec::new(),
+            },
         }
     }
 
@@ -2725,7 +2785,6 @@ smoke doctor 0
 
     fn a_clean_run() -> RunOutcomes {
         RunOutcomes {
-            linux_release: false,
             remote_created: true,
             mkdir: Some(okc()),
             rsync: Some(okc()),
@@ -2736,7 +2795,7 @@ smoke doctor 0
             doctor_json: Some(GOOD_DOCTOR.to_string()),
             suite: Some(okc()),
             suite_wait: None,
-            test_log: Some(GOOD_LOG.to_string()),
+            test_log: Some(gates::parse_log(GOOD_LOG)),
             host_manifest: Some(okc()),
             evidence_errors: Vec::new(),
             contract_validation: Some(okc()),
@@ -2747,12 +2806,106 @@ smoke doctor 0
             }),
             smoke: Some(clean_smoke()),
             acceptance: Some(Ok(mini_acceptance())),
-            revision: Some(REV.to_string()),
+            revision: Some(rev()),
         }
     }
 
     fn verdict(o: &RunOutcomes) -> Decision {
-        decide(o, Some(&a_manifest()), false)
+        decide(o, Some(&a_manifest()), Config::default())
+    }
+
+    /// Review XT2: a step that could not even start (ssh missing, a tree git
+    /// cannot list) is a recorded failure with its reason, and the run still
+    /// decides, keeps its directory and says why, instead of ending early.
+    #[test]
+    fn a_step_that_could_not_start_is_a_failure_with_its_reason() {
+        let mut o = a_clean_run();
+        o.rsync = Some(CommandResult::not_run(
+            "git could not enumerate the source files: not a repository",
+        ));
+        let d = verdict(&o);
+        assert_eq!(d.failures.len(), 1, "{:?}", d.failures);
+        assert!(
+            d.failures[0].starts_with("rsync exited without an exit status: git could not"),
+            "{:?}",
+            d.failures
+        );
+        assert!(
+            d.keep_remote,
+            "the created directory is kept for inspection"
+        );
+
+        let mut o = a_clean_run();
+        o.remote_created = false;
+        o.mkdir = Some(proc::run("/nonexistent/ssh", &[], None, None));
+        o.evidence_errors.push("doctor.json: disk full".into());
+        let d = verdict(&o);
+        assert!(
+            d.failures[0].contains("the remote run directory exited without an exit status"),
+            "{:?}",
+            d.failures
+        );
+        // Evidence problems are reported however early the run stopped.
+        assert!(
+            d.failures
+                .iter()
+                .any(|f| f == "evidence: doctor.json: disk full"),
+            "{:?}",
+            d.failures
+        );
+        assert!(!d.keep_remote);
+    }
+
+    /// Review XT3: the decision reads test.log by the gates' rules, once: a
+    /// nested helper's own `test result: FAILED`, printed while a test of
+    /// the suite was running, is that helper's, not a failed test binary.
+    #[test]
+    fn the_decision_and_the_verdict_read_one_parse_of_the_log() {
+        let mut o = a_clean_run();
+        let nested = GOOD_LOG.replace(
+            "test x01_literal_argv ... ok\n",
+            "test x01_literal_argv ... \nrunning 1 test\ntest result: FAILED. 0 passed; 1 failed; \
+             0 ignored; 0 measured; 0 filtered out; finished in 0.00s\nok\n",
+        );
+        let log = gates::parse_log(&nested);
+        assert_eq!(log.failed_binaries, 0);
+        o.test_log = Some(log);
+        let d = verdict(&o);
+        assert!(
+            !d.failures.iter().any(|f| f.contains("reported FAILED")),
+            "{:?}",
+            d.failures
+        );
+        // The same decision carries the verdict it judged by.
+        let v = d.verdict.expect("a log").expect("a map");
+        assert_eq!(v.failures().is_empty(), d.failures.is_empty());
+    }
+
+    /// Review XT17: what became of the remote directory is said once, and
+    /// truly.
+    #[test]
+    fn the_remote_directorys_fate_is_reported_as_it_was() {
+        let remote = "ci@host:~/ouro-ci/runs/d";
+        let fate =
+            |o: &RunOutcomes, config| remote_fate(&decide(o, Some(&a_manifest()), config), remote);
+        assert_eq!(
+            fate(&a_clean_run(), Config::default()),
+            "the remote run directory was removed"
+        );
+        assert_eq!(
+            fate(&a_clean_run(), KEEP),
+            format!("remote run directory kept: {remote}")
+        );
+        let mut failed_build = a_clean_run();
+        failed_build.build = Some(failed(101, "error: could not compile"));
+        assert_eq!(
+            fate(&failed_build, Config::default()),
+            format!("remote run directory kept: {remote}")
+        );
+        let mut never = a_clean_run();
+        never.remote_created = false;
+        never.mkdir = Some(failed(255, "Connection refused"));
+        assert_eq!(fate(&never, KEEP), "no remote run directory was created");
     }
 
     #[test]
@@ -2824,12 +2977,11 @@ smoke doctor 0
         // earlier one failed; the process code is the safety net, and this is
         // the second one.
         let mut o = a_clean_run();
-        o.test_log = Some(
+        o.test_log = Some(gates::parse_log(
             "test result: ok. 4 passed; 0 failed\n\
              test result: FAILED. 1 passed; 2 failed\n\
-             test result: ok. 9 passed; 0 failed\n"
-                .to_string(),
-        );
+             test result: ok. 9 passed; 0 failed\n",
+        ));
         let d = verdict(&o);
         assert!(
             d.failures
@@ -2839,11 +2991,10 @@ smoke doctor 0
             d.failures
         );
 
-        o.test_log = Some(
+        o.test_log = Some(gates::parse_log(
             "test result: FAILED. 0 passed; 1 failed\n\
-             test result: FAILED. 0 passed; 3 failed\n"
-                .to_string(),
-        );
+             test result: FAILED. 0 passed; 3 failed\n",
+        ));
         assert!(
             verdict(&o)
                 .failures
@@ -2857,13 +3008,12 @@ smoke doctor 0
     #[test]
     fn a_skipped_live_test_fails_the_run() {
         let mut o = a_clean_run();
-        o.test_log = Some(
+        o.test_log = Some(gates::parse_log(
             "running 2 tests\n\
              skipped: strace is not installed on this host\n\
              skipped: bubblewrap is not installed on this host\n\
-             test result: ok. 2 passed; 0 failed\n"
-                .to_string(),
-        );
+             test result: ok. 2 passed; 0 failed\n",
+        ));
         let d = verdict(&o);
         let named = d
             .failures
@@ -2888,7 +3038,7 @@ smoke doctor 0
             verdict(&o).failures
         );
 
-        o.test_log = Some("warning: something\n".to_string());
+        o.test_log = Some(gates::parse_log("warning: something\n"));
         assert!(
             verdict(&o)
                 .failures
@@ -3012,7 +3162,7 @@ smoke doctor 0
     #[test]
     fn a_manifest_that_did_not_load_fails_the_run() {
         let o = a_clean_run();
-        let d = decide(&o, None, false);
+        let d = decide(&o, None, Config::default());
         assert!(
             d.failures
                 .iter()
@@ -3061,14 +3211,14 @@ smoke doctor 0
     #[test]
     fn keep_remote_is_honoured_on_a_clean_run_and_never_invents_a_directory() {
         let clean = a_clean_run();
-        assert!(decide(&clean, Some(&a_manifest()), true).keep_remote);
+        assert!(decide(&clean, Some(&a_manifest()), KEEP).keep_remote);
 
         let never_created = RunOutcomes {
             remote_created: false,
             mkdir: Some(failed(255, "")),
             ..RunOutcomes::default()
         };
-        assert!(!decide(&never_created, Some(&a_manifest()), true).keep_remote);
+        assert!(!decide(&never_created, Some(&a_manifest()), KEEP).keep_remote);
     }
 
     #[test]
@@ -3083,7 +3233,7 @@ smoke doctor 0
             verdict(&o)
                 .failures
                 .iter()
-                .any(|f| f.contains("suite exited a signal")),
+                .any(|f| f.contains("suite exited without an exit status")),
             "{:?}",
             verdict(&o).failures
         );
@@ -3137,7 +3287,7 @@ smoke doctor 0
 
     #[test]
     fn the_suite_does_not_stop_at_the_first_failing_binary() {
-        let t = test_command("d", 2, REV);
+        let t = test_command("d", 2, &rev());
         assert!(t.contains("--no-fail-fast"), "{t}");
         assert!(
             t.contains("--test-threads=1"),
@@ -3162,8 +3312,12 @@ smoke doctor 0
         assert_eq!(excludes, vec!["/target", "/.git", "/evidence"]);
     }
 
+    /// Review RH-07: the copy is an allowlist of what the remote suite needs
+    /// (it was every file but four corpora: 121 MiB per run for 9 MiB of
+    /// code), never secrets, and of the retained results only the preview
+    /// evidence the release tests replay.
     #[test]
-    fn transfer_inventory_keeps_sources_and_excludes_ignored_caches_and_secrets() {
+    fn transfer_inventory_copies_only_what_the_suite_needs_and_never_secrets() {
         let root = tempfile::tempdir().unwrap();
         let destination = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
@@ -3181,55 +3335,55 @@ smoke doctor 0
         git(&["init", "-q"]);
         std::fs::write(
             root.path().join(".gitignore"),
-            ".claude/\nnode_modules/\n.env\n*.fixture\n",
+            "target/\nnode_modules/\n.env\n*.fixture\n",
         )
         .unwrap();
-        for directory in [
-            ".claude/worktrees/nested",
-            "website/node_modules",
-            "fixtures/target",
-            "docs/benchmarks/jail",
-            "docs/benchmarks/competitors",
-            "docs/benchmarks/competitors-after",
-            "docs/benchmarks/competitors-startup",
-            "docs/benchmarks/credentials",
-        ] {
-            std::fs::create_dir_all(root.path().join(directory)).unwrap();
-        }
-        for name in [
-            ".claude/worktrees/nested/cache",
-            "website/node_modules/cache",
-            ".env",
-            "fixtures/target/source with spaces\nand newline",
-            "new.rs",
-            "kept.fixture",
-            // Untracked and not ignored: only the inventory's own pathspec
-            // excludes keep these off the transfer.
-            "staging.env",
-            "server.pem",
-            "docs/benchmarks/jail/required-evidence.json",
+        let wanted = [
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+            "crates/a/src/lib.rs",
+            "crates/a/tests/source with spaces\nand newline.rs",
+            "crates/a/kept.fixture",
+            "docs/specs/jail-v1/acceptance-map.toml",
+            "docs/benchmarks/jail/verify_preview_evidence.py",
+            "docs/benchmarks/jail/README.md",
+            "docs/benchmarks/jail/fixtures/learn_access.c",
+            "docs/benchmarks/jail/results/current/vm.json",
+        ];
+        let unwanted = [
+            "README.md",
+            "website/index.html",
+            "fleet/mix.exs",
+            "docs/RELEASING.md",
+            "docs/benchmarks/jail/results/older/vm.json",
             "docs/benchmarks/competitors/results.json",
-            "docs/benchmarks/competitors-after/results.json",
-            "docs/benchmarks/competitors-startup/archive.tar.gz",
             "docs/benchmarks/credentials/results.json",
-        ] {
-            std::fs::write(root.path().join(name), "fixture").unwrap();
+            "crates/a/target/debug/out",
+            "website/node_modules/cache",
+        ];
+        // Untracked and not ignored inside the allowlist: only the
+        // inventory's own pathspec excludes keep these off the transfer.
+        let secrets = [
+            "crates/a/staging.env",
+            "crates/a/server.pem",
+            "crates/a/.env",
+        ];
+        for name in wanted.iter().chain(&unwanted).chain(&secrets) {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "fixture").unwrap();
         }
-        git(&["add", "-f", "kept.fixture"]);
-        git(&["add", "docs/benchmarks"]);
+        std::fs::write(
+            root.path().join(PREVIEW_INDEX),
+            r#"{"directory": "results/current"}"#,
+        )
+        .unwrap();
+        git(&["add", "-f", "crates/a/kept.fixture"]);
+        git(&["add", "docs"]);
         let inventory = destination.path().join("source-files.nul");
         source_inventory(root.path(), &inventory).unwrap();
-        let bytes = std::fs::read(&inventory).unwrap();
-        let listed: Vec<&[u8]> = bytes
-            .split(|byte| *byte == 0)
-            .filter(|entry| !entry.is_empty())
-            .collect();
-        for secret in [".env", "staging.env", "server.pem"] {
-            assert!(
-                !listed.contains(&secret.as_bytes()),
-                "inventory lists {secret}"
-            );
-        }
         let transfer = Command::new("rsync")
             .args(["-a", "--from0", "--files-from"])
             .arg(&inventory)
@@ -3243,31 +3397,23 @@ smoke doctor 0
             String::from_utf8_lossy(&transfer.stderr)
         );
         let copied = destination.path().join("copy");
-        for name in [
-            "fixtures/target/source with spaces\nand newline",
-            "new.rs",
-            "kept.fixture",
-            "docs/benchmarks/jail/required-evidence.json",
-        ] {
+        for name in wanted.iter().chain([&PREVIEW_INDEX]) {
             assert!(copied.join(name).is_file(), "missing {name}");
         }
-        for name in [".claude", "website/node_modules", ".env", ".git"] {
-            assert!(!copied.join(name).exists(), "copied ignored state {name}");
+        for name in unwanted {
+            assert!(!copied.join(name).exists(), "copied {name}");
         }
-        for name in ["staging.env", "server.pem"] {
+        for name in secrets {
             assert!(!copied.join(name).exists(), "copied secret {name}");
         }
-        for corpus in [
-            "competitors",
-            "competitors-after",
-            "competitors-startup",
-            "credentials",
-        ] {
-            assert!(
-                !copied.join("docs/benchmarks").join(corpus).exists(),
-                "copied comparison result corpus {corpus}"
-            );
-        }
+        assert!(!copied.join(".git").exists());
+
+        // An index that escapes the results directory, or none, is refused.
+        std::fs::write(root.path().join(PREVIEW_INDEX), r#"{"directory": "../.."}"#).unwrap();
+        assert!(source_inventory(root.path(), &inventory).is_err());
+        std::fs::remove_file(root.path().join(PREVIEW_INDEX)).unwrap();
+        let error = source_inventory(root.path(), &inventory).unwrap_err();
+        assert!(error.contains(PREVIEW_INDEX), "{error}");
     }
 
     #[test]
@@ -3291,10 +3437,10 @@ smoke doctor 0
 
     #[test]
     fn i01_the_suite_runs_with_only_the_system_directories_on_its_path_and_says_so() {
-        let t = test_command("d", 2, REV);
+        let t = test_command("d", 2, &rev());
         assert!(
             t.contains(&format!(
-                "PATH={SUITE_PATH} /bin/sh -c \"echo {SUITE_PATH_MARKER}\\$PATH; \
+                "PATH={SUITE_PATH} /bin/sh -c \"echo ouro-suite-path=\\$PATH; \
                  echo ouro-suite-revision={REV}; \
                  echo ouro-suite-conformance=\\$OURO_CONFORMANCE; exec $C test"
             )),
@@ -3321,22 +3467,16 @@ smoke doctor 0
                 "only system directories: {dir}"
             );
         }
-        let marker = format!("{SUITE_PATH_MARKER}{SUITE_PATH}");
-        assert!(suite_ran_with_the_scrubbed_path(&format!(
-            "{marker}\nrunning 1 test\n"
-        )));
+        let marker = format!("{}{SUITE_PATH}", gates::MARKER_PATH);
+        let scrubbed = |log: &str| suite_ran_with_the_scrubbed_path(&gates::parse_log(log));
+        assert!(scrubbed(&format!("{marker}\nrunning 1 test\n")));
+        assert!(!scrubbed("running 1 test\n"), "no marker");
         assert!(
-            !suite_ran_with_the_scrubbed_path("running 1 test\n"),
-            "no marker"
-        );
-        assert!(
-            !suite_ran_with_the_scrubbed_path(
-                "ouro-suite-path=/home/ouro-ci/.cargo/bin:/usr/bin\n"
-            ),
+            !scrubbed("ouro-suite-path=/home/ouro-ci/.cargo/bin:/usr/bin\n"),
             "a PATH with the account's directories"
         );
         assert!(
-            !suite_ran_with_the_scrubbed_path(&format!(
+            !scrubbed(&format!(
                 "{marker}\nouro-suite-path=/opt/erlang/bin:{SUITE_PATH}\n"
             )),
             "two markers that disagree"
@@ -3346,13 +3486,7 @@ smoke doctor 0
     #[test]
     #[should_panic(expected = "double quote")]
     fn a_suite_command_with_a_double_quote_is_refused() {
-        let _ = with_suite_path("echo \"hi\"", REV);
-    }
-
-    #[test]
-    #[should_panic(expected = "revision")]
-    fn a_revision_that_is_not_a_commit_is_refused() {
-        let _ = with_suite_path("true", "main; rm -rf /");
+        let _ = with_suite_path("echo \"hi\"", &rev());
     }
 
     /// Review H6, the proof on the host: under `OURO_CONFORMANCE=1` this
@@ -3391,21 +3525,25 @@ smoke doctor 0
     #[test]
     fn a_log_from_another_revision_or_without_conformance_mode_fails_the_run() {
         let mut o = a_clean_run();
-        o.test_log = Some(GOOD_LOG.replace(REV, "fedcba9876543210fedcba9876543210fedcba98"));
+        o.test_log = Some(gates::parse_log(
+            &GOOD_LOG.replace(REV, "fedcba9876543210fedcba9876543210fedcba98"),
+        ));
         let d = verdict(&o);
         assert!(
             d.failures.iter().any(|f| f.contains("revision")),
             "{:?}",
             d.failures
         );
-        o.test_log = Some(GOOD_LOG.replace("ouro-suite-conformance=1", "ouro-suite-conformance="));
+        o.test_log = Some(gates::parse_log(
+            &GOOD_LOG.replace("ouro-suite-conformance=1", "ouro-suite-conformance="),
+        ));
         let d = verdict(&o);
         assert!(
             d.failures.iter().any(|f| f.contains("OURO_CONFORMANCE")),
             "{:?}",
             d.failures
         );
-        let v = gate_verdict(&a_clean_run(), Some(&a_manifest()))
+        let v = gate_verdict(&a_clean_run(), Some(&a_manifest()), Config::default())
             .unwrap()
             .unwrap();
         assert!(v.lanes_label.contains(&REV[..12]), "{}", v.lanes_label);
@@ -3553,10 +3691,10 @@ smoke doctor 0
     #[test]
     fn a_suite_log_without_the_scrubbed_path_fails_i01() {
         let mut o = a_clean_run();
-        o.test_log = Some(GOOD_LOG.replace(
+        o.test_log = Some(gates::parse_log(&GOOD_LOG.replace(
             "ouro-suite-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n",
             "",
-        ));
+        )));
         let d = verdict(&o);
         assert!(
             d.failures
@@ -3602,7 +3740,7 @@ smoke doctor 0
             verdict(&o)
                 .failures
                 .iter()
-                .any(|f| f.contains("contract validator did not run")),
+                .any(|f| f.contains("contract validator") && f.contains("did not run")),
             "{:?}",
             verdict(&o).failures
         );
@@ -3830,11 +3968,11 @@ smoke doctor 0
     #[test]
     fn a_mapped_test_missing_from_the_log_fails_the_run_by_gate_and_clause() {
         let mut o = a_clean_run();
-        o.test_log = Some(
-            GOOD_LOG
+        o.test_log = Some(gates::parse_log(
+            &GOOD_LOG
                 .replace("test x01_literal_argv ... ok\n", "")
                 .replace("1 passed", "0 passed"),
-        );
+        ));
         let d = verdict(&o);
         assert!(
             d.failures
@@ -3843,8 +3981,9 @@ smoke doctor 0
             "{:?}",
             d.failures
         );
-        o.test_log =
-            Some(GOOD_LOG.replace("x01_literal_argv ... ok", "x01_literal_argv ... ignored"));
+        o.test_log = Some(gates::parse_log(
+            &GOOD_LOG.replace("x01_literal_argv ... ok", "x01_literal_argv ... ignored"),
+        ));
         let d = verdict(&o);
         assert!(
             d.failures.iter().any(|f| f.starts_with("gate X01 fails")),
@@ -3886,14 +4025,18 @@ smoke doctor 0
     #[test]
     fn every_driver_check_is_derived_from_its_own_step() {
         let clean = driver_checks(&a_clean_run(), Some(&a_manifest()));
-        for k in gates::CHECKS.iter().filter(|k| **k != "suite_clean") {
-            assert_eq!(clean.get(*k), Some(&true), "{k}: {clean:?}");
+        for k in DriverCheck::ALL
+            .into_iter()
+            .filter(|k| *k != DriverCheck::SuiteClean)
+        {
+            assert_eq!(clean.get(&k), Some(&true), "{k:?}: {clean:?}");
         }
         let flip = |edit: &dyn Fn(&mut RunOutcomes), check: &str| {
             let mut o = a_clean_run();
             edit(&mut o);
             let c = driver_checks(&o, Some(&a_manifest()));
-            assert_ne!(c.get(check), Some(&true), "{check}: {c:?}");
+            let check = DriverCheck::parse(check).unwrap();
+            assert_ne!(c.get(&check), Some(&true), "{check:?}: {c:?}");
         };
         flip(&|o| o.i02 = Some(failed(1, "")), "i02_scan");
         flip(&|o| o.i02 = None, "i02_scan");
@@ -3911,7 +4054,7 @@ smoke doctor 0
             "i01_absent",
         );
         flip(
-            &|o| o.test_log = Some("running 0 tests\n".to_string()),
+            &|o| o.test_log = Some(gates::parse_log("running 0 tests\n")),
             "i01_scrubbed_path",
         );
         flip(
@@ -3919,19 +4062,19 @@ smoke doctor 0
             "plain_session_smoke",
         );
         assert_eq!(
-            driver_checks(&a_clean_run(), None).get("doctor_manifest"),
+            driver_checks(&a_clean_run(), None).get(&DriverCheck::DoctorManifest),
             Some(&false)
         );
     }
 
     #[test]
     fn the_verdict_the_driver_writes_is_the_one_it_decides_on() {
-        let v = gate_verdict(&a_clean_run(), Some(&a_manifest()))
+        let v = gate_verdict(&a_clean_run(), Some(&a_manifest()), Config::default())
             .expect("a log exists")
             .expect("the map loaded");
         assert!(v.failures().is_empty(), "{:?}", v.failures());
         let mut o = a_clean_run();
         o.test_log = None;
-        assert!(gate_verdict(&o, Some(&a_manifest())).is_none());
+        assert!(gate_verdict(&o, Some(&a_manifest()), Config::default()).is_none());
     }
 }

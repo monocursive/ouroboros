@@ -50,6 +50,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 
+use crate::revision::Revision;
+use crate::util::toml_string;
+
 /// The map's own identifier.
 pub const MAP_SCHEMA: &str = "ouro.jail.acceptance-map/1";
 /// The verdict's identifier, in `gates.json`.
@@ -145,31 +148,75 @@ pub struct Map {
 /// The reason an `untested` clause fails.
 pub const UNTESTED: &str = "no test asserts this clause yet";
 
-/// The driver checks a clause may name.
-pub const CHECKS: &[&str] = &[
-    "i01_absent",
-    "i01_scrubbed_path",
-    "i02_scan",
-    "contract_validation",
-    "doctor_manifest",
-    "plain_session_smoke",
-    "suite_clean",
-];
+/// A driver check: evidence a clause may name that is not a libtest test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DriverCheck {
+    I01Absent,
+    I01ScrubbedPath,
+    I02Scan,
+    ContractValidation,
+    DoctorManifest,
+    PlainSessionSmoke,
+    /// Computed from the lane's own log, never reported by the driver.
+    SuiteClean,
+}
 
-/// Which clauses each driver check may prove: a check is evidence for the
-/// claim it measures, never for another (a clean log proves nothing about an
-/// owner's death, the contract validator nothing about the gate protocol).
-/// `doctor_manifest` and `plain_session_smoke` fail the run on their own and
-/// prove no §15 clause.
-pub const CHECK_CLAUSES: &[(&str, &[&str])] = &[
-    ("i01_absent", &["I01.1"]),
-    ("i01_scrubbed_path", &["I01.2"]),
-    ("suite_clean", &["I01.3", "M01.1"]),
-    ("i02_scan", &["I02.1"]),
-    ("contract_validation", &["R01.1", "R01.4"]),
-    ("doctor_manifest", &[]),
-    ("plain_session_smoke", &[]),
-];
+impl DriverCheck {
+    /// Every check, in the order the map's documentation lists them.
+    pub const ALL: [DriverCheck; 7] = [
+        DriverCheck::I01Absent,
+        DriverCheck::I01ScrubbedPath,
+        DriverCheck::I02Scan,
+        DriverCheck::ContractValidation,
+        DriverCheck::DoctorManifest,
+        DriverCheck::PlainSessionSmoke,
+        DriverCheck::SuiteClean,
+    ];
+
+    /// The name the map and `--check` use.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DriverCheck::I01Absent => "i01_absent",
+            DriverCheck::I01ScrubbedPath => "i01_scrubbed_path",
+            DriverCheck::I02Scan => "i02_scan",
+            DriverCheck::ContractValidation => "contract_validation",
+            DriverCheck::DoctorManifest => "doctor_manifest",
+            DriverCheck::PlainSessionSmoke => "plain_session_smoke",
+            DriverCheck::SuiteClean => "suite_clean",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(name: &str) -> Option<DriverCheck> {
+        DriverCheck::ALL
+            .into_iter()
+            .find(|check| check.as_str() == name)
+    }
+
+    /// The clauses this check may prove: a check is evidence for the claim it
+    /// measures, never for another (a clean log proves nothing about an
+    /// owner's death, the contract validator nothing about the gate
+    /// protocol). `doctor_manifest` and `plain_session_smoke` fail the run on
+    /// their own and prove no §15 clause.
+    #[must_use]
+    pub fn proves(self) -> &'static [&'static str] {
+        match self {
+            DriverCheck::I01Absent => &["I01.1"],
+            DriverCheck::I01ScrubbedPath => &["I01.2"],
+            DriverCheck::SuiteClean => &["I01.3", "M01.1"],
+            DriverCheck::I02Scan => &["I02.1"],
+            DriverCheck::ContractValidation => &["R01.1", "R01.4"],
+            DriverCheck::DoctorManifest | DriverCheck::PlainSessionSmoke => &[],
+        }
+    }
+
+    /// Every check's name, for a message.
+    #[must_use]
+    pub fn names() -> String {
+        DriverCheck::ALL.map(DriverCheck::as_str).join(", ")
+    }
+}
 
 impl Map {
     /// Every problem [`Map::problems`] finds, plus a `limit` that does not
@@ -287,19 +334,19 @@ impl Map {
                 }
             }
             for k in &c.checks {
-                match CHECK_CLAUSES.iter().find(|(name, _)| name == k) {
+                match DriverCheck::parse(k) {
                     None => p.push(format!(
                         "{}: `{k}` is not a driver check (one of {})",
                         c.id,
-                        CHECKS.join(", ")
+                        DriverCheck::names()
                     )),
-                    Some((_, allowed)) if !allowed.contains(&c.id.as_str()) => p.push(format!(
+                    Some(check) if !check.proves().contains(&c.id.as_str()) => p.push(format!(
                         "{}: the check `{k}` cannot prove it; it proves only {}",
                         c.id,
-                        if allowed.is_empty() {
+                        if check.proves().is_empty() {
                             "no clause (it fails the run on its own)".to_string()
                         } else {
-                            allowed.join(", ")
+                            check.proves().join(", ")
                         }
                     )),
                     Some(_) => {}
@@ -620,7 +667,8 @@ pub struct TestLog {
     pub failed_binaries: usize,
     /// `test result:` lines of any kind.
     pub summaries: usize,
-    /// `skipped:` lines (a live test that did not run).
+    /// Skip notes (a live test that did not run): a `skipped:` line, or one
+    /// after a test's `test <name> ... `, then named by its test.
     pub skips: Vec<String>,
     /// `ouro-suite-revision=` lines: the revision the suite ran at.
     pub revisions: Vec<String>,
@@ -646,17 +694,19 @@ pub fn read_log(path: &std::path::Path) -> Result<String, String> {
 #[must_use]
 pub fn binding_problems(
     logs: &BTreeMap<Lane, TestLog>,
-    expected_revision: Option<&str>,
+    expected_revision: Option<&Revision>,
 ) -> Vec<String> {
     let mut p = Vec::new();
-    let mut seen: Vec<(Lane, &str)> = Vec::new();
+    let mut seen: Vec<(Lane, Revision)> = Vec::new();
     for (lane, log) in logs {
         let lane_name = lane.as_str();
         match log.revisions.as_slice() {
             [] => p.push(format!(
                 "the {lane_name} log has no {MARKER_REVISION} line: nothing ties it to a revision"
             )),
-            [one] if is_revision(one) => seen.push((*lane, one.as_str())),
+            [one] if Revision::parse(one).is_some() => {
+                seen.extend(Revision::parse(one).map(|r| (*lane, r)));
+            }
             [one] => p.push(format!(
                 "the {lane_name} log's revision `{one}` is not a commit"
             )),
@@ -688,7 +738,7 @@ pub fn binding_problems(
     }
     if let Some(expected) = expected_revision {
         for (lane, revision) in &seen {
-            if *revision != expected {
+            if revision != expected {
                 p.push(format!(
                     "the {} log is at revision {revision}, but the map was read at {expected}",
                     lane.as_str()
@@ -715,13 +765,23 @@ pub fn describe_lanes(logs: &BTreeMap<Lane, TestLog>) -> String {
         .join(" + ")
 }
 
+/// A test binary's own `test result:` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Summary {
+    /// None was printed: it crashed, or the log is cut.
+    Missing,
+    /// One was printed that does not read as libtest's counts.
+    Unparseable(String),
+    /// `passed`, `failed`, `ignored`.
+    Counted([usize; 3]),
+}
+
 /// The test binary the log is in.
 struct Binary {
     prefix: String,
     /// Results attributed to it, in order; merged into the log at its end.
     entries: Vec<(String, Outcome)>,
-    /// `passed`, `failed`, `ignored` from its own `test result:` line.
-    summary: Option<[usize; 3]>,
+    summary: Summary,
     /// The names libtest lists under its closing `failures:`.
     failures: Vec<String>,
 }
@@ -787,6 +847,10 @@ fn normalise(name: &str) -> String {
     out.push_str(rest);
     out
 }
+
+/// The note the harness prints for a live test it did not run
+/// (`harness::skip_decision`).
+pub const SKIP_MARKER: &str = "skipped:";
 
 /// The markers the conformance suite prints before any test runs.
 pub const MARKER_PATH: &str = "ouro-suite-path=";
@@ -872,8 +936,8 @@ pub fn parse_log(text: &str) -> TestLog {
         for (_, outcome) in &b.entries {
             seen[*outcome as usize] += 1;
         }
-        match b.summary {
-            None => log.anomalies.push(Anomaly {
+        match &b.summary {
+            Summary::Missing => log.anomalies.push(Anomaly {
                 test: None,
                 binary: Some(b.prefix.clone()),
                 text: format!(
@@ -881,7 +945,16 @@ pub fn parse_log(text: &str) -> TestLog {
                     b.prefix
                 ),
             }),
-            Some(counts) if counts != seen => log.anomalies.push(Anomaly {
+            Summary::Unparseable(line) => log.anomalies.push(Anomaly {
+                test: None,
+                binary: Some(b.prefix.clone()),
+                text: format!(
+                    "{}: its `test result:` line does not read as libtest's counts \
+                     (`{line}`), so none of its results can be trusted",
+                    b.prefix
+                ),
+            }),
+            Summary::Counted(counts) if *counts != seen => log.anomalies.push(Anomaly {
                 test: None,
                 binary: Some(b.prefix.clone()),
                 text: format!(
@@ -889,7 +962,7 @@ pub fn parse_log(text: &str) -> TestLog {
                     b.prefix, counts[0], counts[1], counts[2], seen[0], seen[1], seen[2]
                 ),
             }),
-            Some(_) => {}
+            Summary::Counted(_) => {}
         }
         for (id, outcome) in b.entries {
             log.results.entry(id).or_default().push(outcome);
@@ -909,7 +982,7 @@ pub fn parse_log(text: &str) -> TestLog {
             binary = Some(Binary {
                 prefix: format!("{krate}/{source}"),
                 entries: Vec::new(),
-                summary: None,
+                summary: Summary::Missing,
                 failures: Vec::new(),
             });
             continue;
@@ -921,7 +994,7 @@ pub fn parse_log(text: &str) -> TestLog {
             binary = Some(Binary {
                 prefix: format!("{}/doc", krate.replace('_', "-")),
                 entries: Vec::new(),
-                summary: None,
+                summary: Summary::Missing,
                 failures: Vec::new(),
             });
             continue;
@@ -954,11 +1027,14 @@ pub fn parse_log(text: &str) -> TestLog {
             list = FailuresList::Off;
             names.clear();
             if let Some(b) = binary.as_mut() {
-                b.summary = counted(rest).or(Some([usize::MAX; 3]));
+                b.summary = counted(rest).map_or_else(
+                    || Summary::Unparseable(rest.chars().take(200).collect()),
+                    Summary::Counted,
+                );
             }
             continue;
         }
-        if trimmed.starts_with("skipped:") {
+        if trimmed.starts_with(SKIP_MARKER) {
             log.skips.push(trimmed.to_string());
             continue;
         }
@@ -1023,7 +1099,14 @@ pub fn parse_log(text: &str) -> TestLog {
             }
             match Outcome::read(result) {
                 Some(outcome) => b.entries.push((id, outcome)),
-                None => pending = Some(id),
+                None => {
+                    // With one test thread, a live test's skip note lands
+                    // right after libtest's `test <name> ... `.
+                    if let Some(at) = result.find(SKIP_MARKER) {
+                        log.skips.push(format!("{id}: {}", result[at..].trim()));
+                    }
+                    pending = Some(id);
+                }
             }
             continue;
         }
@@ -1076,13 +1159,6 @@ impl TestLog {
             .iter()
             .filter(move |a| a.test.as_deref() == Some(test) || a.binary.as_deref() == Some(binary))
     }
-}
-
-/// Is `value` a revision the suite may print: 40 hex digits, optionally
-/// followed by `+dirty` for a tree with uncommitted changes?
-fn is_revision(value: &str) -> bool {
-    let sha = value.strip_suffix("+dirty").unwrap_or(value);
-    sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 // -------------------------------------------------------------- the verdict
@@ -1157,8 +1233,9 @@ pub struct GateVerdict {
 
 #[derive(Debug, Clone, Default)]
 pub struct Verdict {
-    /// Explicit publication scope; absent means the complete specification.
-    pub linux_release: bool,
+    /// The publication scope judged ([`ReleaseScope::name`]); `None` means
+    /// the complete specification.
+    pub publication_scope: Option<String>,
     /// The map the verdict read, as its header names it.
     pub map_label: String,
     /// Which lanes were combined, at which revision.
@@ -1209,7 +1286,7 @@ impl Lane {
 fn clause_verdict(
     c: &Clause,
     logs: &BTreeMap<Lane, TestLog>,
-    checks: &BTreeMap<String, bool>,
+    checks: &BTreeMap<DriverCheck, bool>,
 ) -> ClauseVerdict {
     let mut reasons = Vec::new();
     let status = if c.tag == Tag::Credential {
@@ -1245,10 +1322,11 @@ fn clause_verdict(
             }
         }
         for k in &c.checks {
-            let passed = if k == "suite_clean" {
-                Some(log.clean())
-            } else {
-                checks.get(k).copied()
+            // An unknown name is a map problem, reported as one.
+            let passed = match DriverCheck::parse(k) {
+                Some(DriverCheck::SuiteClean) => Some(log.clean()),
+                Some(check) => checks.get(&check).copied(),
+                None => None,
             };
             match passed {
                 Some(true) => {}
@@ -1278,6 +1356,35 @@ fn clause_verdict(
     }
 }
 
+/// A gate's status from its clauses, and the reasons it fails without one:
+/// a failing clause fails it; a credential gate is a credential gate; a
+/// clause left to another lane leaves it there; an unsupported clause makes
+/// it unsupported, or a pass with unsupported clauses; a recorded limit
+/// makes it a pass with limits.
+fn gate_status(kind: Option<Kind>, reasons: &[String], clauses: &[ClauseVerdict]) -> GateStatus {
+    let any = |s: ClauseStatus| clauses.iter().any(|c| c.status == s);
+    if !reasons.is_empty() || any(ClauseStatus::Fail) {
+        GateStatus::Fail
+    } else if kind == Some(Kind::Credential) {
+        GateStatus::Credential
+    } else if any(ClauseStatus::Elsewhere) {
+        GateStatus::Elsewhere
+    } else if any(ClauseStatus::Unsupported) {
+        if clauses
+            .iter()
+            .all(|c| c.status == ClauseStatus::Unsupported)
+        {
+            GateStatus::Unsupported
+        } else {
+            GateStatus::PassWithUnsupported
+        }
+    } else if any(ClauseStatus::Limit) {
+        GateStatus::PassWithLimits
+    } else {
+        GateStatus::Pass
+    }
+}
+
 /// Compute the verdict. `checks` holds the driver checks this run produced
 /// (`true` = passed); `suite_clean` is computed from each lane's log.
 #[must_use]
@@ -1285,22 +1392,73 @@ pub fn evaluate(
     map: &Map,
     rows: &[(String, String)],
     logs: &BTreeMap<Lane, TestLog>,
-    checks: &BTreeMap<String, bool>,
+    checks: &BTreeMap<DriverCheck, bool>,
+) -> Verdict {
+    evaluate_in(map, rows, logs, checks, None)
+}
+
+/// The verdict for a publication scope ([`ReleaseScope`]): the clauses it
+/// names are reported unsupported, never passed, and only a macOS-lane
+/// clause may be named. Shared tests, macOS refusal checks and every Linux
+/// requirement still gate.
+#[must_use]
+pub fn evaluate_linux_release(
+    map: &Map,
+    rows: &[(String, String)],
+    logs: &BTreeMap<Lane, TestLog>,
+    checks: &BTreeMap<DriverCheck, bool>,
+    scope: &ReleaseScope,
+) -> Verdict {
+    evaluate_in(map, rows, logs, checks, Some(scope))
+}
+
+fn evaluate_in(
+    map: &Map,
+    rows: &[(String, String)],
+    logs: &BTreeMap<Lane, TestLog>,
+    checks: &BTreeMap<DriverCheck, bool>,
+    scope: Option<&ReleaseScope>,
 ) -> Verdict {
     let mut v = Verdict {
         lanes: logs.keys().copied().collect(),
+        publication_scope: scope.map(|s| s.name.clone()),
         ..Verdict::default()
     };
     v.problems.extend(map.problems());
     v.problems.extend(spec_problems(map, rows));
+    if let Some(scope) = scope {
+        for id in &scope.unsupported {
+            match map.clause.iter().find(|c| &c.id == id) {
+                None => v.problems.push(format!(
+                    "{RELEASE_PATH} reports {id} unsupported, but the map has no such clause"
+                )),
+                Some(c) if c.lane != Lane::Macos => v.problems.push(format!(
+                    "{id} cannot be excluded from Linux: its lane is not macos"
+                )),
+                Some(_) => {}
+            }
+        }
+    }
 
     for (id, _) in rows {
-        let clauses: Vec<ClauseVerdict> = map
+        let mut clauses: Vec<ClauseVerdict> = map
             .clause
             .iter()
             .filter(|c| &c.gate == id)
             .map(|c| clause_verdict(c, logs, checks))
             .collect();
+        if let Some(scope) = scope {
+            for clause in &mut clauses {
+                if clause.lane == Lane::Macos && scope.unsupported.contains(&clause.id) {
+                    clause.status = ClauseStatus::Unsupported;
+                    clause.reasons = vec![format!(
+                        "macOS execution is unsupported by the {} release; the full \
+                         specification requirement remains open",
+                        scope.name
+                    )];
+                }
+            }
+        }
         let kind = map.gate.iter().find(|g| &g.id == id).map(|g| g.kind);
         let mut reasons = Vec::new();
         if kind.is_none() {
@@ -1309,21 +1467,9 @@ pub fn evaluate(
         if clauses.is_empty() {
             reasons.push("the acceptance map has no clause for it".to_string());
         }
-        let any = |s: ClauseStatus| clauses.iter().any(|c| c.status == s);
-        let status = if !reasons.is_empty() || any(ClauseStatus::Fail) {
-            GateStatus::Fail
-        } else if kind == Some(Kind::Credential) {
-            GateStatus::Credential
-        } else if any(ClauseStatus::Elsewhere) {
-            GateStatus::Elsewhere
-        } else if any(ClauseStatus::Limit) {
-            GateStatus::PassWithLimits
-        } else {
-            GateStatus::Pass
-        };
         v.gates.push(GateVerdict {
             id: id.clone(),
-            status,
+            status: gate_status(kind, &reasons, &clauses),
             clauses,
             reasons,
         });
@@ -1388,60 +1534,6 @@ pub fn evaluate(
     v
 }
 
-/// Linux-only developer distribution. These five macOS execution requirements
-/// remain untested in the full verdict; this scope never calls them passes.
-/// Shared tests, macOS refusal checks and every Linux requirement still gate.
-pub const LINUX_RELEASE_UNSUPPORTED: &[&str] = &["K22.2", "K23.1", "K24.1", "K26.1", "K29.1"];
-
-pub fn evaluate_linux_release(
-    map: &Map,
-    rows: &[(String, String)],
-    logs: &BTreeMap<Lane, TestLog>,
-    checks: &BTreeMap<String, bool>,
-) -> Verdict {
-    let mut verdict = evaluate(map, rows, logs, checks);
-    verdict.linux_release = true;
-    for gate in &mut verdict.gates {
-        for clause in &mut gate.clauses {
-            if LINUX_RELEASE_UNSUPPORTED.contains(&clause.id.as_str()) {
-                if clause.lane != Lane::Macos {
-                    verdict.problems.push(format!(
-                        "{} cannot be excluded from Linux: its lane is not macos",
-                        clause.id
-                    ));
-                    continue;
-                }
-                clause.status = ClauseStatus::Unsupported;
-                clause.reasons = vec![
-                    "macOS execution is unsupported by the Linux developer release; the full specification requirement remains open".into(),
-                ];
-            }
-        }
-        if !gate
-            .clauses
-            .iter()
-            .any(|c| c.status == ClauseStatus::Unsupported)
-        {
-            continue;
-        }
-        let any = |status| gate.clauses.iter().any(|c| c.status == status);
-        gate.status = if !gate.reasons.is_empty() || any(ClauseStatus::Fail) {
-            GateStatus::Fail
-        } else if any(ClauseStatus::Elsewhere) {
-            GateStatus::Elsewhere
-        } else if gate
-            .clauses
-            .iter()
-            .all(|c| c.status == ClauseStatus::Unsupported)
-        {
-            GateStatus::Unsupported
-        } else {
-            GateStatus::PassWithUnsupported
-        };
-    }
-    verdict
-}
-
 impl Verdict {
     /// One line per failing gate plus every problem. Empty means every gate
     /// in the evaluated lanes passed (with recorded limits at most).
@@ -1481,7 +1573,7 @@ impl Verdict {
                 matches!(
                     g.status,
                     GateStatus::Pass | GateStatus::PassWithLimits | GateStatus::Credential
-                ) || (self.linux_release
+                ) || (self.publication_scope.is_some()
                     && matches!(
                         g.status,
                         GateStatus::Unsupported | GateStatus::PassWithUnsupported
@@ -1508,10 +1600,10 @@ impl Verdict {
         if !self.lanes_label.is_empty() {
             let _ = writeln!(s, "lanes combined: {}", self.lanes_label);
         }
-        if self.linux_release {
+        if let Some(scope) = &self.publication_scope {
             let _ = writeln!(
                 s,
-                "publication scope: linux-preview; macOS execution requirements remain unsupported, never passed"
+                "publication scope: {scope}; macOS execution requirements remain unsupported, never passed"
             );
         }
         let _ = writeln!(
@@ -1638,7 +1730,7 @@ impl Verdict {
         serde_json::json!({
             "schema": VERDICT_SCHEMA,
             "map_schema": map.schema,
-            "publication_scope": if self.linux_release { "linux-preview" } else { "full" },
+            "publication_scope": self.publication_scope.as_deref().unwrap_or("full"),
             "lanes": self.lanes.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
             "all_noncredential_gates_pass": self.all_noncredential_gates_pass(),
             "counts": self.counts(),
@@ -1651,11 +1743,59 @@ impl Verdict {
 
 // ------------------------------------------------------ loading and the CLI
 
-/// The map and the §15 rows it is checked against, loaded together.
+/// The map and the §15 rows it is checked against, loaded together, with
+/// the publication scope of the Linux release.
 #[derive(Debug, Clone)]
 pub struct Acceptance {
     pub map: Map,
     pub rows: Vec<(String, String)>,
+    pub release: ReleaseScope,
+}
+
+/// Where the release coordinates live, relative to the repository root.
+pub const RELEASE_PATH: &str = "crates/ouro-jail/dist/release.json";
+
+/// The Linux developer release's publication scope, from [`RELEASE_PATH`]:
+/// its name and the clauses it reports unsupported instead of failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseScope {
+    pub name: String,
+    pub unsupported: Vec<String>,
+}
+
+impl ReleaseScope {
+    /// Read `jail.publication_scope` and `jail.unsupported_clauses`.
+    ///
+    /// # Errors
+    /// The coordinates are not JSON or lack either field.
+    pub fn parse(text: &str) -> Result<ReleaseScope, String> {
+        #[derive(Deserialize)]
+        struct Coordinates {
+            jail: Jail,
+        }
+        #[derive(Deserialize)]
+        struct Jail {
+            publication_scope: String,
+            unsupported_clauses: Vec<String>,
+        }
+        let c: Coordinates =
+            serde_json::from_str(text).map_err(|e| format!("{RELEASE_PATH}: {e}"))?;
+        Ok(ReleaseScope {
+            name: c.jail.publication_scope,
+            unsupported: c.jail.unsupported_clauses,
+        })
+    }
+
+    /// [`ReleaseScope::parse`] of the repository's coordinates.
+    ///
+    /// # Errors
+    /// They cannot be read or parsed.
+    pub fn load(root: &std::path::Path) -> Result<ReleaseScope, String> {
+        ReleaseScope::parse(
+            &std::fs::read_to_string(root.join(RELEASE_PATH))
+                .map_err(|e| format!("cannot read {RELEASE_PATH}: {e}"))?,
+        )
+    }
 }
 
 /// Load the map and the spec from a repository root.
@@ -1685,6 +1825,7 @@ pub fn load_from(
     }
     Ok(Acceptance {
         map: parsed,
+        release: ReleaseScope::load(root)?,
         rows: combine_rows(
             spec_rows(&spec_text)?,
             spec_v2_rows(
@@ -1693,28 +1834,6 @@ pub fn load_from(
             )?,
         )?,
     })
-}
-
-/// The revision a repository is at, as the suite prints it: `<40-hex>`,
-/// with `+dirty` when tracked files have uncommitted changes.
-#[must_use]
-pub fn repository_revision(root: &std::path::Path) -> Option<String> {
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    };
-    let sha = git(&["rev-parse", "HEAD"])?;
-    if !is_revision(&sha) || sha.ends_with("+dirty") {
-        return None;
-    }
-    let dirty = !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty();
-    Some(if dirty { format!("{sha}+dirty") } else { sha })
 }
 
 /// `cargo xtask gates`: the verdict over saved logs.
@@ -1751,7 +1870,7 @@ pub struct GatesArgs {
 }
 
 /// Parse `--check` values.
-pub fn parse_checks(values: &[String]) -> Result<BTreeMap<String, bool>, String> {
+pub fn parse_checks(values: &[String]) -> Result<BTreeMap<DriverCheck, bool>, String> {
     let mut out = BTreeMap::new();
     for v in values {
         let (name, passed) = match v.split_once('=') {
@@ -1760,12 +1879,16 @@ pub fn parse_checks(values: &[String]) -> Result<BTreeMap<String, bool>, String>
             Some((n, "fail")) => (n, false),
             Some((_, other)) => return Err(format!("--check {v}: `{other}` is not pass or fail")),
         };
-        if !CHECKS.contains(&name) || name == "suite_clean" {
-            return Err(format!(
-                "--check {name}: not a driver check (suite_clean comes from the log)"
-            ));
+        match DriverCheck::parse(name) {
+            Some(DriverCheck::SuiteClean) | None => {
+                return Err(format!(
+                    "--check {name}: not a driver check (suite_clean comes from the log)"
+                ));
+            }
+            Some(check) => {
+                out.insert(check, passed);
+            }
         }
-        out.insert(name.to_string(), passed);
     }
     Ok(out)
 }
@@ -1785,9 +1908,19 @@ pub fn run_cli(args: &GatesArgs, root: &std::path::Path) -> std::process::ExitCo
         Ok(a) => a,
         Err(e) => return fail(e),
     };
-    let expected = match args.revision.clone().or_else(|| repository_revision(root)) {
-        Some(r) => r,
-        None => return fail("the repository's revision could not be read; pass --revision".into()),
+    let expected = match &args.revision {
+        Some(text) => match Revision::parse(text) {
+            Some(r) => r,
+            None => return fail(format!("--revision {text}: not a 40-hex commit (+dirty)")),
+        },
+        None => match Revision::of_repository(root) {
+            Ok(r) => r,
+            Err(e) => {
+                return fail(format!(
+                    "the repository's revision could not be read ({e}); pass --revision"
+                ));
+            }
+        },
     };
     let mut logs = BTreeMap::new();
     for spec in &args.logs {
@@ -1810,7 +1943,13 @@ pub fn run_cli(args: &GatesArgs, root: &std::path::Path) -> std::process::ExitCo
         Err(e) => return fail(e),
     };
     let mut verdict = if args.linux_release {
-        evaluate_linux_release(&acceptance.map, &acceptance.rows, &logs, &checks)
+        evaluate_linux_release(
+            &acceptance.map,
+            &acceptance.rows,
+            &logs,
+            &checks,
+            &acceptance.release,
+        )
     } else {
         evaluate(&acceptance.map, &acceptance.rows, &logs, &checks)
     };
@@ -2212,11 +2351,6 @@ pub const MAP_HEADER: &str = "\
 # K01-K32 computed from the suite at the M6 fix (2026-10-08).
 ";
 
-/// A TOML basic string (JSON's escapes are a subset TOML accepts).
-fn toml_string(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
-}
-
 /// The map in its canonical form: the file is always what this prints.
 #[must_use]
 pub fn render_map(map: &Map) -> String {
@@ -2374,14 +2508,16 @@ mod tests {
         let map = Map::parse(MAP).unwrap();
         let rows = combine_rows(spec_rows(SPEC).unwrap(), spec_v2_rows(SPEC_V2).unwrap()).unwrap();
         let logs = BTreeMap::new();
+        let scope = release_scope();
         let full = evaluate(&map, &rows, &logs, &BTreeMap::new());
-        let linux = evaluate_linux_release(&map, &rows, &logs, &BTreeMap::new());
-        for id in LINUX_RELEASE_UNSUPPORTED {
+        let linux = evaluate_linux_release(&map, &rows, &logs, &BTreeMap::new(), &scope);
+        assert!(!scope.unsupported.is_empty());
+        for id in &scope.unsupported {
             let find = |v: &Verdict| {
                 v.gates
                     .iter()
                     .flat_map(|g| &g.clauses)
-                    .find(|c| c.id == *id)
+                    .find(|c| &c.id == id)
                     .unwrap()
                     .status
             };
@@ -2427,7 +2563,8 @@ mod tests {
         unproved_linux.tag = Tag::Untested;
         unproved_linux.tests.clear();
         let logs = BTreeMap::from([(Lane::Macos, TestLog::default())]);
-        let verdict = evaluate_linux_release(&map, &rows, &logs, &BTreeMap::new());
+        let verdict =
+            evaluate_linux_release(&map, &rows, &logs, &BTreeMap::new(), &release_scope());
         assert!(
             verdict
                 .problems
@@ -2456,11 +2593,156 @@ mod tests {
     /// The v2 spec whose §11 carries the K rows.
     const SPEC_V2: &str = include_str!("../../../docs/specs/jail-v2.md");
 
+    /// Review XT3: with one test thread, a live test's skip note lands on
+    /// the line libtest opened for it. Counting only lines that start with
+    /// the note missed every real skip.
+    #[test]
+    fn a_skip_note_after_a_tests_name_is_counted_and_attributed() {
+        let log = parse_log(&MINI_LOG.replace(
+            "test x01_literal_argv ... ok\n",
+            "test x01_literal_argv ... skipped: bubblewrap is absent\nok\n",
+        ));
+        assert_eq!(
+            log.skips,
+            ["ouro-jail/tests/conformance_j1.rs::x01_literal_argv: skipped: bubblewrap is absent"]
+        );
+        assert_eq!(
+            log.results["ouro-jail/tests/conformance_j1.rs::x01_literal_argv"],
+            [Outcome::Ok]
+        );
+        assert!(log.anomalies.is_empty(), "{:?}", log.anomalies);
+        assert!(!log.clean(), "a skip makes the log unclean");
+    }
+
+    /// Review XT21: a `test result:` line that does not read as libtest's
+    /// counts says so, instead of standing in as `usize::MAX` counts.
+    #[test]
+    fn an_unreadable_summary_is_named_as_one() {
+        let log = parse_log(&MINI_LOG.replacen(
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+            "test result: ok. one passed",
+            1,
+        ));
+        assert!(
+            log.anomalies
+                .iter()
+                .any(|a| a.binary.as_deref() == Some("ouro-jail/src/lib.rs")
+                    && a.text.contains("does not read as libtest's counts")
+                    && a.text.contains("one passed")),
+            "{:?}",
+            log.anomalies
+        );
+        assert!(!log.clean());
+    }
+
+    /// Review XT10: one rule decides a gate's status, in either scope.
+    #[test]
+    fn a_gates_status_follows_one_precedence() {
+        let clause = |status| ClauseVerdict {
+            id: "G01.1".into(),
+            tag: Tag::Portable,
+            lane: Lane::Linux,
+            status,
+            reasons: Vec::new(),
+        };
+        use ClauseStatus as C;
+        let status = |kind, clauses: &[ClauseStatus]| {
+            let clauses: Vec<ClauseVerdict> = clauses.iter().map(|s| clause(*s)).collect();
+            gate_status(Some(kind), &[], &clauses)
+        };
+        assert_eq!(status(Kind::Scripted, &[C::Pass]), GateStatus::Pass);
+        assert_eq!(
+            status(Kind::Scripted, &[C::Pass, C::Limit]),
+            GateStatus::PassWithLimits
+        );
+        assert_eq!(
+            status(Kind::Scripted, &[C::Limit, C::Unsupported]),
+            GateStatus::PassWithUnsupported
+        );
+        assert_eq!(
+            status(Kind::Scripted, &[C::Unsupported]),
+            GateStatus::Unsupported
+        );
+        assert_eq!(
+            status(Kind::Scripted, &[C::Unsupported, C::Elsewhere]),
+            GateStatus::Elsewhere
+        );
+        assert_eq!(
+            status(Kind::Credential, &[C::Credential, C::Unsupported]),
+            GateStatus::Credential
+        );
+        assert_eq!(
+            status(Kind::Credential, &[C::Credential, C::Fail]),
+            GateStatus::Fail
+        );
+        assert_eq!(
+            gate_status(None, &["no [[gate]]".into()], &[]),
+            GateStatus::Fail
+        );
+    }
+
+    /// Review XT10: the release scope is the release coordinates', and a
+    /// clause it names that the map does not have is a problem, not a no-op.
+    #[test]
+    fn the_release_scope_comes_from_the_coordinates() {
+        let scope = release_scope();
+        assert_eq!(scope.name, "linux-preview");
+        assert_eq!(
+            scope.unsupported,
+            ["K22.2", "K23.1", "K24.1", "K26.1", "K29.1"]
+        );
+        let map = Map::parse(MAP).unwrap();
+        let rows = combine_rows(spec_rows(SPEC).unwrap(), spec_v2_rows(SPEC_V2).unwrap()).unwrap();
+        let mut stale = scope.clone();
+        stale.unsupported.push("K99.1".into());
+        let v = evaluate_linux_release(&map, &rows, &BTreeMap::new(), &BTreeMap::new(), &stale);
+        assert!(
+            v.problems.iter().any(|p| p.contains("K99.1")),
+            "{:?}",
+            v.problems
+        );
+        assert!(ReleaseScope::parse(r#"{"jail": {"publication_scope": "x"}}"#).is_err());
+    }
+
+    /// Review XT9: a check the map names is a [`DriverCheck`], each name
+    /// round-trips, and an unknown one is a map problem.
+    #[test]
+    fn driver_checks_are_one_vocabulary() {
+        for check in DriverCheck::ALL {
+            assert_eq!(DriverCheck::parse(check.as_str()), Some(check));
+        }
+        assert_eq!(DriverCheck::parse("suite-clean"), None);
+        let mut map = Map::parse(MAP).unwrap();
+        map.clause
+            .iter_mut()
+            .find(|c| c.id == "I02.1")
+            .unwrap()
+            .checks
+            .push("i02_scan_v2".into());
+        assert!(
+            map.problems()
+                .iter()
+                .any(|p| p.contains("`i02_scan_v2` is not a driver check")),
+            "{:?}",
+            map.problems()
+        );
+        assert!(parse_checks(&["suite_clean".into()]).is_err());
+        assert_eq!(
+            parse_checks(&["i02_scan=fail".into()]).unwrap(),
+            BTreeMap::from([(DriverCheck::I02Scan, false)])
+        );
+    }
+
+    /// The checked-in release coordinates' scope.
+    fn release_scope() -> ReleaseScope {
+        ReleaseScope::parse(include_str!("../../ouro-jail/dist/release.json")).unwrap()
+    }
+
     fn linux(log: &str) -> BTreeMap<Lane, TestLog> {
         BTreeMap::from([(Lane::Linux, parse_log(log))])
     }
 
-    fn no_checks() -> BTreeMap<String, bool> {
+    fn no_checks() -> BTreeMap<DriverCheck, bool> {
         BTreeMap::new()
     }
 
@@ -3001,12 +3283,12 @@ reason = ""
                 .any(|r| r.contains("i01_absent") && r.contains("not produced")),
             "{v:#?}"
         );
-        let passed = BTreeMap::from([("i01_absent".to_string(), true)]);
+        let passed = BTreeMap::from([(DriverCheck::I01Absent, true)]);
         assert_eq!(
             gate(&evaluate(&map, &rows, &linux(MINI_LOG), &passed), "I01").status,
             GateStatus::Pass
         );
-        let failed = BTreeMap::from([("i01_absent".to_string(), false)]);
+        let failed = BTreeMap::from([(DriverCheck::I01Absent, false)]);
         assert_eq!(
             gate(&evaluate(&map, &rows, &linux(MINI_LOG), &failed), "I01").status,
             GateStatus::Fail
@@ -3505,9 +3787,9 @@ reason = "an `ignore` doc example"
         };
         let good = lanes(&bound(MINI_LOG, REV, "1"), &bound(MINI_LOG, REV, "1"));
         assert!(
-            binding_problems(&good, Some(REV)).is_empty(),
+            binding_problems(&good, Revision::parse(REV).as_ref()).is_empty(),
             "{:?}",
-            binding_problems(&good, Some(REV))
+            binding_problems(&good, Revision::parse(REV).as_ref())
         );
         assert!(binding_problems(&good, None).is_empty());
         let label = describe_lanes(&good);
@@ -3541,7 +3823,7 @@ reason = "an `ignore` doc example"
             let p = binding_problems(&logs, None);
             assert!(p.iter().any(|p| p.contains(needle)), "{needle}: {p:?}");
         }
-        let p = binding_problems(&good, Some(other));
+        let p = binding_problems(&good, Revision::parse(other).as_ref());
         assert!(
             p.iter().any(|p| p.contains("map") && p.contains(other)),
             "{p:?}"
@@ -3987,9 +4269,9 @@ Unrelated prose.
         // Given the driver checks it did not have, the base still fails
         // every clause that is untested: the verdict never passes a gate on
         // a log alone that the map says nothing proves.
-        let all = CHECKS
-            .iter()
-            .map(|c| ((*c).to_string(), true))
+        let all = DriverCheck::ALL
+            .into_iter()
+            .map(|c| (c, true))
             .collect::<BTreeMap<_, _>>();
         let v = evaluate(&map, &rows, &linux(BASE_LOG), &all);
         for c in map.clause.iter().filter(|c| c.tag == Tag::Untested) {

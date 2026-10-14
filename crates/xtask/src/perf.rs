@@ -2817,8 +2817,8 @@ fn write_summary(
         "summarizer": {
             "xtask_version": env!("CARGO_PKG_VERSION"),
             "record_schema": RECORD_SCHEMA,
-            "source_revision": command_text("git", &["rev-parse", "HEAD"])
-                .map(|t| t.trim().to_owned())
+            "source_revision": crate::proc::git(Path::new("."), &["rev-parse", "HEAD"])
+                .ok()
                 .filter(|t| t.len() == 40),
         },
     });
@@ -2867,30 +2867,25 @@ fn load1() -> Option<f64> {
     loadavg()?.split_whitespace().next()?.parse().ok()
 }
 
-fn command_text(program: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if !out.status.success() {
-        let _ = write!(
-            text,
-            "\n[exit {}] {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+/// What a command printed, as the host facts record it: its stdout, as
+/// JSON when it is JSON; when it failed (or did not start), its exit status
+/// and stderr beside it rather than mixed into it.
+fn command_fact(program: &str, args: &[&str]) -> Value {
+    let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+    let r = crate::proc::run(program, &args, None, None);
+    let stdout = serde_json::from_str::<Value>(&r.stdout)
+        .unwrap_or_else(|_| Value::String(r.stdout.trim_end().to_owned()));
+    if r.ok() {
+        stdout
+    } else {
+        json!({ "exit": r.code, "stdout": stdout, "stderr": r.stderr.trim() })
     }
-    Some(text)
 }
 
-fn sha256(path: &Path) -> Option<String> {
-    let p = path.to_str()?;
-    let text =
-        command_text("sha256sum", &[p]).or_else(|| command_text("shasum", &["-a", "256", p]))?;
-    let hex = text.split_whitespace().next()?;
-    (hex.len() == 64).then(|| hex.to_owned())
+/// A file's SHA-256, or why it has none (a host fact, so a failure is
+/// recorded rather than fatal).
+fn sha256(path: &Path) -> Value {
+    crate::util::sha256_file(path).map_or_else(|e| json!({ "error": e }), Value::String)
 }
 
 /// `/proc/pressure/cpu`'s `some` line: (avg10 in percent, total in µs).
@@ -2934,11 +2929,6 @@ fn host_facts(plan: &Plan) -> Value {
         .as_deref()
         .map(|u| Path::new("/var/lib/systemd/linger").join(u).exists());
     let jail = plan.jail.to_str().unwrap_or_default();
-    let json_of = |text: Option<String>| {
-        text.map_or(Value::Null, |t| {
-            serde_json::from_str::<Value>(&t).unwrap_or(Value::String(t))
-        })
-    };
     json!({
         "collected_at": crate::stamp::rfc3339_from_unix(crate::stamp::unix_now()),
         "hostname": read("/proc/sys/kernel/hostname"),
@@ -2956,12 +2946,12 @@ fn host_facts(plan: &Plan) -> Value {
         "jail": {
             "path": plan.jail,
             "sha256": sha256(&plan.jail),
-            "version": json_of(command_text(jail, &["version", "--json"])),
+            "version": command_fact(jail, &["version", "--json"]),
         },
         "fixture": { "path": plan.fixture, "sha256": sha256(&plan.fixture) },
-        "bwrap_version": command_text("bwrap", &["--version"]),
+        "bwrap_version": command_fact("bwrap", &["--version"]),
         "spawn_child_resolved": std::fs::canonicalize("/usr/bin/true").ok(),
-        "doctor_tool": json_of(command_text(jail, &["doctor", "--json", "--profile", "tool"])),
+        "doctor_tool": command_fact(jail, &["doctor", "--json", "--profile", "tool"]),
     })
 }
 

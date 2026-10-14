@@ -26,6 +26,8 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::proc::git_bytes;
+
 // The build-input digest rule `build.rs` applies, so a tested binary's
 // `inputs` can be recomputed from the tree and from a commit.
 #[allow(dead_code)]
@@ -102,19 +104,7 @@ fn read(root: &Path, relative: &str) -> Result<String, String> {
     std::fs::read_to_string(root.join(relative)).map_err(|error| format!("{relative}: {error}"))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest as _;
-    sha2::Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-/// A TOML basic string. JSON's escapes (`\"`, `\\`, `\n`, `\uXXXX`) are all
-/// valid in a TOML basic string.
-fn quote(text: &str) -> String {
-    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned())
-}
+use crate::util::{sha256_hex, toml_string as quote};
 
 fn quote_list(items: &[String]) -> String {
     let quoted: Vec<String> = items.iter().map(|item| quote(item)).collect();
@@ -846,20 +836,9 @@ fn restore_null(
     }
 }
 
-fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| output.stdout)
-}
-
 /// The build-input digest of `revision`'s tree, from git's objects.
 fn revision_inputs(root: &Path, revision: &str) -> Result<String, String> {
-    let listing = git(
+    let listing = git_bytes(
         root,
         &[
             "ls-tree",
@@ -871,7 +850,7 @@ fn revision_inputs(root: &Path, revision: &str) -> Result<String, String> {
             build_provenance::INPUT_DIR,
         ],
     )
-    .ok_or_else(|| format!("git cannot list {revision}"))?;
+    .map_err(|e| format!("git cannot list {revision}: {e}"))?;
     let mut files: Vec<String> = String::from_utf8_lossy(&listing)
         .split('\0')
         .filter(|name| !name.is_empty())
@@ -886,8 +865,8 @@ fn revision_inputs(root: &Path, revision: &str) -> Result<String, String> {
     let mut contents = Vec::with_capacity(files.len());
     for file in &files {
         contents.push(
-            git(root, &["cat-file", "blob", &format!("{revision}:{file}")])
-                .ok_or_else(|| format!("git has no {file} at {revision}"))?,
+            git_bytes(root, &["cat-file", "blob", &format!("{revision}:{file}")])
+                .map_err(|e| format!("git has no {file} at {revision}: {e}"))?,
         );
     }
     Ok(build_provenance::digest(
@@ -965,7 +944,7 @@ pub fn validate_tested(root: &Path, tested: &Tested) -> Result<Vec<&'static str>
     if let Some(revision) = revision
         && root.join(".git").exists()
     {
-        if git(root, &["merge-base", "--is-ancestor", revision, "HEAD"]).is_some() {
+        if git_bytes(root, &["merge-base", "--is-ancestor", revision, "HEAD"]).is_ok() {
             verified.push("revision_is_ancestor_of_head");
         } else {
             problems.push(format!("{revision} is not an ancestor of HEAD"));
@@ -983,7 +962,7 @@ pub fn validate_tested(root: &Path, tested: &Tested) -> Result<Vec<&'static str>
         }
         let mut args = vec!["diff", "--quiet", revision, "HEAD", "--"];
         args.extend(FROZEN_PATHSPECS);
-        if git(root, &args).is_some() {
+        if git_bytes(root, &args).is_ok() {
             verified.push("frozen_inputs_unchanged_since_revision");
         } else {
             problems.push(format!(
@@ -1472,10 +1451,7 @@ mod tests {
     }
 
     fn head(root: &Path) -> String {
-        String::from_utf8(git(root, &["rev-parse", "HEAD"]).unwrap())
-            .unwrap()
-            .trim()
-            .to_owned()
+        crate::proc::git(root, &["rev-parse", "HEAD"]).unwrap()
     }
 
     /// Where `.git` is present, the revision claim is checked against the
