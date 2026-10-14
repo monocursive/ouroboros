@@ -13,33 +13,49 @@ defmodule OuroFleet.Request do
   alias OuroFleet.InvalidRequest
 
   @keys ~w(schema request_id on dir jail launch observe evidence limits capture capture_limit tags argv)
+  @defaults %{
+    "on" => "auto",
+    "jail" => "tool",
+    "observe" => "on",
+    "evidence" => "strict",
+    "capture" => [],
+    "limits" => [],
+    "tags" => [],
+    "capture_limit" => 1_048_576
+  }
 
-  def validate!(request) when is_map(request) do
-    if Map.keys(request) -- @keys != [], do: invalid!("unknown request field")
+  def validate!(input) when is_map(input) do
+    if Map.keys(input) -- @keys != [], do: invalid!("unknown request field")
+
+    # JSON null asks for the default. Every check below reads the merged map, so the
+    # request returned, digested and turned into argv is exactly the one validated.
+    request =
+      Map.merge(@defaults, input, fn _key, default, value ->
+        if is_nil(value), do: default, else: value
+      end)
+
     if request["schema"] != "ouro.fleet.request/1", do: invalid!("unsupported request schema")
     scalar!(request["request_id"], 256)
-    scalar!(request["on"] || "auto", 128)
+    scalar!(request["on"], 128)
     argv = request["argv"]
     if not is_list(argv) or argv == [] or length(argv) > 4096, do: invalid!("invalid argv")
     Enum.each(argv, &scalar!(&1, 65536, true))
+    if IO.iodata_length(OuroFleet.JSON.encode(input)) > 524_288, do: invalid!("request too large")
 
-    if IO.iodata_length(OuroFleet.JSON.encode(request)) > 524_288,
-      do: invalid!("request too large")
-
-    for key <- ["dir", "jail", "launch"] do
-      if request[key], do: scalar!(request[key], 4096)
+    for key <- ["dir", "jail", "launch"], not is_nil(request[key]) do
+      scalar!(request[key], 4096)
     end
 
     if request["dir"] && Path.type(request["dir"]) != :absolute,
       do: invalid!("directory must be absolute")
 
-    if (request["observe"] || "on") not in ["on", "off"], do: invalid!("invalid observation mode")
+    if request["observe"] not in ["on", "off"], do: invalid!("invalid observation mode")
 
-    if (request["evidence"] || "strict") not in ["strict", "best-effort"],
+    if request["evidence"] not in ["strict", "best-effort"],
       do: invalid!("invalid evidence mode")
 
     for key <- ["limits", "capture", "tags"] do
-      values = request[key] || []
+      values = request[key]
 
       if not is_list(values) or length(values) > 16 or Enum.uniq(values) != values,
         do: invalid!("invalid option list")
@@ -47,27 +63,15 @@ defmodule OuroFleet.Request do
       Enum.each(values, &scalar!(&1, 256))
     end
 
-    if Enum.any?(request["capture"] || [], &(&1 not in ["stdout", "stderr"])),
+    if Enum.any?(request["capture"], &(&1 not in ["stdout", "stderr"])),
       do: invalid!("invalid capture")
 
-    limit = request["capture_limit"] || 1_048_576
+    limit = request["capture_limit"]
 
     if not is_integer(limit) or limit < 0 or limit > 16_777_216,
       do: invalid!("invalid capture limit")
 
-    Map.merge(
-      %{
-        "on" => "auto",
-        "jail" => "tool",
-        "observe" => "on",
-        "evidence" => "strict",
-        "capture" => [],
-        "limits" => [],
-        "tags" => [],
-        "capture_limit" => 1_048_576
-      },
-      request
-    )
+    request
   end
 
   def validate!(_), do: invalid!("request must be an object")

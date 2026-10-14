@@ -50,6 +50,23 @@ defmodule OuroFleet.WorkerTest do
     assert ["--data-dir " <> _, "--data-dir " <> _] = ledger_calls(context.log)
   end
 
+  test "a null option plans with its default instead of reaching argv", context do
+    worker = Process.whereis(Worker)
+    key = "job_" <> String.duplicate("b", 64)
+
+    request = %{
+      "schema" => "ouro.fleet.request/1",
+      "request_id" => "null",
+      "argv" => ["/bin/true"],
+      "jail" => nil,
+      "limits" => nil
+    }
+
+    assert {:ok, %{"active" => 0}} = Worker.call({:plan, key, request})
+    assert Process.whereis(Worker) == worker
+    assert Enum.any?(ledger_calls(context.log), &(&1 =~ " --profile tool "))
+  end
+
   defp ledger_calls(log), do: log |> File.read!() |> String.split("\n", trim: true)
 
   # Answers each ledger verb the worker uses with the smallest reply it accepts, and

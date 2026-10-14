@@ -52,6 +52,27 @@ defmodule OuroFleet.ContractsTest do
     end
   end
 
+  test "JSON null asks for a field's default; any other non-text value refuses" do
+    base = %{"schema" => "ouro.fleet.request/1", "request_id" => "a", "argv" => ["/bin/true"]}
+    defaults = Request.validate!(base)
+
+    for key <- ~w(on jail observe evidence capture limits tags capture_limit) do
+      assert Request.validate!(Map.put(base, key, nil)) == defaults
+
+      assert_raise OuroFleet.InvalidRequest, fn ->
+        Request.validate!(Map.put(base, key, false))
+      end
+    end
+
+    assert Request.validate!(Map.put(base, "dir", nil))["dir"] == nil
+
+    for key <- ["dir", "launch"] do
+      assert_raise OuroFleet.InvalidRequest, fn ->
+        Request.validate!(Map.put(base, key, false))
+      end
+    end
+  end
+
   test "unsafe checkpoints refuse; durable replacement survives reread" do
     root =
       Path.join(
