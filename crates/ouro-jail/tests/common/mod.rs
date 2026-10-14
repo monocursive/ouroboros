@@ -88,6 +88,10 @@ pub fn within(bound: std::time::Duration, mut ready: impl FnMut() -> bool) -> bo
 /// The variable a parent test sets to the name of the helper it runs.
 pub const HELPER_VAR: &str = "OURO_TEST_HELPER";
 
+/// What a helper prints, followed by its name, once its guard let it run
+/// ([`running_helper`]); [`assert_helper_ran`] requires the line.
+pub const HELPER_RAN: &str = "ouro-test-helper-ran:";
+
 /// Whether this process is running helper `name` for a parent test.
 ///
 /// A self-exec helper is an `#[ignore]`d test of its own binary that a parent
@@ -95,9 +99,19 @@ pub const HELPER_VAR: &str = "OURO_TEST_HELPER";
 /// parent and none of its inputs, so every helper calls this first and
 /// returns when it is false: it then does nothing, rather than panicking or
 /// acting on a host it was not set up for.
+///
+/// That early return still passes, so a helper whose guard variable was lost
+/// on the way (an environment the jail scrubbed, a renamed variable) reports
+/// "1 passed" without running its body. When the guard lets it run, this
+/// prints [`HELPER_RAN`] and the helper's name on a line of its own, and a
+/// parent's [`assert_helper_ran`] requires that line.
 #[must_use]
 pub fn running_helper(name: &str) -> bool {
-    std::env::var_os(HELPER_VAR).is_some_and(|value| value == name)
+    let running = std::env::var_os(HELPER_VAR).is_some_and(|value| value == name);
+    if running {
+        println!("{HELPER_RAN} {name}");
+    }
+    running
 }
 
 /// The arguments that run exactly the `#[ignore]`d test `name` of a test
@@ -124,7 +138,10 @@ pub fn helper_command(name: &str) -> std::process::Command {
 ///
 /// libtest exits 0 both when the helper passed and when the filter matched
 /// nothing (a renamed helper), printing "1 passed" or "0 passed": a parent
-/// that only reads the exit status passes over a helper that never ran.
+/// that only reads the exit status passes over a helper that never ran. And
+/// "1 passed" alone is also what a helper prints when its guard returned
+/// early, so the line [`running_helper`] prints past the guard is required
+/// too.
 pub fn assert_helper_ran(name: &str, output: &std::process::Output) -> String {
     let text = format!(
         "{}{}",
@@ -135,6 +152,12 @@ pub fn assert_helper_ran(name: &str, output: &std::process::Output) -> String {
     assert!(
         text.contains("test result: ok. 1 passed"),
         "helper {name} did not run:\n{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.trim_end().ends_with(&format!("{HELPER_RAN} {name}"))),
+        "helper {name} passed without getting past its guard ({HELPER_VAR} did not \
+         reach it):\n{text}"
     );
     text
 }
