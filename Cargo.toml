@@ -31,7 +31,11 @@ ouro-fixture = { path = "crates/ouro-fixture" }
 ouro-records = { path = "crates/ouro-records" }
 
 [workspace.lints.clippy]
-all = "deny"
+# The group yields to the single lints below it.
+all = { level = "deny", priority = -1 }
+# Every `unsafe` block states why it is sound. `warn` until the ledger and
+# fixture blocks still without a SAFETY comment have one; then `deny`.
+undocumented_unsafe_blocks = "warn"
 
 [profile.release]
 opt-level = 3
