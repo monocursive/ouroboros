@@ -79,30 +79,8 @@ impl Session {
     /// A `PTRACE_EVENT_SECCOMP` stop: the tracee is at the entry of a call
     /// the narrowing filter traces, and the syscall has not run.
     pub(super) fn handle_entry(&mut self, tid: pid_t) {
-        let info = match sys::syscall_info(tid) {
-            Ok(info)
-                if info.op == sys::SYSCALL_INFO_SECCOMP || info.op == sys::SYSCALL_INFO_ENTRY =>
-            {
-                info
-            }
-            // J4 O-3: the tracee left this stop without being resumed, which
-            // only a SIGKILL does — it is either on its way out (`ESRCH`) or
-            // already stopped at its exit notification. The kernel skips a
-            // call whose thread has a fatal signal pending after the trace
-            // event (`__seccomp_filter`), so whatever it was, it never ran.
-            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {
-                self.summary.killed_at_entry += 1;
-                return;
-            }
-            Ok(_) if Self::at_exit_notification(tid) => {
-                self.summary.killed_at_entry += 1;
-                return;
-            }
-            _ => {
-                self.summary.loss.syscall_info_unavailable += 1;
-                self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
-                return;
-            }
+        let Some(info) = self.entry_info(tid) else {
+            return;
         };
         let site = Site {
             arch: info.arch,
@@ -110,42 +88,7 @@ impl Session {
             ip: info.ip,
             arg0: info.args[0],
         };
-        // jail-v1 §9.2: validate the architecture before the syscall number.
-        // A compat or x32 entry carries a number from a different table, and
-        // naming it from this one would mislabel the call (J4 D2): it is
-        // foreign, followed to its return and never decoded.
-        if info.arch != abi::AUDIT_ARCH || info.nr & u64::from(seccomp::X32_SYSCALL_BIT) != 0 {
-            // Security 2026-09-27 (audit 4 B2): the two calls whose *native*
-            // forms carry their own classification — a listener hides every
-            // later syscall for as long as it is held, and an untraced
-            // descendant is never seen again, so both are open-ended gaps,
-            // not closed intervals — reach those classifications through a
-            // compat ABI too. Only `none` stops here (contained baselines
-            // EPERM the foreign arch before the trace), but its receipt must
-            // not present a live listener channel as an ended interval.
-            if let Some(special) = Session::compat_special(&info) {
-                self.follow(tid, special, site);
-                return;
-            }
-            self.follow(tid, Call::Foreign, site);
-            return;
-        }
-        // J4 D1: a child asking for its own notification listener. The flags
-        // are the register the kernel will read, not memory the child could
-        // change behind this stop.
-        if info.nr == u64::from(filter::LISTENER_SYSCALL.1)
-            && info.args[1] & u64::from(filter::SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
-        {
-            self.follow(tid, Call::Listener, site);
-            return;
-        }
-        // J4 S4: a clone the kernel will not attach to this tracer. The flags
-        // are the register the kernel reads. Contained baselines refuse the
-        // flag (EPERM outranks the trace), so only `none` stops here.
-        if info.nr == u64::from(filter::CLONE_SYSCALL.1)
-            && info.args[0] & u64::from(filter::CLONE_UNTRACED) != 0
-        {
-            self.follow(tid, Call::Untraced, site);
+        if self.follow_special(tid, &info, site) {
             return;
         }
         let Some(entry) = closed_set::lookup(info.nr) else {
@@ -161,38 +104,138 @@ impl Session {
             && let Some(flags) = flags
             && !closed_set::open_is_covered(flags)
         {
-            // Register-sourced flags are the kernel's own saved pt_regs, so
-            // an entry-time read-only verdict is final. `openat2`'s verdict
-            // never is — see [`Session::filter_readonly_open_at_entry`].
-            if self.filter_readonly_open_at_entry(entry) {
-                return;
-            }
-            // The verification follow costs an in-flight slot like any
-            // followed call; refused one, the call runs unfollowed, which is
-            // a hole the receipt must name.
-            if !self.admit(OpSet::of(entry.op)) {
-                return;
-            }
-            let pending = Pending {
-                flags_unavailable,
-                ..Pending::new(
-                    entry,
-                    Args {
-                        flags: Some(flags),
-                        ..Args::default()
-                    },
-                    info.args,
-                )
-            };
-            self.begin(tid, Call::Closed(pending), site);
+            self.enter_uncovered_open(tid, entry, (flags, flags_unavailable), &info, site);
             return;
         }
+        self.enter_closed(tid, entry, (flags, flags_unavailable), &info, site);
+    }
+
+    /// The entry stop's syscall info, or `None` once the stop is accounted
+    /// for without it.
+    fn entry_info(&mut self, tid: pid_t) -> Option<sys::SyscallInfo> {
+        match sys::syscall_info(tid) {
+            Ok(info)
+                if info.op == sys::SYSCALL_INFO_SECCOMP || info.op == sys::SYSCALL_INFO_ENTRY =>
+            {
+                Some(info)
+            }
+            // J4 O-3: the tracee left this stop without being resumed, which
+            // only a SIGKILL does — it is either on its way out (`ESRCH`) or
+            // already stopped at its exit notification. The kernel skips a
+            // call whose thread has a fatal signal pending after the trace
+            // event (`__seccomp_filter`), so whatever it was, it never ran.
+            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {
+                self.summary.killed_at_entry += 1;
+                None
+            }
+            Ok(_) if Self::at_exit_notification(tid) => {
+                self.summary.killed_at_entry += 1;
+                None
+            }
+            _ => {
+                self.summary.loss.syscall_info_unavailable += 1;
+                self.gap(GapReason::SyscallInfoUnavailable, OpSet::ALL, Some(1));
+                None
+            }
+        }
+    }
+
+    /// Follows the calls classified before the closed-set table is
+    /// consulted: a foreign-ABI entry, a listener request and an untraced
+    /// clone. Returns whether `info` was one of them.
+    fn follow_special(&mut self, tid: pid_t, info: &sys::SyscallInfo, site: Site) -> bool {
+        // jail-v1 §9.2: validate the architecture before the syscall number.
+        // A compat or x32 entry carries a number from a different table, and
+        // naming it from this one would mislabel the call (J4 D2): it is
+        // foreign, followed to its return and never decoded.
+        if info.arch != abi::AUDIT_ARCH || info.nr & u64::from(seccomp::X32_SYSCALL_BIT) != 0 {
+            // Security 2026-09-27 (audit 4 B2): the two calls whose *native*
+            // forms carry their own classification — a listener hides every
+            // later syscall for as long as it is held, and an untraced
+            // descendant is never seen again, so both are open-ended gaps,
+            // not closed intervals — reach those classifications through a
+            // compat ABI too. Only `none` stops here (contained baselines
+            // EPERM the foreign arch before the trace), but its receipt must
+            // not present a live listener channel as an ended interval.
+            let call = Session::compat_special(info).unwrap_or(Call::Foreign);
+            self.follow(tid, call, site);
+            return true;
+        }
+        // J4 D1: a child asking for its own notification listener. The flags
+        // are the register the kernel will read, not memory the child could
+        // change behind this stop.
+        if info.nr == u64::from(filter::LISTENER_SYSCALL.1)
+            && info.args[1] & u64::from(filter::SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
+        {
+            self.follow(tid, Call::Listener, site);
+            return true;
+        }
+        // J4 S4: a clone the kernel will not attach to this tracer. The flags
+        // are the register the kernel reads. Contained baselines refuse the
+        // flag (EPERM outranks the trace), so only `none` stops here.
+        if info.nr == u64::from(filter::CLONE_SYSCALL.1)
+            && info.args[0] & u64::from(filter::CLONE_UNTRACED) != 0
+        {
+            self.follow(tid, Call::Untraced, site);
+            return true;
+        }
+        false
+    }
+
+    /// An open whose flags say it is outside the closed set: filtered here
+    /// when its verdict is final at entry, otherwise followed to its exit,
+    /// where the flags are read again.
+    fn enter_uncovered_open(
+        &mut self,
+        tid: pid_t,
+        entry: &'static Entry,
+        (flags, flags_unavailable): (u64, bool),
+        info: &sys::SyscallInfo,
+        site: Site,
+    ) {
+        // Register-sourced flags are the kernel's own saved pt_regs, so
+        // an entry-time read-only verdict is final. `openat2`'s verdict
+        // never is — see [`Session::filter_readonly_open_at_entry`].
+        if self.filter_readonly_open_at_entry(entry) {
+            return;
+        }
+        // The verification follow costs an in-flight slot like any
+        // followed call; refused one, the call runs unfollowed, which is
+        // a hole the receipt must name.
+        if !self.admit(OpSet::of(entry.op)) {
+            return;
+        }
+        let pending = Pending {
+            flags_unavailable,
+            ..Pending::new(
+                entry,
+                Args {
+                    flags: Some(flags),
+                    ..Args::default()
+                },
+                info.args,
+            )
+        };
+        self.begin(tid, Call::Closed(pending), site);
+    }
+
+    /// A closed-set call: admitted to the in-flight table, its paths
+    /// captured and, for an exec under command rules, judged before it
+    /// runs.
+    fn enter_closed(
+        &mut self,
+        tid: pid_t,
+        entry: &'static Entry,
+        (flags, flags_unavailable): (Option<u64>, bool),
+        info: &sys::SyscallInfo,
+        site: Site,
+    ) {
         if !self.admit(OpSet::of(entry.op)) {
             // With command rules configured, an exec refused its in-flight
             // slot would resume unfollowed, with no argv read and no verdict
             // at all. The refusal already recorded its gap; the process dies
             // rather than run an unjudged exec (the `deny_exec` failure path
-            // below makes the same call).
+            // in `judge_exec` makes the same call).
             if entry.op == ClosedOp::Exec
                 && !self.config.commands.is_empty()
                 && !Self::kill_tracee(tid)
@@ -204,29 +247,46 @@ impl Session {
         let mut pending = self.capture_paths(tid, entry, &info.args);
         pending.args.flags = flags;
         pending.flags_unavailable = flags_unavailable;
-        if entry.op == ClosedOp::Exec && !self.config.commands.is_empty() {
-            let argv = entry
-                .argv
-                .and_then(|index| sys::argv(tid, info.args[usize::from(index)]));
-            pending.args.command = self
-                .config
-                .commands
-                .check(
-                    argv.as_deref(),
-                    pending.args.path.as_ref().map(|p| p.bytes.as_slice()),
-                )
-                .map(Box::new);
-            pending.entry_argv = argv;
-            if pending.args.command.is_some() && sys::deny_exec(tid, true).is_err() {
-                // The call has not run, and the kill keeps it from running.
-                // It still costs a gap: the verdict — a `forbid` stops the
-                // run — rides only on the denied call's result, which a
-                // killed tracee never produces.
-                self.deny_by_kill(tid);
-                return;
-            }
+        if entry.op == ClosedOp::Exec
+            && !self.config.commands.is_empty()
+            && !self.judge_exec(tid, entry, info, &mut pending)
+        {
+            return;
         }
         self.begin(tid, Call::Closed(pending), site);
+    }
+
+    /// Checks an exec against the command rules at its entry, denying it
+    /// there when a rule matched. Returns `false` when the denial failed
+    /// and the tracee was killed instead, so the call is not followed.
+    fn judge_exec(
+        &mut self,
+        tid: pid_t,
+        entry: &'static Entry,
+        info: &sys::SyscallInfo,
+        pending: &mut Pending,
+    ) -> bool {
+        let argv = entry
+            .argv
+            .and_then(|index| sys::argv(tid, info.args[usize::from(index)]));
+        pending.args.command = self
+            .config
+            .commands
+            .check(
+                argv.as_deref(),
+                pending.args.path.as_ref().map(|p| p.bytes.as_slice()),
+            )
+            .map(Box::new);
+        pending.entry_argv = argv;
+        if pending.args.command.is_some() && sys::deny_exec(tid, true).is_err() {
+            // The call has not run, and the kill keeps it from running.
+            // It still costs a gap: the verdict — a `forbid` stops the
+            // run — rides only on the denied call's result, which a
+            // killed tracee never produces.
+            self.deny_by_kill(tid);
+            return false;
+        }
+        true
     }
 
     /// Whether a tracee is stopped at its `PTRACE_EVENT_EXIT` notification:
