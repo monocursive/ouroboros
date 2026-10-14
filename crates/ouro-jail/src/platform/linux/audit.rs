@@ -11,9 +11,7 @@ use std::time::SystemTime;
 
 use serde_json::{Map, Value};
 
-use crate::observer::{
-    ClassSummary, ClosedOperation, CoverageClass, CoverageSummary, LEARNING_READ_KIND,
-};
+use crate::observer::{ClassSummary, ClosedOperation, CoverageClass, CoverageSummary};
 use crate::records::{CLOSED_SET_LINUX_V1, Completion, Event, EventOutcome, Gap, SourceStatus};
 use crate::trace::{Priority, SharedTrace};
 
@@ -374,7 +372,7 @@ impl AuditWriter {
                 return;
             };
             let mut fields = Map::new();
-            fields.insert("kind".into(), Value::from(LEARNING_READ_KIND));
+            fields.insert("kind".into(), Value::from("learning_read"));
             fields.insert("path".into(), native_value(&path.bytes));
             fields.insert(
                 "errno".into(),

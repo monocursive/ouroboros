@@ -15,10 +15,6 @@ use crate::records::{
     CLOSED_SET_LINUX_V1, Coverage, CoverageEntry, Gap, ObserverRecord, SourceHealth, SourceStatus,
 };
 
-/// `fields.kind` of the note a learning run writes for a read-only open
-/// (`--learn`): not a closed-set result, so it is counted in no class.
-pub const LEARNING_READ_KIND: &str = "learning_read";
-
 /// One operation in the closed set (§11.2).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum ClosedOperation {
