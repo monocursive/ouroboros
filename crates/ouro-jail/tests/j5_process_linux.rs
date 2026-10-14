@@ -754,6 +754,7 @@ fn j5_x03_owner_helper() {
     // The gate: the read end goes to the jail as fd 3, the write end stays
     // here and closes when this process exits.
     let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` is a live array of the two ints pipe2 writes.
     assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
     let (gate_read, gate_write) = (fds[0], fds[1]);
 
@@ -789,7 +790,9 @@ fn j5_x03_owner_helper() {
     let child = command.spawn().expect("ouro-jail starts");
     std::fs::write(&pidfile, child.id().to_string()).expect("the pid file");
     // The read end belongs to the jail now.
-    unsafe { libc::close(gate_read) };
+    // SAFETY: `gate_read` is this process's own descriptor from pipe2, open
+    // until here and used by nothing after.
+    assert_eq!(unsafe { libc::close(gate_read) }, 0);
 
     // Wait for the durable prepared receipt of this attempt.
     let attempts = data.join("attempts");
@@ -817,6 +820,8 @@ fn j5_x03_owner_helper() {
         let bytes = frame.as_bytes();
         let mut written = 0;
         while written < bytes.len() {
+            // SAFETY: `gate_write` is this process's open pipe end, and the
+            // slice outlives the call with exactly that many bytes.
             let n = unsafe {
                 libc::write(
                     gate_write,

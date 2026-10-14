@@ -74,6 +74,10 @@ fn invalid_control_destinations_never_prepare_or_execute() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let source = fd.as_raw_fd();
+        // SAFETY: the hook runs in the forked child before exec and calls
+        // only dup2 and close, which are async-signal-safe, on descriptor
+        // numbers: `source` is still open in the child (inherited from `fd`,
+        // which outlives the spawn), and CONTROL is the number it installs.
         unsafe {
             command.pre_exec(move || {
                 let source = match case {

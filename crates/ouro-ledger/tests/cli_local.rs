@@ -2,20 +2,19 @@
 #![cfg(unix)]
 
 use std::{
-    fs::{self, OpenOptions},
-    os::unix::{
-        fs::{FileTypeExt as _, OpenOptionsExt as _, PermissionsExt as _},
-        net::UnixStream,
-    },
-    path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    fs,
+    os::unix::{fs::PermissionsExt as _, net::UnixStream},
+    path::PathBuf,
+    process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
 
-const WAIT_LIMIT: Duration = Duration::from_secs(5);
+mod common;
+
+use common::{CLI_LIMIT, Process, REPLY_LIMIT, WRITER_READY, private_file};
 
 #[test]
 fn show_transcript_requires_explicit_opt_in_and_preserves_metadata() {
@@ -412,25 +411,6 @@ fn writer_owns_persistent_policy_and_cli_capture_expiry_preserves_export_after_r
     assert_eq!(fs::read(root.join("events-0001.ndjson")).unwrap(), bytes);
 }
 
-/// Own every subprocess from spawn through wait, including assertion failures.
-struct Process(Child);
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn private_file(path: &Path) -> fs::File {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .expect("private subprocess output")
-}
-
 struct LocalCli {
     temp: tempfile::TempDir,
     data: PathBuf,
@@ -464,75 +444,18 @@ impl LocalCli {
             .temp
             .path()
             .join(format!("serve-{}.stderr", self.command_count));
-        let mut writer = Process(
-            self.command()
-                .arg("serve")
-                .stdout(Stdio::null())
-                .stderr(Stdio::from(private_file(&log)))
-                .spawn()
-                .expect("start real writer"),
-        );
-        let deadline = Instant::now() + WAIT_LIMIT;
-        let socket = self.data.join("ledger/serve.sock");
-        loop {
-            assert!(
-                Instant::now() < deadline,
-                "writer did not listen within {WAIT_LIMIT:?}: {}",
-                fs::read_to_string(&log).unwrap_or_default()
-            );
-            if let Some(status) = writer.0.try_wait().expect("writer status") {
-                panic!(
-                    "writer exited {status}: {}",
-                    fs::read_to_string(&log).unwrap_or_default()
-                );
-            }
-            if fs::symlink_metadata(&socket).is_ok_and(|meta| {
-                meta.file_type().is_socket() && meta.permissions().mode() & 0o777 == 0o600
-            }) && UnixStream::connect(&socket).is_ok()
-            {
-                return writer;
-            }
-            thread::sleep(
-                Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
-            );
-        }
+        common::start_writer(self.command().arg("serve"), &self.data, &log)
     }
 
     /// Files avoid pipe backpressure; the subprocess has its own bounded wait.
     fn invoke(&mut self, arguments: &[&str]) -> Output {
         self.command_count += 1;
-        let stdout = self
-            .temp
-            .path()
-            .join(format!("command-{}.stdout", self.command_count));
-        let stderr = self
-            .temp
-            .path()
-            .join(format!("command-{}.stderr", self.command_count));
-        let mut process = Process(
-            self.command()
-                .args(arguments)
-                .stdout(Stdio::from(private_file(&stdout)))
-                .stderr(Stdio::from(private_file(&stderr)))
-                .spawn()
-                .expect("start real CLI"),
-        );
-        let deadline = Instant::now() + WAIT_LIMIT;
-        let status = loop {
-            if let Some(status) = process.0.try_wait().expect("CLI status") {
-                break status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "CLI {arguments:?} did not terminate within {WAIT_LIMIT:?}"
-            );
-            thread::sleep(Duration::from_millis(10));
-        };
-        Output {
-            status,
-            stdout: fs::read(stdout).expect("CLI stdout"),
-            stderr: fs::read(stderr).expect("CLI stderr"),
-        }
+        common::run_to_files(
+            self.command().args(arguments),
+            self.temp.path(),
+            &format!("command-{}", self.command_count),
+            CLI_LIMIT,
+        )
     }
 
     fn json(&mut self, arguments: &[&str]) -> Value {
@@ -810,24 +733,21 @@ fn operator_cli_and_follow_tail_preserve_bytes_across_late_appends_and_restart()
     let cursor = first["next_cursor"].as_str().unwrap();
     let stdout = cli.temp.path().join("follow.stdout");
     let stderr = cli.temp.path().join("follow.stderr");
-    let mut follower = Process(
-        cli.command()
-            .args([
-                "tail",
-                run_id,
-                "--cursor",
-                cursor,
-                "--follow",
-                "--timeout",
-                "2",
-                "--json",
-            ])
-            .stdout(Stdio::from(private_file(&stdout)))
-            .stderr(Stdio::from(private_file(&stderr)))
-            .spawn()
-            .unwrap(),
+    let mut follower = Process::spawn_to_files(
+        cli.command().args([
+            "tail",
+            run_id,
+            "--cursor",
+            cursor,
+            "--follow",
+            "--timeout",
+            "2",
+            "--json",
+        ]),
+        &stdout,
+        &stderr,
     );
-    let deadline = Instant::now() + WAIT_LIMIT;
+    let deadline = Instant::now() + CLI_LIMIT;
     while fs::metadata(&stdout).unwrap().len() == 0 {
         assert!(
             Instant::now() < deadline,
@@ -846,7 +766,7 @@ fn operator_cli_and_follow_tail_preserve_bytes_across_late_appends_and_restart()
         })
         .unwrap();
     loop {
-        if let Some(status) = follower.0.try_wait().unwrap() {
+        if let Some(status) = follower.child.try_wait().unwrap() {
             assert!(status.success());
             break;
         }
@@ -939,7 +859,7 @@ fn concurrent_operator_ingress_and_lost_reply_keep_one_sequence_per_identity() {
     let mut forged = serde_json::to_value(Request::Append { intent: request }).unwrap();
     forged["intent"]["actor"] = json!("owner");
     let mut socket = UnixStream::connect(cli.data.join("ledger/serve.sock")).unwrap();
-    socket.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
+    socket.set_read_timeout(Some(REPLY_LIMIT)).unwrap();
     write_frame(&mut socket, &forged).unwrap();
     let refused = ouro_ledger::daemon::read_frame::<ouro_ledger::protocol::Response>(&mut socket);
     assert!(
@@ -964,7 +884,7 @@ fn writer_refuses_undecodable_oversized_and_excess_connections_explicitly() {
     let _writer = cli.start_writer();
     let socket_path = cli.data.join("ledger/serve.sock");
     let refusal = |socket: &mut UnixStream| -> String {
-        socket.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
+        socket.set_read_timeout(Some(REPLY_LIMIT)).unwrap();
         match read_frame::<Response>(socket).unwrap() {
             Response::Error { message } => message,
             other => panic!("expected a refusal, got {other:?}"),
@@ -992,7 +912,7 @@ fn writer_refuses_undecodable_oversized_and_excess_connections_explicitly() {
     let mut excess = UnixStream::connect(&socket_path).unwrap();
     assert!(refusal(&mut excess).starts_with("writer_busy:"));
     drop(held);
-    let deadline = Instant::now() + WAIT_LIMIT;
+    let deadline = Instant::now() + WRITER_READY;
     let mut client = loop {
         match Client::connect(&cli.data) {
             Ok(client) => break client,
@@ -1012,7 +932,7 @@ fn writer_keeps_accepting_after_descriptor_exhaustion() {
     };
     let mut cli = LocalCli::new();
     let mut writer = cli.start_writer();
-    let pid = writer.0.id() as libc::pid_t;
+    let pid = writer.child.id() as libc::pid_t;
     let mut original = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -1036,7 +956,7 @@ fn writer_keeps_accepting_after_descriptor_exhaustion() {
     let mut queued = UnixStream::connect(cli.data.join("ledger/serve.sock")).unwrap();
     thread::sleep(Duration::from_millis(300));
     assert!(
-        writer.0.try_wait().unwrap().is_none(),
+        writer.child.try_wait().unwrap().is_none(),
         "the writer exited after a transient accept failure"
     );
     // SAFETY: as above; this restores the writer's original limits.
@@ -1044,13 +964,13 @@ fn writer_keeps_accepting_after_descriptor_exhaustion() {
         unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &original, std::ptr::null_mut()) },
         0
     );
-    queued.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
+    queued.set_read_timeout(Some(REPLY_LIMIT)).unwrap();
     write_frame(&mut queued, &Request::Ping).unwrap();
     assert!(matches!(
         read_frame::<Response>(&mut queued).unwrap(),
         Response::Ok { .. }
     ));
-    assert!(writer.0.try_wait().unwrap().is_none());
+    assert!(writer.child.try_wait().unwrap().is_none());
 }
 
 #[test]

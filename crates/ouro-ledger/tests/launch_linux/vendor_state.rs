@@ -45,11 +45,11 @@ fn vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death() {
         match ending {
             "normal" => {
                 fs::write(fixture.workspace.join("finish"), b"go").unwrap();
-                assert!(owner.finish().status.success());
+                assert!(owner.finish(COMMAND_LIMIT).status.success());
             }
             "writer-death" => {
                 fixture.writer.kill();
-                assert!(!owner.finish().status.success());
+                assert!(!owner.finish(COMMAND_LIMIT).status.success());
             }
             "owner-death" => owner.kill(),
             _ => unreachable!(),
@@ -94,7 +94,7 @@ fn vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death() {
                 .any(|bytes| bytes == b"private-vendor-content"),
             "{ending}: private state content must not become ledger metadata"
         );
-        let retry = Process::spawn(&mut command, true).finish();
+        let retry = Process::spawn(&mut command, true).finish(COMMAND_LIMIT);
         assert_eq!(retry.status.success(), ending == "normal");
         let replay = fixture.client().show(&run.run_id).unwrap();
         assert_eq!(replay.state, final_run.state);

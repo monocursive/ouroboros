@@ -568,6 +568,8 @@ fn k04_bootstrap_executes_the_descriptor_without_pathname_fallback() {
     ]);
     fds.apply(&mut command);
     // The bootstrap cannot execute anything until its private release byte.
+    // SAFETY: an open pipe end `start_w` owns, and a one-byte buffer that
+    // outlives the call.
     assert_eq!(
         unsafe { libc::write(start_w.as_raw_fd(), [1u8].as_ptr().cast(), 1) },
         1

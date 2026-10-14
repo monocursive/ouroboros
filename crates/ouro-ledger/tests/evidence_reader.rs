@@ -3,12 +3,9 @@
 
 use std::{
     fs::{self, OpenOptions},
-    os::unix::{
-        fs::{FileTypeExt as _, OpenOptionsExt as _, PermissionsExt as _},
-        net::UnixStream,
-    },
-    path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    os::unix::{fs::PermissionsExt as _, net::UnixStream},
+    path::PathBuf,
+    process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -16,25 +13,11 @@ use std::{
 use ouro_records::canonical::{sha256_prefixed, to_jcs};
 use serde_json::{Value, json};
 
+mod common;
+
+use common::{CLI_LIMIT, Process, REPLY_LIMIT, private_file};
+
 const RUN: &str = "run_11111111111111111111111111111111";
-
-struct Process(Child);
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn private_file(path: &Path) -> fs::File {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .unwrap()
-}
 
 struct Fixture {
     // The daemon must be stopped before TempDir removes its store.
@@ -98,67 +81,21 @@ impl Fixture {
     fn start_writer(&mut self) {
         self.commands += 1;
         let log = self.temp.path().join(format!("writer-{}", self.commands));
-        self.writer = Some(Process(
-            self.command()
-                .arg("serve")
-                .stdout(Stdio::null())
-                .stderr(Stdio::from(private_file(&log)))
-                .spawn()
-                .unwrap(),
+        self.writer = Some(common::start_writer(
+            self.command().arg("serve"),
+            &self.data,
+            &log,
         ));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let socket = self.data.join("ledger/serve.sock");
-        loop {
-            assert!(
-                Instant::now() < deadline,
-                "writer readiness exceeded five seconds"
-            );
-            if let Some(status) = self.writer.as_mut().unwrap().0.try_wait().unwrap() {
-                panic!(
-                    "writer exited {status}: {}",
-                    fs::read_to_string(&log).unwrap()
-                );
-            }
-            if fs::symlink_metadata(&socket).is_ok_and(|meta| {
-                meta.file_type().is_socket() && meta.permissions().mode() & 0o777 == 0o600
-            }) && UnixStream::connect(&socket).is_ok()
-            {
-                return;
-            }
-            thread::sleep(
-                Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
-            );
-        }
     }
 
     fn run(&mut self, arguments: &[&str]) -> Output {
         self.commands += 1;
-        let stdout = self.temp.path().join(format!("stdout-{}", self.commands));
-        let stderr = self.temp.path().join(format!("stderr-{}", self.commands));
-        let mut child = Process(
-            self.command()
-                .args(arguments)
-                .stdout(Stdio::from(private_file(&stdout)))
-                .stderr(Stdio::from(private_file(&stderr)))
-                .spawn()
-                .unwrap(),
-        );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let status = loop {
-            if let Some(status) = child.0.try_wait().unwrap() {
-                break status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "reader CLI {arguments:?} timed out"
-            );
-            thread::sleep(Duration::from_millis(10));
-        };
-        Output {
-            status,
-            stdout: fs::read(stdout).unwrap(),
-            stderr: fs::read(stderr).unwrap(),
-        }
+        common::run_to_files(
+            self.command().args(arguments),
+            self.temp.path(),
+            &format!("command-{}", self.commands),
+            CLI_LIMIT,
+        )
     }
 
     fn query(&mut self, extra: &[&str]) -> Value {
@@ -374,7 +311,7 @@ fn dropped_socket_reply_replays_the_checkpointed_page_after_restart() {
     // Keep the socket open but unread until the durable checkpoint proves the
     // daemon accepted the request. Closing before accept races peer attribution.
     let checkpoint = fixture.checkpoint(&cursor);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + REPLY_LIMIT;
     loop {
         let durable: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
         if durable["checkpoint"]["prior"]["token"] == cursor[32..] {
@@ -592,14 +529,7 @@ fn live_writer_detects_unexpected_tail_before_export() {
     assert_eq!(status["bytes_written"], fixture.bytes.len());
     assert_eq!(fs::read(&fixture.stream).unwrap(), damaged);
     assert!(
-        fixture
-            .writer
-            .as_mut()
-            .unwrap()
-            .0
-            .try_wait()
-            .unwrap()
-            .is_none(),
+        fixture.writer.as_mut().unwrap().running(),
         "this case must exercise the original live writer"
     );
 }
@@ -620,7 +550,7 @@ fn closed_export_sink_exits_nonzero_without_finished_success() {
         .temp
         .path()
         .join(format!("stderr-{}", fixture.commands));
-    let mut child = Process(
+    let mut child = Process::from_child(
         fixture
             .command()
             .args(["export", RUN, "--ndjson", "--json"])
@@ -628,8 +558,9 @@ fn closed_export_sink_exits_nonzero_without_finished_success() {
             .stderr(Stdio::from(private_file(&stderr)))
             .spawn()
             .unwrap(),
+        false,
     );
-    let mut pipe = child.0.stdout.take().unwrap();
+    let mut pipe = child.child.stdout.take().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let reader = thread::spawn(move || {
         use std::io::Read as _;
@@ -639,19 +570,12 @@ fn closed_export_sink_exits_nonzero_without_finished_success() {
         let _ = sender.send(result);
     });
     let prefix = receiver
-        .recv_timeout(Duration::from_secs(5))
-        .expect("export did not produce a prefix within five seconds")
+        .recv_timeout(CLI_LIMIT)
+        .expect("export did not produce a prefix in time")
         .expect("export closed before producing its prefix");
     reader.join().unwrap();
     assert_eq!(prefix.as_slice(), &fixture.bytes[..8]);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "closed export sink did not stop");
-        thread::sleep(Duration::from_millis(10));
-    };
+    let status = child.wait_within(CLI_LIMIT, "an export whose sink closed");
     assert!(!status.success());
     let metadata = fs::read_to_string(stderr).unwrap();
     assert!(metadata.lines().all(|line| {

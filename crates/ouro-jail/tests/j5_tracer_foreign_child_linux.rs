@@ -891,6 +891,9 @@ fn high(fd: OwnedFd) -> OwnedFd {
 /// # Safety
 /// Runs in a child forked from a multi-threaded process.
 unsafe fn foreign_main(mode: Foreign, hold: RawFd, trace: RawFd, copy: RawFd, done: RawFd) -> ! {
+    // SAFETY: the caller's contract above. Each call is async-signal-safe and
+    // takes descriptor numbers the parent opened before the fork, plain
+    // integers, or buffers on this stack that outlive the call.
     unsafe {
         match mode {
             Foreign::Hold => {

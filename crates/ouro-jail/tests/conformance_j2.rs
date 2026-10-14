@@ -434,6 +434,7 @@ fn l03_a_real_leaf_without_pids_refuses_required_but_runs_preferred() {
     }
     use ouro_jail::platform::linux::cgroup::{self, ExecutionCgroup};
     use ouro_jail::policy::{LimitCeiling, LimitsSnapshot};
+    // SAFETY: getuid takes no arguments and cannot fail.
     let root = cgroup::delegated_root(unsafe { libc::getuid() })
         .unwrap()
         .join(format!("ouro-no-pids-{}", std::process::id()));
@@ -542,6 +543,8 @@ fn startup_supervisor_helper() {
     )
     .unwrap();
     if released {
+        // SAFETY: an open pipe end `start_w` owns, and a one-byte buffer that
+        // outlives the call.
         assert_eq!(
             unsafe { libc::write(start_w.as_raw_fd(), [1u8].as_ptr().cast(), 1) },
             1

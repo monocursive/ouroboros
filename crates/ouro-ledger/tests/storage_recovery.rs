@@ -24,6 +24,7 @@ fn first_run_consistent(store: &Store) -> bool {
 
 fn peer() -> Peer {
     Peer {
+        // SAFETY: geteuid takes no arguments and cannot fail.
         uid: unsafe { libc::geteuid() },
         pid: std::process::id(),
         birth: "storage-recovery-fixture".into(),

@@ -14,6 +14,8 @@
 pub mod contract;
 pub mod gate;
 pub mod http;
+#[cfg(target_os = "linux")]
+pub mod pidfd;
 pub mod pipes;
 // The product's own trace recogniser (jail-v1 §13.3, contract S8), included by
 // path so the harness and `ouro-jail` cannot disagree about what a torn frame
@@ -721,12 +723,7 @@ fn nonblocking(fd: RawFd) -> io::Result<()> {
 /// A descriptor that turns readable when `pid` (an unreaped child) exits.
 #[cfg(target_os = "linux")]
 fn pidfd(pid: libc::pid_t) -> Option<std::os::fd::OwnedFd> {
-    use std::os::fd::FromRawFd as _;
-    // SAFETY: plain integers; the kernel returns a new descriptor or fails.
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    let fd = RawFd::try_from(fd).ok().filter(|fd| *fd >= 0)?;
-    // SAFETY: `fd` was just returned by `pidfd_open` and nothing else owns it.
-    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+    pidfd::open(pid).ok()
 }
 
 #[cfg(not(target_os = "linux"))]
