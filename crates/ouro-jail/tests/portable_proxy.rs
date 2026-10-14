@@ -2397,19 +2397,14 @@ fn run_helper(mode: &str, ulimits: &str, port: Option<u16>) -> String {
         .arg("-c")
         .arg(format!("{ulimits} && exec \"$0\" \"$@\""))
         .arg(exe)
-        .args(["--ignored", "--exact", "proxy_limits_helper", "--nocapture"])
+        .args(common::helper_args("proxy_limits_helper"))
+        .env(common::HELPER_VAR, "proxy_limits_helper")
         .env(HELPER_MODE, mode);
     if let Some(port) = port {
         command.env(HELPER_PORT, port.to_string());
     }
     let output = command.output().expect("the helper runs");
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert!(
-        output.status.success(),
-        "helper {mode} failed: {stdout}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    stdout
+    common::assert_helper_ran("proxy_limits_helper", &output)
 }
 
 fn helper_value<'a>(stdout: &'a str, key: &str) -> &'a str {
@@ -2516,6 +2511,9 @@ fn helper_connect(path: &Path) -> std::io::Result<UnixStream> {
 #[test]
 #[ignore = "child helper invoked by the n04 descriptor tests"]
 fn proxy_limits_helper() {
+    if !common::running_helper("proxy_limits_helper") {
+        return;
+    }
     let mode = std::env::var(HELPER_MODE).expect("the helper needs a mode");
     let port: Option<u16> = std::env::var(HELPER_PORT)
         .ok()

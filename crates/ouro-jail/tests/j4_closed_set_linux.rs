@@ -1614,7 +1614,7 @@ fn j4_closed_set_the_published_table_is_the_one_this_build_traces() {
     assert_eq!(
         generated, checked_in,
         "the published closed-set table has drifted from what this build traces; \
-         regenerate it with the ignored `bless_the_published_closed_set_table`"
+         regenerate it with the ignored `bless_the_published_closed_set_table` and OURO_BLESS=1"
     );
     let published = checked_in
         .lines()
@@ -1639,10 +1639,20 @@ fn j4_closed_set_the_published_table_is_the_one_this_build_traces() {
 }
 
 /// Writes the published table from this build. Run by hand, on Linux,
-/// after a deliberate change to the closed set or the narrowing filter.
+/// after a deliberate change to the closed set or the narrowing filter:
+/// `OURO_BLESS=1 cargo test --test j4_closed_set_linux -- --ignored
+/// bless_the_published_closed_set_table`. Without `OURO_BLESS=1` it writes
+/// nothing, so `--include-ignored` never rewrites checked-in evidence.
 #[test]
-#[ignore = "writes the evidence file; run deliberately"]
+#[ignore = "writes the evidence file with OURO_BLESS=1; run deliberately"]
 fn bless_the_published_closed_set_table() {
+    if std::env::var_os("OURO_BLESS").is_none_or(|value| value != "1") {
+        eprintln!(
+            "not blessing {}: set OURO_BLESS=1 to rewrite it",
+            published_table_path().display()
+        );
+        return;
+    }
     std::fs::write(
         published_table_path(),
         ouro_jail::platform::linux::tracer::closed_set_table(),

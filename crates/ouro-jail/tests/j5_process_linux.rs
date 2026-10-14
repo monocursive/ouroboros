@@ -737,6 +737,9 @@ fn i03_untrusted_request_fields_cannot_mutate_the_owners_operator_inputs() {
 fn j5_x03_owner_helper() {
     use std::os::unix::process::CommandExt as _;
 
+    if !common::running_helper("j5_x03_owner_helper") {
+        return;
+    }
     let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is set"));
     let data = PathBuf::from(var("OURO_J5_X03_DATA"));
     let config = PathBuf::from(var("OURO_J5_X03_CONFIG"));
@@ -867,8 +870,9 @@ fn x03_owner_run(mode: &str) -> (Value, bool, usize) {
     let marker = workspace.join("target-ran");
     let pidfile = root.path().join("jail.pid");
 
-    let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "j5_x03_owner_helper"])
+    // The owner's jail outlives it, so its output is not waited for; the jail
+    // pid it records is what proves it ran.
+    let mut owner = common::helper_command("j5_x03_owner_helper")
         .env("OURO_J5_X03_DATA", &data)
         .env("OURO_J5_X03_CONFIG", &config)
         .env("OURO_J5_X03_WORKSPACE", &workspace)

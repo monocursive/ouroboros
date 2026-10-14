@@ -506,6 +506,9 @@ print('native/x32/compat: setup, enter and register denied')
 fn startup_supervisor_helper() {
     use ouro_jail::platform::linux::{clock::Deadline, exec};
     use std::os::fd::AsRawFd;
+    if !common::running_helper("startup_supervisor_helper") {
+        return;
+    }
     let root = PathBuf::from(std::env::var_os("OURO_J2_HELPER_ROOT").unwrap());
     let released = std::env::var("OURO_J2_HELPER_RELEASE").unwrap() == "yes";
     let (start_r, start_w) = exec::pipe().unwrap();
@@ -553,8 +556,9 @@ fn l02_startup_parent_death_window_is_closed() {
     use std::os::fd::AsRawFd;
     for released in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let mut supervisor = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--ignored", "--exact", "startup_supervisor_helper"])
+        // The helper is killed half way, so it never reports; the ready file
+        // its backend writes is what proves it ran.
+        let mut supervisor = common::helper_command("startup_supervisor_helper")
             .env("OURO_J2_HELPER_ROOT", root.path())
             .env(
                 "OURO_J2_HELPER_RELEASE",

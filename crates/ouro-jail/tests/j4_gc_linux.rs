@@ -1314,14 +1314,9 @@ fn j4_w3_g1_gc_never_rewrites_a_dead_supervisors_enforced_receipt() {
 fn j4_w3_p1c_a_zombie_leader_with_a_live_thread_is_alive() {
     let tmp = common::private_tempdir();
     let ready = tmp.path().join("ready");
-    let mut helper = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "j4_w3_zombie_leader_helper",
-            "--ignored",
-            "--nocapture",
-            "--test-threads=1",
-        ])
+    // The helper never finishes (its leader thread exits first), so it never
+    // reports; the ready file it writes is what proves it ran.
+    let mut helper = common::helper_command("j4_w3_zombie_leader_helper")
         .env("OURO_W3G_ZOMBIE_READY", &ready)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1420,9 +1415,10 @@ fn j4_w3_zombie_leader_helper() {
         // SAFETY: exit(2) of the calling thread only; async-signal-safe.
         unsafe { libc::syscall(libc::SYS_exit, 0) };
     }
-    let Some(ready) = std::env::var_os("OURO_W3G_ZOMBIE_READY") else {
+    if !common::running_helper("j4_w3_zombie_leader_helper") {
         return;
-    };
+    }
+    let ready = std::env::var_os("OURO_W3G_ZOMBIE_READY").expect("the parent names the ready file");
     // SAFETY: getpid and gettid take no arguments and cannot fail.
     let (pid, tid) = unsafe { (libc::getpid(), libc::gettid()) };
     if tid == pid {

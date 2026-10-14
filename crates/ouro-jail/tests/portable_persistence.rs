@@ -1912,15 +1912,12 @@ fn j4_d5_a_later_persistence_failure_does_not_replace_the_reported_error() {
 // S9: every test seam in force is recorded
 // ---------------------------------------------------------------------------
 
-/// Set in the environment of the child that runs [`seam_child_helper`].
-const SEAM_HELPER: &str = "OURO_J4_SEAM_HELPER";
-
 /// Runs one simulated `tool` attempt in this (child) process, whose
 /// environment the parent chose, and prints its receipt and jail state.
 #[test]
 #[ignore = "child helper invoked by j4_s9_every_test_seam_in_force_is_recorded"]
 fn seam_child_helper() {
-    if std::env::var_os(SEAM_HELPER).is_none() {
+    if !common::running_helper("seam_child_helper") {
         return;
     }
     let fixture = Fixture::new();
@@ -1936,9 +1933,7 @@ fn seam_child_helper() {
 }
 
 fn seam_child(seams: &[(&str, &str)]) -> Value {
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", "seam_child_helper", "--ignored", "--nocapture"]);
-    command.env(SEAM_HELPER, "1");
+    let mut command = common::helper_command("seam_child_helper");
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("OURO_JAIL_TEST_") {
             command.env_remove(name);
@@ -1948,16 +1943,11 @@ fn seam_child(seams: &[(&str, &str)]) -> Value {
         command.env(name, value);
     }
     let output = command.output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = common::assert_helper_ran("seam_child_helper", &output);
     let line = stdout
         .lines()
         .find_map(|line| line.strip_prefix("SEAM-RESULT "))
-        .unwrap_or_else(|| {
-            panic!(
-                "the helper printed no result: {stdout}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-        });
+        .unwrap_or_else(|| panic!("the helper printed no result: {stdout}"));
     serde_json::from_str(line).unwrap()
 }
 

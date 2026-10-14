@@ -3788,7 +3788,7 @@ reason = "runs inside bubblewrap from m1_a_read_only_bind_of_a_writable_filesyst
 
 [[ignored]]
 test = "ouro-jail/tests/j4_closed_set_linux.rs::bless_the_published_closed_set_table"
-reason = "writes the evidence file; run deliberately"
+reason = "writes the evidence file with OURO_BLESS=1; run deliberately"
 
 [[ignored]]
 test = "ouro-jail/tests/j4_gc_linux.rs::j4_w3_zombie_leader_helper"

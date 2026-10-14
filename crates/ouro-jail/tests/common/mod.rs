@@ -34,6 +34,75 @@ pub fn private_tempdir() -> TempDir {
 }
 
 // ---------------------------------------------------------------------------
+// Self-exec helpers
+// ---------------------------------------------------------------------------
+
+/// The variable a parent test sets to the name of the helper it runs.
+pub const HELPER_VAR: &str = "OURO_TEST_HELPER";
+
+/// Whether this process is running helper `name` for a parent test.
+///
+/// A self-exec helper is an `#[ignore]`d test of its own binary that a parent
+/// test runs in a child process. `--include-ignored` runs it too, with no
+/// parent and none of its inputs, so every helper calls this first and
+/// returns when it is false: it then does nothing, rather than panicking or
+/// acting on a host it was not set up for.
+#[must_use]
+pub fn running_helper(name: &str) -> bool {
+    std::env::var_os(HELPER_VAR).is_some_and(|value| value == name)
+}
+
+/// The arguments that run exactly the `#[ignore]`d test `name` of a test
+/// binary, uncaptured. (One test runs on one thread either way; with
+/// `--test-threads=1` libtest would print the test's name on the line its
+/// output starts on, and a helper's report lines would no longer start the
+/// line.)
+#[must_use]
+pub fn helper_args(name: &str) -> [&str; 4] {
+    ["--ignored", "--exact", name, "--nocapture"]
+}
+
+/// The command that runs helper `name` of this test binary in a child
+/// process, with [`HELPER_VAR`] naming it ([`running_helper`]).
+#[must_use]
+pub fn helper_command(name: &str) -> std::process::Command {
+    let mut command =
+        std::process::Command::new(std::env::current_exe().expect("this test binary"));
+    command.args(helper_args(name)).env(HELPER_VAR, name);
+    command
+}
+
+/// The helper's output, after checking that it ran and passed.
+///
+/// libtest exits 0 both when the helper passed and when the filter matched
+/// nothing (a renamed helper), printing "1 passed" or "0 passed": a parent
+/// that only reads the exit status passes over a helper that never ran.
+pub fn assert_helper_ran(name: &str, output: &std::process::Output) -> String {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "helper {name} failed:\n{text}");
+    assert!(
+        text.contains("test result: ok. 1 passed"),
+        "helper {name} did not run:\n{text}"
+    );
+    text
+}
+
+/// Run helper `name` of this test binary to completion with `env` and
+/// return its output ([`helper_command`], [`assert_helper_ran`]).
+pub fn rerun_self(name: &str, env: &[(&str, &std::ffi::OsStr)]) -> String {
+    let mut command = helper_command(name);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("the helper starts");
+    assert_helper_ran(name, &output)
+}
+
+// ---------------------------------------------------------------------------
 // The precondition every live Linux check shares
 // ---------------------------------------------------------------------------
 

@@ -17,6 +17,8 @@ use std::time::Duration;
 use ouro_jail::records::ErrorCode;
 use ouro_jail::trace::{EXTERNAL_NO_PROGRESS, EXTERNAL_QUEUE_MAX, FdSink, Priority, TraceSink};
 
+mod common;
+
 /// Serialises every test here that creates a pipe or spawns a process.
 ///
 /// Measured on macOS 27 (a standalone loop of 3000 pipes beside a thread that
@@ -547,9 +549,10 @@ const FSIZE_RAISE: &str = "OURO_J4_FSIZE_RAISE";
 #[ignore = "subprocess helper for j4_r03_a_failed_local_write_never_leaves_a_partial_frame_mid_file"]
 fn j4_fsize_helper() {
     use ouro_jail::trace::FileSink;
-    let Some(path) = std::env::var_os(FSIZE_HELPER) else {
+    if !common::running_helper("j4_fsize_helper") {
         return;
-    };
+    }
+    let path = std::env::var_os(FSIZE_HELPER).expect("the parent names the trace file");
     let raise = std::env::var_os(FSIZE_RAISE).is_some();
     // SAFETY: SIG_IGN is a valid disposition; this process is the helper.
     unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
@@ -612,20 +615,11 @@ fn j4_fsize_helper() {
 fn run_fsize_helper(raise: bool) -> (serde_json::Value, Vec<u8>) {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("trace.ndjson");
-    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
-    command
-        .args(["--ignored", "--exact", "j4_fsize_helper", "--nocapture"])
-        .env(FSIZE_HELPER, &path);
+    let mut env = vec![(FSIZE_HELPER, path.as_os_str())];
     if raise {
-        command.env(FSIZE_RAISE, "1");
+        env.push((FSIZE_RAISE, std::ffi::OsStr::new("1")));
     }
-    let output = command.output().expect("the helper runs");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "the helper failed: {stdout}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let stdout = common::rerun_self("j4_fsize_helper", &env);
     let report = stdout
         .lines()
         .find_map(|line| line.strip_prefix("J4FSIZE "))
