@@ -247,12 +247,21 @@ impl Store {
                 }
                 Err(PendingFailure::Other(problem)) => {
                     // Not the journal's doing: the next attempt may succeed.
-                    eprintln!("pending recovery for {id} will be retried: {problem}");
+                    eprintln!(
+                        "{}",
+                        log_line(
+                            format_args!("pending recovery for {id} will be retried"),
+                            &problem
+                        )
+                    );
                     continue;
                 }
                 Err(PendingFailure::Refused(refusal, problem)) => (refusal, problem),
             };
-            eprintln!("pending recovery for {id}: {problem}");
+            eprintln!(
+                "{}",
+                log_line(format_args!("pending recovery for {id}"), &problem)
+            );
             // Retain the failed journal for inspection. A bad local file is
             // never sufficient evidence for a successful terminal outcome.
             if self
@@ -260,12 +269,23 @@ impl Store {
                 .is_ok_and(|s| ["prepared", "admitted"].contains(&s.run().state.as_str()))
                 && let Err(error) = self.record_invalid_pending(&id, peer, refusal)
             {
-                eprintln!("recording unknown outcome for {id}: {error}");
+                eprintln!(
+                    "{}",
+                    log_line(format_args!("recording unknown outcome for {id}"), &error)
+                );
             }
             // Retrying an unchanged journal every second cannot succeed.
             self.failed_journals().insert(id, seen);
         }
     }
+}
+
+/// One line for the operator's log. A refusal can quote journal values
+/// verbatim, so control characters are spelled out: a journal must neither
+/// forge log lines nor drive the operator's terminal.
+#[cfg(any(target_os = "linux", test))]
+fn log_line(context: std::fmt::Arguments<'_>, problem: &LedgerError) -> String {
+    format!("{context}: {}", records::escape_control(problem.message()))
 }
 
 fn validate_completion(run: &RunRecord, completion: &Completion) -> Result<()> {

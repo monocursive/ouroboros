@@ -88,3 +88,28 @@ fn a_journal_that_does_not_decode_is_refused_as_unreadable() {
         ))
     ));
 }
+
+#[test]
+fn journal_text_reaches_the_operator_log_with_control_characters_spelled_out() {
+    let (_temp, mut store, run) = admitted_with_journal("pending-log");
+    // A journal key decoding quotes verbatim: a newline that would start a
+    // forged log line, and an escape sequence that clears the terminal.
+    fs::write(
+        store.run_dir(&run.run_id).join(crate::pending::STATE),
+        b"{\"evil\\nouro-ledger: FORGED\\u001b[2J\":1,\"state\":{},\"digest\":\"x\"}",
+    )
+    .unwrap();
+    let refusal = store
+        .reconcile_pending(&run.run_id, &peer(), &|_| false)
+        .unwrap_err();
+    assert!(refusal.message().contains('\n'), "{refusal:?}");
+    let line = log_line(
+        format_args!("pending recovery for {}", run.run_id),
+        &refusal,
+    );
+    assert!(!line.contains('\n') && !line.contains('\u{1b}'), "{line:?}");
+    assert!(
+        line.contains("<U+000A>ouro-ledger: FORGED<U+001B>[2J"),
+        "{line}"
+    );
+}
