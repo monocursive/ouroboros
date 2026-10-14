@@ -93,6 +93,25 @@ defmodule OuroFleet.ControllerTest do
     assert Path.wildcard(context.root <> "/jobs/*.json") == []
   end
 
+  test "malformed input is refused without restarting the controller", context do
+    controller = Process.whereis(Controller)
+
+    for message <- [
+          {:run, %{"schema" => "ouro.fleet.request/1", "request_id" => "typo", "argv" => []}},
+          {:run, "not an object"},
+          {:status, "job_not-a-digest"},
+          {:status, 7},
+          {:kill, nil},
+          {:ledger, "../escape", ["show"]}
+        ] do
+      assert {:error, "invalid_request"} = Controller.call(message)
+    end
+
+    assert Process.whereis(Controller) == controller
+    assert :sys.get_state(context.worker) == %{plans: 0, submits: 0}
+    assert Path.wildcard(context.root <> "/jobs/*.json") == []
+  end
+
   test "an unavailable worker keeps its last observation and never invents failure" do
     request = %{
       "schema" => "ouro.fleet.request/1",

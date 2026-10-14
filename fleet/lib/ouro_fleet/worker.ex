@@ -1,7 +1,7 @@
 defmodule OuroFleet.Worker do
   @moduledoc "Worker reservations route to Rust; only the Rust owner can launch or settle."
   use GenServer
-  alias OuroFleet.{Command, Reader, Request, Store}
+  alias OuroFleet.{Command, InvalidRequest, Reader, Request, Store}
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)
   def call(message), do: GenServer.call(__MODULE__, message, 120_000)
 
@@ -23,6 +23,10 @@ defmodule OuroFleet.Worker do
     try do
       {:reply, dispatch(message, config), config}
     rescue
+      # Malformed input wrote nothing; refusing it must not restart this node.
+      InvalidRequest ->
+        {:reply, {:error, "invalid_request"}, config}
+
       error ->
         OuroFleet.Diagnostics.refused(error, __STACKTRACE__)
         {:stop, :normal, {:error, "worker_refused_or_persistence_unknown"}, config}
@@ -191,7 +195,7 @@ defmodule OuroFleet.Worker do
   end
 
   defp checkpoint(config, key) do
-    if not Regex.match?(~r/^job_[0-9a-f]{64}$/, key), do: raise("invalid job id")
+    if not Request.job?(key), do: Request.invalid!("invalid job id")
     Path.join(config["attempts"], key <> ".json")
   end
 
@@ -199,7 +203,7 @@ defmodule OuroFleet.Worker do
     checkpoint(config, key)
 
     if request["dir"] do
-      if not File.dir?(request["dir"]), do: raise("workspace missing")
+      if not File.dir?(request["dir"]), do: Request.invalid!("workspace missing")
       request["dir"]
     else
       Store.directory!(Path.join(config["scratch"], key))

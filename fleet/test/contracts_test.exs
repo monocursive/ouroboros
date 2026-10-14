@@ -48,7 +48,7 @@ defmodule OuroFleet.ContractsTest do
           Map.put(request, "capture_limit", 16_777_217),
           Map.put(request, "argv", ["a\0b"])
         ] do
-      assert_raise RuntimeError, fn -> Request.validate!(changed) end
+      assert_raise OuroFleet.InvalidRequest, fn -> Request.validate!(changed) end
     end
   end
 

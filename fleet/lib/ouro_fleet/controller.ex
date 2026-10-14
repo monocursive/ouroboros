@@ -1,7 +1,7 @@
 defmodule OuroFleet.Controller do
   @moduledoc "Durable placement identity. An unreachable worker is never replaced."
   use GenServer
-  alias OuroFleet.{Request, Store, Worker}
+  alias OuroFleet.{InvalidRequest, Request, Store, Worker}
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)
   def call(message), do: GenServer.call(__MODULE__, message, 180_000)
 
@@ -14,6 +14,10 @@ defmodule OuroFleet.Controller do
     try do
       {:reply, dispatch(message, config), config}
     rescue
+      # Malformed input wrote nothing; refusing it must not restart this node.
+      InvalidRequest ->
+        {:reply, {:error, "invalid_request"}, config}
+
       error ->
         OuroFleet.Diagnostics.refused(error, __STACKTRACE__)
         {:stop, :normal, {:error, "controller_refused_or_persistence_unknown"}, config}
@@ -163,7 +167,7 @@ defmodule OuroFleet.Controller do
   end
 
   defp checkpoint(config, key) do
-    if not Regex.match?(~r/^job_[0-9a-f]{64}$/, key), do: raise("invalid job id")
+    if not Request.job?(key), do: Request.invalid!("invalid job id")
     Path.join(config["jobs"], key <> ".json")
   end
 
