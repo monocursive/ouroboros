@@ -5,7 +5,8 @@
 //! The rendezvous: for every connect to a bridge port, the mediator pins the
 //! calling process before it connects ([`Origins::prepare`]) and, once the
 //! connect succeeded, publishes what it established under the connection's
-//! key ([`Origins::connected`]): the pinned process, or why there is none.
+//! key, its whole loopback 4-tuple ([`Origins::connected`]): the pinned
+//! process, or why there is none.
 //! The sealed bridge writes the same key ahead of the stream it relays
 //! ([`preamble`]), and the proxy claims the outcome published under exactly
 //! that key ([`Origins::receive`]). TCP accept and the preamble can beat the
@@ -20,9 +21,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read as _};
-use std::net::TcpStream;
-#[cfg(target_os = "linux")]
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream};
 use std::os::fd::{AsFd as _, OwnedFd};
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd as _, BorrowedFd};
@@ -49,12 +48,29 @@ pub(crate) const FDS_PER_PIN: usize = 2;
 /// pin, so the pin budget already bounds those; this bounds refusals too.
 #[cfg(target_os = "linux")]
 const MAX_ENTRIES: usize = MAX_PINNED;
-const MAGIC: &[u8; 8] = b"OUROPID1";
-/// [`MAGIC`], then the client port and the bridge port.
-const PREAMBLE_LEN: usize = 12;
+const MAGIC: &[u8; 8] = b"OUROPID2";
+/// [`MAGIC`], the client's address as IPv6 (an IPv4 one mapped), the
+/// client's port, then the bridge port.
+const PREAMBLE_LEN: usize = 8 + 16 + 2 + 2;
 
-/// A bridged connection: its client port and the bridge port it reached.
-type Key = (u16, u16);
+/// A bridged connection: the client's address and port and the bridge port
+/// it reached, which with the bridge's fixed address is its whole TCP
+/// 4-tuple. Two live connections never share one, so neither can claim the
+/// other's authority.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct Key {
+    client: SocketAddr,
+    bridge_port: u16,
+}
+impl Key {
+    fn new(client: SocketAddr, bridge_port: u16) -> Self {
+        // A v4-mapped IPv6 client is the connection the bridge sees as IPv4.
+        Self {
+            client: SocketAddr::new(client.ip().to_canonical(), client.port()),
+            bridge_port,
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 struct Identity {
@@ -352,11 +368,16 @@ impl Origins {
                 table.entries.remove(&oldest);
             }
         }
-        // Existing authority cannot be replaced by a later connection.
-        table.entries.entry(key).or_insert(Entry {
-            at: Instant::now(),
-            outcome,
-        });
+        // A key names one live connection: an outcome already under it
+        // belongs to an earlier connection that closed unclaimed and whose
+        // address was reused, never to this one.
+        table.entries.insert(
+            key,
+            Entry {
+                at: Instant::now(),
+                outcome,
+            },
+        );
         self.published.notify_all();
     }
     /// Reads the bridge's preamble at the start of a proxy connection and
@@ -435,7 +456,7 @@ fn bridge_key(socket: BorrowedFd<'_>) -> Option<Key> {
     let (local, peer) = (stream.local_addr().ok()?, stream.peer_addr().ok()?);
     let loopback = IpAddr::V4(crate::platform::linux::bridge::LOOPBACK);
     (peer.ip().to_canonical() == loopback && bridge_port(peer.port()))
-        .then_some((local.port(), peer.port()))
+        .then(|| Key::new(local, peer.port()))
 }
 
 /// Drops outcomes no connection claimed within [`RETENTION`], and releases
@@ -529,35 +550,46 @@ fn read_preamble(socket: &UnixStream, deadline: Instant) -> Result<Option<Key>, 
 }
 
 fn encode(key: Key) -> [u8; PREAMBLE_LEN] {
+    let address = match key.client.ip() {
+        IpAddr::V4(address) => address.to_ipv6_mapped(),
+        IpAddr::V6(address) => address,
+    };
     let mut bytes = [0u8; PREAMBLE_LEN];
-    let (magic, ports) = bytes.split_at_mut(MAGIC.len());
-    magic.copy_from_slice(MAGIC);
-    ports[..2].copy_from_slice(&key.0.to_be_bytes());
-    ports[2..].copy_from_slice(&key.1.to_be_bytes());
+    bytes[..8].copy_from_slice(MAGIC);
+    bytes[8..24].copy_from_slice(&address.octets());
+    bytes[24..26].copy_from_slice(&key.client.port().to_be_bytes());
+    bytes[26..].copy_from_slice(&key.bridge_port.to_be_bytes());
     bytes
 }
 fn decode(bytes: &[u8; PREAMBLE_LEN]) -> Option<Key> {
-    let (magic, ports) = bytes.split_at(MAGIC.len());
-    (magic == MAGIC).then(|| {
-        (
-            u16::from_be_bytes([ports[0], ports[1]]),
-            u16::from_be_bytes([ports[2], ports[3]]),
-        )
-    })
+    if bytes[..8] != MAGIC[..] {
+        return None;
+    }
+    let mut address = [0u8; 16];
+    address.copy_from_slice(&bytes[8..24]);
+    let port = u16::from_be_bytes([bytes[24], bytes[25]]);
+    let bridge_port = u16::from_be_bytes([bytes[26], bytes[27]]);
+    Some(Key::new(
+        SocketAddr::new(Ipv6Addr::from(address).into(), port),
+        bridge_port,
+    ))
 }
 /// The preamble the sealed bridge writes ahead of a client it relays: the
 /// key the mediator published that connection's outcome under.
 pub(crate) fn preamble(client: &TcpStream) -> io::Result<[u8; PREAMBLE_LEN]> {
-    Ok(encode((
-        client.peer_addr()?.port(),
+    Ok(encode(Key::new(
+        client.peer_addr()?,
         client.local_addr()?.port(),
     )))
 }
-/// A preamble as the bridge writes it, for tests that stand in for the
-/// bridge in front of a vault proxy.
+/// A preamble as the bridge writes it for a client on the IPv4 loopback,
+/// for tests that stand in for the bridge in front of a vault proxy.
 #[cfg(test)]
 pub(super) fn preamble_for(client_port: u16, bridge_port: u16) -> [u8; PREAMBLE_LEN] {
-    encode((client_port, bridge_port))
+    encode(Key::new(
+        SocketAddr::from(([127, 0, 0, 1], client_port)),
+        bridge_port,
+    ))
 }
 
 #[cfg(test)]
@@ -570,8 +602,8 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (accepted, _) = listener.accept().unwrap();
-        let key = (
-            client.local_addr().unwrap().port(),
+        let key = Key::new(
+            client.local_addr().unwrap(),
             listener.local_addr().unwrap().port(),
         );
         let bytes = preamble(&accepted).unwrap();
@@ -580,6 +612,14 @@ mod tests {
         let mut forged = bytes;
         forged[0] ^= 1;
         assert_eq!(decode(&forged), None);
+        // The v4-mapped spelling of a client is the same connection.
+        let v4 = SocketAddr::from(([127, 0, 0, 1], 40000));
+        let v6 = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 40000));
+        assert_eq!(Key::new(v6, 3128), Key::new(v4, 3128));
+        assert_eq!(
+            decode(&encode(Key::new(v4, 3128))),
+            Some(Key::new(v4, 3128))
+        );
     }
 }
 
@@ -594,6 +634,11 @@ mod linux_tests {
         IpAddr::V4(crate::platform::linux::bridge::LOOPBACK),
         crate::platform::linux::bridge::HTTP_PORT,
     );
+
+    /// A connection from `port` on the IPv4 loopback to `bridge_port`.
+    fn loopback(port: u16, bridge_port: u16) -> Key {
+        Key::new(SocketAddr::from(([127, 0, 0, 1], port)), bridge_port)
+    }
 
     fn configured(enabled: bool, rendezvous: Duration) -> Arc<Origins> {
         let origins = Arc::new(Origins::with_rendezvous(rendezvous));
@@ -671,7 +716,7 @@ mod linux_tests {
             "no byte: no request"
         );
         let (mut bridge, proxy) = UnixStream::pair().unwrap();
-        bridge.write_all(&encode((1, 2))[..5]).unwrap();
+        bridge.write_all(&encode(loopback(1, 2))[..5]).unwrap();
         drop(bridge);
         assert!(matches!(origins.receive(&proxy), Err(Reason::ClientClosed)));
         let (mut bridge, proxy) = UnixStream::pair().unwrap();
@@ -684,7 +729,7 @@ mod linux_tests {
     #[test]
     fn a_bridge_preamble_before_connect_publication_waits_for_pinned_authority() {
         let origins = configured(true, RENDEZVOUS);
-        let key = (40001, 3128);
+        let key = loopback(40001, 3128);
         let (_bridge, proxy) = bridged(key);
         let (rx, thread) = receiving(&origins, proxy);
         let outcome = pinned(&origins);
@@ -703,7 +748,7 @@ mod linux_tests {
         // A zero rendezvous: the deadline has passed by the time the table
         // is consulted, yet the published authority is there.
         let origins = configured(true, Duration::ZERO);
-        let key = (40002, 3128);
+        let key = loopback(40002, 3128);
         origins.publish(key, pinned(&origins));
         let (_bridge, proxy) = bridged(key);
         assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned));
@@ -714,7 +759,7 @@ mod linux_tests {
     fn a_published_origin_is_single_use_and_a_missing_origin_times_out() {
         let rendezvous = Duration::from_millis(50);
         let origins = configured(true, rendezvous);
-        let key = (40003, 3128);
+        let key = loopback(40003, 3128);
         origins.publish(key, pinned(&origins));
         let (_bridge, proxy) = bridged(key);
         assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned));
@@ -731,9 +776,9 @@ mod linux_tests {
     #[test]
     fn another_connection_key_never_authorizes_a_waiter_and_stop_wakes_it() {
         let origins = configured(true, RENDEZVOUS);
-        let (_bridge, proxy) = bridged((40004, 3128));
+        let (_bridge, proxy) = bridged(loopback(40004, 3128));
         let (rx, thread) = receiving(&origins, proxy);
-        origins.publish((40005, 3128), pinned(&origins));
+        origins.publish(loopback(40005, 3128), pinned(&origins));
         assert!(matches!(
             rx.recv_timeout(Duration::from_millis(100)),
             Err(mpsc::RecvTimeoutError::Timeout)
@@ -751,22 +796,15 @@ mod linux_tests {
     }
 
     #[test]
-    fn publication_keeps_the_first_authority_and_stopped_origins_stay_closed() {
+    fn a_later_connection_replaces_an_unclaimed_outcome_and_stop_is_terminal() {
         let origins = configured(true, RENDEZVOUS);
-        let key = (40006, 3129);
-        let first = pinned(&origins);
-        let Outcome::Authority(process) = &first else {
-            unreachable!()
-        };
-        let first_process = process.clone();
-        origins.publish(key, first);
+        let key = loopback(40006, 3129);
+        // An earlier connection on the same 4-tuple closed unclaimed; its
+        // outcome is not the new connection's.
+        origins.publish(key, Outcome::Refused(Reason::ResourceExhausted));
         origins.publish(key, pinned(&origins));
         let (_bridge, proxy) = bridged(key);
-        let Ok(Some(Initiator::Pinned(claimed))) = origins.receive(&proxy) else {
-            panic!("the first authority was not claimed");
-        };
-        assert!(Arc::ptr_eq(&claimed.0, &first_process.0));
-        drop((claimed, first_process));
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned));
         let pending = pinned(&origins);
         origins.stop();
         origins.publish(key, pending);
@@ -780,9 +818,25 @@ mod linux_tests {
     }
 
     #[test]
+    fn an_authority_is_never_claimed_from_another_loopback_address() {
+        let origins = configured(true, Duration::from_millis(50));
+        // Same client port, same bridge port, another source address: a
+        // different connection, which may be live at the same time.
+        let elsewhere = Key::new(SocketAddr::from(([127, 0, 0, 2], 40011)), 3128);
+        origins.publish(loopback(40011, 3128), pinned(&origins));
+        let (_bridge, proxy) = bridged(elsewhere);
+        assert_eq!(
+            seen(origins.receive(&proxy)),
+            Ok(Seen::Unverified(Reason::CredentialProcessUnverified))
+        );
+        let (_bridge, proxy) = bridged(loopback(40011, 3128));
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned));
+    }
+
+    #[test]
     fn a_profile_without_process_binding_never_waits_for_origin_authority() {
         let origins = configured(false, RENDEZVOUS);
-        let (_bridge, proxy) = bridged((40007, 3128));
+        let (_bridge, proxy) = bridged(loopback(40007, 3128));
         let began = Instant::now();
         assert_eq!(
             seen(origins.receive(&proxy)),
@@ -803,7 +857,7 @@ mod linux_tests {
             refused,
             Outcome::Refused(Reason::ResourceExhausted)
         ));
-        let key = (40008, 3128);
+        let key = loopback(40008, 3128);
         let (_bridge, proxy) = bridged(key);
         let (rx, thread) = receiving(&origins, proxy);
         origins.publish(key, refused);
@@ -844,13 +898,16 @@ mod linux_tests {
         let start = crate::platform::linux::identity::start_time_ticks(pid).unwrap();
         let outcome = origins.prepare(pid, start, BRIDGE).unwrap().0;
         assert!(matches!(outcome, Outcome::Authority(_)));
-        let key = (40009, 3128);
+        let key = loopback(40009, 3128);
         origins.publish(key, outcome);
         assert_eq!(origins.pins.load(Ordering::SeqCst), 1);
         child.kill().unwrap();
         child.wait().unwrap();
         // The next publication prunes it.
-        origins.publish((40010, 3128), Outcome::Refused(Reason::ResourceExhausted));
+        origins.publish(
+            loopback(40010, 3128),
+            Outcome::Refused(Reason::ResourceExhausted),
+        );
         assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
         let (_bridge, proxy) = bridged(key);
         assert_eq!(
