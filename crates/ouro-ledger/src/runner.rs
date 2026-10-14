@@ -693,6 +693,33 @@ impl Capture {
     }
 }
 
+/// Give the terminal a bounded grace to show what is queued; whatever it has
+/// not shown by then is recorded as undelivered. The writer closes an owner
+/// connection that stays silent for its 2 s request timeout, which a grace
+/// can reach, so the owner keeps sending heartbeats until it ends or one fails.
+#[cfg(target_os = "linux")]
+fn forwarding_grace(
+    captures: &mut [Capture],
+    grace: Duration,
+    last_heartbeat: &mut Instant,
+    failure: &mut Option<LedgerError>,
+    mut heartbeat: impl FnMut() -> Result<()>,
+) {
+    for item in captures.iter_mut() {
+        item.close_forwarding();
+    }
+    let deadline = Instant::now() + grace;
+    while !captures.iter_mut().all(Capture::forwarding_done) && Instant::now() < deadline {
+        if failure.is_none() && last_heartbeat.elapsed() >= HEARTBEAT {
+            if let Err(problem) = heartbeat() {
+                *failure = Some(problem);
+            }
+            *last_heartbeat = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn terminate(child: &mut Child) {
     // A trailing frame or drain failure can arrive after try_wait reaped the
@@ -1219,22 +1246,13 @@ fn run_owned(
         drop(gate_parent);
         terminate(&mut child.0);
     }
-    // Give the terminal a bounded grace to show what is queued, keeping the
-    // writer connection alive meanwhile; whatever it has not shown by then
-    // is recorded as undelivered.
-    for item in &mut captures {
-        item.close_forwarding();
-    }
-    let grace = Instant::now() + FORWARDING_GRACE;
-    while !captures.iter_mut().all(Capture::forwarding_done) && Instant::now() < grace {
-        if failure.is_none() && last_heartbeat.elapsed() >= HEARTBEAT {
-            if let Err(problem) = evidence.heartbeat(client) {
-                failure = Some(problem);
-            }
-            last_heartbeat = Instant::now();
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    forwarding_grace(
+        &mut captures,
+        FORWARDING_GRACE,
+        &mut last_heartbeat,
+        &mut failure,
+        || evidence.heartbeat(client),
+    );
     let mut capture = serde_json::Map::new();
     capture.insert("argv".into(), argv_capture);
     let complete = failure.is_none();
@@ -1333,6 +1351,41 @@ fn run_owned(
         s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0))
     });
     Ok(RunResult { record, exit_code })
+}
+
+/// The operator's note about a stream whose foreground forwarding did not
+/// finish, saying exactly how much of what was not shown the capture holds:
+/// the capture keeps the stream's first `stored_bytes`, the terminal was shown
+/// its first `delivered_bytes`.
+pub fn forwarding_warning(name: &str, capture: &Value) -> Option<String> {
+    let forwarding = &capture["forwarding"];
+    if !forwarding.is_object() || forwarding["state"] == "complete" {
+        return None;
+    }
+    let unshown = forwarding["undelivered_bytes"].as_u64().unwrap_or(0);
+    if unshown == 0 {
+        return None;
+    }
+    let shown = forwarding["delivered_bytes"].as_u64().unwrap_or(0);
+    let held = capture["stored_bytes"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_sub(shown)
+        .min(unshown);
+    let kept = if capture["state"] == "not_captured" {
+        "this stream is not captured".into()
+    } else if held == unshown {
+        "the capture holds them".into()
+    } else if held == 0 {
+        "the capture holds none of them".into()
+    } else {
+        format!("the capture holds the first {held} of them")
+    };
+    Some(format!(
+        "{name} forwarding {}: {unshown} bytes had not reached the terminal when the run was \
+         recorded; {kept}",
+        records::escape_control(forwarding["state"].as_str().unwrap_or("unknown"))
+    ))
 }
 
 pub fn record_exit(record: &RunRecord) -> i32 {
@@ -1535,6 +1588,106 @@ mod tests {
             tee.report(5),
             json!({"state":"complete","delivered_bytes":5,"undelivered_bytes":0})
         );
+    }
+
+    #[test]
+    fn a_forwarding_warning_says_exactly_what_the_capture_holds() {
+        let warning = |capture: Value| forwarding_warning("stdout", &capture);
+        let forwarding = |state: &str, shown: u64, unshown: u64| json!({"state":state,"delivered_bytes":shown,"undelivered_bytes":unshown});
+        let prefix = "stdout forwarding stopped: 2031616 bytes had not reached the terminal \
+                      when the run was recorded";
+        // An 8-byte capture of a 2 MiB stream holds none of the unshown bytes.
+        assert_eq!(
+            warning(json!({"state":"captured","stored_bytes":8,"truncated":true,
+                "forwarding":forwarding("stopped",65536,2_031_616)})),
+            Some(format!("{prefix}; the capture holds none of them"))
+        );
+        assert_eq!(
+            warning(
+                json!({"state":"captured","stored_bytes":2_097_152,"truncated":false,
+                "forwarding":forwarding("stopped",65536,2_031_616)})
+            ),
+            Some(format!("{prefix}; the capture holds them"))
+        );
+        assert_eq!(
+            warning(
+                json!({"state":"captured","stored_bytes":65636,"truncated":true,
+                "forwarding":forwarding("stopped",65536,2_031_616)})
+            ),
+            Some(format!("{prefix}; the capture holds the first 100 of them"))
+        );
+        assert_eq!(
+            warning(json!({"state":"not_captured","observed_bytes":2_097_152,
+                "forwarding":forwarding("stopped",65536,2_031_616)})),
+            Some(format!("{prefix}; this stream is not captured"))
+        );
+        // Nothing to warn about: everything shown, or nothing left unshown.
+        for state in ["complete", "stopped", "unfinished"] {
+            assert_eq!(
+                warning(json!({"state":"captured","stored_bytes":5,
+                    "forwarding":forwarding(state,5,0)})),
+                None
+            );
+        }
+        assert_eq!(warning(json!({"state":"captured","stored_bytes":5})), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_owner_keeps_its_writer_connection_alive_through_the_forwarding_grace() {
+        let (source, child) = output_pipe().unwrap();
+        // Nothing reads this terminal, so its queue never drains.
+        let (_unread_terminal, terminal) = output_pipe().unwrap();
+        let mut capture = Capture {
+            stream: source,
+            file: None,
+            observed: 0,
+            stored: 0,
+            limit: 0,
+            eof: false,
+            name: "stdout",
+            tee: Some(Tee::new(terminal)),
+        };
+        let mut child = child;
+        let chunk = vec![b'x'; 32 * 1024];
+        for _ in 0..8 {
+            child.write_all(&chunk).unwrap();
+            capture.drain().unwrap();
+        }
+        let mut captures = [capture];
+        // A grace well past the writer's 2 s idle limit.
+        let grace = HEARTBEAT * 12;
+        let started = Instant::now();
+        let mut last_heartbeat = Instant::now();
+        let mut failure = None;
+        let mut beats = 0;
+        forwarding_grace(
+            &mut captures,
+            grace,
+            &mut last_heartbeat,
+            &mut failure,
+            || {
+                beats += 1;
+                Ok(())
+            },
+        );
+        assert!(started.elapsed() >= grace);
+        assert!(failure.is_none());
+        assert!(beats >= 10, "{beats} heartbeats in {grace:?}");
+        // A failed heartbeat is the owner's failure, and the last one sent.
+        let mut beats = 0;
+        forwarding_grace(
+            &mut captures,
+            HEARTBEAT * 4,
+            &mut last_heartbeat,
+            &mut failure,
+            || {
+                beats += 1;
+                Err(error("writer gone"))
+            },
+        );
+        assert_eq!(beats, 1);
+        assert!(failure.is_some());
     }
 
     #[cfg(target_os = "linux")]

@@ -1028,15 +1028,10 @@ fn execute(cli: Cli) -> Result<i32> {
                 );
             }
             for name in ["stdout", "stderr"] {
-                let forwarding = &result.record.capture[name]["forwarding"];
-                if forwarding.is_object() && forwarding["state"] != "complete" {
-                    eprintln!(
-                        "ouro-ledger: {name} forwarding {}: {} bytes were not shown; the capture records them",
-                        ouro_records::records::escape_control(
-                            forwarding["state"].as_str().unwrap_or("unknown")
-                        ),
-                        forwarding["undelivered_bytes"],
-                    );
+                if let Some(warning) =
+                    runner::forwarding_warning(name, &result.record.capture[name])
+                {
+                    eprintln!("ouro-ledger: {warning}");
                 }
             }
             Ok(result.exit_code)
