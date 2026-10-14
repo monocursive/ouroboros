@@ -1428,6 +1428,25 @@ repositories, symlink replacement and mount replacement separately. A newly
 created protected segment below a previously ordinary nested directory remains
 outside Linux `existing_and_root` coverage. Requiring `all_descendants` refuses.
 
+For `agent`, the protected names are `.git/hooks` and `.git/config`, and
+`.git` itself stays writable so commits work. A multi-component name matches
+at any depth on whole components (`sub/.git/hooks`, never `x.git/hooks`). It
+is not a root literal: nothing is protected or held by a placeholder where it
+is absent. When a name starts with `.git/`, every existing file-form `.git`
+(a gitlink), the root's included, is protected whole, because it names the git
+directory those paths are read from; a `.git` symlink at any depth hides them
+and refuses `existing_and_root`. Not covered, and stated as such to the
+operator: submodule git directories under `.git/modules/`, whose
+`core.worktree` `git submodule update` rewrites on every run, which a
+read-only config would refuse; repositories, gitlinks and git directories
+created during the run, a moved-aside repository's replacement included;
+bare repositories; and the other files of a writable git directory that change
+where git reads its configuration and hooks — a planted `commondir` redirects
+the common directory, and `config.worktree` is read where
+`extensions.worktreeConfig` is enabled. The protection keeps a run from editing
+the existing hooks and configuration in place; it does not make the
+workspace's git metadata trustworthy after a run that set out to subvert it.
+
 Vendor state is bound read-write at `/run/ouro/state`, and each `bind_ro`
 credential view read-only at its destination beneath it, after every operator
 grant; the attempt directory above it is never visible. Vendor state and

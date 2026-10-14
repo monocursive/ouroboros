@@ -924,9 +924,10 @@ impl Planned {
         // answer (§9.1). The walk's names are the snapshot's own segments:
         // every contained baseline carries exactly its literals (`tool` the
         // built-in `.git`/`.ouroboros`, `agent` — audit 2026-10-08 M5 — only
-        // `.git/hooks` and `.git/config`, so the rest of Git metadata stays
-        // writable), so merging the built-ins in again here would protect
-        // more than the profile asked for.
+        // `.git/hooks` and `.git/config`, at any depth and with every
+        // gitlink, so the rest of Git metadata stays writable), so merging
+        // the built-ins in again here would protect more than the profile
+        // asked for.
         let mut names: Vec<String> = snapshot.filesystem.protected_segments.clone();
         names.sort_unstable();
         names.dedup();

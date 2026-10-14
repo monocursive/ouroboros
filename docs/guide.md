@@ -216,9 +216,44 @@ only the paths and services it needs.
 | Profile | Good starting point for | Default access |
 | --- | --- | --- |
 | `tool` | Tests and local commands | Writable workspace and scratch; no network. Existing `.git` and `.ouroboros` trees are protected from writes. |
-| `agent` | Coding agents that call a provider | Writable workspace, scratch, and temporary agent state. Network destinations need explicit grants. Git metadata is writable except `.git/hooks` and `.git/config`, which are protected: a contained run could otherwise plant a hook or `core.hooksPath` that runs with your authority on your next `git` command *outside* the jail. Objects, refs, `HEAD` and the index stay writable, so commits work; a `.git` created by a fresh `git clone` inside the run is not protected (nothing existed to protect). |
+| `agent` | Coding agents that call a provider | Writable workspace, scratch, and temporary agent state. Network destinations need explicit grants. Git metadata stays writable except the hooks, configs and gitlinks that exist at launch; see [Git metadata under `agent`](#git-metadata-under-agent) for what that does and does not stop. |
 | `build` | Builds from read-only inputs | Writable scratch; add read-only inputs and writable outputs. No network. Requires an explicit memory limit and host support. |
 | `none` | Deliberately uncontained execution | Host access. Filesystem and network containment are disabled. |
+
+### Git metadata under `agent`
+
+`agent` keeps `.git` writable, so commits, fetches, checkouts and
+`git submodule update` work inside the run. It protects, as they exist at
+launch, the files git reads with your authority on your next `git` command
+*outside* the jail:
+
+- `.git/hooks` and `.git/config` of every repository in the workspace, at
+  any depth, are read-only.
+- Every file-form `.git` (the link a linked worktree or a submodule checkout
+  holds) is read-only, so a run cannot point it at a git directory of its
+  own.
+
+That stops a run from editing those files in place, for example adding a
+hook or the `core.hooksPath` a package's install script sets. It does not
+make the metadata trustworthy after a run that set out to subvert it:
+
+- A run can plant a `commondir` file in a writable git directory, naming a
+  copy with its own config and hooks; git outside the jail then reads the
+  copy. Where `extensions.worktreeConfig` is enabled, it can write
+  `config.worktree`.
+- A run can move a `.git` directory, or a nested repository's directory,
+  aside and create another in its place.
+- Submodule git directories under `.git/modules/` stay writable:
+  `git submodule update` rewrites their config every time it runs.
+- Repositories created during the run, such as a fresh `git clone`, and bare
+  repositories are not protected.
+- A symlinked `.git`, hooks directory or config refuses the run, since no
+  coverage can be claimed through it.
+
+After an `agent` run, treat the workspace's git metadata like a repository
+from an untrusted source: look for a `commondir`, a `config.worktree` and
+hooks you did not install in `.git` and in nested repositories before you
+run `git` there.
 
 Contained profiles also expose system runtime files needed to execute
 programs. Inspect the resolved policy before running a new command:

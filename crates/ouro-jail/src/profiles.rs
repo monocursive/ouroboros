@@ -109,12 +109,14 @@ pub fn baseline(profile: ProfileName, platform: Os, lookup: &EnvLookup) -> Profi
             read_only: runtime_roots,
             deny_read: Vec::new(),
             // Audit 2026-10-08 M5: the workspace `.git` stays writable so
-            // commits work, but the hooks directory and the config file are
-            // the two persistence points that execute with the operator's
-            // full authority on their next `git` command *outside* the
-            // jail (`hooks/*`, `core.hooksPath`, `core.fsmonitor`), so they
-            // are protected like `tool` protects the whole tree. Objects
-            // and refs stay writable.
+            // commits work, but the hooks directory and the config file of
+            // every existing repository (and, by the walk's reading of
+            // these names, every gitlink) are protected: they execute with
+            // the operator's authority on their next `git` command
+            // *outside* the jail (`hooks/*`, `core.hooksPath`,
+            // `core.fsmonitor`). Objects and refs stay writable. A run that
+            // redirects git instead (a planted `commondir`) is outside this
+            // protection (jail-v1 §9.1).
             protected_segments: vec![".git/hooks".to_owned(), ".git/config".to_owned()],
             protected_coverage: ProtectedCoverage::ExistingAndRoot,
             network_mode: NetworkMode::Proxy,
