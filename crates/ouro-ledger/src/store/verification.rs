@@ -24,6 +24,9 @@ pub(crate) struct Target {
     poisoned: Vec<String>,
     /// The head the writer had accepted when the layout was taken.
     accepted: Chain,
+    /// The labels the writer had accepted, reported when the re-read fails.
+    child_protection: String,
+    coverage: Value,
     /// The canonical bytes the writer had accepted, when nothing poisoned
     /// the stream. A writer that has not poisoned a stream left no bytes
     /// beyond them: any there are someone else's.
@@ -123,6 +126,8 @@ impl Store {
             directory,
             poisoned: poison_details(stream.poisoned()),
             accepted: stream.run().chain.clone(),
+            child_protection: stream.run().child_protection.clone(),
+            coverage: crate::reader::coverage_summary(&stream.run().coverage),
             accepted_bytes: (!stream.is_poisoned()).then(|| stream.accepted_bytes()),
             kind,
         })
@@ -165,7 +170,28 @@ impl Store {
 impl Target {
     /// Re-read and re-hash this run. `proceed` is asked before every
     /// canonical frame; once it refuses, the report says what was not checked.
-    pub(crate) fn verify(self, proceed: &mut impl FnMut() -> bool) -> Result<VerifyReport> {
+    /// A re-read that fails outright is this run's problem, never the page's:
+    /// a GC may have caused it, and every other run is still reported.
+    pub(crate) fn verify(self, proceed: &mut impl FnMut() -> bool) -> VerifyReport {
+        let (run_id, child_protection, coverage) = (
+            self.run_id.clone(),
+            self.child_protection.clone(),
+            self.coverage.clone(),
+        );
+        self.reread(proceed).unwrap_or_else(|error| VerifyReport {
+            run_id,
+            local_consistency: false,
+            child_protection,
+            coverage,
+            events: 0,
+            problems: vec![format!(
+                "fresh verification could not re-read this run: {error}"
+            )],
+            history: None,
+        })
+    }
+
+    fn reread(self, proceed: &mut impl FnMut() -> bool) -> Result<VerifyReport> {
         let (layout, projection) = match self.kind {
             TargetKind::Pruned { retained, run } => {
                 return Ok(pruning::verify_pruned(
@@ -259,11 +285,11 @@ pub(crate) fn verify_page(
     limit: u32,
 ) -> Result<VerifyPage> {
     let page = plan(run_id, after, limit)?;
-    let mut reports = page
+    let mut reports: Vec<_> = page
         .targets
         .into_iter()
         .map(|target| target.verify(proceed))
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
     if reports.iter().any(|report| !report.problems.is_empty())
         && gc_generation()? != page.gc_generation
     {
@@ -275,7 +301,7 @@ pub(crate) fn verify_page(
             let Some(target) = again.targets.into_iter().next() else {
                 continue;
             };
-            *report = target.verify(proceed)?;
+            *report = target.verify(proceed);
             if !report.problems.is_empty() && gc_generation()? != again.gc_generation {
                 report
                     .problems
@@ -347,6 +373,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_run_whose_re_read_fails_is_reported_and_the_rest_of_its_page_too() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let first = store.prepare("first", &payload(), &peer()).unwrap();
+        let second = store.prepare("second", &payload(), &peer()).unwrap();
+        // A capture GC authority the re-read cannot even read.
+        fs::write(
+            store.run_dir(&first.run_id).join("captures-gc.json"),
+            b"not an authority",
+        )
+        .unwrap();
+        let reports = store.verify(None).unwrap();
+        assert_eq!(reports.len(), 2, "{reports:?}");
+        for report in reports {
+            if report.run_id == first.run_id {
+                assert!(!report.local_consistency);
+                assert_eq!(report.problems.len(), 1, "{report:?}");
+                assert!(
+                    report.problems[0]
+                        .starts_with("fresh verification could not re-read this run: "),
+                    "{report:?}"
+                );
+            } else {
+                assert_eq!(report.run_id, second.run_id);
+                assert!(report.local_consistency, "{report:?}");
+            }
+        }
+    }
+
     fn planned(store: &Store, run_id: &str) -> Target {
         let mut plan = store.plan_verify(Some(run_id), None, 1).unwrap();
         assert_eq!(plan.targets.len(), 1);
@@ -366,7 +422,7 @@ mod tests {
                 .hold(&run.run_id, &format!("after-plan-{n}"), &peer())
                 .unwrap();
         }
-        let report = target.verify(&mut || true).unwrap();
+        let report = target.verify(&mut || true);
         assert!(report.local_consistency, "{report:?}");
         assert_eq!(report.events, 2);
         assert!(store.verify(None).unwrap()[0].local_consistency);
@@ -396,7 +452,7 @@ mod tests {
         for (name, bytes) in files.iter().zip(&extended) {
             fs::write(directory.join(name), bytes).unwrap();
         }
-        let report = planned(&store, &run.run_id).verify(&mut || true).unwrap();
+        let report = planned(&store, &run.run_id).verify(&mut || true);
         assert!(!report.local_consistency, "{report:?}");
         assert_eq!(
             report.problems,
@@ -411,12 +467,10 @@ mod tests {
         let run = store.prepare("stopped", &payload(), &peer()).unwrap();
         store.hold(&run.run_id, "second", &peer()).unwrap();
         let mut frames = 0;
-        let report = planned(&store, &run.run_id)
-            .verify(&mut || {
-                frames += 1;
-                frames <= 1
-            })
-            .unwrap();
+        let report = planned(&store, &run.run_id).verify(&mut || {
+            frames += 1;
+            frames <= 1
+        });
         assert!(!report.local_consistency, "{report:?}");
         assert_eq!(report.events, 1);
         assert!(
