@@ -3285,7 +3285,7 @@ fn remove_proxy_directory(
     record: &mut AttemptRecord,
 ) -> Option<JailError> {
     match state::remove_proxy_dir(attempt_dir) {
-        Ok(state::ProxyDirRemoval::Retained(reason)) => {
+        Ok(state::ProxyDirRemoval::Retained(reason) | state::ProxyDirRemoval::Failed(reason)) => {
             record.errors.push(
                 JailError::new(
                     ErrorCode::StateWriteFailed,

@@ -333,9 +333,12 @@ pub struct ProxyDirEntry {
     /// Who removed it, when `gc` did.
     #[serde(default, skip_serializing_if = "Field::is_absent")]
     pub removed_by: Field<String>,
-    /// Why it was retained.
+    /// Why it was retained: nothing proves it this attempt's to remove.
     #[serde(default, skip_serializing_if = "Field::is_absent")]
     pub retained: Field<String>,
+    /// Why its removal failed: reading or removing it did not complete.
+    #[serde(default, skip_serializing_if = "Field::is_absent")]
+    pub failed: Field<String>,
     /// The socket node bound in it.
     #[serde(default, skip_serializing_if = "Field::is_absent")]
     pub socket: Field<SocketEntry>,

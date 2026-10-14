@@ -2040,12 +2040,12 @@ fn proxy_then_resume(
     let mut settled = true;
     entry.proxy_dir = match state::gc_proxy_dir(dir, dry_run) {
         Ok(outcome) => {
-            if let state::ProxyDirGc::Failed(reason) = &outcome {
+            if let state::ProxyDirRemoval::Failed(reason) = &outcome {
                 incomplete.push(format!("{name} (proxy directory: {reason})"));
             }
             settled &= matches!(
                 outcome,
-                state::ProxyDirGc::Nothing | state::ProxyDirGc::Removed
+                state::ProxyDirRemoval::Nothing | state::ProxyDirRemoval::Removed
             );
             outcome.describe()
         }
