@@ -132,6 +132,21 @@ class RetiredArchives(unittest.TestCase):
         record.write_text(json.dumps({'schema': retired_archives.SCHEMA, 'archive': f'{RUN}/archives/gone.tar.gz'}))
         self.assertTrue(validate_links.retired(target))
 
+    def test_link_checker_main_resolves_a_retired_link_through_its_record(self):
+        doc = self.repo.resolve() / 'docs/a.md'
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.write_text('[bundle](benchmarks/demo/gone.tar.gz)\n')
+        for name, value in (('ROOT', self.repo.resolve()), ('DOCS', [doc])):
+            self.addCleanup(setattr, validate_links, name, getattr(validate_links, name))
+            setattr(validate_links, name, value)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(validate_links.main(), 1)
+        (self.repo / 'docs/benchmarks/demo/gone.tar.gz.retired.json').write_text(
+            json.dumps({'schema': retired_archives.SCHEMA, 'archive': 'docs/benchmarks/demo/gone.tar.gz'}))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(validate_links.main(), 0)
+        self.assertIn('1 links to archives retired from HEAD', out.getvalue())
+
     def test_refuses_optimized_python(self):
         result = subprocess.run([sys.executable, '-O', str(HERE / 'retired_archives.py'), 'verify'],
                                 capture_output=True, text=True)
