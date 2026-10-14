@@ -2068,10 +2068,26 @@ fn roll_up(verdicts: &[Verdict]) -> (Option<Verdict>, String) {
     )
 }
 
-/// The Markdown report.
+/// The Markdown report, section by section.
 #[must_use]
 pub fn render_markdown(summary: &Summary) -> String {
     let mut md = String::new();
+    write_preamble(&mut md, summary);
+    write_quietness(&mut md, summary);
+    write_notices(&mut md, summary);
+    write_roll_up(&mut md, summary);
+    write_comparisons(&mut md, summary);
+    write_per_arm(&mut md, summary);
+    write_peak_memory(&mut md, summary);
+    write_events_and_losses(&mut md, summary);
+    write_backend_evaluation(&mut md, summary);
+    md.push_str(&definitions());
+    md
+}
+
+/// The title, the host, where the raw data came from and the run's
+/// parameters.
+fn write_preamble(md: &mut String, summary: &Summary) {
     let p = &summary.parameters;
     let _ = writeln!(md, "# `ouro-jail` performance (jail-v1 §5)\n");
     let _ = writeln!(md, "{}\n", host_line(&summary.host));
@@ -2107,6 +2123,10 @@ pub fn render_markdown(summary: &Summary) -> String {
         p["sample_ms"],
         p["seed"],
     );
+}
+
+/// The quietness threshold and what the host's load was.
+fn write_quietness(md: &mut String, summary: &Summary) {
     let dist3 = |d: Option<&Dist>, digits: usize| {
         d.map_or_else(
             || "not recorded".to_owned(),
@@ -2138,6 +2158,11 @@ pub fn render_markdown(summary: &Summary) -> String {
             .as_u64()
             .map_or("?".to_owned(), |n| n.to_string()),
     );
+}
+
+/// The revalidation notices, the raw-data problems, and why these numbers
+/// are not the §5 measurement when they are not.
+fn write_notices(md: &mut String, summary: &Summary) {
     if !summary.revalidated.is_empty() {
         let _ = writeln!(
             md,
@@ -2158,6 +2183,19 @@ pub fn render_markdown(summary: &Summary) -> String {
         }
         let _ = writeln!(md);
     }
+    let why = not_the_measurement(summary);
+    if !why.is_empty() {
+        let _ = writeln!(
+            md,
+            "**Not the §5 measurement:** {}; the verdicts this touches are withheld and the \
+             numbers are provisional.\n",
+            why.join("; ")
+        );
+    }
+}
+
+/// Why this summary is not the §5 measurement; empty when it is.
+fn not_the_measurement(summary: &Summary) -> Vec<String> {
     let mut why: Vec<String> = Vec::new();
     if !summary.integrity.is_empty() {
         why.push("the raw data has problems".to_owned());
@@ -2175,28 +2213,23 @@ pub fn render_markdown(summary: &Summary) -> String {
     if summary.cells.iter().any(|c| c.excluded > 0) {
         why.push("an arm has excluded launches".to_owned());
     }
-    let verdicts = || {
-        summary.comparisons.iter().flat_map(|c| {
-            [
-                c.startup_verdict,
-                c.work_verdict,
-                c.post_start_verdict,
-                c.wall_verdict,
-            ]
-        })
-    };
-    if verdicts().any(|v| v == Some(Verdict::Loaded)) {
+    let loaded = summary.comparisons.iter().any(|c| {
+        [
+            c.startup_verdict,
+            c.work_verdict,
+            c.post_start_verdict,
+            c.wall_verdict,
+        ]
+        .contains(&Some(Verdict::Loaded))
+    });
+    if loaded {
         why.push("the host was not shown quiet".to_owned());
     }
-    if !why.is_empty() {
-        let _ = writeln!(
-            md,
-            "**Not the §5 measurement:** {}; the verdicts this touches are withheld and the \
-             numbers are provisional.\n",
-            why.join("; ")
-        );
-    }
+    why
+}
 
+/// One row per profile and comparison: every cell's verdicts rolled up.
+fn write_roll_up(md: &mut String, summary: &Summary) {
     let _ = writeln!(
         md,
         "## Verdict roll-up\n\n\
@@ -2245,7 +2278,11 @@ pub fn render_markdown(summary: &Summary) -> String {
         }
     }
     let _ = writeln!(md);
+}
 
+/// The comparison tables: `tool` against direct with observation off and
+/// on, the cost of observation, and the informational profiles.
+fn write_comparisons(md: &mut String, summary: &Summary) {
     let _ = writeln!(
         md,
         "## `--observe off` against direct: the jail's own overhead (`tool`)\n\n\
@@ -2257,7 +2294,7 @@ pub fn render_markdown(summary: &Summary) -> String {
          prove it ran, and the timing is the jail's real path.\n"
     );
     comparison_table(
-        &mut md,
+        md,
         summary,
         Some(Profile::Tool),
         CompareKind::OffVsDirect,
@@ -2269,7 +2306,7 @@ pub fn render_markdown(summary: &Summary) -> String {
          The §5 budgets as first written, observation included.\n"
     );
     comparison_table(
-        &mut md,
+        md,
         summary,
         Some(Profile::Tool),
         CompareKind::OnVsDirect,
@@ -2279,7 +2316,7 @@ pub fn render_markdown(summary: &Summary) -> String {
         md,
         "## Observation cost: `--observe on` against `--observe off` (reported, no budget)\n"
     );
-    comparison_table(&mut md, summary, None, CompareKind::OnVsOff, false);
+    comparison_table(md, summary, None, CompareKind::OnVsOff, false);
     let _ = writeln!(md, "## Informational profiles\n");
     for profile in [Profile::Agent, Profile::None] {
         for kind in [CompareKind::OffVsDirect, CompareKind::OnVsDirect] {
@@ -2289,10 +2326,13 @@ pub fn render_markdown(summary: &Summary) -> String {
                 profile.name(),
                 enum_name(&kind).replace('_', " ")
             );
-            comparison_table(&mut md, summary, Some(profile), kind, true);
+            comparison_table(md, summary, Some(profile), kind, true);
         }
     }
+}
 
+/// Every arm's counts and phase timings.
+fn write_per_arm(md: &mut String, summary: &Summary) {
     let _ = writeln!(md, "## Per arm\n");
     let _ = writeln!(
         md,
@@ -2318,6 +2358,10 @@ pub fn render_markdown(summary: &Summary) -> String {
             pair(c.wall_ms.as_ref(), 1, ""),
         );
     }
+}
+
+/// Every arm's peak memory, by each of the four readings.
+fn write_peak_memory(md: &mut String, summary: &Summary) {
     let _ = writeln!(
         md,
         "\n### Peak memory (KiB, median / p95 / max over valid launches)\n\n\
@@ -2337,6 +2381,10 @@ pub fn render_markdown(summary: &Summary) -> String {
             med_p95_max(c.target_maxrss_kib.as_ref()),
         );
     }
+}
+
+/// Every jailed arm's event counts and losses.
+fn write_events_and_losses(md: &mut String, summary: &Summary) {
     let _ = writeln!(
         md,
         "\n### Events and losses\n\n\
@@ -2380,7 +2428,10 @@ pub fn render_markdown(summary: &Summary) -> String {
             ),
         );
     }
+}
 
+/// The table backend-evaluation.md §4 asks for, for `tool`, per session.
+fn write_backend_evaluation(md: &mut String, summary: &Summary) {
     let _ = writeln!(
         md,
         "\n## backend-evaluation.md §4, `tool`\n\n\
@@ -2410,70 +2461,73 @@ pub fn render_markdown(summary: &Summary) -> String {
             session.name()
         );
         for c in rows {
-            let cell = summary
-                .cells
-                .iter()
-                .find(|x| x.session == c.session && x.workload == c.workload && x.arm == c.subject);
-            let observe = match c.subject {
-                Arm::Jailed(_, o) => o.name(),
-                Arm::Direct => "-",
-            };
-            let median = |d: &Option<Dist>| d.as_ref().map(|d| d.median);
-            let _ = writeln!(
-                md,
-                "| {} | {} | {} ({}) | {} | {} | {} | {} | {} | {} | {} |",
-                c.workload.name(),
-                observe,
-                c.subject_valid,
-                c.subject_excluded,
-                verdict_text(
-                    c.startup_verdict,
-                    c.added_startup_ms.as_ref().map(|d| d.p95),
-                    " ms",
-                    STARTUP_BUDGET_MS
-                ),
-                verdict_or_value(
-                    c.work_verdict,
-                    median(&c.work_overhead_pct),
-                    "%",
-                    OVERHEAD_BUDGET_PCT
-                ),
-                verdict_or_value(
-                    c.post_start_verdict,
-                    median(&c.post_start_overhead_pct),
-                    "%",
-                    OVERHEAD_BUDGET_PCT
-                ),
-                verdict_or_value(
-                    c.wall_verdict,
-                    median(&c.wall_overhead_pct),
-                    "%",
-                    OVERHEAD_BUDGET_PCT
-                ),
-                cell.and_then(|x| x.launched_hwm_kib.as_ref()).map_or_else(
-                    || "n/a".to_owned(),
-                    |d| format!("{:.0} / {:.0}", d.median, d.p95)
-                ),
-                num(
-                    cell.and_then(|x| x.trace_frames.as_ref()).map(|d| d.median),
-                    0
-                ),
-                cell.map_or_else(
-                    || "n/a".to_owned(),
-                    |x| format!(
-                        "{} / {} / {} / {}",
-                        x.losses.observer_gaps + x.losses.coverage_gaps,
-                        x.losses.receipt_errors,
-                        x.losses.incomplete_traces,
-                        x.excluded
-                    )
-                ),
-            );
+            write_backend_evaluation_row(md, summary, c);
         }
         let _ = writeln!(md);
     }
-    md.push_str(&definitions());
-    md
+}
+
+/// One comparison's row of [`write_backend_evaluation`]'s table.
+fn write_backend_evaluation_row(md: &mut String, summary: &Summary, c: &Comparison) {
+    let cell = summary
+        .cells
+        .iter()
+        .find(|x| x.session == c.session && x.workload == c.workload && x.arm == c.subject);
+    let observe = match c.subject {
+        Arm::Jailed(_, o) => o.name(),
+        Arm::Direct => "-",
+    };
+    let median = |d: &Option<Dist>| d.as_ref().map(|d| d.median);
+    let _ = writeln!(
+        md,
+        "| {} | {} | {} ({}) | {} | {} | {} | {} | {} | {} | {} |",
+        c.workload.name(),
+        observe,
+        c.subject_valid,
+        c.subject_excluded,
+        verdict_text(
+            c.startup_verdict,
+            c.added_startup_ms.as_ref().map(|d| d.p95),
+            " ms",
+            STARTUP_BUDGET_MS
+        ),
+        verdict_or_value(
+            c.work_verdict,
+            median(&c.work_overhead_pct),
+            "%",
+            OVERHEAD_BUDGET_PCT
+        ),
+        verdict_or_value(
+            c.post_start_verdict,
+            median(&c.post_start_overhead_pct),
+            "%",
+            OVERHEAD_BUDGET_PCT
+        ),
+        verdict_or_value(
+            c.wall_verdict,
+            median(&c.wall_overhead_pct),
+            "%",
+            OVERHEAD_BUDGET_PCT
+        ),
+        cell.and_then(|x| x.launched_hwm_kib.as_ref()).map_or_else(
+            || "n/a".to_owned(),
+            |d| format!("{:.0} / {:.0}", d.median, d.p95)
+        ),
+        num(
+            cell.and_then(|x| x.trace_frames.as_ref()).map(|d| d.median),
+            0
+        ),
+        cell.map_or_else(
+            || "n/a".to_owned(),
+            |x| format!(
+                "{} / {} / {} / {}",
+                x.losses.observer_gaps + x.losses.coverage_gaps,
+                x.losses.receipt_errors,
+                x.losses.incomplete_traces,
+                x.excluded
+            )
+        ),
+    );
 }
 
 fn comparison_table(
