@@ -3192,7 +3192,7 @@ clause = "While a `none` run's live marker exists (in the data or the configurat
 tag = "simulated"
 tests = [
   "ouro-jail/src/lib.rs::supervisor::tests::a_live_uncontained_run_in_either_marker_directory_refuses_every_trusted_file",
-  "ouro-jail/src/lib.rs::state::tests::an_uncontained_run_is_live_until_its_guard_settles_both_marker_directories",
+  "ouro-jail/src/lib.rs::state::uncontained::tests::an_uncontained_run_is_live_until_its_guard_settles_both_marker_directories",
 ]
 note = "The real trigger, a concurrent contained run resolving while a `none` run is live, is not produced; the guard is driven directly for a marker in either directory, and a re-save after the marker is still refused while the run is live."
 
@@ -3202,9 +3202,9 @@ gate = "K03"
 clause = "A `none` run that cannot write its live markers does not release the workload, and a directory planted at the settled marker's path fails closed and is cleared by the settle"
 tag = "simulated"
 tests = [
-  "ouro-jail/src/lib.rs::state::tests::an_uncontained_run_that_cannot_write_its_live_marker_does_not_arm",
-  "ouro-jail/src/lib.rs::state::tests::a_blocked_settled_marker_fails_closed_and_the_guard_clears_the_obstacle",
-  "ouro-jail/src/lib.rs::state::tests::a_settle_that_cannot_be_written_leaves_the_run_live",
+  "ouro-jail/src/lib.rs::state::uncontained::tests::an_uncontained_run_that_cannot_write_its_live_marker_does_not_arm",
+  "ouro-jail/src/lib.rs::state::uncontained::tests::a_blocked_settled_marker_fails_closed_and_the_guard_clears_the_obstacle",
+  "ouro-jail/src/lib.rs::state::uncontained::tests::a_settle_that_cannot_be_written_leaves_the_run_live",
 ]
 note = "Library-level, the guard driven directly: arming refuses the run, an unsettleable run stays live (fail-closed), and the settle clears what the child planted."
 

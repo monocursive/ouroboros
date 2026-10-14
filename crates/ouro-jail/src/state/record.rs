@@ -24,7 +24,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use crate::records::StateCleanup;
+use super::{AttemptDir, Site, read_capped, replace_atomically_at};
+use crate::records::{ErrorCode, ErrorStage, JailError, Remediation, StateCleanup};
 
 /// A field jail state may leave out, set to null, or set.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -418,6 +419,57 @@ impl GcAction {
         };
         timeless(self) == timeless(other)
     }
+}
+
+/// The schema identifier of `jail-state.json` (§7).
+pub const SCHEMA_STATE: &str = "ouro.jail.state/1";
+
+/// Largest `jail-state.json` this tool reads back. It writes the file itself;
+/// the bound is there so a replaced file cannot grow a read without limit.
+pub const STATE_FILE_MAX: u64 = 1024 * 1024;
+
+pub(super) fn state_parse_failed(detail: impl std::fmt::Display) -> JailError {
+    JailError::new(
+        ErrorCode::StateWriteFailed,
+        ErrorStage::Preparing,
+        Remediation::InspectState,
+        format!("the attempt state could not be read back: {detail}"),
+    )
+}
+
+/// Reads `jail-state.json` back.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when the file is missing,
+/// unreadable, oversized, a symlink, not JSON or of another shape than the
+/// one this tool writes.
+pub fn read_attempt_state(attempt_dir: &AttemptDir) -> Result<JailState, JailError> {
+    let path = attempt_dir.state_path();
+    let bytes = read_capped(&path, STATE_FILE_MAX)
+        .map_err(state_parse_failed)?
+        .ok_or_else(|| state_parse_failed("the file is absent"))?;
+    JailState::parse(&bytes).map_err(state_parse_failed)
+}
+
+/// Read-modify-write of `jail-state.json` through the durable replacement.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be read,
+/// parsed or durably replaced, or names another schema.
+pub fn update_attempt_state(
+    site: Site,
+    attempt_dir: &AttemptDir,
+    change: impl FnOnce(&mut JailState),
+) -> Result<(), JailError> {
+    let mut state = read_attempt_state(attempt_dir)?;
+    if state.schema.get().map(String::as_str) != Some(SCHEMA_STATE) {
+        return Err(state_parse_failed(format!(
+            "the schema is not {SCHEMA_STATE}"
+        )));
+    }
+    change(&mut state);
+    let bytes = state.to_bytes().map_err(state_parse_failed)?;
+    replace_atomically_at(site, &attempt_dir.state_path(), &bytes)
 }
 
 #[cfg(test)]
