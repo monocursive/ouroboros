@@ -300,10 +300,6 @@ fn micros(tv: libc::timeval) -> u64 {
         .saturating_add(u64::try_from(tv.tv_usec).unwrap_or(0))
 }
 
-fn errno_name(e: c_int) -> String {
-    crate::errno::name(e).map_or_else(|| format!("errno_{e}"), ToString::to_string)
-}
-
 /// The first line of every workload: its own clock reading, taken
 /// before anything else it does.
 fn perf_start(rep: &Reporter, mode: &str) -> u64 {
@@ -334,7 +330,7 @@ fn keep_first(first: &mut Option<(&'static str, String)>, op: &'static str, a: &
         return;
     }
     let errno = match a {
-        Attempt::Performed { errno: Some(e), .. } => errno_name(*e),
+        Attempt::Performed { errno: Some(e), .. } => crate::errno::spelling(*e),
         Attempt::Performed { errno: None, .. } => "none".to_owned(),
         Attempt::Absent(_) => "absent".to_owned(),
     };
@@ -429,7 +425,7 @@ pub(crate) fn spawn_tree(rep: &Reporter, count: u32, argv: &[OsString]) -> Resul
         // the exec syscall and `_exit`, over an image built before.
         let pid = unsafe { libc::fork() };
         if pid < 0 {
-            fork_errno = Some(errno_name(raw_errno()));
+            fork_errno = Some(crate::errno::spelling(raw_errno()));
             break;
         }
         if pid == 0 {
@@ -793,9 +789,9 @@ pub(crate) fn perf_launch(
         exec_ns,
         t1_ns: t1,
         timens,
-        exec_errno: spawned.exec_errno.map(errno_name),
+        exec_errno: spawned.exec_errno.map(crate::errno::spelling),
         timed_out: waited.timed_out,
-        wait_errno: waited.wait_errno.map(errno_name),
+        wait_errno: waited.wait_errno.map(crate::errno::spelling),
         waited_via: waited.via,
         cgroup: own_cgroup(),
         status: LaunchStatus {

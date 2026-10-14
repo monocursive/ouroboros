@@ -80,7 +80,7 @@ pub(crate) fn open_socket(
         }
         report
     };
-    let errno = report.errno.as_deref().and_then(crate::errno::value);
+    let errno = report.raw_errno;
     rep.emit(&report);
     if fd >= 0 {
         Ok(fd as c_int)
@@ -396,8 +396,7 @@ pub(crate) fn dns_query(
         bounded::close(fd);
         summary.set("failed_step", "sendto");
         summary.set("answered", false);
-        let errno = sent.report.errno.as_deref().and_then(crate::errno::value);
-        summary.result(-1, errno);
+        summary.result(-1, sent.report.raw_errno);
         let e = Emitted::done(summary);
         rep.emit(&e.report);
         return Ok(e.satisfies(expect));
@@ -665,11 +664,7 @@ fn tcp_connect(
     if emitted.report.ret >= 0 {
         return Ok(fd);
     }
-    let errno = emitted
-        .report
-        .errno
-        .as_deref()
-        .and_then(crate::errno::value);
+    let errno = emitted.report.raw_errno;
     if errno != Some(libc::EINPROGRESS) {
         bounded::close(fd);
         return Err(IoFail::Errno(errno.unwrap_or(libc::EIO)));

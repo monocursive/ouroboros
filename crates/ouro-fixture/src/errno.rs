@@ -57,6 +57,8 @@ const SHARED: &[(&str, c_int)] = table![
     ENOSYS,
     ENOTEMPTY,
     ELOOP,
+    ENODATA,
+    EPROTO,
     ENOMSG,
     EIDRM,
     EOVERFLOW,
@@ -129,6 +131,13 @@ pub fn name(value: c_int) -> Option<&'static str> {
         .map(|(n, _)| *n)
 }
 
+/// How a report spells `value`: its name, or `E<n>` for a value this build
+/// has no name for, as the jail spells one.
+#[must_use]
+pub fn spelling(value: c_int) -> String {
+    name(value).map_or_else(|| format!("E{value}"), str::to_owned)
+}
+
 /// The raw value for an errno name, case-sensitive, or `None` when unknown here.
 #[must_use]
 pub fn value(name: &str) -> Option<c_int> {
@@ -151,6 +160,14 @@ pub fn known_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_value_without_a_name_is_spelled_by_number() {
+        assert_eq!(spelling(libc::ENOENT), "ENOENT");
+        assert_eq!(spelling(libc::ENODATA), "ENODATA");
+        assert_eq!(spelling(libc::EPROTO), "EPROTO");
+        assert_eq!(spelling(4095), "E4095");
+    }
 
     #[test]
     fn round_trips_a_common_errno() {
