@@ -341,14 +341,8 @@ impl Store {
 mod tests {
     use super::*;
 
-    fn peer() -> Peer {
-        Peer {
-            uid: crate::fsx::euid(),
-            pid: std::process::id(),
-            birth: "catalog-fixture".into(),
-            boot_id: "fixture".into(),
-        }
-    }
+    use crate::test_support::{TOKEN, peer};
+
     fn payload() -> Value {
         serde_json::from_str(include_str!(
             "../../../../docs/specs/ledger-v1/fixtures/request.json"
@@ -477,7 +471,7 @@ mod tests {
                 None,
                 &json!({"outcome":{"kind":"refused"}}),
                 &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                TOKEN,
             )
             .unwrap();
         let result = store

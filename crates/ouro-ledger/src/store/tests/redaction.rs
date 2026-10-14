@@ -34,12 +34,7 @@ fn redaction_is_durable_before_append_and_replay_preserves_minimized_bytes() {
     raw["outcome"]["return_value"] = json!(7);
     assert!(
         store
-            .append_source(
-                &run.run_id,
-                &raw,
-                &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            )
+            .append_source(&run.run_id, &raw, &peer(), TOKEN)
             .is_err()
     );
     assert_eq!(fs::read(&path).unwrap(), bytes);

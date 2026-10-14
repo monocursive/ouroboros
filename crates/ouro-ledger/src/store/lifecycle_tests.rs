@@ -31,24 +31,17 @@ const POINTS: [Point; 14] = [
     Point::AppendBeforeDirectorySync,
     Point::AppendAfterDirectorySync,
 ];
-const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const WORKER: &str = "store::lifecycle_tests::sigkill_at_every_lifecycle_boundary_preserves_identity_and_canonical_bytes";
 const WORKER_ENV: &str = "OURO_LEDGER_TEST_WORKER";
 
+use crate::test_support::{TOKEN, request as payload};
+
+/// An owner that is not this process, so nothing here reads as its live owner.
 fn peer() -> Peer {
     Peer {
-        uid: crate::fsx::euid(),
         pid: 424242,
-        birth: "fixture-birth".into(),
-        boot_id: "fixture-boot".into(),
+        ..crate::test_support::peer()
     }
-}
-fn payload() -> Value {
-    let receipt: Value = serde_json::from_str(include_str!(
-        "../../../../docs/specs/jail-v1/examples/receipt-prepared.json"
-    ))
-    .unwrap();
-    json!({"schema":"ouro.ledger.request/1","profile":"tool","argv_digest":receipt["argv_digest"],"policy_digest":receipt["policy"]["digest"],"requirements":receipt["policy"]["requirements"],"jail_image_digest":receipt["argv_digest"],"io":{"mode":"batch","pty":false},"capture":{"streams":[],"limit_bytes":1_048_576},"evidence":"strict"})
 }
 fn receipt(run: &RunRecord, final_receipt: bool) -> Value {
     let mut receipt: Value = serde_json::from_str(if final_receipt {

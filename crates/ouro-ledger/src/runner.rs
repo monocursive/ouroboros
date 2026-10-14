@@ -1728,10 +1728,7 @@ mod tests {
 
     #[test]
     fn prepared_gate_compares_each_identity_and_receipt_digest() {
-        let receipt: Value = serde_json::from_str(include_str!(
-            "../../../docs/specs/jail-v1/examples/receipt-prepared.json"
-        ))
-        .unwrap();
+        let receipt = crate::test_support::prepared_receipt();
         let control:ControlMessage=serde_json::from_value(json!({"schema":records::SCHEMA_CONTROL,"attempt_id":receipt["attempt_id"],"seq":1,"kind":"prepared","receipt_phase":"prepared","receipt_digest":records::semantic::receipt_digest(&receipt).unwrap(),"outcome":receipt["outcome"],"error":null})).unwrap();
         let run:RunRecord=serde_json::from_value(json!({"schema":"ouro.ledger.run/1","run_id":"run_01234567890123456789012345678901","attempt_id":receipt["attempt_id"],"request_id":"test","payload":{"argv_digest":receipt["argv_digest"],"policy_digest":receipt["policy"]["digest"],"requirements":receipt["policy"]["requirements"]},"state":"prepared","child_protection":"pending","owner":null,"outcome":null,"coverage":{},"settlement":"pending","receipts":[],"capture":{},"chain":{"head_seq":1,"head_digest":null}})).unwrap();
         check_prepared(&receipt, &control, &run).unwrap();

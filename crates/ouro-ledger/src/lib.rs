@@ -17,3 +17,5 @@ pub mod schemas;
 mod segments;
 pub mod service;
 pub mod store;
+#[cfg(test)]
+mod test_support;

@@ -2,14 +2,8 @@ use super::*;
 use crate::faults::{Plan, Point, Replaced, Step};
 use crate::protocol::{OperatorIntent, READ_CHUNK_BYTES, TailRequest};
 
-fn peer() -> Peer {
-    Peer {
-        uid: crate::fsx::euid(),
-        pid: std::process::id(),
-        birth: "test-birth".into(),
-        boot_id: "test-boot".into(),
-    }
-}
+use crate::test_support::peer;
+
 fn create() -> (tempfile::TempDir, Store, RunRecord) {
     let temp = tempfile::tempdir().unwrap();
     let mut store = Store::open(&temp.path().join("data")).unwrap();

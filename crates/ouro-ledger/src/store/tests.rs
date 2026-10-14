@@ -17,21 +17,7 @@ pub(super) fn assert_refused<T>(result: Result<T>, expected: &str) {
     }
 }
 
-pub(super) fn peer() -> Peer {
-    Peer {
-        uid: crate::fsx::euid(),
-        pid: std::process::id(),
-        birth: "fixture-birth".into(),
-        boot_id: "fixture-boot".into(),
-    }
-}
-pub(super) fn payload() -> Value {
-    let receipt: Value = serde_json::from_str(include_str!(
-        "../../../../docs/specs/jail-v1/examples/receipt-prepared.json"
-    ))
-    .unwrap();
-    json!({"schema":"ouro.ledger.request/1","profile":"tool","argv_digest":receipt["argv_digest"],"policy_digest":receipt["policy"]["digest"],"requirements":receipt["policy"]["requirements"],"jail_image_digest":receipt["argv_digest"],"io":{"mode":"batch","pty":false},"capture":{"streams":[],"limit_bytes":1_048_576},"evidence":"strict"})
-}
+pub(super) use crate::test_support::{TOKEN, peer, request as payload};
 
 #[test]
 fn detached_request_lifetime_is_validated_and_cannot_rebind_a_request() {
@@ -64,10 +50,7 @@ fn detached_request_lifetime_is_validated_and_cannot_rebind_a_request() {
     );
 }
 fn prepared(run: &RunRecord) -> Value {
-    let mut receipt: Value = serde_json::from_str(include_str!(
-        "../../../../docs/specs/jail-v1/examples/receipt-prepared.json"
-    ))
-    .unwrap();
+    let mut receipt = crate::test_support::prepared_receipt();
     receipt["attempt_id"] = json!(run.attempt_id);
     receipt
 }
@@ -98,7 +81,7 @@ fn pending_recovery_keeps_the_journal_through_canonical_persistence_failures() {
                 None,
                 &json!({"receipt":prepared(&run)}),
                 &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                TOKEN,
             )
             .unwrap();
         let run = store.show(&run.run_id).unwrap();
@@ -169,7 +152,7 @@ fn orphan_settlement_records_why_pending_evidence_was_refused() {
             None,
             &json!({"receipt":prepared(&run)}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     let run = store.show(&run.run_id).unwrap();
@@ -232,7 +215,7 @@ fn unreconcilable_pending_evidence_is_recorded_once_and_retried_only_after_a_cha
             None,
             &json!({"receipt":prepared(&run)}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     let run = store.show(&run.run_id).unwrap();
@@ -285,7 +268,7 @@ fn a_reconciliation_the_journal_did_not_refuse_is_neither_recorded_nor_cached() 
             None,
             &json!({"receipt":prepared(&run)}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     let run = store.show(&run.run_id).unwrap();
@@ -337,7 +320,7 @@ fn retention_holds_replay_without_reapplying_an_old_intent_after_release() {
             None,
             &json!({}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         ),
         "invalid owner intent",
     );
@@ -451,7 +434,7 @@ fn retention_preview_keeps_active_unknown_held_recent_and_damaged_runs() {
             None,
             &json!({"outcome":{"kind":"refused"}}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     let now = SystemTime::now();
@@ -492,7 +475,7 @@ fn retention_preview_keeps_active_unknown_held_recent_and_damaged_runs() {
             None,
             &json!({}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     let plan = store.gc_plan_at(90, None, 100, future).unwrap();
@@ -603,15 +586,7 @@ fn retention_preview_pins_durable_readers_without_expiring_or_repairing_files() 
     );
 }
 fn note(store: &mut Store, run: &RunRecord, key: &str, body: Value) -> Result<AppendReceipt> {
-    store.append_owner(
-        &run.run_id,
-        key,
-        "note",
-        None,
-        &body,
-        &peer(),
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    )
+    store.append_owner(&run.run_id, key, "note", None, &body, &peer(), TOKEN)
 }
 
 pub(super) fn gc_fixture() -> (tempfile::TempDir, Store, RunRecord) {
@@ -638,7 +613,7 @@ pub(super) fn gc_fixture_captures(
             Some("effect-1"),
             &json!({"note":"private-note-body"}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     let mut metadata = json!({"stdout":{"state":"not_captured"},"stderr":{"state":"not_captured"}});
@@ -661,7 +636,7 @@ pub(super) fn gc_fixture_captures(
             None,
             &json!({"outcome":{"kind":"refused"},"capture":metadata}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     (temp, store, run)
@@ -1016,7 +991,7 @@ fn gc_prunes_segments_and_captures_but_preserves_replays_effects_and_none_labels
             Some("effect-1"),
             &json!({"note":"private-note-body"}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     assert_eq!(note, replay["gc-note"].receipt);
@@ -1028,7 +1003,7 @@ fn gc_prunes_segments_and_captures_but_preserves_replays_effects_and_none_labels
             Some("effect-1"),
             &json!({"note":"private-note-body"}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         ),
         "run history was pruned; new mutations are refused",
     );
@@ -1040,7 +1015,7 @@ fn gc_prunes_segments_and_captures_but_preserves_replays_effects_and_none_labels
             Some("effect-1"),
             &json!({"note":"changed"}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         ),
         "request id conflicts with its immutable payload",
     );
@@ -1342,12 +1317,7 @@ fn source_fixture(store: &mut Store, run: &RunRecord, fixture: &str, seq: u64, p
         event["fields"]["path"]["value"] = json!(path);
     }
     store
-        .append_source(
-            &run.run_id,
-            &event,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
+        .append_source(&run.run_id, &event, &peer(), TOKEN)
         .unwrap();
 }
 
@@ -1693,7 +1663,7 @@ fn durable_reader_preserves_snapshot_labels_after_a_later_state_change() {
             None,
             &json!({"coverage":{"status":"degraded"}}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     drop(store);
@@ -2040,7 +2010,7 @@ fn different_payload_cannot_rebind_prepare_or_effect_identity() {
             Some("effect-1"),
             &json!({"v":1}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     assert_refused(
@@ -2051,7 +2021,7 @@ fn different_payload_cannot_rebind_prepare_or_effect_identity() {
             Some("effect-1"),
             &json!({"v":2}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         ),
         "effect id conflicts with its immutable payload",
     );
@@ -2368,7 +2338,7 @@ fn admission_cannot_change_reserved_policy_or_argv() {
             None,
             &json!({"receipt":receipt}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         ),
         "record violates frozen jail-receipt schema",
     );
@@ -2385,7 +2355,7 @@ fn admission_cannot_change_reserved_policy_or_argv() {
                 None,
                 &json!({"receipt":receipt}),
                 &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                TOKEN,
             ),
             "intent receipt does not match prepared policy, argv, requirements and attempt",
         );
@@ -2398,7 +2368,7 @@ fn admission_cannot_change_reserved_policy_or_argv() {
             None,
             &json!({"receipt":prepared(&run)}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     assert_eq!(
@@ -2411,7 +2381,7 @@ fn admission_cannot_change_reserved_policy_or_argv() {
                 None,
                 &json!({"receipt":prepared(&run)}),
                 &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                TOKEN
             )
             .unwrap()
     );
@@ -2423,7 +2393,7 @@ fn admission_cannot_change_reserved_policy_or_argv() {
             None,
             &json!({"receipt":prepared(&run)}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         ),
         "admission or refusal is only valid from prepared",
     );
@@ -2446,33 +2416,18 @@ fn source_replay_and_gap_are_preserved_when_projection_is_updated() {
     ))
     .unwrap();
     let first = store
-        .append_source(
-            &run.run_id,
-            &event,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
+        .append_source(&run.run_id, &event, &peer(), TOKEN)
         .unwrap();
     assert_eq!(
         first,
         store
-            .append_source(
-                &run.run_id,
-                &event,
-                &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            )
+            .append_source(&run.run_id, &event, &peer(), TOKEN)
             .unwrap()
     );
     let mut changed = event.clone();
     changed["fields"]["message"] = json!("conflicting source sequence");
     assert_refused(
-        store.append_source(
-            &run.run_id,
-            &changed,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ),
+        store.append_source(&run.run_id, &changed, &peer(), TOKEN),
         "request id conflicts with its immutable payload",
     );
     store
@@ -2483,7 +2438,7 @@ fn source_replay_and_gap_are_preserved_when_projection_is_updated() {
             None,
             &json!({"coverage":{"exec":"active"}}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     assert_eq!(
@@ -2532,7 +2487,7 @@ fn none_cannot_claim_enforced_protection_on_admission_or_in_its_projection() {
             None,
             &json!({"receipt":receipt}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap_err();
     assert!(
@@ -2551,7 +2506,7 @@ fn none_cannot_claim_enforced_protection_on_admission_or_in_its_projection() {
             None,
             &json!({"receipt":receipt}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     assert_eq!(
@@ -2581,7 +2536,7 @@ fn recovery_poisons_an_enforced_admission_of_a_none_run() {
             None,
             &json!({"receipt":prepared(&run)}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     // Re-chain the history as a none preparation: only recovery's own
@@ -2632,12 +2587,7 @@ fn flattened_source_is_the_original_frozen_envelope_plus_writer_fields() {
     ))
     .unwrap();
     store
-        .append_source(
-            &run.run_id,
-            &source,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
+        .append_source(&run.run_id, &source, &peer(), TOKEN)
         .unwrap();
     let bytes = fs::read(store.root.join(&run.run_id).join(STREAM)).unwrap();
     let mut canonical: Value = serde_json::from_slice(
@@ -2676,24 +2626,14 @@ fn strict_transport_gap_and_private_metadata_refuse_without_an_ack() {
     ))
     .unwrap();
     assert_refused(
-        store.append_source(
-            &run.run_id,
-            &source,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ),
+        store.append_source(&run.run_id, &source, &peer(), TOKEN),
         "strict producer transport loss was durably recorded; stop admission and execution",
     );
     let mut source = source;
     source["source_seq"] = json!(1);
     source["fields"]["raw_environment"] = json!("seed-secret-must-not-leak");
     let error = store
-        .append_source(
-            &run.run_id,
-            &source,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
+        .append_source(&run.run_id, &source, &peer(), TOKEN)
         .unwrap_err();
     assert!(!error.0.contains("seed-secret"));
     let mut plan = payload();
@@ -2706,12 +2646,7 @@ fn strict_transport_gap_and_private_metadata_refuse_without_an_ack() {
         "degraded"
     );
     assert_refused(
-        store.append_source(
-            &run.run_id,
-            &source,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ),
+        store.append_source(&run.run_id, &source, &peer(), TOKEN),
         "record violates frozen jail-event schema",
     );
 }
@@ -2727,7 +2662,7 @@ fn settlement_requires_matching_final_receipt_and_trace_and_closes_observations(
             None,
             &json!({"receipt":prepared(&run)}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     let mut receipt: Value = serde_json::from_str(include_str!(
@@ -2745,7 +2680,7 @@ fn settlement_requires_matching_final_receipt_and_trace_and_closes_observations(
             None,
             &body,
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         ),
         "terminal trace and receipt do not corroborate",
     );
@@ -2760,12 +2695,7 @@ fn settlement_requires_matching_final_receipt_and_trace_and_closes_observations(
     ))
     .unwrap();
     store
-        .append_source(
-            &run.run_id,
-            &event,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
+        .append_source(&run.run_id, &event, &peer(), TOKEN)
         .unwrap();
     let settled = store
         .append_owner(
@@ -2775,7 +2705,7 @@ fn settlement_requires_matching_final_receipt_and_trace_and_closes_observations(
             None,
             &body,
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     assert_eq!(
@@ -2788,7 +2718,7 @@ fn settlement_requires_matching_final_receipt_and_trace_and_closes_observations(
                 None,
                 &body,
                 &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                TOKEN
             )
             .unwrap()
     );
@@ -2802,12 +2732,7 @@ fn settlement_requires_matching_final_receipt_and_trace_and_closes_observations(
     ))
     .unwrap();
     assert_refused(
-        store.append_source(
-            &run.run_id,
-            &event,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ),
+        store.append_source(&run.run_id, &event, &peer(), TOKEN),
         "terminal run cannot ingest new observations",
     );
 }
@@ -2823,15 +2748,7 @@ fn refused_receipt_requires_the_same_attempt_and_final_source_note() {
     let body =
         json!({"receipt":receipt,"outcome":receipt["outcome"],"coverage":receipt["coverage"]});
     assert_refused(
-        store.append_owner(
-            &run.run_id,
-            "denied",
-            "denied",
-            None,
-            &body,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ),
+        store.append_owner(&run.run_id, "denied", "denied", None, &body, &peer(), TOKEN),
         "terminal trace and receipt do not corroborate",
     );
     let receipt_digest = records::semantic::receipt_digest(&receipt).unwrap();
@@ -2845,23 +2762,10 @@ fn refused_receipt_requires_the_same_attempt_and_final_source_note() {
     ))
     .unwrap();
     store
-        .append_source(
-            &run.run_id,
-            &event,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
+        .append_source(&run.run_id, &event, &peer(), TOKEN)
         .unwrap();
     store
-        .append_owner(
-            &run.run_id,
-            "denied",
-            "denied",
-            None,
-            &body,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
+        .append_owner(&run.run_id, "denied", "denied", None, &body, &peer(), TOKEN)
         .unwrap();
     assert_eq!(store.show(&run.run_id).unwrap().state, "denied");
 }
@@ -2877,7 +2781,7 @@ fn source_exec_outcomes_do_not_become_the_run_outcome_on_ingress_or_recovery() {
             None,
             &json!({"receipt":prepared(&run)}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     let mut event: Value = serde_json::from_str(include_str!(
@@ -2887,12 +2791,7 @@ fn source_exec_outcomes_do_not_become_the_run_outcome_on_ingress_or_recovery() {
     event["attempt_id"] = json!(run.attempt_id);
     event["source_seq"] = json!(1);
     store
-        .append_source(
-            &run.run_id,
-            &event,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
+        .append_source(&run.run_id, &event, &peer(), TOKEN)
         .unwrap();
     assert_eq!(store.show(&run.run_id).unwrap().state, "admitted");
     assert_eq!(store.show(&run.run_id).unwrap().outcome, None);
@@ -2930,7 +2829,7 @@ fn admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt()
             None,
             &body,
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         ),
         "settlement requires durable admission",
     );
@@ -2942,21 +2841,13 @@ fn admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt()
             None,
             &json!({"receipt":prepared(&run)}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     for kind in ["denied", "settled"] {
         assert!(
             store
-                .append_owner(
-                    &run.run_id,
-                    "settle",
-                    kind,
-                    None,
-                    &body,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                )
+                .append_owner(&run.run_id, "settle", kind, None, &body, &peer(), TOKEN,)
                 .is_err()
         );
     }
@@ -2971,12 +2862,7 @@ fn admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt()
     ))
     .unwrap();
     store
-        .append_source(
-            &run.run_id,
-            &event,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
+        .append_source(&run.run_id, &event, &peer(), TOKEN)
         .unwrap();
     let ack = store
         .append_owner(
@@ -2986,7 +2872,7 @@ fn admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt()
             None,
             &body,
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     assert_eq!(
@@ -2998,7 +2884,7 @@ fn admitted_exec_failure_settles_only_with_a_correlated_verified_empty_attempt()
                 None,
                 &body,
                 &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                TOKEN
             )
             .unwrap(),
         ack
@@ -3034,7 +2920,7 @@ fn admitted_refusal_cannot_settle_with_unproved_tree_policy_mismatch_or_source_l
                 None,
                 &json!({"receipt":prepared(&run)}),
                 &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                TOKEN,
             )
             .unwrap();
         let mut receipt: Value = serde_json::from_str(include_str!(
@@ -3065,12 +2951,7 @@ fn admitted_refusal_cannot_settle_with_unproved_tree_policy_mismatch_or_source_l
             &receipt_digest,
         ))
         .unwrap();
-        let appended = store.append_source(
-            &run.run_id,
-            &event,
-            &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        );
+        let appended = store.append_source(&run.run_id, &event, &peer(), TOKEN);
         assert_eq!(appended.is_err(), variant == "source_gap");
         let head = store.show(&run.run_id).unwrap().chain.head_seq;
         assert!(
@@ -3082,7 +2963,7 @@ fn admitted_refusal_cannot_settle_with_unproved_tree_policy_mismatch_or_source_l
                     None,
                     &json!({"receipt":receipt}),
                     &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    TOKEN
                 )
                 .is_err(),
             "accepted {variant}"
@@ -3103,7 +2984,7 @@ fn unresolved_run_keeps_a_proven_child_exit_separate_from_unknown_outcome() {
             None,
             &json!({"outcome":{"kind":"exited","code":0}}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     let record = store.show(&run.run_id).unwrap();
@@ -3129,7 +3010,7 @@ fn recovery_rechecks_admission_bindings_even_with_a_recomputed_local_chain() {
             None,
             &json!({"receipt":prepared(&run)}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     let path = store.root.join(&run.run_id).join(STREAM);
@@ -3615,7 +3496,7 @@ fn rotated_queries_preserve_source_filters_and_effect_identity() {
             Some("effect-stable"),
             &json!({"v":1}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         )
         .unwrap();
     source_fixture(&mut store, &run, "exec", 1, None);
@@ -3643,7 +3524,7 @@ fn rotated_queries_preserve_source_filters_and_effect_identity() {
                 Some("effect-stable"),
                 &json!({"v":1}),
                 &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                TOKEN
             )
             .unwrap(),
         effect
@@ -3656,7 +3537,7 @@ fn rotated_queries_preserve_source_filters_and_effect_identity() {
             Some("effect-stable"),
             &json!({"v":1}),
             &peer(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            TOKEN,
         ),
         "effect id conflicts with its immutable payload",
     );

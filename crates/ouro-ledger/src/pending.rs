@@ -328,6 +328,7 @@ impl State {
 mod tests {
     use super::*;
     use crate::store::Store;
+    use crate::test_support::{TOKEN, prepared_receipt, request};
     use ouro_records::records;
     use serde_json::json;
     use std::{
@@ -335,22 +336,15 @@ mod tests {
         os::unix::fs::{PermissionsExt, symlink},
         time::SystemTime,
     };
-    const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     pub(super) fn fixture(evidence: &str, admit: bool) -> (tempfile::TempDir, Store, RunRecord) {
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(&temp.path().join("data")).unwrap();
-        let owner = Peer {
-            uid: crate::fsx::euid(),
-            pid: std::process::id(),
-            birth: "pending-fixture".into(),
-            boot_id: "pending-boot".into(),
-        };
-        let mut receipt: Value = serde_json::from_str(include_str!(
-            "../../../docs/specs/jail-v1/examples/receipt-prepared.json"
-        ))
-        .unwrap();
-        let payload = json!({"schema":"ouro.ledger.request/1","profile":"tool","argv_digest":receipt["argv_digest"],"policy_digest":receipt["policy"]["digest"],"requirements":receipt["policy"]["requirements"],"jail_image_digest":receipt["argv_digest"],"io":{"mode":"batch","pty":false},"capture":{"streams":[],"limit_bytes":1024},"evidence":evidence});
+        let owner = crate::test_support::peer();
+        let mut receipt = prepared_receipt();
+        let mut payload = request();
+        payload["capture"]["limit_bytes"] = json!(1024);
+        payload["evidence"] = json!(evidence);
         let run = store.prepare("pending-test", &payload, &owner).unwrap();
         store.claim_owner(&run.run_id, &owner).unwrap();
         if admit {

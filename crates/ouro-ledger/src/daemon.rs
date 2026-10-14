@@ -935,14 +935,7 @@ pub fn peer_alive(peer: &Peer) -> bool {
 mod tests {
     use super::*;
 
-    fn fixture_peer() -> Peer {
-        Peer {
-            uid: crate::fsx::euid(),
-            pid: std::process::id(),
-            birth: "fixture".into(),
-            boot_id: "fixture".into(),
-        }
-    }
+    use crate::test_support::{peer as fixture_peer, request as request_payload};
 
     /// A writer process kept on a leash: killed when the test ends.
     struct Worker(std::process::Child);
@@ -955,17 +948,6 @@ mod tests {
 
     const SLOW_VERIFY_WORKER: &str = "OURO_LEDGER_SLOW_VERIFY_WORKER";
     const FRAME_DELAY: Duration = Duration::from_millis(50);
-
-    fn request_payload() -> Value {
-        let receipt: Value = serde_json::from_str(include_str!(
-            "../../../docs/specs/jail-v1/examples/receipt-prepared.json"
-        ))
-        .unwrap();
-        json!({"schema":"ouro.ledger.request/1","profile":"tool","argv_digest":receipt["argv_digest"],
-            "policy_digest":receipt["policy"]["digest"],"requirements":receipt["policy"]["requirements"],
-            "jail_image_digest":receipt["argv_digest"],"io":{"mode":"batch","pty":false},
-            "capture":{"streams":[],"limit_bytes":1_048_576},"evidence":"strict"})
-    }
 
     /// Re-reading one run takes several times the 2 s request timeout here,
     /// yet the writer keeps answering status, ping and appends meanwhile.

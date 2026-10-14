@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    protocol::{OperatorIntent, Peer},
-    store::Store,
-};
+use crate::{protocol::OperatorIntent, store::Store};
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
@@ -15,14 +12,7 @@ struct Fixture {
     store: Store,
     run: RunRecord,
 }
-fn peer() -> Peer {
-    Peer {
-        uid: crate::fsx::euid(),
-        pid: std::process::id(),
-        birth: "bundle-test".into(),
-        boot_id: "bundle-boot".into(),
-    }
-}
+use crate::test_support::{TOKEN, peer};
 impl Fixture {
     fn new() -> Self {
         Self::with_captures(&["stdout"])
@@ -62,7 +52,7 @@ impl Fixture {
                 &json!({"outcome":{"kind":"refused"}, "capture":capture,
             "coverage":{"status":"degraded","gaps":[{"reason":"fixture gap"}]}}),
                 &peer(),
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                TOKEN,
             )
             .unwrap();
         Self {

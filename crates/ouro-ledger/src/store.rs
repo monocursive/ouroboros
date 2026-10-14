@@ -33,6 +33,7 @@ mod bundle_replay;
 mod capture_pruning;
 pub(crate) use bundle_replay::{Replayed, replay as replay_bundle};
 mod catalog;
+mod gc;
 #[cfg(test)]
 mod intent_tail_tests;
 #[cfg(test)]
