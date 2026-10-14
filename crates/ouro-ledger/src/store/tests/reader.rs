@@ -301,14 +301,13 @@ fn a_checkpoint_an_earlier_writer_saved_under_its_selection_rule_still_restores(
     envelope["digest"] = json!(digest(&envelope["checkpoint"]).unwrap());
     fs::write(&checkpoint_path, canonical(&envelope).unwrap()).unwrap();
     let mut upgraded = Store::open(&temp.path().join("data")).unwrap();
-    let next = upgraded.read(&request).unwrap();
+    let second = upgraded.read(&request).unwrap();
     // The snapshot keeps the label it was issued under.
-    assert_eq!(next.coverage["selection_status"], "active");
-    assert_eq!(next.snapshot, first.snapshot);
+    assert_eq!(second.coverage["selection_status"], "active");
+    assert_eq!(second.snapshot, first.snapshot);
     // A label neither rule gives is still refused.
-    let mut forged = request.clone();
-    forged.cursor = next.next_cursor;
-    let cursor = forged.cursor.as_ref().unwrap();
+    request.cursor = second.next_cursor;
+    let cursor = request.cursor.as_ref().unwrap();
     let checkpoint_path = upgraded
         .root()
         .join("readers")
@@ -319,7 +318,7 @@ fn a_checkpoint_an_earlier_writer_saved_under_its_selection_rule_still_restores(
     envelope["digest"] = json!(digest(&envelope["checkpoint"]).unwrap());
     fs::write(&checkpoint_path, canonical(&envelope).unwrap()).unwrap();
     let mut reopened = Store::open(&temp.path().join("data")).unwrap();
-    assert!(reopened.read(&forged).is_err());
+    assert!(reopened.read(&request).is_err());
 }
 
 #[test]
