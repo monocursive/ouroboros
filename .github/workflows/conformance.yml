@@ -84,10 +84,9 @@ jobs:
         # gates.json). It removes the remote run directory on success and
         # keeps it, with the path printed, on failure.
         #
-        # The `hashFiles('Cargo.toml')` gate that used to guard this step is
-        # gone: the workspace exists, and a condition that silently disarms the
-        # only conformance step if the file is ever moved is worse than the
-        # failure it was meant to avoid (§16).
+        # No `if:` guards this step: a condition that silently disarmed the
+        # only conformance step (a moved file, say) would be worse than the
+        # failure it avoided (§16).
         run: |
           cargo run -p xtask -- conformance \
             --linux-release \

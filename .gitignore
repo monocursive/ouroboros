@@ -1,7 +1,7 @@
 # Cargo build output for every crate in the workspace.
 target/
 
-# Elixir fleet build output (milestone 3).
+# Elixir fleet build output.
 /fleet/_build/
 /fleet/deps/
 

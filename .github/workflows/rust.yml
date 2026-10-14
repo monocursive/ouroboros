@@ -47,7 +47,7 @@ jobs:
       - name: Install Linux cross compiler and minisign
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu minisign
-      # J5 platform compilation (jail-v1 §3.2): compile-only evidence for a
+      # Platform compilation (jail-v1 §3.2): compile-only evidence for a
       # triple no runner executes, one per leg. Intel macOS is "additional
       # evidence, not an execution support claim"; Linux aarch64 execution
       # is validated separately on the native Raspberry Pi. This job proves
@@ -66,8 +66,8 @@ jobs:
           rustup target add "$target"
           cargo check --workspace --all-targets --target "$target"
           echo "Compiled (not run): \`$target\`" >> "$GITHUB_STEP_SUMMARY"
-      # jail-v1 §15 row I02: no vendor name in the execution core. Nothing ran
-      # this before, so a vendor name landed green.
+      # jail-v1 §15 row I02: no vendor name in the execution core. No test
+      # scans the tree itself, so without this step one would land green.
       - name: I02 vendor-name scan
         run: cargo run -p xtask -- i02-scan
       - name: Tests
