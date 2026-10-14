@@ -15,7 +15,7 @@ use super::clock::Deadline;
 use super::identity::{pidfd_open, pidfd_send_signal};
 
 mod bootstrap;
-pub(crate) use bootstrap::{BootstrapChild, BootstrapSpawn, spawn_bootstrap};
+pub(crate) use bootstrap::{BootstrapChild, BootstrapSpawn, KillOnDrop, spawn_bootstrap};
 
 /// Default start of the source-descriptor range. Large mount plans raise it
 /// above their last target, so the child's `dup2` calls cannot overwrite a

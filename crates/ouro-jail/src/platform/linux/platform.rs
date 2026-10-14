@@ -1354,81 +1354,64 @@ impl Boundary {
             .map(ExecutionCgroup::spawn_handle)
             .transpose()
             .map_err(io)?;
-        let mut child =
-            exec::spawn_bootstrap(&exe, &arguments, &fds, spawn_cgroup.as_ref(), deadline)
-                .map_err(|err| {
-                    // The exec handshake spends the same preparation budget.
-                    if err.kind() == std::io::ErrorKind::TimedOut {
-                        return io(err);
-                    }
-                    preparing(
-                        ErrorCode::BackendUnavailable,
-                        format!(
-                            "the backend bootstrap ({}) could not be started: {err}",
-                            exe.display()
-                        ),
-                    )
-                })?;
+        let child = exec::spawn_bootstrap(&exe, &arguments, &fds, spawn_cgroup.as_ref(), deadline)
+            .map_err(|err| {
+                // The exec handshake spends the same preparation budget.
+                if err.kind() == std::io::ErrorKind::TimedOut {
+                    return io(err);
+                }
+                preparing(
+                    ErrorCode::BackendUnavailable,
+                    format!(
+                        "the backend bootstrap ({}) could not be started: {err}",
+                        exe.display()
+                    ),
+                )
+            })?;
+        // Until the boundary owns it, every refusal below kills and reaps the
+        // backend, within a fresh tree budget (§8.1: a pre-exec failure
+        // refuses and leaves no orphan).
+        let child = exec::KillOnDrop::new(child);
         let bootstrap_spawn = child.spawn();
         // In particular close our duplicate of ARGS_FD before streaming: if
         // the backend exits there must be no reader left to suppress EPIPE.
         drop(fds);
+        let bwrap_pid = libc::pid_t::try_from(child.id()).map_err(|_| {
+            preparing(
+                ErrorCode::InternalError,
+                format!("the backend's pid {} does not fit a pid_t", child.id()),
+            )
+        })?;
         // Root the cgroup namespace in this attempt's leaf. Moving only the
         // target after bubblewrap unshares exposes a /../../host-leaf path in
         // /proc/self/cgroup. Direct creation still requires the same parent
         // readback; the compatibility path moves the blocked bootstrap first.
-        if let Some(leaf) = &cgroup
-            && let Err(err) = if child.created_in_cgroup() {
-                leaf.verify_member(child.id() as i32)
+        if let Some(leaf) = &cgroup {
+            if child.created_in_cgroup() {
+                leaf.verify_member(bwrap_pid)
             } else {
-                leaf.place(child.id() as i32)
+                leaf.place(bwrap_pid)
             }
-        {
-            let _ = child.kill();
-            child.reap_until(deadline);
-            return Err(io(err));
+            .map_err(io)?;
         }
-        let cgroup_kill = match cgroup
+        let cgroup_kill = cgroup
             .as_ref()
             .map(ExecutionCgroup::kill_handle)
             .transpose()
-        {
-            Ok(kill) => kill,
-            Err(err) => {
-                let _ = child.kill();
-                child.reap_until(deadline);
-                return Err(io(err));
-            }
-        };
+            .map_err(io)?;
         let watcher =
-            match super::watch::Watcher::start(&exe, child.id() as i32, cgroup_kill, deadline) {
-                Ok(watcher) => watcher,
-                Err(err) => {
-                    let _ = child.kill();
-                    child.reap_until(deadline);
-                    return Err(io(err));
-                }
-            };
-        if let Err(err) = write_all(start_w.as_raw_fd(), &[1]) {
-            let _ = child.kill();
-            child.reap_until(deadline);
-            return Err(io(err));
-        }
+            super::watch::Watcher::start(&exe, bwrap_pid, cgroup_kill, deadline).map_err(io)?;
+        write_all(start_w.as_raw_fd(), &[1]).map_err(io)?;
         drop(start_w);
         // The payload write happens with bwrap already blocked on ARGS_FD, so
         // a payload larger than the pipe's capacity flows through instead of
-        // deadlocking. A failure here means bwrap died reading: tear it down
-        // rather than leak an orphan (§8.1 pre-exec failure refuses).
+        // deadlocking. A failure here means bwrap died reading.
         if let (Some(args_w), Some(payload)) =
             (args_writer.as_ref(), rendered.args_payload.as_ref())
-            && let Err(err) = write_until(args_w.as_raw_fd(), payload, deadline)
         {
-            let _ = child.kill();
-            child.reap_until(clock::Deadline::after(TREE_BUDGET));
-            return Err(io(err));
+            write_until(args_w.as_raw_fd(), payload, deadline).map_err(io)?;
         }
         drop(args_writer);
-        let bwrap_pid = libc::pid_t::try_from(child.id()).unwrap_or(-1);
 
         let workspace_path = plan.workspace.clone();
         let mut boundary = Boundary {
@@ -1442,7 +1425,7 @@ impl Boundary {
             .with_roots(audit_named_roots(&bplan)),
             snapshot,
             workspace: workspace_path,
-            child: Some(child),
+            child: Some(child.hand_over()),
             bootstrap_spawn,
             bwrap_pid,
             bwrap_fd: identity::pidfd_open(bwrap_pid).ok(),

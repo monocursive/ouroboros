@@ -108,6 +108,50 @@ impl BootstrapChild {
             std::thread::sleep(REAP_STEP);
         }
     }
+
+    /// Kills the child and reaps it within a fresh tree budget. A spent
+    /// preparation deadline must not spend the kill/reap budget too, or the
+    /// refusal leaves a zombie, or a child still dying, behind.
+    pub(crate) fn kill_and_reap(&mut self) {
+        let _ = self.kill();
+        self.reap_until(Deadline::after(crate::supervisor::TREE_BUDGET));
+    }
+}
+
+/// A bootstrap child until preparation hands it to the boundary that owns
+/// it: dropped before then (by any refusal between the spawn and the
+/// hand-over), it is killed and reaped ([`BootstrapChild::kill_and_reap`]).
+pub(crate) struct KillOnDrop(Option<BootstrapChild>);
+
+impl KillOnDrop {
+    pub(crate) fn new(child: BootstrapChild) -> Self {
+        Self(Some(child))
+    }
+
+    /// The child, which this guard then no longer kills.
+    pub(crate) fn hand_over(mut self) -> BootstrapChild {
+        self.0
+            .take()
+            .expect("the child is held until it is handed over")
+    }
+}
+
+impl std::ops::Deref for KillOnDrop {
+    type Target = BootstrapChild;
+
+    fn deref(&self) -> &BootstrapChild {
+        self.0
+            .as_ref()
+            .expect("the child is held until it is handed over")
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            child.kill_and_reap();
+        }
+    }
 }
 
 // Linux UAPI clone_args v2, including its 64-bit flags and cgroup descriptor.
@@ -297,9 +341,7 @@ pub(crate) fn spawn_bootstrap(
     drop(error_write);
     let result = exec_handshake(error_read.as_raw_fd(), deadline);
     if let Err(error) = result {
-        let _ = child.kill();
-        // A spent preparation deadline must not spend the kill/reap budget.
-        child.reap_until(Deadline::after(crate::supervisor::TREE_BUDGET));
+        child.kill_and_reap();
         return Err(error);
     }
     Ok(child)
@@ -522,6 +564,42 @@ mod tests {
             std::fs::read_to_string("/proc/thread-self/children").unwrap(),
             before
         );
+    }
+
+    #[test]
+    fn a_dropped_guard_kills_and_reaps_the_child() {
+        let child = spawn_bootstrap(
+            Path::new("/bin/sleep"),
+            &["30".into()],
+            &FdMap::new(),
+            None,
+            Deadline::after(Duration::from_secs(5)),
+        )
+        .unwrap();
+        let pid = child.id();
+        let guard = KillOnDrop::new(child);
+        assert!(Path::new(&format!("/proc/{pid}")).exists());
+        drop(guard);
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "the child is killed and reaped, not left a zombie"
+        );
+
+        let child = spawn_bootstrap(
+            Path::new("/bin/sleep"),
+            &["30".into()],
+            &FdMap::new(),
+            None,
+            Deadline::after(Duration::from_secs(5)),
+        )
+        .unwrap();
+        let mut owned = KillOnDrop::new(child).hand_over();
+        assert!(
+            matches!(owned.try_wait(), Ok(None)),
+            "a handed-over child is its owner's"
+        );
+        owned.kill_and_reap();
+        assert!(matches!(owned.try_wait(), Ok(Some(_))));
     }
 
     #[test]
