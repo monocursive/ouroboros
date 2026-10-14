@@ -217,6 +217,8 @@ fn seize_and_confirm(
     }
 }
 
+/// The tracer thread's state: the outbox, the traced threads and processes
+/// with the calls they have in flight, and the account the thread ends on.
 struct Session {
     config: TracerConfig,
     tx: SyncSender<TracerEvent>,

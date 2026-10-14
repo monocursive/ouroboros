@@ -228,10 +228,10 @@ impl Session {
         self.tasks.take_call(tid);
         if !Self::kill_tracee(tid) {
             // The hit is live: the process dies before its image runs an
-            // instruction — after its evidence was read above, so the
-            // event keeps it — and the event records the verdict and
-            // stops the run for a `forbid`. A kill that could not be
-            // sent leaves the image free to run, which the gap says.
+            // instruction — after `evidence` was read, so the event keeps
+            // it — and the event records the verdict and stops the run
+            // for a `forbid`. A kill that could not be sent leaves the
+            // image free to run, which the gap says.
             self.exec_denial_failed();
         }
         Some(command)

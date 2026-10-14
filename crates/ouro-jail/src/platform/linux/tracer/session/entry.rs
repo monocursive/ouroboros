@@ -310,7 +310,8 @@ impl Session {
     /// another filter — a child's own `SECCOMP_RET_TRACE` — on a call outside
     /// the closed set, and is continued untouched (not a result, not a loss,
     /// and never decoded). One carrying this filter's own data means the
-    /// program the launcher installed is not this module's, which is a gap.
+    /// program the launcher installed is not the tracer's own, which is a
+    /// gap.
     fn stop_not_ours(&mut self, tid: pid_t) {
         match sys::event_msg(tid) {
             // Audit 2026-09-25-2, S14: the expected data is this attempt's
