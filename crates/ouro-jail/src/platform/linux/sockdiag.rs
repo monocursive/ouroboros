@@ -20,8 +20,7 @@
 //! so it is denied rather than guessed (spike §3a).
 //!
 //! The wire parsing is a pure function, [`parse_dump`], tested against a
-//! hand-built buffer; only [`SockDiag::listeners`] and [`SockDiag::open`] call
-//! the kernel.
+//! hand-built buffer; only [`SockDiag`]'s methods call the kernel.
 
 use std::io;
 
@@ -33,15 +32,71 @@ const NLMSG_ERROR: u16 = 2;
 const NLMSG_DONE: u16 = 3;
 /// `NLM_F_REQUEST | NLM_F_DUMP`.
 const NLM_F_REQUEST_DUMP: u16 = 0x0001 | 0x0300;
-/// `UNIX_DIAG_NAME` attribute type.
-const UNIX_DIAG_NAME: u16 = 0;
 /// `UNIX_DIAG_VFS` attribute type.
 const UNIX_DIAG_VFS: u16 = 1;
 
-/// `UDIAG_SHOW_NAME`: request the bound name attribute.
-pub const UDIAG_SHOW_NAME: u32 = 0x0000_0001;
 /// `UDIAG_SHOW_VFS`: request the on-disk inode/dev of a pathname socket.
+/// It is the only attribute requested: the identity match needs nothing
+/// else, and every other one (the bound name above all) would be copied for
+/// every socket of the namespace on each mediated connect.
 pub const UDIAG_SHOW_VFS: u32 = 0x0000_0002;
+
+// The wire layouts, as offsets into a received buffer.
+/// `struct nlmsghdr`: `nlmsg_len` (u32), `nlmsg_type` (u16), `nlmsg_flags`
+/// (u16), `nlmsg_seq` (u32), `nlmsg_pid` (u32).
+const NLMSG_HDRLEN: usize = 16;
+const NLMSG_LEN_AT: usize = 0;
+const NLMSG_TYPE_AT: usize = 4;
+const NLMSG_SEQ_AT: usize = 8;
+/// `struct nlmsgerr` begins with the `error` (i32) right after the header.
+const NLMSGERR_ERROR_AT: usize = NLMSG_HDRLEN;
+/// `struct unix_diag_msg`: `udiag_family`, `udiag_type`, `udiag_state`,
+/// `pad` (u8 each), `udiag_ino` (u32), `udiag_cookie` (2 x u32); its
+/// attributes follow.
+const UNIX_DIAG_MSG_LEN: usize = 16;
+const UDIAG_STATE_AT: usize = 2;
+/// `struct nlattr`: `nla_len` (u16), `nla_type` (u16); the payload follows.
+const NLA_HDRLEN: usize = 4;
+const NLA_LEN_AT: usize = 0;
+const NLA_TYPE_AT: usize = 2;
+/// The `nla_type` bits that are the type, without `NLA_F_NESTED` and
+/// `NLA_F_NET_BYTEORDER`.
+const NLA_TYPE_MASK: u16 = 0x3fff;
+/// `UNIX_DIAG_VFS`'s payload: `udiag_vfs_ino` (u32), `udiag_vfs_dev` (u32).
+const UNIX_DIAG_VFS_INO_AT: usize = 0;
+const UNIX_DIAG_VFS_DEV_AT: usize = 4;
+const UNIX_DIAG_VFS_LEN: usize = 8;
+
+/// A malformed reply: never read as "no such listener".
+fn malformed(what: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, what)
+}
+
+/// `N` bytes at `at` in `buf`, or a malformed reply.
+fn bytes_at<const N: usize>(buf: &[u8], at: usize) -> io::Result<[u8; N]> {
+    at.checked_add(N)
+        .and_then(|end| buf.get(at..end))
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| malformed("sock_diag: a field runs past its message"))
+}
+
+fn u16_at(buf: &[u8], at: usize) -> io::Result<u16> {
+    bytes_at(buf, at).map(u16::from_ne_bytes)
+}
+
+fn u32_at(buf: &[u8], at: usize) -> io::Result<u32> {
+    bytes_at(buf, at).map(u32::from_ne_bytes)
+}
+
+fn i32_at(buf: &[u8], at: usize) -> io::Result<i32> {
+    bytes_at(buf, at).map(i32::from_ne_bytes)
+}
+
+/// `len` rounded up to the 4-byte netlink alignment (`NLMSG_ALIGN`,
+/// `NLA_ALIGN`).
+fn align4(len: usize) -> usize {
+    (len + 3) & !3
+}
 
 /// `TCP_LISTEN`, the `st_state` value a bound, listening socket reports.
 pub const SS_LISTEN: u8 = 10;
@@ -92,31 +147,26 @@ fn dev_minor(dev: u64) -> u32 {
     ((dev & 0xff) | ((dev >> 12) & !0xff_u64)) as u32
 }
 
-/// One socket from a unix `sock_diag` dump.
+/// One socket from a unix `sock_diag` dump: what the identity match reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// The socket's own inode (`udiag_ino`), not the on-disk node.
-    pub sock_ino: u32,
-    /// `SOCK_STREAM`, `SOCK_DGRAM` or `SOCK_SEQPACKET`.
-    pub sock_type: u8,
     /// The TCP-style state; [`SS_LISTEN`] for a listening socket.
     pub state: u8,
     /// `UNIX_DIAG_VFS`, present only for a *bound pathname* socket and only
     /// when `UDIAG_SHOW_VFS` was requested.
     pub vfs: Option<VfsId>,
-    /// `UNIX_DIAG_NAME`, the bound name (a leading NUL marks an abstract name).
-    pub name: Option<Vec<u8>>,
 }
 
-/// Parse a sequence of received netlink bytes into unix `sock_diag` entries.
+/// Parse a sequence of received netlink bytes into unix `sock_diag` entries,
+/// appended to `out`.
 ///
 /// Pure: it performs no I/O and is the unit under test. It rejects a truncated
 /// message, an attribute that runs past its message, a sequence mismatch and a
 /// `NLMSG_ERROR`, rather than skipping quietly — a short read must not look
 /// like "no such listener".
 ///
-/// Returns `Ok(None)` when the buffer did not contain the `NLMSG_DONE` marker
-/// (the caller must read more), or `Ok(Some(entries))` when the dump ended.
+/// Returns `Ok(false)` when the buffer did not contain the `NLMSG_DONE`
+/// marker (the caller must read more), or `Ok(true)` when the dump ended.
 ///
 /// # Errors
 ///
@@ -124,84 +174,61 @@ pub struct Entry {
 /// a `NLMSG_ERROR` reply.
 pub fn parse_dump(buf: &[u8], expect_seq: u32, out: &mut Vec<Entry>) -> io::Result<bool> {
     let mut off = 0usize;
-    while off + 16 <= buf.len() {
-        let len = u32::from_ne_bytes(buf[off..off + 4].try_into().unwrap()) as usize;
-        let ty = u16::from_ne_bytes(buf[off + 4..off + 6].try_into().unwrap());
-        let seq = u32::from_ne_bytes(buf[off + 8..off + 12].try_into().unwrap());
-        if len < 16 || off + len > buf.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "sock_diag: truncated netlink message",
-            ));
+    while off + NLMSG_HDRLEN <= buf.len() {
+        let message = &buf[off..];
+        let len = usize::try_from(u32_at(message, NLMSG_LEN_AT)?)
+            .map_err(|_| malformed("sock_diag: truncated netlink message"))?;
+        if len < NLMSG_HDRLEN || len > message.len() {
+            return Err(malformed("sock_diag: truncated netlink message"));
         }
-        if seq != expect_seq {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "sock_diag: sequence mismatch",
-            ));
+        let message = &message[..len];
+        if u32_at(message, NLMSG_SEQ_AT)? != expect_seq {
+            return Err(malformed("sock_diag: sequence mismatch"));
         }
-        match ty {
+        match u16_at(message, NLMSG_TYPE_AT)? {
             NLMSG_DONE => return Ok(true),
             NLMSG_ERROR => {
-                if len < 20 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "sock_diag: truncated netlink error",
-                    ));
-                }
-                let err = i32::from_ne_bytes(buf[off + 16..off + 20].try_into().unwrap());
+                let err = i32_at(message, NLMSGERR_ERROR_AT)
+                    .map_err(|_| malformed("sock_diag: truncated netlink error"))?;
                 if err == 0 {
                     return Ok(true); // an ACK, treated as a clean end
                 }
                 return Err(io::Error::from_raw_os_error(-err));
             }
-            SOCK_DIAG_BY_FAMILY => {
-                out.push(parse_unix_msg(&buf[off + 16..off + len])?);
-            }
+            SOCK_DIAG_BY_FAMILY => out.push(parse_unix_msg(&message[NLMSG_HDRLEN..])?),
             _ => {}
         }
-        off += (len + 3) & !3;
+        off += align4(len);
     }
     Ok(false)
 }
 
 /// Parse one `unix_diag_msg` and its attributes.
 fn parse_unix_msg(body: &[u8]) -> io::Result<Entry> {
-    // struct unix_diag_msg { u8 family; u8 type; u8 state; u8 pad; u32 ino;
-    //                        u32 cookie[2]; } then netlink attributes.
-    if body.len() < 16 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "sock_diag: short unix_diag_msg",
-        ));
+    if body.len() < UNIX_DIAG_MSG_LEN {
+        return Err(malformed("sock_diag: short unix_diag_msg"));
     }
     let mut entry = Entry {
-        sock_type: body[1],
-        state: body[2],
-        sock_ino: u32::from_ne_bytes(body[4..8].try_into().unwrap()),
+        state: body[UDIAG_STATE_AT],
         vfs: None,
-        name: None,
     };
-    let mut a = 16usize;
-    while a + 4 <= body.len() {
-        let alen = u16::from_ne_bytes(body[a..a + 2].try_into().unwrap()) as usize;
-        let aty = u16::from_ne_bytes(body[a + 2..a + 4].try_into().unwrap()) & 0x3fff;
-        if alen < 4 || a + alen > body.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "sock_diag: attribute runs past its message",
-            ));
+    let mut at = UNIX_DIAG_MSG_LEN;
+    while at + NLA_HDRLEN <= body.len() {
+        let attribute = &body[at..];
+        let len = usize::from(u16_at(attribute, NLA_LEN_AT)?);
+        if len < NLA_HDRLEN || len > attribute.len() {
+            return Err(malformed("sock_diag: attribute runs past its message"));
         }
-        let payload = &body[a + 4..a + alen];
-        if aty == UNIX_DIAG_VFS && payload.len() >= 8 {
+        let payload = &attribute[NLA_HDRLEN..len];
+        if u16_at(attribute, NLA_TYPE_AT)? & NLA_TYPE_MASK == UNIX_DIAG_VFS
+            && payload.len() >= UNIX_DIAG_VFS_LEN
+        {
             entry.vfs = Some(VfsId {
-                ino: u32::from_ne_bytes(payload[0..4].try_into().unwrap()),
-                dev: u32::from_ne_bytes(payload[4..8].try_into().unwrap()),
+                ino: u32_at(payload, UNIX_DIAG_VFS_INO_AT)?,
+                dev: u32_at(payload, UNIX_DIAG_VFS_DEV_AT)?,
             });
-        } else if aty == UNIX_DIAG_NAME {
-            entry.name = Some(payload.to_vec());
         }
-        a += (alen + 3) & !3;
+        at += align4(len);
     }
     Ok(entry)
 }
@@ -224,17 +251,15 @@ pub fn has_listener_for(entries: &[Entry], want: VfsId) -> bool {
 #[cfg(target_os = "linux")]
 mod live {
     use std::io;
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+    use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
     use std::time::Duration;
 
     use crate::platform::linux::clock::Deadline;
 
     use super::{
-        Entry, NLM_F_REQUEST_DUMP, SOCK_DIAG_BY_FAMILY, VfsId, has_listener_for, parse_dump,
+        Entry, NLM_F_REQUEST_DUMP, SOCK_DIAG_BY_FAMILY, UDIAG_SHOW_VFS, VfsId, has_listener_for,
+        parse_dump,
     };
-
-    /// `NETLINK_SOCK_DIAG`.
-    const NETLINK_SOCK_DIAG: libc::c_int = 4;
 
     /// A `NETLINK_SOCK_DIAG` socket, bound to the network namespace it was
     /// created in.
@@ -265,7 +290,7 @@ mod live {
                 libc::socket(
                     libc::AF_NETLINK,
                     libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-                    NETLINK_SOCK_DIAG,
+                    libc::NETLINK_SOCK_DIAG,
                 )
             };
             if fd < 0 {
@@ -299,11 +324,13 @@ mod live {
         }
 
         /// Dump every AF_UNIX socket in this socket's netns, requesting `show`.
+        /// A readable `stop` ends the dump early with `Interrupted`; with
+        /// none, the dump's own deadline and datagram bound still apply.
         ///
         /// # Errors
         ///
         /// A send/recv failure, or a malformed dump (see [`parse_dump`]).
-        pub fn dump(&mut self, show: u32, stop_fd: RawFd) -> io::Result<Vec<Entry>> {
+        pub fn dump(&mut self, show: u32, stop: Option<BorrowedFd<'_>>) -> io::Result<Vec<Entry>> {
             let deadline = Deadline::after(Duration::from_secs(2));
             self.seq = self.seq.wrapping_add(1);
             let seq = self.seq;
@@ -335,7 +362,8 @@ mod live {
                         revents: 0,
                     },
                     libc::pollfd {
-                        fd: stop_fd,
+                        // poll ignores a negative descriptor.
+                        fd: stop.map_or(-1, |stop| stop.as_raw_fd()),
                         events: libc::POLLIN,
                         revents: 0,
                     },
@@ -400,8 +428,8 @@ mod live {
         /// # Errors
         ///
         /// As [`SockDiag::dump`].
-        pub fn has_listener_for(&mut self, want: VfsId, stop_fd: RawFd) -> io::Result<bool> {
-            let entries = self.dump(super::UDIAG_SHOW_VFS | super::UDIAG_SHOW_NAME, stop_fd)?;
+        pub fn has_listener_for(&mut self, want: VfsId, stop: BorrowedFd<'_>) -> io::Result<bool> {
+            let entries = self.dump(UDIAG_SHOW_VFS, Some(stop))?;
             Ok(has_listener_for(&entries, want))
         }
 
@@ -459,25 +487,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_signaled_stop_interrupts_a_sock_diag_dump() {
-        use std::os::fd::{FromRawFd as _, OwnedFd};
-        let mut pipe = [-1; 2];
-        // SAFETY: pipe points to two writable descriptor slots.
-        assert_eq!(
-            unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
-            0
-        );
-        // SAFETY: pipe2 returned two independently owned descriptors.
-        let (read, write) =
-            unsafe { (OwnedFd::from_raw_fd(pipe[0]), OwnedFd::from_raw_fd(pipe[1])) };
-        use std::os::fd::AsRawFd as _;
-        // SAFETY: one byte is read from a live string literal.
-        assert_eq!(
-            unsafe { libc::write(write.as_raw_fd(), b"x".as_ptr().cast(), 1) },
-            1
-        );
+        use std::io::Write as _;
+        use std::os::fd::AsFd as _;
+        let (read, write) = crate::platform::linux::exec::pipe().expect("pipe");
+        std::fs::File::from(write)
+            .write_all(b"x")
+            .expect("stop byte");
         let mut diag = SockDiag::open().expect("sock_diag socket");
         let error = diag
-            .dump(UDIAG_SHOW_VFS | UDIAG_SHOW_NAME, read.as_raw_fd())
+            .dump(UDIAG_SHOW_VFS, Some(read.as_fd()))
             .expect_err("stop must interrupt dump");
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
     }
@@ -608,6 +626,27 @@ mod tests {
         msg.extend_from_slice(&0u32.to_ne_bytes());
         let err = parse_dump(&msg, 3, &mut Vec::new()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_truncated_attribute_or_header_is_rejected_without_panicking() {
+        // An attribute whose length runs past the message.
+        let mut buf = unix_msg(1, SS_LISTEN, 100, Some((2534, 8_388_609)));
+        let attribute = 16 + UNIX_DIAG_MSG_LEN;
+        buf[attribute..attribute + 2].copy_from_slice(&64u16.to_ne_bytes());
+        assert_eq!(
+            parse_dump(&buf, 1, &mut Vec::new()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        // A message header that claims less than a header.
+        let mut buf = done(1);
+        buf[0..4].copy_from_slice(&8u32.to_ne_bytes());
+        assert_eq!(
+            parse_dump(&buf, 1, &mut Vec::new()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        // A partial header is not a message yet: read more.
+        assert!(!parse_dump(&done(1)[..12], 1, &mut Vec::new()).unwrap());
     }
 
     #[test]

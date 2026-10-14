@@ -925,9 +925,8 @@ fn probe_unix_socket_diagnostics() -> ProbeResult {
     const NAME: &str = "unix_socket_diagnostics";
     const MECHANISM: &str = "netlink-sock-diag";
     let result = super::sockdiag::SockDiag::open().and_then(|mut socket| {
-        // A negative poll descriptor disables the optional stop channel;
-        // dump still enforces its own deadline and datagram bound.
-        socket.dump(super::sockdiag::UDIAG_SHOW_VFS, -1)
+        // No stop channel: the dump's own deadline and datagram bound apply.
+        socket.dump(super::sockdiag::UDIAG_SHOW_VFS, None)
     });
     match result {
         Ok(_) => ProbeResult::new(

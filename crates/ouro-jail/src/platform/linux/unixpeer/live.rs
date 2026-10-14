@@ -653,7 +653,7 @@ fn mediate_pathname(
         let Ok(mut sd) = w.sockdiag.lock() else {
             return (Err(libc::EACCES), "sock_diag_poisoned");
         };
-        sd.has_listener_for(want, w.stop_r.as_raw_fd())
+        sd.has_listener_for(want, w.stop_r.as_fd())
     };
     match listener_present {
         Ok(true) => {}

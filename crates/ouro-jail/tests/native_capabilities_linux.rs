@@ -14,7 +14,7 @@ fn an_agent_requires_unix_socket_diagnostics_before_exec() {
     }
     let diagnostics =
         ouro_jail::platform::linux::sockdiag::SockDiag::open().and_then(|mut socket| {
-            socket.dump(ouro_jail::platform::linux::sockdiag::UDIAG_SHOW_VFS, -1)
+            socket.dump(ouro_jail::platform::linux::sockdiag::UDIAG_SHOW_VFS, None)
         });
     let jail = Jail::new().unwrap();
     let workspace = jail.root().join("workspace");
