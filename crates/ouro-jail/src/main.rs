@@ -413,17 +413,14 @@ fn explain_text(report: &ExplainReport) -> String {
         "protected_coverage {}",
         snapshot.filesystem.protected_coverage.as_str()
     );
-    for (key, ceiling) in [
-        ("wall", &snapshot.limits.wall),
-        ("pids", &snapshot.limits.pids),
-        ("mem", &snapshot.limits.mem),
-        ("cpu", &snapshot.limits.cpu),
-    ] {
-        if let Some(ceiling) = ceiling {
+    for key in ouro_jail::policy::LimitKey::ALL {
+        if let Some(ceiling) = snapshot.limits.get(key) {
             let _ = writeln!(
                 out,
-                "limit {key}={} required={}",
-                ceiling.value, ceiling.required
+                "limit {}={} required={}",
+                key.as_str(),
+                ceiling.value,
+                ceiling.required
             );
         }
     }
@@ -1039,6 +1036,41 @@ mod tests {
         assert!(
             clean.chars().all(|c| c.is_ascii() || !c.is_control()),
             "{clean}"
+        );
+    }
+
+    /// Every ceiling the snapshot sets is printed, swap, storage and inodes
+    /// included, in the keys' one order.
+    #[test]
+    fn explain_text_prints_every_limit_the_snapshot_sets() {
+        use ouro_jail::policy::{LimitCeiling, LimitKey};
+        let mut resolved = m1_resolved();
+        for (index, key) in LimitKey::ALL.into_iter().enumerate() {
+            *resolved.snapshot.limits.get_mut(key) = Some(LimitCeiling {
+                value: format!("{}", index + 1),
+                required: index % 2 == 0,
+            });
+        }
+        let text = explain_text(&ExplainReport {
+            resolved,
+            platform: m1_platform(),
+        });
+        let limits: Vec<&str> = text
+            .lines()
+            .filter(|line| line.starts_with("limit "))
+            .collect();
+        assert_eq!(
+            limits,
+            [
+                "limit wall=1 required=true",
+                "limit pids=2 required=false",
+                "limit mem=3 required=true",
+                "limit swap=4 required=false",
+                "limit storage=5 required=true",
+                "limit inodes=6 required=false",
+                "limit cpu=7 required=true",
+            ],
+            "{text}"
         );
     }
 
