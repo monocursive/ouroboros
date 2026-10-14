@@ -173,6 +173,8 @@ pub struct Calls {
     pub stops: Arc<Mutex<Vec<StopReason>>>,
     /// The budget of every `wait_tree`.
     pub tree_budgets: Arc<Mutex<Vec<Duration>>>,
+    /// How many prepared executions were torn down by `abort`.
+    pub aborts: Arc<Mutex<usize>>,
 }
 
 /// A whole simulated platform, from a script: every requirement available,
@@ -300,6 +302,7 @@ impl PreparedExecution for ScriptedPrepared {
         }))
     }
     fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
+        *self.0.calls.aborts.lock().unwrap() += 1;
         Ok(Teardown {
             tree: self.0.abort_tree.clone().map(stamped),
         })

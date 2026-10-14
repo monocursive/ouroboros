@@ -3895,6 +3895,68 @@ mod tests {
         assert_eq!(record.revision, 2);
     }
 
+    /// A policy envelope past the bound every reader holds `policy.json` to
+    /// is refused before anything is written.
+    #[test]
+    fn a_policy_envelope_past_the_reader_bound_is_never_written() {
+        let (_root, attempt_dir, mut plan) = scratch_fixture();
+        plan.resolved
+            .provenance
+            .push(crate::policy::ProvenanceEntry {
+                origin: "test".to_owned(),
+                key: "filesystem.read_only".to_owned(),
+                detail: Some("x".repeat(usize::try_from(cleanup::RECEIPT_MAX).unwrap())),
+            });
+        let error = write_policy_file(&attempt_dir, &plan).expect_err("past the bound");
+        assert_eq!(error.code, ErrorCode::StateWriteFailed);
+        assert!(error.message.contains("bound"), "{}", error.message);
+        assert!(!attempt_dir.policy_path().exists());
+        plan.resolved.provenance.pop();
+        write_policy_file(&attempt_dir, &plan).expect("within the bound");
+    }
+
+    /// A receipt for the worker past the bound every reader holds receipts
+    /// to is refused before it is handed over: nothing is submitted, and the
+    /// revision it would have carried is not spent.
+    #[test]
+    fn a_worker_receipt_past_the_reader_bound_is_never_submitted() {
+        use clap::Parser as _;
+        let (_root, attempt_dir, _plan) = scratch_fixture();
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        record.errors.push(
+            JailError::new(
+                ErrorCode::EvidenceLost,
+                ErrorStage::Running,
+                Remediation::InspectState,
+                "x".repeat(usize::try_from(cleanup::RECEIPT_MAX).unwrap()),
+            )
+            .to_object(),
+        );
+        let crate::cli::Command::Run(args) =
+            crate::cli::Cli::try_parse_from(["ouro-jail", "run", "--", "/bin/true"])
+                .unwrap()
+                .command
+        else {
+            panic!("not run");
+        };
+        let persister = state::Persister::start().unwrap();
+        let journal = Journal::new("att_test", trace::shared(DrainFailure { loss: None }));
+        let error = submit_receipt(
+            &persister,
+            state::Site::EnforcedReceipt,
+            &attempt_dir,
+            &mut record,
+            Phase::Enforced,
+            &args,
+            &journal,
+        )
+        .err()
+        .expect("past the bound");
+        assert_eq!(error.code, ErrorCode::StateWriteFailed);
+        assert_eq!(record.revision, 1, "no revision is spent");
+        assert!(!attempt_dir.receipt_path().exists());
+    }
+
     /// A terminal receipt that persisted, whose rewrite recording the loss
     /// its own final note met then failed, is reported as on disk at its
     /// revision, never as a receipt that was not persisted.

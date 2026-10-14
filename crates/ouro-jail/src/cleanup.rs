@@ -1472,6 +1472,37 @@ mod tests {
         assert_eq!(permitted(Some(&receipt), true), Err(REASON_INTEGRITY_LOST));
     }
 
+    /// gc completes a receipt only within the bound every reader holds
+    /// receipts to: completing one that sits exactly at the bound grows it
+    /// (`pending` becomes `complete`), so the completion is refused and the
+    /// receipt on disk stays as it was.
+    #[test]
+    fn completing_a_receipt_past_the_reader_bound_is_refused() {
+        let (_dir, attempt) = registered_attempt(None);
+        let pad = |len: usize| {
+            JailError::new(
+                ErrorCode::EvidenceLost,
+                ErrorStage::Running,
+                Remediation::InspectState,
+                "x".repeat(len),
+            )
+            .to_object()
+        };
+        let size = |receipt: &Receipt| serde_json::to_vec_pretty(receipt).unwrap().len();
+        let bound = usize::try_from(RECEIPT_MAX).unwrap();
+        let mut receipt = sample_receipt();
+        assert_eq!(receipt.state_cleanup, StateCleanup::Pending);
+        receipt.errors.push(pad(0));
+        receipt.errors[0] = pad(bound - size(&receipt));
+        let bytes = serde_json::to_vec_pretty(&receipt).unwrap();
+        assert_eq!(bytes.len(), bound, "the receipt sits exactly at the bound");
+        std::fs::write(attempt.receipt_path(), &bytes).unwrap();
+        let error = complete_receipt(&attempt, &mut receipt).expect_err("past the bound");
+        assert_eq!(error.code, ErrorCode::StateWriteFailed);
+        assert!(error.message.contains("bound"), "{}", error.message);
+        assert_eq!(std::fs::read(attempt.receipt_path()).unwrap(), bytes);
+    }
+
     fn sample_receipt() -> Receipt {
         use crate::observer::CoverageSummary;
         use crate::records::{
