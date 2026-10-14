@@ -14,6 +14,7 @@
 //! startup parent-death window. A resource leaf includes bubblewrap, namespace
 //! init and the target tree, while the supervisor/observer/watcher stay outside.
 
+use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
@@ -3811,7 +3812,7 @@ impl PreparedExecution for LinuxPrepared {
             wall_reported: false,
             exec_confirmed: false,
             target_outcome: None,
-            pending: Vec::new(),
+            pending: VecDeque::new(),
             stop_requested: None,
             stop_at: None,
             hard_killed: false,
@@ -3845,7 +3846,7 @@ struct LinuxRunning {
     wall_reported: bool,
     exec_confirmed: bool,
     target_outcome: Option<RunEvent>,
-    pending: Vec<RunEvent>,
+    pending: VecDeque<RunEvent>,
     stop_requested: Option<StopReason>,
     stop_at: Option<u64>,
     hard_killed: bool,
@@ -3866,7 +3867,7 @@ impl LinuxRunning {
         match pump_stdio_relays(&mut self.boundary.stdio_relays) {
             Ok(active) => active,
             Err(err) => {
-                self.pending.push(RunEvent::StdioFailed {
+                self.pending.push_back(RunEvent::StdioFailed {
                     reason: format!("a stdio relay failed: {err}"),
                     after_target_end: self.target_outcome.is_some() || self.bwrap_status.is_some(),
                 });
@@ -3970,12 +3971,12 @@ impl LinuxRunning {
             images: &self.boundary.target_images,
         };
         match super::observed::record(&mut self.boundary.audit, &target, event) {
-            Fact::CommandForbidden(pattern) => {
-                self.pending.push(RunEvent::CommandForbidden { pattern })
-            }
+            Fact::CommandForbidden(pattern) => self
+                .pending
+                .push_back(RunEvent::CommandForbidden { pattern }),
             Fact::TargetExec if !self.exec_confirmed => {
                 self.exec_confirmed = true;
-                self.pending.push(RunEvent::ExecConfirmed);
+                self.pending.push_back(RunEvent::ExecConfirmed);
             }
             Fact::TargetExit(status) if self.target_outcome.is_none() => {
                 self.target_outcome = Some(outcome_from_status(status));
@@ -3985,7 +3986,7 @@ impl LinuxRunning {
             }
             Fact::CoverageLost(reason) if !self.evidence_reported => {
                 self.evidence_reported = true;
-                self.pending.push(RunEvent::EvidenceLost {
+                self.pending.push_back(RunEvent::EvidenceLost {
                     reason: format!("the closed-set observer lost coverage: {}", reason.as_str()),
                     // J4 W2-S: R-2 — the target's exit is held back until the
                     // backend ends too, so a loss in the teardown after it
@@ -4032,7 +4033,7 @@ impl LinuxRunning {
         }
         if self.boundary.launcher.is_live() && image_changed(self.boundary.launcher.pid) {
             self.exec_confirmed = true;
-            self.pending.push(RunEvent::ExecConfirmed);
+            self.pending.push_back(RunEvent::ExecConfirmed);
         }
     }
 
@@ -4043,7 +4044,7 @@ impl LinuxRunning {
         if self.wall.is_some_and(clock::Deadline::expired) {
             self.wall_reported = true;
             self.boundary.audit.record_limit_hit();
-            self.pending.push(RunEvent::WallExpired);
+            self.pending.push_back(RunEvent::WallExpired);
         }
     }
 
@@ -4075,7 +4076,7 @@ impl LinuxRunning {
         if let Some(outcome) = self.target_outcome.take() {
             if !self.exec_confirmed {
                 self.exec_confirmed = true;
-                self.pending.push(outcome);
+                self.pending.push_back(outcome);
                 return Some(RunEvent::ExecConfirmed);
             }
             return Some(outcome);
@@ -4142,124 +4143,117 @@ fn outcome_from_status(status: i32) -> RunEvent {
 
 impl RunningExecution for LinuxRunning {
     fn wait(&mut self, deadline: PortableDeadline) -> RunEvent {
+        if let Some(event) = self.pending.pop_front() {
+            return event;
+        }
+        self.pump_error();
+        self.pump_tracer(Duration::ZERO);
+        // Mediated connects, helper facts, and a loss of
+        // mediation or proxy evidence, which strict evidence stops for
+        if let Some(reason) = self.boundary.pump_agent() {
+            // J4 W2-S: R-2 — the target's end as this loop knows it:
+            // the observer's exit, or without one the backend's.
+            let after_target_end = self.target_outcome.is_some()
+                || (self.boundary.tracer.is_none() && self.bwrap_status.is_some());
+            self.pending.push_back(RunEvent::EvidenceLost {
+                reason,
+                after_target_end,
+            });
+        }
+        self.pump_status();
+        // Audit 2026-10-08 H1: move relayed stdio while the run is
+        // live; a relay making progress keeps the loop spinning fast so
+        // a chatty child is not throttled to the poll cadence.
+        let relay_active = self.pump_stdio();
+        self.boundary.release_watcher_after_backend();
+        self.sample_limits(false);
+        self.check_exec_without_tracer();
+        self.check_wall();
+        self.check_grace();
+        // The watcher follows the backend out, and its exit can be seen
+        // before the backend's status has been pumped; only a watcher
+        // gone while the backend still runs is a lost helper.
+        if self.boundary.watcher.ended()
+            && self.bwrap_status.is_none()
+            && !self.boundary.backend_exited()
         {
-            if !self.pending.is_empty() {
-                return self.pending.remove(0);
-            }
-            self.pump_error();
-            self.pump_tracer(Duration::ZERO);
-            // Mediated connects, helper facts, and a loss of
-            // mediation or proxy evidence, which strict evidence stops for
-            if let Some(reason) = self.boundary.pump_agent() {
-                // J4 W2-S: R-2 — the target's end as this loop knows it:
-                // the observer's exit, or without one the backend's.
-                let after_target_end = self.target_outcome.is_some()
-                    || (self.boundary.tracer.is_none() && self.bwrap_status.is_some());
-                self.pending.push(RunEvent::EvidenceLost {
-                    reason,
-                    after_target_end,
-                });
-            }
-            self.pump_status();
-            // Audit 2026-10-08 H1: move relayed stdio while the run is
-            // live; a relay making progress keeps the loop spinning fast so
-            // a chatty child is not throttled to the poll cadence.
-            let relay_active = self.pump_stdio();
-            self.boundary.release_watcher_after_backend();
-            self.sample_limits(false);
-            self.check_exec_without_tracer();
-            self.check_wall();
-            self.check_grace();
-            // The watcher follows the backend out, and its exit can be seen
-            // before the backend's status has been pumped; only a watcher
-            // gone while the backend still runs is a lost helper.
-            if self.boundary.watcher.ended()
-                && self.bwrap_status.is_none()
-                && !self.boundary.backend_exited()
-            {
-                self.hard_kill();
-            }
-            if !self.pending.is_empty() {
-                return self.pending.remove(0);
-            }
-            if !self.boundary.error_bytes.is_empty() && self.exec_confirmed {
-                // Bytes after a confirmed exec cannot happen; keep them out of
-                // the way rather than reporting a second event.
-                self.boundary.error_bytes.clear();
-            }
-            if !self.boundary.error_bytes.is_empty() {
-                let (errno, detail) = super::launch::exec_failure_parts(&self.boundary.error_bytes);
-                self.boundary.error_bytes.clear();
-                return RunEvent::ExecError { errno, detail };
-            }
-            let done = self.bwrap_status.is_some()
-                && (self.boundary.tracer.is_none()
-                    || self.finished
-                    || self.target_outcome.is_some());
-            if done {
-                // The counters must be in hand before the outcome is
-                // classified: an OOM kill is attributed from them.
-                self.sample_limits(true);
-                // The child's end has closed by now; deliver what it wrote
-                // through the relays before the outcome is recorded.
-                let drain = clock::Deadline::after(Duration::from_millis(250));
-                while self.boundary.stdio_relays.iter().any(|relay| !relay.done())
-                    && !drain.expired()
-                {
-                    self.pump_stdio();
-                    if self
-                        .boundary
-                        .stdio_relays
-                        .iter()
-                        .all(|relay| relay.buffer.is_empty())
-                        && self
-                            .boundary
-                            .stdio_relays
-                            .iter()
-                            .all(|relay| relay.finished)
-                    {
-                        break;
-                    }
-                    std::thread::yield_now();
-                }
+            self.hard_kill();
+        }
+        if let Some(event) = self.pending.pop_front() {
+            return event;
+        }
+        if !self.boundary.error_bytes.is_empty() && self.exec_confirmed {
+            // Bytes after a confirmed exec cannot happen; keep them out of
+            // the way rather than reporting a second event.
+            self.boundary.error_bytes.clear();
+        }
+        if !self.boundary.error_bytes.is_empty() {
+            let (errno, detail) = super::launch::exec_failure_parts(&self.boundary.error_bytes);
+            self.boundary.error_bytes.clear();
+            return RunEvent::ExecError { errno, detail };
+        }
+        let done = self.bwrap_status.is_some()
+            && (self.boundary.tracer.is_none() || self.finished || self.target_outcome.is_some());
+        if done {
+            // The counters must be in hand before the outcome is
+            // classified: an OOM kill is attributed from them.
+            self.sample_limits(true);
+            // The child's end has closed by now; deliver what it wrote
+            // through the relays before the outcome is recorded.
+            let drain = clock::Deadline::after(Duration::from_millis(250));
+            while self.boundary.stdio_relays.iter().any(|relay| !relay.done()) && !drain.expired() {
+                self.pump_stdio();
                 if self
                     .boundary
                     .stdio_relays
                     .iter()
-                    .any(|relay| !relay.to_child && !relay.buffer.is_empty())
+                    .all(|relay| relay.buffer.is_empty())
+                    && self
+                        .boundary
+                        .stdio_relays
+                        .iter()
+                        .all(|relay| relay.finished)
                 {
-                    self.pending.push(RunEvent::StdioFailed {
-                        reason:
-                            "a stdio relay could not drain its output within the delivery budget"
-                                .to_owned(),
-                        after_target_end: true,
-                    });
-                    self.boundary.stdio_relays.clear();
+                    break;
                 }
-                if !self.pending.is_empty() {
-                    return self.pending.remove(0);
-                }
+                std::thread::yield_now();
             }
-            if done && let Some(event) = self.terminal_event() {
+            if self
+                .boundary
+                .stdio_relays
+                .iter()
+                .any(|relay| !relay.to_child && !relay.buffer.is_empty())
+            {
+                self.pending.push_back(RunEvent::StdioFailed {
+                    reason: "a stdio relay could not drain its output within the delivery budget"
+                        .to_owned(),
+                    after_target_end: true,
+                });
+                self.boundary.stdio_relays.clear();
+            }
+            if let Some(event) = self.pending.pop_front() {
                 return event;
             }
-            if self.hard_deadline.is_some_and(clock::Deadline::expired) {
-                return RunEvent::Unknown {
-                    reason: "termination could not be observed within the tree budget".to_owned(),
-                };
-            }
-            let step = if relay_active {
-                std::cmp::min(step_for(deadline), Duration::from_millis(2))
-            } else {
-                step_for(deadline)
-            };
-            if self.boundary.tracer.is_some() {
-                self.pump_tracer(step);
-            } else {
-                sleep_for(step);
-            }
-            RunEvent::Poll
         }
+        if done && let Some(event) = self.terminal_event() {
+            return event;
+        }
+        if self.hard_deadline.is_some_and(clock::Deadline::expired) {
+            return RunEvent::Unknown {
+                reason: "termination could not be observed within the tree budget".to_owned(),
+            };
+        }
+        let step = if relay_active {
+            std::cmp::min(step_for(deadline), Duration::from_millis(2))
+        } else {
+            step_for(deadline)
+        };
+        if self.boundary.tracer.is_some() {
+            self.pump_tracer(step);
+        } else {
+            sleep_for(step);
+        }
+        RunEvent::Poll
     }
 
     fn request_stop(&mut self, reason: StopReason) {

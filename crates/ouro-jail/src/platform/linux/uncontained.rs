@@ -59,7 +59,7 @@
 //! that snapshot and orphaned here is indistinguishable from an escaped
 //! attempt process and is treated as one (a recorded limit).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
@@ -403,7 +403,7 @@ struct Uncontained {
     target_exit_seen: bool,
     /// The target's raw wait status, when this process collected it.
     target_status: Option<i32>,
-    pending: Vec<RunEvent>,
+    pending: VecDeque<RunEvent>,
     stop_requested: Option<StopReason>,
     stop_at: Option<u64>,
     hard_killed: bool,
@@ -680,7 +680,7 @@ impl Uncontained {
             target_outcome: None,
             target_exit_seen: false,
             target_status: None,
-            pending: Vec::new(),
+            pending: VecDeque::new(),
             stop_requested: None,
             stop_at: None,
             hard_killed: false,
@@ -1180,7 +1180,7 @@ impl Uncontained {
         match observed::record(&mut self.audit, &target, event) {
             Fact::TargetExec if !self.exec_confirmed => {
                 self.exec_confirmed = true;
-                self.pending.push(RunEvent::ExecConfirmed);
+                self.pending.push_back(RunEvent::ExecConfirmed);
             }
             Fact::TargetExit(status) => {
                 self.target_exit_seen = true;
@@ -1192,7 +1192,7 @@ impl Uncontained {
             // run, exactly as for the contained profiles.
             Fact::CoverageLost(reason) if !self.evidence_reported => {
                 self.evidence_reported = true;
-                self.pending.push(RunEvent::EvidenceLost {
+                self.pending.push_back(RunEvent::EvidenceLost {
                     reason: format!("the closed-set observer lost coverage: {}", reason.as_str()),
                     // J4 W2-S: R-2 — processed after the target's own exit.
                     after_target_end: self.target_exit_seen,
@@ -1271,7 +1271,7 @@ impl Uncontained {
         }
         if self.launcher.is_live() && shared::image_changed(self.pid) {
             self.exec_confirmed = true;
-            self.pending.push(RunEvent::ExecConfirmed);
+            self.pending.push_back(RunEvent::ExecConfirmed);
         }
     }
 
@@ -1282,7 +1282,7 @@ impl Uncontained {
         if self.wall.is_some_and(clock::Deadline::expired) {
             self.wall_reported = true;
             self.audit.record_limit_hit();
-            self.pending.push(RunEvent::WallExpired);
+            self.pending.push_back(RunEvent::WallExpired);
         }
     }
 
@@ -1355,7 +1355,7 @@ impl Uncontained {
         if let Some(outcome) = self.target_outcome.take() {
             if !self.exec_confirmed {
                 self.exec_confirmed = true;
-                self.pending.push(outcome);
+                self.pending.push_back(outcome);
                 return Some(RunEvent::ExecConfirmed);
             }
             return Some(outcome);
@@ -1375,7 +1375,7 @@ impl Uncontained {
         if !self.exec_confirmed {
             if libc::WIFEXITED(status) && self.error_eof {
                 self.exec_confirmed = true;
-                self.pending.push(outcome);
+                self.pending.push_back(outcome);
                 return Some(RunEvent::ExecConfirmed);
             }
             return Some(RunEvent::Unknown {
@@ -1582,8 +1582,8 @@ impl RunningExecution for Uncontained {
     }
 
     fn wait(&mut self, deadline: PortableDeadline) -> RunEvent {
-        if !self.pending.is_empty() {
-            return self.pending.remove(0);
+        if let Some(event) = self.pending.pop_front() {
+            return event;
         }
         self.pump_error();
         self.pump_tracer(Duration::ZERO);
@@ -1594,8 +1594,8 @@ impl RunningExecution for Uncontained {
         self.check_exec_without_tracer();
         self.check_wall();
         self.check_grace();
-        if !self.pending.is_empty() {
-            return self.pending.remove(0);
+        if let Some(event) = self.pending.pop_front() {
+            return event;
         }
         if !self.error_bytes.is_empty() && self.exec_confirmed {
             // Bytes after a confirmed exec cannot happen; keep them out of
@@ -2110,7 +2110,7 @@ mod tests {
             target_outcome: None,
             target_exit_seen: false,
             target_status: None,
-            pending: Vec::new(),
+            pending: VecDeque::new(),
             stop_requested: None,
             stop_at: None,
             hard_killed: false,
