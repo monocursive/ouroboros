@@ -235,9 +235,8 @@ fn the_walk_finds_nested_and_file_form_protected_segments() {
 
 /// Audit 2026-10-08 M5: `agent` protects `.git/hooks` and `.git/config`
 /// while `.git` itself stays writable. Such a name is never a root literal,
-/// and nothing else inside `.git` is protected; the file-form `.git` the
-/// workspace holds is protected whole, since it names the git directory
-/// those two are read from.
+/// and nothing else inside `.git` is protected, nor the file-form `.git`
+/// the workspace holds.
 #[test]
 fn multi_component_names_protect_nested_paths_only() {
     let dir = temp_dir("multicomponent");
@@ -268,7 +267,6 @@ fn multi_component_names_protect_nested_paths_only() {
         vec![
             ".git/config File".to_owned(),
             ".git/hooks Directory".to_owned(),
-            "src/worktree/.git File".to_owned(),
         ]
     );
     // The rest of `.git` is walked, not protected.

@@ -350,7 +350,7 @@ fn scan_directory(
         skipped_symlinks: Vec::new(),
         root_found: Vec::new(),
     };
-    walk(root_dir, root, b"", 1, names, &mut state)?;
+    walk(root_dir, root, 1, names, &mut state)?;
 
     // Only single-component names are root literals —
     // a multi-component name like `.git/hooks` protects what exists and
@@ -396,8 +396,6 @@ struct Child<'a> {
     name: &'a CStr,
     /// Its absolute path on the host.
     path: PathBuf,
-    /// Its path beneath the writable root, `/`-separated.
-    relative: Vec<u8>,
 }
 
 /// What the walk does with one entry.
@@ -424,7 +422,6 @@ enum EntryAction<'n> {
 fn walk(
     dir: &Dir,
     dir_path: &Path,
-    relative: &[u8],
     depth: usize,
     names: &[&str],
     state: &mut WalkState,
@@ -456,7 +453,10 @@ fn walk(
         }
     })?;
 
-    let mut subdirs: Vec<(PathBuf, Name, Vec<u8>)> = Vec::new();
+    let submodule_git_directory = names.iter().any(|name| name.as_bytes() == GIT_HOOKS)
+        && is_submodule_git_directory(dir_path, &entries);
+
+    let mut subdirs: Vec<(PathBuf, Name)> = Vec::new();
     for entry in &entries {
         state.entries_seen += 1;
         if state.entries_seen > state.limits.max_entries {
@@ -465,17 +465,18 @@ fn walk(
             });
         }
         let name = entry.name.as_c_str();
-        let mut child_relative = relative.to_vec();
-        if !child_relative.is_empty() {
-            child_relative.push(b'/');
-        }
-        child_relative.extend_from_slice(name.to_bytes());
         let child = Child {
             name,
             path: dir_path.join(OsStr::from_bytes(name.to_bytes())),
-            relative: child_relative,
         };
-        match classify_entry(dir, entry.kind, &child, names, ordinary_hint_safe)? {
+        match classify_entry(
+            dir,
+            entry.kind,
+            &child,
+            names,
+            submodule_git_directory,
+            ordinary_hint_safe,
+        )? {
             EntryAction::Skip => {}
             EntryAction::Segment {
                 literal,
@@ -509,12 +510,12 @@ fn walk(
                     path: child.path.clone(),
                     errno: libc::EINVAL,
                 })?;
-                subdirs.push((child.path, component, child.relative));
+                subdirs.push((child.path, component));
             }
         }
     }
 
-    for (child_path, name, child_relative) in subdirs {
+    for (child_path, name) in subdirs {
         if depth + 1 > state.limits.max_depth {
             return Err(ScanError::DepthLimit {
                 limit: state.limits.max_depth,
@@ -527,55 +528,43 @@ fn walk(
                 path: child_path.clone(),
                 errno: errno_of(&error),
             })?;
-        walk(
-            &child,
-            &child_path,
-            &child_relative,
-            depth + 1,
-            names,
-            state,
-        )?;
+        walk(&child, &child_path, depth + 1, names, state)?;
     }
     Ok(())
 }
 
 /// Decides what the walk does with one entry of `dir` whose `readdir` type
-/// is `kind`.
+/// is `kind`; `submodule_git_directory` says `dir` is a submodule's git
+/// directory ([`is_submodule_git_directory`]).
 ///
 /// A single-component name matches any entry of that name. A
-/// multi-component name matches at any depth, whole components only: the
-/// entry's path beneath the writable root ends with the name, so
+/// multi-component name matches at any depth, whole components only, and
+/// against the entry's host path, not its path beneath the writable root:
 /// `.git/hooks` protects `sub/.git/hooks` as it protects `.git/hooks`, and
-/// never `x.git/hooks`; `.git` itself stays writable. When a name starts
-/// with `.git/`, a file-form `.git` (a gitlink, which a linked worktree or
-/// a submodule checkout holds) is protected whole: it names the git
-/// directory those paths are read from, and repointing it would replace
-/// them all.
+/// the `hooks` of a root that is itself a `.git` (a read-write grant of
+/// `<repo>/.git`), and never `x.git/hooks`; `.git` itself stays writable.
+/// `.git/hooks` also protects the `hooks` of every submodule's git
+/// directory: that directory is not named `.git`, and its config stays
+/// writable, because `git submodule update` rewrites it on every run.
 fn classify_entry<'n>(
     dir: &Dir,
     kind: u8,
     child: &Child<'_>,
     names: &[&'n str],
+    submodule_git_directory: bool,
     ordinary_hint_safe: bool,
 ) -> Result<EntryAction<'n>, ScanError> {
     let entry_name = child.name.to_bytes();
-    let relative = child.relative.as_slice();
+    let path = child.path.as_os_str().as_bytes();
     let literal = names.iter().copied().find(|literal| {
         let literal = literal.as_bytes();
         if literal.contains(&b'/') {
-            ends_with_components(relative, literal)
+            ends_with_components(path, literal)
+                || (submodule_git_directory && literal == GIT_HOOKS && entry_name == b"hooks")
         } else {
             entry_name == literal
         }
     });
-    let gitlink = (entry_name == GIT_DIR)
-        .then(|| {
-            names
-                .iter()
-                .copied()
-                .find(|name| name.as_bytes().starts_with(b".git/"))
-        })
-        .flatten();
 
     // readdir already identifies ordinary regular files. Their identity is
     // irrelevant unless their name is protected: they cannot contain deeper
@@ -583,7 +572,7 @@ fn classify_entry<'n>(
     // and every protected name still get the no-follow stat. The directory
     // stamps and mount-handoff verification remain responsible for a
     // rename or type swap after enumeration.
-    if ordinary_hint_safe && literal.is_none() && gitlink.is_none() && kind == libc::DT_REG {
+    if ordinary_hint_safe && literal.is_none() && kind == libc::DT_REG {
         return Ok(EntryAction::Skip);
     }
     let meta = stat_entry(dir, child.name).map_err(|errno| ScanError::Unreadable {
@@ -603,27 +592,19 @@ fn classify_entry<'n>(
             }
         });
     }
-    if let Some(literal) = gitlink
-        && !matches!(meta.kind, Kind::Directory | Kind::Symlink)
-    {
-        return Ok(EntryAction::Segment {
-            literal,
-            kind: segment_kind(meta.kind),
-            dev: meta.dev,
-            ino: meta.ino,
-        });
-    }
-    // A symlink on the path *to* a deeper protected name hides whatever
-    // lives behind it, so `existing_and_root` cannot claim coverage it could
-    // not see: a `.git` symlink while `.git/hooks` is protected, at any
-    // depth, is recorded like a protected symlink.
+    // A symlink where a deeper protected name could be hides whatever lives
+    // behind it, so `existing_and_root` cannot claim coverage it could not
+    // see: a `.git` symlink while `.git/hooks` is protected, at any depth,
+    // and a symlink under `.git/modules/`, where a submodule's git
+    // directory would be, are recorded like a protected symlink.
     if meta.kind == Kind::Symlink
         && names.iter().any(|literal| {
             let literal = literal.as_bytes();
-            literal
+            let on_the_path = literal
                 .iter()
                 .enumerate()
-                .any(|(at, byte)| *byte == b'/' && ends_with_components(relative, &literal[..at]))
+                .any(|(at, byte)| *byte == b'/' && ends_with_components(path, &literal[..at]));
+            on_the_path || (literal == GIT_HOOKS && beneath_git_modules(path))
         })
     {
         return Ok(EntryAction::HidingSymlink);
@@ -635,14 +616,34 @@ fn classify_entry<'n>(
     })
 }
 
-/// The name of a git directory, and of a gitlink.
-const GIT_DIR: &[u8] = b".git";
+/// The name that also reaches into submodules' git directories.
+const GIT_HOOKS: &[u8] = b".git/hooks";
 
 /// Whether `path` ends with `name`, whole components only: `sub/.git/hooks`
 /// ends with `.git/hooks`, `x.git/hooks` does not.
 fn ends_with_components(path: &[u8], name: &[u8]) -> bool {
     path.strip_suffix(name)
         .is_some_and(|head| head.is_empty() || head.ends_with(b"/"))
+}
+
+/// Whether `path` lies beneath a `.git/modules/`, where git keeps its
+/// submodules' git directories (nested submodules' too).
+fn beneath_git_modules(path: &[u8]) -> bool {
+    let parts: Vec<&[u8]> = path.split(|byte| *byte == b'/').collect();
+    parts
+        .windows(3)
+        .any(|window| window[0] == b".git" && window[1] == b"modules" && !window[2].is_empty())
+}
+
+/// Whether the directory at host path `path`, holding `entries`, is a
+/// submodule's git directory: beneath a `.git/modules/`, and holding what
+/// git requires of a git directory, `HEAD`, `objects` and `refs`.
+fn is_submodule_git_directory(path: &Path, entries: &[DirectoryEntry]) -> bool {
+    let has = |name: &[u8]| entries.iter().any(|entry| entry.name.to_bytes() == name);
+    beneath_git_modules(path.as_os_str().as_bytes())
+        && has(b"HEAD")
+        && has(b"objects")
+        && has(b"refs")
 }
 
 fn segment_kind(kind: Kind) -> SegmentKind {
@@ -1290,52 +1291,88 @@ mod tests {
         assert!(hidden.is_empty(), "{hidden:?}");
     }
 
-    /// A submodule's git directory, under `.git/modules/`, is not
-    /// protected: `git submodule update` rewrites its `core.worktree` on
-    /// every run, which a read-only config would refuse (jail-v1 §9.1).
+    /// A submodule's git directory, under `.git/modules/` (nested, and under
+    /// a name with a slash in it), has its hooks protected and its config
+    /// left writable: `git submodule update` rewrites its `core.worktree`
+    /// on every run, which a read-only config would refuse. A branch named
+    /// `hooks`, a directory under `modules/` that is not a git directory,
+    /// and a bare repository are not reached.
     #[test]
-    fn a_submodules_git_directory_is_not_protected() {
+    fn a_submodules_hooks_are_protected_and_its_config_is_not() {
         let base = tempfile::tempdir().unwrap();
         let root = base.path();
         git_directory(root, ".git");
         git_directory(root, ".git/modules/m");
+        git_directory(root, ".git/modules/m/modules/inner");
+        git_directory(root, ".git/modules/libs/n");
+        file(root, ".git/modules/m/refs/heads/hooks");
+        mkdir(root, ".git/modules/stray/hooks");
+        git_directory(root, "remote.git");
         let (segments, hidden) = protected(root);
-        assert_eq!(segments, [".git/config File", ".git/hooks Directory"]);
+        assert_eq!(
+            segments,
+            [
+                ".git/config File",
+                ".git/hooks Directory",
+                ".git/modules/libs/n/hooks Directory",
+                ".git/modules/m/hooks Directory",
+                ".git/modules/m/modules/inner/hooks Directory",
+            ]
+        );
         assert!(hidden.is_empty(), "{hidden:?}");
     }
 
-    /// A file-form `.git`, at the root or nested, is protected whole: it
-    /// names the git directory the hooks and config are read from. Under
-    /// names that are not `.git/` names it is an ordinary file.
+    /// A writable root that is itself a git directory (a read-write grant
+    /// of `<repo>/.git`) has its hooks and config protected: names match
+    /// the host path, not the path beneath the root.
     #[test]
-    fn a_gitlink_is_protected_whole() {
+    fn a_root_that_is_a_git_directory_is_protected() {
+        let base = tempfile::tempdir().unwrap();
+        git_directory(base.path(), "main/.git");
+        let root = base.path().join("main/.git");
+        let (segments, hidden) = protected(&root);
+        assert_eq!(segments, ["config File", "hooks Directory"]);
+        assert!(hidden.is_empty(), "{hidden:?}");
+    }
+
+    /// A file-form `.git` (a gitlink) is an ordinary file: binding it
+    /// read-only broke `git worktree remove` and `git rm` of a submodule
+    /// inside the run, and bought nothing while the git directory it names
+    /// stays writable.
+    #[test]
+    fn a_gitlink_is_not_protected() {
         let base = tempfile::tempdir().unwrap();
         let root = base.path();
         file(root, ".git");
         file(root, "sub/.git");
-        file(root, "sub/x.git");
         let (segments, hidden) = protected(root);
-        assert_eq!(segments, [".git File", "sub/.git File"]);
+        assert!(segments.is_empty(), "{segments:?}");
         assert!(hidden.is_empty(), "{hidden:?}");
-        let other = scan_protected_names(root, &["docs/notes"], ScanLimits::DEFAULT).unwrap();
-        assert!(other.segments.is_empty(), "{:?}", other.segments);
     }
 
-    /// A `.git` symlink hides the hooks and config behind it, at any depth.
+    /// A symlink where a protected name could be hides it: a `.git` at any
+    /// depth, and anything under `.git/modules/`. A symlink elsewhere in a
+    /// git directory, or named like `.git` without being it, hides nothing.
     #[test]
-    fn a_git_symlink_at_any_depth_is_reported() {
+    fn a_symlink_that_could_hold_a_protected_name_is_reported() {
         let base = tempfile::tempdir().unwrap();
         let root = base.path();
         let outside = tempfile::tempdir().unwrap();
         git_directory(outside.path(), "elsewhere");
         git_directory(root, ".git");
+        mkdir(root, ".git/modules");
         mkdir(root, "nested/deeper");
-        for link in ["nested/.git", "nested/deeper/x.git"] {
+        for link in [
+            "nested/.git",
+            "nested/deeper/x.git",
+            ".git/modules/linked",
+            ".git/refs/heads/linked",
+        ] {
             std::os::unix::fs::symlink(outside.path().join("elsewhere"), root.join(link)).unwrap();
         }
         let (segments, hidden) = protected(root);
         assert_eq!(segments, [".git/config File", ".git/hooks Directory"]);
-        assert_eq!(hidden, ["nested/.git"]);
+        assert_eq!(hidden, [".git/modules/linked", "nested/.git"]);
     }
 
     #[test]
