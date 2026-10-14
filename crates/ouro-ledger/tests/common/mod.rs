@@ -28,6 +28,42 @@ const POLL: Duration = Duration::from_millis(10);
 /// The most a drained pipe keeps: enough for every report these tests read.
 const DRAIN_LIMIT: u64 = 2 * 1_048_576;
 
+/// Whether `ready` came to hold within `bound`, looking every [`POLL`]: for
+/// a caller that reports the timeout itself.
+#[must_use]
+pub fn within(bound: Duration, mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + bound;
+    loop {
+        if ready() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(POLL);
+    }
+}
+
+/// Wait until `ready` holds, looking every [`POLL`]; fail the test naming
+/// `what` when `bound` passes first.
+pub fn eventually(what: &str, bound: Duration, ready: impl FnMut() -> bool) {
+    assert!(
+        within(bound, ready),
+        "timed out after {bound:?} waiting for {what}"
+    );
+}
+
+/// [`eventually`] for a probe that finds something: wait until `probe`
+/// returns it, and hand it back.
+pub fn eventually_some<T>(what: &str, bound: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
+    let mut found = None;
+    eventually(what, bound, || {
+        found = probe();
+        found.is_some()
+    });
+    found.expect("the wait ended on a probe that found it")
+}
+
 /// A file only this user can read, created fresh: the subprocess output a
 /// test keeps never lands in a pipe whose backpressure could stall it.
 pub fn private_file(path: &Path) -> File {
@@ -104,17 +140,13 @@ impl Process {
 
     /// Wait for exit, failing the test if it takes longer than `limit`.
     pub fn wait_within(&mut self, limit: Duration, what: &str) -> ExitStatus {
-        let deadline = Instant::now() + limit;
-        loop {
-            if let Some(status) = self.child.try_wait().expect("the subprocess status") {
-                return status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "{what} did not terminate within {limit:?}"
-            );
-            thread::sleep(POLL);
-        }
+        let mut status = None;
+        let ended = within(limit, || {
+            status = self.child.try_wait().expect("the subprocess status");
+            status.is_some()
+        });
+        assert!(ended, "{what} did not terminate within {limit:?}");
+        status.expect("the wait ended on an exit status")
     }
 
     /// Wait for exit within `limit` and collect what was drained, plus a
@@ -191,26 +223,22 @@ pub fn start_writer(command: &mut Command, data: &Path, log: &Path) -> Process {
         .spawn()
         .expect("the writer starts");
     let mut writer = Process::from_child(child, false);
-    let deadline = Instant::now() + WRITER_READY;
     let socket = data.join("ledger/serve.sock");
-    loop {
+    let listening = within(WRITER_READY, || {
         if let Some(status) = writer.child.try_wait().expect("the writer status") {
             panic!(
                 "the writer exited {status}: {}",
                 fs::read_to_string(log).unwrap_or_default()
             );
         }
-        if fs::symlink_metadata(&socket).is_ok_and(|meta| {
+        fs::symlink_metadata(&socket).is_ok_and(|meta| {
             meta.file_type().is_socket() && meta.permissions().mode() & 0o777 == 0o600
         }) && UnixStream::connect(&socket).is_ok()
-        {
-            return writer;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the writer did not listen within {WRITER_READY:?}: {}",
-            fs::read_to_string(log).unwrap_or_default()
-        );
-        thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
-    }
+    });
+    assert!(
+        listening,
+        "the writer did not listen within {WRITER_READY:?}: {}",
+        fs::read_to_string(log).unwrap_or_default()
+    );
+    writer
 }

@@ -286,19 +286,18 @@ impl Fixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"));
         command.arg("--data-dir").arg(data).arg("serve");
         let mut writer = Process::spawn(&mut command, true);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
+        common::eventually("the writer to become ready", common::WRITER_READY, || {
             if let Ok(mut client) = Client::connect(data) {
                 client.ping().unwrap();
-                return writer;
+                return true;
             }
             assert!(
                 writer.child.try_wait().unwrap().is_none(),
                 "writer refused its private fixture"
             );
-            assert!(Instant::now() < deadline, "writer did not become ready");
-            thread::sleep(Duration::from_millis(10));
-        }
+            false
+        });
+        writer
     }
 
     fn command(&self, request: &str, batch: bool) -> Command {
@@ -381,16 +380,10 @@ impl Fixture {
     }
 
     fn wait_started(&self, process: &mut Process) -> RunRecord {
-        let deadline = Instant::now() + COMMAND_LIMIT;
-        loop {
-            if self.workspace.join("started").exists() {
-                let runs = self.runs();
-                assert_eq!(runs.len(), 1);
-                assert_eq!(
-                    runs[0].state, "admitted",
-                    "target marker must follow durable admission"
-                );
-                return runs.into_iter().next().unwrap();
+        let marker = self.workspace.join("started");
+        common::eventually("the target to start", COMMAND_LIMIT, || {
+            if marker.exists() {
+                return true;
             }
             if process.child.try_wait().unwrap().is_some() {
                 let output = process.finish(COMMAND_LIMIT);
@@ -401,9 +394,15 @@ impl Fixture {
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
-            assert!(Instant::now() < deadline, "target did not start");
-            thread::sleep(Duration::from_millis(10));
-        }
+            false
+        });
+        let runs = self.runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].state, "admitted",
+            "target marker must follow durable admission"
+        );
+        runs.into_iter().next().unwrap()
     }
 
     fn assert_unknown(&self, run_id: &str) -> RunRecord {
@@ -421,26 +420,23 @@ impl Fixture {
 
     fn assert_tree_stopped(&self, run: &RunRecord) {
         let path = self.receipt_path(run);
-        let deadline = Instant::now() + COMMAND_LIMIT;
-        loop {
-            if let Ok(bytes) = fs::read(&path)
-                && let Ok(receipt) = serde_json::from_slice::<Value>(&bytes)
-                && matches!(receipt["phase"].as_str(), Some("settled" | "unsettled"))
-            {
-                assert_eq!(receipt["attempt_id"], run.attempt_id);
-                assert!(records::semantic::receipt(&receipt).is_empty(), "{receipt}");
-                assert_eq!(receipt["lifetime"]["tree_empty"], true, "{receipt}");
-                assert_eq!(receipt["lifetime"]["integrity"], "verified", "{receipt}");
-                assert!(receipt["lifetime"]["verified_at"].is_string());
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "jail did not corroborate termination of {} within {COMMAND_LIMIT:?}",
-                run.attempt_id
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
+        let receipt = common::eventually_some(
+            &format!("the jail to corroborate termination of {}", run.attempt_id),
+            COMMAND_LIMIT,
+            || {
+                fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .filter(|receipt| {
+                        matches!(receipt["phase"].as_str(), Some("settled" | "unsettled"))
+                    })
+            },
+        );
+        assert_eq!(receipt["attempt_id"], run.attempt_id);
+        assert!(records::semantic::receipt(&receipt).is_empty(), "{receipt}");
+        assert_eq!(receipt["lifetime"]["tree_empty"], true, "{receipt}");
+        assert_eq!(receipt["lifetime"]["integrity"], "verified", "{receipt}");
+        assert!(receipt["lifetime"]["verified_at"].is_string());
     }
 
     fn receipt_path(&self, run: &RunRecord) -> PathBuf {
@@ -807,43 +803,40 @@ fn writer_death_stops_the_owner_and_recovery_remains_unknown() {
 
 #[track_caller]
 fn wait_pending(fixture: &Fixture, run: &RunRecord, predicate: impl Fn(&Value) -> bool) -> Value {
-    let deadline = Instant::now() + COMMAND_LIMIT;
     let path = fixture
         .data
         .join("ledger")
         .join(&run.run_id)
         .join("owner-pending.json");
-    loop {
-        if let Ok(bytes) = fs::read(&path)
-            && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
-            && predicate(&value["state"])
-        {
-            return value;
-        }
-        if Instant::now() >= deadline {
-            let read = |name: &str| -> Value {
-                fs::read(path.with_file_name(name))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or(Value::Null)
-            };
-            let pending = read("owner-pending.json");
-            let projection = read("run.json");
-            let verification =
-                Client::connect(&fixture.data).and_then(|mut c| c.verify(Some(&run.run_id)));
-            panic!(
-                "pending journal timeout: profile={} active={} overflow={} completion={} events={} projection={} verification={verification:?} caller={}",
-                run.payload["profile"],
-                pending["state"]["active"],
-                pending["state"]["overflow"],
-                pending["state"]["completion"]["kind"],
-                pending["state"]["events"].as_array().map_or(0, Vec::len),
-                projection["state"],
-                std::panic::Location::caller()
-            );
-        }
-        thread::sleep(Duration::from_millis(20));
+    let mut found = None;
+    if common::within(COMMAND_LIMIT, || {
+        found = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .filter(|value| predicate(&value["state"]));
+        found.is_some()
+    }) {
+        return found.expect("the wait ended on a matching journal");
     }
+    let read = |name: &str| -> Value {
+        fs::read(path.with_file_name(name))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or(Value::Null)
+    };
+    let pending = read("owner-pending.json");
+    let projection = read("run.json");
+    let verification = Client::connect(&fixture.data).and_then(|mut c| c.verify(Some(&run.run_id)));
+    panic!(
+        "pending journal timeout: profile={} active={} overflow={} completion={} events={} projection={} verification={verification:?} caller={}",
+        run.payload["profile"],
+        pending["state"]["active"],
+        pending["state"]["overflow"],
+        pending["state"]["completion"]["kind"],
+        pending["state"]["events"].as_array().map_or(0, Vec::len),
+        projection["state"],
+        std::panic::Location::caller()
+    );
 }
 
 #[test]
@@ -1300,15 +1293,11 @@ fn detached_fixture() -> Option<Fixture> {
 }
 
 fn wait_for_file(path: &Path) {
-    let deadline = Instant::now() + COMMAND_LIMIT;
-    while !path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "missing fixture marker {}",
-            path.display()
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    common::eventually(
+        &format!("the fixture marker {}", path.display()),
+        COMMAND_LIMIT,
+        || path.exists(),
+    );
 }
 
 /// Signal the process `peer` names, pinned first so the signal cannot reach
@@ -1639,14 +1628,11 @@ fn detached_writer_death_fails_closed_without_starting_a_session_writer() {
         Client::connect(&fixture.data).is_err(),
         "strict evidence must not silently replace the writer"
     );
-    let deadline = Instant::now() + COMMAND_LIMIT;
-    while daemon::peer_alive(run.owner.as_ref().unwrap()) {
-        assert!(
-            Instant::now() < deadline,
-            "owner stayed alive after evidence loss"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    common::eventually(
+        "the owner to end after evidence loss",
+        COMMAND_LIMIT,
+        || !daemon::peer_alive(run.owner.as_ref().unwrap()),
+    );
     let _writer = Fixture::start_writer(&fixture.data);
     fixture.client().settle_orphans().unwrap();
     fixture.assert_unknown(&run.run_id);

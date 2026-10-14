@@ -7,7 +7,6 @@ use std::{
     path::PathBuf,
     process::{Command, Output, Stdio},
     thread,
-    time::{Duration, Instant},
 };
 
 use ouro_records::canonical::{sha256_prefixed, to_jcs};
@@ -311,18 +310,14 @@ fn dropped_socket_reply_replays_the_checkpointed_page_after_restart() {
     // Keep the socket open but unread until the durable checkpoint proves the
     // daemon accepted the request. Closing before accept races peer attribution.
     let checkpoint = fixture.checkpoint(&cursor);
-    let deadline = Instant::now() + REPLY_LIMIT;
-    loop {
-        let durable: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
-        if durable["checkpoint"]["prior"]["token"] == cursor[32..] {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "lost reply checkpoint was not persisted"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    common::eventually(
+        "the lost reply's checkpoint to persist",
+        REPLY_LIMIT,
+        || {
+            let durable: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+            durable["checkpoint"]["prior"]["token"] == cursor[32..]
+        },
+    );
     // Drop the reply without receiving any page, then recover the accepted advance.
     drop(socket);
     fixture.restart();

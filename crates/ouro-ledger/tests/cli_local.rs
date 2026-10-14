@@ -951,14 +951,16 @@ fn writer_refuses_undecodable_oversized_and_excess_connections_explicitly() {
     let mut excess = UnixStream::connect(&socket_path).unwrap();
     assert!(refusal(&mut excess).starts_with("writer_busy:"));
     drop(held);
-    let deadline = Instant::now() + WRITER_READY;
-    let mut client = loop {
-        match Client::connect(&cli.data) {
-            Ok(client) => break client,
-            Err(error) => assert!(Instant::now() < deadline, "{error}"),
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
+    let mut connected = None;
+    let _ = common::within(WRITER_READY, || {
+        let attempt = Client::connect(&cli.data);
+        let ready = attempt.is_ok();
+        connected = Some(attempt);
+        ready
+    });
+    let mut client = connected
+        .expect("the wait tries at least once")
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(client.ping().unwrap()["protocol"], PROTOCOL_VERSION);
 }
 
