@@ -721,12 +721,21 @@ when its requirements still permit that launch profile's credentials/network.
 `--label-only` resolves, probes and prints a proposed execution label, without
 executing the user command or copying credentials. `explain` does not probe or
 execute anything, and distinguishes requested policy from measured capability.
+`run`, `--label-only`, `explain` and `doctor` resolve a policy the same way,
+and that resolution refuses with `invalid_config` (stage `resolving`) a policy
+whose records could not be written within the 4 MiB bound of §13.2:
+`policy.json` measured exactly, the receipt projected from the refused
+receipt the attempt would start from, plus 1 MiB for the mount table and
+512 KiB for what a run adds. Such a policy is refused before any attempt is
+claimed, so no claim is left without a receipt.
 Its output carries environment names, never values (canonicalization.md).
 `--label-only` rejects `--gate-fd` and `--attempt-id` as usage errors.
 Inspection JSON goes to stdout; diagnostics go to stderr. `run` preserves child
 stdout/stderr byte streams and has no `--json` stdout mode. An error that
-reaches no durable receipt (a terminal receipt that failed to persist, and
-what only it would have recorded) is printed on stderr, one line per error.
+reaches no durable receipt as it was raised (a terminal receipt that failed
+to persist, and what only it would have recorded, or an error a refused
+receipt holds cut or omitted to fit, §13.2) is printed on stderr whole, one
+line per error.
 Every byte of an error or diagnostic that comes from untrusted input — a
 project-config value, a path a child chose — has its control characters
 escaped at the write, so no value can forge a second line or drive the
@@ -2635,6 +2644,33 @@ signal where applicable; there is no separate `outcome.limit_hit`. Requested
 but unapplied limits have null mechanism, scope and hit. Native strings in
 grant values and mount paths use the same UTF-8/base64 codec as the canonical
 appendix; a JSON string-only schema cannot represent all Unix pathnames.
+
+Every reader (the supervisor, cleanup, `gc`, `learn`) holds a receipt and
+`policy.json` to 4 MiB, and no writer writes a larger one. A boundary's
+mount table takes at most 1 MiB of a receipt, as its rows render: the row
+count does not bound a table whose paths are long, escaped (a control
+character takes six bytes) or base64-encoded, so a boundary whose table is
+larger is refused as `invalid_config` while it is prepared, before any of it
+is recorded, and its refused receipt carries no table. A policy too large to
+record is refused before the claim (§6.1). A `refused` receipt is fitted to
+the bound as it is written, the pending one written before vendor-state
+removal included, so a claimed attempt always ends with one:
+
+- `errors` lists at most 128 entries (the schema's bound). Past it the oldest
+  are omitted, those coded `evidence_lost` or `tree_unknown` and the refusal
+  itself only when nothing else is left, and the first entry kept begins
+  `[N other error(s) omitted: a receipt lists at most 128; every error was
+  reported on stderr]`.
+- Past 4 MiB the longest messages (in `errors` and `outcome.error`) are cut,
+  each to no less than 256 bytes, and each ends `[... N bytes omitted to keep
+  this receipt within 4194304 bytes; the whole message was reported on
+  stderr]`. No error is omitted for its size.
+
+Every error a `refused` receipt holds cut or not at all is printed whole on
+stderr. Any other receipt past the bound is not written: before release the
+attempt refuses with `state_write_failed`, after release a receipt handed to
+the persistence worker stops the tree for `state_write_failed`, and a
+terminal receipt leaves the last one written on disk (§7).
 
 Native lifetime details live under an OS-tagged object. Linux may record cgroup
 and namespace identities; macOS will define its own. `pidfd`, `/proc` paths,

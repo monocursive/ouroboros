@@ -280,6 +280,9 @@ and reports the error yet exits 0. Deleting a repository that existed at
 launch fails partway and leaves its hooks and config behind. Each nested repository takes two rows of the
 receipt's mount table, whose bound of 1024 rows refuses a workspace of more
 than about 500 nested repositories; the largest real tree measured held 122.
+The table is also bounded by size, to 1 MiB of the receipt: repositories
+nested under very long paths, or paths with control characters or bytes
+that are not UTF-8 (which a receipt must escape or encode), refuse sooner.
 A symlinked `.git`, hooks directory or config refuses the run and names the
 path, since no coverage can be claimed through it.
 
@@ -484,6 +487,15 @@ before repeating work that might have side effects.
 **The command returned a nonzero status.** It may be a child failure, a
 refusal, or a problem with evidence or cleanup. Read the receipt alongside
 the exit code. A child's own exit code can overlap the jail's codes.
+
+**A policy or workspace is too large to record.** Every receipt and resolved
+policy is held to 4 MiB. A policy whose records could not fit, such as one
+with thousands of long `--ro` paths, refuses with `invalid_config` before
+anything runs, in `explain` and `--label-only` as in `run`; a workspace whose
+mount table would not fit refuses with `invalid_config` while it is
+prepared. Narrow the grants or the workspace. A refused run whose error
+messages alone would not fit still writes its receipt: messages are cut and
+say so, and every error is printed whole on stderr.
 
 ## For agents and scripts
 
