@@ -332,8 +332,8 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
 const RECEIPT_RESERVE: u64 = 512 * 1024;
 
 /// §7 and I01: the records of this plan's attempt stay within the bound
-/// every reader holds receipts and `policy.json` to
-/// ([`cleanup::RECEIPT_MAX`]). Checked while the plan is resolved, so
+/// every writer writes receipts and `policy.json` within
+/// ([`cleanup::RECEIPT_WRITE_MAX`]). Checked while the plan is resolved, so
 /// `run`, `--label-only`, `explain` and `doctor` agree, and no attempt is
 /// claimed whose refusal could not be recorded.
 ///
@@ -363,7 +363,7 @@ fn check_record_bounds(ctx: &Context, plan: &Plan) -> Result<(), JailError> {
     let receipt = pretty_len(&start.receipt(Phase::Refused))
         .saturating_add(MOUNT_TABLE_BYTES_MAX)
         .saturating_add(RECEIPT_RESERVE);
-    let bound = cleanup::RECEIPT_MAX;
+    let bound = cleanup::RECEIPT_WRITE_MAX;
     if envelope <= bound && receipt <= bound {
         return Ok(());
     }
@@ -373,7 +373,7 @@ fn check_record_bounds(ctx: &Context, plan: &Plan) -> Result<(), JailError> {
         Remediation::Configuration,
         format!(
             "the resolved policy is too large to record: its policy.json would be {envelope} \
-             bytes and its receipt about {receipt}, and every reader holds them to {bound}; \
+             bytes and its receipt about {receipt}, and every one is written within {bound}; \
              grant fewer or shorter paths"
         ),
     ))
@@ -2196,7 +2196,12 @@ fn submit_receipt(
     }
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
-    let bytes = cleanup::record_bytes("receipt", &receipt, ErrorStage::Running)?;
+    let bytes = cleanup::record_bytes(
+        "receipt",
+        &receipt,
+        ErrorStage::Running,
+        cleanup::RECEIPT_WRITE_MAX,
+    )?;
     record.revision += 1;
     let canonical = attempt_dir.receipt_path();
     let extra = args.receipt.clone();
@@ -2838,7 +2843,12 @@ pub fn write_receipt_at(
     if phase == Phase::Refused {
         fit_refused_receipt(&mut receipt);
     }
-    let bytes = cleanup::record_bytes("receipt", &receipt, ErrorStage::Preparing)?;
+    let bytes = cleanup::record_bytes(
+        "receipt",
+        &receipt,
+        ErrorStage::Preparing,
+        cleanup::RECEIPT_WRITE_MAX,
+    )?;
     let canonical = state::TempWrite::create_at(site, &attempt_dir.receipt_path(), &bytes, io)?;
     // J4-D4: the rename below can land and a later step still fail (its
     // directory sync, or the extra copy), leaving this revision visible under
@@ -2911,15 +2921,16 @@ const CUT_NOTE_MAX: usize = 192;
 /// tree's end is unknown. (Nor the refusal itself, the outcome's error.)
 const ERRORS_KEPT_WHOLE: [ErrorCode; 2] = [ErrorCode::EvidenceLost, ErrorCode::TreeUnknown];
 
-/// Fits a refused receipt, as it is rendered, to what every reader accepts,
-/// so a claimed attempt still ends with a receipt (I01). The attempt's own
+/// Fits a refused receipt, as it is rendered, to the bound every writer
+/// writes within ([`cleanup::RECEIPT_WRITE_MAX`]), so a claimed attempt
+/// still ends with a receipt (I01). The attempt's own
 /// `errors[]` is left whole: whatever the receipt holds cut or not at all
 /// reaches stderr through the report ([`not_held`], [`unrecorded`]).
 ///
 /// - Past [`RECEIPT_ERRORS_MAX`] errors (the schema's bound) the oldest are
 ///   omitted, those in [`ERRORS_KEPT_WHOLE`] and the refusal last, and the
 ///   first error kept says how many were.
-/// - Past [`cleanup::RECEIPT_MAX`] bytes the longest messages, in
+/// - Past that bound the longest messages, in
 ///   `errors[]` and in the outcome's error, are cut, each to no less than
 ///   [`MESSAGE_KEPT_MIN`] bytes and each saying how much it lost. No error is
 ///   omitted for its size.
@@ -2928,13 +2939,14 @@ const ERRORS_KEPT_WHOLE: [ErrorCode; 2] = [ErrorCode::EvidenceLost, ErrorCode::T
 /// it is, and its write refuses.
 fn fit_refused_receipt(receipt: &mut Receipt) {
     omit_past_the_item_bound(receipt);
+    let bound = cleanup::RECEIPT_WRITE_MAX;
     let length = |receipt: &Receipt| {
         serde_json::to_vec_pretty(receipt).map_or(u64::MAX, |bytes| {
             u64::try_from(bytes.len()).unwrap_or(u64::MAX)
         })
     };
     let mut size = length(receipt);
-    while size > cleanup::RECEIPT_MAX {
+    while size > bound {
         let Some(message) = receipt
             .errors
             .iter_mut()
@@ -2945,7 +2957,7 @@ fn fit_refused_receipt(receipt: &mut Receipt) {
         else {
             return;
         };
-        cut_message(message, size - cleanup::RECEIPT_MAX);
+        cut_message(message, size - bound);
         let cut = length(receipt);
         if cut >= size {
             return;
@@ -3004,7 +3016,7 @@ fn cut_message(message: &mut String, excess: u64) {
         " [... {} bytes omitted to keep this receipt within {} bytes; the whole message was \
          reported on stderr]",
         length - keep,
-        cleanup::RECEIPT_MAX
+        cleanup::RECEIPT_WRITE_MAX
     ));
 }
 
@@ -3227,7 +3239,12 @@ fn policy_envelope(plan: &Plan) -> Result<serde_json::Value, JailError> {
 
 fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailError> {
     let envelope = policy_envelope(plan)?;
-    let bytes = cleanup::record_bytes("policy envelope", &envelope, ErrorStage::Preparing)?;
+    let bytes = cleanup::record_bytes(
+        "policy envelope",
+        &envelope,
+        ErrorStage::Preparing,
+        cleanup::RECEIPT_WRITE_MAX,
+    )?;
     state::replace_atomically_at(state::Site::Policy, &attempt_dir.policy_path(), &bytes)
 }
 
@@ -4212,7 +4229,7 @@ mod tests {
         let record = refused_record(errors.clone(), 2);
         let mut receipt = record.receipt(Phase::Refused);
         fit_refused_receipt(&mut receipt);
-        assert!(rendered_len(&receipt) <= cleanup::RECEIPT_MAX);
+        assert!(rendered_len(&receipt) <= cleanup::RECEIPT_WRITE_MAX);
         assert_eq!(receipt.errors.len(), 4);
         assert_eq!(receipt.errors[1..], errors[1..]);
         assert_eq!(receipt.errors[0].code, "evidence_lost");
@@ -4371,7 +4388,7 @@ mod tests {
         let base = serde_json::to_vec_pretty(&record.receipt(Phase::Settled))
             .unwrap()
             .len();
-        let bound = usize::try_from(cleanup::RECEIPT_MAX).unwrap();
+        let bound = usize::try_from(cleanup::RECEIPT_WRITE_MAX).unwrap();
         record.errors[0] = padding(bound - base - 64);
         use clap::Parser as _;
         let crate::cli::Command::Run(args) =
@@ -4405,6 +4422,55 @@ mod tests {
         );
         assert!(!described.contains("not persisted"), "{described}");
         assert!(described.contains("bound"), "{described}");
+    }
+
+    /// Every receipt the supervisor writes leaves `gc` the room to complete
+    /// it in place (`pending` becomes `complete`, and the revision may gain
+    /// a digit): one at the write bound is written and then completed within
+    /// the bound every reader holds it to, one byte more is not written, and
+    /// a refused receipt fitted to the bound completes too.
+    #[test]
+    fn every_receipt_written_is_one_gc_can_complete() {
+        let (_root, attempt_dir, _plan) = scratch_fixture();
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        record.state_cleanup = StateCleanup::Pending;
+        record.revision = 9;
+        record
+            .errors
+            .push(error_object(ErrorCode::EvidenceLost, String::new()));
+        let base = rendered_len(&record.receipt(Phase::Settled));
+        let pad = usize::try_from(cleanup::RECEIPT_WRITE_MAX - base).unwrap();
+        record.errors[0] = error_object(ErrorCode::EvidenceLost, "x".repeat(pad + 1));
+        write_receipt(&attempt_dir, &mut record, Phase::Settled, None)
+            .expect_err("a byte past the write bound");
+        record.errors[0] = error_object(ErrorCode::EvidenceLost, "x".repeat(pad));
+        let mut receipt = write_receipt(&attempt_dir, &mut record, Phase::Settled, None)
+            .expect("at the write bound");
+        assert_eq!(rendered_len(&receipt), cleanup::RECEIPT_WRITE_MAX);
+        let completed = |receipt: &mut Receipt| {
+            cleanup::complete_receipt(&attempt_dir, receipt).expect("gc completes it");
+            let bytes = std::fs::read(attempt_dir.receipt_path()).unwrap();
+            assert!(u64::try_from(bytes.len()).unwrap() <= cleanup::RECEIPT_MAX);
+            serde_json::from_slice::<Receipt>(&bytes).unwrap()
+        };
+        let done = completed(&mut receipt);
+        assert_eq!(done.state_cleanup, StateCleanup::Complete);
+        assert_eq!(done.revision, 10);
+
+        let bound = usize::try_from(cleanup::RECEIPT_MAX).unwrap();
+        let mut refused = refused_record(
+            vec![
+                error_object(ErrorCode::EvidenceLost, "x".repeat(bound)),
+                error_object(ErrorCode::GateClosed, "refused".to_owned()),
+            ],
+            1,
+        );
+        refused.state_cleanup = StateCleanup::Pending;
+        refused.revision = 99;
+        let mut receipt = write_receipt(&attempt_dir, &mut refused, Phase::Refused, None)
+            .expect("the refused receipt is fitted to the write bound");
+        assert!(rendered_len(&receipt) <= cleanup::RECEIPT_WRITE_MAX);
+        assert_eq!(completed(&mut receipt).revision, 100);
     }
 
     /// An unsatisfied requirement refuses with the code, remediation and
@@ -4847,7 +4913,7 @@ mod tests {
             grant(plan, usize::try_from(size - base).unwrap());
             assert_eq!(start(plan), size);
         };
-        let bound = cleanup::RECEIPT_MAX;
+        let bound = cleanup::RECEIPT_WRITE_MAX;
         // Fits beside the mount table, not beside the run's room too.
         starting_at(
             &mut plan,

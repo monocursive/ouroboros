@@ -723,11 +723,11 @@ executing the user command or copying credentials. `explain` does not probe or
 execute anything, and distinguishes requested policy from measured capability.
 `run`, `--label-only`, `explain` and `doctor` resolve a policy the same way,
 and that resolution refuses with `invalid_config` (stage `resolving`) a policy
-whose records could not be written within the 4 MiB bound of §13.2:
-`policy.json` measured exactly, the receipt projected from the refused
-receipt the attempt would start from, plus 1 MiB for the mount table and
-512 KiB for what a run adds. Such a policy is refused before any attempt is
-claimed, so no claim is left without a receipt.
+whose records could not be written within the bound of §13.2 (4 MiB less
+256 bytes): `policy.json` measured exactly, the receipt projected from the
+refused receipt the attempt would start from, plus 1 MiB for the mount table
+and 512 KiB for what a run adds. Such a policy is refused before any attempt
+is claimed, so no claim is left without a receipt.
 Its output carries environment names, never values (canonicalization.md).
 `--label-only` rejects `--gate-fd` and `--attempt-id` as usage errors.
 Inspection JSON goes to stdout; diagnostics go to stderr. `run` preserves child
@@ -2646,25 +2646,27 @@ grant values and mount paths use the same UTF-8/base64 codec as the canonical
 appendix; a JSON string-only schema cannot represent all Unix pathnames.
 
 Every reader (the supervisor, cleanup, `gc`, `learn`) holds a receipt and
-`policy.json` to 4 MiB, and no writer writes a larger one. A boundary's
-mount table takes at most 1 MiB of a receipt, as its rows render: the row
-count does not bound a table whose paths are long, escaped (a control
-character takes six bytes) or base64-encoded, so a boundary whose table is
-larger is refused as `invalid_config` while it is prepared, before any of it
-is recorded, and its refused receipt carries no table. A policy too large to
+`policy.json` to 4 MiB, and every writer writes them within 4 MiB less 256
+bytes: the room `gc` needs to complete a receipt in place (`pending`
+becoming `complete`, the revision gaining a digit). A boundary's mount
+table takes at most 1 MiB of a receipt, as its rows render: the row count
+does not bound a table whose paths are long, escaped (a control character
+takes six bytes) or base64-encoded, so a boundary whose table is larger is
+refused as `invalid_config` while it is prepared, before any of it is
+recorded, and its refused receipt carries no table. A policy too large to
 record is refused before the claim (§6.1). A `refused` receipt is fitted to
-the bound as it is written, the pending one written before vendor-state
-removal included, so a claimed attempt always ends with one:
+the write bound as it is written, the pending one written before
+vendor-state removal included, so a claimed attempt always ends with one:
 
 - `errors` lists at most 128 entries (the schema's bound). Past it the oldest
   are omitted, those coded `evidence_lost` or `tree_unknown` and the refusal
   itself only when nothing else is left, and the first entry kept begins
   `[N other error(s) omitted: a receipt lists at most 128; every error was
   reported on stderr]`.
-- Past 4 MiB the longest messages (in `errors` and `outcome.error`) are cut,
-  each to no less than 256 bytes, and each ends `[... N bytes omitted to keep
-  this receipt within 4194304 bytes; the whole message was reported on
-  stderr]`. No error is omitted for its size.
+- Past the write bound the longest messages (in `errors` and
+  `outcome.error`) are cut, each to no less than 256 bytes, and each ends
+  `[... N bytes omitted to keep this receipt within 4194048 bytes; the whole
+  message was reported on stderr]`. No error is omitted for its size.
 
 Every error a `refused` receipt holds cut or not at all is printed whole on
 stderr. Any other receipt past the bound is not written: before release the

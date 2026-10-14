@@ -642,8 +642,16 @@ pub enum Resume {
 /// and every writer refuses to write a larger one ([`record_bytes`]).
 pub const RECEIPT_MAX: u64 = 4 * 1024 * 1024;
 
+/// Largest receipt (or `policy.json`) the supervisor writes: [`RECEIPT_MAX`]
+/// less the room `gc` needs to complete a receipt in place (`pending`
+/// becomes `complete`, and the revision may gain a digit), so every receipt
+/// a run writes is one `gc` can finish.
+pub const RECEIPT_WRITE_MAX: u64 = RECEIPT_MAX - 256;
+
 /// The bytes of a record this tool reads back under [`RECEIPT_MAX`] (a
-/// receipt or the policy envelope, named by `what`), as they are written.
+/// receipt or the policy envelope, named by `what`), as they are written,
+/// held to `bound` ([`RECEIPT_WRITE_MAX`] for the supervisor's writes,
+/// [`RECEIPT_MAX`] for `gc`'s completion of one).
 ///
 /// A larger one is refused before anything is written: on disk it would be
 /// a record no reader accepts, so the attempt it describes could never be
@@ -656,6 +664,7 @@ pub fn record_bytes(
     what: &str,
     record: &impl serde::Serialize,
     stage: ErrorStage,
+    bound: u64,
 ) -> Result<Vec<u8>, JailError> {
     let bytes = serde_json::to_vec_pretty(record).map_err(|error| {
         JailError::new(
@@ -665,14 +674,14 @@ pub fn record_bytes(
             format!("the {what} could not be serialized: {error}"),
         )
     })?;
-    if u64::try_from(bytes.len()).map_or(true, |len| len > RECEIPT_MAX) {
+    if u64::try_from(bytes.len()).map_or(true, |len| len > bound) {
         return Err(JailError::new(
             ErrorCode::StateWriteFailed,
             stage,
             Remediation::InspectState,
             format!(
-                "the {what} is {} bytes, past the {RECEIPT_MAX}-byte bound every reader holds \
-                 it to, so it was not written",
+                "the {what} is {} bytes, past the {bound}-byte bound it is written within \
+                 (every reader holds it to {RECEIPT_MAX}), so it was not written",
                 bytes.len()
             ),
         ));
@@ -941,13 +950,17 @@ fn complete_receipt_without_vendor_state(
 }
 
 /// Records `state_cleanup = complete` in a receipt that permits the cleanup,
-/// at its next revision (P12).
-fn complete_receipt(attempt_dir: &AttemptDir, receipt: &mut Receipt) -> Result<(), JailError> {
+/// at its next revision (P12). It grows by a few bytes, which every writer
+/// leaves room for ([`RECEIPT_WRITE_MAX`]).
+pub(crate) fn complete_receipt(
+    attempt_dir: &AttemptDir,
+    receipt: &mut Receipt,
+) -> Result<(), JailError> {
     receipt.state_cleanup = StateCleanup::Complete;
     receipt.cleanup_error = None;
     receipt.revision += 1;
     receipt.updated_at = crate::records::rfc3339_utc(std::time::SystemTime::now());
-    let bytes = record_bytes("receipt", &*receipt, ErrorStage::Reconciling)?;
+    let bytes = record_bytes("receipt", &*receipt, ErrorStage::Reconciling, RECEIPT_MAX)?;
     state::replace_atomically_at(state::Site::GcResume, &attempt_dir.receipt_path(), &bytes)
 }
 
