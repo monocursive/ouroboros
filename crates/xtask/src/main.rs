@@ -191,7 +191,7 @@ fn absolutise(root: &std::path::Path, p: &std::path::Path) -> PathBuf {
 
 fn i02_scan(root: Option<PathBuf>) -> ExitCode {
     let base = root.unwrap_or_else(conformance::worktree_root);
-    let scan = match i02::scan_roots(&base, i02::ROOTS) {
+    let scan = match i02::scan_roots(&base, &i02::roots()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("xtask i02-scan: {e}");

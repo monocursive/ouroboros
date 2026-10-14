@@ -3919,60 +3919,6 @@ Unrelated prose.
         false
     }
 
-    /// I02: "no vendor names/protocol dependencies in the execution core".
-    /// The vendor-name scan sees a dependency only through its name, so a
-    /// protocol client with a neutral name would pass it. This pins the
-    /// execution core's shipped dependencies (every table but
-    /// dev-dependencies): adding one fails here until it is reviewed against
-    /// I02 and added to the reviewed set below.
-    #[test]
-    fn the_execution_core_dependencies_are_the_reviewed_set() {
-        const REVIEWED: &[&str] = &[
-            "base64",
-            "clap",
-            "libc",
-            // The frozen receipt/event types and canonical encoding, shared with the ledger.
-            "ouro-records",
-            // Shared HTTP vault transport and in-memory CA, no vendor protocol.
-            "rcgen",
-            "rustls",
-            // Generic supervisor HTTP transport for operator-configured OAuth refresh;
-            // no vendor client, provider SDK, or protocol-specific dependency.
-            "ureq",
-            // RFC 6455's mandated upgrade challenge, not credential hashing.
-            "sha1",
-            "webpki-roots",
-            "zeroize",
-            // Explicit operator-reviewed proposal adoption preserves TOML comments.
-            "toml_edit",
-            "serde",
-            "serde_json",
-            "sha2",
-            "toml",
-            "uuid",
-        ];
-        let manifest: toml::Value =
-            toml::from_str(include_str!("../../ouro-jail/Cargo.toml")).unwrap();
-        let mut names = BTreeSet::new();
-        let mut tables = vec![&manifest];
-        if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
-            tables.extend(targets.values());
-        }
-        for table in tables {
-            for key in ["dependencies", "build-dependencies"] {
-                if let Some(deps) = table.get(key).and_then(toml::Value::as_table) {
-                    names.extend(deps.keys().cloned());
-                }
-            }
-        }
-        let reviewed: BTreeSet<String> = REVIEWED.iter().map(|s| (*s).to_string()).collect();
-        assert_eq!(
-            names, reviewed,
-            "the execution core's dependencies changed: review the change against I02 \
-             (no protocol dependency) and update the reviewed set"
-        );
-    }
-
     /// Every reason a real, green run can give for a failing clause: the
     /// clause is untested, the driver produced no check (a saved log has
     /// none), or the test is newer than the log. Anything else (a mapped

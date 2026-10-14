@@ -8,7 +8,11 @@
 //! §4 scopes the scan to `<crate>/src`, but §15 row I02 says "no vendor
 //! names/**protocol dependencies** in the execution core", and a dependency
 //! named after a vendor lives in `Cargo.toml`, not in `src/`. The roots below
-//! therefore also carry each crate's manifest and its `build.rs`.
+//! therefore also carry each crate's manifest and its `build.rs`, and a test
+//! next to the scan pins each core crate's direct dependencies to a reviewed
+//! set, since a protocol client with a neutral name passes a name scan.
+//!
+//! The execution core is [`EXECUTION_CORE`]: one list drives both checks.
 //!
 //! What this cannot catch, by construction, because it is a text scan: a
 //! token split across lines or across `concat!`, a Unicode look-alike
@@ -33,19 +37,28 @@ pub const FORBIDDEN: &[&str] = &[
     "copilot",
 ];
 
-/// The roots the scan covers when they exist, relative to the repository root.
-///
-/// A root may be a directory, which is walked, or a single file.
-pub const ROOTS: &[&str] = &[
-    "crates/ouro-records/src",
-    "crates/ouro-records/Cargo.toml",
-    "crates/ouro-jail/src",
-    "crates/ouro-jail/Cargo.toml",
-    "crates/ouro-jail/build.rs",
-    "crates/ouro-ledger/src",
-    "crates/ouro-ledger/Cargo.toml",
-    "crates/ouro-ledger/build.rs",
-];
+/// The execution core (§4, §15 row I02): the crates that run, contain or
+/// record an attempt. `ouro-jail` and `ouro-ledger` are the ones §4 names;
+/// `ouro-records` is compiled into both, so a vendor name or protocol
+/// dependency there is in both. `ouro`, the fleet operator's command line,
+/// is not in the core: it neither runs nor records an attempt, and the fleet
+/// it drives is outside it (§4: "`fleet/` is outside Cargo"). The fixture
+/// and `xtask` are test and repository tooling.
+pub const EXECUTION_CORE: &[&str] = &["ouro-records", "ouro-jail", "ouro-ledger"];
+
+/// The roots the scan covers, relative to the repository root: each core
+/// crate's `src`, its manifest and its build script. A root may be a
+/// directory, which is walked, or a single file; one that does not exist
+/// is reported absent (a crate without a build script has none).
+#[must_use]
+pub fn roots() -> Vec<String> {
+    EXECUTION_CORE
+        .iter()
+        .flat_map(|krate| {
+            ["src", "Cargo.toml", "build.rs"].map(|part| format!("crates/{krate}/{part}"))
+        })
+        .collect()
+}
 
 const CURSOR_HOMONYMS: &str = include_str!("i02-cursor-homonyms.tsv");
 
@@ -95,16 +108,17 @@ pub fn scan_bytes(path: &Path, bytes: &[u8]) -> Vec<Hit> {
     for (i, line) in bytes.split(|b| *b == b'\n').enumerate() {
         let lower: Vec<u8> = line.iter().map(u8::to_ascii_lowercase).collect();
         for token in FORBIDDEN {
+            if !lower.windows(token.len()).any(|w| w == token.as_bytes()) {
+                continue;
+            }
             if *token == "cursor" && reviewed_cursor_homonym(path, line) {
                 continue;
             }
-            if lower.windows(token.len()).any(|w| w == token.as_bytes()) {
-                hits.push(Hit {
-                    path: path.to_path_buf(),
-                    line: i + 1,
-                    token,
-                });
-            }
+            hits.push(Hit {
+                path: path.to_path_buf(),
+                line: i + 1,
+                token,
+            });
         }
     }
     hits
@@ -139,10 +153,10 @@ fn scan_file(path: &Path, scan: &mut Scan) -> std::io::Result<()> {
 
 /// Scan the given roots. A root that does not exist is recorded as absent, not
 /// silently treated as clean.
-pub fn scan_roots(base: &Path, roots: &[&str]) -> std::io::Result<Scan> {
+pub fn scan_roots<S: AsRef<str>>(base: &Path, roots: &[S]) -> std::io::Result<Scan> {
     let mut scan = Scan::default();
     for root in roots {
-        let path = base.join(root);
+        let path = base.join(root.as_ref());
         match std::fs::symlink_metadata(&path) {
             Ok(m) if m.is_dir() => {
                 walk(&path, &mut scan)?;
@@ -162,6 +176,8 @@ pub fn scan_roots(base: &Path, roots: &[&str]) -> std::io::Result<Scan> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -230,17 +246,18 @@ mod tests {
 
     #[test]
     fn a_planted_hit_in_a_temp_tree_is_reported_and_a_clean_tree_is_not() {
-        let base = std::env::temp_dir().join(format!("xtask-i02-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
         let src = base.join("crates/ouro-jail/src");
         std::fs::create_dir_all(src.join("platform/linux")).unwrap();
         std::fs::write(src.join("lib.rs"), b"pub mod policy;\n").unwrap();
 
-        let clean = scan_roots(&base, ROOTS).unwrap();
+        let clean = scan_roots(base, &roots()).unwrap();
         assert!(clean.hits.is_empty(), "{:?}", clean.hits);
         assert_eq!(clean.roots_scanned.len(), 1, "only src/ exists here");
         assert_eq!(
             clean.roots_absent.len(),
-            ROOTS.len() - 1,
+            roots().len() - 1,
             "{:?}",
             clean.roots_absent
         );
@@ -251,7 +268,7 @@ mod tests {
             b"// ok\nconst NAME: &str = \"Anthropic\";\n",
         )
         .unwrap();
-        let dirty = scan_roots(&base, ROOTS).unwrap();
+        let dirty = scan_roots(base, &roots()).unwrap();
         assert_eq!(dirty.hits.len(), 1, "{:?}", dirty.hits);
         assert_eq!(dirty.hits[0].line, 2);
         assert_eq!(dirty.hits[0].token, "anthropic");
@@ -260,15 +277,14 @@ mod tests {
             "{}",
             dirty.hits[0]
         );
-
-        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
     fn a_vendor_named_dependency_and_a_build_script_are_caught() {
         // §15 row I02 covers "protocol dependencies", which live in the
         // manifest, and a build script can inject one into the build.
-        let base = std::env::temp_dir().join(format!("xtask-i02-manifest-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
         let crate_dir = base.join("crates/ouro-jail");
         std::fs::create_dir_all(crate_dir.join("src")).unwrap();
         std::fs::write(crate_dir.join("src/lib.rs"), b"pub mod policy;\n").unwrap();
@@ -283,40 +299,151 @@ mod tests {
         )
         .unwrap();
 
-        let scan = scan_roots(&base, ROOTS).unwrap();
+        let scan = scan_roots(base, &roots()).unwrap();
         assert_eq!(scan.files_scanned, 3, "{:?}", scan.roots_scanned);
         let tokens: Vec<&str> = scan.hits.iter().map(|h| h.token).collect();
         assert!(tokens.contains(&"anthropic"), "{:?}", scan.hits);
         assert!(tokens.contains(&"codex"), "{:?}", scan.hits);
         assert_eq!(scan.hits.len(), 2, "{:?}", scan.hits);
-
-        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
     fn a_directory_symlink_is_named_and_not_followed() {
-        let base = std::env::temp_dir().join(format!("xtask-i02-link-{}", std::process::id()));
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
         let src = base.join("crates/ouro-jail/src");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("lib.rs"), b"pub mod policy;\n").unwrap();
         std::os::unix::fs::symlink("../src", src.join("selfloop")).unwrap();
 
-        let scan = scan_roots(&base, ROOTS).unwrap();
+        let scan = scan_roots(base, &roots()).unwrap();
         assert_eq!(scan.files_scanned, 1, "the loop was followed");
         assert_eq!(scan.symlinks_skipped.len(), 1);
         assert!(scan.symlinks_skipped[0].ends_with("selfloop"));
-
-        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
     fn an_absent_root_is_reported_as_absent_not_as_clean() {
-        let base = std::env::temp_dir().join(format!("xtask-i02-absent-{}", std::process::id()));
-        std::fs::create_dir_all(&base).unwrap();
-        let scan = scan_roots(&base, ROOTS).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let scan = scan_roots(base, &roots()).unwrap();
         assert!(scan.roots_scanned.is_empty());
-        assert_eq!(scan.roots_absent.len(), ROOTS.len());
+        assert_eq!(scan.roots_absent.len(), roots().len());
         assert_eq!(scan.files_scanned, 0);
-        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// I02: "no vendor names/protocol dependencies in the execution core".
+    /// The vendor-name scan sees a dependency only through its name, so a
+    /// protocol client with a neutral name would pass it. This pins each
+    /// execution-core crate's shipped dependencies (every table but
+    /// dev-dependencies): adding one fails here until it is reviewed against
+    /// I02 and added to the reviewed set below.
+    #[test]
+    fn the_execution_core_dependencies_are_the_reviewed_set() {
+        const REVIEWED: &[(&str, &[&str])] = &[
+            ("ouro-records", &["base64", "serde", "serde_json", "sha2"]),
+            (
+                "ouro-jail",
+                &[
+                    "base64",
+                    "clap",
+                    "libc",
+                    // The frozen receipt/event types and canonical encoding,
+                    // shared with the ledger.
+                    "ouro-records",
+                    // Shared HTTP vault transport and in-memory CA, no vendor
+                    // protocol.
+                    "rcgen",
+                    "rustls",
+                    // Generic supervisor HTTP transport for operator-configured
+                    // OAuth refresh; no vendor client, provider SDK, or
+                    // protocol-specific dependency.
+                    "ureq",
+                    // RFC 6455's mandated upgrade challenge, not credential
+                    // hashing.
+                    "sha1",
+                    "webpki-roots",
+                    "zeroize",
+                    // Explicit operator-reviewed proposal adoption preserves
+                    // TOML comments.
+                    "toml_edit",
+                    "serde",
+                    "serde_json",
+                    "sha2",
+                    "toml",
+                    "uuid",
+                ],
+            ),
+            (
+                "ouro-ledger",
+                &[
+                    // Validates records against the frozen schemas.
+                    "jsonschema",
+                    "ouro-records",
+                    "clap",
+                    "libc",
+                    // The local store: SQLite compiled in, no service.
+                    "rusqlite",
+                    "serde",
+                    "serde_json",
+                    "toml",
+                    "sha2",
+                    // Signatures over records; no vendor protocol.
+                    "ring",
+                    "uuid",
+                ],
+            ),
+        ];
+        let reviewed_crates: Vec<&str> = REVIEWED.iter().map(|(krate, _)| *krate).collect();
+        assert_eq!(
+            reviewed_crates, EXECUTION_CORE,
+            "every execution-core crate has a reviewed set, and only those"
+        );
+        for (krate, reviewed) in REVIEWED {
+            let path = repo_root().join(format!("crates/{krate}/Cargo.toml"));
+            let manifest: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let mut names = BTreeSet::new();
+            let mut tables = vec![&manifest];
+            if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+                tables.extend(targets.values());
+            }
+            for table in tables {
+                for key in ["dependencies", "build-dependencies"] {
+                    if let Some(deps) = table.get(key).and_then(toml::Value::as_table) {
+                        names.extend(deps.keys().cloned());
+                    }
+                }
+            }
+            let reviewed: BTreeSet<String> = reviewed.iter().map(|s| (*s).to_owned()).collect();
+            assert_eq!(
+                names, reviewed,
+                "{krate}'s dependencies changed: review the change against I02 \
+                 (no protocol dependency) and update the reviewed set"
+            );
+        }
+    }
+
+    /// Every reviewed homonym still names a line of its file: an entry the
+    /// code moved away from would otherwise exempt whatever line next reads
+    /// the same.
+    #[test]
+    fn every_reviewed_homonym_is_a_line_of_its_file() {
+        for entry in CURSOR_HOMONYMS.lines().filter(|l| !l.starts_with('#')) {
+            let (file, source) = entry
+                .split_once('\t')
+                .unwrap_or_else(|| panic!("`{entry}` is not `path<TAB>source`"));
+            let text =
+                std::fs::read(repo_root().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+            assert!(
+                text.split(|b| *b == b'\n')
+                    .any(|line| line.trim_ascii() == source.as_bytes()),
+                "{file} no longer has the reviewed line `{source}`: remove or update the entry"
+            );
+        }
     }
 }

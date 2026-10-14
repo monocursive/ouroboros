@@ -23,9 +23,7 @@ crates/ouro-ledger/src/reader.rs	let (id, token) = if let Some(cursor) = &reques
 crates/ouro-ledger/src/reader.rs	if cursor.len() != 64
 crates/ouro-ledger/src/reader.rs	|| !cursor
 crates/ouro-ledger/src/reader.rs	return Err(LedgerError("invalid reader cursor".into()));
-crates/ouro-ledger/src/reader.rs	(cursor[..32].to_owned(), cursor[32..].to_owned())
 crates/ouro-ledger/src/reader.rs	next_cursor: None,
-crates/ouro-ledger/src/reader.rs	"reader cursor expired or daemon restarted; start a new snapshot, do not append it to an old export".into()))?;
 crates/ouro-ledger/src/reader.rs	"reader cursor run, filter or limit mismatch".into(),
 crates/ouro-ledger/src/reader.rs	"reader cursor position is stale or forged".into(),
 crates/ouro-ledger/src/reader.rs	page.next_cursor = Some(format!("{id}{token}"));
@@ -36,7 +34,6 @@ crates/ouro-ledger/src/store.rs	request.cursor = first.next_cursor.clone();
 crates/ouro-ledger/src/store.rs	request.cursor = second.next_cursor.clone();
 crates/ouro-ledger/src/store.rs	request.cursor = page.next_cursor;
 crates/ouro-ledger/src/store.rs	assert!(request.cursor.is_some());
-crates/ouro-ledger/src/store.rs	fn reader_cursor_cannot_change_scope_and_expires_explicitly_after_restart() {
 crates/ouro-ledger/src/store.rs	resumed.cursor = page.next_cursor;
 crates/ouro-ledger/src/store.rs	wrong.cursor.as_mut().unwrap().replace_range(63..64, "z");
 crates/ouro-ledger/src/reader.rs	next_cursor: Option<String>,

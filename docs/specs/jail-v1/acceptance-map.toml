@@ -3038,7 +3038,7 @@ gate = "I02"
 clause = "No protocol dependency in the execution core: its direct dependencies are the reviewed set"
 tag = "portable"
 tests = [
-  "xtask/src/main.rs::gates::tests::the_execution_core_dependencies_are_the_reviewed_set",
+  "xtask/src/main.rs::i02::tests::the_execution_core_dependencies_are_the_reviewed_set",
   "xtask/src/main.rs::i02::tests::a_vendor_named_dependency_and_a_build_script_are_caught",
 ]
 
