@@ -2423,12 +2423,11 @@ impl Tree for Boundary {
 
     fn boundary_identity(&self, run: &RunState) -> BoundaryIdentity {
         let mut details = Map::new();
-        if self
-            .snapshot
-            .launch
-            .as_ref()
-            .is_some_and(|l| l.credentials.iter().any(|c| c.mode == "vault"))
-        {
+        if self.snapshot.launch.as_ref().is_some_and(|l| {
+            l.credentials
+                .iter()
+                .any(|c| c.mode == crate::policy::CredentialMode::Vault)
+        }) {
             details.insert("credential_injection".into(), Value::from("mitm_ca"));
         }
         details.insert("backend_exec_by".to_owned(), Value::from("descriptor"));

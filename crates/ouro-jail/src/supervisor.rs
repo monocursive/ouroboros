@@ -39,7 +39,8 @@ use crate::platform::{
     BoundaryIdentity, ContinuousDeadline, PlanRequest, Platform, StopReason, Teardown,
 };
 use crate::policy::{
-    self, Layer, LayerOrigin, PolicyDelta, ProfileName, ResolveInputs, Resolved, ScratchRoot,
+    self, CredentialMode, Layer, LayerOrigin, PolicyDelta, ProfileName, ResolveInputs, Resolved,
+    ScratchRoot,
 };
 use crate::profiles;
 use crate::records::StateCleanup;
@@ -2326,7 +2327,11 @@ fn prepare_launch(
     // §12 and the §8.2 preparation budget: staging runs in a worker bounded
     // by what is left of it, and no source may lie in a child-writable grant.
     let mut forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
-    if launch.credentials.iter().any(|c| c.mode == "vault") {
+    if launch
+        .credentials
+        .iter()
+        .any(|c| c.mode == CredentialMode::Vault)
+    {
         forbidden.extend(
             state::mount_alias::forbidden_identities(&child_visible_roots(plan)).map_err(|e| {
                 usage(
@@ -2385,7 +2390,7 @@ fn receipt_credentials(
             let mut record = credential.record.clone();
             record.digest = None;
             record.digest_unavailable_reason = Some(
-                if record.mode == "vault" {
+                if credential.mode == CredentialMode::Vault {
                     "never_staged"
                 } else {
                     "receipt_verifier_withheld"
@@ -2405,7 +2410,7 @@ fn private_provenance(
         .iter()
         .map(|credential| state::PrivateCredential {
             id: credential.record.id.clone(),
-            mode: credential.record.mode.clone(),
+            mode: credential.mode,
             source_dev: credential.source.dev,
             source_ino: credential.source.ino,
             source_size: credential.source.size,

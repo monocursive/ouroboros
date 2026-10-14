@@ -450,7 +450,7 @@ fn explain_text(report: &ExplainReport) -> String {
                 out,
                 "launch credential {} mode={} dest={} source=omitted",
                 records::escape_control(&credential.id),
-                records::escape_control(&credential.mode),
+                credential.mode.as_str(),
                 records::escape_control(&credential.dest.to_display())
             );
         }
@@ -515,7 +515,7 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
                 .iter()
                 .map(|check| serde_json::json!({
                     "id": check.id,
-                    "mode": check.mode,
+                    "mode": check.mode.as_str(),
                     "dest": check.dest,
                     "status": if check.available { "available" } else { "unavailable" },
                     "reason_code": check.reason_code,
@@ -598,7 +598,7 @@ fn doctor_text(report: &DoctorReport) -> String {
                 out,
                 "credential {} mode={} dest={} {} reason={}",
                 records::escape_control(&check.id),
-                check.mode,
+                check.mode.as_str(),
                 records::escape_control(&check.dest.to_display()),
                 if check.available {
                     "available"

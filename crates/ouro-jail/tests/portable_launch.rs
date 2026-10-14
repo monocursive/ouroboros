@@ -1626,7 +1626,7 @@ fn stage_one_source(fixture: &Fixture, source: &Path) -> Result<(), (JailError, 
             )
             .unwrap(),
             dest: ouro_jail::records::NativeString::Text("only".into()),
-            mode: "copy_rw".into(),
+            mode: ouro_jail::policy::CredentialMode::CopyRw,
         }],
     };
     ouro_jail::credentials::stage(&launch, vendor.as_fd(), &[])
@@ -2236,7 +2236,7 @@ fn rm16_the_copy_budget_is_cumulative_across_credentials() {
             )
             .unwrap(),
             dest: ouro_jail::records::NativeString::Text(id.into()),
-            mode: "copy_rw".into(),
+            mode: ouro_jail::policy::CredentialMode::CopyRw,
         }
     };
     let launch = ouro_jail::policy::LaunchSnapshot {
@@ -2459,7 +2459,7 @@ fn stage_one_source_with(
             )
             .unwrap(),
             dest: ouro_jail::records::NativeString::Text("only".into()),
-            mode: "copy_rw".into(),
+            mode: ouro_jail::policy::CredentialMode::CopyRw,
         }],
     };
     ouro_jail::credentials::stage(&launch, vendor.as_fd(), forbidden)

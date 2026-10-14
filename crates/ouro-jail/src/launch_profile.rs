@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::policy::{
-    CredentialDecl, EnvBinding, EnvValue, LaunchSnapshot, Layer, LayerOrigin, PathRef, PolicyDelta,
-    ProfileName, ProvenanceEntry, Resolved, RootToken, VendorStateRoot,
+    CredentialDecl, CredentialMode, EnvBinding, EnvValue, LaunchSnapshot, Layer, LayerOrigin,
+    PathRef, PolicyDelta, ProfileName, ProvenanceEntry, Resolved, RootToken, VendorStateRoot,
 };
 use crate::records::{ErrorCode, ErrorStage, JailError, NativeString, Remediation};
 use crate::state::anchored::{self, Dir, Kind};
@@ -606,13 +606,13 @@ pub fn parse(
         if !valid_credential_id(id) {
             return Err(invalid(&key, format!("`{id}` is not a credential id")));
         }
-        if entry.mode != "copy_rw" && entry.mode != "bind_ro" && entry.mode != "vault" {
+        let Some(mode) = CredentialMode::parse(&entry.mode) else {
             return Err(invalid(
                 format!("{key}.mode"),
                 format!("`{}` is not `copy_rw`, `bind_ro` or `vault`", entry.mode),
             ));
-        }
-        let vault = if entry.mode == "vault" {
+        };
+        let vault = if mode == CredentialMode::Vault {
             if !vault_names.insert(crate::vault::env_name(id)) {
                 return Err(invalid(
                     &key,
@@ -686,7 +686,7 @@ pub fn parse(
             source: native(source, &source_key)?,
             dest: NativeString::Text(destination),
             vault,
-            mode: entry.mode.clone(),
+            mode,
         });
     }
 
@@ -1058,7 +1058,7 @@ pub fn apply(mut resolved: Resolved, launch: &LaunchProfile) -> Result<Resolved,
     for credential in &credentials {
         why.push(entry(
             format!("launch.credentials.{}", credential.id),
-            Some(credential.mode.clone()),
+            Some(credential.mode.as_str().to_owned()),
         ));
     }
     why.push(entry("launch".to_owned(), Some(launch.name.clone())));
@@ -1235,7 +1235,7 @@ header = { name = "x-api-key" }
             .iter()
             .find(|credential| credential.id == "api")
             .expect("the vault credential parses");
-        assert_eq!(credential.mode, "vault");
+        assert_eq!(credential.mode, CredentialMode::Vault);
         assert_eq!(credential.dest.as_bytes(), b".vault-api");
         let vault = credential
             .vault

@@ -34,7 +34,7 @@ use ouro_jail::platform::linux::bwrap::{
 };
 use ouro_jail::platform::linux::clock::Deadline;
 use ouro_jail::platform::linux::exec::{self, FdMap};
-use ouro_jail::policy::{CredentialDecl, LaunchSnapshot};
+use ouro_jail::policy::{CredentialDecl, CredentialMode, LaunchSnapshot};
 use ouro_jail::records::{ErrorCode, NativeString};
 use ouro_jail::state::anchored::{Dir, Name};
 use serde_json::Value;
@@ -64,7 +64,7 @@ fn decl(id: &str, source: &Path, dest: &str, mode: &str) -> CredentialDecl {
         id: id.to_owned(),
         source: NativeString::from_bytes(source.as_os_str().as_encoded_bytes()).unwrap(),
         dest: text(dest),
-        mode: mode.to_owned(),
+        mode: CredentialMode::parse(mode).expect("a credential mode"),
     }
 }
 
@@ -1184,7 +1184,7 @@ fn m1_inner_bind_ro_digest_on_a_read_only_bind_of_a_writable_filesystem() {
             id: "cfg".into(),
             source: text("/r/cfg.toml"),
             dest: text("cfg.toml"),
-            mode: "bind_ro".into(),
+            mode: CredentialMode::BindRo,
         }],
     };
     let staged = credentials::stage(&launch, vendor.as_fd(), &[])
@@ -1246,7 +1246,7 @@ fn foreign_inner_owner_and_mount_checks() {
                 id: "c".into(),
                 source: text(source),
                 dest: text("c"),
-                mode: "copy_rw".into(),
+                mode: CredentialMode::CopyRw,
             }],
         };
         ouro_jail::credentials::inspect(&launch, &[])[0].reason_code

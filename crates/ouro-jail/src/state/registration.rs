@@ -38,8 +38,8 @@ pub struct VendorRegistration {
 pub struct PrivateCredential {
     /// The logical id.
     pub id: String,
-    /// `copy_rw` or `bind_ro`.
-    pub mode: String,
+    /// How it reaches the child: `copy_rw` or `bind_ro`.
+    pub mode: crate::policy::CredentialMode,
     /// Source device.
     pub source_dev: u64,
     /// Source inode.
@@ -218,7 +218,7 @@ pub fn record_staged_credentials(
         .iter()
         .map(|row| CredentialEntry {
             id: row.id.clone(),
-            mode: row.mode.clone(),
+            mode: row.mode,
             source_dev: Decimal(row.source_dev),
             source_ino: Decimal(row.source_ino),
             source_size: Decimal(row.source_size),

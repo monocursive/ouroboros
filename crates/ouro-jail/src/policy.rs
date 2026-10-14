@@ -354,6 +354,43 @@ pub struct EnvironmentSnapshot {
     pub bindings: Vec<EnvBinding>,
 }
 
+/// How a launch credential reaches the child (§12).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialMode {
+    /// A private copy in vendor state, writable by the child.
+    CopyRw,
+    /// The source object itself, bound read-only into vendor state.
+    BindRo,
+    /// Never staged: the vault proxy adds it to the requests it admits.
+    Vault,
+}
+
+impl CredentialMode {
+    /// Every mode.
+    pub const ALL: [CredentialMode; 3] = [
+        CredentialMode::CopyRw,
+        CredentialMode::BindRo,
+        CredentialMode::Vault,
+    ];
+
+    /// The wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            CredentialMode::CopyRw => "copy_rw",
+            CredentialMode::BindRo => "bind_ro",
+            CredentialMode::Vault => "vault",
+        }
+    }
+
+    /// The mode `text` spells, if any.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<CredentialMode> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == text)
+    }
+}
+
 /// A resolved launch credential declaration (§12).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -368,8 +405,8 @@ pub struct CredentialDecl {
     /// Relative native destination under vendor state (`.vault-<id>` for
     /// `vault`, which stages no file there).
     pub dest: NativeString,
-    /// `copy_rw`, `bind_ro` or `vault`.
-    pub mode: String,
+    /// How it reaches the child.
+    pub mode: CredentialMode,
 }
 
 /// `launch` field group of the snapshot, null without a launch profile.
@@ -1845,6 +1882,23 @@ fn is_false(value: &bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A credential mode's serde spelling is its `as_str`, and `parse`
+    /// reads back exactly those spellings, so a snapshot's bytes and its
+    /// digest do not depend on which one wrote it.
+    #[test]
+    fn each_credential_mode_has_one_spelling() {
+        for mode in CredentialMode::ALL {
+            assert_eq!(
+                serde_json::to_value(mode).unwrap(),
+                serde_json::Value::from(mode.as_str())
+            );
+            assert_eq!(CredentialMode::parse(mode.as_str()), Some(mode));
+        }
+        for text in ["", "Vault", "copy-rw", "bind_ro "] {
+            assert_eq!(CredentialMode::parse(text), None, "{text:?}");
+        }
+    }
 
     fn reference(root: RootToken, path: &str) -> PathRef {
         PathRef {

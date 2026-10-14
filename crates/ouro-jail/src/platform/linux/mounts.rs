@@ -451,7 +451,7 @@ pub(super) fn staged_mounts(
     }
     let binds: Vec<&&crate::policy::CredentialDecl> = declared
         .iter()
-        .filter(|declaration| declaration.mode == crate::credentials::MODE_BIND_RO)
+        .filter(|declaration| declaration.mode == crate::policy::CredentialMode::BindRo)
         .collect();
     if binds.len() != handoff.binds.len() {
         return Err(refuse(
@@ -1490,7 +1490,7 @@ mod tests {
                     id: "c".to_owned(),
                     source: NativeString::Text("/src/c".to_owned()),
                     dest: NativeString::Text("c".to_owned()),
-                    mode: "bind_ro".to_owned(),
+                    mode: crate::policy::CredentialMode::BindRo,
                 }]
             } else {
                 Vec::new()

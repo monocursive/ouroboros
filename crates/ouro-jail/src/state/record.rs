@@ -297,8 +297,8 @@ impl VendorStateEntry {
 pub struct CredentialEntry {
     /// The logical id.
     pub id: String,
-    /// `copy_rw` or `bind_ro`.
-    pub mode: String,
+    /// How it reaches the child: `copy_rw` or `bind_ro`.
+    pub mode: crate::policy::CredentialMode,
     /// Source device.
     pub source_dev: Decimal<u64>,
     /// Source inode.

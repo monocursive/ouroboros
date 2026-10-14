@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
 
-use crate::policy::{CredentialDecl, LaunchSnapshot};
+use crate::policy::{CredentialDecl, CredentialMode, LaunchSnapshot};
 use crate::records::{
     CredentialRecord, ErrorCode, ErrorStage, JailError, NativeString, Remediation,
 };
@@ -61,13 +61,6 @@ use crate::state::anchored::{self, Dir, Kind, Name, Stat};
 pub const COPY_BUDGET: u64 = 16 * 1024 * 1024;
 /// The largest `bind_ro` source this code will hash for a digest.
 pub const DIGEST_BUDGET: u64 = 16 * 1024 * 1024;
-
-/// `copy_rw`.
-pub const MODE_COPY_RW: &str = "copy_rw";
-/// `bind_ro`.
-pub const MODE_BIND_RO: &str = "bind_ro";
-/// `vault`.
-pub const MODE_VAULT: &str = "vault";
 
 /// `doctor`'s reason for a `vault` credential that passes every check staging
 /// makes before it reads the secret. `doctor` reads no credential, so the
@@ -102,6 +95,8 @@ pub struct SourceIdentity {
 #[derive(Debug)]
 pub struct StagedCredential {
     pub vault: Option<Arc<crate::vault::Secret>>,
+    /// How it reaches the child.
+    pub mode: CredentialMode,
     /// The receipt row: `{id, mode, digest, digest_unavailable_reason}`.
     pub record: CredentialRecord,
     /// For `bind_ro`: a descriptor of the exact source object and the
@@ -249,16 +244,7 @@ pub fn stage_within(
     .with_key_path("launch.credentials");
     Err(StagingRefusal {
         error,
-        staged: progress
-            .abandon()
-            .into_iter()
-            .map(|(record, source)| StagedCredential {
-                vault: None,
-                record,
-                bind: None,
-                source,
-            })
-            .collect(),
+        staged: progress.abandon(),
     })
 }
 
@@ -267,7 +253,7 @@ pub fn stage_within(
 /// list [`Progress::abandon`] returns or never recorded at all.
 #[derive(Default)]
 struct Progress {
-    staged: Mutex<Vec<(CredentialRecord, SourceIdentity)>>,
+    staged: Mutex<Vec<(CredentialMode, CredentialRecord, SourceIdentity)>>,
     abandoned: AtomicBool,
 }
 
@@ -276,7 +262,11 @@ impl Progress {
     fn report(&self, credential: &StagedCredential) {
         let mut staged = crate::sync::lock(&self.staged);
         if !self.abandoned.load(Ordering::SeqCst) {
-            staged.push((credential.record.clone(), credential.source));
+            staged.push((
+                credential.mode,
+                credential.record.clone(),
+                credential.source,
+            ));
         }
     }
 
@@ -285,12 +275,22 @@ impl Progress {
         self.abandoned.load(Ordering::SeqCst)
     }
 
-    /// Gives up on the worker and returns what it reported before then;
-    /// nothing it reports afterwards is recorded.
-    fn abandon(&self) -> Vec<(CredentialRecord, SourceIdentity)> {
+    /// Gives up on the worker and returns what it reported before then,
+    /// without the descriptors the worker still holds; nothing it reports
+    /// afterwards is recorded.
+    fn abandon(&self) -> Vec<StagedCredential> {
         let staged = crate::sync::lock(&self.staged);
         self.abandoned.store(true, Ordering::SeqCst);
-        staged.clone()
+        staged
+            .iter()
+            .map(|(mode, record, source)| StagedCredential {
+                vault: None,
+                mode: *mode,
+                record: record.clone(),
+                bind: None,
+                source: *source,
+            })
+            .collect()
     }
 }
 
@@ -458,14 +458,7 @@ fn stage_one(
     abandoned: &dyn Fn() -> bool,
 ) -> Result<StagedCredential, JailError> {
     let id = declaration.id.as_str();
-    let mode = declaration.mode.as_str();
-    if mode != MODE_COPY_RW && mode != MODE_BIND_RO && mode != MODE_VAULT {
-        return Err(refusal(
-            id,
-            Remediation::Configuration,
-            format!("unknown mode `{mode}`"),
-        ));
-    }
+    let mode = declaration.mode;
     let destination = anchored::split_relative(declaration.dest.as_bytes()).map_err(|error| {
         refusal(
             id,
@@ -490,7 +483,7 @@ fn stage_one(
         size: source.stat.size,
     };
 
-    if mode == MODE_VAULT {
+    if mode == CredentialMode::Vault {
         let policy = declaration
             .vault
             .clone()
@@ -504,10 +497,11 @@ fn stage_one(
         .map_err(|e| refusal(id, Remediation::Configuration, e))?;
         return Ok(StagedCredential {
             vault: Some(Arc::new(secret)),
+            mode,
             record: CredentialRecord {
                 never_staged: true,
                 id: id.into(),
-                mode: MODE_VAULT.into(),
+                mode: mode.as_str().into(),
                 digest: None,
                 digest_unavailable_reason: Some("never_staged".into()),
             },
@@ -516,7 +510,7 @@ fn stage_one(
         });
     }
 
-    if mode == MODE_COPY_RW && !fits_copy_budget(*copied, source.stat.size) {
+    if mode == CredentialMode::CopyRw && !fits_copy_budget(*copied, source.stat.size) {
         return Err(refusal(
             id,
             Remediation::Configuration,
@@ -545,15 +539,16 @@ fn stage_one(
         }
     })?;
 
-    if mode == MODE_COPY_RW {
+    if mode == CredentialMode::CopyRw {
         let digest = copy_exactly(id, &source, &mut target)?;
         *copied += source.stat.size;
         return Ok(StagedCredential {
             vault: None,
+            mode,
             record: CredentialRecord {
                 never_staged: false,
                 id: id.to_owned(),
-                mode: MODE_COPY_RW.to_owned(),
+                mode: mode.as_str().to_owned(),
                 digest: Some(digest),
                 digest_unavailable_reason: None,
             },
@@ -568,10 +563,11 @@ fn stage_one(
     let (digest, reason) = bind_digest(&source);
     Ok(StagedCredential {
         vault: None,
+        mode,
         record: CredentialRecord {
             never_staged: false,
             id: id.to_owned(),
-            mode: MODE_BIND_RO.to_owned(),
+            mode: mode.as_str().to_owned(),
             digest,
             digest_unavailable_reason: reason.map(str::to_owned),
         },
@@ -1022,8 +1018,8 @@ fn check_file(stat: &Stat) -> Result<(), SourceRefusal> {
 pub struct CredentialCheck {
     /// The logical id.
     pub id: String,
-    /// `copy_rw`, `bind_ro` or `vault`.
-    pub mode: String,
+    /// How it reaches the child.
+    pub mode: CredentialMode,
     /// The destination beneath vendor state, as the profile names it.
     pub dest: NativeString,
     /// Whether every check [`inspect`] makes passed. For `copy_rw` and
@@ -1059,20 +1055,20 @@ pub fn inspect(launch: &LaunchSnapshot, forbidden: &[(u64, u64)]) -> Vec<Credent
                 .and_then(|source| check_mode(&source.stat).map(|()| source));
             let reason = match opened {
                 Err(refused) => refused.reason,
-                Ok(source) if declaration.mode == MODE_VAULT => {
+                Ok(source) if declaration.mode == CredentialMode::Vault => {
                     match vault_precheck(&source.stat, crate::vault::SOURCE_MAX) {
                         Ok(()) => REASON_VALUE_UNREAD,
                         Err(reason) => reason,
                     }
                 }
                 Ok(source)
-                    if declaration.mode == MODE_COPY_RW
+                    if declaration.mode == CredentialMode::CopyRw
                         && !fits_copy_budget(copied, source.stat.size) =>
                 {
                     "copy_budget_exceeded"
                 }
                 Ok(source) => {
-                    if declaration.mode == MODE_COPY_RW {
+                    if declaration.mode == CredentialMode::CopyRw {
                         copied += source.stat.size;
                     }
                     "ok"
@@ -1080,7 +1076,7 @@ pub fn inspect(launch: &LaunchSnapshot, forbidden: &[(u64, u64)]) -> Vec<Credent
             };
             CredentialCheck {
                 id: declaration.id.clone(),
-                mode: declaration.mode.clone(),
+                mode: declaration.mode,
                 dest: declaration.dest.clone(),
                 available: reason == "ok" || reason == REASON_VALUE_UNREAD,
                 reason_code: reason,
@@ -1427,21 +1423,21 @@ mod tests {
             state_var: None,
             home_is_state: false,
             state_subdirs: Vec::new(),
-            credentials: [MODE_COPY_RW, MODE_BIND_RO, MODE_VAULT]
-                .iter()
+            credentials: CredentialMode::ALL
+                .into_iter()
                 .map(|mode| CredentialDecl {
                     vault: None,
-                    id: (*mode).to_owned(),
+                    id: mode.as_str().to_owned(),
                     source: source.clone(),
-                    dest: NativeString::Text((*mode).to_owned()),
-                    mode: (*mode).to_owned(),
+                    dest: NativeString::Text(mode.as_str().to_owned()),
+                    mode,
                 })
                 .collect(),
         };
         for check in inspect(&launch, &[]) {
             assert_eq!(
                 check.reason_code, "source_multiply_linked",
-                "{}",
+                "{:?}",
                 check.mode
             );
         }
@@ -1553,7 +1549,7 @@ mod tests {
             id: id.to_owned(),
             source,
             dest: NativeString::Text(format!(".vault-{id}")),
-            mode: MODE_VAULT.to_owned(),
+            mode: CredentialMode::Vault,
         };
         let max = crate::vault::SOURCE_MAX;
         let cases = [
@@ -1621,7 +1617,7 @@ mod tests {
                 )
                 .unwrap(),
                 dest: NativeString::Text("a".to_owned()),
-                mode: MODE_COPY_RW.to_owned(),
+                mode: CredentialMode::CopyRw,
             }],
         };
         let reported = Mutex::new(0usize);
@@ -1663,7 +1659,7 @@ mod tests {
                         )
                         .unwrap(),
                         dest: NativeString::Text((*id).to_owned()),
-                        mode: MODE_COPY_RW.to_owned(),
+                        mode: CredentialMode::CopyRw,
                     }
                 })
                 .collect(),
@@ -1756,9 +1752,9 @@ mod tests {
         let progress = Progress::default();
         assert!(!progress.abandoned());
         progress.report(&staged[0]);
-        let ids = |list: Vec<(CredentialRecord, SourceIdentity)>| {
+        let ids = |list: Vec<StagedCredential>| {
             list.into_iter()
-                .map(|(record, _)| record.id)
+                .map(|credential| credential.record.id)
                 .collect::<Vec<_>>()
         };
         assert_eq!(ids(progress.abandon()), ["a"]);
@@ -1870,7 +1866,7 @@ mod tests {
                     )
                     .unwrap(),
                     dest: NativeString::Text((*id).to_owned()),
-                    mode: MODE_COPY_RW.to_owned(),
+                    mode: CredentialMode::CopyRw,
                 })
                 .collect(),
         };
