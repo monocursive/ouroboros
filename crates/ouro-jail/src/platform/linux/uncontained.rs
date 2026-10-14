@@ -1245,29 +1245,17 @@ impl Uncontained {
         }
         self.sampled_at_ns = now;
         if self.scan_leaf().is_some() {
-            match self.leaf.sample() {
-                Ok(hits) => {
-                    for _ in 0..hits {
-                        self.audit.record_limit_hit();
-                    }
-                    if self.leaf.oom_killed() {
+            match shared::sample_counters(&mut self.leaf, &mut self.audit) {
+                shared::Counters::Read { oom_killed } => {
+                    if oom_killed {
                         self.hard_kill();
                     }
                 }
-                Err(_) => {
-                    self.leaf.invalidate_hits();
-                    // Audit 2026-10-08 M2: unreadable counters leave every
-                    // `hit: false` claim unsupported (§11.4).
-                    self.audit
-                        .record_limit_evidence_missing("cgroup_counters_unreadable");
-                    self.lose(Subject::Boundary, Loss::VerificationFailed);
-                }
+                shared::Counters::Lost => self.lose(Subject::Boundary, Loss::VerificationFailed),
             }
         } else {
-            self.leaf.invalidate_hits();
             // The leaf cannot even be scanned, so no counter claim stands.
-            self.audit
-                .record_limit_evidence_missing("cgroup_leaf_scan_failed");
+            shared::counters_lost(&mut self.leaf, &mut self.audit, "cgroup_leaf_scan_failed");
         }
         self.scan_descendants();
     }

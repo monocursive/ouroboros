@@ -882,6 +882,15 @@ impl ExecutionCgroup {
             },
         )
     }
+    /// [`Self::open_for_test`] with `limits` written into the fake leaf's
+    /// control files, so a test can make a counter read fail.
+    #[cfg(test)]
+    pub(crate) fn open_for_test_with(
+        path: &Path,
+        limits: &crate::policy::LimitsSnapshot,
+    ) -> io::Result<Self> {
+        Self::open_created(path, limits)
+    }
     /// Keep the leaf when this value is dropped. jail-v1 §9.3: a boundary
     /// whose integrity was lost retains its state for explicit recovery,
     /// even when it happens to be empty.

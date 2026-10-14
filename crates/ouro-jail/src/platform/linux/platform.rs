@@ -3909,17 +3909,13 @@ impl LinuxRunning {
         let Some(leaf) = self.boundary.cgroup.as_mut() else {
             return;
         };
-        match leaf.sample() {
-            Ok(hits) => {
-                for _ in 0..hits {
-                    self.boundary.audit.record_limit_hit();
-                }
-                if leaf.oom_killed() {
+        match shared::sample_counters(leaf, &mut self.boundary.audit) {
+            shared::Counters::Read { oom_killed } => {
+                if oom_killed {
                     self.hard_kill();
                 }
             }
-            Err(_) => {
-                leaf.invalidate_hits();
+            shared::Counters::Lost => {
                 self.boundary.cgroup_lost = true;
                 self.hard_kill();
             }
@@ -4687,6 +4683,8 @@ pub(super) mod shared {
     use crate::capability::{Capability, CapabilityScope};
     use crate::platform::{Deadline, RunEvent};
 
+    use super::super::audit::AuditWriter;
+    use super::super::cgroup::ExecutionCgroup;
     use super::super::probe::ProbeResult;
     use super::super::tracer::TracerSummary;
 
@@ -4732,6 +4730,51 @@ pub(super) mod shared {
     }
     pub(in crate::platform::linux) fn nap() {
         super::nap();
+    }
+
+    /// What one read of the execution cgroup's counters established.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in crate::platform::linux) enum Counters {
+        /// Read, with every newly hit ceiling counted. `oom_killed`: the
+        /// kernel's OOM killer has run in the leaf.
+        Read { oom_killed: bool },
+        /// The read failed, and [`counters_lost`] recorded it.
+        Lost,
+    }
+
+    /// Reads the leaf's counters once and counts every newly hit ceiling in
+    /// the `limits` class. A failed read is [`counters_lost`].
+    pub(in crate::platform::linux) fn sample_counters(
+        leaf: &mut ExecutionCgroup,
+        audit: &mut AuditWriter,
+    ) -> Counters {
+        match leaf.sample() {
+            Ok(hits) => {
+                for _ in 0..hits {
+                    audit.record_limit_hit();
+                }
+                Counters::Read {
+                    oom_killed: leaf.oom_killed(),
+                }
+            }
+            Err(_) => {
+                counters_lost(leaf, audit, "cgroup_counters_unreadable");
+                Counters::Lost
+            }
+        }
+    }
+
+    /// Counter evidence the leaf can no longer give (§11.4): every `hit`
+    /// not yet seen becomes null, and the `limits` class records a gap
+    /// naming `reason`, so it reads degraded with a null count instead of
+    /// active with a count nothing supports.
+    pub(in crate::platform::linux) fn counters_lost(
+        leaf: &mut ExecutionCgroup,
+        audit: &mut AuditWriter,
+        reason: &str,
+    ) {
+        leaf.invalidate_hits();
+        audit.record_limit_evidence_missing(reason);
     }
 }
 
@@ -5795,6 +5838,75 @@ mod tests {
             super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&moved)).is_err()
         );
     }
+    /// Unreadable counters leave every `hit: false` unsupported (§11.4). The
+    /// sample both boundaries take records the `limits` gap, so the class
+    /// reads degraded with a null count in a contained run exactly as in
+    /// `none`, instead of active with a count nothing supports.
+    #[test]
+    fn lost_counters_degrade_the_limits_class() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("leaf");
+        std::fs::create_dir(&path).unwrap();
+        for (name, value) in [
+            ("cgroup.kill", ""),
+            ("cgroup.procs", ""),
+            ("cgroup.events", "populated 0\n"),
+            ("pids.max", ""),
+            ("pids.events", "max 0\n"),
+        ] {
+            std::fs::write(path.join(name), value).unwrap();
+        }
+        let limits = crate::policy::LimitsSnapshot {
+            wall: None,
+            pids: Some(crate::policy::LimitCeiling {
+                value: "64".to_owned(),
+                required: true,
+            }),
+            mem: None,
+            swap: None,
+            storage: None,
+            inodes: None,
+            cpu: None,
+        };
+        let mut leaf = ExecutionCgroup::open_for_test_with(&path, &limits).unwrap();
+        let mut audit = AuditWriter::new(
+            "att_00000000-0000-4000-8000-000000000001",
+            None,
+            b"/work",
+            b"/tmp",
+        );
+        assert_eq!(
+            shared::sample_counters(&mut leaf, &mut audit),
+            shared::Counters::Read { oom_killed: false }
+        );
+        assert_eq!(
+            audit.limits_class().status,
+            crate::records::SourceStatus::Active
+        );
+        assert_eq!(leaf.limits()[0].hit, Some(false));
+
+        std::fs::remove_file(path.join("pids.events")).unwrap();
+        assert_eq!(
+            shared::sample_counters(&mut leaf, &mut audit),
+            shared::Counters::Lost
+        );
+        let class = audit.limits_class();
+        assert_eq!(class.status, crate::records::SourceStatus::Degraded);
+        assert_eq!(class.observed_count, None);
+        assert!(
+            class
+                .gaps
+                .iter()
+                .any(|gap| gap.reason == "cgroup_counters_unreadable"),
+            "{class:?}"
+        );
+        assert_eq!(
+            leaf.limits()[0].hit,
+            None,
+            "an unread counter claims no `false`"
+        );
+    }
+
     /// A storage ceiling adds the hard-link denials to the `agent` baseline
     /// bubblewrap installs. The receipt's agent detail names that program —
     /// the one `applied.syscalls.digest` names — never the plain baseline,
