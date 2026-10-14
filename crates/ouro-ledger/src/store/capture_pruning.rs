@@ -260,6 +260,10 @@ impl Store {
                     operator: peer.clone(),
                     files,
                 };
+                // Every later read holds a published authority to `validate`,
+                // and nothing removes one, so an authority it would refuse is
+                // refused here, before it becomes durable.
+                r.validate(&root, id)?;
                 r.check_remaining(&root, false)?;
                 faults::hit(Point::GcIntentWrite)?;
                 if let Err(e) = gc::publish_anchor(&root, &r) {

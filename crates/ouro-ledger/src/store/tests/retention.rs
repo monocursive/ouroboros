@@ -486,6 +486,35 @@ fn capture_expiry_refuses_changed_reappearing_or_unanchored_files() {
     }
 }
 
+/// An authority every later read would refuse (here, a retention outside
+/// `RETAIN_DAYS`) is refused before it is published: once durable, nothing
+/// removes it, and the run could no longer be opened.
+#[test]
+fn capture_expiry_refuses_an_invalid_authority_before_publishing_it() {
+    let (temp, mut store, run) = gc_fixture();
+    let directory = store.root().join(&run.run_id);
+    let plan = store
+        .gc_plan_policy_at(capture_policy(), None, 100, gc_future())
+        .unwrap();
+    assert!(plan.runs[0].captures_candidate);
+    assert_refused(
+        store.prune_captures(
+            &run.run_id,
+            0,
+            &plan.evaluated_at,
+            &plan.capture_cutoff,
+            &peer(),
+        ),
+        "invalid capture GC authority",
+    );
+    assert!(fs::symlink_metadata(directory.join("captures-gc.json")).is_err());
+    assert!(directory.join("artifacts/stdout.bin").exists());
+    assert!(store.show(&run.run_id).unwrap().capture_history.is_none());
+    drop(store);
+    let store = Store::open(&temp.path().join("data")).unwrap();
+    assert!(store.verify(None).unwrap()[0].local_consistency);
+}
+
 #[test]
 fn capture_expiry_removes_empty_selected_files_without_claiming_removed_bytes() {
     let (_temp, mut store, run) = gc_fixture_captures(&[("stdout", b"")]);
