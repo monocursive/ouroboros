@@ -3341,7 +3341,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     }
 
     #[test]
-    fn a_missing_host_manifest_or_evidence_write_fails_the_run() {
+    fn a_failed_host_manifest_or_evidence_write_fails_the_run() {
         let mut o = a_clean_run();
         remote(&mut o).host_manifest = failed(1, "bash: line 1");
         assert!(
@@ -3797,7 +3797,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     }
 
     #[test]
-    fn an_i01_finding_or_a_missing_probe_fails_the_run() {
+    fn an_i01_finding_or_a_failed_probe_fails_the_run() {
         let mut o = a_clean_run();
         tested(&mut o).i01 = CommandResult {
             code: Some(0),
@@ -3862,7 +3862,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     }
 
     #[test]
-    fn a_failed_or_absent_contract_validation_fails_the_run() {
+    fn a_failed_contract_validation_fails_the_run() {
         let mut o = a_clean_run();
         o.contract_validation = failed(1, "AssertionError: receipt-tool.json");
         let d = verdict(&o);
@@ -4067,7 +4067,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     }
 
     #[test]
-    fn a_failed_or_absent_smoke_leg_fails_the_run() {
+    fn a_failed_smoke_leg_fails_the_run() {
         let mut o = a_clean_run();
         let mut s = clean_smoke();
         s.transcript.stdout = SMOKE_TRANSCRIPT.replace("smoke tool 0", "smoke tool 1");
