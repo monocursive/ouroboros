@@ -352,7 +352,7 @@ fn scan_directory(
     };
     walk(root_dir, root, b"", 1, names, &mut state)?;
 
-    // Audit 2026-10-08 M5: only single-component names are root literals —
+    // Only single-component names are root literals —
     // a multi-component name like `.git/hooks` protects what exists and
     // claims nothing for a path that does not (§4.4: a segment created
     // later is outside the claim either way).
@@ -550,7 +550,7 @@ fn classify_entry<'n>(
     ordinary_hint_safe: bool,
 ) -> Result<EntryAction<'n>, ScanError> {
     // A single-component name matches any directory entry; a
-    // multi-component name (audit 2026-10-08 M5) matches the entry's whole
+    // multi-component name matches the entry's whole
     // path beneath the writable root, so `.git/hooks` protects a nested
     // hooks directory while `.git` itself stays writable. A multi-component
     // name never matches at the root: it is not a root literal and a
@@ -592,7 +592,7 @@ fn classify_entry<'n>(
     }
     // A symlink on the path *to* a deeper protected name hides whatever
     // lives behind it, so `existing_and_root` cannot claim coverage it could
-    // not see (audit 2026-10-08 M5): a `.git` symlink while `.git/hooks` is
+    // not see: a `.git` symlink while `.git/hooks` is
     // protected is recorded like a protected symlink.
     if meta.kind == Kind::Symlink
         && names.iter().any(|literal| {

@@ -6,11 +6,14 @@
 //! than work in `pre_exec`, so that nothing but the target's own code runs
 //! after the boundary is closed.
 //!
-//! It does three things, in this order:
+//! In this order, it:
 //!
-//! 1. installs the narrowing filter, when observation is on;
-//! 2. blocks reading one byte from the release pipe;
-//! 3. `execve`s the target, searching `PATH` itself
+//! 1. under `agent`, installs the connect mediation and starts the bridge;
+//! 2. installs the narrowing filter, when observation is on;
+//! 3. blocks reading one byte from the release pipe;
+//! 4. gives the target the signal state and descriptor limit the operator
+//!    started the run with, and closes what the supervisor took;
+//! 5. `execve`s the target, searching `PATH` itself
 //!    ([`exec_candidates`]).
 //!
 //! The blocking read is the gate: until the supervisor writes that byte, no
@@ -371,7 +374,7 @@ fn fd_value(raw: Option<&OsString>, option: &'static str) -> Result<RawFd, Launc
 /// Everything that allocates happens before the filter is installed. After
 /// that point the only calls are `read`, `close`, `sigaction` and
 /// `sigprocmask` (with `sigemptyset` and `sigaddset` on stack data),
-/// `execve`, `faccessat`, `write` and `_exit`.
+/// `getrlimit` and `setrlimit`, `execve`, `faccessat`, `write` and `_exit`.
 pub fn launch_main(args: &[OsString]) -> ! {
     let parsed = match parse(args) {
         Ok(parsed) => parsed,
@@ -434,8 +437,7 @@ pub fn launch_main(args: &[OsString]) -> ! {
         report_and_exit(parsed.error_fd, errno, EXIT_BRIDGE_FAILED);
     }
 
-    // Audit 2026-09-25-2, S14: read this attempt's narrowing data before the
-    // filter goes in. Two bytes, already in the pipe; the descriptor closes
+    // Read this attempt's narrowing data before the filter goes in. Two bytes, already in the pipe; the descriptor closes
     // immediately after, so the value never reaches the target — and neither
     // does any argument, because the launcher's whole argv is visible in
     // `/proc/1/cmdline` from inside the sandbox.
@@ -772,8 +774,8 @@ fn mediate(listener_fd: RawFd, sockdiag_fd: RawFd) -> Result<(), i32> {
 /// The pair's other end is placed at `report_fd` for the supervisor to take
 /// while this process is blocked; like the mediation descriptors it is not
 /// close-on-exec, and the explicit close after release keeps it from the
-/// target. A socket, unlike the pipe it replaced, cannot be reopened by a
-/// same-uid peer through `/proc/<bridge>/fd` (audit 2026-09-25-2, S2).
+/// target. A socket, unlike a pipe, cannot be reopened by a
+/// same-uid peer through `/proc/<bridge>/fd`.
 /// Refuses (`EEXIST`) if `report_fd` is already open.
 fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
     let path = CString::new(super::bwrap::JAIL_INSIDE_PATH).map_err(|_| libc::EINVAL)?;
@@ -789,7 +791,7 @@ fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
     // SAFETY: socketpair fills the two-element array it is given. A
     // `SOCK_SEQPACKET` pair, not a pipe: a same-uid target in the jail's pid
     // namespace can open `/proc/<bridge>/fd/2` on a pipe and forge report
-    // bytes into the supervisor's channel (audit 2026-09-25-2, S2), while a
+    // bytes into the supervisor's channel, while a
     // socket cannot be reopened through /proc at all, and this pair has no
     // name any address could reach. Nonblocking on both ends: a bridge whose
     // reader is slow drops a report datagram rather than stall its relays,
@@ -878,7 +880,7 @@ fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
 /// The same list as [`exec_candidates`], as raw bytes, each spelling followed
 /// by its symlink-resolved form when it exists on this host.
 ///
-/// Security 2026-09-27 (audit 3 A1): the exec confirmation now also compares
+/// The exec confirmation also compares
 /// the kernel's own image (`/proc/<tid>/exe`, every symlink followed) against
 /// this list, so a candidate's canonical form must be here too: on a
 /// merged-`/usr` host the operator's `/bin/true` spelling resolves to
@@ -897,7 +899,7 @@ pub fn exec_candidate_bytes(
     let mut out = Vec::new();
     for candidate in exec_candidates(&program, path) {
         // Resolve first, while the candidate is still borrowed: the kernel's
-        // `/proc/<tid>/exe` link names the resolved form (audit 3 A1).
+        // `/proc/<tid>/exe` link names the resolved form.
         if let Ok(resolved) = std::fs::canonicalize({
             use std::os::unix::ffi::OsStrExt as _;
             std::ffi::OsStr::from_bytes(candidate.as_bytes())

@@ -3,8 +3,9 @@
 //! jail-v1 §8.3: everything but validated stdio closes before exec, and the
 //! descriptors that must survive get fixed numbers the inside launcher is told
 //! about by number. The work after `fork` is `prctl`, `getppid`,
-//! `close_range` and one `dup2` per mapped descriptor, all async-signal-safe;
-//! nothing else runs in that window.
+//! `close_range` and one `dup2` per mapped descriptor, or `_exit` when the
+//! supervisor is already gone, all async-signal-safe; nothing else runs in
+//! that window.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -117,7 +118,8 @@ impl FdMap {
     /// Arrange for this layout to be installed in `command`'s child.
     ///
     /// The closure runs after `fork` and before `exec` and calls nothing but
-    /// `prctl`, `getppid`, `close_range` and `dup2`, all async-signal-safe.
+    /// `prctl`, `getppid`, `close_range`, `dup2` and `_exit`, all
+    /// async-signal-safe.
     ///
     /// It starts by tying the child's life to this process with
     /// `PR_SET_PDEATHSIG` (§8.2), and re-reads the parent pid immediately
@@ -173,7 +175,8 @@ impl FdMap {
                 if parent_death && libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                // SAFETY: getppid takes no arguments and cannot fail.
+                // SAFETY: getppid takes no arguments and cannot fail; _exit
+                // takes a scalar and does not return.
                 if parent_death && libc::getppid() != supervisor {
                     // The supervisor died in the fork window, so the signal
                     // this child just armed will never arrive. Leave before

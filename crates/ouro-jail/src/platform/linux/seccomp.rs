@@ -118,7 +118,7 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     ("open_by_handle_at", nr(304, 265)),
     ("name_to_handle_at", nr(303, 264)),
     ("syslog", nr(103, 116)),
-    // Security 2026-09-25-2 (audits S7 and S10): the ptrace-class cousins
+    // The ptrace-class cousins
     // of the denied `ptrace`/`process_vm_*`. Each is kernel-gated by a
     // PTRACE_MODE_* check, but on a host with
     // `kernel.yama.ptrace_scope=0` a same-uid peer is enough: `pidfd_getfd`
@@ -135,15 +135,14 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     ("kcmp", nr(312, 272)),
     ("move_pages", nr(279, 239)),
     ("migrate_pages", nr(256, 238)),
-    // Security 2026-09-25-2 (audit S10): `statmount`/`listmount` read the
+    // `statmount`/`listmount` read the
     // mount topology. Inside the jail they see only its own mount
     // namespace, but §9.2's claim is "every mount interface old and new",
     // and a default-allow table must not ship new kernel surface by
     // accident.
     ("statmount", 457),
     ("listmount", 458),
-    // Security 2026-09-27 (audit 3 A7a, the S7/S10 drift class): the quota
-    // interfaces. `quotactl` names a mounted filesystem by path and
+    // The quota interfaces. `quotactl` names a mounted filesystem by path and
     // `quotactl_fd` by fd, and both set, clear and read per-filesystem
     // accounting: inside the jail they reach its own mounts only, but §9.2's
     // claim is "every mount interface old and new", and a default-allow
@@ -152,8 +151,7 @@ pub const DENY_EPERM: &[(&str, u32)] = &[
     // a deny.
     ("quotactl", nr(179, 60)),
     ("quotactl_fd", 443),
-    // Security 2026-09-27 (audit 4 B8, the S10 drift class): the global
-    // clock-adjustment interfaces. Inside the jail they are stopped by the
+    // The global clock-adjustment interfaces. Inside the jail they are stopped by the
     // absent CAP_SYS_TIME rather than by a deny — unreachability, not a
     // refusal, which is exactly the "new kernel surface ships allowed"
     // shape §9.2's rationale names. `adjtimex`, `clock_adjtime` and
@@ -224,7 +222,7 @@ pub const CLONE_NS_MASK: u32 = CLONE_NEWTIME
     | CLONE_NEWNET;
 
 /// `CLONE_UNTRACED`, checked in argument 0 of `clone` by every contained
-/// baseline (J4 S4): a task the kernel does not attach to the observer's
+/// baseline: a task the kernel does not attach to the observer's
 /// tracer would be a descendant nothing observes.
 pub const CLONE_UNTRACED: u32 = 0x0080_0000;
 
@@ -401,7 +399,7 @@ fn build(shape: &Shape) -> Result<Program, BpfError> {
     }
     asm.ja(L_ALLOW);
 
-    // clone: deny CLONE_UNTRACED in every contained profile (J4 S4) — the
+    // clone: deny CLONE_UNTRACED in every contained profile — the
     // observer's ptrace attachment is how every descendant is seen, and the
     // kernel skips it for that flag — and any namespace bit where the shape
     // says so. Every clone flag lives in the low 32 bits, so the low word is
@@ -1117,7 +1115,7 @@ mod tests {
         }
     }
 
-    // -- J3 agent: the agent baseline and the mediation filter ------------
+    // -- agent: the agent baseline and the mediation filter ---------------
 
     /// [`run3`] with a zero third argument.
     fn run(prog: &Program, arch: u32, nr: u32, args: [u32; 2]) -> u32 {
@@ -1192,7 +1190,7 @@ mod tests {
     ];
 
     /// Regenerates the pinned evidence tables after a deliberate change to
-    /// the deny set (audit 4 B8 used it for the time-family additions). Run
+    /// the deny set. Run
     /// deliberately; the byte-for-byte tests above then pin the new tables.
     #[test]
     #[ignore = "writes the evidence files; run deliberately"]
@@ -1273,7 +1271,7 @@ mod tests {
     #[test]
     fn the_tool_baseline_is_byte_for_byte_the_checked_in_one() {
         // The shared builder must not have moved a single instruction of the
-        // `tool` filter J2 verified: its digest is pinned by the evidence
+        // `tool` filter: its digest is pinned by the evidence
         // file the conformance run compares, checked here on every host.
         let checked_in = std::fs::read_to_string(format!(
             "{}/../../docs/specs/jail-v1/evidence/seccomp-table-tool-{}.txt",
@@ -1284,9 +1282,9 @@ mod tests {
         assert_eq!(tool_baseline_table(), checked_in);
     }
 
-    /// J4 S4 moved both `agent` baselines; their tables are now kept as
-    /// evidence beside the `tool` one and pinned the same way, so the next
-    /// change to either digest is a visible diff.
+    /// Both `agent` baselines' tables are kept as evidence beside the `tool`
+    /// one and pinned the same way, so a change to either digest is a
+    /// visible diff.
     #[test]
     fn the_agent_baselines_are_byte_for_byte_the_checked_in_ones() {
         let unprivileged = std::fs::read_to_string(format!(
@@ -1515,7 +1513,7 @@ mod tests {
                     assert_eq!(run3(&m, NATIVE, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
                 }
             }
-            // AF_UNIX: tool refuses it (EPERM, as J2 verified); agent leaves
+            // AF_UNIX: tool refuses it (EPERM); agent leaves
             // it to the mediation filter.
             assert_eq!(run3(&tool, NATIVE, nr, [AF_UNIX, SOCK_STREAM, 0]), EPERM);
             for agent in &agents {
@@ -1558,7 +1556,7 @@ mod tests {
         }
     }
 
-    /// J4 D1: `tool` and `build` refuse `seccomp(2)` asking for a
+    /// `tool` and `build` refuse `seccomp(2)` asking for a
     /// notification listener. A child's own listener outranks the observer's
     /// trace stop, and a `CONTINUE` reply runs the call unobserved. Only the
     /// flag decides: the other operations and a plain filter stay allowed,
@@ -1621,7 +1619,7 @@ mod tests {
         );
     }
 
-    /// J4 S4: every contained baseline refuses `clone` with
+    /// Every contained baseline refuses `clone` with
     /// `CLONE_UNTRACED` (EPERM), whatever else the flags carry, in both
     /// `agent` variants too: `agent` is observed by the same ptrace tracer.
     /// The flags glibc uses for threads, `fork` and `posix_spawn` stay
