@@ -1,10 +1,10 @@
 ---
 import '@fontsource-variable/manrope';
 import '../styles/global.css';
+import { releasedDocument, repositoryUrl } from '../release';
 
 interface Props { title: string; description: string; markdown?: string; }
 const { title, description, markdown } = Astro.props;
-const repository = 'https://github.com/monocursive/ouroboros';
 const canonical = new URL(Astro.url.pathname, Astro.site);
 ---
 <!doctype html>
@@ -39,7 +39,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
         <nav aria-label="Main navigation">
           <a href="/guide/" aria-current={Astro.url.pathname.startsWith('/guide') ? 'page' : undefined}>Guide</a>
           <a href="/roadmap/" aria-current={Astro.url.pathname.startsWith('/roadmap') ? 'page' : undefined}>Roadmap</a>
-          <a class="github-link" href={`${repository}/tree/dev`}>GitHub <span aria-hidden="true">↗</span></a>
+          <a class="github-link" href={`${repositoryUrl}/tree/dev`}>GitHub <span aria-hidden="true">↗</span></a>
         </nav>
       </div>
     </header>
@@ -47,7 +47,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <footer class="site-footer">
       <div class="container footer-row">
         <p>An open-source sandbox for AI agents. Currently in development.</p>
-        <div><a href={`${repository}/blob/dev/LICENSE`}>MIT license</a><a href="https://monocursive.com">By Monocursive ↗</a></div>
+        <div><a href={releasedDocument('LICENSE')}>MIT license</a><a href="https://monocursive.com">By Monocursive ↗</a></div>
       </div>
     </footer>
   </body>

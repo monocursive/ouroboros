@@ -1,6 +1,6 @@
 ---
 import Site from '../layouts/Site.astro';
-import { jailReleaseUrl, vmReleaseUrl, vmVersion } from '../release';
+import { jailReleaseUrl, releasedDocument, vmReleaseUrl, vmVersion } from '../release';
 const command = `curl --proto '=https' --tlsv1.2 -fsSL https://ouroboros.monocursive.com/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 # Linux: ouro-jail doctor --profile tool
@@ -21,7 +21,8 @@ const upcoming = [
   { status: 'Next', title: 'More tested agents', text: 'Run each agent and version against a current jail build, then publish the compatibility results and updated benchmarks.' },
   { status: 'Research', title: 'Native macOS execution', text: 'Resolve process cleanup when the supervising helper dies. Apple entitlement approval is also pending; approval alone will not make execution ready.' },
 ];
-const benchmark = 'https://github.com/monocursive/ouroboros/blob/dev/docs/benchmarks/jail/followup-2026-09-29.md#k17-results';
+// The figures below are this record's, as published with the Linux release.
+const benchmark = `${releasedDocument('docs/benchmarks/jail/followup-2026-09-29.md')}#k17-results`;
 ---
 <Site title="Ouroboros Jail — A Linux sandbox for AI agents" description="Give your AI agent only the access it needs. Restrict files, network destinations, and runtime, with receipts and recorded Linux benchmarks.">
   <section class="hero container" aria-labelledby="hero-heading">
