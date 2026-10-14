@@ -12,11 +12,12 @@ use super::{
     relay::RelayOutcome,
     sys,
 };
-use crate::{network::Destination, vault::Vault};
+use crate::{network::Destination, vault::Vault, vault::origin::Initiator};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::os::fd::{AsFd as _, BorrowedFd};
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
@@ -76,30 +77,29 @@ pub(super) struct Failure {
     pub reason: Reason,
     pub progress: RelayOutcome,
 }
-pub(super) fn relay(
-    vault: &Vault,
-    client: &std::sync::Arc<UnixStream>,
-    upstream: &std::sync::Arc<TcpStream>,
-    target: &Destination,
-    early: &[u8],
-    chunk: usize,
-    initiator: &crate::vault::origin::Initiator,
-) -> Result<RelayOutcome, Failure> {
+
+/// One connection through the lane: its two sockets, the destination its
+/// certificate and credentials are bound to, the process that initiated it,
+/// the client's first flight (read before the lane started) and the relay
+/// buffer one direction owns.
+pub(super) struct Connection<'a> {
+    pub vault: &'a Vault,
+    pub client: &'a Arc<UnixStream>,
+    pub upstream: &'a Arc<TcpStream>,
+    pub target: &'a Destination,
+    pub initiator: &'a Initiator,
+    pub early: &'a [u8],
+    pub chunk: usize,
+}
+
+pub(super) fn relay(connection: &Connection<'_>) -> Result<RelayOutcome, Failure> {
     let mut progress = RelayOutcome {
         bytes_in: 0,
         bytes_out: 0,
         discarded: 0,
         end: EndReason::UpstreamClosed,
     };
-    match relay_inner(
-        vault,
-        client,
-        upstream,
-        (target, initiator),
-        early,
-        chunk,
-        &mut progress,
-    ) {
+    match relay_inner(connection, &mut progress) {
         Ok(()) => Ok(progress),
         Err(reason) => {
             progress.end = if matches!(
@@ -119,28 +119,107 @@ pub(super) fn relay(
     }
 }
 
-fn relay_inner(
-    vault: &Vault,
-    client: &std::sync::Arc<UnixStream>,
-    upstream: &std::sync::Arc<TcpStream>,
-    authority: (&Destination, &crate::vault::origin::Initiator),
-    early: &[u8],
-    chunk: usize,
-    outcome: &mut RelayOutcome,
-) -> Result<(), Reason> {
-    let (target, initiator) = authority;
+/// The client's side of the lane, decrypted: the first flight's bytes are
+/// read before the socket.
+type Incoming<'a> = rustls::StreamOwned<rustls::ServerConnection, ClientIo<'a>>;
+/// The upstream's side of the lane, re-originated.
+type Outgoing<'a> = rustls::StreamOwned<rustls::ClientConnection, &'a TcpStream>;
+
+fn relay_inner(connection: &Connection<'_>, outcome: &mut RelayOutcome) -> Result<(), Reason> {
     let started = Instant::now();
     // One lifetime for the whole connection: every client phase, the pump
     // included, ends by it.
     let lifetime = started + CLIENT_DEADLINE;
-    let mut server = vault.server(target)?;
+    let mut incoming = terminate(connection, started + HEADER_DEADLINE)?;
+    let (mut request, length) = read_request(&mut incoming, connection.target)?;
+    let mut outgoing = originate(connection)?;
+    let websocket_key = request.websocket_key().map(<[u8]>::to_vec);
+    let lease = connection
+        .vault
+        .inject_bound("https", &mut request, connection.initiator)?;
+    let lease = Arc::new(lease);
+    let watch = crate::vault::lifecycle::Watch::start(
+        lease.clone(),
+        connection.client.clone(),
+        connection.upstream.clone(),
+    )?;
+    incoming.sock.deadline = lifetime;
+    lease.check()?;
+    forward(
+        &mut incoming,
+        &mut outgoing,
+        &mut request,
+        length,
+        connection.chunk,
+        outcome,
+    )?;
+    let response = read_response(&mut outgoing, &watch)?;
+    let switched = response.starts_with(b"HTTP/1.1 101 ");
+    if switched {
+        // A switch nobody asked for is the upstream's protocol error.
+        let key = websocket_key.as_deref().ok_or(Reason::UpstreamProtocol)?;
+        verify_websocket(&response, key)?;
+    }
+    incoming
+        .write_all(&response)
+        .map_err(|_| Reason::ClientClosed)?;
+    outcome.bytes_in += response.len() as u64;
+    incoming.flush().map_err(|_| Reason::ClientClosed)?;
+    let result = pump(
+        incoming.conn,
+        outgoing.conn,
+        incoming.sock.socket,
+        outgoing.sock,
+        &watch,
+        Lane {
+            websocket: switched,
+            chunk: connection.chunk,
+            lifetime,
+        },
+        outcome,
+    );
+    connection
+        .client
+        .set_nonblocking(false)
+        .map_err(|_| Reason::InternalError)?;
+    connection
+        .upstream
+        .set_nonblocking(false)
+        .map_err(|_| Reason::InternalError)?;
+    let server = result?;
+    finish(
+        server,
+        connection.client,
+        lifetime,
+        connection.chunk,
+        outcome,
+    );
+    if watch.revoked() {
+        outcome.end = EndReason::CredentialRevoked;
+    }
+    Ok(())
+}
+
+/// Terminates the client's TLS with a certificate for the destination,
+/// reading the first flight before the socket, until `deadline`.
+fn terminate<'a>(connection: &Connection<'a>, deadline: Instant) -> Result<Incoming<'a>, Reason> {
+    let mut server = connection.vault.server(connection.target)?;
     server.set_buffer_limit(Some(TLS_BUFFER));
     let io = ClientIo {
-        prefix: early,
-        socket: client,
-        deadline: started + HEADER_DEADLINE,
+        prefix: connection.early,
+        socket: connection.client,
+        deadline,
     };
-    let mut incoming = rustls::StreamOwned::new(server, io);
+    Ok(rustls::StreamOwned::new(server, io))
+}
+
+/// Reads the decrypted request head, bounded by [`MAX_HEAD`] and the
+/// client's deadline, and parses it. Returns the request and its body's
+/// length: the lane takes one request whose body has a declared length.
+fn read_request(
+    incoming: &mut Incoming<'_>,
+    target: &Destination,
+) -> Result<(http::Request, u64), Reason> {
     let mut head = Vec::new();
     while !head.ends_with(b"\r\n\r\n") {
         if head.len() >= MAX_HEAD {
@@ -152,7 +231,7 @@ fn relay_inner(
             .map_err(|error| client_head_failure(&error))?;
         head.push(byte[0]);
     }
-    let mut request = origin::http_request(&head, target, 443)?;
+    let request = origin::http_request(&head, target, 443)?;
     head.zeroize();
     // Chunked uploads are explicitly unsupported in this minimal TLS lane;
     // never mistake an unframed body or pipeline for part of this request.
@@ -170,27 +249,42 @@ fn relay_inner(
     {
         return Err(Reason::UnsupportedRequest);
     }
+    Ok((request, length))
+}
+
+/// Re-originates TLS to the upstream with certificate validation, under the
+/// upstream I/O deadlines. The handshake completes, and the certificate is
+/// verified, before any secret is released.
+fn originate<'a>(connection: &Connection<'a>) -> Result<Outgoing<'a>, Reason> {
+    let upstream: &'a TcpStream = connection.upstream;
     upstream
         .set_read_timeout(Some(UPSTREAM_IO))
         .map_err(|_| Reason::InternalError)?;
     upstream
         .set_write_timeout(Some(UPSTREAM_IO))
         .map_err(|_| Reason::InternalError)?;
-    let mut outgoing = rustls::StreamOwned::new(vault.client(target)?, &**upstream);
-    // Complete and verify the upstream handshake before releasing any secret.
+    let mut outgoing =
+        rustls::StreamOwned::new(connection.vault.client(connection.target)?, upstream);
     while outgoing.conn.is_handshaking() {
         outgoing
             .conn
             .complete_io(&mut outgoing.sock)
             .map_err(|_| Reason::UpstreamProtocol)?;
     }
-    let websocket_key = request.websocket_key().map(|key| key.to_vec());
-    let lease = vault.inject_bound("https", &mut request, initiator)?;
-    let lease = std::sync::Arc::new(lease);
-    let watch =
-        crate::vault::lifecycle::Watch::start(lease.clone(), client.clone(), upstream.clone())?;
-    incoming.sock.deadline = lifetime;
-    lease.check()?;
+    Ok(outgoing)
+}
+
+/// Sends the substituted request head, wiping it as soon as it is written,
+/// then exactly `length` body bytes from the client, counting what reached
+/// the upstream.
+fn forward(
+    incoming: &mut Incoming<'_>,
+    outgoing: &mut Outgoing<'_>,
+    request: &mut http::Request,
+    length: u64,
+    chunk: usize,
+    outcome: &mut RelayOutcome,
+) -> Result<(), Reason> {
     let sent = outgoing.write_all(&request.forward_head);
     let head_bytes = request.forward_head.len() as u64;
     request.forward_head.zeroize();
@@ -213,8 +307,16 @@ fn relay_inner(
         outgoing.flush().map_err(|_| Reason::ConnectFailed)?;
         outcome.bytes_out += n as u64;
     }
-    outgoing.flush().map_err(|_| Reason::ConnectFailed)?;
-    // Read a bounded response head before exposing any protocol switch.
+    outgoing.flush().map_err(|_| Reason::ConnectFailed)
+}
+
+/// Reads the upstream's response head, bounded by [`MAX_HEAD`], before
+/// anything of it reaches the client, so no protocol switch is exposed
+/// before it is checked. A revoked lease ends the wait.
+fn read_response(
+    outgoing: &mut Outgoing<'_>,
+    watch: &crate::vault::lifecycle::Watch,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, Reason> {
     let mut response = zeroize::Zeroizing::new(Vec::new());
     while !response.ends_with(b"\r\n\r\n") {
         if response.len() >= MAX_HEAD {
@@ -229,40 +331,19 @@ fn relay_inner(
             .map_err(|_| Reason::ConnectFailed)?;
         response.push(byte[0]);
     }
-    let switched = response.starts_with(b"HTTP/1.1 101 ");
-    if switched {
-        // A switch nobody asked for is the upstream's protocol error.
-        let key = websocket_key.as_deref().ok_or(Reason::UpstreamProtocol)?;
-        verify_websocket(&response, key)?;
-    }
-    incoming
-        .write_all(&response)
-        .map_err(|_| Reason::ClientClosed)?;
-    outcome.bytes_in += response.len() as u64;
-    incoming.flush().map_err(|_| Reason::ClientClosed)?;
-    let (server, client_io) = (incoming.conn, incoming.sock);
-    let (client_conn, socket) = (outgoing.conn, outgoing.sock);
-    drop(buffer);
-    let result = pump(
-        server,
-        client_conn,
-        client_io.socket,
-        socket,
-        &watch,
-        Lane {
-            websocket: switched,
-            chunk,
-            lifetime,
-        },
-        outcome,
-    );
-    client
-        .set_nonblocking(false)
-        .map_err(|_| Reason::InternalError)?;
-    upstream
-        .set_nonblocking(false)
-        .map_err(|_| Reason::InternalError)?;
-    let server = result?;
+    Ok(response)
+}
+
+/// Ends the client's side once the response is complete: its
+/// `close_notify` first, then whatever the client still sends counted and
+/// dropped for at most [`DRAIN`] within the lifetime.
+fn finish(
+    server: rustls::ServerConnection,
+    client: &UnixStream,
+    lifetime: Instant,
+    chunk: usize,
+    outcome: &mut RelayOutcome,
+) {
     let mut buffer = zeroize::Zeroizing::new(vec![0u8; chunk.max(1)]);
     let mut incoming = rustls::StreamOwned::new(
         server,
@@ -291,10 +372,6 @@ fn relay_inner(
             Err(_) => break,
         }
     }
-    if watch.revoked() {
-        outcome.end = EndReason::CredentialRevoked;
-    }
-    Ok(())
 }
 
 /// Checks the upstream's `101` against RFC 6455 and the client's nonce.
@@ -382,6 +459,158 @@ struct Lane {
     lifetime: Instant,
 }
 
+/// Whom one side's failures are put on.
+struct Blame {
+    /// The relay's end when writing this side's records fails.
+    write: EndReason,
+    /// The refusal when a record from this side does not decrypt.
+    record: Reason,
+}
+
+impl Blame {
+    const CLIENT: Blame = Blame {
+        write: EndReason::ClientError,
+        record: Reason::ClientClosed,
+    };
+    const DESTINATION: Blame = Blame {
+        write: EndReason::UpstreamError,
+        record: Reason::UpstreamProtocol,
+    };
+}
+
+/// One side of the pump: its TLS connection and what the pump knows of it.
+struct Side {
+    conn: rustls::Connection,
+    blame: Blame,
+    /// Plaintext read from this side and not yet handed to the other.
+    read: zeroize::Zeroizing<Vec<u8>>,
+    /// The side's records ended: its peer closed, or reading or writing
+    /// them failed.
+    eof: bool,
+    /// Plaintext handed to this side's connection whose records have not
+    /// all reached its socket yet; counted once they have.
+    pending: u64,
+}
+
+/// What taking one side's decrypted plaintext found.
+enum Plaintext {
+    /// Bytes arrived.
+    Read,
+    /// The side's plaintext ended: its peer's `close_notify`, or a failure.
+    Ended,
+    /// Nothing is decrypted yet.
+    Waiting,
+    /// The buffer is full; nothing was taken.
+    Full,
+}
+
+impl Side {
+    fn new(conn: rustls::Connection, blame: Blame, limit: usize) -> Self {
+        Side {
+            conn,
+            blame,
+            read: zeroize::Zeroizing::new(Vec::with_capacity(limit)),
+            eof: false,
+            pending: 0,
+        }
+    }
+
+    /// Moves what the connection has decrypted into the buffer, up to
+    /// `limit` bytes, records received before the pump included. With
+    /// `discarded`, the bytes are counted there and wiped instead of kept.
+    fn take_plaintext(&mut self, limit: usize, discarded: Option<&mut u64>) -> Plaintext {
+        if self.read.len() >= limit {
+            return Plaintext::Full;
+        }
+        let used = self.read.len();
+        self.read.resize(limit, 0);
+        let read = self.conn.reader().read(&mut self.read[used..]);
+        let n = read.as_ref().ok().copied().unwrap_or(0);
+        self.read.truncate(used + n);
+        match read {
+            Ok(0) => Plaintext::Ended,
+            Ok(n) => {
+                if let Some(discarded) = discarded {
+                    *discarded += n as u64;
+                    self.read[used..].zeroize();
+                    self.read.truncate(used);
+                }
+                Plaintext::Read
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Plaintext::Waiting,
+            Err(_) => Plaintext::Ended,
+        }
+    }
+
+    /// Hands `plaintext` (the other side's) to this side's connection once
+    /// its previous records are written, wiping what it took. Whether
+    /// anything was taken.
+    fn give_plaintext(
+        &mut self,
+        plaintext: &mut zeroize::Zeroizing<Vec<u8>>,
+    ) -> Result<bool, Reason> {
+        if plaintext.is_empty() || self.conn.wants_write() {
+            return Ok(false);
+        }
+        match self.conn.writer().write(plaintext) {
+            Ok(n) => {
+                self.pending += n as u64;
+                plaintext[..n].zeroize();
+                plaintext.drain(..n);
+                Ok(n != 0)
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(false),
+            Err(_) => Err(Reason::ConnectFailed),
+        }
+    }
+
+    /// Moves records between the connection and `socket` as `revents`
+    /// allows: pending records out, then new records in. Plaintext whose
+    /// records all reached the socket is counted in `delivered`. A failed
+    /// write ends the side and records its blame as the relay's `end`; a
+    /// record that does not decrypt refuses with its blame.
+    fn exchange<S>(
+        &mut self,
+        mut socket: &S,
+        revents: libc::c_short,
+        delivered: &mut u64,
+        end: &mut EndReason,
+    ) -> Result<(), Reason>
+    where
+        for<'s> &'s S: io::Read + io::Write,
+    {
+        if revents & libc::POLLOUT != 0 {
+            let result = self.conn.write_tls(&mut socket);
+            if result.is_ok() && !self.conn.wants_write() {
+                *delivered += std::mem::take(&mut self.pending);
+            }
+            if result.is_err_and(|e| {
+                e.kind() != io::ErrorKind::WouldBlock && e.kind() != io::ErrorKind::Interrupted
+            }) {
+                *end = self.blame.write;
+                self.eof = true;
+            }
+        }
+        if revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+            && !self.eof
+            && self.conn.wants_read()
+        {
+            match self.conn.read_tls(&mut socket) {
+                Ok(0) => self.eof = true,
+                Ok(_) => {
+                    let record = self.blame.record;
+                    let _state = self.conn.process_new_packets().map_err(|_| record)?;
+                }
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => self.eof = true,
+            }
+        }
+        Ok(())
+    }
+}
+
 // Two nonblocking TLS state machines, bounded plaintext buffers, the
 // connection's one absolute lifetime. Only a verified RFC6455 switch enables
 // client-to-upstream traffic.
@@ -400,24 +629,24 @@ fn pump(
         lifetime,
     } = lane;
     let limit = chunk.clamp(1, TLS_BUFFER);
-    let mut incoming = rustls::Connection::Server(server);
-    let mut outgoing = rustls::Connection::Client(upstream);
-    incoming.set_buffer_limit(Some(TLS_BUFFER));
-    outgoing.set_buffer_limit(Some(TLS_BUFFER));
+    let mut client = Side::new(rustls::Connection::Server(server), Blame::CLIENT, limit);
+    let mut destination = Side::new(
+        rustls::Connection::Client(upstream),
+        Blame::DESTINATION,
+        limit,
+    );
+    client.conn.set_buffer_limit(Some(TLS_BUFFER));
+    destination.conn.set_buffer_limit(Some(TLS_BUFFER));
     socket
         .set_nonblocking(true)
         .map_err(|_| Reason::InternalError)?;
     remote
         .set_nonblocking(true)
         .map_err(|_| Reason::InternalError)?;
-    let mut up = zeroize::Zeroizing::new(Vec::with_capacity(limit));
-    let mut down = zeroize::Zeroizing::new(Vec::with_capacity(limit));
-    let mut client_eof = false;
-    let mut upstream_eof = false;
+    // The upstream's plaintext is all taken: it ended, and nothing of it is
+    // left in its connection.
     let mut upstream_drained = false;
     let mut sent_close = false;
-    let mut pending_out = 0u64;
-    let mut pending_in = 0u64;
     loop {
         if watch.revoked() {
             outcome.end = EndReason::CredentialRevoked;
@@ -428,85 +657,50 @@ fn pump(
             outcome.end = EndReason::Deadline;
             break;
         }
-        let mut progress = false;
-        // Read decrypted pending bytes, including records received before the pump.
-        for (index, (conn, buffer, eof, count_discard)) in [
-            (&mut incoming, &mut up, &mut client_eof, !websocket),
-            (&mut outgoing, &mut down, &mut upstream_eof, false),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if buffer.len() < limit {
-                let used = buffer.len();
-                buffer.resize(limit, 0);
-                let read = conn.reader().read(&mut buffer[used..]);
-                let n = read.as_ref().ok().copied().unwrap_or(0);
-                buffer.truncate(used + n);
-                match read {
-                    Ok(0) => {
-                        *eof = true;
-                        if index == 1 {
-                            upstream_drained = true;
-                        }
-                    }
-                    Ok(n) => {
-                        progress = true;
-                        if count_discard {
-                            outcome.discarded += n as u64;
-                            buffer[used..].zeroize();
-                            buffer.truncate(used);
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        if index == 1 && *eof {
-                            upstream_drained = true;
-                        }
-                    }
-                    Err(_) => {
-                        *eof = true;
-                        if index == 1 {
-                            upstream_drained = true;
-                        }
-                    }
-                }
+        // Outside a WebSocket the client may send the upstream nothing more:
+        // its bytes are counted and dropped.
+        let discarded = (!websocket).then_some(&mut outcome.discarded);
+        let mut progress = match client.take_plaintext(limit, discarded) {
+            Plaintext::Read => true,
+            Plaintext::Ended => {
+                client.eof = true;
+                false
             }
-        }
-        for (conn, buffer, count) in [
-            (&mut outgoing, &mut up, &mut pending_out),
-            (&mut incoming, &mut down, &mut pending_in),
-        ] {
-            if !buffer.is_empty() && !conn.wants_write() {
-                match conn.writer().write(buffer) {
-                    Ok(n) => {
-                        progress |= n != 0;
-                        *count += n as u64;
-                        buffer[..n].zeroize();
-                        buffer.drain(..n);
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(_) => return Err(Reason::ConnectFailed),
-                }
+            Plaintext::Waiting | Plaintext::Full => false,
+        };
+        match destination.take_plaintext(limit, None) {
+            Plaintext::Read => progress = true,
+            Plaintext::Ended => {
+                destination.eof = true;
+                upstream_drained = true;
             }
+            Plaintext::Waiting => upstream_drained |= destination.eof,
+            Plaintext::Full => {}
         }
-        if upstream_drained && down.is_empty() && !sent_close {
-            incoming.send_close_notify();
+        progress |= destination.give_plaintext(&mut client.read)?;
+        progress |= client.give_plaintext(&mut destination.read)?;
+        if upstream_drained && destination.read.is_empty() && !sent_close {
+            client.conn.send_close_notify();
             sent_close = true;
         }
-        if sent_close && !incoming.wants_write() {
+        if sent_close && !client.conn.wants_write() {
             break;
         }
-        if websocket && client_eof && up.is_empty() {
-            outgoing.send_close_notify();
+        if websocket && client.eof && client.read.is_empty() {
+            destination.conn.send_close_notify();
         }
         // The wait between revocation checks is the lease poll.
         let revents = match sys::poll(
             &[
-                interest(socket.as_fd(), &incoming, !client_eof && up.len() < limit),
+                interest(
+                    socket.as_fd(),
+                    &client.conn,
+                    !client.eof && client.read.len() < limit,
+                ),
                 interest(
                     remote.as_fd(),
-                    &outgoing,
-                    !upstream_eof && down.len() < limit,
+                    &destination.conn,
+                    !destination.eof && destination.read.len() < limit,
                 ),
             ],
             Some(if progress {
@@ -519,66 +713,10 @@ fn pump(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return Err(Reason::InternalError),
         };
-        for (index, conn, eof) in [
-            (0, &mut incoming, &mut client_eof),
-            (1, &mut outgoing, &mut upstream_eof),
-        ] {
-            let flags = revents[index];
-            if flags & libc::POLLOUT != 0 {
-                let result = if index == 0 {
-                    conn.write_tls(&mut &*socket)
-                } else {
-                    conn.write_tls(&mut &*remote)
-                };
-                if result.is_ok() && !conn.wants_write() {
-                    if index == 0 {
-                        outcome.bytes_in += pending_in;
-                        pending_in = 0;
-                    } else {
-                        outcome.bytes_out += pending_out;
-                        pending_out = 0;
-                    }
-                }
-                if result.is_err_and(|e| {
-                    e.kind() != io::ErrorKind::WouldBlock && e.kind() != io::ErrorKind::Interrupted
-                }) {
-                    outcome.end = if index == 0 {
-                        EndReason::ClientError
-                    } else {
-                        EndReason::UpstreamError
-                    };
-                    *eof = true;
-                }
-            }
-            if flags & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
-                && !*eof
-                && conn.wants_read()
-            {
-                let result = if index == 0 {
-                    conn.read_tls(&mut &*socket)
-                } else {
-                    conn.read_tls(&mut &*remote)
-                };
-                match result {
-                    Ok(0) => *eof = true,
-                    Ok(_) => {
-                        let _state = conn.process_new_packets().map_err(|_| {
-                            if index == 0 {
-                                Reason::ClientClosed
-                            } else {
-                                Reason::UpstreamProtocol
-                            }
-                        })?;
-                    }
-                    Err(e)
-                        if e.kind() == io::ErrorKind::WouldBlock
-                            || e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => *eof = true,
-                }
-            }
-        }
+        client.exchange(socket, revents[0], &mut outcome.bytes_in, &mut outcome.end)?;
+        destination.exchange(remote, revents[1], &mut outcome.bytes_out, &mut outcome.end)?;
     }
-    let rustls::Connection::Server(server) = incoming else {
+    let rustls::Connection::Server(server) = client.conn else {
         return Err(Reason::InternalError);
     };
     Ok(server)

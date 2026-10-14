@@ -7,8 +7,11 @@
 //!   files under the workspace or scratch. It performs one named syscall per
 //!   operation through [`raw`] and prints one JSON line per operation:
 //!   `{"op":"<syscall>","args":{…},"ret":<signed>,"errno":<name|null>}`. It
-//!   exits 0 when every `--expect` held, 3 when one did not, and 2 on a usage
-//!   error. It needs no credential and never prints an environment value.
+//!   exits 0 when every `--expect` held, 3 when one did not, 2 on a usage
+//!   error (refused before anything ran) and 4 when it stopped after
+//!   something ran (an operation it needed for itself failed, or a later
+//!   script step was refused). It needs no credential and never prints an
+//!   environment value.
 //! * The **harness** ([`harness`]) runs in the test process, outside the jail.
 //!   It builds a private state directory, plumbs the gate/control/trace pipes,
 //!   runs `ouro-jail`, and reads back receipts, control messages and trace
@@ -53,3 +56,9 @@ pub const EXIT_OK: u8 = 0;
 pub const EXIT_USAGE: u8 = 2;
 /// Exit code when at least one operation did not match its `--expect`.
 pub const EXIT_EXPECTATION_FAILED: u8 = 3;
+/// Exit code when the fixture stopped after something ran, without its
+/// result: an operation it needed for itself (a directory descriptor, a
+/// pipe, a fork, its result file) failed, or a later script step was
+/// refused. Not the operation under test, and not a usage error, which
+/// promises that nothing ran.
+pub const EXIT_FIXTURE_FAILED: u8 = 4;

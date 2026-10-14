@@ -2068,10 +2068,26 @@ fn roll_up(verdicts: &[Verdict]) -> (Option<Verdict>, String) {
     )
 }
 
-/// The Markdown report.
+/// The Markdown report, section by section.
 #[must_use]
 pub fn render_markdown(summary: &Summary) -> String {
     let mut md = String::new();
+    write_preamble(&mut md, summary);
+    write_quietness(&mut md, summary);
+    write_notices(&mut md, summary);
+    write_roll_up(&mut md, summary);
+    write_comparisons(&mut md, summary);
+    write_per_arm(&mut md, summary);
+    write_peak_memory(&mut md, summary);
+    write_events_and_losses(&mut md, summary);
+    write_backend_evaluation(&mut md, summary);
+    md.push_str(&definitions());
+    md
+}
+
+/// The title, the host, where the raw data came from and the run's
+/// parameters.
+fn write_preamble(md: &mut String, summary: &Summary) {
     let p = &summary.parameters;
     let _ = writeln!(md, "# `ouro-jail` performance (jail-v1 §5)\n");
     let _ = writeln!(md, "{}\n", host_line(&summary.host));
@@ -2107,6 +2123,10 @@ pub fn render_markdown(summary: &Summary) -> String {
         p["sample_ms"],
         p["seed"],
     );
+}
+
+/// The quietness threshold and what the host's load was.
+fn write_quietness(md: &mut String, summary: &Summary) {
     let dist3 = |d: Option<&Dist>, digits: usize| {
         d.map_or_else(
             || "not recorded".to_owned(),
@@ -2138,6 +2158,11 @@ pub fn render_markdown(summary: &Summary) -> String {
             .as_u64()
             .map_or("?".to_owned(), |n| n.to_string()),
     );
+}
+
+/// The revalidation notices, the raw-data problems, and why these numbers
+/// are not the §5 measurement when they are not.
+fn write_notices(md: &mut String, summary: &Summary) {
     if !summary.revalidated.is_empty() {
         let _ = writeln!(
             md,
@@ -2158,6 +2183,19 @@ pub fn render_markdown(summary: &Summary) -> String {
         }
         let _ = writeln!(md);
     }
+    let why = not_the_measurement(summary);
+    if !why.is_empty() {
+        let _ = writeln!(
+            md,
+            "**Not the §5 measurement:** {}; the verdicts this touches are withheld and the \
+             numbers are provisional.\n",
+            why.join("; ")
+        );
+    }
+}
+
+/// Why this summary is not the §5 measurement; empty when it is.
+fn not_the_measurement(summary: &Summary) -> Vec<String> {
     let mut why: Vec<String> = Vec::new();
     if !summary.integrity.is_empty() {
         why.push("the raw data has problems".to_owned());
@@ -2175,28 +2213,23 @@ pub fn render_markdown(summary: &Summary) -> String {
     if summary.cells.iter().any(|c| c.excluded > 0) {
         why.push("an arm has excluded launches".to_owned());
     }
-    let verdicts = || {
-        summary.comparisons.iter().flat_map(|c| {
-            [
-                c.startup_verdict,
-                c.work_verdict,
-                c.post_start_verdict,
-                c.wall_verdict,
-            ]
-        })
-    };
-    if verdicts().any(|v| v == Some(Verdict::Loaded)) {
+    let loaded = summary.comparisons.iter().any(|c| {
+        [
+            c.startup_verdict,
+            c.work_verdict,
+            c.post_start_verdict,
+            c.wall_verdict,
+        ]
+        .contains(&Some(Verdict::Loaded))
+    });
+    if loaded {
         why.push("the host was not shown quiet".to_owned());
     }
-    if !why.is_empty() {
-        let _ = writeln!(
-            md,
-            "**Not the §5 measurement:** {}; the verdicts this touches are withheld and the \
-             numbers are provisional.\n",
-            why.join("; ")
-        );
-    }
+    why
+}
 
+/// One row per profile and comparison: every cell's verdicts rolled up.
+fn write_roll_up(md: &mut String, summary: &Summary) {
     let _ = writeln!(
         md,
         "## Verdict roll-up\n\n\
@@ -2245,7 +2278,11 @@ pub fn render_markdown(summary: &Summary) -> String {
         }
     }
     let _ = writeln!(md);
+}
 
+/// The comparison tables: `tool` against direct with observation off and
+/// on, the cost of observation, and the informational profiles.
+fn write_comparisons(md: &mut String, summary: &Summary) {
     let _ = writeln!(
         md,
         "## `--observe off` against direct: the jail's own overhead (`tool`)\n\n\
@@ -2257,7 +2294,7 @@ pub fn render_markdown(summary: &Summary) -> String {
          prove it ran, and the timing is the jail's real path.\n"
     );
     comparison_table(
-        &mut md,
+        md,
         summary,
         Some(Profile::Tool),
         CompareKind::OffVsDirect,
@@ -2269,7 +2306,7 @@ pub fn render_markdown(summary: &Summary) -> String {
          The §5 budgets as first written, observation included.\n"
     );
     comparison_table(
-        &mut md,
+        md,
         summary,
         Some(Profile::Tool),
         CompareKind::OnVsDirect,
@@ -2279,7 +2316,7 @@ pub fn render_markdown(summary: &Summary) -> String {
         md,
         "## Observation cost: `--observe on` against `--observe off` (reported, no budget)\n"
     );
-    comparison_table(&mut md, summary, None, CompareKind::OnVsOff, false);
+    comparison_table(md, summary, None, CompareKind::OnVsOff, false);
     let _ = writeln!(md, "## Informational profiles\n");
     for profile in [Profile::Agent, Profile::None] {
         for kind in [CompareKind::OffVsDirect, CompareKind::OnVsDirect] {
@@ -2289,10 +2326,13 @@ pub fn render_markdown(summary: &Summary) -> String {
                 profile.name(),
                 enum_name(&kind).replace('_', " ")
             );
-            comparison_table(&mut md, summary, Some(profile), kind, true);
+            comparison_table(md, summary, Some(profile), kind, true);
         }
     }
+}
 
+/// Every arm's counts and phase timings.
+fn write_per_arm(md: &mut String, summary: &Summary) {
     let _ = writeln!(md, "## Per arm\n");
     let _ = writeln!(
         md,
@@ -2318,6 +2358,10 @@ pub fn render_markdown(summary: &Summary) -> String {
             pair(c.wall_ms.as_ref(), 1, ""),
         );
     }
+}
+
+/// Every arm's peak memory, by each of the four readings.
+fn write_peak_memory(md: &mut String, summary: &Summary) {
     let _ = writeln!(
         md,
         "\n### Peak memory (KiB, median / p95 / max over valid launches)\n\n\
@@ -2337,6 +2381,10 @@ pub fn render_markdown(summary: &Summary) -> String {
             med_p95_max(c.target_maxrss_kib.as_ref()),
         );
     }
+}
+
+/// Every jailed arm's event counts and losses.
+fn write_events_and_losses(md: &mut String, summary: &Summary) {
     let _ = writeln!(
         md,
         "\n### Events and losses\n\n\
@@ -2380,7 +2428,10 @@ pub fn render_markdown(summary: &Summary) -> String {
             ),
         );
     }
+}
 
+/// The table backend-evaluation.md §4 asks for, for `tool`, per session.
+fn write_backend_evaluation(md: &mut String, summary: &Summary) {
     let _ = writeln!(
         md,
         "\n## backend-evaluation.md §4, `tool`\n\n\
@@ -2410,70 +2461,73 @@ pub fn render_markdown(summary: &Summary) -> String {
             session.name()
         );
         for c in rows {
-            let cell = summary
-                .cells
-                .iter()
-                .find(|x| x.session == c.session && x.workload == c.workload && x.arm == c.subject);
-            let observe = match c.subject {
-                Arm::Jailed(_, o) => o.name(),
-                Arm::Direct => "-",
-            };
-            let median = |d: &Option<Dist>| d.as_ref().map(|d| d.median);
-            let _ = writeln!(
-                md,
-                "| {} | {} | {} ({}) | {} | {} | {} | {} | {} | {} | {} |",
-                c.workload.name(),
-                observe,
-                c.subject_valid,
-                c.subject_excluded,
-                verdict_text(
-                    c.startup_verdict,
-                    c.added_startup_ms.as_ref().map(|d| d.p95),
-                    " ms",
-                    STARTUP_BUDGET_MS
-                ),
-                verdict_or_value(
-                    c.work_verdict,
-                    median(&c.work_overhead_pct),
-                    "%",
-                    OVERHEAD_BUDGET_PCT
-                ),
-                verdict_or_value(
-                    c.post_start_verdict,
-                    median(&c.post_start_overhead_pct),
-                    "%",
-                    OVERHEAD_BUDGET_PCT
-                ),
-                verdict_or_value(
-                    c.wall_verdict,
-                    median(&c.wall_overhead_pct),
-                    "%",
-                    OVERHEAD_BUDGET_PCT
-                ),
-                cell.and_then(|x| x.launched_hwm_kib.as_ref()).map_or_else(
-                    || "n/a".to_owned(),
-                    |d| format!("{:.0} / {:.0}", d.median, d.p95)
-                ),
-                num(
-                    cell.and_then(|x| x.trace_frames.as_ref()).map(|d| d.median),
-                    0
-                ),
-                cell.map_or_else(
-                    || "n/a".to_owned(),
-                    |x| format!(
-                        "{} / {} / {} / {}",
-                        x.losses.observer_gaps + x.losses.coverage_gaps,
-                        x.losses.receipt_errors,
-                        x.losses.incomplete_traces,
-                        x.excluded
-                    )
-                ),
-            );
+            write_backend_evaluation_row(md, summary, c);
         }
         let _ = writeln!(md);
     }
-    md.push_str(&definitions());
-    md
+}
+
+/// One comparison's row of [`write_backend_evaluation`]'s table.
+fn write_backend_evaluation_row(md: &mut String, summary: &Summary, c: &Comparison) {
+    let cell = summary
+        .cells
+        .iter()
+        .find(|x| x.session == c.session && x.workload == c.workload && x.arm == c.subject);
+    let observe = match c.subject {
+        Arm::Jailed(_, o) => o.name(),
+        Arm::Direct => "-",
+    };
+    let median = |d: &Option<Dist>| d.as_ref().map(|d| d.median);
+    let _ = writeln!(
+        md,
+        "| {} | {} | {} ({}) | {} | {} | {} | {} | {} | {} | {} |",
+        c.workload.name(),
+        observe,
+        c.subject_valid,
+        c.subject_excluded,
+        verdict_text(
+            c.startup_verdict,
+            c.added_startup_ms.as_ref().map(|d| d.p95),
+            " ms",
+            STARTUP_BUDGET_MS
+        ),
+        verdict_or_value(
+            c.work_verdict,
+            median(&c.work_overhead_pct),
+            "%",
+            OVERHEAD_BUDGET_PCT
+        ),
+        verdict_or_value(
+            c.post_start_verdict,
+            median(&c.post_start_overhead_pct),
+            "%",
+            OVERHEAD_BUDGET_PCT
+        ),
+        verdict_or_value(
+            c.wall_verdict,
+            median(&c.wall_overhead_pct),
+            "%",
+            OVERHEAD_BUDGET_PCT
+        ),
+        cell.and_then(|x| x.launched_hwm_kib.as_ref()).map_or_else(
+            || "n/a".to_owned(),
+            |d| format!("{:.0} / {:.0}", d.median, d.p95)
+        ),
+        num(
+            cell.and_then(|x| x.trace_frames.as_ref()).map(|d| d.median),
+            0
+        ),
+        cell.map_or_else(
+            || "n/a".to_owned(),
+            |x| format!(
+                "{} / {} / {} / {}",
+                x.losses.observer_gaps + x.losses.coverage_gaps,
+                x.losses.receipt_errors,
+                x.losses.incomplete_traces,
+                x.excluded
+            )
+        ),
+    );
 }
 
 fn comparison_table(
@@ -3224,6 +3278,24 @@ struct PassCtx<'a> {
     scratch: &'a Path,
 }
 
+/// Where one launch's launcher writes: its result, the target's stdout and
+/// its stderr. The same three paths serve every launch of a pass.
+struct LaunchFiles {
+    result: PathBuf,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+impl LaunchFiles {
+    fn in_scratch(scratch: &Path) -> LaunchFiles {
+        LaunchFiles {
+            result: scratch.join("result.json"),
+            stdout: scratch.join("stdout"),
+            stderr: scratch.join("stderr"),
+        }
+    }
+}
+
 fn launch(
     ctx: &PassCtx<'_>,
     arm: Arm,
@@ -3231,35 +3303,67 @@ fn launch(
     warmup: bool,
     state: &mut ArmState,
 ) -> Result<LaunchRecord, String> {
-    let PassCtx {
-        plan,
-        session,
-        workload,
-        target_argv,
-        ws,
-        scratch,
-    } = *ctx;
-    let mut rec = LaunchRecord::new(session, workload, arm, round, warmup);
+    let mut rec = LaunchRecord::new(ctx.session, ctx.workload, arm, round, warmup);
     rec.load1_before = load1();
     let pressure_before = cpu_pressure();
     rec.cpu_pressure_before = pressure_before.map(|(avg10, _)| avg10);
-    let result_path = scratch.join("result.json");
-    let stdout_path = scratch.join("stdout");
-    let stderr_path = scratch.join("stderr");
+    let files = LaunchFiles::in_scratch(ctx.scratch);
     // A result left by the previous launch must not be read as this one's.
-    match std::fs::remove_file(&result_path) {
+    match std::fs::remove_file(&files.result) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("{}: {e}", result_path.display())),
+        Err(e) => return Err(format!("{}: {e}", files.result.display())),
     }
-    let stdout = std::fs::File::create(&stdout_path).map_err(|e| e.to_string())?;
-    let stderr = std::fs::File::create(&stderr_path).map_err(|e| e.to_string())?;
+    let mut cmd = perf_launch_command(ctx, arm, state, &files)?;
+    let status = cmd.status();
+    if let (Some((_, before)), Some((_, after))) = (pressure_before, cpu_pressure()) {
+        rec.cpu_stall_us = Some(after.saturating_sub(before));
+    }
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => rec.launch_error = Some(format!("perf-launch exited {status}")),
+        Err(e) => rec.launch_error = Some(format!("perf-launch did not start: {e}")),
+    }
+    read_launcher_result(&mut rec, &files.result);
+    rec.target = target_facts(
+        &std::fs::read(&files.stdout).unwrap_or_default(),
+        ctx.workload,
+    );
+    let attempts: Vec<AttemptFacts> = rec
+        .launcher
+        .as_ref()
+        .and_then(|l| l.attempts.clone())
+        .unwrap_or_default();
+    if let [only] = attempts.as_slice() {
+        read_attempt_receipt(&mut rec, only);
+    }
+    rec.validity = validate(&rec);
+    if !rec.validity.valid {
+        let err = std::fs::read(&files.stderr).unwrap_or_default();
+        let tail = &err[err.len().saturating_sub(2000)..];
+        rec.stderr_tail = Some(String::from_utf8_lossy(tail).into_owned());
+        keep_excluded_launch(ctx, &rec, &files)?;
+    }
+    settle_attempts(&mut rec, &attempts, state)?;
+    Ok(rec)
+}
 
+/// `ouro-fixture perf-launch` for one launch of `arm`: the jail around the
+/// target for a jailed arm, the target alone for direct.
+fn perf_launch_command(
+    ctx: &PassCtx<'_>,
+    arm: Arm,
+    state: &ArmState,
+    files: &LaunchFiles,
+) -> Result<Command, String> {
+    let plan = ctx.plan;
+    let stdout = std::fs::File::create(&files.stdout).map_err(|e| e.to_string())?;
+    let stderr = std::fs::File::create(&files.stderr).map_err(|e| e.to_string())?;
     let mut cmd = Command::new(&plan.fixture);
     cmd.arg("--no-report")
         .arg("perf-launch")
         .arg("--out")
-        .arg(&result_path)
+        .arg(&files.result)
         .arg("--sample-ms")
         .arg(plan.args.sample_ms.to_string())
         .arg("--deadline-ms")
@@ -3279,26 +3383,23 @@ fn launch(
                 observe.name(),
             ])
             .arg("--workspace")
-            .arg(ws)
+            .arg(ctx.ws)
             .arg("--");
     } else {
         cmd.arg("--");
     }
-    cmd.args(target_argv)
-        .current_dir(ws)
+    cmd.args(ctx.target_argv)
+        .current_dir(ctx.ws)
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr);
-    let status = cmd.status();
-    if let (Some((_, before)), Some((_, after))) = (pressure_before, cpu_pressure()) {
-        rec.cpu_stall_us = Some(after.saturating_sub(before));
-    }
-    match status {
-        Ok(status) if status.success() => {}
-        Ok(status) => rec.launch_error = Some(format!("perf-launch exited {status}")),
-        Err(e) => rec.launch_error = Some(format!("perf-launch did not start: {e}")),
-    }
-    match std::fs::read(&result_path) {
+    Ok(cmd)
+}
+
+/// The launcher's typed result, read strictly; what went wrong otherwise
+/// becomes the launch error unless the launch already has one.
+fn read_launcher_result(rec: &mut LaunchRecord, result: &Path) {
+    match std::fs::read(result) {
         Ok(bytes) => match PerfLaunchResult::parse(&bytes) {
             Ok(l) => rec.launcher = Some(l.into()),
             Err(e) => {
@@ -3311,69 +3412,72 @@ fn launch(
                 .get_or_insert(format!("perf-launch wrote no result: {e}"));
         }
     }
-    rec.target = target_facts(&std::fs::read(&stdout_path).unwrap_or_default(), workload);
+}
 
-    let attempts: Vec<AttemptFacts> = rec
-        .launcher
-        .as_ref()
-        .and_then(|l| l.attempts.clone())
-        .unwrap_or_default();
-    if let [only] = attempts.as_slice() {
-        let path = Path::new(&only.dir).join("jail.json");
-        // No readable receipt is excluded as `no_receipt`; say why here.
-        match std::fs::read(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|b| read_receipt(&b))
-        {
-            Ok(receipt) => rec.receipt = Some(receipt_facts(&receipt)),
-            Err(e) => eprintln!("perf: {}: {e}", path.display()),
-        }
+/// The facts of the attempt's final receipt. No readable receipt is
+/// excluded as `no_receipt` by [`validate`]; why it is unreadable is
+/// said here.
+fn read_attempt_receipt(rec: &mut LaunchRecord, attempt: &AttemptFacts) {
+    let path = Path::new(&attempt.dir).join("jail.json");
+    match std::fs::read(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|b| read_receipt(&b))
+    {
+        Ok(receipt) => rec.receipt = Some(receipt_facts(&receipt)),
+        Err(e) => eprintln!("perf: {}: {e}", path.display()),
     }
-    rec.validity = validate(&rec);
-    if !rec.validity.valid {
-        let err = std::fs::read(&stderr_path).unwrap_or_default();
-        let tail = &err[err.len().saturating_sub(2000)..];
-        rec.stderr_tail = Some(String::from_utf8_lossy(tail).into_owned());
-    }
+}
 
-    // Keep the data directory warm and empty: remove what a valid launch
-    // left once it is settled and cleaned up. An excluded launch keeps its
-    // attempt (receipt, trace, state) where it is, so `gc` still finds it
-    // and the exclusion can be audited; the arm moves to a fresh data
-    // directory. Its stdout and stderr are kept beside the raw file.
-    if !rec.validity.valid {
-        let kept = plan.out.join("kept").join(format!(
-            "{}-{}-{}-{}{}",
-            session.name(),
-            workload.name(),
-            arm.dir_name(),
-            if warmup { "warmup-" } else { "" },
-            round
-        ));
-        std::fs::create_dir_all(&kept).map_err(|e| format!("{}: {e}", kept.display()))?;
-        // The report says excluded launches keep this evidence: a copy that
-        // fails ends the run rather than leave the claim false. The
-        // launcher's result exists only when it wrote one.
-        let mut copies = vec![(&stdout_path, "stdout"), (&stderr_path, "stderr")];
-        if result_path.exists() {
-            copies.push((&result_path, "perf-launch.json"));
-        }
-        for (from, name) in copies {
-            std::fs::copy(from, kept.join(name))
-                .map_err(|e| format!("keeping {}: {e}", kept.join(name).display()))?;
-        }
+/// Copy an excluded launch's stdout, stderr and launcher result beside the
+/// raw file. The report says excluded launches keep this evidence: a copy
+/// that fails ends the run rather than leave the claim false. The
+/// launcher's result exists only when it wrote one.
+fn keep_excluded_launch(
+    ctx: &PassCtx<'_>,
+    rec: &LaunchRecord,
+    files: &LaunchFiles,
+) -> Result<(), String> {
+    let kept = ctx.plan.out.join("kept").join(format!(
+        "{}-{}-{}-{}{}",
+        rec.session.name(),
+        rec.workload.name(),
+        rec.arm.dir_name(),
+        if rec.warmup { "warmup-" } else { "" },
+        rec.round
+    ));
+    std::fs::create_dir_all(&kept).map_err(|e| format!("{}: {e}", kept.display()))?;
+    let mut copies = vec![(&files.stdout, "stdout"), (&files.stderr, "stderr")];
+    if files.result.exists() {
+        copies.push((&files.result, "perf-launch.json"));
     }
-    if !attempts.is_empty() {
-        if keep_attempt(&rec) || attempts.len() != 1 {
-            rec.kept_attempt = Some(state.data().display().to_string());
-            state.generation += 1;
-            state.prepare()?;
-        } else {
-            std::fs::remove_dir_all(&attempts[0].dir)
-                .map_err(|e| format!("remove {}: {e}", attempts[0].dir))?;
-        }
+    for (from, name) in copies {
+        std::fs::copy(from, kept.join(name))
+            .map_err(|e| format!("keeping {}: {e}", kept.join(name).display()))?;
     }
-    Ok(rec)
+    Ok(())
+}
+
+/// Keep the data directory warm and empty: remove what a valid launch left
+/// once it is settled and cleaned up. An excluded launch keeps its attempt
+/// (receipt, trace, state) where it is, so `gc` still finds it and the
+/// exclusion can be audited; the arm moves to a fresh data directory.
+fn settle_attempts(
+    rec: &mut LaunchRecord,
+    attempts: &[AttemptFacts],
+    state: &mut ArmState,
+) -> Result<(), String> {
+    if attempts.is_empty() {
+        return Ok(());
+    }
+    if keep_attempt(rec) || attempts.len() != 1 {
+        rec.kept_attempt = Some(state.data().display().to_string());
+        state.generation += 1;
+        state.prepare()?;
+    } else {
+        std::fs::remove_dir_all(&attempts[0].dir)
+            .map_err(|e| format!("remove {}: {e}", attempts[0].dir))?;
+    }
+    Ok(())
 }
 
 /// Whether a launch's attempt directory must be kept: always for an
@@ -4702,12 +4806,8 @@ not json
         /// F2: `run` never appends to an existing run directory.
         #[test]
         fn a_run_refuses_a_non_empty_out() {
-            let dir = std::env::temp_dir().join(format!(
-                "xtask-perf-out-{}-{}",
-                std::process::id(),
-                crate::stamp::unix_now()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("out");
             assert!(check_out_dir(&dir, false).is_ok(), "absent is fine");
             std::fs::create_dir_all(&dir).unwrap();
             assert!(check_out_dir(&dir, false).is_ok(), "empty is fine");
@@ -4718,7 +4818,6 @@ not json
                 check_out_dir(&dir, true).is_ok(),
                 "the scope pass appends by design"
             );
-            std::fs::remove_dir_all(&dir).unwrap();
         }
 
         /// F3: every count is exact for the workload and agrees with the trace.

@@ -31,9 +31,9 @@ fn main() -> std::process::ExitCode {
     match outcome {
         Ok(true) => std::process::ExitCode::from(EXIT_OK),
         Ok(false) => std::process::ExitCode::from(EXIT_EXPECTATION_FAILED),
-        Err(usage) => {
-            eprintln!("ouro-fixture: {usage}");
-            std::process::ExitCode::from(EXIT_USAGE)
+        Err(stop) => {
+            eprintln!("ouro-fixture: {stop}");
+            std::process::ExitCode::from(stop.exit_code())
         }
     }
 }

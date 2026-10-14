@@ -45,7 +45,7 @@ pub struct Header {
     pub prefix: Option<String>,
 }
 impl Policy {
-    pub fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.hosts.is_empty() || self.hosts.len() > 64 {
             return Err("vault needs 1..64 exact HTTP(S) origins".into());
         }
@@ -96,7 +96,7 @@ fn validate_path(path: &str) -> Result<(), String> {
 }
 impl Header {
     /// An RFC 9110 token name and a printable, line-ending-free prefix.
-    pub fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.name.len() > 64 || !crate::proxy::http::is_token(self.name.as_bytes()) {
             return Err("vault header name must be 1..64 ASCII token characters".into());
         }
@@ -161,8 +161,8 @@ pub(crate) fn env_name(id: &str) -> String {
 }
 
 pub struct Secret {
-    pub id: String,
-    pub policy: Policy,
+    pub(crate) id: String,
+    pub(crate) policy: Policy,
     runtime: lifecycle::Runtime,
     executables: Vec<origin::Executable>,
 }
@@ -174,7 +174,10 @@ impl std::fmt::Debug for Secret {
     }
 }
 impl Secret {
-    pub fn new(id: String, policy: Policy, bytes: Vec<u8>) -> Result<Self, String> {
+    /// A secret whose value is fixed for the attempt, for tests: staging
+    /// always reads a live source ([`Secret::from_source`]).
+    #[cfg(test)]
+    pub(crate) fn new(id: String, policy: Policy, bytes: Vec<u8>) -> Result<Self, String> {
         let value = Zeroizing::new(bytes);
         if !valid_value(&value) {
             return Err(format!(
@@ -434,6 +437,9 @@ mod tests {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::{Mutex, mpsc};
     use std::time::Duration;
+
+    use crate::platform::linux::bridge::HTTP_PORT;
+
     struct Sink(Mutex<mpsc::Sender<ProxyResult>>);
     impl ProxySink for Sink {
         fn emit(&self, result: ProxyResult) {
@@ -593,7 +599,10 @@ mod tests {
         // This test stands in for the sealed bridge, which writes the
         // connection's origin preamble first.
         socket
-            .write_all(&origin::preamble_for(([127, 0, 0, 1], 40000).into(), 3128))
+            .write_all(&origin::preamble_for(
+                ([127, 0, 0, 1], 40000).into(),
+                HTTP_PORT,
+            ))
             .unwrap();
         write!(
             socket,
@@ -784,7 +793,10 @@ mod tests {
         // result; once neither is active both have settled.
         let mut refused = UnixStream::connect(&path).unwrap();
         refused
-            .write_all(&origin::preamble_for(([127, 0, 0, 1], 40000).into(), 3128))
+            .write_all(&origin::preamble_for(
+                ([127, 0, 0, 1], 40000).into(),
+                HTTP_PORT,
+            ))
             .unwrap();
         refused
             .write_all(b"CONNECT other.test:443 HTTP/1.1\r\nHost: other.test:443\r\n\r\n")

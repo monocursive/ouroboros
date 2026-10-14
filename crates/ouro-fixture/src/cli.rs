@@ -107,8 +107,52 @@ pub enum UnixLen {
     Full,
 }
 
+/// Every mode, by group. The groups are flattened: each mode is a
+/// subcommand of its own, and a script step parses the same way.
 #[derive(Subcommand, Debug)]
 pub enum Mode {
+    #[command(flatten)]
+    Fs(FsMode),
+    #[command(flatten)]
+    Net(NetMode),
+    #[command(flatten)]
+    Unix(UnixMode),
+    /// Wrap a command the way a vendor agent's own sandbox wraps its tools
+    /// (Linux): set no_new_privs, install a Landlock ruleset granting the
+    /// listed trees, install a seccomp filter returning EPERM for the listed
+    /// syscalls (the native architecture's numbers, checked), report each step, then
+    /// replace this process with ARGV. Any failed step stops before the exec.
+    SandboxExec {
+        /// Grant every filesystem right beneath DIR.
+        #[arg(long = "landlock-rw", value_name = "DIR")]
+        landlock_rw: Vec<OsString>,
+        /// Grant execute, read-file and read-dir beneath DIR.
+        #[arg(long = "landlock-ro", value_name = "DIR")]
+        landlock_ro: Vec<OsString>,
+        /// Handle LANDLOCK_ACCESS_NET_CONNECT_TCP with no port rule, so every
+        /// TCP connect is denied. Needs Landlock ABI 4.
+        #[arg(long)]
+        landlock_deny_tcp: bool,
+        /// Return EPERM for this syscall (a name in the native table, or a number).
+        #[arg(long = "seccomp-errno", value_name = "SYSCALL")]
+        seccomp_errno: Vec<String>,
+        #[arg(last = true, required = true, num_args = 1.., value_name = "ARGV")]
+        argv: Vec<OsString>,
+    },
+    #[command(flatten)]
+    Process(ProcessMode),
+    #[command(flatten)]
+    Introspect(IntrospectMode),
+    /// Run a JSON array of argv arrays in this one process.
+    Script { file: OsString },
+    #[command(flatten)]
+    Perf(PerfMode),
+}
+
+/// The filesystem modes: the closed-set calls, the calls beside them that
+/// name no path (`ftruncate`, `write-mmap`), and the working directory.
+#[derive(Subcommand, Debug)]
+pub enum FsMode {
     /// Open a path. `--via creat` implies create, truncate and write-only.
     Open {
         path: OsString,
@@ -234,6 +278,29 @@ pub enum Mode {
         #[arg(long, default_value = "ok")]
         expect: Expect,
     },
+    /// Open PATH, write through the descriptor, then through a shared mapping.
+    WriteMmap { path: OsString },
+    /// Change this process's working directory (not a closed-set call; the
+    /// line lets a test rename the directory afterwards and see what a
+    /// relative path is then reported as).
+    Chdir { path: OsString },
+    /// Call `mkdir` COUNT times on one buffer while a second thread flips
+    /// the single byte in which A and B differ, so the name the kernel
+    /// consumes races the name a tracer snapshots. A and B must have the
+    /// same length and differ in exactly one byte, so every snapshot of the
+    /// buffer is literally one of the two. One `mkdir` line per call.
+    RaceMkdir {
+        a: OsString,
+        b: OsString,
+        #[arg(value_name = "COUNT")]
+        count: u32,
+    },
+}
+
+/// The network modes: numeric addresses only, so no lookup adds connects
+/// of its own.
+#[derive(Subcommand, Debug)]
+pub enum NetMode {
     /// Connect a socket to a numeric address. Names are refused: a lookup
     /// would issue its own connects and pollute the trace.
     Connect {
@@ -304,6 +371,11 @@ pub enum Mode {
         #[arg(long, default_value = "ok")]
         expect: Expect,
     },
+}
+
+/// The Unix-socket modes.
+#[derive(Subcommand, Debug)]
+pub enum UnixMode {
     /// Connect an AF_UNIX stream (or seqpacket) socket to a pathname.
     /// `--expect` applies to the `connect`.
     UnixConnect {
@@ -401,28 +473,11 @@ pub enum Mode {
         #[arg(last = true, num_args = 0.., value_name = "ARGV")]
         spawn: Vec<OsString>,
     },
-    /// Wrap a command the way a vendor agent's own sandbox wraps its tools
-    /// (Linux): set no_new_privs, install a Landlock ruleset granting the
-    /// listed trees, install a seccomp filter returning EPERM for the listed
-    /// syscalls (the native architecture's numbers, checked), report each step, then
-    /// replace this process with ARGV. Any failed step stops before the exec.
-    SandboxExec {
-        /// Grant every filesystem right beneath DIR.
-        #[arg(long = "landlock-rw", value_name = "DIR")]
-        landlock_rw: Vec<OsString>,
-        /// Grant execute, read-file and read-dir beneath DIR.
-        #[arg(long = "landlock-ro", value_name = "DIR")]
-        landlock_ro: Vec<OsString>,
-        /// Handle LANDLOCK_ACCESS_NET_CONNECT_TCP with no port rule, so every
-        /// TCP connect is denied. Needs Landlock ABI 4.
-        #[arg(long)]
-        landlock_deny_tcp: bool,
-        /// Return EPERM for this syscall (a name in the native table, or a number).
-        #[arg(long = "seccomp-errno", value_name = "SYSCALL")]
-        seccomp_errno: Vec<String>,
-        #[arg(last = true, required = true, num_args = 1.., value_name = "ARGV")]
-        argv: Vec<OsString>,
-    },
+}
+
+/// The process and lifetime modes.
+#[derive(Subcommand, Debug)]
+pub enum ProcessMode {
     /// Fork, exec ARGV in the child, wait. Reports the exec result and the
     /// child's raw wait status as two lines.
     Exec {
@@ -458,40 +513,8 @@ pub enum Mode {
     IgnoreTerm { ms: u64 },
     /// Fork N children that exit immediately, and reap them all.
     ForkStorm { count: u32 },
-    /// Report the trailing arguments as exact length-prefixed bytes.
-    EchoArgs {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
-        argv: Vec<OsString>,
-    },
-    /// Write N bytes of a deterministic pattern to stdout.
-    StdoutBytes { count: u64 },
-    /// Write N bytes of a deterministic pattern to stderr.
-    StderrBytes { count: u64 },
-    /// Report the sorted names of the environment. Never a value.
-    Env,
-    /// Report every open descriptor and its kind. Never a path.
-    Fds,
-    /// Report the privilege-relevant fields of `/proc/self/status` (Linux).
-    Status,
-    /// Open PATH, write through the descriptor, then through a shared mapping.
-    WriteMmap { path: OsString },
     /// Spawn one thread, have it run, and join it.
     Thread,
-    /// Change this process's working directory (not a closed-set call; the
-    /// line lets a test rename the directory afterwards and see what a
-    /// relative path is then reported as).
-    Chdir { path: OsString },
-    /// Call `mkdir` COUNT times on one buffer while a second thread flips
-    /// the single byte in which A and B differ, so the name the kernel
-    /// consumes races the name a tracer snapshots. A and B must have the
-    /// same length and differ in exactly one byte, so every snapshot of the
-    /// buffer is literally one of the two. One `mkdir` line per call.
-    RaceMkdir {
-        a: OsString,
-        b: OsString,
-        #[arg(value_name = "COUNT")]
-        count: u32,
-    },
     /// `clone(CLONE_UNTRACED | SIGCHLD)` (Linux): the child makes one
     /// raw `mkdir(PATH)` and exits with its errno (0 on success); the parent
     /// reports the `clone` result and, when a child ran, an
@@ -509,17 +532,40 @@ pub enum Mode {
         #[arg(long, default_value = "ok")]
         expect: Expect,
     },
-    /// Report this process's own identity: `getpid()`, its start time
-    /// (field 22 of `/proc/self/stat`, clock ticks since boot) and the
-    /// `NSpid` line of `/proc/self/status` (Linux).
-    Identity,
     /// Report, then exit with CODE.
     Exit { code: u8 },
     /// Report, then raise SIGNAL on self (name without `SIG`, or a number).
     Raise { signal: String },
-    /// Run a JSON array of argv arrays in this one process.
-    Script { file: OsString },
-    // The performance workloads and launcher (jail-v1 §5)
+}
+
+/// The modes that report what the process sees: its arguments, streams,
+/// environment names, descriptors, status and identity.
+#[derive(Subcommand, Debug)]
+pub enum IntrospectMode {
+    /// Report the trailing arguments as exact length-prefixed bytes.
+    EchoArgs {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        argv: Vec<OsString>,
+    },
+    /// Write N bytes of a deterministic pattern to stdout.
+    StdoutBytes { count: u64 },
+    /// Write N bytes of a deterministic pattern to stderr.
+    StderrBytes { count: u64 },
+    /// Report the sorted names of the environment. Never a value.
+    Env,
+    /// Report every open descriptor and its kind. Never a path.
+    Fds,
+    /// Report the privilege-relevant fields of `/proc/self/status` (Linux).
+    Status,
+    /// Report this process's own identity: `getpid()`, its start time
+    /// (field 22 of `/proc/self/stat`, clock ticks since boot) and the
+    /// `NSpid` line of `/proc/self/status` (Linux).
+    Identity,
+}
+
+/// The performance workloads and launcher (jail-v1 §5).
+#[derive(Subcommand, Debug)]
+pub enum PerfMode {
     /// The fixed file-operation workload (J0's): ROUNDS rounds of create
     /// (`openat` with `O_WRONLY|O_CREAT|O_TRUNC`, then `close`), `rename` and
     /// `unlink` of one name in DIR, which must exist (`renameat`/`unlinkat`
@@ -565,11 +611,11 @@ pub enum Mode {
     },
 }
 
-/// Parse an octal mode string.
 /// The largest mode a call takes: the file-type and permission bits, which
 /// is also all a Darwin `mode_t` (16 bits) holds.
 pub const MAX_MODE: u32 = 0o177_777;
 
+/// Parse an octal mode string.
 pub fn parse_mode(s: &str) -> Result<u32, String> {
     let mode = u32::from_str_radix(s, 8).map_err(|_| format!("`{s}` is not an octal mode"))?;
     if mode > MAX_MODE {
@@ -599,9 +645,9 @@ mod tests {
         let cli = parse(&["open", "/tmp/x"]);
         assert_eq!(cli.report_fd, 1);
         match cli.mode {
-            Mode::Open {
+            Mode::Fs(FsMode::Open {
                 via, expect, mode, ..
-            } => {
+            }) => {
                 assert_eq!(via, OpenVia::Openat);
                 assert_eq!(expect, Expect::Ok);
                 assert_eq!(parse_mode(&mode).unwrap(), 0o600);
@@ -621,7 +667,9 @@ mod tests {
     fn exec_argv_only_comes_after_a_double_dash() {
         let cli = parse(&["exec", "--", "/bin/echo", "-n", "hi"]);
         match cli.mode {
-            Mode::Exec { argv, .. } => assert_eq!(argv, ["/bin/echo", "-n", "hi"]),
+            Mode::Process(ProcessMode::Exec { argv, .. }) => {
+                assert_eq!(argv, ["/bin/echo", "-n", "hi"])
+            }
             other => panic!("wrong mode: {other:?}"),
         }
         assert!(Cli::try_parse_from(["ouro-fixture", "exec"]).is_err());
@@ -631,7 +679,9 @@ mod tests {
     fn echo_args_keeps_hyphenated_and_metacharacter_arguments() {
         let cli = parse(&["echo-args", "--", "-x", "a b", "$(id)", "a\nb"]);
         match cli.mode {
-            Mode::EchoArgs { argv } => assert_eq!(argv, ["-x", "a b", "$(id)", "a\nb"]),
+            Mode::Introspect(IntrospectMode::EchoArgs { argv }) => {
+                assert_eq!(argv, ["-x", "a b", "$(id)", "a\nb"])
+            }
             other => panic!("wrong mode: {other:?}"),
         }
     }
@@ -641,7 +691,7 @@ mod tests {
         let step =
             Step::try_parse_from(["ouro-fixture", "mkdir", "/tmp/d", "--via", "mkdir"]).unwrap();
         match step.mode {
-            Mode::Mkdir { via, .. } => assert_eq!(via, MkdirVia::Mkdir),
+            Mode::Fs(FsMode::Mkdir { via, .. }) => assert_eq!(via, MkdirVia::Mkdir),
             other => panic!("wrong mode: {other:?}"),
         }
     }
@@ -650,14 +700,14 @@ mod tests {
     fn mknod_defaults_to_mknodat_and_a_fifo() {
         let cli = parse(&["mknod", "/tmp/p"]);
         match cli.mode {
-            Mode::Mknod {
+            Mode::Fs(FsMode::Mknod {
                 via,
                 fifo,
                 regular,
                 mode,
                 expect,
                 ..
-            } => {
+            }) => {
                 assert_eq!(via, MknodVia::Mknodat);
                 assert!(!fifo, "the flag is off; the kind still defaults to a fifo");
                 assert!(!regular);
@@ -676,17 +726,17 @@ mod tests {
     #[test]
     fn the_truncation_modes_take_a_signed_length() {
         match parse(&["truncate", "/tmp/f", "4096"]).mode {
-            Mode::Truncate { length, .. } => assert_eq!(length, 4096),
+            Mode::Fs(FsMode::Truncate { length, .. }) => assert_eq!(length, 4096),
             other => panic!("wrong mode: {other:?}"),
         }
         match parse(&["ftruncate", "/tmp/f", "0"]).mode {
-            Mode::Ftruncate { length, .. } => assert_eq!(length, 0),
+            Mode::Fs(FsMode::Ftruncate { length, .. }) => assert_eq!(length, 0),
             other => panic!("wrong mode: {other:?}"),
         }
         // A negative length must reach the kernel, which answers EINVAL; the
         // fixture does not pre-judge it.
         match parse(&["truncate", "/tmp/f", "--", "-1"]).mode {
-            Mode::Truncate { length, .. } => assert_eq!(length, -1),
+            Mode::Fs(FsMode::Truncate { length, .. }) => assert_eq!(length, -1),
             other => panic!("wrong mode: {other:?}"),
         }
     }
