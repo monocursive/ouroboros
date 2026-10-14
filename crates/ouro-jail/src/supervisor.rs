@@ -8,12 +8,15 @@
 //!
 //! I01 is the shape of this module: nothing reaches `release` until
 //! resolution, state, probing, preparation and the gate have all succeeded.
-//! A failure before the attempt is claimed returns its error and leaves no
-//! claim. From the claim on, the claimed [`attempt::Attempt`] returns a
-//! report, never an error: every exit before the target runs goes through
-//! its `refuse` (after tearing the boundary down, once one exists), which
-//! writes the `refused` receipt or reports that it could not, and an attempt
-//! whose target ran ends in its settlement.
+//! A failure up to the claim returns its error and writes no receipt. The
+//! claim is one exclusive link, so such a failure leaves no claim, or at
+//! most one whose directory sync failed after the link landed: a claim with
+//! no receipt, which `gc` reconciles as one. From the claim on, the claimed
+//! [`attempt::Attempt`] returns a report, never an error: every exit before
+//! the target runs goes through its `refuse` (after tearing the boundary
+//! down, once one exists), which writes the `refused` receipt or reports
+//! that it could not, and an attempt whose target ran ends in its
+//! settlement.
 
 use std::ffi::OsString;
 use std::io::Write as _;

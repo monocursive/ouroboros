@@ -1,14 +1,15 @@
 //! One claimed attempt, from its claim to its last receipt (§8.1).
 //!
 //! I01 by construction. [`Attempt::claim`] is the last step that may fail
-//! without a receipt: it fails before the claim exists or with nothing
-//! claimed. From the claim on, [`Attempt::run`] returns a report, never an
-//! error, and each phase hands its failure back to it: one before the
-//! boundary exists ([`Attempt::prepare`]) ends in [`Attempt::refuse`], one
-//! while the boundary waits for release ([`Attempt::register`],
-//! [`Attempt::gate`]) in [`Attempt::abort_and_refuse`], a failed release or
-//! a failed target exec in [`Attempt::refuse`] with what the platform's
-//! teardown established, and an attempt whose target ran in
+//! without a receipt (its failure leaves no claim, or one whose directory
+//! sync failed after the exclusive link landed and that has no receipt).
+//! From the claim on, [`Attempt::run`] returns a report, never an error,
+//! and each phase hands its failure back to it: one before the boundary
+//! exists ([`Attempt::prepare`]) ends in [`Attempt::refuse`]; one while the
+//! boundary waits for release ([`Attempt::register`], [`Attempt::gate`]) in
+//! [`Attempt::abort_and_refuse`]; a failed release or a failed target exec
+//! in [`Attempt::refuse`], with what the teardown or the tree's
+//! verification established; and an attempt whose target ran in
 //! [`Attempt::settle`].
 
 use std::collections::VecDeque;
@@ -116,8 +117,9 @@ impl<'a> Attempt<'a> {
     /// claimed every exit can write its receipt.
     ///
     /// # Errors
-    /// Whatever stops the claim. Nothing is claimed then, so there is no
-    /// attempt to write a refused receipt for.
+    /// Whatever stops the claim. Nothing is claimed then, or, when only the
+    /// directory sync after the claim's link failed, a claim stands that has
+    /// no receipt; either way there is no claimed attempt to refuse.
     pub(super) fn claim(
         ctx: &'a Context,
         args: &'a RunArgs,
