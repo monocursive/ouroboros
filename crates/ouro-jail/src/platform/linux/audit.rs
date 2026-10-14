@@ -171,16 +171,15 @@ impl AuditWriter {
     /// coverage degraded and the count null, and a degraded class names
     /// its gap.
     pub fn record_limit_evidence_missing(&mut self, reason: &str) {
-        self.push_gap(Gap {
-            classes: vec![CoverageClass::Limits.as_str().to_owned()],
-            source: "audit".to_owned(),
-            // Nothing observes the evidence to come back: the hole stays
-            // open-ended, like a child's own lost notifications (§13.1).
-            start_ns: now_ns().to_string(),
-            end_ns: None,
-            reason: reason.to_owned(),
-            lost_count: None,
-        });
+        // Nothing observes the evidence to come back: the hole stays
+        // open-ended, like a child's own lost notifications (§13.1).
+        self.push_gap(
+            vec![CoverageClass::Limits.as_str().to_owned()],
+            reason,
+            now_ns(),
+            None,
+            None,
+        );
     }
 
     /// Records why a requested ceiling stays unapplied: the explanatory
@@ -240,14 +239,13 @@ impl AuditWriter {
                 // frame, not even the sink's own loss note: this result is a
                 // gap of its class, with a count of one (see [`AuditWriter`]).
                 let now = now_ns();
-                self.push_gap(Gap {
-                    classes: vec![class.as_str().to_owned()],
-                    source: "audit".to_owned(),
-                    start_ns: now.to_string(),
-                    end_ns: Some(now.to_string()),
-                    reason: TRACE_WRITER_POISONED.to_owned(),
-                    lost_count: Some(1),
-                });
+                self.push_gap(
+                    vec![class.as_str().to_owned()],
+                    TRACE_WRITER_POISONED,
+                    now,
+                    Some(now),
+                    Some(1),
+                );
                 false
             }
         }
@@ -683,40 +681,44 @@ impl AuditWriter {
         to_ns: u64,
         count: Option<u64>,
     ) {
-        let classes = classes_for(ops);
-        self.push_gap(Gap {
-            classes: classes
-                .iter()
-                .map(|class| class.as_str().to_owned())
-                .collect(),
-            source: "audit".to_owned(),
-            start_ns: from_ns.to_string(),
-            // A hole whose cause is never observed to end — a child's own
-            // notification listener — has no end the observer can state:
-            // `null`, not the moment it was noticed (§13.1 lets it be).
-            end_ns: (!reason.is_open_ended()).then(|| to_ns.to_string()),
-            reason: reason.as_str().to_owned(),
-            lost_count: count,
-        });
+        let classes = classes_for(ops)
+            .iter()
+            .map(|class| class.as_str().to_owned())
+            .collect();
+        // A hole whose cause is never observed to end — a child's own
+        // notification listener — has no end the observer can state:
+        // `null`, not the moment it was noticed (§13.1 lets it be).
+        let to_ns = (!reason.is_open_ended()).then_some(to_ns);
+        self.push_gap(classes, reason.as_str(), from_ns, to_ns, count);
     }
 
-    /// Records one gap: degrades the classes it names, coalesces it with a
-    /// gap of the same reason and classes, bounds the summaries, and writes
-    /// its note. The summary keeps the gap whether or not the trace took its
-    /// note; a note it did not take is the stream's loss.
-    fn push_gap(&mut self, gap: Gap) {
+    /// Records one gap of `reason` over `classes`, from `from_ns` to `to_ns`
+    /// (`None` when its end is never observed): degrades the classes it
+    /// names, coalesces it with a gap of the same reason and classes, bounds
+    /// the summaries, and writes its note. The summary keeps the gap whether
+    /// or not the trace took its note; a note it did not take is the
+    /// stream's loss.
+    fn push_gap(
+        &mut self,
+        classes: Vec<String>,
+        reason: &str,
+        from_ns: u64,
+        to_ns: Option<u64>,
+        lost_count: Option<u64>,
+    ) {
+        let gap = Gap {
+            classes,
+            source: "audit".to_owned(),
+            start_ns: from_ns.to_string(),
+            end_ns: to_ns.map(|to| to.to_string()),
+            reason: reason.to_owned(),
+            lost_count,
+        };
         for class in CoverageClass::ALL {
             if gap.classes.iter().any(|name| name == class.as_str()) {
                 self.degraded.insert(class);
             }
         }
-        let (from_ns, to_ns) = (
-            gap.start_ns.parse::<u64>().unwrap_or(0),
-            gap.end_ns
-                .as_deref()
-                .and_then(|end| end.parse::<u64>().ok())
-                .unwrap_or(0),
-        );
         // Keep bounded interval summaries; repeated losses extend an interval.
         if let Some(existing) = self
             .gaps
@@ -732,12 +734,6 @@ impl AuditWriter {
         }
         if self.gaps.len() >= 64 {
             let existing = self.gaps.last_mut().expect("nonempty bounded gaps");
-            // Audit 7 L13: an open-ended loss (`end_ns: null`) merged into a
-            // closed interval must leave the interval open — only a
-            // presented or written `end` bounds it, never a merge.
-            if gap.end_ns.is_none() {
-                existing.end_ns = None;
-            }
             existing.reason = "coalesced_losses".to_owned();
             extend_gap_interval(existing, from_ns, to_ns);
             existing.lost_count = None;
@@ -1168,18 +1164,24 @@ fn classes_for(ops: OpSet) -> Vec<CoverageClass> {
     classes.into_iter().collect()
 }
 
-fn extend_gap_interval(gap: &mut Gap, from: u64, to: u64) {
+/// Widen `gap`'s interval to cover a loss from `from` to `to` (`None` when
+/// that loss is never observed to end). The bounds read back are the ones
+/// [`AuditWriter::push_gap`] wrote from numbers.
+///
+/// An open interval stays open, and audit 7 L13: an open-ended loss merged
+/// into a closed interval leaves it open — only a presented or written end
+/// bounds an interval, never a merge.
+fn extend_gap_interval(gap: &mut Gap, from: u64, to: Option<u64>) {
     gap.start_ns = gap
         .start_ns
         .parse::<u64>()
-        .unwrap_or(from)
-        .min(from)
+        .map_or(from, |start| start.min(from))
         .to_string();
-    // An open interval stays open: merging a later loss into it cannot give
-    // it an end.
-    if let Some(end) = gap.end_ns.as_deref() {
-        gap.end_ns = Some(end.parse::<u64>().unwrap_or(to).max(to).to_string());
-    }
+    let end = gap
+        .end_ns
+        .as_deref()
+        .and_then(|end| end.parse::<u64>().ok());
+    gap.end_ns = end.zip(to).map(|(end, to)| end.max(to).to_string());
 }
 
 #[cfg(test)]
@@ -1931,6 +1933,29 @@ mod tests {
             .find(|gap| gap.reason == "foreign_abi")
             .unwrap();
         assert_eq!(foreign.end_ns.as_deref(), Some("2"));
+    }
+
+    /// One rule widens every merged interval: the earliest start, the latest
+    /// end, and no end once either side has none.
+    #[test]
+    fn a_merged_interval_covers_both_and_ends_only_if_both_end() {
+        let gap = |start: u64, end: Option<u64>| Gap {
+            classes: Vec::new(),
+            source: "audit".to_owned(),
+            start_ns: start.to_string(),
+            end_ns: end.map(|end| end.to_string()),
+            reason: "queue_full".to_owned(),
+            lost_count: Some(1),
+        };
+        let merged = |mut into: Gap, from: u64, to: Option<u64>| {
+            extend_gap_interval(&mut into, from, to);
+            (into.start_ns, into.end_ns)
+        };
+        let closed = |start: &str, end: &str| (start.to_owned(), Some(end.to_owned()));
+        assert_eq!(merged(gap(5, Some(9)), 2, Some(7)), closed("2", "9"));
+        assert_eq!(merged(gap(5, Some(9)), 6, Some(12)), closed("5", "12"));
+        assert_eq!(merged(gap(5, Some(9)), 7, None), ("5".to_owned(), None));
+        assert_eq!(merged(gap(5, None), 1, Some(3)), ("1".to_owned(), None));
     }
 
     /// Audit 7 L13: at the 64-gap bound, an open-ended loss merged into the
