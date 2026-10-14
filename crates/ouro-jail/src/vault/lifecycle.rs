@@ -542,33 +542,28 @@ fn form(out: &mut String, value: &str) {
 #[derive(Default)]
 pub struct Lease {
     entries: Vec<(Arc<Secret>, u64)>,
-    process: Option<super::origin::Process>,
+    /// The connection's initiator, which every process-bound entry needs.
+    initiator: super::origin::Initiator,
 }
 impl Lease {
     pub(super) fn add(&mut self, secret: Arc<Secret>, generation: u64) {
         self.entries.push((secret, generation));
     }
+    /// Adds the entries of a lease bound to the same connection.
     pub(crate) fn extend(&mut self, other: Self) {
         self.entries.extend(other.entries);
-        if other.process.is_some() {
-            self.process = other.process;
-        }
+        self.initiator = other.initiator;
     }
-    pub(crate) fn bind(&mut self, process: Option<&super::origin::Process>) {
-        self.process = process.cloned();
+    pub(crate) fn bind(&mut self, initiator: &super::origin::Initiator) {
+        self.initiator = initiator.clone();
     }
     pub(crate) fn check(&self) -> Result<(), Reason> {
         for (secret, generation) in &self.entries {
             if !secret.runtime.live(*generation) {
                 return Err(Reason::CredentialRevoked);
             }
-            if !secret.policy.binaries.is_empty()
-                && !self
-                    .process
-                    .as_ref()
-                    .is_some_and(|p| p.permits(&secret.executables))
-            {
-                return Err(Reason::CredentialProcessDenied);
+            if !secret.policy.binaries.is_empty() {
+                self.initiator.check(&secret.executables)?;
             }
         }
         Ok(())

@@ -191,11 +191,11 @@ struct RecordQueue {
 
 struct PreparedOrigin {
     origins: Arc<crate::vault::origin::Origins>,
-    process: crate::vault::origin::Process,
+    prepared: crate::vault::origin::Prepared,
 }
 impl super::unixpeer::ConnectionOrigin for PreparedOrigin {
-    fn connected(self: Box<Self>, fd: std::os::fd::RawFd) {
-        self.origins.connected(self.process, fd);
+    fn connected(self: Box<Self>, socket: BorrowedFd<'_>) {
+        self.origins.connected(self.prepared, socket);
     }
 }
 
@@ -204,6 +204,7 @@ impl MediationSink for RecordQueue {
         &self,
         pid: libc::pid_t,
         start: u64,
+        destination: std::net::SocketAddr,
     ) -> Option<Box<dyn super::unixpeer::ConnectionOrigin>> {
         let origins = self
             .origins
@@ -211,8 +212,8 @@ impl MediationSink for RecordQueue {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()?
             .clone();
-        let process = origins.prepare(pid, start)?;
-        Some(Box::new(PreparedOrigin { origins, process }))
+        let prepared = origins.prepare(pid, start, destination)?;
+        Some(Box::new(PreparedOrigin { origins, prepared }))
     }
     fn record(&self, record: MediationRecord) {
         let tx = self.tx.lock().unwrap_or_else(PoisonError::into_inner);
@@ -572,9 +573,6 @@ impl AgentNet {
             identity::start_time_ticks(pid).map_err(|error| refusal("bridge", error))?;
         if super::watch::readable(fd.as_raw_fd()) {
             return Err(refusal("bridge", "it exited during discovery"));
-        }
-        if let Some(vault) = &self.vault {
-            vault.origins.set_bridge(pid);
         }
         self.bridge = Some(Bridge {
             pid,

@@ -506,16 +506,11 @@ fn service_one(w: &Workers) -> io::Result<()> {
     facts.address_complete = ualen <= 256 && sockaddr.len() == ualen;
     facts.peer = peer_of(&sockaddr);
 
-    let origin = if facts
-        .family
-        .is_some_and(|family| family == libc::AF_INET as u16 || family == libc::AF_INET6 as u16)
-    {
-        match (facts.tgid, facts.tgid_start) {
-            (Some(pid), Some(start)) => sink.connecting(pid, start),
-            _ => None,
+    let origin = match (&facts.peer, facts.tgid, facts.tgid_start) {
+        (Some(Peer::Internet { port, address }), Some(pid), Some(start)) => {
+            sink.connecting(pid, start, std::net::SocketAddr::new(*address, *port))
         }
-    } else {
-        None
+        _ => None,
     };
     // Another thread's exec can cancel the notifying task during executable
     // capture. Never attach the successor's identity to a stale notification.
@@ -526,7 +521,7 @@ fn service_one(w: &Workers) -> io::Result<()> {
     if verdict.is_ok()
         && let Some(origin) = origin
     {
-        origin.connected(dup.as_raw_fd());
+        origin.connected(dup.as_fd());
     }
     let verdict = match verdict {
         Ok(()) => Verdict::Allowed,

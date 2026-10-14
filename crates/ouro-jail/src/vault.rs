@@ -304,19 +304,19 @@ impl Vault {
         scheme: &str,
         request: &mut crate::proxy::http::Request,
     ) -> Result<lifecycle::Lease, crate::proxy::Reason> {
-        self.inject_bound(scheme, request, None)
+        self.inject_bound(scheme, request, &origin::Initiator::default())
     }
 
     pub(crate) fn inject_bound(
         &self,
         scheme: &str,
         request: &mut crate::proxy::http::Request,
-        process: Option<&origin::Process>,
+        initiator: &origin::Initiator,
     ) -> Result<lifecycle::Lease, crate::proxy::Reason> {
         use crate::proxy::Reason;
         let mut out = Zeroizing::new(Vec::with_capacity(request.forward_head.len() + 8192));
         let mut lease = lifecycle::Lease::default();
-        lease.bind(process);
+        lease.bind(initiator);
         for line in request.forward_head.split_inclusive(|b| *b == b'\n') {
             if !line.windows(6).any(|s| s == b"vault:") {
                 out.extend_from_slice(line);
@@ -368,10 +368,8 @@ impl Vault {
                     return Err(Reason::CredentialPathDenied);
                 }
             }
-            if !secret.policy.binaries.is_empty()
-                && !process.is_some_and(|p| p.permits(&secret.executables))
-            {
-                return Err(Reason::CredentialProcessDenied);
+            if !secret.policy.binaries.is_empty() {
+                initiator.check(&secret.executables)?;
             }
             let (value, generation) = secret.runtime.current()?;
             lease.add(Arc::clone(secret), generation);
@@ -585,6 +583,11 @@ mod tests {
         socket
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
+        // This test stands in for the sealed bridge, which writes the
+        // connection's origin preamble first.
+        socket
+            .write_all(&origin::preamble_for(40000, 3128))
+            .unwrap();
         write!(
             socket,
             "CONNECT fixture.test:{port} HTTP/1.1\r\nHost: fixture.test:{port}\r\n\r\n"
@@ -770,6 +773,57 @@ mod tests {
         plain_vault
             .inject("http", &mut default_port)
             .expect("the allow_plaintext opt-in substitutes");
+    }
+    /// A vault proxy reads the bridge's preamble first: a connection that
+    /// closes before it is no request, not a process denial.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_vault_connection_closed_before_its_preamble_is_no_request() {
+        let secret = Secret::new(
+            "api".into(),
+            Policy {
+                hosts: vec!["https://fixture.test".into()],
+                ..Policy::default()
+            },
+            b"fixture-secret".to_vec(),
+        )
+        .unwrap();
+        let vault = Vault::new("test-attempt", vec![Arc::new(secret)]).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("proxy.sock");
+        let (sender, receiver) = mpsc::channel();
+        let proxy = proxy::start_with_vault(
+            ProxyConfig {
+                listener: UnixListener::bind(&path).unwrap(),
+                rules: Rules::from_strings(&["fixture.test:443".to_owned()], &[]).unwrap(),
+                budgets: Budgets::default(),
+                resolver: Arc::new(FixtureResolver::new()),
+            },
+            Arc::new(Sink(Mutex::new(sender))),
+            Some(Arc::new(vault)),
+        )
+        .unwrap();
+        drop(UnixStream::connect(&path).unwrap());
+        // A second connection, accepted after the first, settles with a
+        // result; once neither is active both have settled.
+        let mut refused = UnixStream::connect(&path).unwrap();
+        refused
+            .write_all(&origin::preamble_for(40000, 3128))
+            .unwrap();
+        refused
+            .write_all(b"CONNECT other.test:443 HTTP/1.1\r\nHost: other.test:443\r\n\r\n")
+            .unwrap();
+        let result = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(result.reason, Reason::HostNotAllowed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while proxy.active_connections() != 0 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        let summary = proxy.stop(Duration::from_secs(10));
+        assert_eq!((summary.accepted, summary.results_emitted), (2, 1));
+        assert_eq!(summary.without_request, 1);
+        assert!(summary.complete());
     }
     #[test]
     fn a_placeholder_outside_authorization_is_refused_never_rewritten() {

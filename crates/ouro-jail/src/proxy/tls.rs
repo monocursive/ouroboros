@@ -54,7 +54,7 @@ pub(super) fn relay(
     target: &Destination,
     early: &[u8],
     chunk: usize,
-    process: Option<&crate::vault::origin::Process>,
+    initiator: &crate::vault::origin::Initiator,
 ) -> Result<RelayOutcome, Failure> {
     let mut progress = RelayOutcome {
         bytes_in: 0,
@@ -66,7 +66,7 @@ pub(super) fn relay(
         vault,
         client,
         upstream,
-        (target, process),
+        (target, initiator),
         early,
         chunk,
         &mut progress,
@@ -75,7 +75,9 @@ pub(super) fn relay(
         Err(reason) => {
             progress.end = if matches!(
                 reason,
-                Reason::CredentialRevoked | Reason::CredentialProcessDenied
+                Reason::CredentialRevoked
+                    | Reason::CredentialProcessDenied
+                    | Reason::CredentialProcessUnverified
             ) {
                 EndReason::CredentialRevoked
             } else if reason == Reason::ClientClosed {
@@ -92,12 +94,12 @@ fn relay_inner(
     vault: &Vault,
     client: &std::sync::Arc<UnixStream>,
     upstream: &std::sync::Arc<TcpStream>,
-    authority: (&Destination, Option<&crate::vault::origin::Process>),
+    authority: (&Destination, &crate::vault::origin::Initiator),
     early: &[u8],
     chunk: usize,
     outcome: &mut RelayOutcome,
 ) -> Result<(), Reason> {
-    let (target, process) = authority;
+    let (target, initiator) = authority;
     let mut server = vault.server(target)?;
     server.set_buffer_limit(Some(16 * 1024));
     let io = ClientIo {
@@ -152,7 +154,7 @@ fn relay_inner(
             .map_err(|_| Reason::OriginUnverified)?;
     }
     let websocket_key = request.websocket_key().map(|key| key.to_vec());
-    let lease = vault.inject_bound("https", &mut request, process)?;
+    let lease = vault.inject_bound("https", &mut request, initiator)?;
     let lease = std::sync::Arc::new(lease);
     let watch =
         crate::vault::lifecycle::Watch::start(lease.clone(), client.clone(), upstream.clone())?;

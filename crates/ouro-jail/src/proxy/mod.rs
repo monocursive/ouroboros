@@ -179,8 +179,13 @@ pub enum ProxyDecision {
 pub enum Reason {
     /// Credential path was not granted.
     CredentialPathDenied,
-    /// Connection initiator was not granted.
+    /// The connection's initiating process is not one the credential is
+    /// bound to.
     CredentialProcessDenied,
+    /// The connection's initiating process could not be established: the
+    /// bridge's preamble was late or invalid, the process could not be
+    /// pinned, or no authority was published within the rendezvous.
+    CredentialProcessUnverified,
     /// The credential source is missing, revoked or changed.
     CredentialRevoked,
     /// The credential is expired or awaiting a safe refresh.
@@ -227,7 +232,8 @@ pub enum Reason {
     ClientClosed,
     /// The connection budget was exhausted.
     Overload,
-    /// The proxy ran out of a process resource (descriptors or threads).
+    /// The proxy ran out of a process resource (descriptors, threads, or
+    /// the budget of pinned connection initiators).
     ResourceExhausted,
     /// The proxy is stopping.
     Stopping,
@@ -242,6 +248,7 @@ impl Reason {
         match self {
             Reason::CredentialPathDenied => "credential_path_denied",
             Reason::CredentialProcessDenied => "credential_process_denied",
+            Reason::CredentialProcessUnverified => "credential_process_unverified",
             Reason::CredentialRevoked => "credential_revoked",
             Reason::CredentialUnavailable => "credential_unavailable",
             Reason::OriginMismatch => "origin_mismatch",
@@ -275,6 +282,7 @@ impl Reason {
         match self {
             Reason::CredentialPathDenied
             | Reason::CredentialProcessDenied
+            | Reason::CredentialProcessUnverified
             | Reason::CredentialRevoked
             | Reason::CredentialUnavailable
             | Reason::OriginMismatch
@@ -645,11 +653,15 @@ pub fn start_with_vault(
         let bound = vault.has_process_bindings();
         vault.origins.configure(bound, budgets.max_connections);
         if bound {
+            use crate::vault::origin::{FDS_PER_PIN, MAX_PINNED};
             let open = sys::open_descriptor_count()?;
             let (soft, _) = sys::nofile_limits()?;
-            let needed = budgets
-                .descriptors_needed()
-                .saturating_add(budgets.max_connections.min(128).saturating_mul(2));
+            let needed = budgets.descriptors_needed().saturating_add(
+                budgets
+                    .max_connections
+                    .min(MAX_PINNED)
+                    .saturating_mul(FDS_PER_PIN),
+            );
             if soft.saturating_sub(open as u64) < needed as u64 {
                 return Err(invalid(
                     "the proxy descriptor budget cannot reserve pinned process authority".into(),
@@ -938,7 +950,9 @@ fn denial(
 /// rely on the slot being free.
 struct ResultSlot<'a> {
     shared: &'a Shared,
-    process: Option<crate::vault::origin::Process>,
+    /// The process that initiated the connection, as the bridge's preamble
+    /// and the mediator established it.
+    initiator: crate::vault::origin::Initiator,
     id: u64,
     accepted_at: Instant,
     kind: RequestKind,
@@ -1032,7 +1046,7 @@ fn respond(client: &UnixStream, reason: Reason, budget: Duration) {
 fn handle_connection(shared: &Shared, client: &Arc<UnixStream>, id: u64, accepted_at: Instant) {
     let mut slot = ResultSlot {
         shared,
-        process: None,
+        initiator: crate::vault::origin::Initiator::default(),
         id,
         accepted_at,
         kind: RequestKind::Unknown,
@@ -1079,7 +1093,16 @@ fn serve(
 ) -> Result<(), Reason> {
     let budgets = shared.budgets;
     if let Some(vault) = &shared.vault {
-        slot.process = vault.origins.receive(client)?;
+        slot.initiator = match vault.origins.receive(client) {
+            Ok(Some(initiator)) => initiator,
+            Ok(None) => {
+                slot.no_request();
+                return Ok(());
+            }
+            // Stop shuts the socket down under a reader, too.
+            Err(_) if shared.is_stopping() => return Err(Reason::Stopping),
+            Err(reason) => return Err(reason),
+        };
     }
     let Some(is_socks) = socks::detect(client, accepted_at + budgets.header_deadline)? else {
         slot.no_request();
@@ -1248,10 +1271,10 @@ fn connect_and_relay(
     let mut lease = crate::vault::lifecycle::Lease::default();
     if let Some(vault) = &shared.vault {
         if forwarded.framing != http::Framing::Tunnel {
-            lease.extend(vault.inject_bound("http", &mut forwarded, slot.process.as_ref())?);
+            lease.extend(vault.inject_bound("http", &mut forwarded, &slot.initiator)?);
         }
         if let Some(inner) = flight.as_mut().and_then(|f| f.http.as_mut()) {
-            lease.extend(vault.inject_bound("http", inner, slot.process.as_ref())?);
+            lease.extend(vault.inject_bound("http", inner, &slot.initiator)?);
         }
     }
     let request = &forwarded;
@@ -1322,7 +1345,7 @@ fn connect_and_relay(
             &request.destination,
             &flight.bytes,
             chunk,
-            slot.process.as_ref(),
+            &slot.initiator,
         );
         let mut event = match result {
             Ok(outcome) => {
