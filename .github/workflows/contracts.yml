@@ -10,12 +10,19 @@ permissions:
 concurrency:
   group: contracts-${{ github.ref }}
   cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4, pinned by SHA
-      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff  # v6, pinned by SHA (third-party toolchain installer: highest-risk unpinned action)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      # Third-party toolchain installer, so pinned to a commit like the rest.
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
       - run: uv run docs/specs/jail-v1/validate_contract.py
       - run: uv run docs/specs/ledger-v1/validate_contract.py
       - run: python3 -m unittest discover -s docs/specs/ledger-v1 -p test_freeze.py

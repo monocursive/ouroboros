@@ -17,23 +17,34 @@ permissions:
 concurrency:
   group: rust-${{ github.ref }}
   cancel-in-progress: true
+defaults:
+  run:
+    # GitHub's `bash` runs with `-eo pipefail`, so a pipeline (the test step's
+    # `tee`) reports the failing command, not its last one.
+    shell: bash
 jobs:
   gates:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Named images, not `-latest`: a runner upgrade is a reviewed change.
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     # A hung test must fail the job, not hold the runner for six hours.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4, pinned by SHA
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup toolchain install && rustup show
+      # Dependencies and the build cache, keyed by OS, toolchain and Cargo.lock.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      # ring builds native C/assembly even during cargo check.
-      - name: Install Linux cross compiler
+      # ring builds native C/assembly even during cargo check; minisign is
+      # for the release-tooling tests.
+      - name: Install Linux cross compiler and minisign
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu minisign
       # J5 platform compilation (jail-v1 §3.2): compile-only evidence for a
@@ -59,12 +70,6 @@ jobs:
       # this before, so a vendor name landed green.
       - name: I02 vendor-name scan
         run: cargo run -p xtask -- i02-scan
-      # deny.toml is the pinned dependency policy (licenses, advisories);
-      # this is the step that makes it enforced rather than declared.
-      - name: Dependency policy (cargo-deny)
-        run: |
-          cargo install cargo-deny --version 0.20.2 --locked
-          cargo deny --workspace check bans licenses advisories
       - name: Tests
         # One test thread: a ptrace tracer owns every waitpid in its process, so two
         # observer tests in parallel reap each other (the conformance driver pins
@@ -74,7 +79,7 @@ jobs:
         # to this revision, so its acceptance-map lane can be judged; the Ubuntu
         # leg must not: its live tests skip, which conformance mode fails.
         env:
-          OURO_CONFORMANCE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+          OURO_CONFORMANCE: ${{ runner.os == 'macOS' && '1' || '' }}
         run: |
           {
             echo "ouro-suite-path=$PATH"
@@ -87,9 +92,8 @@ jobs:
       # revision. Linux clauses read `elsewhere`; the conformance workflow
       # judges them on the reference host.
       - name: Acceptance verdict (macOS lane)
-        if: matrix.os == 'macos-latest'
+        if: runner.os == 'macOS'
         run: cargo run -p xtask -- gates --linux-release --log macos=test-output.txt
-      # `tee` would otherwise mask the test step's own status.
       - name: Report what was not exercised
         if: always()
         run: |
@@ -115,7 +119,19 @@ jobs:
               echo "No test output was produced."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-defaults:
-  run:
-    # `-o pipefail`, so a pipeline reports the failing command and not `tee`.
-    shell: bash
+  dependency-policy:
+    # deny.toml is the pinned dependency policy (bans, licenses, advisories,
+    # sources); this job makes it enforced rather than declared. Cargo.lock
+    # resolves the same graph for every host, so one Linux run covers it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install && rustup show
+      # Also caches ~/.cargo/bin, so cargo-deny is compiled only on a miss.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      - run: cargo install cargo-deny --version 0.20.2 --locked
+      - run: cargo deny --workspace check bans licenses advisories sources

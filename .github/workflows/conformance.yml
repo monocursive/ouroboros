@@ -16,12 +16,16 @@ permissions:
 concurrency:
   group: conformance-reference-host
   cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
 jobs:
   # §16 makes a skipped required capability a failure; a wholly unconfigured
   # host cannot run at all, but the skip must be loud, not a green silence.
   not-configured-notice:
     if: vars.OURO_CI_HOST == ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -37,14 +41,17 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
   reference-host:
     if: vars.OURO_CI_HOST != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A wedged SSH session must fail the job, not hold the serialized lane.
     timeout-minutes: 45
     env:
       CI_HOST: ${{ vars.OURO_CI_HOST }}
       CI_USER: ${{ vars.OURO_CI_USER }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4, pinned by SHA: this job holds the reference-host key
+      # This job holds the reference-host key, so the checkout keeps no token.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
       - name: SSH identity
         env:
           KEY: ${{ secrets.OURO_CI_SSH_KEY }}
@@ -55,10 +62,9 @@ jobs:
           printf '%s\n' "$KEY" > ~/.ssh/ouro_ci
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
       - name: Host manifest
-        # Redirected, not piped: GitHub's default shell for `run:` is
-        # `bash -e {0}` with no `pipefail`, so the step's status would be
-        # `tee`'s and an unreachable host would leave an empty manifest and a
-        # green step.
+        # Redirected, not piped through `tee`, so the step's status is ssh's
+        # own: an unreachable host fails the step instead of leaving an empty
+        # manifest.
         run: |
           mkdir -p evidence
           ssh -i ~/.ssh/ouro_ci -o BatchMode=yes -o StrictHostKeyChecking=yes \
@@ -71,7 +77,8 @@ jobs:
         run: rustup toolchain install && rustup show
       # The driver runs the contract validator (validate_contract.py) at the
       # same revision and records its output as evidence (R01); it needs uv.
-      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff  # v6, pinned by SHA (third-party toolchain installer: highest-risk unpinned action)
+      # Third-party toolchain installer, so pinned to a commit like the rest.
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
       - name: Conformance suite
         # The xtask driver validates the contract locally, copies the tree to a
         # per-run directory on the host, builds it, runs `doctor --json`
@@ -96,7 +103,7 @@ jobs:
             --host "$CI_HOST" --user "$CI_USER" \
             --key ~/.ssh/ouro_ci --known-hosts ~/.ssh/known_hosts \
             --evidence evidence/
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4, pinned by SHA
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: reference-host-evidence-${{ github.run_id }}

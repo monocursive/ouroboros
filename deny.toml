@@ -1,5 +1,5 @@
-# Pinned dependency policy, enforced by the `rust` workflow's cargo-deny
-# step (bans, licenses, advisories).
+# Pinned dependency policy, enforced by the `rust` workflow's
+# dependency-policy job (bans, licenses, advisories, sources).
 
 [licenses]
 allow = [
@@ -14,6 +14,12 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
+
+# Every dependency comes from crates.io; a new registry or git source is a
+# reviewed change to this file, not a side effect of a Cargo.toml edit.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
 
 [advisories]
 # cargo-deny 0.20 uses dependency scope here rather than a lint level.

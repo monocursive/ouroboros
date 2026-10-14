@@ -1,0 +1,12 @@
+# Actions are pinned by full commit SHA with a `# vX.Y.Z` comment; Dependabot
+# proposes both together, so pins are updated by reviewed pull requests rather
+# than drifting or being bumped by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ['*']
