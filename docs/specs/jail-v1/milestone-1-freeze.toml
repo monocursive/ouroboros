@@ -54,7 +54,7 @@ agent_mediation = "sha256:33063c21492671bcf0a73a39a2a51af680cb9482443fb5ab8be82b
 [aarch64_closed_set]
 name = "linux-closed-v1"
 narrowing_filter = "sha256:f5353e3a8e29beeca5edb0e19952196e8c1b8b575c4d5aab1698a7017fefb56e"
-table_sha256 = "a0b842cbae4834fbb8512474ee5e39e7b9ba0d007b64b818cbf5bec324be4b02"
+table_sha256 = "f1fd7559e4f6ae6fcc244210b5c32ffd4e33ddb0e5f34d1236e5a4c05b5643f3"
 
 # The contained mount baselines: what every contained profile mounts
 [mounts]

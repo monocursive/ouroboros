@@ -124,12 +124,25 @@ pub fn closed_set_table() -> String {
          canonical learning filter (every verdict below is the program's own, run on\n\
          that input)\n\n",
     );
+    // The x32 bit is x86_64's. The same program tests it on aarch64, where
+    // it marks no ABI: no arm64 syscall number has that bit.
+    let (clone3, high_bit) = if abi::AARCH64 {
+        (
+            "clone3 (435 or 435|bit 30)   ENOSYS  every ABI, before the architecture branch",
+            "bit 30, x86_64's x32 marker (no arm64 number has it)",
+        )
+    } else {
+        (
+            "clone3 (nr 435 or x32|435)   ENOSYS  every ABI, before the architecture branch",
+            "x32",
+        )
+    };
     let _ = writeln!(
         out,
         "precondition                 verdict  meaning\n\
-         clone3 (nr 435 or x32|435)   ENOSYS  every ABI, before the architecture branch\n\
+         {clone3}\n\
          arch != 0x{native:08x}          {}    other calls: stopped, labelled foreign, never decoded\n\
-         nr & 0x{:08x}             {}    x32: stopped, labelled foreign, never decoded",
+         nr & 0x{:08x}             {}    {high_bit}: stopped, labelled foreign, never decoded",
         name(verdict(abi::AUDIT_ARCH_I386, 59, 0, 0)),
         seccomp::X32_SYSCALL_BIT,
         name(verdict(native, seccomp::X32_SYSCALL_BIT | 59, 0, 0)),
@@ -294,6 +307,12 @@ mod tests {
         for name in ["seccomp", "clone ", "clone3", "x32", "EBUSY", "0x4f4a"] {
             assert!(table.contains(name), "{name}");
         }
+        // x32 is an x86_64 ABI: the aarch64 table names the bit, not the ABI.
+        let high_bit = table
+            .lines()
+            .find(|line| line.starts_with("nr & 0x40000000"))
+            .expect("the high-bit row");
+        assert_eq!(high_bit.contains("x32:"), !abi::AARCH64, "{high_bit}");
         // J4 W3: the rules the loss and tracer reviews added, and the
         // agent's named exclusion, are stated.
         for text in [

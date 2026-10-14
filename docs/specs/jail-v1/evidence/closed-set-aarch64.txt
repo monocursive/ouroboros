@@ -4,9 +4,9 @@ canonical learning filter (every verdict below is the program's own, run on
 that input)
 
 precondition                 verdict  meaning
-clone3 (nr 435 or x32|435)   ENOSYS  every ABI, before the architecture branch
+clone3 (435 or 435|bit 30)   ENOSYS  every ABI, before the architecture branch
 arch != 0xc00000b7          TRACE    other calls: stopped, labelled foreign, never decoded
-nr & 0x40000000             TRACE    x32: stopped, labelled foreign, never decoded
+nr & 0x40000000             TRACE    bit 30, x86_64's x32 marker (no arm64 number has it): stopped, labelled foreign, never decoded
 
 closed-set rows (a stop, then one result per return; EACCES or EPERM is
 one fs.deny naming the operation below as attempted_operation)
