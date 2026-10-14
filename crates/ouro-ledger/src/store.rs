@@ -2045,6 +2045,20 @@ mod tests {
     use super::*;
     mod redaction;
 
+    /// The call failed with the refusal named by `expected`, not with some
+    /// unrelated error that merely makes it fail.
+    #[track_caller]
+    pub(super) fn assert_refused<T>(result: Result<T>, expected: &str) {
+        match result {
+            Ok(_) => panic!("expected a refusal containing {expected:?}, but the call succeeded"),
+            Err(error) => assert!(
+                error.0.contains(expected),
+                "expected a refusal containing {expected:?}, got {:?}",
+                error.0
+            ),
+        }
+    }
+
     pub(super) fn peer() -> Peer {
         Peer {
             uid: crate::os::euid(),
@@ -2069,7 +2083,10 @@ mod tests {
         let mut plan = payload();
         plan["owner_lifetime"] = "systemd_user_service".into();
         let run = store.prepare("detached", &plan, &peer()).unwrap();
-        assert!(store.prepare("detached", &payload(), &peer()).is_err());
+        assert_refused(
+            store.prepare("detached", &payload(), &peer()),
+            "request id already maps to a different prepare payload",
+        );
         drop(store);
         let mut store = Store::open(temp.path()).unwrap();
         assert_eq!(
@@ -2077,10 +2094,16 @@ mod tests {
             run.run_id
         );
         plan["io"]["mode"] = "foreground".into();
-        assert!(store.prepare("foreground", &plan, &peer()).is_err());
+        assert_refused(
+            store.prepare("foreground", &plan, &peer()),
+            "prepare only accepts the versioned digest-only request plan",
+        );
         plan["io"]["mode"] = "batch".into();
         plan["owner_lifetime"] = "unchecked_double_fork".into();
-        assert!(store.prepare("unproved", &plan, &peer()).is_err());
+        assert_refused(
+            store.prepare("unproved", &plan, &peer()),
+            "prepare only accepts the versioned digest-only request plan",
+        );
     }
     fn prepared(run: &RunRecord) -> Value {
         let mut receipt: Value = serde_json::from_str(include_str!(
@@ -2151,7 +2174,10 @@ mod tests {
             let mut store = Store::open(&data).unwrap();
             let result = store.reconcile_pending(&run.run_id, &peer(), &|_| true);
             if matches!(fault, Fault::PartialWrite) {
-                assert!(result.is_err());
+                assert_refused(
+                    result,
+                    "ambiguous canonical history refuses pending recovery",
+                );
                 assert!(!store.verify(None).unwrap()[0].local_consistency);
             } else {
                 let recovered = result.unwrap();
@@ -2286,23 +2312,25 @@ mod tests {
         let held = store.hold(&run.run_id, "hold-1", &peer()).unwrap();
         assert_eq!(store.show(&run.run_id).unwrap().holds, ["operator"]);
         assert_eq!(store.hold(&run.run_id, "hold-1", &peer()).unwrap(), held);
-        assert!(store.release(&run.run_id, "hold-1", &peer()).is_err());
+        assert_refused(
+            store.release(&run.run_id, "hold-1", &peer()),
+            "request id conflicts with its immutable payload",
+        );
         let released = store.release(&run.run_id, "release-1", &peer()).unwrap();
         assert_eq!(released.seq, held.seq + 1);
         assert_eq!(store.hold(&run.run_id, "hold-1", &peer()).unwrap(), held);
         assert!(store.show(&run.run_id).unwrap().holds.is_empty());
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "forged",
-                    "hold",
-                    None,
-                    &json!({}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "forged",
+                "hold",
+                None,
+                &json!({}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "invalid owner intent",
         );
         let path = store.root.join(&run.run_id).join(manifest::name(2));
         let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
@@ -2386,7 +2414,10 @@ mod tests {
                     assert_eq!(&fs::read(directory.join(name)).unwrap(), bytes);
                 }
                 if matches!(fault, Fault::PartialWrite) {
-                    assert!(apply(&mut store).is_err());
+                    assert_refused(
+                        apply(&mut store),
+                        "stream is poisoned; no dependent dispatch or sequence reuse",
+                    );
                     assert!(!store.verify(None).unwrap()[0].local_consistency);
                 } else {
                     let receipt = apply(&mut store).unwrap();
@@ -2481,10 +2512,19 @@ mod tests {
         assert_eq!(second.runs.len(), 2);
         assert!(second.runs.iter().all(|r| r.run_id > first.runs[0].run_id));
         assert!(second.next_after.is_none());
-        assert!(store.gc_plan(0, None, 1).is_err());
-        assert!(store.gc_plan(u32::MAX, None, 1).is_err());
-        assert!(store.gc_plan(90, None, 101).is_err());
-        assert!(store.gc_plan(90, Some("../escape"), 1).is_err());
+        assert_refused(
+            store.gc_plan(0, None, 1),
+            "retention requires 1..36500 days",
+        );
+        assert_refused(
+            store.gc_plan(u32::MAX, None, 1),
+            "retention requires 1..36500 days",
+        );
+        assert_refused(
+            store.gc_plan(90, None, 101),
+            "GC preview requires 1..36500 retention days and 1..100 runs per page",
+        );
+        assert_refused(store.gc_plan(90, Some("../escape"), 1), "invalid run id");
         assert!(serde_json::to_vec(&plan).unwrap().len() < MAX_FRAME_BYTES);
         let path = store.root.join(&run.run_id).join(STREAM);
         let mut file = OpenOptions::new().append(true).open(path).unwrap();
@@ -2726,7 +2766,10 @@ mod tests {
                 );
             }
             if matches!(fault, Fault::GcIntentSync | Fault::GcBeforeUnlink) {
-                assert!(store.hold(&run.run_id, "during-expiry", &peer()).is_err());
+                assert_refused(
+                    store.hold(&run.run_id, "during-expiry", &peer()),
+                    "capture pruning is incomplete; retry GC or restart before mutations",
+                );
                 let _ = store.verify(None); // A verifier cannot delete the pending capture.
                 assert!(directory.join("artifacts/stdout.bin").exists());
             }
@@ -2934,7 +2977,10 @@ mod tests {
                 .0
                 .contains("pruned")
         );
-        assert!(store.hold(&run.run_id, "too-late", &peer()).is_err());
+        assert_refused(
+            store.hold(&run.run_id, "too-late", &peer()),
+            "run history was pruned; new mutations are refused",
+        );
         store.flush_index();
         drop(store);
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
@@ -2947,10 +2993,9 @@ mod tests {
         );
         let mut conflicting = run.payload.clone();
         conflicting["argv_digest"] = json!(format!("sha256:{}", "f".repeat(64)));
-        assert!(
-            recovered
-                .prepare("gc-prepare", &conflicting, &peer())
-                .is_err()
+        assert_refused(
+            recovered.prepare("gc-prepare", &conflicting, &peer()),
+            "request id already maps to a different prepare payload",
         );
         recovered.claim_owner(&run.run_id, &peer()).unwrap();
         let note = recovered
@@ -2965,31 +3010,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(note, replay["gc-note"].receipt);
-        assert!(
-            recovered
-                .append_owner(
-                    &run.run_id,
-                    "new-key",
-                    "note",
-                    Some("effect-1"),
-                    &json!({"note":"private-note-body"}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            recovered.append_owner(
+                &run.run_id,
+                "new-key",
+                "note",
+                Some("effect-1"),
+                &json!({"note":"private-note-body"}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "run history was pruned; new mutations are refused",
         );
-        assert!(
-            recovered
-                .append_owner(
-                    &run.run_id,
-                    "gc-note",
-                    "note",
-                    Some("effect-1"),
-                    &json!({"note":"changed"}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            recovered.append_owner(
+                &run.run_id,
+                "gc-note",
+                "note",
+                Some("effect-1"),
+                &json!({"note":"changed"}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "request id conflicts with its immutable payload",
         );
         source_fixture(&mut recovered, &run, "exec", 1, None);
         assert_eq!(recovered.stream(&run.run_id).unwrap().replay, replay);
@@ -3034,12 +3077,14 @@ mod tests {
                 assert!(directory.join(STREAM).exists());
             } else {
                 assert!(directory.join("gc.json").exists());
-                assert!(
-                    store
-                        .read(&read_request(&run, crate::protocol::ReadSelector::All))
-                        .is_err()
+                assert_refused(
+                    store.read(&read_request(&run, crate::protocol::ReadSelector::All)),
+                    "run history was pruned; canonical query and export are unavailable",
                 );
-                assert!(store.hold(&run.run_id, "after-decision", &peer()).is_err());
+                assert_refused(
+                    store.hold(&run.run_id, "after-decision", &peer()),
+                    "run history was pruned; new mutations are refused",
+                );
             }
             drop(store);
             let mut recovered = Store::open(&temp.path().join("data")).unwrap();
@@ -3204,7 +3249,10 @@ mod tests {
             b"restored history"
         );
         drop(store);
-        assert!(Store::open(&temp.path().join("data")).is_err());
+        assert_refused(
+            Store::open(&temp.path().join("data")),
+            "GC inventory file identity or content changed; bytes preserved",
+        );
         assert_eq!(
             fs::read(directory.join(STREAM)).unwrap(),
             b"restored history"
@@ -3521,7 +3569,7 @@ mod tests {
         assert!(store.read(&wrong).unwrap_err().0.contains("mismatch"));
         wrong = resumed.clone();
         wrong.cursor.as_mut().unwrap().replace_range(63..64, "z");
-        assert!(store.read(&wrong).is_err());
+        assert_refused(store.read(&wrong), "invalid reader cursor");
         drop(store);
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
         assert!(recovered.read(&resumed).unwrap().local_consistency);
@@ -3738,7 +3786,10 @@ mod tests {
         };
         fs::write(&path, &bytes).unwrap();
         request.cursor = Some(cursor);
-        assert!(store.read(&request).is_err());
+        assert_refused(
+            store.read(&request),
+            "reader checkpoint is corrupt or unavailable; start a new snapshot",
+        );
     }
 
     #[test]
@@ -3770,7 +3821,10 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        assert!(store.read(&corrupt_request).is_err());
+        assert_refused(
+            store.read(&corrupt_request),
+            "reader checkpoint is corrupt or unavailable; start a new snapshot",
+        );
         for _ in 0..31 {
             let unrelated = store.read(&fresh).unwrap();
             assert!(!unrelated.done);
@@ -3780,7 +3834,10 @@ mod tests {
         assert_eq!(fs::read(&checkpoint_path).unwrap(), altered);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 32);
         assert!(store.read(&fresh).unwrap_err().0.contains("session limit"));
-        assert!(store.read(&corrupt_request).is_err());
+        assert_refused(
+            store.read(&corrupt_request),
+            "reader checkpoint is corrupt or unavailable; start a new snapshot",
+        );
 
         File::open(&checkpoint_path)
             .unwrap()
@@ -3794,7 +3851,10 @@ mod tests {
         assert_eq!(after_expiry.snapshot, initial.snapshot);
         assert!(!checkpoint_path.exists());
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 32);
-        assert!(store.read(&corrupt_request).is_err());
+        assert_refused(
+            store.read(&corrupt_request),
+            "reader cursor expired or is unknown; start a new snapshot, do not append it to an old export",
+        );
         assert_eq!(fs::read(&canonical_path).unwrap(), original);
         assert!(store.verify(None).unwrap()[0].local_consistency);
     }
@@ -3928,7 +3988,10 @@ mod tests {
             )
             .unwrap()
         );
-        assert!(note(&mut store, &run, "stable", json!({"meaning":"changed"})).is_err());
+        assert_refused(
+            note(&mut store, &run, "stable", json!({"meaning":"changed"})),
+            "request id conflicts with its immutable payload",
+        );
         drop(store);
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
         assert_eq!(
@@ -3954,10 +4017,9 @@ mod tests {
     #[test]
     fn different_payload_cannot_rebind_prepare_or_effect_identity() {
         let (_temp, mut store, run) = create();
-        assert!(
-            store
-                .prepare("test-prepare", &json!({"different":true}), &peer())
-                .is_err()
+        assert_refused(
+            store.prepare("test-prepare", &json!({"different":true}), &peer()),
+            "prepare only accepts the versioned digest-only request plan",
         );
         store
             .append_owner(
@@ -3970,18 +4032,17 @@ mod tests {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             .unwrap();
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "effect-second",
-                    "note",
-                    Some("effect-1"),
-                    &json!({"v":2}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "effect-second",
+                "note",
+                Some("effect-1"),
+                &json!({"v":2}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "effect id conflicts with its immutable payload",
         );
     }
 
@@ -3995,7 +4056,10 @@ mod tests {
         let broken = fs::read(&stream_path).unwrap();
         assert!(broken.len() > before.len());
         store.fault = None;
-        assert!(note(&mut store, &run, "retry", json!({})).is_err());
+        assert_refused(
+            note(&mut store, &run, "retry", json!({})),
+            "stream is poisoned; no dependent dispatch or sequence reuse",
+        );
         drop(store);
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
         assert_eq!(fs::read(&stream_path).unwrap(), broken);
@@ -4004,8 +4068,14 @@ mod tests {
             recovered.show(&run.run_id).unwrap().state,
             "outcome_unknown"
         );
-        assert!(recovered.prepare("different", &payload(), &peer()).is_err());
-        assert!(note(&mut recovered, &run, "partial", json!({"v":"half record"})).is_err());
+        assert_refused(
+            recovered.prepare("different", &payload(), &peer()),
+            "ambiguous recovery blocks new preparation; inspect verify",
+        );
+        assert_refused(
+            note(&mut recovered, &run, "partial", json!({"v":"half record"})),
+            "stream is poisoned; no dependent dispatch or sequence reuse",
+        );
     }
 
     /// Rewrite the canonical records and drop the segment manifest, so only the
@@ -4120,7 +4190,10 @@ mod tests {
             .collect();
         ids.sort();
         for limit in [0, MAX_VERIFY_LIMIT + 1] {
-            assert!(store.verify_page(None, None, limit).is_err());
+            assert_refused(
+                store.verify_page(None, None, limit),
+                "verify limit must be between 1 and 100",
+            );
         }
         let first = store.verify_page(None, None, 2).unwrap();
         assert_eq!(first.reports.len(), 2);
@@ -4168,7 +4241,10 @@ mod tests {
             store.fault = Some(fault);
             assert!(note(&mut store, &run, "uncertain", json!({"v":1})).is_err());
             store.fault = None;
-            assert!(note(&mut store, &run, "new", json!({"v":2})).is_err());
+            assert_refused(
+                note(&mut store, &run, "new", json!({"v":2})),
+                "stream is poisoned; no dependent dispatch or sequence reuse",
+            );
             assert!(!store.verify(None).unwrap()[0].local_consistency);
             drop(store);
             let mut recovered = Store::open(&temp.path().join("data")).unwrap();
@@ -4256,19 +4332,36 @@ mod tests {
         let (_temp, mut store, run) = create();
         let mut receipt = prepared(&run);
         receipt["argv_digest"] = json!("sha256:bad");
-        assert!(
-            store
-                .append_owner(
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "admit",
+                "admitted",
+                None,
+                &json!({"receipt":receipt}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "record violates frozen jail-receipt schema",
+        );
+        // Well-formed receipts for another argv or policy reach the binding check.
+        let other = json!(format!("sha256:{}", "e".repeat(64)));
+        for path in ["/argv_digest", "/policy/digest"] {
+            let mut receipt = prepared(&run);
+            *receipt.pointer_mut(path).unwrap() = other.clone();
+            assert_refused(
+                store.append_owner(
                     &run.run_id,
                     "admit",
                     "admitted",
                     None,
                     &json!({"receipt":receipt}),
                     &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
-        );
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ),
+                "intent receipt does not match prepared policy, argv, requirements and attempt",
+            );
+        }
         let first = store
             .append_owner(
                 &run.run_id,
@@ -4294,18 +4387,17 @@ mod tests {
                 )
                 .unwrap()
         );
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "admit-again",
-                    "admitted",
-                    None,
-                    &json!({"receipt":prepared(&run)}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "admit-again",
+                "admitted",
+                None,
+                &json!({"receipt":prepared(&run)}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "admission or refusal is only valid from prepared",
         );
     }
 
@@ -4346,15 +4438,14 @@ mod tests {
         );
         let mut changed = event.clone();
         changed["fields"]["message"] = json!("conflicting source sequence");
-        assert!(
-            store
-                .append_source(
-                    &run.run_id,
-                    &changed,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_source(
+                &run.run_id,
+                &changed,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "request id conflicts with its immutable payload",
         );
         store
             .append_owner(
@@ -4388,7 +4479,10 @@ mod tests {
         );
         let mut stranger = peer();
         stranger.birth = "new-process-birth".into();
-        assert!(store.claim_owner(&run.run_id, &stranger).is_err());
+        assert_refused(
+            store.claim_owner(&run.run_id, &stranger),
+            "attempt already has an owner; dead owners require reconciliation and are never restarted",
+        );
     }
 
     #[test]
@@ -4486,16 +4580,16 @@ mod tests {
         std::os::unix::fs::symlink(temp.path(), temp.path().join("link")).unwrap();
         assert!(Store::open(&temp.path().join("link")).is_err());
         let (_temp, mut store, run) = create();
-        assert!(
+        assert_refused(
             note(
                 &mut store,
                 &run,
                 "large",
-                json!({"body":"x".repeat(MAX_FRAME_BYTES)})
-            )
-            .is_err()
+                json!({"body":"x".repeat(MAX_FRAME_BYTES)}),
+            ),
+            "canonical event exceeds bounded frame limit",
         );
-        assert!(store.show("../../escape").is_err());
+        assert_refused(store.show("../../escape"), "invalid run id");
     }
 
     #[test]
@@ -4553,15 +4647,14 @@ mod tests {
             "prepared",
         ))
         .unwrap();
-        assert!(
-            store
-                .append_source(
-                    &run.run_id,
-                    &source,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_source(
+                &run.run_id,
+                &source,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "strict producer transport loss was durably recorded; stop admission and execution",
         );
         let mut source = source;
         source["source_seq"] = json!(1);
@@ -4584,15 +4677,14 @@ mod tests {
             store.show(&run.run_id).unwrap().coverage["ledger"]["status"],
             "degraded"
         );
-        assert!(
-            store
-                .append_source(
-                    &run.run_id,
-                    &source,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_source(
+                &run.run_id,
+                &source,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "record violates frozen jail-event schema",
         );
     }
 
@@ -4617,18 +4709,17 @@ mod tests {
         receipt["attempt_id"] = json!(run.attempt_id);
         let body =
             json!({"receipt":receipt,"outcome":receipt["outcome"],"coverage":receipt["coverage"]});
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "settle",
-                    "settled",
-                    None,
-                    &body,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "settle",
+                "settled",
+                None,
+                &body,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "terminal trace and receipt do not corroborate",
         );
         let receipt_digest = records::semantic::receipt_digest(&receipt).unwrap();
         let event = serde_json::to_value(records::Event::receipt_note(
@@ -4679,18 +4770,17 @@ mod tests {
             2,
             SystemTime::now(),
             2,
-            "after-settlement",
+            "after_settlement",
         ))
         .unwrap();
-        assert!(
-            store
-                .append_source(
-                    &run.run_id,
-                    &event,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_source(
+                &run.run_id,
+                &event,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "terminal run cannot ingest new observations",
         );
     }
 
@@ -4704,18 +4794,17 @@ mod tests {
         receipt["attempt_id"] = json!(run.attempt_id);
         let body =
             json!({"receipt":receipt,"outcome":receipt["outcome"],"coverage":receipt["coverage"]});
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "denied",
-                    "denied",
-                    None,
-                    &body,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "denied",
+                "denied",
+                None,
+                &body,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "terminal trace and receipt do not corroborate",
         );
         let receipt_digest = records::semantic::receipt_digest(&receipt).unwrap();
         let event = serde_json::to_value(records::Event::receipt_note(
@@ -4805,18 +4894,17 @@ mod tests {
         receipt["outcome"]["cause"] = json!("ENOENT");
         let body = json!({"receipt":receipt,"coverage":receipt["coverage"]});
         // A known exec error cannot retroactively stand in for admission.
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "settle",
-                    "settled",
-                    None,
-                    &body,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "settle",
+                "settled",
+                None,
+                &body,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "settlement requires durable admission",
         );
         store
             .append_owner(
@@ -4839,7 +4927,7 @@ mod tests {
                         None,
                         &body,
                         &peer(),
-                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     )
                     .is_err()
             );
@@ -5155,7 +5243,10 @@ mod tests {
         assert_eq!(fs::read(directory.join(manifest::NAME)).unwrap(), anchored);
         assert_eq!(segment_bytes(&directory), canonical);
         // Request/effect identities are global, not scoped to a file.
-        assert!(note(&mut recovered, &run, "rotated-0", json!({"changed":true})).is_err());
+        assert_refused(
+            note(&mut recovered, &run, "rotated-0", json!({"changed":true})),
+            "request id conflicts with its immutable payload",
+        );
     }
 
     #[test]
@@ -5177,7 +5268,10 @@ mod tests {
             store.fault = Some(fault);
             assert!(note(&mut store, &run, "rotation-fault", json!({"v":1})).is_err());
             store.fault = None;
-            assert!(note(&mut store, &run, "different", json!({})).is_err());
+            assert_refused(
+                note(&mut store, &run, "different", json!({})),
+                "stream is poisoned; no dependent dispatch or sequence reuse",
+            );
             let second = directory.join(manifest::name(2));
             let before = fs::read(&second).unwrap();
             let original_receipt = before.strip_suffix(b"\n").map(|frame| {
@@ -5193,8 +5287,14 @@ mod tests {
             assert_eq!(fs::read(&second).unwrap(), before);
             if matches!(fault, Fault::PartialWrite) {
                 assert!(!recovered.verify(None).unwrap()[0].local_consistency);
-                assert!(note(&mut recovered, &run, "rotation-fault", json!({"v":1})).is_err());
-                assert!(recovered.prepare("new", &payload(), &peer()).is_err());
+                assert_refused(
+                    note(&mut recovered, &run, "rotation-fault", json!({"v":1})),
+                    "stream is poisoned; no dependent dispatch or sequence reuse",
+                );
+                assert_refused(
+                    recovered.prepare("new", &payload(), &peer()),
+                    "ambiguous recovery blocks new preparation; inspect verify",
+                );
                 continue;
             }
             let receipt = note(&mut recovered, &run, "rotation-fault", json!({"v":1})).unwrap();
@@ -5414,7 +5514,10 @@ mod tests {
             .unwrap();
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
         assert!(recovered.verify(None).unwrap()[0].local_consistency);
-        assert!(recovered.read(&request).is_err());
+        assert_refused(
+            recovered.read(&request),
+            "reader canonical snapshot is corrupt: identity or length changed",
+        );
     }
 
     #[test]
@@ -5511,18 +5614,17 @@ mod tests {
                 .unwrap(),
             effect
         );
-        assert!(
-            recovered
-                .append_owner(
-                    &run.run_id,
-                    "new-request",
-                    "note",
-                    Some("effect-stable"),
-                    &json!({"v":1}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            recovered.append_owner(
+                &run.run_id,
+                "new-request",
+                "note",
+                Some("effect-stable"),
+                &json!({"v":1}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "effect id conflicts with its immutable payload",
         );
         for selector in [ReadSelector::Execs, ReadSelector::Hosts] {
             let (pages, _) = read_all(&mut recovered, read_request(&run, selector));
