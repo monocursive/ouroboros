@@ -329,7 +329,8 @@ const JSET_K: u16 = 0x45;
 /// `BPF_RET | BPF_K`.
 const RET_K: u16 = 0x06;
 
-/// `AUDIT_ARCH`: EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE.
+/// `AUDIT_ARCH` of the native architecture: `EM_AARCH64` or `EM_X86_64`,
+/// with `__AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE`.
 pub const AUDIT_ARCH: u32 = if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
     0xc000_00b7
 } else {
@@ -491,7 +492,7 @@ pub(crate) fn sandbox_exec(
             "seccomp",
             "unsupported",
             format!(
-                "the fixture's syscall table is x86_64; unsupported on this architecture ({})",
+                "the fixture has syscall tables for x86_64 and aarch64 only, not {}",
                 std::env::consts::ARCH
             ),
         ));

@@ -175,12 +175,6 @@ impl Drop for BuildLock {
     }
 }
 
-/// Last resort: build the package on demand.
-///
-/// This runs *inside* `cargo test`, which already holds the lock on the
-/// workspace build directory, so the nested build is given a target directory
-/// of its own. Sharing one would block forever, and sharing a build directory
-/// between trees is a known source of stale cross-tree artifacts here.
 /// A stable short key for a path, so two worktrees never share a build
 /// directory. FNV-1a, because a hash crate is not worth a dependency here.
 fn path_key(p: &Path) -> String {
@@ -193,6 +187,12 @@ fn path_key(p: &Path) -> String {
     format!("{h:016x}")
 }
 
+/// Last resort: build the package on demand.
+///
+/// This runs *inside* `cargo test`, which already holds the lock on the
+/// workspace build directory, so the nested build is given a target directory
+/// of its own. Sharing one would block forever, and sharing a build directory
+/// between trees is a known source of stale cross-tree artifacts here.
 fn build_package(package: &str, name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let release = exe.components().any(|c| c.as_os_str() == "release");

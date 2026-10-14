@@ -1254,8 +1254,9 @@ pub(crate) fn spawn_exec(img: &Image, via: ExecVia) -> Result<Spawned, Usage> {
         let _ = do_exec(img, via);
         let e = raw_errno();
         let bytes = e.to_ne_bytes();
-        // SAFETY: `bytes` is live for the call; short writes are irrelevant
-        // because the parent treats any error byte count as a failed exec.
+        // SAFETY: `bytes` is live for the call. A four-byte write to a pipe
+        // is atomic (PIPE_BUF is at least 512), so the parent reads either
+        // nothing (the image was replaced) or all four bytes.
         unsafe {
             libc::write(pw, bytes.as_ptr().cast::<libc::c_void>(), bytes.len());
             libc::_exit(127)
@@ -1291,6 +1292,13 @@ pub(crate) fn spawn_exec(img: &Image, via: ExecVia) -> Result<Spawned, Usage> {
     }
     // SAFETY: the parent owns the read end.
     unsafe { libc::close(pr) };
+    // A partial errno is a failed exec whose errno was cut: never success.
+    if got != 0 && got != buf.len() {
+        return Err(format!(
+            "the exec error pipe returned {got} of {} bytes",
+            buf.len()
+        ));
+    }
 
     Ok(Spawned {
         pid,

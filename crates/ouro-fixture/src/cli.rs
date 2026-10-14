@@ -404,7 +404,7 @@ pub enum Mode {
     /// Wrap a command the way a vendor agent's own sandbox wraps its tools
     /// (Linux): set no_new_privs, install a Landlock ruleset granting the
     /// listed trees, install a seccomp filter returning EPERM for the listed
-    /// syscalls (x86_64 numbers, architecture checked), report each step, then
+    /// syscalls (the native architecture's numbers, checked), report each step, then
     /// replace this process with ARGV. Any failed step stops before the exec.
     SandboxExec {
         /// Grant every filesystem right beneath DIR.
@@ -417,7 +417,7 @@ pub enum Mode {
         /// TCP connect is denied. Needs Landlock ABI 4.
         #[arg(long)]
         landlock_deny_tcp: bool,
-        /// Return EPERM for this syscall (an x86_64 name, or a number).
+        /// Return EPERM for this syscall (a name in the native table, or a number).
         #[arg(long = "seccomp-errno", value_name = "SYSCALL")]
         seccomp_errno: Vec<String>,
         #[arg(last = true, required = true, num_args = 1.., value_name = "ARGV")]
@@ -492,7 +492,7 @@ pub enum Mode {
         #[arg(value_name = "COUNT")]
         count: u32,
     },
-    /// `clone(CLONE_UNTRACED | SIGCHLD)` (Linux x86_64): the child makes one
+    /// `clone(CLONE_UNTRACED | SIGCHLD)` (Linux): the child makes one
     /// raw `mkdir(PATH)` and exits with its errno (0 on success); the parent
     /// reports the `clone` result and, when a child ran, an
     /// `untraced-mkdir` line with the child's result. `--expect` applies
