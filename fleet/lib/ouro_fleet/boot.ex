@@ -44,7 +44,8 @@ defmodule OuroFleet.Boot do
         config["node"]
       end
 
-    {:module, _} = Code.ensure_loaded(Ouroboros.Cluster.Epmd)
+    # Load the `-epmd_module` before distribution starts; `OuroFleet.Epmd` says why.
+    {:module, _} = Code.ensure_loaded(OuroFleet.Epmd)
 
     options =
       if client, do: %{name_domain: :longnames, hidden: true}, else: %{name_domain: :longnames}

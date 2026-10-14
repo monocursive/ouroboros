@@ -84,7 +84,8 @@ Both `server` and `client` entries in the Erlang TLS option file must use
 `{verify,verify_peer}`, `certfile`, `keyfile`, and `cacertfile`; the server also
 requires `{fail_if_no_peer_cert,true}`. Startup refuses plaintext distribution
 and weaker verification. The TLS option-file path cannot contain whitespace.
-The fixed-port EPMD adapter is reused from the preserved legacy implementation.
+The fixed-port EPMD adapter, `OuroFleet.Epmd`, derives from the preserved legacy
+implementation.
 
 Start the node with the following Erlang arguments, the compiled `ebin` path,
 and `fleet/scripts/node.exs /private/fleet/node.json`. Run it as its own user
@@ -93,7 +94,7 @@ Do not put this service in the owner or ledger service's lifetime unit.
 
 ```text
 +S 2:2 -proto_dist inet_tls -start_epmd false
--epmd_module Elixir.Ouroboros.Cluster.Epmd
+-epmd_module Elixir.OuroFleet.Epmd
 -ssl_dist_optfile /private/fleet/ssl_dist.conf
 ```
 

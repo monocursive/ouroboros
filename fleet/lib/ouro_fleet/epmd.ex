@@ -1,39 +1,40 @@
-defmodule Ouroboros.Cluster.Epmd do
+defmodule OuroFleet.Epmd do
   @moduledoc """
   The fleet's `-epmd_module`: distribution without an EPMD daemon.
 
-  Erlang's port mapper exists to answer one question — "which TCP port is `name@host`
-  listening on?" — for a machine that may run many nodes on ports nobody chose. An
-  Ouroboros fleet has neither problem. One fleet has one distribution port, every member
-  already carries the other members in its own profile, and the launcher exports that
-  answer as `OUROBOROS_DIST_PORT` (this node's listener) and `OUROBOROS_DIST_PORTS`. So
-  the daemon is replaced by a lookup in this module: no extra process, no extra listening
-  socket, and nothing to reach on 4369.
+  Erlang's port mapper exists to answer one question, "which TCP port is `name@host`
+  listening on?", for a machine that may run many nodes on ports nobody chose. A fleet
+  node's configuration already holds that answer: it lists every member with its
+  `dist_port`. `OuroFleet.Boot.start/2` exports the list as `OUROBOROS_DIST_PORTS` and,
+  on a member node, its own port as `OUROBOROS_DIST_PORT`, before it starts
+  distribution. This module answers from those two variables: no extra process, no
+  extra listening socket, and nothing to reach on 4369.
 
-  The generated `vm.args` names this module with `-epmd_module` and turns the daemon off
-  with `-start_epmd false`. Releases boot in embedded mode, so every module in the
-  release is loaded before any application starts, which is what makes this module
-  available to `net_kernel` before distribution comes up.
+  The VM is started with `-epmd_module Elixir.OuroFleet.Epmd -start_epmd false`. The
+  operator's node service passes these arguments (`docs/specs/fleet-v1/README.md`),
+  and the `ouro` front door passes them to the client node it starts.
 
   **Being loaded is not optional, and being on the path is not enough.**
-  `inet_tcp_dist:call_epmd_function/3` gates every callback but `register_node/3` on
-  `erlang:function_exported/3`, which answers `false` for a module that has not been
-  loaded yet — and then applies `erl_epmd` instead, with no error anywhere. A node in that
-  state binds an ephemeral port and dials peers through a port mapper that is not running.
-  Nothing here can detect it, because the fallback is taken before this module is reached.
-  Two things keep it from happening: embedded mode above, and `erl_distribution`, which
-  starts the epmd module as its first child — calling `start_link/0` loads it before
-  `net_kernel` listens. A test that drives `inet_tcp_dist` directly, without starting
+  `inet_tcp_dist`, to which `inet_tls_dist` delegates listening and dialling, calls
+  `address_please/3` and `listen_port_please/2` only if `erlang:function_exported/3`
+  says so. That answers `false` for a module that has not been loaded yet, and
+  `erl_epmd` is applied instead, with no error anywhere. A node in that state binds an
+  ephemeral port and dials peers through a port mapper that is not running. Nothing
+  here can detect it, because the fallback is taken before this module is reached.
+  Two things load it first: `OuroFleet.Boot.start/2` calls `Code.ensure_loaded/1` and
+  refuses to go on unless it loads, and the distribution supervisor that
+  `:net_kernel.start/2` brings up calls `start_link/0` on the epmd module before it
+  starts `net_kernel`. A test that drives `inet_tcp_dist` directly, without starting
   distribution, has neither and must load this module itself.
 
   ## The map
 
-  `OUROBOROS_DIST_PORTS` is `name@host=port`, one entry per member including this one,
-  written by the launcher from the profile's members. It is keyed by the whole node name
-  rather than by the host for two reasons: a lab or a test may put two nodes on one host,
-  where a host-keyed map cannot answer for both; and the node name is the one string the
-  dialer is actually holding. A bare `host=port` entry is still read, as a fallback for a
-  hand-written map, and a node-name entry wins wherever the two disagree.
+  `OUROBOROS_DIST_PORTS` is a comma-separated list of `name@host=port`, one entry per
+  configured member including this node. It is keyed by the whole node name rather than
+  by the host for two reasons: a lab or a test may put two nodes on one host, where a
+  host-keyed map cannot answer for both; and the node name is the one string the dialer
+  is actually holding. The parser also accepts a bare `host=port` key, which `Boot`
+  never writes; where both name a node, the node-name entry wins.
 
   ## The answers
 
@@ -50,34 +51,38 @@ defmodule Ouroboros.Cluster.Epmd do
 
   `inet_tcp_dist:fam_setup/4` calls `address_please/3` first and, unless that answers with
   a port, calls `port_please/2` with the **address it just resolved**. So on the dial path
-  `port_please/2` never sees a host's text: a member whose `host` is a private DNS name —
-  which §2 of the fleet contract allows — would have its map entry looked up under
-  `name@<resolved ip>`, which is in no map anyone writes, and would be dialled on this
-  node's own `OUROBOROS_DIST_PORT` instead. That is invisible while one fleet shares one
-  port and wrong the moment it does not.
+  `port_please/2` never sees a host's text. A member whose node name carries a DNS name,
+  which the membership check in `OuroFleet.Application` admits, would have its map entry
+  looked up under `name@<resolved ip>`. No map `Boot` writes has that key, so the member
+  would be dialled on this node's own `OUROBOROS_DIST_PORT` instead. That is invisible
+  while every member uses the same port and wrong the moment one does not.
 
   The lookup therefore happens in `address_please/3`, which still has the host as the
-  operator wrote it, and the four-tuple skips `port_please/2` entirely. `port_please/2,3`
-  stays for hand calls and for any caller that reaches it with a host of its own, and
-  applies the same lookup to whatever shape it is given.
+  node name spells it, and the four-tuple skips `port_please/2` entirely.
+  `port_please/2,3` stays for hand calls and for any caller that reaches it with a host
+  of its own, and applies the same lookup to whatever shape it is given.
 
-  A member the map does not name falls back to `OUROBOROS_DIST_PORT`, which is the
-  production case: one port for the whole fleet means this node's own listener names it.
-  `:noport` — neither variable set — is a node that was never given a way to dial anyone,
-  and is reported as such rather than guessed at.
+  A node the map does not name falls back to `OUROBOROS_DIST_PORT`, this node's own
+  listener port, which is right only when the peer shares it. `Boot` writes an entry
+  for every configured member, so only a member with a missing or invalid `dist_port`
+  takes this path. `:noport` (neither variable names a port) is a node that was never
+  given a way to dial that peer, and is reported as such rather than guessed at.
   """
 
   # The distribution protocol version `erl_epmd` reports, and the only one ERTS speaks.
   @dist_version 5
 
-  # `register_node/2,3` must answer with a creation, which distinguishes an incarnation
-  # of a node name from the one before it so a stale reference is recognised as stale.
-  # EPMD allocated it centrally; with no registry, each node picks its own from the same
-  # small range the port mapper used.
+  # `register_node/2,3` must answer with a creation, which tells one incarnation of a
+  # node name from the next. With no registry to allocate it, each node draws its own
+  # from 1..3 at random, so two successive incarnations share one a third of the time,
+  # and a pid or reference held from the earlier one is then not recognised as stale.
   @creations 1..3
 
   @doc """
-  Nothing to start. `net_kernel` accepts `:ignore` and carries on.
+  Nothing to start; the distribution supervisor accepts `:ignore` and carries on.
+
+  Being called is still what loads this module before `net_kernel` starts; see the
+  moduledoc.
   """
   @spec start_link() :: :ignore
   def start_link, do: :ignore
@@ -100,7 +105,8 @@ defmodule Ouroboros.Cluster.Epmd do
 
   `{:ok, 0}` means "nothing was asked for": `inet_tcp_dist` then falls back to the
   `inet_dist_listen_min`/`max` kernel range, and to an ephemeral port when that is unset
-  too. The generated `vm.args` sets both, so the pinned port is stated twice and agrees.
+  too. `Boot` sets `OUROBOROS_DIST_PORT` on a member node only and never sets the kernel
+  range, so a client node listens on an ephemeral port.
   """
   @spec listen_port_please(charlist() | String.t(), term()) :: {:ok, :inet.port_number()}
   def listen_port_please(_name, _host), do: {:ok, listen_port() || 0}
@@ -108,12 +114,12 @@ defmodule Ouroboros.Cluster.Epmd do
   @doc """
   The port a peer is listening on, from this node's own environment.
 
-  Not the dial path — see the moduledoc: `inet_tcp_dist` reaches this only when
-  `address_please/3` answered without a port, and then with the resolved address rather
-  than the host's text. It is kept for hand calls and for any caller that has a host of
-  its own, and it applies the same lookup to whichever of the three shapes it is given: a
-  charlist, a binary, or an IP tuple. `timeout` is accepted and ignored, because this
-  answer costs no network round trip, which is the point.
+  `inet_tcp_dist` reaches this only when `address_please/3` answered without a port, and
+  then with the resolved address rather than the host's text; see the moduledoc. It also
+  serves hand calls and any caller that has a host of its own, and it applies the same
+  lookup to whichever of the three shapes it is given: a charlist, a binary, or an IP
+  tuple. `timeout` is accepted and ignored, because this answer costs no network round
+  trip, which is the point.
   """
   @spec port_please(charlist() | String.t(), term()) ::
           {:port, :inet.port_number(), pos_integer()} | :noport
@@ -131,15 +137,15 @@ defmodule Ouroboros.Cluster.Epmd do
   @doc """
   Resolves a peer's host, and answers with its port when the map names it.
 
-  Resolution is the one thing EPMD never did: a member's host is an address or a private
-  DNS name the operator's network already answers for. The port comes with it because
-  this is the last place that holds the host as the profile spelled it — the moduledoc
-  has the whole of why.
+  Resolution is `:inet.getaddr/2`, as in `erl_epmd`: a member's host is an address or a
+  DNS name the operator's network answers for. The port comes with it because this is
+  the last place that holds the host as the node name spells it; the moduledoc has the
+  whole of why.
 
   `{:ok, address}` means "resolved, and the map says nothing about this node", which
   sends `inet_tcp_dist` on to `port_please/2` and its `OUROBOROS_DIST_PORT` fallback. A
-  host that does not resolve is an error tuple, never a raise: the dialer turns it into a
-  refused connection and tries again later.
+  host that does not resolve is an error tuple, never a raise: that connection attempt
+  fails, and the next call to the node tries again.
   """
   @spec address_please(charlist() | String.t(), term(), :inet.address_family()) ::
           {:ok, :inet.ip_address()}
@@ -183,10 +189,11 @@ defmodule Ouroboros.Cluster.Epmd do
 
   # A trailing dot is the DNS root and is not part of the name, so `pi.internal.` and
   # `pi.internal` are one key. Applied to the map's own keys as well as to the host being
-  # looked up, because `valid_profile_host?/1` admits a fully qualified host and a fold
-  # done on one side only would turn a profile that uses one into a member nothing can
-  # find. Exactly one dot is stripped: anything further is a malformed host, and inventing
-  # a reading for it would be guessing.
+  # looked up, because a node name may spell its host fully qualified (the membership
+  # check in `OuroFleet.Application` admits a trailing dot), and a fold done on one side
+  # only would turn such a member into one nothing can find. Exactly one dot is stripped:
+  # anything further is a malformed host, and inventing a reading for it would be
+  # guessing.
   #
   # Only the key folds. Resolution is left exactly as `:inet` does it — a trailing dot
   # tells a resolver not to append its search domains, and dropping it there could answer
@@ -195,12 +202,11 @@ defmodule Ouroboros.Cluster.Epmd do
 
   # `OUROBOROS_DIST_PORTS`, as a map from a whole node name (or a bare host) to a port.
   #
-  # Read on every lookup rather than cached: the profile is the authority for membership
-  # and the launcher rewrites this environment at every refresh, so a stale copy here
-  # would be a second, older roster. An entry that is not `key=port` with a port in
-  # 1..65535 is ignored rather than fatal — one bad entry must not cost this node every
-  # other member — and the first entry for a key wins, so a duplicate cannot change an
-  # answer already given.
+  # Read on every lookup rather than cached, so the module keeps no state of its own: it
+  # has no process (`start_link/0` answers `:ignore`). An entry that is not `key=port`
+  # with a port in 1..65535 is ignored rather than fatal, because one bad entry must not
+  # cost this node every other member. The first entry for a key wins, so a duplicate
+  # cannot change an answer already given.
   defp dist_ports do
     "OUROBOROS_DIST_PORTS"
     |> env()
@@ -238,8 +244,8 @@ defmodule Ouroboros.Cluster.Epmd do
   end
 
   # One spelling for a host, whatever the caller had: `inet_tcp_dist` hands
-  # `port_please/2` the address `address_please/3` just resolved, while a hand call and
-  # `dist_util` hand it the text out of the node name.
+  # `port_please/2` the address `address_please/3` just resolved, while a hand call
+  # passes the text out of the node name.
   defp normalize(host) when is_tuple(host) do
     case :inet.ntoa(host) do
       address when is_list(address) -> List.to_string(address)
