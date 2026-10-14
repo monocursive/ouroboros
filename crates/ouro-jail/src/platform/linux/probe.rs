@@ -1209,6 +1209,9 @@ fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResul
             );
         }
     };
+    // What creation configured and read back (a required ceiling that
+    // fails either makes `create` fail): the evidence names exactly that.
+    let applied = leaf.limits();
     let parent = own_pid();
     // SAFETY: fork; the child calls only prctl, getppid and `pause`, which
     // are async-signal-safe, and never returns.
@@ -1261,7 +1264,7 @@ fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResul
             ProbeStatus::Available,
             MECHANISM,
             "ok",
-            "created pinned leaf, configured/read back ceiling, placed fixture, cgroup.kill, populated=0, reaped and removed",
+            leaf_evidence(&applied),
         ),
         Err(err) => ProbeResult::new(
             name,
@@ -1271,6 +1274,28 @@ fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResul
             err.to_string(),
         ),
     }
+}
+
+/// What a successful leaf probe did, step by step: a ceiling is named only
+/// when one was configured and read back.
+fn leaf_evidence(applied: &[crate::records::AppliedLimit]) -> String {
+    let mut steps = vec!["created pinned leaf".to_owned()];
+    steps.extend(
+        applied
+            .iter()
+            .filter_map(|limit| limit.mechanism.as_deref())
+            .map(|control| format!("configured/read back {control}")),
+    );
+    steps.extend(
+        [
+            "placed fixture",
+            "cgroup.kill",
+            "populated=0",
+            "reaped and removed",
+        ]
+        .map(str::to_owned),
+    );
+    steps.join(", ")
 }
 
 fn probe_observer(jail_exe: &Path) -> ProbeResult {
@@ -1814,6 +1839,30 @@ mod tests {
             let result = run_one(name, Path::new("/nonexistent"), Path::new("/nonexistent"));
             assert_eq!(result.name, name, "{name} fell through to the unknown arm");
         }
+    }
+
+    /// A leaf probe's evidence names a ceiling only when creation configured
+    /// and read one back: the delegated-leaf row configures none.
+    #[test]
+    fn leaf_evidence_names_only_the_ceiling_that_was_configured() {
+        assert_eq!(
+            leaf_evidence(&[]),
+            "created pinned leaf, placed fixture, cgroup.kill, populated=0, reaped and removed"
+        );
+        let pids = crate::records::AppliedLimit {
+            key: "pids".to_owned(),
+            requested: "16".to_owned(),
+            required: true,
+            applied: true,
+            mechanism: Some("pids.max".to_owned()),
+            scope: Some("tree".to_owned()),
+            hit: Some(false),
+        };
+        assert_eq!(
+            leaf_evidence(&[pids]),
+            "created pinned leaf, configured/read back pids.max, placed fixture, cgroup.kill, \
+             populated=0, reaped and removed"
+        );
     }
 
     #[test]
