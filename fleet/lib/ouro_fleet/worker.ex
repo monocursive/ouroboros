@@ -96,46 +96,25 @@ defmodule OuroFleet.Worker do
     digest = Store.digest(request)
     old = Store.read!(path)
 
-    if old && (old["request_digest"] != digest or old["resolved"] != expected),
-      do: raise("reservation conflict")
-
-    workspace = workspace!(key, request, config)
-
-    record =
-      old ||
-        Store.write!(path, %{
-          "schema" => "ouro.fleet.attempt/1",
-          "job_id" => key,
-          "request_digest" => digest,
-          "resolved" => expected,
-          "run_id" => nil,
-          "workspace" => workspace
-        })
-
-    # Persist the run cross-reference before any owner start. On a lost reply,
-    # retry this deterministic ledger request, never allocate another attempt.
-    preparation = ["--prepare-only"]
-
-    with {:ok, resolved, 0} <- launch_command(config, key, request, workspace, ["--plan-only"]),
-         true <- resolved == expected,
-         {:ok, prepared, 0} <- launch_command(config, key, request, workspace, preparation),
-         true <- prepared["payload"] == expected,
-         true <- is_nil(record["run_id"]) or record["run_id"] == prepared["run_id"] do
-      record =
-        Store.write!(
-          path,
-          Map.merge(record, %{
-            "run_id" => prepared["run_id"],
-            "attempt_id" => prepared["attempt_id"]
-          })
-        )
-
-      case launch_command(config, key, request, workspace, ["--prepared", record["run_id"]]) do
-        {:ok, run, 0} -> {:ok, render(record, run)}
-        _ -> {:error, "launch_reply_unknown_retry_same_request"}
-      end
+    if old && (old["request_digest"] != digest or old["resolved"] != expected) do
+      # A different request or plan already holds this job id. Nothing is written or
+      # started for this one, so refusing it must not restart the node.
+      {:error, "reservation_conflict"}
     else
-      _ -> {:error, "prepared_request_conflict_or_unknown"}
+      workspace = workspace!(key, request, config)
+
+      record =
+        old ||
+          Store.write!(path, %{
+            "schema" => "ouro.fleet.attempt/1",
+            "job_id" => key,
+            "request_digest" => digest,
+            "resolved" => expected,
+            "run_id" => nil,
+            "workspace" => workspace
+          })
+
+      prepare_and_launch(config, key, request, workspace, record)
     end
   end
 
@@ -171,6 +150,35 @@ defmodule OuroFleet.Worker do
   end
 
   defp dispatch(_, _), do: {:error, "unsupported_worker_operation"}
+
+  # Persist the run cross-reference before any owner start. On a lost reply, retry this
+  # deterministic ledger request, never allocate another attempt.
+  defp prepare_and_launch(config, key, request, workspace, record) do
+    expected = record["resolved"]
+    preparation = ["--prepare-only"]
+
+    with {:ok, resolved, 0} <- launch_command(config, key, request, workspace, ["--plan-only"]),
+         true <- resolved == expected,
+         {:ok, prepared, 0} <- launch_command(config, key, request, workspace, preparation),
+         true <- prepared["payload"] == expected,
+         true <- is_nil(record["run_id"]) or record["run_id"] == prepared["run_id"] do
+      record =
+        Store.write!(
+          checkpoint(config, key),
+          Map.merge(record, %{
+            "run_id" => prepared["run_id"],
+            "attempt_id" => prepared["attempt_id"]
+          })
+        )
+
+      case launch_command(config, key, request, workspace, ["--prepared", record["run_id"]]) do
+        {:ok, run, 0} -> {:ok, render(record, run)}
+        _ -> {:error, "launch_reply_unknown_retry_same_request"}
+      end
+    else
+      _ -> {:error, "prepared_request_conflict_or_unknown"}
+    end
+  end
 
   # One `settle-orphans` for the whole batch, then one `show` per started run, each
   # bounded by what is left before `deadline`. A job the budget does not reach is

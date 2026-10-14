@@ -119,6 +119,21 @@ defmodule OuroFleet.WorkerTest do
     assert ledger_calls(context.log) == []
   end
 
+  test "a reservation conflict is refused without restarting the worker", context do
+    worker = Process.whereis(Worker)
+    key = attempt(context.root, "c", "run-done")
+
+    assert {:error, "reservation_conflict"} =
+             Worker.call({:submit, key, request("other"), %{"policy_digest" => "other"}})
+
+    assert Process.whereis(Worker) == worker
+    record = Store.read!(Path.join([context.root, "attempts", key <> ".json"]))
+    assert record["run_id"] == "run-done"
+  end
+
+  defp request(id),
+    do: %{"schema" => "ouro.fleet.request/1", "request_id" => id, "argv" => ["/bin/true"]}
+
   defp attempt(root, letter, run) do
     key = "job_" <> String.duplicate(letter, 64)
     record = %{"schema" => "ouro.fleet.attempt/1", "job_id" => key, "run_id" => run}
