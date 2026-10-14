@@ -41,6 +41,7 @@ use ouro_jail::platform::linux::tracer::{
     ClosedOp, GapReason, OpSet, Tracer, TracerConfig, TracerEvent, TracerSummary,
     narrowing_filter_bytes,
 };
+use ouro_jail::policy::ProfileName;
 use serde_json::Value;
 
 mod common;
@@ -1331,25 +1332,10 @@ fn j4_o3_a_group_exit_racing_entry_stops_is_never_syscall_info_loss() {
 // Through the product
 // ===========================================================================
 
-/// `none` needs a delegated leaf (§9.3); the conformance run provides it.
-fn none_live() -> bool {
-    let leaf = ouro_jail::platform::linux::probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != ouro_jail::platform::linux::probe::ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "the none checks need a delegated user scope: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    true
-}
-
+/// Whether this host can run a live check of `profile`.
 fn live(profile: &str) -> bool {
-    common::live() && (profile != "none" || none_live())
+    let profile = ProfileName::parse(profile).expect("a built-in profile");
+    common::profile_live(profile)
 }
 
 fn private_dir(path: &Path) {
@@ -1401,22 +1387,6 @@ impl Case {
         argv.extend(rest.iter().map(|arg| arg.as_ref().to_os_string()));
         argv
     }
-}
-
-/// Every receipt checked against its schema and the semantic rules, every
-/// trace event against its schema; returns the receipt of `phase`.
-fn receipt(run: &Run, phase: &str) -> Value {
-    run.assert_channels_complete();
-    // J5-C: every receipt, the trace as a stream and the control transcript,
-    // held to the frozen contract.
-    common::assert_run_records(run);
-    run.receipt_phase(phase).unwrap_or_else(|| {
-        panic!(
-            "no {phase} receipt: exit {:?}, stderr {}",
-            run.code(),
-            run.stderr_text()
-        )
-    })
 }
 
 fn audit_events(run: &Run) -> Vec<&Value> {
@@ -1480,7 +1450,7 @@ fn eintr_through_the_product(profile: &str) {
     let argv = c.argv("interrupt", &[&"eintr", &"open", &c.fifo, &c.ops]);
     let run = c.jail.target(argv).run().unwrap();
     let out = lines(&run.stdout_text());
-    let settled = receipt(&run, "settled");
+    let settled = common::settled(&run);
     assert_eq!(line(&out, "call").errno, libc::EINTR, "{profile}: {out:#?}");
     assert_eq!(
         run.code(),
@@ -1541,7 +1511,7 @@ fn inflight_through_the_product(profile: &str) {
     let argv = c.argv("inflight", &[&c.fifo, &c.ops, &ROUNDS.to_string()]);
     let run = c.jail.target(argv).run().unwrap();
     let out = lines(&run.stdout_text());
-    let settled = receipt(&run, "settled");
+    let settled = common::settled(&run);
     assert_eq!(line(&out, "parked").raw, 0, "{profile}: {out:#?}");
     assert_eq!(line(&out, "covered").raw, 2 * ROUNDS as i64, "{profile}");
     assert_eq!(line(&out, "reads").raw, 2 * ROUNDS as i64, "{profile}");
@@ -1684,7 +1654,7 @@ fn leader_exec_through_the_product(profile: &str) {
     let argv = c.argv("leader-exec", &[&c.fifo, &c.helper]);
     let run = c.jail.target(argv).run().unwrap();
     let out = lines(&run.stdout_text());
-    let settled = receipt(&run, "settled");
+    let settled = common::settled(&run);
     assert_eq!(line(&out, "leader_parked").raw, 1, "{profile}: {out:#?}");
     assert!(
         out.iter().all(|l| l.label != "leader_open_returned"),

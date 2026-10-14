@@ -41,6 +41,7 @@ use ouro_fixture::harness::{self, Jail, Run};
 use ouro_jail::platform::linux::tracer::{
     GapReason, Tracer, TracerConfig, TracerEvent, TracerSummary, narrowing_filter_bytes,
 };
+use ouro_jail::policy::ProfileName;
 use serde_json::Value;
 
 mod common;
@@ -932,26 +933,10 @@ fn build() -> Option<&'static (PathBuf, PathBuf)> {
     }
 }
 
-/// `none` needs a delegated leaf (§9.3); the conformance run provides it.
-fn none_live() -> bool {
-    let leaf = ouro_jail::platform::linux::probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != ouro_jail::platform::linux::probe::ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "the none checks need a delegated user scope: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    true
-}
-
 /// Whether this host can run a live check of `profile`.
 fn live(profile: &str) -> bool {
-    common::live() && (profile != "none" || none_live())
+    let profile = ProfileName::parse(profile).expect("a built-in profile");
+    common::profile_live(profile)
 }
 
 fn private_dir(path: &Path) {
@@ -1046,28 +1031,6 @@ fn line<'a>(lines: &'a [Line], label: &str) -> &'a Line {
         .iter()
         .find(|line| line.label == label)
         .unwrap_or_else(|| panic!("no fixture line {label:?} in {lines:#?}"))
-}
-
-/// Every record of the run held to its contract, then the receipt of
-/// `phase`.
-///
-/// J5-C: this used to validate receipts and events against their schemas
-/// only, so the live O03, O05 and R04 tests never ran the semantic rules the
-/// J4 authority said every live test runs (gap analysis §1.3.2). Now every
-/// receipt passes the schema and `ouro_jail::records::semantic::receipt`, the
-/// trace passes `jail-event` per event and `semantic::trace` plus
-/// `trace_ends_with` against the final receipt, and the control transcript
-/// passes `jail-control` and `semantic::control` (`common::assert_run_records`).
-fn receipt(run: &Run, phase: &str) -> Value {
-    run.assert_channels_complete();
-    common::assert_run_records(run);
-    run.receipt_phase(phase).unwrap_or_else(|| {
-        panic!(
-            "no {phase} receipt: exit {:?}, stderr {}",
-            run.code(),
-            run.stderr_text()
-        )
-    })
 }
 
 fn details(receipt: &Value) -> &Value {
@@ -1205,7 +1168,7 @@ fn r04(profile: &str, evidence: &str) {
     let elapsed = started.elapsed();
     let label = format!("{profile}/{evidence}");
     let out = lines(&run.stdout_text());
-    let settled = receipt(&run, "settled");
+    let settled = common::settled(&run);
 
     // The fixture did lose one open, and nothing else. (That the re-exec
     // ran is the exec count below: under strict, the stop can end the new
@@ -1323,7 +1286,7 @@ fn teardown_loss(profile: &str, evidence: &str) {
     let argv = c.argv("bg-park", &[&c.fifo]);
     let run = c.jail.target(argv).run().unwrap();
     let out = lines(&run.stdout_text());
-    let settled = receipt(&run, "settled");
+    let settled = common::settled(&run);
     assert_eq!(line(&out, "parked").raw, 0, "{label}: {out:#?}");
     assert_eq!(settled["outcome"]["kind"], "exited", "{label}");
     assert_eq!(settled["outcome"]["code"], 0, "{label}");
@@ -1405,7 +1368,7 @@ fn j4_o03_a_class_never_returns_to_active_after_an_early_gap() {
     let argv = c.argv("early-loss", &[&c.fifo, &c.helper, &c.ops, &"200"]);
     let run = c.jail.target(argv).run().unwrap();
     let out = lines(&run.stdout_text());
-    let settled = receipt(&run, "settled");
+    let settled = common::settled(&run);
     assert_eq!(line(&out, "results").raw, 800, "{out:#?}");
     let gap = assert_degraded(&settled, "fs.write", "entry_abandoned").clone();
     // The observer saw every later result...
@@ -1602,7 +1565,7 @@ fn j4_o03_exhaustion_through_the_product() {
     let argv = c.argv("inflight", &[&c.fifo, &c.ops]);
     let run = c.jail.target(argv).run().unwrap();
     let out = lines(&run.stdout_text());
-    let settled = receipt(&run, "settled");
+    let settled = common::settled(&run);
     assert_eq!(line(&out, "parked").raw, 0, "{out:#?}");
     assert_eq!(
         details(&settled)["observer_plan"]["in_flight_max"],
@@ -1650,7 +1613,7 @@ fn j4_o03_exhaustion_through_the_product() {
     let argv = c.argv("queue", &[&c.ops]);
     let run = c.jail.target(argv).run().unwrap();
     let out = lines(&run.stdout_text());
-    let settled = receipt(&run, "settled");
+    let settled = common::settled(&run);
     assert_eq!(line(&out, "mkdir").raw, 0, "the mkdir ran: {out:#?}");
     assert_eq!(
         details(&settled)["observer_plan"]["queue_bytes_max"],
@@ -1701,7 +1664,7 @@ fn j4_w3_a_seam_set_twice_is_recorded_as_applied() {
     let argv = c.argv("exit0", &[]);
     let run = c.jail.target(argv).run().unwrap();
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    let settled = receipt(&run, "settled");
+    let settled = common::settled(&run);
     let details = details(&settled);
     assert_eq!(
         details["observer_plan"]["in_flight_max"], 1,
@@ -1775,7 +1738,7 @@ fn attach_failure(profile: &str) {
             "{label}: stderr {}",
             run.stderr_text()
         );
-        let refused = receipt(&run, "refused");
+        let refused = common::phase_receipt(&run, "refused");
         let error = &refused["outcome"]["error"];
         assert_eq!(error["code"], code, "{label}: {error:#}");
         assert_eq!(error["stage"], stage, "{label}: {error:#}");
@@ -1827,7 +1790,7 @@ fn j4_o05_directory_operation_losses_degrade_fs_write() {
         let argv = c.argv("inflight", &[&c.fifo, &c.ops]);
         let run = c.jail.target(argv).run().unwrap();
         let out = lines(&run.stdout_text());
-        let settled = receipt(&run, "settled");
+        let settled = common::settled(&run);
         assert_eq!(line(&out, "parked").raw, 0, "{profile}: {out:#?}");
         let lost: Vec<&Line> = out
             .iter()
@@ -1888,7 +1851,7 @@ fn denied_connect(profile: &str) {
     let argv = c.argv("deny-connect", &[&c.ops]);
     let run = c.jail.target(argv).run().unwrap();
     let out = lines(&run.stdout_text());
-    let settled = receipt(&run, "settled");
+    let settled = common::settled(&run);
     assert_eq!(run.code(), Some(0), "{profile}: {}", run.stderr_text());
     let (denied, other) = connects(&out);
     assert!(
@@ -2013,11 +1976,9 @@ fn j4_observer_plan_is_recorded() {
                 .owner()
                 .await_prepared()
                 .unwrap_or_else(|error| panic!("{label}: {error}"));
-            let prepared = common::checked_receipt(
-                spawned
-                    .receipt_value()
-                    .expect("the prepared receipt is on disk when `prepared` arrives"),
-            );
+            let prepared = spawned
+                .receipt_value()
+                .expect("the prepared receipt is on disk when `prepared` arrives");
             assert_eq!(prepared["phase"], "prepared", "{label}: {prepared:#}");
             let attempt_id = control["attempt_id"].as_str().unwrap().to_owned();
             let policy_digest = prepared["policy"]["digest"].as_str().unwrap().to_owned();
@@ -2026,7 +1987,7 @@ fn j4_observer_plan_is_recorded() {
                 .release(&harness::gate::Release::Valid, &attempt_id, &policy_digest)
                 .unwrap_or_else(|error| panic!("{label}: the release: {error}"));
             let run = spawned.wait().unwrap();
-            let settled = receipt(&run, "settled");
+            let settled = common::settled(&run);
             assert_eq!(run.code(), Some(0), "{label}: {}", run.stderr_text());
             for (phase, receipt) in [("prepared", &prepared), ("settled", &settled)] {
                 let label = format!("{label} {phase}");

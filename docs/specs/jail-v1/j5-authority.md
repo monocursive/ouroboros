@@ -467,6 +467,20 @@ simulation leaves out.
 - Correction of J4: [j4-authority.md](j4-authority.md) said every live test
   ran the Rust semantic checks on each product receipt it read. That was false
   until J5-C: `j4_loss_linux.rs`'s receipt helper ran the schema only, and two
-  `none` receipts in `observer_j4_linux.rs` ran neither. Since J5-C every live
-  reader checks receipts, traces and control transcripts against the frozen
-  schemas and the semantic rules.
+  `none` receipts in `observer_j4_linux.rs` ran neither. The J5-C sentence
+  that replaced it, that every live reader checked receipts, traces and
+  control transcripts, was false too: seven local copies of the
+  settled-receipt helper checked at four strengths, and five suites read
+  traces or control transcripts with no check at all (`j4_trace_linux.rs`,
+  the R03 delivery file, never looked for a `source_seq` hole). Since the
+  code-quality review of 2026-10-14 the harness refuses to hand out a record
+  that has not passed the contract `tests/common` installs
+  (`harness::hold_records_to`, from `common::live()`): every receipt,
+  control transcript and complete trace a live test reads through `Run` or
+  `Spawned` has passed its frozen schema and the semantic rules, and a binary
+  that installed no contract cannot read one. A trace cut short by design is
+  held to what a prefix can keep (`common::assert_trace_prefix`), and a
+  receipt a test reads from disk itself to assert on goes through
+  `common::read_receipt` or `common::checked_receipt`; the crash matrices
+  that parse every record file after a crash check `jail.json` with
+  `common::check_receipt`.

@@ -24,36 +24,21 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ouro_fixture::harness::{self, Jail, Run, Spawned};
-use ouro_jail::platform::linux::{identity, probe, watch};
+use ouro_jail::platform::linux::{identity, watch};
 use serde_json::{Value, json};
 
 mod common;
 
-const PYTHON: &str = "/usr/bin/python3";
+use common::PYTHON;
 
 // ---------------------------------------------------------------------------
 // Preconditions and helpers
 // ---------------------------------------------------------------------------
 
-/// A delegated user scope with a usable leaf, and the fixture interpreter.
+/// A delegated leaf (`common::delegated_leaf`) and the interpreter the
+/// fixtures are written in.
 fn live() -> bool {
-    let leaf = probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != probe::ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "slice G needs a delegated user scope with a usable leaf: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    if !Path::new(PYTHON).is_file() {
-        harness::skip_or_fail("the orphan fixtures are python3 scripts");
-        return false;
-    }
-    true
+    common::delegated_leaf() && common::python()
 }
 
 fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
@@ -469,7 +454,7 @@ fn j4_c03_a_simulated_reboot_never_targets_a_reused_cgroup() {
     assert_ne!(state["owner"]["boot_id"], other_boot);
     state["owner"]["boot_id"] = json!(other_boot);
     write_json(&attempt.join("jail-state.json"), &state);
-    let mut receipt = read_json(&attempt.join("jail.json"));
+    let mut receipt = common::read_receipt(&attempt.join("jail.json"));
     receipt["process"]["identity"]["value"]["boot_id"] = json!(other_boot);
     write_json(&attempt.join("jail.json"), &receipt);
 
@@ -627,7 +612,7 @@ fn j4_c03_a_receipt_naming_another_cgroup_is_never_acted_on() {
     let mut bystander = Command::new("sleep").arg("120").spawn().unwrap();
     std::fs::write(other.join("cgroup.procs"), bystander.id().to_string()).unwrap();
     let meta = std::fs::metadata(&other).unwrap();
-    let mut receipt = read_json(&attempt.join("jail.json"));
+    let mut receipt = common::read_receipt(&attempt.join("jail.json"));
     let registration = &mut receipt["lifetime"]["native"]["details"]["execution_cgroup"];
     registration["path"] = json!(other);
     registration["device"] = json!(meta.dev());
@@ -747,7 +732,10 @@ fn j4_c03_contained_crash_leaves_an_empty_leaf_that_gc_removes() {
     });
     assert_eq!(inode(&leaf), Some(leaf_inode), "nothing removed the leaf");
     let receipt = std::fs::read(attempt.join("jail.json")).unwrap();
-    assert_eq!(read_json(&attempt.join("jail.json"))["phase"], "enforced");
+    assert_eq!(
+        common::read_receipt(&attempt.join("jail.json"))["phase"],
+        "enforced"
+    );
 
     let (code, report, stderr) = gc(&run, &["--dry-run"]);
     assert_eq!(code, Some(0), "{stderr}\n{report:#}");
@@ -1122,7 +1110,7 @@ fn j4_w3_g2_each_execution_leaf_is_named_for_its_attempt() {
             Some(format!("ouro-{id}.leaf").as_str()),
             "{profile}: the registered leaf does not carry its attempt"
         );
-        let receipt = read_json(&attempt.join("jail.json"));
+        let receipt = common::read_receipt(&attempt.join("jail.json"));
         assert_eq!(
             receipt["lifetime"]["native"]["details"]["execution_cgroup"]["path"],
             json!(path),

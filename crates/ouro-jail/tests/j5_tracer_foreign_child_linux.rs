@@ -43,7 +43,6 @@ use std::time::{Duration, Instant};
 use ouro_fixture::harness;
 use ouro_jail::platform::linux::clock::Deadline;
 use ouro_jail::platform::linux::exec::{self, FdMap};
-use ouro_jail::platform::linux::probe::{self, ProbeStatus};
 use ouro_jail::platform::linux::tracer::{
     self, ClosedOp, Tracer, TracerConfig, TracerEvent, TracerSummary,
 };
@@ -1051,23 +1050,6 @@ fn run_beside(foreign: Foreign, args: &[&str], target: &[&str]) -> Beside {
     }
 }
 
-/// `none` needs a delegated leaf (§9.3); the conformance run provides it.
-fn none_live() -> bool {
-    let leaf = probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "`none` needs a delegated user scope: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    true
-}
-
 fn capability<'a>(doctor: &'a Value, name: &str) -> &'a Value {
     doctor["capabilities"]
         .as_array()
@@ -1192,7 +1174,7 @@ fn j5t_a_strict_tool_run_traced_to_an_inherited_reader_settles_verified() {
 /// through the attempt or ends during it, with observation on or off.
 fn none_case(observe: &str, foreign: Foreign) {
     let _serial = serial();
-    if !common::live() || !tracer_live() || !none_live() {
+    if !common::live() || !tracer_live() || !common::delegated_leaf() {
         return;
     }
     let label = format!("none/observe {observe}/{foreign:?}");

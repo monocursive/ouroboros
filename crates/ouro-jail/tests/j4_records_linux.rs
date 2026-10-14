@@ -658,7 +658,7 @@ fn j4_w3_p6_control_messages_name_receipts_by_their_canonical_digest() {
     let messages = run.control_messages();
     let kinds: Vec<&Value> = messages.iter().map(|message| &message["kind"]).collect();
     assert_eq!(kinds, ["prepared", "exec_confirmed", "settled"]);
-    let settled = common::checked_receipt(run.receipt_phase("settled").expect("settled"));
+    let settled = run.receipt_phase("settled").expect("settled");
     let (_, canonical) =
         harness::receipt_note_of(&serde_json::to_vec(&settled).unwrap()).expect("a receipt");
     assert_eq!(

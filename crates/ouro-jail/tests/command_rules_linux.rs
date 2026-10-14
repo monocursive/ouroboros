@@ -257,10 +257,8 @@ fn a_deny_rule_that_only_the_kernel_copy_hits_kills_the_exec_and_the_run_complet
     assert_eq!(note["fields"]["kind"], "command_denied", "{note}");
     assert_eq!(note["fields"]["signal"], "SIGKILL", "{note}");
     assert_no_entry_abandoned_gap(&result);
-    let receipt = common::checked_receipt(
-        result
-            .receipt_phase("settled")
-            .expect("the run settles after the kill"),
-    );
+    let receipt = result
+        .receipt_phase("settled")
+        .expect("the run settles after the kill");
     assert_eq!(receipt["lifetime"]["tree_empty"], true);
 }

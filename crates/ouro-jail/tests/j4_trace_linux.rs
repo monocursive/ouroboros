@@ -100,20 +100,6 @@ impl Case {
     }
 }
 
-/// The receipt the attempt ended with (`jail.json` holds the latest),
-/// checked against the schema and the rules it cannot state
-/// (`common::check_receipt`), as every receipt of the run is.
-fn last_receipt(run: &Run) -> Value {
-    let mut receipts: Vec<Value> = run
-        .receipts()
-        .into_iter()
-        .map(common::checked_receipt)
-        .collect();
-    receipts
-        .pop()
-        .unwrap_or_else(|| panic!("no receipt; stderr: {}", run.stderr_text()))
-}
-
 fn field<'a>(value: &'a Value, pointer: &str) -> &'a Value {
     value
         .pointer(pointer)
@@ -150,7 +136,7 @@ fn is_transport_gap(frame: &Value) -> bool {
 
 /// The stop was the evidence loss, early, not the target's own end.
 fn assert_strict_stop(run: &Run, elapsed: Duration, what: &str) {
-    let receipt = last_receipt(run);
+    let receipt = common::last_receipt(run);
     assert_eq!(
         field(&receipt, "/outcome/cause"),
         "evidence_loss",
@@ -176,7 +162,7 @@ fn assert_strict_stop(run: &Run, elapsed: Duration, what: &str) {
 
 /// Best-effort let the target finish on its own and reported the loss.
 fn assert_best_effort_continued(run: &Run, what: &str) {
-    let receipt = last_receipt(run);
+    let receipt = common::last_receipt(run);
     assert_eq!(field(&receipt, "/phase"), "settled", "{what}: {receipt:#}");
     assert_eq!(field(&receipt, "/outcome/kind"), "exited", "{what}");
     assert_eq!(field(&receipt, "/outcome/code"), 0, "{what}");
@@ -206,7 +192,8 @@ fn assert_best_effort_continued(run: &Run, what: &str) {
 }
 
 /// Whatever the consumer took is a prefix of frames, possibly with a torn
-/// last line, and never a torn frame followed by more.
+/// last line, and never a torn frame followed by more; its whole frames keep
+/// the stream's rules up to the cut (`source_seq` from 1 with no hole).
 fn assert_recognisable(run: &Run, what: &str) {
     let readback = run.trace_readback.as_ref().expect("a trace fd was used");
     assert_ne!(
@@ -214,7 +201,10 @@ fn assert_recognisable(run: &Run, what: &str) {
         TraceState::Corrupt,
         "{what}: a torn frame was followed by more bytes"
     );
-    assert!(!readback.frames.is_empty(), "{what}: the prefix is there");
+    assert!(
+        !common::assert_trace_prefix(run).is_empty(),
+        "{what}: the prefix is there"
+    );
 }
 
 // ------------------------------------------------------------- saturation
@@ -285,7 +275,7 @@ fn j4_r03_the_wall_is_enforced_while_the_trace_is_saturated() {
         jail.trace_consumer(TraceConsumer::Never)
             .args(["--limit", "wall=2s"])
     });
-    let receipt = last_receipt(&run);
+    let receipt = common::last_receipt(&run);
     assert_eq!(
         field(&receipt, "/outcome/cause"),
         "wall_expiry",
@@ -320,7 +310,7 @@ fn j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full() {
         jail.trace_consumer(TraceConsumer::Never)
             .args(["--limit", "wall=3s"])
     });
-    let receipt = last_receipt(&run);
+    let receipt = common::last_receipt(&run);
     assert_eq!(
         field(&receipt, "/outcome/cause"),
         "wall_expiry",
@@ -395,7 +385,7 @@ fn j4_r03_local_cap_strict_stops() {
     let (run, elapsed) = case("strict", 400, 30_000)
         .run(|jail| jail.env("OURO_JAIL_TEST_TRACE_CAP", SHRUNK_CAP.to_string()));
     assert_strict_stop(&run, elapsed, "the local cap");
-    let receipt = last_receipt(&run);
+    let receipt = common::last_receipt(&run);
     assert!(
         evidence_errors(&receipt)
             .iter()
@@ -453,7 +443,7 @@ fn j4_r03_a_local_write_failure_is_loss_and_never_tears_the_trace() {
         } else {
             assert_best_effort_continued(&run, "a failed local write");
         }
-        let receipt = last_receipt(&run);
+        let receipt = common::last_receipt(&run);
         assert!(
             evidence_errors(&receipt)
                 .iter()
@@ -499,7 +489,7 @@ fn j4_r03_a_slow_consumer_within_the_deadline_loses_nothing() {
         })
     });
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    let receipt = last_receipt(&run);
+    let receipt = common::last_receipt(&run);
     assert!(
         evidence_errors(&receipt).is_empty(),
         "a slow consumer is not a lost one: {receipt:#}"

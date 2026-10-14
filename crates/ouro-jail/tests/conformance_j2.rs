@@ -1,7 +1,7 @@
 //! J2 authority: actual controller effects, helper death, and build grants.
 #![cfg(target_os = "linux")]
 
-use ouro_fixture::harness::{self, Jail, Run};
+use ouro_fixture::harness::{self, Jail};
 use ouro_jail::platform::linux::{identity, watch};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -23,32 +23,6 @@ fn case() -> (Jail, PathBuf) {
     )
 }
 
-fn live() -> bool {
-    if !common::live() {
-        return false;
-    }
-    let result = ouro_jail::platform::linux::probe::run_one(
-        "cgroup_memory",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if result.status != ouro_jail::platform::linux::probe::ProbeStatus::Available {
-        harness::skip_or_fail("J2 requires a delegated user scope with memory, pids and cpu");
-        return false;
-    }
-    true
-}
-
-/// The settled receipt, after every receipt of the run passed the schema and
-/// the rules it cannot state (`common::check_receipt`).
-fn settled(run: &Run) -> Value {
-    for receipt in run.receipts() {
-        let _ = common::checked_receipt(receipt);
-    }
-    run.receipt_phase("settled")
-        .unwrap_or_else(|| panic!("{}; {:?}", run.stderr_text(), run.receipts()))
-}
-
 fn limit<'a>(receipt: &'a Value, key: &str) -> &'a Value {
     receipt["applied"]["limits"]
         .as_array()
@@ -60,7 +34,10 @@ fn limit<'a>(receipt: &'a Value, key: &str) -> &'a Value {
 
 #[test]
 fn l03_explicit_same_value_limits_apply_with_observation_on_and_off() {
-    if !live() {
+    if !common::probe_available(
+        "cgroup_memory",
+        "these checks need a delegated user scope with memory, pids and cpu",
+    ) {
         return;
     }
     for observe in ["on", "off"] {
@@ -84,7 +61,7 @@ fn l03_explicit_same_value_limits_apply_with_observation_on_and_off() {
             .spawn()
             .unwrap();
         let prepared = spawned.owner().await_prepared().unwrap();
-        let receipt = common::checked_receipt(spawned.receipt_value().unwrap());
+        let receipt = spawned.receipt_value().unwrap();
         let native = &receipt["lifetime"]["native"]["details"];
         let leaf = Path::new(native["execution_cgroup"]["path"].as_str().unwrap()).to_owned();
         let members = std::fs::read_to_string(leaf.join("cgroup.procs")).unwrap();
@@ -136,7 +113,7 @@ fn l03_explicit_same_value_limits_apply_with_observation_on_and_off() {
             .unwrap();
         let run = spawned.wait().unwrap();
         assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         for key in ["pids", "mem", "swap", "cpu"] {
             assert_eq!(limit(&receipt, key)["applied"], true);
             assert_eq!(limit(&receipt, key)["required"], true);
@@ -148,7 +125,10 @@ fn l03_explicit_same_value_limits_apply_with_observation_on_and_off() {
 
 #[test]
 fn l04_pids_ceiling_is_aggregate_across_forked_children() {
-    if !live() {
+    if !common::probe_available(
+        "cgroup_memory",
+        "these checks need a delegated user scope with memory, pids and cpu",
+    ) {
         return;
     }
     let (jail, _) = case();
@@ -178,12 +158,15 @@ finally:
     assert_eq!(report["errno"], libc::EAGAIN);
     // Three slots belong to the target and the two listed backend helpers.
     assert_eq!(report["children"], 5);
-    assert_eq!(limit(&settled(&run), "pids")["hit"], true);
+    assert_eq!(limit(&common::settled(&run), "pids")["hit"], true);
 }
 
 #[test]
 fn l03_a_ceiling_too_small_for_charged_helpers_refuses_before_target_exec() {
-    if !live() {
+    if !common::probe_available(
+        "cgroup_memory",
+        "these checks need a delegated user scope with memory, pids and cpu",
+    ) {
         return;
     }
     let (jail, ws) = case();
@@ -196,12 +179,15 @@ fn l03_a_ceiling_too_small_for_charged_helpers_refuses_before_target_exec() {
         .unwrap();
     assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
     assert!(!marker.exists());
-    let _ = common::checked_receipt(run.receipt_phase("refused").expect("a refused receipt"));
+    let _ = run.receipt_phase("refused").expect("a refused receipt");
 }
 
 #[test]
 fn l04_memory_events_prove_oom_but_exit_137_does_not() {
-    if !live() {
+    if !common::probe_available(
+        "cgroup_memory",
+        "these checks need a delegated user scope with memory, pids and cpu",
+    ) {
         return;
     }
     // The kill is attributed from memory.events in both observation modes;
@@ -222,7 +208,7 @@ fn l04_memory_events_prove_oom_but_exit_137_does_not() {
             .spawn()
             .unwrap();
         let prepared = spawned.owner().await_prepared().unwrap();
-        let before = common::checked_receipt(spawned.receipt_value().unwrap());
+        let before = spawned.receipt_value().unwrap();
         // memory.max limits resident memory; the host has swap. Disable swap
         // only in this test's own leaf so allocation deterministically reaches
         // OOM instead of legitimately completing through reclaim/swap.
@@ -241,7 +227,7 @@ fn l04_memory_events_prove_oom_but_exit_137_does_not() {
             )
             .unwrap();
         let run = spawned.wait().unwrap();
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         assert_eq!(limit(&receipt, "mem")["hit"], oom, "{receipt:#}");
         match (oom, observe) {
             (true, "on") => {
@@ -274,7 +260,10 @@ fn l04_memory_events_prove_oom_but_exit_137_does_not() {
 
 #[test]
 fn l04_cpu_is_bandwidth_throttling_not_a_failure() {
-    if !live() {
+    if !common::probe_available(
+        "cgroup_memory",
+        "these checks need a delegated user scope with memory, pids and cpu",
+    ) {
         return;
     }
     let (jail, _) = case();
@@ -294,14 +283,17 @@ print(time.monotonic()-start)
         .unwrap();
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
     assert!(run.stdout_text().trim().parse::<f64>().unwrap() >= 1.0);
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(limit(&receipt, "cpu")["hit"], true);
     assert_eq!(receipt["outcome"]["cause"], Value::Null);
 }
 
 #[test]
 fn f01_build_exposes_only_declared_inputs_and_writes_scratch() {
-    if !live() {
+    if !common::probe_available(
+        "cgroup_memory",
+        "these checks need a delegated user scope with memory, pids and cpu",
+    ) {
         return;
     }
     let (empty, _) = case();
@@ -352,12 +344,15 @@ open('/tmp/output','w').write('built')
         .run()
         .unwrap();
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    assert_eq!(settled(&run)["lifetime"]["tree_empty"], true);
+    assert_eq!(common::settled(&run)["lifetime"]["tree_empty"], true);
 }
 
 #[test]
 fn l02_every_runtime_helper_loss_ends_the_tree() {
-    if !live() {
+    if !common::probe_available(
+        "cgroup_memory",
+        "these checks need a delegated user scope with memory, pids and cpu",
+    ) {
         return;
     }
     for key in [
@@ -382,7 +377,7 @@ fn l02_every_runtime_helper_loss_ends_the_tree() {
                 .spawn()
                 .unwrap();
             let prepared = spawned.owner().await_prepared().unwrap();
-            let receipt = common::checked_receipt(spawned.receipt_value().unwrap());
+            let receipt = spawned.receipt_value().unwrap();
             let details = &receipt["lifetime"]["native"]["details"];
             let killed = identity::pidfd_open(if key == "supervisor" {
                 spawned.pid() as i32
@@ -420,7 +415,7 @@ fn l02_every_runtime_helper_loss_ends_the_tree() {
                 continue;
             }
             assert_eq!(
-                settled(&run)["lifetime"]["tree_empty"],
+                common::settled(&run)["lifetime"]["tree_empty"],
                 true,
                 "{key}: {}",
                 run.stderr_text()
@@ -431,7 +426,10 @@ fn l02_every_runtime_helper_loss_ends_the_tree() {
 
 #[test]
 fn l03_a_real_leaf_without_pids_refuses_required_but_runs_preferred() {
-    if !live() {
+    if !common::probe_available(
+        "cgroup_memory",
+        "these checks need a delegated user scope with memory, pids and cpu",
+    ) {
         return;
     }
     use ouro_jail::platform::linux::cgroup::{self, ExecutionCgroup};

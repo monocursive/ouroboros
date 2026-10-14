@@ -59,39 +59,6 @@ fn case(profile: &str) -> Case {
     }
 }
 
-/// Every receipt the run left, each checked against the schema and the rules
-/// it cannot state.
-fn checked(run: &Run) -> Vec<Value> {
-    assert!(
-        run.receipt_errors().is_empty(),
-        "{:?}",
-        run.receipt_errors()
-    );
-    run.receipts()
-        .into_iter()
-        .map(common::checked_receipt)
-        .collect()
-}
-
-/// The receipt with the highest revision.
-fn last(run: &Run) -> Value {
-    checked(run)
-        .into_iter()
-        .max_by_key(|receipt| receipt["revision"].as_u64().unwrap_or(0))
-        .unwrap_or_else(|| panic!("no receipt; stderr: {}", run.stderr_text()))
-}
-
-fn settled(run: &Run) -> Value {
-    let _ = checked(run);
-    run.receipt_phase("settled").unwrap_or_else(|| {
-        panic!(
-            "no settled receipt (exit {:?}): {}",
-            run.code(),
-            run.stderr_text()
-        )
-    })
-}
-
 fn write_script(path: &Path, steps: &Value) {
     std::fs::write(path, serde_json::to_vec(steps).expect("JSON")).expect("the script");
 }
@@ -128,11 +95,9 @@ fn prepared_binding(spawned: &mut Spawned) -> (String, String) {
         .as_str()
         .expect("an attempt id")
         .to_owned();
-    let receipt = common::checked_receipt(
-        spawned
-            .receipt_value()
-            .expect("the prepared receipt is durable when `prepared` arrives"),
-    );
+    let receipt = spawned
+        .receipt_value()
+        .expect("the prepared receipt is durable when `prepared` arrives");
     let digest = receipt["policy"]["digest"]
         .as_str()
         .expect("a digest")
@@ -142,7 +107,7 @@ fn prepared_binding(spawned: &mut Spawned) -> (String, String) {
 
 /// The first error code among a run's receipts' errors.
 fn error_code(run: &Run) -> Option<String> {
-    for receipt in checked(run) {
+    for receipt in run.receipts() {
         if let Some(errors) = receipt["errors"].as_array() {
             for error in errors {
                 if let Some(code) = error["code"].as_str() {
@@ -179,7 +144,7 @@ fn exec_case(
     let c = case(profile);
     let argv = build(&c.workspace);
     let run = c.jail.target(&argv).run().expect("the jail runs");
-    let receipt = last(&run);
+    let receipt = common::last_receipt(&run);
     let terminal_control = run
         .control_messages()
         .iter()
@@ -359,10 +324,9 @@ fn x02_every_malformed_release_refuses_without_running_the_target() {
             !marker.exists(),
             "{label}: the target ran on a malformed release"
         );
-        let refused = common::checked_receipt(
-            run.receipt_phase("refused")
-                .unwrap_or_else(|| panic!("{label}: no refused receipt")),
-        );
+        let refused = run
+            .receipt_phase("refused")
+            .unwrap_or_else(|| panic!("{label}: no refused receipt"));
         assert_eq!(refused["exec_observed"], false, "{label}");
         assert_eq!(refused["outcome"]["kind"], "refused", "{label}");
         // Not one target exec reached the trace.
@@ -588,7 +552,7 @@ fn open_marker(marker: &Path) -> Vec<String> {
 /// closes the gate. Returns the mismatches it found (empty: it released).
 fn owner_decides(owned: &mut Owned) -> Vec<String> {
     let control = owned.spawned.owner().await_prepared().expect("prepared");
-    let receipt = common::checked_receipt(owned.spawned.receipt_value().expect("a receipt"));
+    let receipt = owned.spawned.receipt_value().expect("a receipt");
     match owned
         .spawned
         .owner()
@@ -700,7 +664,7 @@ fn i03_untrusted_request_fields_cannot_mutate_the_owners_operator_inputs() {
     );
     let run = owned.spawned.wait().expect("the jail finishes");
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    let settled = settled(&run);
+    let settled = common::settled(&run);
     assert_eq!(settled["policy"]["name"], "tool");
     assert_eq!(settled["policy"]["observe"], "on");
     assert_eq!(settled["policy"]["grants"], serde_json::json!([]));
@@ -1165,7 +1129,7 @@ fn p03_the_child_truncating_its_selected_profile_and_project_file_does_not_widen
         "a denial did not hold: {}",
         run.stdout_text()
     );
-    let settled = settled(&run);
+    let settled = common::settled(&run);
     assert_eq!(
         settled["policy"]["digest"].as_str(),
         Some(prepared_digest.as_str())
@@ -1275,7 +1239,7 @@ fn observe_off_run(profile: &str, target: &[&str]) -> (Option<i32>, Vec<String>,
         .filter(|line| !line.trim().is_empty())
         .map(ToOwned::to_owned)
         .collect();
-    (run.code(), lines, last(&run))
+    (run.code(), lines, common::last_receipt(&run))
 }
 
 /// With observation off, a target that ends before the supervisor can see
@@ -1421,7 +1385,7 @@ fn p01_a_non_utf8_policy_path_survives_execution_into_the_receipt() {
         "the masked read was not ENOENT: {}",
         run.stdout_text()
     );
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let want = denied.clone().into_os_string().into_vec();
     let decodes_to =
         |value: &Value| common::native_bytes(value).ok().as_deref() == Some(want.as_slice());

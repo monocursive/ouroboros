@@ -11,6 +11,7 @@
 //! EOF and on process exit. Timeouts exist only so a hang fails a test instead
 //! of stalling a suite, and are never used to order events.
 
+pub mod contract;
 pub mod gate;
 pub mod http;
 pub mod pipes;
@@ -34,6 +35,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+pub use contract::{RecordContract, hold_records_to};
 pub use gate::{ExpectedPlan, GateOwner, Proposal, Release};
 pub use http::{HttpServer, SeenRequest};
 pub use pipes::{Captured, Direction, GateWriter, LineReader, TraceCapture, TraceConsumer};
@@ -853,12 +855,15 @@ impl Spawned {
         &self.channel_targets
     }
 
-    /// The prepared receipt written to `--receipt PATH`, when it is there yet.
+    /// The receipt written to `--receipt PATH`, when it is there yet, held
+    /// to the installed [`RecordContract`].
     #[must_use]
     pub fn receipt_value(&self) -> Option<Value> {
         let path = self.receipt.as_ref()?;
         let text = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&text).ok()
+        let value = serde_json::from_str(&text).ok()?;
+        contract::receipt(&value);
+        Some(value)
     }
 
     /// The scripted gate owner for this run. Panics when the run asked for
@@ -1028,6 +1033,7 @@ impl Spawned {
             receipts,
             receipt_errors,
             receipt_files,
+            held: Held::default(),
             _root: self.root,
         })
     }
@@ -1062,7 +1068,19 @@ pub struct Run {
     /// Every receipt file read at `wait`, with its bytes: each `jail.json`
     /// under the private data directory, then the `--receipt` copy.
     receipt_files: Vec<(PathBuf, Vec<u8>)>,
+    held: Held,
     _root: TempDir,
+}
+
+/// Which records of a [`Run`] already passed the installed
+/// [`RecordContract`], so each is checked once however often it is read. A
+/// check that fails panics and leaves its cell empty: the next read fails
+/// again.
+#[derive(Default)]
+struct Held {
+    receipts: std::sync::OnceLock<()>,
+    control: std::sync::OnceLock<()>,
+    trace: std::sync::OnceLock<()>,
 }
 
 impl Run {
@@ -1137,7 +1155,7 @@ impl Run {
     /// receipt, atomically replaced). A file that exists and cannot be read
     /// or parsed panics: an unreadable receipt used to come back as an empty
     /// list, which made "the run produced no refused receipt" pass without
-    /// reading anything.
+    /// reading anything. Each is held to the installed [`RecordContract`].
     #[must_use]
     pub fn receipts(&self) -> Vec<Value> {
         assert!(
@@ -1145,6 +1163,9 @@ impl Run {
             "receipts could not be read: {}",
             self.receipt_errors.join("; ")
         );
+        self.held
+            .receipts
+            .get_or_init(|| self.receipts.iter().for_each(contract::receipt));
         self.receipts.clone()
     }
 
@@ -1174,17 +1195,20 @@ impl Run {
     /// Control messages of one kind, in order. Panics on a partial transcript.
     #[must_use]
     pub fn control_kind(&self, kind: &str) -> Vec<&Value> {
-        self.assert_channels_complete();
-        self.control_messages
+        self.control_messages()
             .iter()
             .filter(|m| m.get("kind").and_then(Value::as_str) == Some(kind))
             .collect()
     }
 
-    /// The whole control transcript. Panics on a partial one.
+    /// The whole control transcript, held to the installed
+    /// [`RecordContract`]. Panics on a partial one.
     #[must_use]
     pub fn control_messages(&self) -> &[Value] {
         self.assert_channels_complete();
+        self.held
+            .control
+            .get_or_init(|| contract::control(&self.control_messages));
         &self.control_messages
     }
 
@@ -1193,12 +1217,22 @@ impl Run {
     /// and the last frame is the `jail.receipt` note of the attempt's final
     /// receipt (see [`trace_guard`] and [`Run::final_receipt`]). A test about
     /// a trace that is not complete (a loss, a consumer that left) reads
-    /// `trace_readback` or `trace_bytes` instead, and says so.
+    /// `trace_readback` or `trace_bytes` instead, and says so. A complete
+    /// trace is held to the installed [`RecordContract`] as a stream, against
+    /// the attempt's final receipt.
     #[must_use]
     pub fn trace_events(&self) -> &[Value] {
         self.assert_channels_complete();
         if let Err(message) = trace_guard(self.trace_readback.as_ref(), self.final_receipt()) {
             panic!("{message}");
+        }
+        if self.trace_readback.is_some() {
+            self.held.trace.get_or_init(|| {
+                let final_receipt = self
+                    .final_receipt()
+                    .and_then(|bytes| receipt_document(bytes).ok());
+                contract::trace(&self.trace_events, final_receipt.as_ref());
+            });
         }
         &self.trace_events
     }
@@ -1258,6 +1292,9 @@ impl Run {
     /// Every local `trace.ndjson` under the private data directory, with the
     /// recogniser's classification of its bytes. A file that cannot be read
     /// panics: an absent classification must not look like a clean trace.
+    /// One that is complete in the §13.3 sense against the `jail.json` beside
+    /// it is held to the installed [`RecordContract`]; one that is not is
+    /// handed back as it is, for a test about why.
     #[must_use]
     pub fn local_traces(&self) -> Vec<(PathBuf, Readback)> {
         let mut found = Vec::new();
@@ -1268,6 +1305,13 @@ impl Run {
                 let bytes = std::fs::read(&path)
                     .unwrap_or_else(|e| panic!("{} cannot be read: {e}", path.display()));
                 let readback = read_frames(&bytes);
+                let beside = std::fs::read(path.with_file_name("jail.json")).ok();
+                if !readback.frames.is_empty()
+                    && trace_guard(Some(&readback), beside.as_deref()).is_ok()
+                {
+                    let receipt = beside.as_deref().and_then(|b| receipt_document(b).ok());
+                    contract::trace(&readback.frames, receipt.as_ref());
+                }
                 (path, readback)
             })
             .collect()
@@ -1790,6 +1834,9 @@ mod tests {
 
     #[test]
     fn a_torn_last_trace_line_is_reported_not_a_failed_run() {
+        // The stand-in's frames are not the product's: the panic below must
+        // be the completeness guard's, not a missing contract's.
+        hold_records_to(RecordContract::STAND_IN);
         let run = torn_trace_writer().run().expect(
             "a torn last line is a recognisable fact about the trace, not a harness failure",
         );
@@ -1843,6 +1890,7 @@ mod tests {
     /// no final receipt note is not complete (§13.3).
     #[test]
     fn a_consumer_that_never_reads_still_reports_what_the_pipe_held_at_exit() {
+        hold_records_to(RecordContract::STAND_IN);
         let run = Jail::with_program("/bin/sh")
             .expect("a private harness root")
             .args(["-c", r#"printf '{"n":1}\n{"n":2}\n' >&"$2""#, "sh"])

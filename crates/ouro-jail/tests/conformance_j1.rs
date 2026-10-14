@@ -12,7 +12,6 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 
-use jsonschema::{Registry, Resource, Validator};
 use serde_json::Value;
 
 use ouro_fixture::harness::gate::{ExpectedPlan, GateOwner, Release};
@@ -27,49 +26,6 @@ fn specs_dir() -> PathBuf {
         .join("../../docs/specs/jail-v1")
         .canonicalize()
         .expect("the checked-in specification directory exists")
-}
-
-/// One validator per checked-in schema, registered by `$id` so that the jail
-/// producer schema can `$ref` the shared envelope.
-fn validators() -> BTreeMap<String, Validator> {
-    let mut schemas: BTreeMap<String, Value> = BTreeMap::new();
-    for entry in std::fs::read_dir(specs_dir()).expect("the specification directory is readable") {
-        let path = entry.expect("a directory entry").path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if let Some(stem) = name.strip_suffix(".schema.json") {
-            let text = std::fs::read_to_string(&path).expect("a readable schema");
-            schemas.insert(
-                stem.to_owned(),
-                serde_json::from_str(&text).expect("valid JSON"),
-            );
-        }
-    }
-    let pairs: Vec<(String, Resource)> = schemas
-        .values()
-        .map(|schema| {
-            let id = schema["$id"].as_str().expect("an $id").to_owned();
-            (id, Resource::from_contents(schema.clone()))
-        })
-        .collect();
-    let registry: Registry = Registry::new()
-        .extend(pairs)
-        .expect("valid schema identifiers")
-        .prepare()
-        .expect("a resolvable registry");
-    let registry: &'static Registry = Box::leak(Box::new(registry));
-    schemas
-        .into_iter()
-        .map(|(name, schema)| {
-            let validator = jsonschema::options()
-                .with_registry(registry)
-                .should_validate_formats(true)
-                .build(&schema)
-                .unwrap_or_else(|error| panic!("compiling {name}: {error}"));
-            (name, validator)
-        })
-        .collect()
 }
 
 mod common;
@@ -120,22 +76,18 @@ fn case() -> Case {
 // ---------------------------------------------------------------------------
 
 /// Every receipt the run produced, from the trace's `jail.receipt` notes and
-/// from `jail.json`, each validated against the checked-in schema and the
-/// rules it cannot state (`common::semantic_receipt`).
+/// from `jail.json`, after everything the run wrote passed its contract
+/// (`common::assert_run_records`: schemas, semantic rules, the trace as a
+/// complete stream and the control transcript in order).
 struct Receipts {
     by_phase: BTreeMap<String, Value>,
     phases_seen: Vec<String>,
 }
 
-fn receipts_of(run: &Run, validators: &BTreeMap<String, Validator>) -> Receipts {
-    let receipt_schema = &validators["jail-receipt"];
-    let event_schema = &validators["jail-event"];
+fn receipts_of(run: &Run) -> Receipts {
+    common::assert_run_records(run);
     let mut by_phase = BTreeMap::new();
     for receipt in run.receipts() {
-        receipt_schema
-            .validate(&receipt)
-            .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
-        common::assert_semantic_receipt(&receipt);
         let phase = receipt
             .get("phase")
             .and_then(Value::as_str)
@@ -145,9 +97,6 @@ fn receipts_of(run: &Run, validators: &BTreeMap<String, Validator>) -> Receipts 
     }
     let mut phases_seen = Vec::new();
     for event in run.trace_events() {
-        event_schema
-            .validate(event)
-            .unwrap_or_else(|error| panic!("an event fails its schema: {error}\n{event:#}"));
         if event.get("operation").and_then(Value::as_str) == Some("jail.receipt")
             && let Some(phase) = event.pointer("/fields/phase").and_then(Value::as_str)
         {
@@ -221,7 +170,6 @@ fn s11_allowed_write() {
     if !live() {
         return;
     }
-    let validators = validators();
     let case = case();
     let target = case.workspace.join("allowed.txt");
     let run = case
@@ -259,7 +207,7 @@ fn s11_allowed_write() {
     assert_eq!(field(create, "/fields/path_complete"), true);
     assert_eq!(field(create, "/outcome/ok"), true);
 
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     assert!(receipts.saw("prepared"), "no prepared receipt note");
     assert!(receipts.saw("enforced"), "no enforced receipt note");
     let settled = receipts.phase("settled");
@@ -309,7 +257,6 @@ fn s11_protected_access_fails() {
     if !live() {
         return;
     }
-    let validators = validators();
     let case = case();
     std::fs::create_dir_all(case.workspace.join(".git")).expect("a repository in the workspace");
     std::fs::write(case.workspace.join(".git/config"), b"[core]\n").expect("a git file");
@@ -356,7 +303,7 @@ fn s11_protected_access_fails() {
     assert_eq!(field(create, "/fields/path/kind"), "workspace_relative");
     assert_eq!(field(create, "/fields/path/value"), ".git/x");
 
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     let settled = receipts.phase("settled");
     assert_eq!(field(settled, "/containment"), "enforced");
     assert_eq!(field(settled, "/lifetime/tree_empty"), true);
@@ -376,7 +323,6 @@ fn s11_agent_protects_git_persistence_points() {
     if !live() {
         return;
     }
-    let validators = validators();
     let hooks_case = case();
     std::fs::create_dir_all(hooks_case.workspace.join(".git/hooks")).expect("hooks");
     std::fs::write(hooks_case.workspace.join(".git/config"), b"[core]\n").expect("config");
@@ -462,7 +408,7 @@ fn s11_agent_protects_git_persistence_points() {
     );
     assert!(head.is_file(), "the ref write did not land");
 
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     let settled = receipts.phase("settled");
     assert_eq!(field(settled, "/containment"), "enforced");
     assert_eq!(
@@ -476,7 +422,6 @@ fn s11_exec_descendant() {
     if !live() {
         return;
     }
-    let validators = validators();
     let case = case();
     let run = case
         .jail
@@ -510,7 +455,7 @@ fn s11_exec_descendant() {
         }
     }
 
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     let settled = receipts.phase("settled");
     // §11.4: the exec class counts proc.exec and proc.exit results.
     assert_eq!(
@@ -528,7 +473,6 @@ fn s11_wall_expiry_separate_run() {
     if !live() {
         return;
     }
-    let validators = validators();
     let case = case();
     let run = case
         .jail
@@ -541,7 +485,7 @@ fn s11_wall_expiry_separate_run() {
         .run()
         .expect("the jail runs");
 
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     let settled = receipts.phase("settled");
     assert_eq!(field(settled, "/outcome/kind"), "signaled");
     assert_eq!(field(settled, "/outcome/cause"), "wall_expiry");
@@ -591,7 +535,7 @@ fn s11_wall_expiry_separate_run() {
     let available = ouro_jail::platform::linux::probe::run_one(
         "cgroup_pids",
         &harness::jail_path(),
-        Path::new("bwrap"),
+        &common::bwrap_path(),
     )
     .status
         == ouro_jail::platform::linux::probe::ProbeStatus::Available;
@@ -610,7 +554,6 @@ fn s11_observe_off() {
     if !live() {
         return;
     }
-    let validators = validators();
     let case = case();
     let target = case.workspace.join("allowed.txt");
     // Keep the image alive long enough for the observation-off backend to
@@ -645,7 +588,7 @@ fn s11_observe_off() {
         operations(&run)
     );
 
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     let settled = receipts.phase("settled");
     assert_eq!(field(settled, "/observer/backend"), &Value::Null);
     assert_eq!(field(settled, "/observer/attached"), false);
@@ -924,7 +867,6 @@ fn o03_an_unreadable_argument_is_not_a_hole_in_coverage() {
     if !live() {
         return;
     }
-    let validators = validators();
     let case = case();
     let run = case
         .jail
@@ -956,7 +898,7 @@ fn o03_an_unreadable_argument_is_not_a_hole_in_coverage() {
         "strict evidence stopped a run that lost nothing: {}",
         run.stderr_text()
     );
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     let settled = receipts.phase("settled");
     assert_eq!(field(settled, "/outcome/kind"), "exited");
     assert_eq!(field(settled, "/outcome/code"), 0);
@@ -998,7 +940,6 @@ fn o02_a_thread_is_not_a_process() {
     if !live() {
         return;
     }
-    let validators = validators();
     let case = case();
     let run = case
         .jail
@@ -1025,7 +966,7 @@ fn o02_a_thread_is_not_a_process() {
         1,
         "a thread was counted as a process ending: {ops:?}"
     );
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     assert_eq!(
         field(receipts.phase("settled"), "/coverage/exec/observed_count")
             .as_u64()
@@ -1156,7 +1097,6 @@ fn x06_no_private_authority() {
     if !live() {
         return;
     }
-    let validators = validators();
     let case = case();
     let script = case.workspace.join("script.json");
     std::fs::write(&script, br#"[["fds"],["status"],["env"]]"#).expect("the script is written");
@@ -1207,7 +1147,7 @@ fn x06_no_private_authority() {
         .iter()
         .filter_map(|entry| entry.as_str().map(ToOwned::to_owned))
         .collect();
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     let settled = receipts.phase("settled");
     let recorded: Vec<String> = field(settled, "/applied/environment_names")
         .as_array()
@@ -1237,7 +1177,6 @@ fn x07_background_descendant_is_terminated() {
     if !live() {
         return;
     }
-    let validators = validators();
     // Both termination paths: with the observer attached and without it.
     //
     // This proves the descendant does not outlive settlement. It does not
@@ -1247,11 +1186,11 @@ fn x07_background_descendant_is_terminated() {
     // is sufficient. A mutation that made `wait_tree` claim emptiness without
     // verifying it still passes here for exactly that reason.
     for observe in [None, Some("off")] {
-        x07_case(&validators, observe);
+        x07_case(observe);
     }
 }
 
-fn x07_case(validators: &BTreeMap<String, Validator>, observe: Option<&str>) {
+fn x07_case(observe: Option<&str>) {
     let case = case();
     // The descendant proves whether it is still alive by writing a marker two
     // seconds after the target has already exited. Tree termination happens
@@ -1276,7 +1215,7 @@ fn x07_case(validators: &BTreeMap<String, Validator>, observe: Option<&str>) {
         .run()
         .expect("the jail runs");
 
-    let receipts = receipts_of(&run, validators);
+    let receipts = receipts_of(&run);
     let settled = receipts.phase("settled");
     // The target's own outcome is preserved; the descendant does not become it.
     if observe == Some("off") && field(settled, "/exec_observed") == false {
@@ -1319,7 +1258,6 @@ fn l01_a_target_that_ignores_the_cooperative_stop_dies_of_the_forced_one() {
     if !live() {
         return;
     }
-    let validators = validators();
     let case = case();
     // The other half of the stop sequence: this target sets SIGTERM to
     // SIG_IGN, so the cooperative signal arrives and does nothing, and only
@@ -1337,7 +1275,7 @@ fn l01_a_target_that_ignores_the_cooperative_stop_dies_of_the_forced_one() {
         .run()
         .expect("the jail runs");
 
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     let settled = receipts.phase("settled");
     assert_eq!(field(settled, "/outcome/kind"), "signaled");
     assert_eq!(field(settled, "/outcome/cause"), "wall_expiry");
@@ -1355,7 +1293,6 @@ fn x03_observation_off_does_not_confirm_an_exec_that_never_happened() {
     if !live() {
         return;
     }
-    let validators = validators();
     let case = case();
     let marker = case.workspace.join("marker.txt");
     let mut spawned = case
@@ -1402,7 +1339,7 @@ fn x03_observation_off_does_not_confirm_an_exec_that_never_happened() {
     let run = spawned.wait().expect("the jail finishes");
 
     assert!(!marker.exists(), "the target ran after its launcher died");
-    let receipts = receipts_of(&run, &validators);
+    let receipts = receipts_of(&run);
     let last = receipts
         .last()
         .expect("the attempt persisted at least one receipt");
@@ -1523,7 +1460,6 @@ fn i03_gate() {
     if !live() {
         return;
     }
-    let validators = validators();
 
     // A matching plan releases once, and exactly one target exec happens.
     {
@@ -1548,11 +1484,9 @@ fn i03_gate() {
         };
         // The prepared receipt is durable before the control message is sent,
         // so the owner reads the plan it is being asked to authorise.
-        let receipt = common::checked_receipt(
-            spawned
-                .receipt_value()
-                .expect("the prepared receipt is on disk when `prepared` arrives"),
-        );
+        let receipt = spawned
+            .receipt_value()
+            .expect("the prepared receipt is on disk when `prepared` arrives");
         let attempt_id = control
             .get("attempt_id")
             .and_then(Value::as_str)
@@ -1591,7 +1525,7 @@ fn i03_gate() {
         let run = spawned.wait().expect("the jail finishes");
         assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
         assert!(marker.is_file(), "the released target did not run");
-        let receipts = receipts_of(&run, &validators);
+        let receipts = receipts_of(&run);
         assert_eq!(field(receipts.phase("settled"), "/exec_observed"), true);
         // Exactly one exec of the target, so one release cannot become two.
         let execs = operations(&run)
@@ -1627,7 +1561,7 @@ fn i03_gate() {
         let run = spawned.wait().expect("the jail finishes");
         assert_eq!(run.code(), Some(125), "stderr: {}", run.stderr_text());
         assert!(!marker.exists(), "the target ran without a release");
-        let receipts = receipts_of(&run, &validators);
+        let receipts = receipts_of(&run);
         let refused = receipts.phase("refused");
         assert_eq!(field(refused, "/exec_observed"), false);
         assert_eq!(field(refused, "/outcome/kind"), "refused");
@@ -1669,7 +1603,7 @@ fn i03_gate() {
         let run = spawned.wait().expect("the jail finishes");
         assert_eq!(run.code(), Some(125));
         assert!(!marker.exists(), "a mismatched digest released the target");
-        let receipts = receipts_of(&run, &validators);
+        let receipts = receipts_of(&run);
         assert_eq!(field(receipts.phase("refused"), "/exec_observed"), false);
     }
 }

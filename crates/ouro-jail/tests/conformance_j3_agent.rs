@@ -20,7 +20,6 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use jsonschema::{Registry, Resource, Validator};
 use ouro_fixture::harness::{self, HttpServer, Jail, ProbeKind, Run, Spawned, UnixProbe};
 use serde_json::Value;
 
@@ -29,53 +28,6 @@ mod common;
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
-
-fn specs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/specs/jail-v1")
-        .canonicalize()
-        .expect("the checked-in specification directory exists")
-}
-
-/// One validator per checked-in schema, by stem.
-fn validators() -> &'static BTreeMap<String, Validator> {
-    static ONCE: std::sync::OnceLock<BTreeMap<String, Validator>> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| {
-        let mut schemas: BTreeMap<String, Value> = BTreeMap::new();
-        for entry in std::fs::read_dir(specs_dir()).unwrap() {
-            let path = entry.unwrap().path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if let Some(stem) = name.strip_suffix(".schema.json") {
-                let text = std::fs::read_to_string(&path).unwrap();
-                schemas.insert(stem.to_owned(), serde_json::from_str(&text).unwrap());
-            }
-        }
-        let pairs: Vec<(String, Resource)> = schemas
-            .values()
-            .map(|schema| {
-                (
-                    schema["$id"].as_str().unwrap().to_owned(),
-                    Resource::from_contents(schema.clone()),
-                )
-            })
-            .collect();
-        let registry: Registry = Registry::new().extend(pairs).unwrap().prepare().unwrap();
-        let registry: &'static Registry = Box::leak(Box::new(registry));
-        schemas
-            .into_iter()
-            .map(|(name, schema)| {
-                let validator = jsonschema::options()
-                    .with_registry(registry)
-                    .should_validate_formats(true)
-                    .build(&schema)
-                    .unwrap();
-                (name, validator)
-            })
-            .collect()
-    })
-}
 
 fn private_dir(path: &Path) {
     std::fs::create_dir_all(path).unwrap();
@@ -163,28 +115,6 @@ fn py_out(run: &Run) -> Value {
     serde_json::from_str(line).unwrap()
 }
 
-/// Every receipt and trace event validated against the checked-in schemas,
-/// and every receipt against the rules they cannot state
-/// (`common::semantic_receipt`); returns the settled receipt.
-fn settled(run: &Run) -> Value {
-    run.assert_channels_complete();
-    assert!(
-        run.receipt_errors().is_empty(),
-        "{:?}",
-        run.receipt_errors()
-    );
-    // J5-C: every receipt, the trace as a stream and the control transcript,
-    // held to the frozen contract.
-    common::assert_run_records(run);
-    run.receipt_phase("settled").unwrap_or_else(|| {
-        panic!(
-            "no settled receipt: exit {:?}, stderr {}",
-            run.code(),
-            run.stderr_text()
-        )
-    })
-}
-
 fn details(receipt: &Value) -> &Value {
     &receipt["lifetime"]["native"]["details"]
 }
@@ -235,7 +165,7 @@ fn prepared(spawned: &mut Spawned) -> (Value, Value) {
         .owner()
         .await_prepared()
         .expect("a prepared message");
-    let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
+    let receipt = spawned.receipt_value().expect("a prepared receipt");
     assert_eq!(receipt["phase"], "prepared");
     (message, receipt)
 }
@@ -370,7 +300,7 @@ fn s03_a_landlock_and_seccomp_inner_sandbox_starts_and_restricts_its_child() {
         "the inner filter refused mkdir"
     );
 
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(receipt["outcome"]["kind"], "exited");
     // The observer saw the Landlock denial of the mutating open (EACCES is
     // an `fs.deny` of the attempted `fs.write`). The read-only open's denial
@@ -473,7 +403,7 @@ print(json.dumps(out))
     assert_eq!(out["write_usr"], "EROFS");
     assert_eq!(out["write_proxy_dir"], "EROFS");
     assert_eq!(out["proxy_listing"], serde_json::json!(["proxy.sock"]));
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(receipt["outcome"]["code"], 0);
 }
 
@@ -509,7 +439,7 @@ print(json.dumps(out))
         assert_ne!(out[label]["rc"], 0, "{label}: {out}");
         assert!(!out[label]["stderr"].as_str().unwrap().is_empty(), "{out}");
     }
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let agent = &details(&receipt)["agent"];
     assert_eq!(agent["nested_user_namespace"], "unavailable", "{agent:#}");
     assert_eq!(agent["filter_variant"], "unprivileged_inner");
@@ -622,7 +552,7 @@ print(json.dumps(out))
         connects[0]
     );
     assert_eq!(connects[1]["errno"], "ENETUNREACH");
-    settled(&run);
+    common::settled(&run);
 }
 
 // ===========================================================================
@@ -693,7 +623,7 @@ fn n01_direct_tcp_udp_ipv6_and_a_proxy_ignoring_client_fail() {
             0,
             "{profile}: the host origin was reached"
         );
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         let mode = if profile == "agent" { "proxy" } else { "none" };
         assert_eq!(receipt["applied"]["network"]["mode"], mode);
     }
@@ -760,7 +690,7 @@ fn n02_allowed_and_denied_requests_through_the_bridge_yield_one_proxy_result_eac
     assert_eq!(seen, ["/allowed", "/tunnel"]);
     assert_eq!(denied.stop().len(), 0);
 
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let proxy = events(&run, "proxy");
     assert_eq!(proxy.len(), 3, "{proxy:#?}");
     let mut ids: Vec<i64> = proxy
@@ -868,7 +798,7 @@ fn n03_address_and_host_rules_hold_end_to_end() {
         .run()
         .unwrap();
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    settled(&run);
+    common::settled(&run);
     let reasons: Vec<&str> = events(&run, "proxy")
         .iter()
         .map(|event| event["fields"]["reason"].as_str().unwrap())
@@ -908,7 +838,7 @@ fn n03_address_and_host_rules_hold_end_to_end() {
         .run()
         .unwrap();
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    settled(&run);
+    common::settled(&run);
     let reasons: Vec<&str> = events(&run, "proxy")
         .iter()
         .map(|event| event["fields"]["reason"].as_str().unwrap())
@@ -959,7 +889,7 @@ fn n03_an_omitted_port_grant_admits_no_plaintext_through_the_agent_proxy() {
         .run()
         .unwrap();
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let facts: Vec<(&str, &str)> = events(&run, "proxy")
         .iter()
         .map(|event| {
@@ -1176,7 +1106,7 @@ fn n04_proxy_death_fails_closed_and_best_effort_continues_degraded() {
     let get = ops(&lines, "http-get")[0].clone();
     assert!(get["args"]["status_code"].is_null(), "no response: {get}");
     assert_eq!(origin.stop().len(), 0);
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(receipt["outcome"]["kind"], "exited");
     assert_eq!(receipt["outcome"]["code"], 0);
     assert!(
@@ -1250,7 +1180,7 @@ print(json.dumps({"finished": True, "tries": tries}))
         run.stdout_text()
     );
     assert_eq!(origin.stop().len(), 0);
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(receipt["outcome"]["cause"], "evidence_loss");
     let (status, reasons, lost) = proxy_net_loss(&receipt);
     assert_eq!(status, "degraded");
@@ -1391,7 +1321,7 @@ fn n04_rig_takes_the_supervisors_listener_when_a_foreign_one_is_listed_first() {
         Some(Value::from("EACCES")),
         "the target cannot name the proxy socket itself (audit F2): {lines:#?}"
     );
-    settled(&run);
+    common::settled(&run);
     assert_eq!(
         helper_notes(&run, "proxy_stopped").len(),
         1,
@@ -1464,23 +1394,27 @@ print(json.dumps(out))
         "{out}"
     );
     assert_eq!(origin.stop().len(), 1, "only the request before the death");
-    settled(&run);
+    common::settled(&run);
     let notes = helper_notes(&run, "bridge_exited");
     assert_eq!(notes.len(), 1);
     // The wrapper note of kind `helper`, validated on its own against both
-    // checked-in event schemas (settled() already validated every event
+    // checked-in event schemas (common::settled() already validated every event
     // against jail-event), next to a copy the schema must refuse, so the
     // validation is shown able to fail.
     let note = notes[0].clone();
     assert_eq!(note["fields"]["helper"], "bridge");
     for schema in ["event", "jail-event"] {
-        validators()[schema]
+        common::validators()[schema]
             .validate(&note)
             .unwrap_or_else(|error| panic!("{schema}: {error}\n{note:#}"));
     }
     let mut unnamed = note.clone();
     unnamed["fields"]["kind"] = Value::from("");
-    assert!(validators()["jail-event"].validate(&unnamed).is_err());
+    assert!(
+        common::validators()["jail-event"]
+            .validate(&unnamed)
+            .is_err()
+    );
     // A bridge death loses no evidence: nothing is degraded for it.
     let receipt = run.receipt_phase("settled").unwrap();
     assert_eq!(receipt["coverage"]["proxy.net"]["status"], "active");
@@ -1570,7 +1504,7 @@ print(json.dumps(out))
     assert_eq!(out["overflow"], 431, "{out}");
     assert_eq!(out["saturated"], 503, "{out}");
     assert_eq!(out["recovered"], 200, "{out}");
-    settled(&run);
+    common::settled(&run);
     let reasons: Vec<&str> = events(&run, "proxy")
         .iter()
         .map(|event| event["fields"]["reason"].as_str().unwrap())
@@ -1629,7 +1563,7 @@ print(json.dumps({"status": int(parts[1]) if len(parts) > 1 else None,
     assert_eq!(out["status"], 408, "{out}");
     let elapsed = out["elapsed"].as_f64().unwrap();
     assert!((9.0..13.0).contains(&elapsed), "{out}");
-    settled(&run);
+    common::settled(&run);
     let reasons: Vec<&str> = events(&run, "proxy")
         .iter()
         .map(|event| event["fields"]["reason"].as_str().unwrap())
@@ -1864,7 +1798,7 @@ fn n05_host_peers_existing_late_aliased_and_in_every_grant_are_unreachable() {
         "EACCES",
         "the target naming the proxy socket directly is refused"
     );
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let denials: Vec<&Value> = mediated(&run)
         .into_iter()
         .filter(|event| {
@@ -2026,7 +1960,7 @@ print(json.dumps({"abstract": a.recv(1).decode()}))
     for socket in datagrams {
         assert_eq!(socket["errno"], "EPERM", "{socket}");
     }
-    settled(&run);
+    common::settled(&run);
 }
 
 /// N05, proxy replacement before the first connect. Attempted: after
@@ -2164,7 +2098,7 @@ fn n05_a_proxy_replaced_before_the_first_connect_is_never_reached() {
     assert_eq!(origin.stop().len(), 0);
     let get = ops(&run.fixture_lines(), "http-get")[0].clone();
     assert!(get["args"]["status_code"].is_null(), "{get}");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let errors = receipt["errors"].to_string();
     assert!(errors.contains("proxy directory was retained"), "{errors}");
     assert!(
@@ -2269,7 +2203,7 @@ print(json.dumps(out))
     assert_eq!(out["direct"], libc::EACCES, "{out}");
     assert_eq!(rogue.stop(), 0, "the replacement was reached");
     assert_eq!(origin.stop().len(), 1, "only the first request");
-    settled(&run);
+    common::settled(&run);
 }
 
 /// N05, the bridge's view under child path and mount changes. Attempted by
@@ -2330,7 +2264,7 @@ print(json.dumps(out))
     assert_eq!(out["listing"], serde_json::json!(["proxy.sock"]));
     assert_eq!(out["get"], 200, "{out}");
     assert_eq!(origin.stop().len(), 1);
-    settled(&run);
+    common::settled(&run);
 }
 
 // ===========================================================================
@@ -2415,7 +2349,7 @@ print(json.dumps(out))
     );
     assert_eq!(origin.stop().len(), 1);
 
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let credentials = receipt["credentials"].as_array().unwrap();
     assert_eq!(credentials.len(), 2, "{credentials:#?}");
     let auth = credentials.iter().find(|row| row["id"] == "auth").unwrap();
@@ -2644,7 +2578,7 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
         names.iter().all(|name| !name.starts_with("OURO_")),
         "{names:?}"
     );
-    let settled_receipt = settled(&run);
+    let settled_receipt = common::settled(&run);
     let mut recorded: Vec<String> = settled_receipt["applied"]["environment_names"]
         .as_array()
         .unwrap()
@@ -2694,7 +2628,7 @@ fn every_contained_profile_reads_back_its_filter_count() {
             "{profile}/{observe}: {}",
             run.stderr_text()
         );
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         let filters = &details(&receipt)["seccomp_filters"];
         assert_eq!(
             filters["expected"], expected,
@@ -2733,7 +2667,7 @@ fn agent_observation_off_keeps_only_the_proxy_facts() {
         .run()
         .unwrap();
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert!(events(&run, "audit").is_empty());
     assert_eq!(events(&run, "proxy").len(), 1);
     for class in ["exec", "fs.write", "fs.deny", "net"] {
@@ -2779,7 +2713,7 @@ fn agent_refuses_naming_the_proxy_it_cannot_establish() {
         .unwrap();
     assert_eq!(run.code(), Some(125), "stderr: {}", run.stderr_text());
     assert!(!marker.exists(), "the target ran");
-    let receipt = common::checked_receipt(run.receipt_phase("refused").expect("a refused receipt"));
+    let receipt = run.receipt_phase("refused").expect("a refused receipt");
     let error = receipt["outcome"]["error"].to_string();
     assert!(
         error.contains("`agent` proxy could not be established"),
@@ -2846,7 +2780,7 @@ print(json.dumps({{"bridge": b}}))
             .run()
             .unwrap();
         assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         let bridge = &details(&receipt)["helpers"][0];
         let pid = bridge["pid"].as_i64().unwrap();
         // The launcher's pid is the target's: it execs the target in place.
@@ -2969,7 +2903,7 @@ os.execv(sys.argv[1], sys.argv[1:])\n";
                 "{profile} {label}: stderr {}",
                 run.stderr_text()
             );
-            settled(&run);
+            common::settled(&run);
             let seen = signal_state(&run.stdout_text());
             assert_eq!(
                 seen, expected,
@@ -3015,7 +2949,7 @@ fn review_gc_removes_a_crashed_agent_attempts_proxy_directory() {
             .receipt_value()
             .filter(|receipt| receipt["phase"] == "enforced")
         {
-            break common::checked_receipt(receipt);
+            break receipt;
         }
         assert!(std::time::Instant::now() < deadline, "never enforced");
         std::thread::sleep(Duration::from_millis(50));
@@ -3111,7 +3045,7 @@ fn review_settlement_itself_produces_no_helper_note() {
                 .run()
                 .unwrap();
             assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-            let receipt = settled(&run);
+            let receipt = common::settled(&run);
             assert_eq!(receipt["coverage"]["proxy.net"]["status"], "active");
             quiet(&run, &format!("sleep, observe {observe}, round {round}"));
         }
@@ -3140,7 +3074,7 @@ fn review_settlement_itself_produces_no_helper_note() {
         .run()
         .unwrap();
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(
         receipt["coverage"]["exec"]["status"], "active",
         "the child's exec was complete when it was killed: {:#}",
@@ -3154,7 +3088,7 @@ fn review_settlement_itself_produces_no_helper_note() {
         .target(["/usr/bin/sleep", "30"])
         .run()
         .unwrap();
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(receipt["outcome"]["cause"], "wall_expiry");
     quiet(&run, "wall expiry");
 }
@@ -3211,7 +3145,7 @@ print(json.dumps({"finished": True, "connects": sum(counts)}))
             "{evidence}: {}",
             run.stderr_text()
         );
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         assert_eq!(
             details(&receipt)["agent"]["mediation_record_queue"],
             1,
@@ -3362,7 +3296,7 @@ print(json.dumps(out))
         "the proxy socket is bridge-only (audit F2): {out}"
     );
     assert_eq!(out["after"], "HTTP/1.1 200 OK", "{out}");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(details(&receipt)["helpers"][0]["rejected_at_capacity"], 1);
     let reasons: Vec<&str> = events(&run, "proxy")
         .iter()
@@ -3435,7 +3369,7 @@ print(json.dumps(out))
     );
     assert_eq!(out["get"], 200, "{out}");
     assert_eq!(origin.stop().len(), 1);
-    settled(&run);
+    common::settled(&run);
     assert!(helper_notes(&run, "bridge_exited").is_empty());
 }
 
@@ -3508,7 +3442,7 @@ print(json.dumps(out))
     assert_eq!(out["before"], 200, "{out}");
     assert_ne!(out["stopped"], 200, "{out}");
     assert_eq!(out["continued"], 200, "{out}");
-    settled(&run);
+    common::settled(&run);
     assert!(helper_notes(&run, "bridge_exited").is_empty());
     // The request made while the bridge was stopped may reach the origin
     // once the bridge continues; nothing else does.
@@ -3574,7 +3508,7 @@ fn review_x06_holds_with_observation_off() {
         ops(&lines, "status")[0]["args"]["fields"]["Seccomp_filters"],
         "2"
     );
-    settled(&run);
+    common::settled(&run);
 }
 
 /// Review r08: a stop under mediation load is bounded. Attempted: 32
@@ -3612,7 +3546,7 @@ ts = [threading.Thread(target=worker, daemon=True) for _ in range(32)]
             .run()
             .unwrap();
         let elapsed = started.elapsed();
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         assert!(elapsed < Duration::from_secs(10), "{observe}: {elapsed:?}");
         assert_eq!(receipt["outcome"]["cause"], "wall_expiry", "{observe}");
         assert_eq!(receipt["lifetime"]["tree_empty"], true, "{observe}");
@@ -3691,7 +3625,7 @@ fn review_every_contained_profile_refuses_a_socket_family_outside_the_list() {
     let c = case("none");
     let run = c.jail.target(py(FAMILIES, &[])).run().unwrap();
     assert_eq!(run.code(), Some(0), "none: {}", run.stderr_text());
-    settled(&run);
+    common::settled(&run);
     let none = py_out(&run);
     for (label, value) in host.as_object().unwrap() {
         assert_eq!(&none[label], value, "none is untouched: {label}");
@@ -3717,7 +3651,7 @@ fn review_every_contained_profile_refuses_a_socket_family_outside_the_list() {
         };
         let run = c.jail.args(limits).target(py(FAMILIES, &[])).run().unwrap();
         assert_eq!(run.code(), Some(0), "{profile}: {}", run.stderr_text());
-        settled(&run);
+        common::settled(&run);
         let out = py_out(&run);
         for label in outside {
             assert_eq!(out[label], "EAFNOSUPPORT", "{profile} {label}: {out}");
@@ -3941,7 +3875,7 @@ fn j4_w3_an_agent_connect_withdrawn_before_the_mediator_received_it_is_excluded(
             .clone()
     };
     assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(find("connect_first").1, 0, "{stdout}");
     let quick = find("connect_quick");
     assert_eq!(

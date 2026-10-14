@@ -1,5 +1,4 @@
 #![cfg(target_os = "linux")]
-#![allow(clippy::too_many_lines)]
 //! J4 slice O, end to end: the observer's closed set and its attribution
 //! (jail-v1 §15 O01, O02, O04, O06 and the §16 "closed set" exit).
 //!
@@ -30,6 +29,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use ouro_fixture::harness::{self, Jail, Run};
+use ouro_jail::policy::ProfileName;
 use serde_json::Value;
 
 mod common;
@@ -45,50 +45,6 @@ fn specs_dir() -> PathBuf {
         .expect("the checked-in specification directory exists")
 }
 
-/// The profiles this file runs. `none` needs a delegated leaf (§9.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Profile {
-    Tool,
-    Build,
-    None,
-    Agent,
-}
-
-impl Profile {
-    fn name(self) -> &'static str {
-        match self {
-            Profile::Tool => "tool",
-            Profile::Build => "build",
-            Profile::None => "none",
-            Profile::Agent => "agent",
-        }
-    }
-
-    /// Whether this host can run the profile; prints or fails the reason
-    /// when it cannot (a skip is a failure under `OURO_CONFORMANCE=1`).
-    fn available(self) -> bool {
-        if !common::live() {
-            return false;
-        }
-        if self != Profile::None {
-            return true;
-        }
-        let leaf = ouro_jail::platform::linux::probe::run_one(
-            "cgroup_delegated_leaf",
-            &harness::jail_path(),
-            Path::new("bwrap"),
-        );
-        if leaf.status != ouro_jail::platform::linux::probe::ProbeStatus::Available {
-            harness::skip_or_fail(&format!(
-                "the none profile needs a delegated user scope: {}",
-                leaf.evidence
-            ));
-            return false;
-        }
-        true
-    }
-}
-
 /// A run of `ouro-jail run --profile <profile>` over a private workspace
 /// holding the fixture at `<workspace>/ouro-fixture`, trace and control on.
 struct Case {
@@ -101,7 +57,7 @@ struct Case {
     build: bool,
 }
 
-fn case(profile: Profile, evidence: &str) -> Case {
+fn case(profile: ProfileName, evidence: &str) -> Case {
     let jail = Jail::new().expect("a private harness");
     let workspace = jail.root().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -112,12 +68,12 @@ fn case(profile: Profile, evidence: &str) -> Case {
     let mut jail = jail
         .arg("run")
         .arg("--profile")
-        .arg(profile.name())
+        .arg(profile.as_str())
         .arg("--evidence")
         .arg(evidence)
         .arg("--workspace")
         .arg(&workspace);
-    if profile == Profile::Build {
+    if profile == ProfileName::Build {
         // `build` requires an explicit memory ceiling (§6.4).
         jail = jail.args(["--limit", "mem=512MiB"]);
     }
@@ -125,7 +81,7 @@ fn case(profile: Profile, evidence: &str) -> Case {
         jail: jail.trace().control(),
         workspace,
         fixture,
-        build: profile == Profile::Build,
+        build: profile == ProfileName::Build,
     }
 }
 
@@ -186,28 +142,6 @@ fn target_identity(receipt: &Value) -> (i64, u64) {
         .or_else(|| ticks.as_str().and_then(|t| t.parse().ok()))
         .unwrap_or_else(|| panic!("no start_time_ticks: {process:#}"));
     (process["pid"].as_i64().unwrap(), ticks)
-}
-
-/// Every receipt and event validated against the checked-in schemas, and
-/// every receipt against the rules they cannot state
-/// (`common::semantic_receipt`); the settled receipt.
-fn settled(run: &Run) -> Value {
-    run.assert_channels_complete();
-    assert!(
-        run.receipt_errors().is_empty(),
-        "{:?}",
-        run.receipt_errors()
-    );
-    // J5-C: every receipt, the trace as a stream and the control transcript,
-    // held to the frozen contract.
-    common::assert_run_records(run);
-    run.receipt_phase("settled").unwrap_or_else(|| {
-        panic!(
-            "no settled receipt: exit {:?}, stderr {}",
-            run.code(),
-            run.stderr_text()
-        )
-    })
 }
 
 /// The audit source's results, in trace order.
@@ -644,18 +578,18 @@ fn o01_steps(c: &Case) -> Value {
 /// process that execed; every class count equals the results in that class,
 /// including a class with none; every `fs.write` names its action; no audit
 /// outcome carries a byte count.
-fn o01_matrix(profile: Profile) {
-    if !profile.available() {
+fn o01_matrix(profile: ProfileName) {
+    if !common::profile_live(profile) {
         return;
     }
     let c = case(profile, "strict");
     let roots = Roots {
         workspace: c.workspace.to_str().unwrap().to_owned(),
-        scratch: (profile != Profile::None).then(|| "/tmp".to_owned()),
+        scratch: (profile != ProfileName::None).then(|| "/tmp".to_owned()),
     };
     let steps = o01_steps(&c);
     let run = c.script("o01", &steps);
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let lines = run.fixture_lines();
     let events = audit_results(&run);
     let context = dump(&run);
@@ -781,7 +715,7 @@ fn o01_matrix(profile: Profile) {
         // connect result is one.
         let connect = event["fields"]["syscall"] == "connect";
         let mediated = event["fields"]["observation"] == "seccomp_user_notification";
-        if profile == Profile::Agent {
+        if profile == ProfileName::Agent {
             assert_eq!(connect, mediated, "{profile:?}: {event}");
         } else {
             assert!(!mediated, "{profile:?}: {event}");
@@ -796,7 +730,7 @@ fn o01_matrix(profile: Profile) {
     let c = case(profile, "strict");
     let fixture = c.fixture.clone().into_os_string();
     let run = c.run_with_inputs(vec![fixture, "exit".into(), "0".into()], &[]);
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let events = audit_results(&run);
     let ops: Vec<&str> = events
         .iter()
@@ -821,22 +755,22 @@ fn o01_matrix(profile: Profile) {
 
 #[test]
 fn j4_o01_every_variant_is_one_event_per_result_tool() {
-    o01_matrix(Profile::Tool);
+    o01_matrix(ProfileName::Tool);
 }
 
 #[test]
 fn j4_o01_every_variant_is_one_event_per_result_build() {
-    o01_matrix(Profile::Build);
+    o01_matrix(ProfileName::Build);
 }
 
 #[test]
 fn j4_o01_every_variant_is_one_event_per_result_none() {
-    o01_matrix(Profile::None);
+    o01_matrix(ProfileName::None);
 }
 
 #[test]
 fn j4_o01_every_variant_is_one_event_per_result_agent() {
-    o01_matrix(Profile::Agent);
+    o01_matrix(ProfileName::Agent);
 }
 
 // ---------------------------------------------------------------------------
@@ -847,7 +781,7 @@ fn j4_o01_every_variant_is_one_event_per_result_agent() {
 /// time of that process (field 22 of `/proc/<pid>/stat`, clock ticks since
 /// boot) as `fields.pid_start_ticks`. With the receipt's `boot_id` that is a
 /// name no later process given the same number can share (§11.3).
-fn assert_births(run: &Run, receipt: &Value, profile: Profile) -> BTreeMap<i64, u64> {
+fn assert_births(run: &Run, receipt: &Value, profile: ProfileName) -> BTreeMap<i64, u64> {
     let context = dump(run);
     let mut births: BTreeMap<i64, u64> = BTreeMap::new();
     for event in audit_results(run) {
@@ -879,8 +813,8 @@ fn assert_births(run: &Run, receipt: &Value, profile: Profile) -> BTreeMap<i64, 
 
 #[test]
 fn j4_o02_every_audit_event_names_the_birth_of_its_process() {
-    for profile in [Profile::Tool, Profile::Agent] {
-        if !profile.available() {
+    for profile in [ProfileName::Tool, ProfileName::Agent] {
+        if !common::profile_live(profile) {
             return;
         }
         let c = case(profile, "strict");
@@ -905,7 +839,7 @@ fn j4_o02_every_audit_event_names_the_birth_of_its_process() {
             ["exec", "--", fixture, "script", child.to_str().unwrap()]
         ]);
         let run = c.script("births", &steps);
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         let context = dump(&run);
         let births = assert_births(&run, &receipt, profile);
         let lines = run.fixture_lines();
@@ -962,10 +896,10 @@ fn j4_o02_every_audit_event_names_the_birth_of_its_process() {
 /// the host pid, and its birth is the one the fixture reads for itself.
 #[test]
 fn j4_o02_a_nested_pid_namespace_under_none_keeps_host_attribution() {
-    if !Profile::None.available() {
+    if !common::profile_live(ProfileName::None) {
         return;
     }
-    let c = case(Profile::None, "strict");
+    let c = case(ProfileName::None, "strict");
     let workspace = c.workspace.to_str().unwrap().to_owned();
     let script = c.workspace.join("nested.json");
     std::fs::write(
@@ -1013,7 +947,7 @@ fn j4_o02_a_nested_pid_namespace_under_none_keeps_host_attribution() {
         script.into_os_string(),
     ]);
     let run = c.jail.target(argv).run().expect("the jail runs");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let context = dump(&run);
     let lines = run.fixture_lines();
     let identity = lines
@@ -1077,10 +1011,10 @@ fn j4_o02_a_nested_pid_namespace_under_none_keeps_host_attribution() {
 /// calls may appear, by pid or by path.
 #[test]
 fn j4_o04_an_unrelated_host_process_is_never_observed() {
-    if !Profile::None.available() {
+    if !common::profile_live(ProfileName::None) {
         return;
     }
-    let c = case(Profile::None, "strict");
+    let c = case(ProfileName::None, "strict");
     let outside = c.jail.root().join("unrelated");
     std::fs::create_dir_all(&outside).unwrap();
     let a = outside.join("race-a");
@@ -1111,7 +1045,7 @@ fn j4_o04_an_unrelated_host_process_is_never_observed() {
     let _ = unrelated.kill();
     let _ = unrelated.wait();
     assert!(still_running, "the unrelated process must outlive the run");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let context = dump(&run);
     let target = target_identity(&receipt).0;
     let digests: Vec<String> = [&a, &b]
@@ -1164,10 +1098,10 @@ fn event_for<'a>(events: &[&'a Value], syscall: &str, n: usize) -> &'a Value {
 /// `chdir` spelling would name a directory that no longer exists.
 #[test]
 fn j4_o06_renamed_cwd() {
-    if !Profile::Tool.available() {
+    if !common::profile_live(ProfileName::Tool) {
         return;
     }
-    let c = case(Profile::Tool, "strict");
+    let c = case(ProfileName::Tool, "strict");
     let workspace = c.workspace.clone();
     let steps = serde_json::json!([
         ["mkdir", c.ws("cwd-a")],
@@ -1177,7 +1111,7 @@ fn j4_o06_renamed_cwd() {
         ["open", "file.txt", "--create", "--write"]
     ]);
     let run = c.script("cwd", &steps);
-    let _ = settled(&run);
+    let _ = common::settled(&run);
     let context = dump(&run);
     assert!(workspace.join("cwd-b/made").is_dir(), "{context}");
     assert!(!workspace.join("cwd-a").exists(), "{context}");
@@ -1217,10 +1151,10 @@ fn j4_o06_renamed_cwd() {
 /// descriptor, and is reported as what it is.
 #[test]
 fn j4_o06_foreign_dirfd() {
-    if !Profile::Tool.available() {
+    if !common::profile_live(ProfileName::Tool) {
         return;
     }
-    let c = case(Profile::Tool, "strict");
+    let c = case(ProfileName::Tool, "strict");
     std::fs::create_dir_all(c.workspace.join("sub")).unwrap();
     let workspace = c.workspace.clone();
     let steps = serde_json::json!([
@@ -1235,7 +1169,7 @@ fn j4_o06_foreign_dirfd() {
         ]
     ]);
     let run = c.script("dirfd", &steps);
-    let _ = settled(&run);
+    let _ = common::settled(&run);
     let context = dump(&run);
     assert!(workspace.join("sub/made").is_dir(), "{context}");
     let lines = run.fixture_lines();
@@ -1280,10 +1214,10 @@ fn j4_o06_foreign_dirfd() {
 /// path.
 #[test]
 fn j4_o06_two_paths_independent() {
-    if !Profile::Tool.available() {
+    if !common::profile_live(ProfileName::Tool) {
         return;
     }
-    let c = case(Profile::Tool, "strict");
+    let c = case(ProfileName::Tool, "strict");
     std::fs::create_dir_all(c.workspace.join("sub")).unwrap();
     std::fs::write(c.workspace.join("two-a"), b"a").unwrap();
     let steps = serde_json::json!([
@@ -1316,7 +1250,7 @@ fn j4_o06_two_paths_independent() {
         ]
     ]);
     let run = c.script("two", &steps);
-    let _ = settled(&run);
+    let _ = common::settled(&run);
     let context = dump(&run);
     let events = audit_results(&run);
     let lines = run.fixture_lines();
@@ -1372,10 +1306,10 @@ fn j4_o06_two_paths_independent() {
 /// native-string codec) and decodes to exactly what the fixture passed.
 #[test]
 fn j4_o06_non_utf8_round_trip() {
-    if !Profile::Tool.available() {
+    if !common::profile_live(ProfileName::Tool) {
         return;
     }
-    let c = case(Profile::Tool, "strict");
+    let c = case(ProfileName::Tool, "strict");
     let name: &[u8] = b"caf\xe9-\xff\xfe";
     let mut path = c.workspace.as_os_str().as_bytes().to_vec();
     path.push(b'/');
@@ -1390,7 +1324,7 @@ fn j4_o06_non_utf8_round_trip() {
         ])
         .run()
         .expect("the jail runs");
-    let _ = settled(&run);
+    let _ = common::settled(&run);
     let context = dump(&run);
     assert!(Path::new(&path).is_dir(), "{context}");
     let events = audit_results(&run);
@@ -1419,10 +1353,10 @@ fn j4_o06_non_utf8_round_trip() {
 /// observed fact. Calls and gap counts together account for every call.
 #[test]
 fn j4_o06_racing_pathname_is_only_a_literal_snapshot() {
-    if !Profile::Tool.available() {
+    if !common::profile_live(ProfileName::Tool) {
         return;
     }
-    let c = case(Profile::Tool, "best-effort");
+    let c = case(ProfileName::Tool, "best-effort");
     const CALLS: usize = 300;
     let steps = serde_json::json!([[
         "race-mkdir",
@@ -1432,7 +1366,7 @@ fn j4_o06_racing_pathname_is_only_a_literal_snapshot() {
     ]]);
     let workspace = c.workspace.clone();
     let run = c.script("race", &steps);
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let context = dump(&run);
     let lines: Vec<Value> = run
         .fixture_lines()
@@ -1516,8 +1450,8 @@ fn j4_o06_racing_pathname_is_only_a_literal_snapshot() {
 /// ordinary ways of creating tasks keep working.
 #[test]
 fn j4_clone_untraced_refused_in_contained() {
-    for profile in [Profile::Tool, Profile::Build, Profile::Agent] {
-        if !profile.available() {
+    for profile in [ProfileName::Tool, ProfileName::Build, ProfileName::Agent] {
+        if !common::profile_live(profile) {
             return;
         }
         let c = case(profile, "strict");
@@ -1534,7 +1468,7 @@ fn j4_clone_untraced_refused_in_contained() {
             ["exec", "--", fixture, "exit", "0"]
         ]);
         let run = c.script("untraced", &steps);
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         let context = dump(&run);
         let lines = run.fixture_lines();
         let clone = lines.iter().find(|l| l["op"] == "clone").unwrap();
@@ -1561,10 +1495,10 @@ fn j4_clone_untraced_refused_in_contained() {
 /// glibc falls back to `clone`, and threads keep working.
 #[test]
 fn j4_clone_untraced_is_a_gap_in_none() {
-    if !Profile::None.available() {
+    if !common::profile_live(ProfileName::None) {
         return;
     }
-    let c = case(Profile::None, "best-effort");
+    let c = case(ProfileName::None, "best-effort");
     let untraced = c.workspace.join("untraced");
     let steps = serde_json::json!([
         ["clone3", "--expect", "ENOSYS"],
@@ -1572,7 +1506,7 @@ fn j4_clone_untraced_is_a_gap_in_none() {
         ["clone-untraced", untraced.to_str().unwrap()]
     ]);
     let run = c.script("untraced-none", &steps);
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let context = dump(&run);
     let lines = run.fixture_lines();
     let clone3 = lines.iter().find(|l| l["op"] == "clone3").unwrap();
@@ -1617,14 +1551,14 @@ fn j4_clone_untraced_is_a_gap_in_none() {
     );
 
     // Strict: the same gap stops the attempt.
-    let c = case(Profile::None, "strict");
+    let c = case(ProfileName::None, "strict");
     let untraced = c.workspace.join("untraced");
     let steps = serde_json::json!([
         ["clone-untraced", untraced.to_str().unwrap()],
         ["sleep", "10000"]
     ]);
     let run = c.script("untraced-strict", &steps);
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(
         receipt["outcome"]["cause"], "evidence_loss",
         "{:#}",
@@ -1664,14 +1598,14 @@ fn j4_closed_set_the_published_table_is_the_one_this_build_traces() {
         .find_map(|line| line.strip_prefix("narrowing filter digest: "))
         .expect("the table publishes the filter digest")
         .to_owned();
-    for profile in [Profile::Tool, Profile::None] {
-        if !profile.available() {
+    for profile in [ProfileName::Tool, ProfileName::None] {
+        if !common::profile_live(profile) {
             return;
         }
         let c = case(profile, "strict");
         let fixture = c.fixture.clone().into_os_string();
         let run = c.run_with_inputs(vec![fixture, "exit".into(), "0".into()], &[]);
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         assert_eq!(
             receipt["lifetime"]["native"]["details"]["narrowing_filter_digest"].as_str(),
             Some(published.as_str()),

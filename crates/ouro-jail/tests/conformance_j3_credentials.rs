@@ -588,12 +588,9 @@ fn attempt_of(run: &Run) -> PathBuf {
     found.pop().unwrap()
 }
 
-/// The attempt's receipt, checked against the schema and the rules it
-/// cannot state (`common::check_receipt`).
+/// The attempt's receipt, held to its contract.
 fn jail_json(attempt: &Path) -> Value {
-    common::checked_receipt(
-        serde_json::from_slice(&std::fs::read(attempt.join("jail.json")).unwrap()).unwrap(),
-    )
+    common::read_receipt(&attempt.join("jail.json"))
 }
 
 fn state_json(attempt: &Path) -> Value {
@@ -715,7 +712,7 @@ fn withheld(jail: Jail, marker: &Path) -> Run {
         .owner()
         .await_prepared()
         .expect("a prepared message");
-    let prepared = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
+    let prepared = spawned.receipt_value().expect("a prepared receipt");
     assert_eq!(prepared["phase"], "prepared");
     assert_eq!(
         prepared["state_cleanup"], "pending",
@@ -819,7 +816,7 @@ fn c02_a_release_failure_after_the_backend_died_verifies_the_teardown_and_cleans
         .owner()
         .await_prepared()
         .expect("a prepared message");
-    let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
+    let receipt = spawned.receipt_value().expect("a prepared receipt");
     assert_eq!(
         receipt["state_cleanup"], "pending",
         "vendor state exists now"

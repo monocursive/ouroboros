@@ -60,7 +60,7 @@ use serde_json::Value;
 
 mod common;
 
-const PYTHON: &str = "/usr/bin/python3";
+use common::PYTHON;
 
 /// A crash point and what the records must show after it.
 #[derive(Clone, Copy, Debug)]
@@ -95,27 +95,10 @@ const POINTS: [Point; 4] = [
     },
 ];
 
+/// A delegated leaf (`common::delegated_leaf`) and the interpreter the
+/// fixtures are written in.
 fn live() -> bool {
-    if !common::live() {
-        return false;
-    }
-    let leaf = ouro_jail::platform::linux::probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != ouro_jail::platform::linux::probe::ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "these crashes need a delegated user scope: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    if !Path::new(PYTHON).is_file() {
-        harness::skip_or_fail("the none fixtures are python3 scripts");
-        return false;
-    }
-    true
+    common::delegated_leaf() && common::python()
 }
 
 fn parse(path: &Path) -> Result<Option<Value>, String> {
@@ -519,7 +502,7 @@ fn pending_cleanup() -> Result<(Run, PathBuf), String> {
         ));
     }
     let dir = the_attempt(&data)?;
-    let receipt = read_json(&dir.join("jail.json"));
+    let receipt = common::read_receipt(&dir.join("jail.json"));
     let state = read_json(&dir.join("jail-state.json"));
     if receipt["phase"] != "settled"
         || receipt["state_cleanup"] != "pending"
@@ -554,7 +537,7 @@ fn resume_crash(point: Point, nth: usize) -> Vec<String> {
     };
     let data = run.data_dir.clone();
     let _leaf = LeafGuard::of(&dir);
-    let revision = read_json(&dir.join("jail.json"))["revision"]
+    let revision = common::read_receipt(&dir.join("jail.json"))["revision"]
         .as_u64()
         .unwrap_or(0);
     // One pass: the receipt is P12's first replacement, jail state its second.
@@ -562,7 +545,7 @@ fn resume_crash(point: Point, nth: usize) -> Vec<String> {
         return problems;
     }
     records_valid(&label, &dir, &mut problems);
-    let receipt = read_json(&dir.join("jail.json"));
+    let receipt = common::read_receipt(&dir.join("jail.json"));
     let state = read_json(&dir.join("jail-state.json"));
     let receipt_done = nth == 2 || point.published;
     let state_done = nth == 2 && point.published;
@@ -606,7 +589,7 @@ fn resume_crash(point: Point, nth: usize) -> Vec<String> {
     let before = present(&dir);
     gc_finishes(&label, &data, &mut problems);
     kept(&label, &dir, &before, &mut problems);
-    let receipt = read_json(&dir.join("jail.json"));
+    let receipt = common::read_receipt(&dir.join("jail.json"));
     let state = read_json(&dir.join("jail-state.json"));
     if receipt["state_cleanup"] != "complete"
         || state["state_cleanup"] != "complete"

@@ -30,7 +30,7 @@ mod common;
 // Shared setup
 // ---------------------------------------------------------------------------
 
-const PYTHON: &str = "/usr/bin/python3";
+use common::PYTHON;
 
 /// A `run --profile <profile>` over a private workspace holding the
 /// conformance fixture at `<workspace>/bin/ouro-fixture`, trace and control
@@ -123,34 +123,6 @@ fn py_out(run: &Run) -> Value {
     serde_json::from_str(line).unwrap()
 }
 
-/// Every receipt and trace event validated against the checked-in schemas
-/// and the rules they cannot state; returns the settled receipt.
-fn settled(run: &Run) -> Value {
-    validate(run);
-    run.receipt_phase("settled").unwrap_or_else(|| {
-        panic!(
-            "no settled receipt: exit {:?}, stderr {}",
-            run.code(),
-            run.stderr_text()
-        )
-    })
-}
-
-fn validate(run: &Run) {
-    let validators = common::validators();
-    for receipt in run.receipts() {
-        validators["jail-receipt"]
-            .validate(&receipt)
-            .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
-        common::assert_semantic_receipt(&receipt);
-    }
-    for event in run.trace_events() {
-        validators["jail-event"]
-            .validate(event)
-            .unwrap_or_else(|error| panic!("an event fails its schema: {error}\n{event:#}"));
-    }
-}
-
 /// The fixture's report lines for one operation, in order.
 fn ops<'a>(lines: &'a [Value], op: &str) -> Vec<&'a Value> {
     lines.iter().filter(|line| line["op"] == op).collect()
@@ -204,7 +176,7 @@ fn f01_a_workspace_symlink_to_a_home_secret_reads_as_absent() {
         !run.stdout_text().contains("SECRET"),
         "the secret's bytes reached the child"
     );
-    settled(&run);
+    common::settled(&run);
 }
 
 // ===========================================================================
@@ -282,7 +254,7 @@ print(json.dumps(out))
     }
     assert_eq!(out["head"], "ref: refs/heads/main\n", "the object changed");
     assert_eq!(out["write"], "EROFS", "the object is not read-only: {out}");
-    settled(&run);
+    common::settled(&run);
 }
 
 // ===========================================================================
@@ -330,7 +302,7 @@ fn f03_a_new_deep_protected_segment_is_outside_existing_and_root_coverage() {
         "a new deep .git was not writable: stderr {}",
         run.stderr_text()
     );
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(
         receipt["applied"]["filesystem"]["protected_coverage"], "existing_and_root",
         "the receipt does not name the coverage limit: {receipt:#}"
@@ -380,7 +352,6 @@ fn f04_a_workspace_deeper_than_the_scan_limit_refuses_without_claiming_coverage(
     let receipts = run.receipts();
     assert!(!receipts.is_empty(), "no refused receipt was written");
     for receipt in &receipts {
-        let _ = common::checked_receipt(receipt.clone());
         assert_ne!(
             receipt["phase"], "settled",
             "a refusal settled: {receipt:#}"
@@ -464,7 +435,6 @@ fn f04_a_source_identity_swap_at_the_mount_handoff_refuses() {
         .iter()
         .find(|r| r["outcome"]["kind"] == "refused")
         .unwrap_or_else(|| panic!("no refused receipt: {receipts:#?}"));
-    let _ = common::checked_receipt((*refused).clone());
     assert_ne!(refused["containment"], "enforced", "{refused:#}");
     let message = refused["outcome"]["error"]["message"]
         .as_str()
@@ -541,7 +511,7 @@ fn k04_backend_replacement_and_mode_change_refuse_before_spawn() {
         let run = spawned.wait().unwrap();
         assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
         assert!(!marker.exists(), "the target ran after the backend changed");
-        let receipt = common::checked_receipt(run.receipt_phase("refused").unwrap());
+        let receipt = run.receipt_phase("refused").unwrap();
         assert_eq!(receipt["outcome"]["error"]["code"], "internal_error");
         assert_eq!(receipt["outcome"]["error"]["stage"], "preparing");
         assert!(
@@ -626,7 +596,7 @@ fn k07_new_nested_protected_directory_after_scan_refuses_before_spawn() {
     let run = spawned.wait().unwrap();
     assert_eq!(run.code(), Some(125), "{}", run.stderr_text());
     assert!(!marker.exists(), "the target ran with an incomplete scan");
-    let receipt = common::checked_receipt(run.receipt_phase("refused").unwrap());
+    let receipt = run.receipt_phase("refused").unwrap();
     assert_eq!(receipt["outcome"]["error"]["code"], "missing_capability");
     assert_eq!(receipt["outcome"]["error"]["stage"], "preparing");
     assert!(
@@ -700,7 +670,7 @@ print(json.dumps(out))
         !pids.contains(&supervisor),
         "the supervisor pid {supervisor} is visible inside the boundary"
     );
-    settled(&run);
+    common::settled(&run);
 }
 
 /// S02.6: no cgroup filesystem is mounted or reachable in the child (§15 S02).
@@ -769,7 +739,7 @@ print(json.dumps(out))
             out["fsopen"], "ok",
             "{profile}: fsopen(cgroup2) succeeded: {out}"
         );
-        settled(&run);
+        common::settled(&run);
     }
 }
 
@@ -939,7 +909,7 @@ print(json.dumps(out))
             out["landlock"]["after_second_ruleset"], "EACCES",
             "{observe}: a second Landlock ruleset widened a denied access: {out}"
         );
-        settled(&run);
+        common::settled(&run);
     }
 }
 
@@ -992,7 +962,7 @@ print(json.dumps(out))
                 );
             }
         }
-        settled(&run);
+        common::settled(&run);
     }
 }
 
@@ -1029,7 +999,7 @@ print(json.dumps(out))
         out["ret"].as_i64().unwrap() >= 0,
         "none refused io_uring_setup ({out}); it installs no filter"
     );
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(receipt["child_protection"], "unprotected", "{receipt:#}");
     assert_eq!(receipt["applied"]["syscalls"], Value::Null, "{receipt:#}");
 }
@@ -1182,7 +1152,7 @@ print(json.dumps(fds))
                 "{profile}: the target inherited an io_uring ring at fd {fd}: {target}"
             );
         }
-        settled(&run);
+        common::settled(&run);
     }
 }
 
@@ -1246,7 +1216,7 @@ print(json.dumps(out))
             "{key} left the build network namespace: {out}"
         );
     }
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(receipt["applied"]["network"]["mode"], "none", "{receipt:#}");
 }
 
@@ -1321,7 +1291,7 @@ fn n05_a_late_socket_in_an_extra_grant_is_unreachable() {
         .spawn()
         .unwrap();
     let message = spawned.owner().await_prepared().expect("prepared");
-    let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
+    let receipt = spawned.receipt_value().expect("a prepared receipt");
     // The host peer is bound now, after the boundary and its mounts exist in
     // the extra grant: no launch-time enumeration saw it.
     let extra = UnixProbe::bind(&extra_rw.join("late-extra.sock")).unwrap();
@@ -1369,7 +1339,7 @@ fn n05_a_late_socket_in_an_extra_grant_is_unreachable() {
             connects[index]
         );
     }
-    settled(&run);
+    common::settled(&run);
 }
 
 /// Attempted, live, by the `agent` child: inside an inner Landlock+seccomp
@@ -1421,7 +1391,7 @@ fn n05_nested_sandbox_ipc_is_allowed() {
     let exchanges = ops(&lines, "exchange");
     assert_eq!(exchanges.len(), 1, "{lines:#?}");
     assert!(exchanges[0]["errno"].is_null(), "{}", exchanges[0]);
-    settled(&run);
+    common::settled(&run);
 }
 
 // ===========================================================================
@@ -1483,15 +1453,10 @@ fn r06_a_detected_escaped_descendant_loses_integrity_and_retains_state() {
         .target([PYTHON, "-c", &code])
         .run()
         .expect("the jail runs");
-    validate(&run);
+    common::assert_run_records(&run);
     assert_eq!(run.code(), Some(1), "stderr: {}", run.stderr_text());
     assert!(moved.exists(), "the descendant never migrated");
-    let receipt = run
-        .receipts()
-        .into_iter()
-        .max_by_key(|r| r["revision"].as_u64().unwrap_or(0))
-        .unwrap();
-    let _ = common::checked_receipt(receipt.clone());
+    let receipt = common::last_receipt(&run);
     // The detected escape loses integrity: no settlement, no tree-empty,
     // integrity lost, registered-boundary scope.
     assert_ne!(
@@ -1607,7 +1572,7 @@ fn r03_a_wall_fires_on_time_under_a_saturated_trace() {
         .run()
         .unwrap();
     let elapsed = started.elapsed();
-    let receipt = last_pressure_receipt(&run);
+    let receipt = common::last_receipt(&run);
     assert_eq!(
         receipt["outcome"]["cause"], "wall_expiry",
         "the wall did not end the run: {receipt:#}"
@@ -1674,7 +1639,7 @@ fn r03_a_wall_expires_before_the_saturation_loss_is_declared() {
         .run()
         .unwrap();
     let elapsed = started.elapsed();
-    let receipt = last_pressure_receipt(&run);
+    let receipt = common::last_receipt(&run);
     // The wall — not the still-undeclared saturation loss — ended the run.
     assert_eq!(
         receipt["outcome"]["cause"], "wall_expiry",
@@ -1691,27 +1656,6 @@ fn r03_a_wall_expires_before_the_saturation_loss_is_declared() {
         elapsed < Duration::from_secs(6),
         "the wall fired late while the trace was saturated: {elapsed:?}"
     );
-}
-
-/// The latest receipt of a pressure run, schema- and semantic-checked. Unlike
-/// `settled`, a best-effort trace loss makes the run exit 1, so this does not
-/// require a `settled` phase.
-fn last_pressure_receipt(run: &Run) -> Value {
-    let validators = common::validators();
-    let mut latest = None;
-    for receipt in run.receipts() {
-        validators["jail-receipt"]
-            .validate(&receipt)
-            .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
-        common::assert_semantic_receipt(&receipt);
-        let revision = receipt["revision"].as_u64().unwrap_or(0);
-        if latest.as_ref().is_none_or(|(seen, _)| *seen <= revision) {
-            latest = Some((revision, receipt));
-        }
-    }
-    latest
-        .map(|(_, receipt)| receipt)
-        .unwrap_or_else(|| panic!("no receipt; stderr: {}", run.stderr_text()))
 }
 
 fn wall_row(receipt: &Value) -> Value {
@@ -1742,7 +1686,8 @@ fn assert_one_evidence_loss(receipt: &Value) {
 
 /// The captured trace is a recognisable prefix: whole frames, then at most a
 /// torn last line — never a torn frame followed by more bytes (which no §13.3
-/// writer produces). A saturated write leaves exactly this.
+/// writer produces). A saturated write leaves exactly this, and its whole
+/// frames keep the stream's rules up to the cut.
 fn assert_recognisable_prefix(run: &Run) {
     let readback = run
         .trace_readback
@@ -1753,7 +1698,10 @@ fn assert_recognisable_prefix(run: &Run) {
         ouro_fixture::harness::TraceState::Corrupt,
         "a torn frame was followed by more bytes"
     );
-    assert!(!readback.frames.is_empty(), "the prefix has no whole frame");
+    assert!(
+        !common::assert_trace_prefix(run).is_empty(),
+        "the prefix has no whole frame"
+    );
 }
 
 // ===========================================================================
@@ -1786,7 +1734,7 @@ fn o03_run(env_var: &str) -> Option<Value> {
         .target(argv)
         .run()
         .expect("the jail runs");
-    validate(&run);
+    common::assert_run_records(&run);
     // Best-effort preserves a natural child exit, while the gap still
     // degrades the coverage and remains in the receipt's errors.
     assert_eq!(
@@ -1795,7 +1743,7 @@ fn o03_run(env_var: &str) -> Option<Value> {
         "{env_var}: best-effort preserves the child's exit with a recorded gap: stderr {}",
         run.stderr_text()
     );
-    let receipt = last_pressure_receipt(&run);
+    let receipt = common::last_receipt(&run);
     // The seam is recorded in the receipt's native details (S9).
     let seams = &receipt["lifetime"]["native"]["details"]["test_seams"];
     assert!(
@@ -2020,7 +1968,7 @@ fn x06_no_tracing_privilege_reaches_the_child() {
             pids.iter().all(|pid| *pid < 100),
             "{profile}: the child addresses a host pid (supervisor/observer reachable): {pids:?}"
         );
-        settled(&run);
+        common::settled(&run);
     }
 }
 
@@ -2137,7 +2085,6 @@ fn r05_forging_records_mid_run_is_outside_local_evidence_assurance() {
     let receipt = run
         .receipt_phase("settled")
         .unwrap_or_else(|| panic!("no settled receipt: {}", run.stderr_text()));
-    let _ = common::checked_receipt(receipt.clone());
     assert_eq!(receipt["outcome"]["kind"], "exited", "{receipt:#}");
     assert_eq!(receipt["outcome"]["code"], 0, "{receipt:#}");
     assert_eq!(receipt["lifetime"]["integrity"], "verified", "{receipt:#}");
@@ -2279,7 +2226,7 @@ print(json.dumps({'ouro_jail_pids_visible': sup}))
         serde_json::json!([]),
         "tool: the supervisor is visible inside the pid namespace"
     );
-    settled(&run);
+    common::settled(&run);
 }
 
 // ---------------------------------------------------------------------------
@@ -2308,29 +2255,10 @@ fn none_case(observe: &str) -> Option<(Jail, PathBuf)> {
     Some((jail, workspace))
 }
 
-/// The delegated-scope precondition the live `none` cases share: the same
-/// leaf probe `none`'s tree termination rests on, plus the interpreter.
+/// The precondition the live `none` cases share: a delegated leaf, which
+/// `none`'s tree termination rests on, and the interpreter.
 fn none_live() -> bool {
-    if !common::live() {
-        return false;
-    }
-    let leaf = ouro_jail::platform::linux::probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != ouro_jail::platform::linux::probe::ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "J5 none needs a delegated user scope with a usable leaf: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    if !Path::new(PYTHON).is_file() {
-        harness::skip_or_fail("the none fixtures are python3 scripts");
-        return false;
-    }
-    true
+    common::delegated_leaf() && common::python()
 }
 
 /// A migration destination beside the attempt's leaf: the same kind of cgroup

@@ -16,7 +16,6 @@
 //! path through the code that matters most.
 
 #![cfg(target_os = "linux")]
-#![allow(clippy::too_many_lines)]
 
 use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt as _;
@@ -72,30 +71,6 @@ fn audit_events(run: &Run) -> Vec<&Value> {
     run.trace_events()
         .iter()
         .filter(|event| event.get("source").and_then(Value::as_str) == Some("audit"))
-        .collect()
-}
-
-/// Every receipt the run left, each checked against the schema and the rules
-/// it cannot state (`common::check_receipt`). J4 W2-H: the reviewer's checks
-/// read receipts field by field; a receipt breaking its contract fails here.
-fn checked_receipts(run: &Run) -> Vec<Value> {
-    run.receipts()
-        .into_iter()
-        .map(common::checked_receipt)
-        .collect()
-}
-
-fn settled(run: &Run) -> Value {
-    let _ = checked_receipts(run);
-    run.receipt_phase("settled")
-        .unwrap_or_else(|| panic!("no settled receipt; receipts: {:?}", phases(run)))
-}
-
-fn phases(run: &Run) -> Vec<String> {
-    checked_receipts(run)
-        .iter()
-        .filter_map(|r| r.get("phase").and_then(Value::as_str))
-        .map(ToOwned::to_owned)
         .collect()
 }
 
@@ -242,7 +217,7 @@ fn r1_the_contained_child_sees_only_the_declared_roots() {
             "a state path is a mount point inside the boundary: {line}"
         );
     }
-    let _ = settled(&run);
+    let _ = common::settled(&run);
 }
 
 /// The workspace is writable, `.git` and `.ouroboros` are not, and the
@@ -517,7 +492,7 @@ fn r2_exec_failures_are_distinguishable_and_exit_125_is_an_exit() {
         .target([c.fixture.to_str().unwrap(), "exit", "125"])
         .run()
         .expect("run");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(
         receipt.pointer("/outcome/kind").and_then(Value::as_str),
         Some("exited"),
@@ -560,7 +535,7 @@ fn r2_an_unrecognised_executable_is_not_handed_to_a_shell() {
         .target([target.to_str().unwrap()])
         .run()
         .expect("run");
-    let receipts = checked_receipts(&run);
+    let receipts = run.receipts();
     let last = receipts.last().expect("a receipt");
     eprintln!(
         "exit={:?} stdout={:?} phase={:?} outcome={}",
@@ -595,7 +570,7 @@ fn r2_a_proved_exec_failure_is_an_exec_error_outcome() {
         .target([missing.to_str().unwrap()])
         .run()
         .expect("run");
-    let receipts = checked_receipts(&run);
+    let receipts = run.receipts();
     let last = receipts.last().expect("a receipt");
     eprintln!("{}", serde_json::to_string_pretty(last).unwrap());
     assert_eq!(
@@ -610,16 +585,9 @@ fn r2_a_proved_exec_failure_is_an_exec_error_outcome() {
     );
 }
 
-#[allow(dead_code)] // a reviewer's helper, kept for the next check that needs it
-fn last_outcome(run: &Run) -> Option<Value> {
-    checked_receipts(run)
-        .last()
-        .and_then(|r| r.get("outcome").cloned())
-}
-
 /// The four exec failures must at least be distinguishable from one another.
 fn exec_failure_facts(run: &Run, name: &str) -> (String, String, String) {
-    let receipts = checked_receipts(run);
+    let receipts = run.receipts();
     let last = receipts
         .last()
         .unwrap_or_else(|| panic!("{name}: no receipt at all"));
@@ -643,38 +611,6 @@ fn exec_failure_facts(run: &Run, name: &str) -> (String, String, String) {
         run.code()
     );
     (phase, kind, message)
-}
-
-#[allow(dead_code)] // a reviewer's helper, kept for the next check that needs it
-fn check_exec_error(run: &Run, name: &str, errno: &str) {
-    let receipts = checked_receipts(run);
-    let last = receipts
-        .last()
-        .unwrap_or_else(|| panic!("{name}: no receipt at all"));
-    eprintln!(
-        "{name}: exit={:?} phase={:?} outcome={} errors={}",
-        run.code(),
-        last.get("phase"),
-        serde_json::to_string(last.get("outcome").unwrap_or(&Value::Null)).unwrap(),
-        serde_json::to_string(last.get("errors").unwrap_or(&Value::Null)).unwrap(),
-    );
-    assert_eq!(
-        last.get("phase").and_then(Value::as_str),
-        Some("refused"),
-        "{name}: phase"
-    );
-    assert_eq!(
-        last.pointer("/outcome/kind").and_then(Value::as_str),
-        Some("exec_error"),
-        "{name}: outcome kind"
-    );
-    let text = serde_json::to_string(last.get("outcome").unwrap_or(&Value::Null)).unwrap()
-        + &serde_json::to_string(last.get("errors").unwrap_or(&Value::Null)).unwrap();
-    assert!(
-        text.contains(errno),
-        "{name}: expected errno {errno} in {text}"
-    );
-    assert_eq!(run.code(), Some(125), "{name}: exit code");
 }
 
 // ===========================================================================
@@ -742,7 +678,7 @@ fn r3_fd_and_environment_hygiene() {
         );
     }
 
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let recorded: Vec<String> = receipt
         .pointer("/applied/environment_names")
         .and_then(Value::as_array)
@@ -1093,7 +1029,7 @@ fn r3_a_shebang_target_confirms_and_runs_under_strict_evidence() {
         "a #! target must run under strict evidence: {}",
         run.stderr_text()
     );
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(
         receipt.pointer("/exec_observed"),
         Some(&serde_json::Value::Bool(true)),
@@ -1136,7 +1072,7 @@ fn r3_tabbed_shebangs_confirm_under_strict_evidence() {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let run = case.jail.target([script.to_str().unwrap()]).run().unwrap();
         assert_eq!(run.code(), Some(0), "{header:?}: {}", run.stderr_text());
-        assert_eq!(settled(&run)["exec_observed"], true);
+        assert_eq!(common::settled(&run)["exec_observed"], true);
     }
 }
 
@@ -1160,7 +1096,7 @@ fn r3_script_replaced_by_fifo_does_not_block_the_next_exec() {
         .run()
         .unwrap();
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    assert_eq!(settled(&run)["exec_observed"], true);
+    assert_eq!(common::settled(&run)["exec_observed"], true);
 }
 
 #[test]
@@ -1238,7 +1174,7 @@ fn r4_wall_expiry_records_its_hit_and_verifies_the_tree() {
         .target([c.fixture.to_str().unwrap(), "sleep", "60000"])
         .run()
         .expect("run");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     eprintln!("{}", serde_json::to_string_pretty(&receipt).unwrap());
     assert_eq!(
         receipt.pointer("/outcome/cause").and_then(Value::as_str),
@@ -1284,7 +1220,7 @@ fn r4_a_sigterm_ignoring_descendant_dies_at_settlement() {
         .target([c.fixture.to_str().unwrap(), "ignore-term", "60000"])
         .run()
         .expect("run");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     eprintln!("{}", serde_json::to_string_pretty(&receipt).unwrap());
     assert_eq!(
         receipt
@@ -1307,7 +1243,7 @@ fn r4_a_fork_burst_is_fully_reaped() {
         .target([c.fixture.to_str().unwrap(), "fork-storm", "500"])
         .run()
         .expect("run");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_eq!(
         receipt
             .pointer("/lifetime/tree_empty")
@@ -1446,7 +1382,7 @@ fn r4_receipt_revisions_advance_and_phases_carry_their_tuples() {
         }
     }
     eprintln!("receipt notes in the trace: {by_phase:?}");
-    let receipts = checked_receipts(&run);
+    let receipts = run.receipts();
     for receipt in &receipts {
         eprintln!(
             "phase={:?} revision={:?} containment={:?} protection={:?} exec_observed={:?} \
@@ -1462,7 +1398,7 @@ fn r4_receipt_revisions_advance_and_phases_carry_their_tuples() {
             receipt.pointer("/lifetime/verified_at"),
         );
     }
-    let settled = settled(&run);
+    let settled = common::settled(&run);
     assert_eq!(
         settled.get("containment").and_then(Value::as_str),
         Some("enforced")
@@ -1840,7 +1776,7 @@ fn r6_observe_off_marks_every_audit_class_unsupported() {
         .target([c.fixture.to_str().unwrap(), "exit", "0"])
         .run()
         .expect("run");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     eprintln!(
         "coverage: {}",
         serde_json::to_string_pretty(receipt.get("coverage").unwrap_or(&Value::Null)).unwrap()
@@ -2259,7 +2195,7 @@ fn r4_killing_the_backend_leaves_an_honest_receipt() {
     unsafe { libc::kill(bwrap, libc::SIGKILL) };
 
     let run = spawned.wait().expect("wait");
-    let receipts = checked_receipts(&run);
+    let receipts = run.receipts();
     let last = receipts.last().expect("a receipt");
     eprintln!("{}", serde_json::to_string_pretty(last).unwrap());
     eprintln!("exit={:?}", run.code());
@@ -2297,7 +2233,7 @@ fn r2_observe_off_keeps_an_ambiguous_exit_unknown() {
         .target([c.fixture.to_str().unwrap(), "raise", "TERM"])
         .run()
         .expect("run");
-    let receipts = checked_receipts(&run);
+    let receipts = run.receipts();
     let last = receipts.last().expect("a receipt");
     eprintln!(
         "signal death, observe off: exit={:?} outcome={}",
@@ -2318,7 +2254,7 @@ fn r2_observe_off_keeps_an_ambiguous_exit_unknown() {
         .target([c.fixture.to_str().unwrap(), "exit", "130"])
         .run()
         .expect("run");
-    let receipts = checked_receipts(&run);
+    let receipts = run.receipts();
     let last = receipts.last().expect("a receipt");
     eprintln!(
         "exit 130, observe off: exit={:?} outcome={}",
@@ -2338,7 +2274,7 @@ fn r2_observe_off_keeps_an_ambiguous_exit_unknown() {
         .target([c.fixture.to_str().unwrap(), "raise", "TERM"])
         .run()
         .expect("run");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     eprintln!(
         "signal death, observe on: exit={:?} outcome={}",
         run.code(),
@@ -2494,7 +2430,7 @@ fn r6_coverage_counts_equal_the_results_per_class() {
         .target([c.fixture.to_str().unwrap(), "script", ops.to_str().unwrap()])
         .run()
         .expect("run");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let mut by_class: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for event in audit_events(&run) {
         let op = event.get("operation").and_then(Value::as_str).unwrap_or("");
@@ -2646,7 +2582,7 @@ fn r6_a_denied_connect_counts_under_fs_deny_only() {
             event.pointer("/fields/attempted_operation"),
         );
     }
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     eprintln!(
         "net={} fs.deny={}",
         serde_json::to_string(receipt.pointer("/coverage/net").unwrap_or(&Value::Null)).unwrap(),
@@ -3089,7 +3025,7 @@ fn r9_a_mid_run_policy_edit_cannot_widen_the_attempt() {
     let run = spawned.wait().expect("wait");
     assert_eq!(run.code(), Some(0), "the target should have run");
     assert!(marker.exists(), "the target did not run");
-    let settled = settled(&run);
+    let settled = common::settled(&run);
     assert_eq!(
         settled.pointer("/policy/digest").and_then(Value::as_str),
         Some(prepared_digest.as_str()),
@@ -3125,7 +3061,7 @@ fn r9_a_symlinked_root_git_refuses_rather_than_downgrade() {
         .expect("run");
     assert_eq!(run.code(), Some(125), "expected a pre-exec refusal");
     assert!(!marker.exists(), "the target ran despite the refusal");
-    let receipt = common::checked_receipt(run.receipt_phase("refused").expect("a receipt"));
+    let receipt = run.receipt_phase("refused").expect("a receipt");
     let codes: Vec<&str> = receipt
         .pointer("/errors")
         .and_then(Value::as_array)
@@ -3178,7 +3114,7 @@ fn r9_deny_read_grants_are_enforced_as_masks() {
         .run()
         .expect("run");
     assert_eq!(run.code(), Some(0), "fixture expectations were not all met");
-    let settled = settled(&run);
+    let settled = common::settled(&run);
     let masked: Vec<&Value> = settled
         .pointer("/applied/filesystem/mounts")
         .and_then(Value::as_array)
@@ -3272,7 +3208,7 @@ for path in [secret, link]:
             "file denial failed: {}",
             run.stderr_text()
         );
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         assert_eq!(receipt["lifetime"]["tree_empty"], true);
         assert_eq!(std::fs::read(&secret).unwrap(), b"classified\n");
         assert!(
@@ -3313,14 +3249,14 @@ fn r9_an_explicit_pids_ceiling_runs_only_when_enforced() {
     let available = ouro_jail::platform::linux::probe::run_one(
         "cgroup_pids",
         &harness::jail_path(),
-        Path::new("bwrap"),
+        &common::bwrap_path(),
     )
     .status
         == ouro_jail::platform::linux::probe::ProbeStatus::Available;
     if available {
         assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
         assert!(marker.exists());
-        let receipt = settled(&run);
+        let receipt = common::settled(&run);
         let limit = receipt["applied"]["limits"]
             .as_array()
             .unwrap()
