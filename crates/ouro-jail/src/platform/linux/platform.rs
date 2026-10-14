@@ -1959,7 +1959,7 @@ impl Boundary {
         }
         while !self.watcher.ended() && !deadline.expired() {
             self.release_watcher_after_backend();
-            sleep_for(WAIT_STEP);
+            std::thread::sleep(WAIT_STEP);
         }
         self.watcher.reap();
         self.remove_placeholders();
@@ -2112,7 +2112,7 @@ impl Boundary {
             if settled || deadline.expired() {
                 break;
             }
-            sleep_for(WAIT_STEP);
+            std::thread::sleep(WAIT_STEP);
         }
         self.watcher.reap();
         let watcher_reaped = self.watcher.ended();
@@ -2355,15 +2355,12 @@ fn prepare_timeout(message: &str) -> JailError {
     )
 }
 
-/// A 200 microsecond pause between polls of `/proc`, which offers no
-/// descriptor to wait on. Every such loop is bounded by a deadline.
+/// A 200 microsecond pause between polls that have no one descriptor to
+/// wait on: a `/proc` read, or several sources checked together (the
+/// backend's status pipe and its exit). Every such loop is bounded by a
+/// deadline.
 fn nap() {
-    let ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 200_000,
-    };
-    // SAFETY: `ts` is a live timespec and the second argument may be null.
-    unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
+    std::thread::sleep(Duration::from_micros(200));
 }
 
 // Naming the mechanism a launcher could not establish
@@ -4201,7 +4198,7 @@ impl RunningExecution for LinuxRunning {
         if self.boundary.tracer.is_some() {
             self.pump_tracer(step);
         } else {
-            sleep_for(step);
+            std::thread::sleep(step);
         }
         RunEvent::Poll
     }
@@ -4253,7 +4250,7 @@ impl RunningExecution for LinuxRunning {
             if self.boundary.tracer.is_some() {
                 self.pump_tracer(WAIT_STEP);
             } else {
-                sleep_for(WAIT_STEP);
+                std::thread::sleep(WAIT_STEP);
             }
         }
 
@@ -4268,7 +4265,7 @@ impl RunningExecution for LinuxRunning {
         self.sample_limits(true);
         while !self.boundary.watcher.ended() && !deadline.expired() {
             self.boundary.release_watcher_after_backend();
-            sleep_for(WAIT_STEP);
+            std::thread::sleep(WAIT_STEP);
         }
         self.boundary.watcher.reap();
         self.boundary.remove_placeholders();
@@ -4612,18 +4609,6 @@ fn step_for(deadline: PortableDeadline) -> Duration {
     remaining.min(WAIT_STEP).max(Duration::from_micros(200))
 }
 
-fn sleep_for(step: Duration) {
-    if step.is_zero() {
-        return;
-    }
-    let ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: i64::try_from(step.as_nanos()).unwrap_or(1_000_000),
-    };
-    // SAFETY: `ts` is a live timespec and the second argument may be null.
-    unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
-}
-
 /// What the contained boundary and `super::uncontained` share: the rules
 /// both run loops apply, each written once in this module, and delegations
 /// to helpers above. A fix to one of these rules (an evidence gap, a stop, a
@@ -4682,9 +4667,6 @@ pub(super) mod shared {
     }
     pub(in crate::platform::linux) fn step_for(deadline: Deadline) -> Duration {
         super::step_for(deadline)
-    }
-    pub(in crate::platform::linux) fn sleep_for(step: Duration) {
-        super::sleep_for(step);
     }
     pub(in crate::platform::linux) fn nap() {
         super::nap();

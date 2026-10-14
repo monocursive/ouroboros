@@ -1555,7 +1555,7 @@ impl RunningExecution for Uncontained {
         if self.tracer.is_some() {
             self.pump_tracer(step);
         } else {
-            shared::sleep_for(step);
+            std::thread::sleep(step);
         }
         RunEvent::Poll
     }
@@ -1621,7 +1621,7 @@ impl RunningExecution for Uncontained {
             if self.tracer.is_some() {
                 self.pump_tracer(shared::WAIT_STEP);
             } else {
-                shared::sleep_for(shared::WAIT_STEP);
+                std::thread::sleep(shared::WAIT_STEP);
             }
         }
         self.pump_tracer(Duration::ZERO);
