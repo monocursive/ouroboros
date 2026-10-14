@@ -58,7 +58,7 @@ impl Budgets {
     /// The descriptors the budget needs: [`FDS_PER_CONNECTION`] per
     /// connection plus [`FD_HEADROOM`].
     #[must_use]
-    pub fn descriptors_needed(&self) -> usize {
+    pub(crate) fn descriptors_needed(&self) -> usize {
         self.max_connections
             .saturating_mul(FDS_PER_CONNECTION)
             .saturating_add(FD_HEADROOM)
@@ -72,12 +72,12 @@ pub const MAX_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Descriptors one admitted connection holds at most: the client's socket
 /// and the destination's. Both relay directions and the stop registry share
 /// them; nothing is duplicated.
-pub const FDS_PER_CONNECTION: usize = 2;
+pub(crate) const FDS_PER_CONNECTION: usize = 2;
 
 /// Descriptors reserved beyond the connections: the listener and its wake
 /// pair, connections being refused for overload, resolver lookups, and the
 /// rest of the supervisor.
-pub const FD_HEADROOM: usize = 64;
+pub(crate) const FD_HEADROOM: usize = 64;
 
 /// Everything the proxy needs.
 pub struct ProxyConfig {

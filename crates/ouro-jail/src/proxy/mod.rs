@@ -44,7 +44,7 @@
 
 mod conn;
 mod event;
-pub mod http;
+pub(crate) mod http;
 pub(crate) mod origin;
 mod relay;
 mod resolve;
@@ -59,8 +59,9 @@ pub use resolve::{
     FixtureAnswer, FixtureResolver, Lookup, ResolveError, Resolver, SystemResolver, absolute_name,
 };
 pub use server::{ProxyHandle, start, start_with_vault};
-pub use sys::{nofile_limits, open_descriptor_count, raise_nofile_soft_to_hard};
+pub use sys::{nofile_limits, open_descriptor_count};
 pub use types::{
-    Budgets, EndReason, FD_HEADROOM, FDS_PER_CONNECTION, MAX_DEADLINE, ProxyConfig, ProxyDecision,
-    ProxyResult, ProxySink, ProxySummary, Reason, RequestKind, Transport, Verification,
+    Budgets, EndReason, MAX_DEADLINE, ProxyConfig, ProxyDecision, ProxyResult, ProxySink,
+    ProxySummary, Reason, RequestKind, Transport, Verification,
 };
+pub(crate) use types::{FD_HEADROOM, FDS_PER_CONNECTION};

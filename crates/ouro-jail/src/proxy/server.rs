@@ -214,6 +214,13 @@ pub fn start(config: ProxyConfig, sink: Arc<dyn ProxySink>) -> io::Result<ProxyH
     start_with_vault(config, sink, None)
 }
 
+/// [`start`], with the attempt's vault when credentials are vaulted: every
+/// connection then begins with the sealed bridge's origin preamble, and
+/// requests are served with the vault's credentials and TLS lane.
+///
+/// # Errors
+/// As [`start`]; also when process-bound credentials leave no descriptors
+/// for pinning the processes that initiate connections.
 pub fn start_with_vault(
     config: ProxyConfig,
     sink: Arc<dyn ProxySink>,
