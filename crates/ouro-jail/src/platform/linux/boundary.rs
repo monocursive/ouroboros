@@ -255,14 +255,22 @@ impl StatusReader {
 /// number.
 struct Init {
     pid: libc::pid_t,
-    fd: OwnedFd,
+    /// `None` only in a refusal whose pidfd could not be opened: such an
+    /// init is never signalled, and its teardown waits on its pid.
+    fd: Option<OwnedFd>,
 }
 
 impl Init {
-    /// Whether the init is still running: its pidfd turns readable at its
+    /// Whether the init is still running. Its pidfd turns readable at its
     /// exit, a zombie's included, and cannot come to name another process.
+    /// Without one, `/proc/<pid>` is all that is left: a number another
+    /// process took reads as alive, which leaves a teardown unverified
+    /// rather than verify a death nothing saw.
     fn alive(&self) -> bool {
-        !watch::is_readable(self.fd.as_fd())
+        match &self.fd {
+            Some(fd) => !watch::is_readable(fd.as_fd()),
+            None => Path::new(&format!("/proc/{}", self.pid)).exists(),
+        }
     }
 }
 
@@ -351,7 +359,7 @@ impl Started {
             let _ = leaf.kill();
         }
         for fd in init
-            .map(|init| &init.fd)
+            .and_then(|init| init.fd.as_ref())
             .into_iter()
             .chain([&self.bwrap_fd])
         {
@@ -385,7 +393,8 @@ impl Started {
     /// null. "The trusted launcher died" is not on the list: it is implied by
     /// the init's death and proves nothing without it. Before bubblewrap
     /// named an init there is none to wait for: the backend's own end, the
-    /// watcher's and an empty leaf are then what is left to see.
+    /// watcher's and an empty leaf are then what is left to see. An init it
+    /// named whose pidfd could not be opened is waited for by its pid.
     fn tear_down(&mut self, init: Option<&Init>, witness: Witness<'_>) -> TreeObservation {
         let deadline = clock::Deadline::after(TREE_BUDGET);
         self.kill(init);
@@ -1755,8 +1764,7 @@ fn discover(
     launcher_error: &mut ErrorPipe,
     inputs: &DiscoveryInputs<'_>,
 ) -> Result<Discovered, Refused> {
-    let init =
-        find_init(started, inputs.deadline).map_err(|error| Refused { error, init: None })?;
+    let init = find_init(started, inputs.deadline)?;
     match read_back(started, launcher_error, &init, inputs) {
         Ok(found) => Ok(found.with_init(init)),
         Err(error) => Err(Refused {
@@ -1769,7 +1777,8 @@ fn discover(
 /// bubblewrap reports the namespace init's host pid as soon as the
 /// namespaces exist. Waiting on that document is the synchronisation point;
 /// nothing here guesses a delay.
-fn find_init(started: &mut Started, deadline: clock::Deadline) -> Result<Init, JailError> {
+fn find_init(started: &mut Started, deadline: clock::Deadline) -> Result<Init, Refused> {
+    let refused = |error| Refused { error, init: None };
     let pid = loop {
         started.status.pump();
         if let Some(pid) = started.status.parsed().child_pid {
@@ -1795,25 +1804,33 @@ fn find_init(started: &mut Started, deadline: clock::Deadline) -> Result<Init, J
             } else {
                 format!("bubblewrap exited during setup: {diagnostic}")
             };
-            return Err(preparing(ErrorCode::BackendUnavailable, detail));
+            return Err(refused(preparing(ErrorCode::BackendUnavailable, detail)));
         }
         if deadline.expired() {
-            return Err(prepare_timeout(
+            return Err(refused(prepare_timeout(
                 "bubblewrap did not report a namespace init",
-            ));
+            )));
         }
         nap();
     };
-    // Taken now, while the kernel has just named this pid as the namespace
-    // init. Without it the tree's death could not be verified, so its
-    // absence refuses.
-    let fd = identity::pidfd_open(pid).map_err(|err| {
-        preparing(
-            ErrorCode::BackendUnavailable,
-            format!("the namespace init's pidfd could not be opened: {err}"),
-        )
-    })?;
-    Ok(Init { pid, fd })
+    open_init(pid)
+}
+
+/// The init bubblewrap named as `pid`, with its pidfd taken now, while the
+/// kernel has just named that pid as the namespace init. Without one its
+/// death could not be verified, so its absence refuses; the refusal keeps
+/// the pid, and its teardown waits for it ([`Init::alive`]).
+fn open_init(pid: libc::pid_t) -> Result<Init, Refused> {
+    match identity::pidfd_open(pid) {
+        Ok(fd) => Ok(Init { pid, fd: Some(fd) }),
+        Err(err) => Err(Refused {
+            error: preparing(
+                ErrorCode::BackendUnavailable,
+                format!("the namespace init's pidfd could not be opened: {err}"),
+            ),
+            init: Some(Init { pid, fd: None }),
+        }),
+    }
 }
 
 /// [`Discovered`] before the init joins it.
@@ -2963,12 +2980,12 @@ mod tests {
         let pid = libc::pid_t::try_from(child.id()).unwrap();
         let init = Init {
             pid,
-            fd: identity::pidfd_open(pid).unwrap(),
+            fd: Some(identity::pidfd_open(pid).unwrap()),
         };
         assert!(init.alive());
         child.kill().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !super::super::watch::is_readable(init.fd.as_fd()) {
+        while !super::super::watch::is_readable(init.fd.as_ref().unwrap().as_fd()) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "SIGKILL not delivered"
@@ -2981,6 +2998,36 @@ mod tests {
         );
         assert!(!init.alive(), "an exited init is not alive");
         child.wait().unwrap();
+    }
+
+    /// An init whose pidfd cannot be opened refuses with its pid kept, and
+    /// its liveness is then read from `/proc/<pid>`: alive while it runs,
+    /// dead once it is gone, never dead merely because there is no pidfd.
+    #[test]
+    fn an_init_without_a_pidfd_is_waited_for_by_its_pid() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        let live = Init { pid, fd: None };
+        assert!(live.alive(), "a running init without a pidfd reads dead");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!live.alive(), "a reaped init still reads alive");
+        // The child is reaped, so the pidfd cannot be opened: the refusal
+        // still names the init it could not open.
+        let Err(refused) = open_init(pid) else {
+            panic!("a pidfd was opened for a reaped process");
+        };
+        assert!(
+            refused.error.message.contains("pidfd could not be opened"),
+            "{}",
+            refused.error.message
+        );
+        let init = refused.init.expect("the refusal dropped the init's pid");
+        assert_eq!(init.pid, pid);
+        assert!(init.fd.is_none());
     }
 
     /// A storage or inode ceiling in the snapshot adds the hard-link denials
