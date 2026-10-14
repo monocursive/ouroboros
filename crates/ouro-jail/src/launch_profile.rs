@@ -47,13 +47,21 @@ use crate::state::anchored::{self, Dir, Kind};
 /// The largest launch file read (the files are a few hundred bytes).
 pub const LAUNCH_FILE_MAX: u64 = 64 * 1024;
 
-/// Environment names the baseline and the platform generate: a launch
-/// profile cannot bind them (§12: "backend-control names").
-pub const GENERATED_NAMES: &[&str] = &["PATH", "LANG", "TERM", "TZ", "TMPDIR", "HOME"];
+/// The variable `home_is_state` points at vendor state.
+const HOME_NAME: &str = "HOME";
+
+/// Whether the contained baseline or this module generates `upper` (an
+/// upper-cased name), so a launch profile cannot bind it (§12:
+/// "backend-control names"): the names admitted from the operator, the
+/// generated `PATH` and `TMPDIR` ([`crate::profiles`]), and `HOME`.
+fn generated_name(upper: &str) -> bool {
+    upper == HOME_NAME
+        || crate::profiles::GENERATED_ENVIRONMENT_NAMES.contains(&upper)
+        || crate::profiles::CONTAINED_ENVIRONMENT_NAMES.contains(&upper)
+}
 
 /// Proxy variables, which the `agent` network plumbing generates (§12:
-/// "Generated HOME/state paths and proxy variables"). Matched without case,
-/// because clients read both spellings.
+/// "Generated HOME/state paths and proxy variables").
 pub const PROXY_NAMES: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -82,22 +90,29 @@ pub const RUNTIME_CONTROL_NAMES: &[&str] = &[
 ];
 
 /// Why an environment name cannot come from a launch profile, or `None`.
+///
+/// Every comparison ignores case. Some consumers fold it (proxy clients read
+/// `https_proxy` and `HTTPS_PROXY`, and zsh ties `path` to `PATH`), and a
+/// launch profile has no reason to bind any spelling of these names, so all
+/// of them refuse. This is wider than [`crate::environment::is_reserved`],
+/// which strips only the exact `OURO_` prefix from an uncontained child's
+/// inherited environment.
 #[must_use]
 pub fn reserved_reason(name: &str) -> Option<&'static str> {
     let upper = name.to_ascii_uppercase();
     if upper.starts_with("LD_") || upper.starts_with("DYLD_") {
         return Some("a dynamic-loader name (every LD_* and DYLD_* name is refused)");
     }
-    if crate::environment::is_reserved(OsStr::new(name)) || upper.starts_with("OURO_") {
+    if crate::environment::is_reserved(OsStr::new(&upper)) {
         return Some("a reserved Ouroboros name");
     }
-    if upper.starts_with("MALLOC_") || RUNTIME_CONTROL_NAMES.contains(&name) {
+    if upper.starts_with("MALLOC_") || RUNTIME_CONTROL_NAMES.contains(&upper.as_str()) {
         return Some("a C runtime control name that reaches the trusted launcher");
     }
     if PROXY_NAMES.contains(&upper.as_str()) {
         return Some("a proxy variable, which the network plumbing generates");
     }
-    if GENERATED_NAMES.contains(&name) {
+    if generated_name(&upper) {
         return Some("a name the contained baseline generates");
     }
     None
@@ -1008,7 +1023,7 @@ pub fn apply(mut resolved: Resolved, launch: &LaunchProfile) -> Result<Resolved,
     }
     if launch.home_is_state {
         additions.push(EnvBinding {
-            name: "HOME".to_owned(),
+            name: HOME_NAME.to_owned(),
             value: EnvValue::Path(vendor_root.clone()),
         });
     }
@@ -1430,6 +1445,16 @@ allow = ["api.example.com:443"]
             "PATH",
             "TMPDIR",
             "HOME",
+            "LANG",
+            "TZ",
+            // Every set refuses every spelling.
+            "ouro_token",
+            "gconv_path",
+            "Glibc_Tunables",
+            "path",
+            "tmpdir",
+            "home",
+            "term",
         ] {
             let error = parse_err(&format!(
                 "name = \"demo\"\njail = \"tool\"\n[environment]\n{name} = \"x\"\n"

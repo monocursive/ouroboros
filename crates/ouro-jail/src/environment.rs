@@ -3,17 +3,21 @@
 //! jail-v1 §12: "`none` inherits the host environment except reserved
 //! Ouroboros state, socket and token names; the receipt lists removed names,
 //! never values. This is hygiene and does not protect uncontained state."
-//! The same predicate is what a launch profile's `environment` table is
-//! validated against, so a name the jail reserves can neither leak into an
-//! uncontained child nor be written back into a contained one.
 //!
 //! The reserved set is every `OURO_*` name: the operator settings of §6.2
-//! (`OURO_CONFIG_DIR`, `OURO_DATA_DIR`, `OURO_JAIL_OBSERVE`,
-//! `OURO_JAIL_EVIDENCE`) and every state, socket, token or control variable a
-//! later Ouroboros component defines under the same prefix. Neither the
+//! ([`crate::config::ENVIRONMENT_ALLOW_LIST`]) and every state, socket, token
+//! or control variable an Ouroboros component defines under the same prefix
+//! (the vault's `OURO_VAULT_*` placeholders among them). Neither the
 //! specification nor the schemas name a reserved variable outside that
-//! prefix. The match is on bytes and case-sensitive: `ouro_x` is an ordinary
-//! name.
+//! prefix. The match is on bytes and case-sensitive: stripping removes the
+//! operator's own variables from an uncontained child, and `ouro_x` is an
+//! ordinary name of theirs to keep.
+//!
+//! A launch profile's `environment` table is validated more strictly
+//! ([`crate::launch_profile::reserved_reason`]): it refuses every name this
+//! predicate reserves in any letter case, so a name the jail reserves can
+//! neither leak into an uncontained child nor be written into a contained
+//! one.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt as _;

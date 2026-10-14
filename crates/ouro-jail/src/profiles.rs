@@ -50,6 +50,15 @@ pub const PROTECTED_SEGMENTS: &[&str] = &[".git", ".ouroboros"];
 /// receipt records only the names.
 pub const CONTAINED_ENVIRONMENT_NAMES: &[&str] = &["LANG", "TERM", "TZ"];
 
+/// The variable holding [`CONTAINED_PATH`].
+const PATH_NAME: &str = "PATH";
+/// The variable pointed at the scratch root.
+const TMPDIR_NAME: &str = "TMPDIR";
+
+/// The variables the contained baseline generates itself rather than
+/// admitting from the operator: `PATH` and `TMPDIR`.
+pub const GENERATED_ENVIRONMENT_NAMES: [&str; 2] = [PATH_NAME, TMPDIR_NAME];
+
 /// The `PATH` a contained profile gives its child (§6.1).
 ///
 /// A fixed value over the runtime roots the profile grants, never the
@@ -216,7 +225,7 @@ fn preferred(requested: &str, value: u64) -> Ceiling {
 /// the operator's environment actually defines, plus the generated `TMPDIR`.
 fn contained_environment(lookup: &EnvLookup) -> crate::policy::EnvironmentSnapshot {
     let mut bindings = vec![EnvBinding {
-        name: "PATH".to_owned(),
+        name: PATH_NAME.to_owned(),
         value: EnvValue::Native(NativeString::Text(CONTAINED_PATH.to_owned())),
     }];
     for name in CONTAINED_ENVIRONMENT_NAMES {
@@ -230,7 +239,7 @@ fn contained_environment(lookup: &EnvLookup) -> crate::policy::EnvironmentSnapsh
         }
     }
     bindings.push(EnvBinding {
-        name: "TMPDIR".to_owned(),
+        name: TMPDIR_NAME.to_owned(),
         value: EnvValue::Path(PathRef {
             root: RootToken::Scratch,
             path: NativeString::Text(String::new()),

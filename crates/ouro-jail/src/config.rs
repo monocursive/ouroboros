@@ -6,8 +6,9 @@
 //! Unknown keys refuse rather than being ignored, so a future policy key can
 //! never be silently dropped by an older binary. Duplicate keys refuse because
 //! TOML itself forbids them and the parser reports them; a test pins that.
-//! Only the four documented environment variables are read; every other
-//! `OURO_*` name is ignored, so a submitter cannot smuggle authority in.
+//! Only the documented environment variables ([`ENVIRONMENT_ALLOW_LIST`]) are
+//! read; every other `OURO_*` name is ignored, so a submitter cannot smuggle
+//! authority in.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -22,13 +23,23 @@ use crate::records::{
     ErrorCode, ErrorStage, EvidenceMode, JailError, ObserveMode, Remediation, SCHEMA_POLICY,
 };
 
-/// The documented environment allow-list (§6.2 step 3).
+/// Relocates the operator's configuration directory.
+pub const CONFIG_DIR_VAR: &str = "OURO_CONFIG_DIR";
+/// Relocates the operator's data directory (jail state).
+pub const DATA_DIR_VAR: &str = "OURO_DATA_DIR";
+/// `observation.mode` from the environment.
+pub const OBSERVE_VAR: &str = "OURO_JAIL_OBSERVE";
+/// `observation.evidence` from the environment.
+pub const EVIDENCE_VAR: &str = "OURO_JAIL_EVIDENCE";
+
+/// The documented environment allow-list (§6.2 step 3): every variable
+/// [`env_settings`] reads, and nothing else.
 pub const ENVIRONMENT_ALLOW_LIST: &[&str] = &[
-    "OURO_CONFIG_DIR",
-    "OURO_DATA_DIR",
-    "OURO_JAIL_OBSERVE",
-    "OURO_JAIL_EVIDENCE",
-    "OURO_JAIL_TRACE_CAP",
+    CONFIG_DIR_VAR,
+    DATA_DIR_VAR,
+    OBSERVE_VAR,
+    EVIDENCE_VAR,
+    crate::trace::TRACE_CAP_ENV,
 ];
 
 fn invalid(key: &str, message: impl Into<String>) -> JailError {
@@ -622,38 +633,34 @@ pub struct EnvSettings {
 /// Returns [`ErrorCode::InvalidConfig`] when an allowed variable has an
 /// unparsable value.
 pub fn env_settings(lookup: &dyn Fn(&str) -> Option<OsString>) -> Result<EnvSettings, JailError> {
-    let mut settings = EnvSettings::default();
-    if let Some(value) = lookup("OURO_CONFIG_DIR") {
-        settings.config_dir = Some(PathBuf::from(value));
+    let text = |name: &str| -> Result<Option<String>, JailError> {
+        lookup(name)
+            .map(|value| {
+                value
+                    .into_string()
+                    .map_err(|_| invalid(name, "the value is not UTF-8"))
+            })
+            .transpose()
+    };
+    let mut settings = EnvSettings {
+        config_dir: lookup(CONFIG_DIR_VAR).map(PathBuf::from),
+        data_dir: lookup(DATA_DIR_VAR).map(PathBuf::from),
+        ..EnvSettings::default()
+    };
+    if let Some(value) = text(OBSERVE_VAR)? {
+        settings.observe = Some(parse_observe(OBSERVE_VAR, &value)?);
     }
-    if let Some(value) = lookup("OURO_DATA_DIR") {
-        settings.data_dir = Some(PathBuf::from(value));
+    if let Some(value) = text(EVIDENCE_VAR)? {
+        settings.evidence = Some(parse_evidence(EVIDENCE_VAR, &value)?);
     }
-    if let Some(value) = lookup("OURO_JAIL_OBSERVE") {
-        let text = value
-            .to_str()
-            .ok_or_else(|| invalid("OURO_JAIL_OBSERVE", "the value is not UTF-8"))?;
-        settings.observe = Some(parse_observe("OURO_JAIL_OBSERVE", text)?);
-    }
-    if let Some(value) = lookup("OURO_JAIL_EVIDENCE") {
-        let text = value
-            .to_str()
-            .ok_or_else(|| invalid("OURO_JAIL_EVIDENCE", "the value is not UTF-8"))?;
-        settings.evidence = Some(parse_evidence("OURO_JAIL_EVIDENCE", text)?);
-    }
-    if let Some(value) = lookup("OURO_JAIL_TRACE_CAP") {
-        let text = value
-            .to_str()
-            .ok_or_else(|| invalid("OURO_JAIL_TRACE_CAP", "the value is not UTF-8"))?;
-        let cap = text.parse::<u64>().map_err(|_| {
-            invalid(
-                "OURO_JAIL_TRACE_CAP",
-                "the value must be plain decimal bytes",
-            )
-        })?;
+    let cap_var = crate::trace::TRACE_CAP_ENV;
+    if let Some(value) = text(cap_var)? {
+        let cap = value
+            .parse::<u64>()
+            .map_err(|_| invalid(cap_var, "the value must be plain decimal bytes"))?;
         if !(crate::trace::TRACE_CAP_SEAM_MIN..=crate::trace::TRACE_CAP_MAX).contains(&cap) {
             return Err(invalid(
-                "OURO_JAIL_TRACE_CAP",
+                cap_var,
                 format!(
                     "the local trace budget must be {}..={} bytes",
                     crate::trace::TRACE_CAP_SEAM_MIN,
@@ -851,6 +858,28 @@ mod tests {
         assert_eq!(settings.data_dir, None);
         assert_eq!(settings.evidence, None);
         assert_eq!(settings.trace_cap, None);
-        assert_eq!(ENVIRONMENT_ALLOW_LIST.len(), 5);
+    }
+
+    /// The allow-list is the set of names `env_settings` reads: a variable
+    /// read without being listed, or listed without being read, fails.
+    #[test]
+    fn the_allow_list_is_exactly_what_is_read() {
+        let asked = std::cell::RefCell::new(BTreeSet::new());
+        let lookup = |name: &str| {
+            asked.borrow_mut().insert(name.to_owned());
+            None
+        };
+        env_settings(&lookup).expect("nothing set");
+        let listed: BTreeSet<String> = ENVIRONMENT_ALLOW_LIST
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        assert_eq!(asked.into_inner(), listed);
+        assert!(
+            ENVIRONMENT_ALLOW_LIST
+                .iter()
+                .all(|name| crate::environment::is_reserved(std::ffi::OsStr::new(name))),
+            "every setting is a reserved name, so none reaches a child"
+        );
     }
 }
