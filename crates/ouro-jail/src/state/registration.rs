@@ -217,7 +217,7 @@ pub fn record_staged_credentials(
         .iter()
         .map(|row| CredentialEntry {
             id: row.id.clone(),
-            mode: row.mode,
+            mode: row.mode.as_str().to_owned(),
             source_dev: Decimal(row.source_dev),
             source_ino: Decimal(row.source_ino),
             source_size: Decimal(row.source_size),

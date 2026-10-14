@@ -289,8 +289,11 @@ impl VendorStateEntry {
 pub struct CredentialEntry {
     /// The logical id.
     pub id: String,
-    /// How it reaches the child: `copy_rw` or `bind_ro`.
-    pub mode: crate::policy::CredentialMode,
+    /// How it reaches the child: `copy_rw` or `bind_ro` as this build writes
+    /// it. Read as text, like every other key of a file a later build may
+    /// also write: a mode this build does not know must not make the whole
+    /// file, and so the attempt, unreadable to `gc`.
+    pub mode: String,
     /// Source device.
     pub source_dev: Decimal<u64>,
     /// Source inode.
@@ -539,6 +542,21 @@ mod tests {
                 .is_name_only()
         );
         assert!(state.rest.is_empty(), "{:?}", state.rest);
+    }
+
+    /// A credential mode this build does not know is read as written, so the
+    /// rest of the file (the vendor state's identity, the gc record) stays
+    /// readable.
+    #[test]
+    fn an_unknown_credential_mode_does_not_make_the_state_unreadable() {
+        let mut value = written();
+        value["vendor_state"]["credentials"][0]["mode"] = Value::from("copy_ro_later");
+        let bytes = serde_json::to_vec_pretty(&value).unwrap();
+        let state = JailState::parse(&bytes).unwrap_or_else(|error| panic!("{error}"));
+        let vendor = state.vendor_state.get().unwrap();
+        assert_eq!(vendor.identity(), Some((64_768, 1_234_567)));
+        assert_eq!(vendor.credentials.get().unwrap()[0].mode, "copy_ro_later");
+        assert_eq!(state.to_bytes().unwrap(), bytes);
     }
 
     /// A key a file leaves out stays left out, a null stays null, and a key
