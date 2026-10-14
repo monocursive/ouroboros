@@ -18,14 +18,14 @@ use std::time::{Instant, SystemTime};
 
 use super::{
     Budget, Context, ControlSink, GATE_WAIT, InFlight, Journal, Plan, RELEASE_STDOUT_AFTER_PREPARE,
-    RunReport, TREE_BUDGET, apply_boundary, await_release, claim_attempt, degrade_trace_coverage,
-    finish_control, first_unsatisfied, interrupted, merge_wall_limit, open_control, open_trace,
-    pending_applied, persist_terminal, persistence_failed, persistence_failed_after,
-    platform_record, prepare_launch, prepare_proxy_dir, record_teardown, record_tree,
-    refuse_vendor_state, register_boundary_in_state, release_own_stdout, remove_managed_scratch,
-    remove_proxy_directory, retain_vendor_state, send_control, settle_in_flight, settlement_loss,
-    signals, stop, storage_loss_error, stream_classes, submit_receipt, unrecorded, wall_deadline,
-    write_policy_file,
+    RunReport, TREE_BUDGET, Unpersisted, apply_boundary, await_release, claim_attempt,
+    degrade_trace_coverage, finish_control, first_unsatisfied, interrupted, merge_wall_limit,
+    open_control, open_trace, pending_applied, persist_terminal, persistence_failed,
+    persistence_failed_after, platform_record, prepare_launch, prepare_proxy_dir, record_teardown,
+    record_tree, refuse_vendor_state, register_boundary_in_state, release_own_stdout,
+    remove_managed_scratch, remove_proxy_directory, retain_vendor_state, send_control,
+    settle_in_flight, settlement_loss, signals, stop, storage_loss_error, stream_classes,
+    submit_receipt, unrecorded, wall_deadline, write_policy_file,
 };
 use crate::cleanup;
 use crate::cli::RunArgs;
@@ -454,12 +454,9 @@ impl<'a> Attempt<'a> {
             // The refusal is still the cause (the first cause wins); the
             // report says the refused receipt did not persist, and no
             // `refused` message acknowledges it.
-            Err(write_error) => {
+            Err(failure) => {
                 let mut reported = error.clone();
-                reported.message = format!(
-                    "{}; the refused receipt was not persisted: {}",
-                    reported.message, write_error.message
-                );
+                reported.message = format!("{}; {}", reported.message, failure.describe("refused"));
                 let trace_error = self.journal.loss.clone();
                 // The refusal and the failed write are in `error`; any other
                 // error no durable receipt carries reaches stderr too.
@@ -864,7 +861,9 @@ impl<'a> Attempt<'a> {
         }
         let receipt = match self.persist_terminal(state::Site::TerminalReceipt, phase) {
             Ok(receipt) => receipt,
-            Err(error) => return self.terminal_unpersisted(error, tree_error, run.outcome_error),
+            Err(failure) => {
+                return self.terminal_unpersisted(&failure, tree_error, run.outcome_error);
+            }
         };
         if let Some(error) = self.journal.loss.clone() {
             run.outcome_error.get_or_insert(error);
@@ -1045,11 +1044,15 @@ impl<'a> Attempt<'a> {
     /// carry, reach stderr instead.
     fn terminal_unpersisted(
         &mut self,
-        error: JailError,
+        failure: &Unpersisted,
         tree_error: Option<JailError>,
         outcome_error: Option<JailError>,
     ) -> RunReport {
-        let error = error.in_stage(ErrorStage::Reconciling);
+        let error = JailError {
+            message: failure.describe("terminal"),
+            ..failure.error.clone()
+        }
+        .in_stage(ErrorStage::Reconciling);
         self.record.errors.push(error.to_object());
         let reported = tree_error.or(outcome_error).unwrap_or(error);
         let trace_error = self.journal.loss.clone();
@@ -1091,7 +1094,11 @@ impl<'a> Attempt<'a> {
 
     /// Persists the attempt's final receipt (§13.3: its note may use the
     /// reserve).
-    fn persist_terminal(&mut self, site: state::Site, phase: Phase) -> Result<Receipt, JailError> {
+    fn persist_terminal(
+        &mut self,
+        site: state::Site,
+        phase: Phase,
+    ) -> Result<Receipt, Unpersisted> {
         persist_terminal(
             site,
             &self.attempt_dir,

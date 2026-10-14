@@ -2815,9 +2815,42 @@ fn persist_noted(
     Ok(receipt)
 }
 
+/// A terminal receipt write that failed, and what it left on disk.
+#[derive(Debug)]
+struct Unpersisted {
+    /// The write that failed.
+    error: JailError,
+    /// The receipt on disk when the terminal receipt itself persisted and
+    /// only its rewrite, recording the trace loss its own final note met,
+    /// failed; `None` when the terminal receipt did not persist.
+    persisted: Option<Box<Receipt>>,
+}
+
+impl Unpersisted {
+    /// Which write failed and what is on disk, for the report about the
+    /// `what` receipt (`refused`, `terminal`).
+    fn describe(&self, what: &str) -> String {
+        match &self.persisted {
+            None => format!(
+                "the {what} receipt was not persisted: {}",
+                self.error.message
+            ),
+            Some(receipt) => format!(
+                "the {what} receipt persisted at revision {} without the trace loss its final \
+                 note met; rewriting it with that loss failed: {}",
+                receipt.revision, self.error.message
+            ),
+        }
+    }
+}
+
 /// Finish the last note before publishing the control receipt. A loss during
 /// that drain requires one durable correction, without another trace write
 /// that could recursively fail and invalidate the correction.
+///
+/// # Errors
+/// The write that failed, with the receipt the first write left on disk
+/// when only the correction failed.
 fn persist_terminal(
     site: state::Site,
     attempt_dir: &AttemptDir,
@@ -2825,12 +2858,18 @@ fn persist_terminal(
     phase: Phase,
     args: &RunArgs,
     journal: &mut Journal,
-) -> Result<Receipt, JailError> {
+) -> Result<Receipt, Unpersisted> {
     // J4 W2-S: (A) — the note of the attempt's final receipt is the one the
     // reserve exists for (§13.3), whatever its phase: an attempt that ends
     // unsettled keeps `enforced` or `prepared`, and its final note used to be
     // refused after a loss although the reserve had room.
-    let receipt = persist_noted(site, attempt_dir, record, phase, args, journal, true)?;
+    let receipt =
+        persist_noted(site, attempt_dir, record, phase, args, journal, true).map_err(|error| {
+            Unpersisted {
+                error,
+                persisted: None,
+            }
+        })?;
     if let Ok(mut sink) = journal.trace.lock() {
         sink.finish();
     }
@@ -2838,16 +2877,23 @@ fn persist_terminal(
         record.errors.push(error.to_object());
         degrade_trace_coverage(record, journal);
         let io = state::current_io();
-        let corrected = write_receipt_at(
+        return match write_receipt_at(
             site,
             attempt_dir,
             record,
             phase,
             args.receipt.as_deref(),
             &*io,
-        )?;
-        journal.durable(&corrected);
-        return Ok(corrected);
+        ) {
+            Ok(corrected) => {
+                journal.durable(&corrected);
+                Ok(corrected)
+            }
+            Err(error) => Err(Unpersisted {
+                error,
+                persisted: Some(Box::new(receipt)),
+            }),
+        };
     }
     Ok(receipt)
 }
@@ -3703,25 +3749,28 @@ mod tests {
         }
     }
 
+    /// A trace sink whose terminal drain loses what it held.
+    struct DrainFailure {
+        loss: Option<trace::Loss>,
+    }
+
+    impl TraceSink for DrainFailure {
+        fn write_frame(&mut self, _: &[u8], _: Priority) -> Result<(), JailError> {
+            Ok(())
+        }
+        fn loss(&self) -> Option<&trace::Loss> {
+            self.loss.as_ref()
+        }
+        fn finish(&mut self) {
+            self.loss = Some(trace::Loss {
+                reason: "terminal drain stalled".to_owned(),
+                lost_frames: None,
+            });
+        }
+    }
+
     #[test]
     fn journal_detects_a_loss_that_only_appears_during_terminal_drain() {
-        struct DrainFailure {
-            loss: Option<trace::Loss>,
-        }
-        impl TraceSink for DrainFailure {
-            fn write_frame(&mut self, _: &[u8], _: Priority) -> Result<(), JailError> {
-                Ok(())
-            }
-            fn loss(&self) -> Option<&trace::Loss> {
-                self.loss.as_ref()
-            }
-            fn finish(&mut self) {
-                self.loss = Some(trace::Loss {
-                    reason: "terminal drain stalled".to_owned(),
-                    lost_frames: None,
-                });
-            }
-        }
         let trace = trace::shared(DrainFailure { loss: None });
         let mut journal = Journal::new("att_test", trace.clone());
         assert!(journal.take_new_loss().is_none());
@@ -3844,6 +3893,64 @@ mod tests {
         record.errors.clear();
         write_receipt(&attempt_dir, &mut record, Phase::Settled, None).expect("within the bound");
         assert_eq!(record.revision, 2);
+    }
+
+    /// A terminal receipt that persisted, whose rewrite recording the loss
+    /// its own final note met then failed, is reported as on disk at its
+    /// revision, never as a receipt that was not persisted.
+    #[test]
+    fn a_failed_loss_correction_names_the_receipt_on_disk() {
+        let (_root, attempt_dir, _plan) = scratch_fixture();
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        let padding = |len: usize| {
+            JailError::new(
+                ErrorCode::EvidenceLost,
+                ErrorStage::Running,
+                Remediation::InspectState,
+                "x".repeat(len),
+            )
+            .to_object()
+        };
+        // The receipt fits with 64 bytes to spare; the correction's error
+        // object is larger than that, so the rewrite is past the bound.
+        record.errors.push(padding(0));
+        let base = serde_json::to_vec_pretty(&record.receipt(Phase::Refused))
+            .unwrap()
+            .len();
+        let bound = usize::try_from(cleanup::RECEIPT_MAX).unwrap();
+        record.errors[0] = padding(bound - base - 64);
+        use clap::Parser as _;
+        let crate::cli::Command::Run(args) =
+            crate::cli::Cli::try_parse_from(["ouro-jail", "run", "--", "/bin/true"])
+                .unwrap()
+                .command
+        else {
+            panic!("not run");
+        };
+        let mut journal = Journal::new("att_test", trace::shared(DrainFailure { loss: None }));
+        let failure = persist_terminal(
+            state::Site::RefusedReceipt,
+            &attempt_dir,
+            &mut record,
+            Phase::Refused,
+            &args,
+            &mut journal,
+        )
+        .expect_err("the correction is past the bound");
+        let persisted = failure
+            .persisted
+            .as_ref()
+            .expect("the first write persisted");
+        let on_disk: Receipt =
+            serde_json::from_slice(&std::fs::read(attempt_dir.receipt_path()).unwrap()).unwrap();
+        assert_eq!(on_disk.revision, persisted.revision);
+        let described = failure.describe("refused");
+        assert!(
+            described.contains(&format!("persisted at revision {}", persisted.revision)),
+            "{described}"
+        );
+        assert!(!described.contains("not persisted"), "{described}");
+        assert!(described.contains("bound"), "{described}");
     }
 
     /// An unsatisfied requirement refuses with the code, remediation and
