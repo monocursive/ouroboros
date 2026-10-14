@@ -18,7 +18,7 @@
 
 use std::ffi::OsString;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ouro_fixture::harness::{self, Jail, Run};
 use ouro_jail::platform::linux::tracer::{
@@ -370,6 +370,10 @@ fn j4_d2_a_foreign_abi_call_without_a_baseline_is_a_gap() {
 /// exits. Both must reach the consumer, the gap ahead of the exit.
 #[test]
 fn j4_d6_critical_facts_survive_a_full_lifecycle_backlog() {
+    /// How long the observer may take to reap the fixture with twenty
+    /// thousand facts ahead of its exit; past it, the account is read as it
+    /// stands.
+    const REAP_BOUND: Duration = Duration::from_secs(120);
     let _serial = serial();
     let Some(work) = setup("d6-backlog") else {
         return;
@@ -389,10 +393,9 @@ fn j4_d6_critical_facts_survive_a_full_lifecycle_backlog() {
     // fact, the exit included, waits in the observer's own buffer. Its
     // stdout closes before its death is reported, hence the reap and not EOF.
     let reports = run.lines();
-    let deadline = Instant::now() + Duration::from_secs(120);
-    while Path::new(&format!("/proc/{target}")).exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let _ = common::within(REAP_BOUND, || {
+        !Path::new(&format!("/proc/{target}")).exists()
+    });
     std::thread::sleep(Duration::from_millis(500));
     let observed = collect(tracer, Duration::from_secs(300));
     println!(

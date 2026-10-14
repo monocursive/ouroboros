@@ -152,10 +152,7 @@ impl Drop for Destination {
         // Only processes the attempt moved here: the test made this cgroup.
         if self.path.exists() && populated(&self.path) {
             let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while populated(&self.path) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            let _ = common::within(common::KILL_BOUND, || !populated(&self.path));
         }
         let _ = std::fs::remove_dir(&self.path);
     }
@@ -1434,6 +1431,9 @@ fn a13_an_oom_kill_in_the_leaf_ends_the_tree() {
 #[test]
 fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
     use std::process::{Command, Stdio};
+    /// How long the jail takes to end once its escaped target is killed
+    /// and its stdin closed.
+    const JAIL_END_BOUND: Duration = Duration::from_secs(30);
     if !live() {
         return;
     }
@@ -1522,14 +1522,9 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
 
     identity::pidfd_send_signal(target_fd.as_raw_fd(), libc::SIGKILL).unwrap();
     drop(supervisor.stdin.take());
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        if let Some(status) = supervisor.try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "the jail did not end");
-        std::thread::sleep(Duration::from_millis(5));
-    };
+    let status = common::eventually_some("the jail to end", JAIL_END_BOUND, || {
+        supervisor.try_wait().unwrap()
+    });
     assert_eq!(status.code(), Some(1));
     let last = common::checked_receipt(current());
     assert_unprotected(&last);
@@ -1663,10 +1658,7 @@ impl Drop for ChildMade {
         if self.path.exists() {
             if populated(&self.path) {
                 let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
-                let deadline = Instant::now() + Duration::from_secs(5);
-                while populated(&self.path) && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
+                let _ = common::within(common::KILL_BOUND, || !populated(&self.path));
             }
             let _ = std::fs::remove_dir(&self.path);
         }

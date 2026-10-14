@@ -850,11 +850,11 @@ fn c02_a_release_failure_after_the_backend_died_verifies_the_teardown_and_cleans
             .and_then(|stat| stat.rsplit(')').next().map(|rest| rest.trim().to_owned()))
             .is_none_or(|rest| rest.starts_with('Z'))
     };
-    let gone = std::time::Instant::now() + Duration::from_secs(5);
-    while !(exited(bwrap) && exited(watcher)) {
-        assert!(std::time::Instant::now() < gone, "the backend did not exit");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    common::eventually(
+        "the backend and its watcher to exit",
+        common::KILL_BOUND,
+        || exited(bwrap) && exited(watcher),
+    );
     spawned
         .owner()
         .release(

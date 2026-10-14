@@ -1297,10 +1297,7 @@ impl Drop for Destination {
         // Only the attempt's own target can be here: the test made this cgroup.
         if populated(&self.path) {
             let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while populated(&self.path) && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
+            let _ = common::within(common::KILL_BOUND, || !populated(&self.path));
         }
         let _ = std::fs::remove_dir(&self.path);
     }
@@ -1375,18 +1372,15 @@ fn j5_r01_a_detected_escape_carries_integrity_lost() {
         .target([PYTHON, "-c", &code])
         .spawn()
         .expect("the jail starts");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let running = loop {
-        let latest = spawned.receipt_value().unwrap_or(Value::Null);
-        if latest["lifetime"]["integrity"] == "lost" {
-            break latest;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no receipt recorded the escape; the latest: {latest:#}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    };
+    let mut running = Value::Null;
+    let lost = common::within(common::SETTLE_BOUND, || {
+        running = spawned.receipt_value().unwrap_or(Value::Null);
+        running["lifetime"]["integrity"] == "lost"
+    });
+    assert!(
+        lost,
+        "no receipt recorded the escape; the latest: {running:#}"
+    );
     // While the target runs, from the receipt written when the loss was seen.
     assert!(moved.exists() && !go.exists());
     assert_lost_tuple(&running);

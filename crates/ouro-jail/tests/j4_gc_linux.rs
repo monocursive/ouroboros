@@ -21,7 +21,7 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ouro_fixture::harness::{self, Jail, Run, Spawned};
 use ouro_jail::platform::linux::{identity, watch};
@@ -102,10 +102,7 @@ impl Drop for LeafGuard {
         }
         if populated(&self.path) {
             let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while populated(&self.path) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            let _ = common::within(common::KILL_BOUND, || !populated(&self.path));
         }
         remove_cgroup_tree(&self.path);
     }

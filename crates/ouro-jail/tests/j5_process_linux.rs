@@ -737,6 +737,8 @@ fn i03_untrusted_request_fields_cannot_mutate_the_owners_operator_inputs() {
 #[ignore = "subprocess owner invoked by the X03 driver tests"]
 fn j5_x03_owner_helper() {
     use std::os::unix::process::CommandExt as _;
+    /// How long the jail may take to make its prepared receipt durable.
+    const PREPARED_BOUND: Duration = Duration::from_secs(30);
 
     if !common::running_helper("j5_x03_owner_helper") {
         return;
@@ -796,16 +798,14 @@ fn j5_x03_owner_helper() {
 
     // Wait for the durable prepared receipt of this attempt.
     let attempts = data.join("attempts");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let prepared = loop {
-        if Instant::now() >= deadline {
-            std::process::exit(3);
-        }
-        if let Some(receipt) = read_only_prepared(&attempts) {
-            break receipt;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let mut prepared = None;
+    if !common::within(PREPARED_BOUND, || {
+        prepared = read_only_prepared(&attempts);
+        prepared.is_some()
+    }) {
+        std::process::exit(3);
+    }
+    let prepared = prepared.expect("the wait ended on a prepared receipt");
 
     if mode == "during" || mode == "mid-frame" {
         let attempt = prepared["attempt_id"].as_str().unwrap();
@@ -860,6 +860,9 @@ fn read_only_prepared(attempts: &Path) -> Option<Value> {
 /// receipt the reparented jail left, the marker path and the count of target
 /// execs in the local trace.
 fn x03_owner_run(mode: &str) -> (Value, bool, usize) {
+    /// How long the reparented jail may take to finish once its owner is
+    /// gone.
+    const REPARENTED_BOUND: Duration = Duration::from_secs(30);
     let root = common::private_tempdir();
     let data = root.path().join("data");
     let config = root.path().join("config");
@@ -903,15 +906,13 @@ fn x03_owner_run(mode: &str) -> (Value, bool, usize) {
         .trim()
         .parse()
         .expect("a pid");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Path::new(&format!("/proc/{jail_pid}")).exists() {
-        if Instant::now() >= deadline {
-            // SAFETY: `jail_pid` is the process this test's own owner started,
-            // recorded in our pid file, with its cwd inside our workspace.
-            unsafe { libc::kill(jail_pid, libc::SIGKILL) };
-            panic!("the reparented jail did not finish");
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    if !common::within(REPARENTED_BOUND, || {
+        !Path::new(&format!("/proc/{jail_pid}")).exists()
+    }) {
+        // SAFETY: `jail_pid` is the process this test's own owner started,
+        // recorded in our pid file, with its cwd inside our workspace.
+        unsafe { libc::kill(jail_pid, libc::SIGKILL) };
+        panic!("the reparented jail did not finish");
     }
 
     // The terminal receipt of the one attempt.
@@ -1594,14 +1595,10 @@ fn p04_socket_backpressure_does_not_delay_wall_expiry() {
         .env("OURO_CONFIG_DIR", c.jail.config_dir())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while child.try_wait().unwrap().is_none() {
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("a socket reader that stops draining must not prevent wall expiry");
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    if !common::within(common::STEP_BOUND, || child.try_wait().unwrap().is_some()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("a socket reader that stops draining must not prevent wall expiry");
     }
     let output = child.wait_with_output().unwrap();
     drop(peer);
@@ -1814,6 +1811,8 @@ fn stdout_eof_and_exit(
 ) -> (Duration, Duration) {
     use std::io::Read as _;
     use std::os::unix::process::CommandExt as _;
+    /// How long the command, three seconds of it a sleep, may take to end.
+    const END_BOUND: Duration = Duration::from_secs(30);
     let mut command = std::process::Command::new(program);
     command
         .args(args)
@@ -1834,14 +1833,9 @@ fn stdout_eof_and_exit(
         let _ = stdout.read_to_end(&mut sink);
         start.elapsed()
     });
-    let deadline = start + Duration::from_secs(30);
-    let exited = loop {
-        if child.try_wait().expect("wait").is_some() {
-            break start.elapsed();
-        }
-        assert!(Instant::now() < deadline, "the command did not end");
-        std::thread::sleep(Duration::from_millis(5));
-    };
+    let exited = common::eventually_some("the command to end", END_BOUND, || {
+        child.try_wait().expect("wait").map(|_| start.elapsed())
+    });
     let eof = reader.join().expect("the reader");
     (eof, exited)
 }

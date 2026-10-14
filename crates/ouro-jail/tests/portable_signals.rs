@@ -10,9 +10,14 @@
 //! handlers is not something to do inside a shared test binary.
 
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ouro_jail::supervisor::signals;
+
+mod common;
+
+/// How long the signal takes to reach the handler once `kill` has sent it.
+const DELIVERY_BOUND: Duration = Duration::from_secs(5);
 
 #[test]
 fn a_termination_signal_wakes_the_supervisor_through_the_self_pipe() {
@@ -29,15 +34,10 @@ fn a_termination_signal_wakes_the_supervisor_through_the_self_pipe() {
         .expect("/bin/kill is available on both supported platforms");
     assert!(status.success(), "the signal was delivered");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if pipe.triggered() {
-            // A second read finds the pipe drained again, so the wakeup is
-            // edge-like rather than a latch that never clears.
-            assert!(!pipe.triggered(), "the pipe is drained after a read");
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the signal never reached the self-pipe");
+    common::eventually("the signal to reach the self-pipe", DELIVERY_BOUND, || {
+        pipe.triggered()
+    });
+    // A second read finds the pipe drained again, so the wakeup is edge-like
+    // rather than a latch that never clears.
+    assert!(!pipe.triggered(), "the pipe is drained after a read");
 }

@@ -5,7 +5,7 @@ use ouro_fixture::harness::{self, Jail};
 use ouro_jail::platform::linux::{identity, watch};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod common;
 
@@ -395,21 +395,16 @@ fn l02_every_runtime_helper_loss_ends_the_tree() {
                     receipt["policy"]["digest"].as_str().unwrap(),
                 )
                 .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !marker.exists() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            assert!(marker.exists());
+            common::eventually("the target to start", common::STEP_BOUND, || {
+                marker.exists()
+            });
             use std::os::fd::AsRawFd;
             identity::pidfd_send_signal(killed.as_raw_fd(), libc::SIGKILL).unwrap();
             let run = spawned.wait().unwrap();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while !watch::readable(target.as_raw_fd()) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            assert!(
-                watch::readable(target.as_raw_fd()),
-                "target survived {key} loss"
+            common::eventually(
+                &format!("the target to end with the {key}"),
+                common::KILL_BOUND,
+                || watch::readable(target.as_raw_fd()),
             );
             if key == "supervisor" {
                 continue;
@@ -570,13 +565,10 @@ fn l02_startup_parent_death_window_is_closed() {
             .spawn()
             .unwrap();
         let ready = root.path().join(if released { "cleared" } else { "ready" });
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !ready.exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(
-            ready.exists(),
-            "backend did not reach the synchronized startup point"
+        common::eventually(
+            "the backend to reach the synchronized startup point",
+            common::STEP_BOUND,
+            || ready.exists(),
         );
         let pids = std::fs::read_to_string(root.path().join("pids")).unwrap();
         let fds: Vec<_> = pids
@@ -585,11 +577,9 @@ fn l02_startup_parent_death_window_is_closed() {
             .collect();
         supervisor.kill().unwrap();
         supervisor.wait().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while fds.iter().any(|fd| !watch::readable(fd.as_raw_fd())) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let ended = fds.iter().all(|fd| watch::readable(fd.as_raw_fd()));
+        let ended = common::within(common::KILL_BOUND, || {
+            fds.iter().all(|fd| watch::readable(fd.as_raw_fd()))
+        });
         for fd in fds {
             let _ = identity::pidfd_send_signal(fd.as_raw_fd(), libc::SIGKILL);
         }

@@ -1380,9 +1380,8 @@ fn launcher_pid_of(jail: u32) -> Option<libc::pid_t> {
         }
         out
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let jail = libc::pid_t::try_from(jail).ok()?;
-    while std::time::Instant::now() < deadline {
+    let search = || {
         let mut frontier = vec![jail];
         for _ in 0..4 {
             let mut next = Vec::new();
@@ -1398,9 +1397,14 @@ fn launcher_pid_of(jail: u32) -> Option<libc::pid_t> {
             }
             frontier = next;
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    None
+        None
+    };
+    let mut found = None;
+    let _ = common::within(common::STEP_BOUND, || {
+        found = search();
+        found.is_some()
+    });
+    found
 }
 
 #[test]

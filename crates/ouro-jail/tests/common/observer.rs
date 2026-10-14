@@ -432,18 +432,14 @@ pub fn launch_tool(work: &Work, argv: &[&str]) -> Launched {
 /// Wait for the inside launcher to appear under `root` and return its host
 /// pid, validated by its argv.
 pub fn find_launcher(root: libc::pid_t, argv0: &[u8], budget: Duration) -> Option<libc::pid_t> {
-    let deadline = Instant::now() + budget;
-    while Instant::now() < deadline {
-        for pid in descendants(root) {
-            if let Some(argv) = cmdline(pid)
-                && argv.first().is_some_and(|first| first == argv0)
-            {
-                return Some(pid);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    None
+    let mut found = None;
+    let _ = super::within(budget, || {
+        found = descendants(root).into_iter().find(|pid| {
+            cmdline(*pid).is_some_and(|argv| argv.first().is_some_and(|first| first == argv0))
+        });
+        found.is_some()
+    });
+    found
 }
 
 /// A FIFO at `path`, mode 0600.

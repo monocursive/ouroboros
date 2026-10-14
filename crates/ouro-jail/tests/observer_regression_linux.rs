@@ -754,13 +754,10 @@ fn r12_finish_returns_even_when_a_tracee_will_not_die() {
         "a tree that had to be killed is loss, and is counted: {:?}",
         summary.loss
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline && std::path::Path::new(&format!("/proc/{pid}")).exists() {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
-        "the tracee that would not die must have been killed, not left stopped"
+    common::eventually(
+        "the tracee that would not die to be killed, not left stopped",
+        common::STEP_BOUND,
+        || !std::path::Path::new(&format!("/proc/{pid}")).exists(),
     );
 }
 
@@ -1431,15 +1428,7 @@ fn r29_a_dead_supervisor_kills_its_traced_tree() {
     // anyone once it is reaped: the pid with the birth the child recorded is
     // the tracee, and a pid alone is not.
     let still_there = || start_ticks(tracee) == Some(birth);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut alive = true;
-    while Instant::now() < deadline {
-        if !still_there() {
-            alive = false;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let alive = !common::within(common::STEP_BOUND, || !still_there());
     if alive {
         // The rescue, through a pidfd checked against that birth after it
         // was opened, so it reaches the tracee or nothing.

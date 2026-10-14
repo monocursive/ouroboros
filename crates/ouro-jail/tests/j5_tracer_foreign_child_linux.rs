@@ -226,20 +226,16 @@ impl Launcher {
         drop(fds);
         let backend = libc::pid_t::try_from(child.id()).expect("a pid");
         drop(child);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let pid = loop {
-            if let Some(pid) = tracer::children(backend).into_iter().find(|pid| {
-                tracer::cmdline(*pid)
-                    .is_some_and(|argv| argv.get(1).map(Vec::as_slice) == Some(b"__launch"))
-            }) {
-                break pid;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the launcher never appeared under {backend}"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        };
+        let pid = common::eventually_some(
+            &format!("the launcher under {backend}"),
+            common::STEP_BOUND,
+            || {
+                tracer::children(backend).into_iter().find(|pid| {
+                    tracer::cmdline(*pid)
+                        .is_some_and(|argv| argv.get(1).map(Vec::as_slice) == Some(b"__launch"))
+                })
+            },
+        );
         let launcher = Launcher {
             pid,
             backend: Some(backend),
@@ -252,25 +248,20 @@ impl Launcher {
 
     /// The attach contract: the launcher is blocked in `read(2)`.
     fn await_blocked(&self) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let number = fs::read_to_string(format!("/proc/{}/syscall", self.pid))
-                .ok()
-                .and_then(|raw| {
-                    raw.split_whitespace()
-                        .next()
-                        .and_then(|n| n.parse::<i64>().ok())
-                });
-            if number == Some(libc::SYS_read) {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the launcher {} never blocked",
-                self.pid
-            );
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        common::eventually(
+            &format!("the launcher {} to block in read(2)", self.pid),
+            common::STEP_BOUND,
+            || {
+                let number = fs::read_to_string(format!("/proc/{}/syscall", self.pid))
+                    .ok()
+                    .and_then(|raw| {
+                        raw.split_whitespace()
+                            .next()
+                            .and_then(|n| n.parse::<i64>().ok())
+                    });
+                number == Some(libc::SYS_read)
+            },
+        );
     }
 
     fn release(&mut self) {
@@ -427,8 +418,7 @@ impl Gate {
     /// reader, without ever blocking past the deadline.
     fn open(&self) {
         let c = std::ffi::CString::new(self.fifo().as_os_str().as_encoded_bytes()).expect("a path");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let fd = loop {
+        let fd = common::eventually_some("the target to open the gate", common::STEP_BOUND, || {
             // SAFETY: a NUL-terminated path; the flags are plain ints.
             let fd = unsafe {
                 libc::open(
@@ -436,15 +426,8 @@ impl Gate {
                     libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
                 )
             };
-            if fd >= 0 {
-                break fd;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the target never opened the gate"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        };
+            (fd >= 0).then_some(fd)
+        });
         // SAFETY: just opened and owned here.
         let mut file = fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
         file.write_all(b"go\n").expect("write the gate");
@@ -823,25 +806,15 @@ impl Beside {
     /// Let a `Hold` child go, and wait (bounded) until it has ended.
     fn release(&mut self) {
         drop(self.hold.take());
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while self.foreign_alive() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let _ = common::within(common::KILL_BOUND, || !self.foreign_alive());
     }
 
     /// `eof` once the reader saw the end of the stream, bounded.
     fn reader_finished(&self) -> bool {
         let done = self.dir.join("reader-done");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if fs::read_to_string(&done).is_ok_and(|text| text == "eof\n") {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        common::within(common::STEP_BOUND, || {
+            fs::read_to_string(&done).is_ok_and(|text| text == "eof\n")
+        })
     }
 
     fn trace_copy(&self) -> Vec<Value> {

@@ -52,14 +52,11 @@ fn fixture_file(path: &Path, bytes: &[u8]) {
 }
 
 fn await_mount_pin(rendezvous: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !rendezvous.join("pinned").exists() {
-        assert!(
-            Instant::now() < deadline,
-            "the mount-swap seam never signalled `pinned`"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    common::eventually(
+        "the mount-swap seam to signal `pinned`",
+        common::SETTLE_BOUND,
+        || rendezvous.join("pinned").exists(),
+    );
 }
 
 fn case(profile: &str) -> Case {
@@ -2308,10 +2305,7 @@ impl Drop for Destination {
         };
         if self.path.exists() && populated(&self.path) {
             let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while populated(&self.path) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            let _ = common::within(common::KILL_BOUND, || !populated(&self.path));
         }
         let _ = std::fs::remove_dir(&self.path);
     }

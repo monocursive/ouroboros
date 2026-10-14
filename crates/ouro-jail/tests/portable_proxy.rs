@@ -1460,11 +1460,9 @@ fn n04_a_listener_shut_down_underneath_the_proxy_stops_serving_and_refuses() {
     // SAFETY: shutting down a socket this process owns; the descriptor stays
     // open and owned by the proxy.
     assert_eq!(unsafe { libc::shutdown(fd, libc::SHUT_RDWR) }, 0);
-    let deadline = Instant::now() + WAIT;
-    while harness.handle.serving() {
-        assert!(Instant::now() < deadline, "the accept loop never noticed");
-        thread::sleep(Duration::from_millis(5));
-    }
+    common::eventually("the accept loop to notice", WAIT, || {
+        !harness.handle.serving()
+    });
     let error = UnixStream::connect(&harness.path).expect_err("nothing accepts any more");
     assert_eq!(error.kind(), ErrorKind::ConnectionRefused, "{error}");
     let (summary, results) = harness.stop(WAIT);
@@ -1602,14 +1600,6 @@ impl HeldLookup {
     }
 }
 
-fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
-    let deadline = Instant::now() + WAIT;
-    while !condition() {
-        assert!(Instant::now() < deadline, "timed out waiting until {what}");
-        thread::sleep(Duration::from_millis(2));
-    }
-}
-
 #[test]
 fn n04_system_resolver_is_bounded_absolute_and_refuses_what_is_not_a_name() {
     let refusing = SystemResolver::new(0);
@@ -1631,7 +1621,9 @@ fn n04_system_resolver_is_bounded_absolute_and_refuses_what_is_not_a_name() {
         .expect("localhost resolves");
     assert!(!answers.is_empty());
     assert!(answers.iter().all(IpAddr::is_loopback), "{answers:?}");
-    wait_until("the lookup worker exits", || resolver.in_flight() == 0);
+    common::eventually("the lookup worker to exit", WAIT, || {
+        resolver.in_flight() == 0
+    });
 }
 
 #[test]
@@ -1693,7 +1685,9 @@ fn n04_system_resolver_looks_up_the_absolute_name_and_keeps_its_deadline() {
         vec!["example.test.".to_owned(), "other.test.".to_owned()],
         "the queued lookup ran once the slot was free"
     );
-    wait_until("the second lookup ends", || resolver.in_flight() == 0);
+    common::eventually("the second lookup to end", WAIT, || {
+        resolver.in_flight() == 0
+    });
 }
 
 /// Issue draft 04: one successful answer set serves a burst of lookups for
@@ -1849,7 +1843,9 @@ fn n04_connect_falls_back_across_approved_answers_only() {
 /// Waits until every proxy thread has let go of the shared state: the sink
 /// is then held by the test alone.
 fn wait_until_gone(sink: &Arc<Sink>) {
-    wait_until("the proxy's threads exit", || Arc::strong_count(sink) == 1);
+    common::eventually("the proxy's threads to exit", WAIT, || {
+        Arc::strong_count(sink) == 1
+    });
 }
 
 /// R02: requests carrying a 10,000-code-point label used to cost 67 ms
@@ -2712,12 +2708,11 @@ fn proxy_limits_helper() {
             sink.wait_for(16);
             // Every descriptor of a settled connection is closed again, not
             // kept alive by the stop registry.
-            let deadline = Instant::now() + WAIT;
-            let mut now = proxy::open_descriptor_count().expect("countable");
-            while now != before && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(2));
+            let mut now = before;
+            let _ = common::within(WAIT, || {
                 now = proxy::open_descriptor_count().expect("countable");
-            }
+                now == before
+            });
             println!("HELPER fds_after_close={}", now.abs_diff(before));
             let _ = handle.stop(WAIT);
         }

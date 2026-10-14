@@ -177,13 +177,10 @@ impl Attempt {
             Err(error) => (None, None, format!("(no run: {error})")),
         };
         if let Some(leaf) = &leaf {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while std::fs::read_to_string(leaf.join("cgroup.events"))
-                .is_ok_and(|events| events.contains("populated 1"))
-                && Instant::now() < deadline
-            {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            let _ = common::within(common::KILL_BOUND, || {
+                !std::fs::read_to_string(leaf.join("cgroup.events"))
+                    .is_ok_and(|events| events.contains("populated 1"))
+            });
             let _ = std::fs::remove_dir(leaf);
         }
         let contract = match receipt.as_ref().map(common::check_receipt) {
@@ -415,23 +412,6 @@ fn kill_by_pidfd(fd: &OwnedFd, signal: libc::c_int) {
     identity::pidfd_send_signal(fd.as_raw_fd(), signal).expect("the signal is delivered");
 }
 
-/// A bounded wait on kernel state that has no event to wait on (`/proc`,
-/// cgroup files, a file the target writes): re-read every 2 ms, fail at the
-/// bound.
-fn poll_until<T>(what: &str, within: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + within;
-    loop {
-        if let Some(found) = probe() {
-            return found;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out after {within:?} waiting for {what}"
-        );
-        std::thread::sleep(Duration::from_millis(2));
-    }
-}
-
 /// The host pids of every child of `pid`, over all its threads.
 fn children(pid: i32) -> Vec<i32> {
     let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
@@ -477,9 +457,9 @@ fn state(pid: i32) -> Option<char> {
 /// disposition, with a pidfd opened on it and its identity rechecked after
 /// the open (so the pidfd cannot name a recycled pid).
 fn term_ignoring_child(parent: i32) -> (i32, OwnedFd) {
-    let pid = poll_until(
+    let pid = common::eventually_some(
         "the target's SIGTERM-ignoring descendant",
-        Duration::from_secs(20),
+        common::SETTLE_BOUND,
         || {
             children(parent).into_iter().find(|child| {
                 signal_mask(*child, "SigIgn").is_some_and(|mask| mask & bit(libc::SIGTERM) != 0)
@@ -751,15 +731,11 @@ fn l01_a_sigterm_ignoring_descendant_of_a_contained_run_dies_when_the_operator_s
         );
         attempt.await_kind("exec_confirmed");
         let tree = started_tree(&attempt.receipt());
-        poll_until(
-            "the target to ignore SIGTERM",
-            Duration::from_secs(10),
-            || {
-                signal_mask(tree.launcher_pid, "SigIgn")
-                    .is_some_and(|mask| mask & bit(libc::SIGTERM) != 0)
-                    .then_some(())
-            },
-        );
+        common::eventually_some("the target to ignore SIGTERM", common::STEP_BOUND, || {
+            signal_mask(tree.launcher_pid, "SigIgn")
+                .is_some_and(|mask| mask & bit(libc::SIGTERM) != 0)
+                .then_some(())
+        });
         assert_real_supervisor_catches(&attempt, libc::SIGTERM);
         let sent = Instant::now();
         signal_supervisor(&attempt, libc::SIGTERM);
@@ -1077,7 +1053,7 @@ fn x07_a_leaf_that_cannot_be_verified_empty_is_never_claimed_empty() {
         // Whatever happened, nothing is in the leaf now; gc verifies and
         // removes the retained leaf before anything is asserted, so a failure
         // leaves nothing of this test in the shared delegated subtree.
-        poll_until("the leaf to empty", Duration::from_secs(10), || {
+        common::eventually_some("the leaf to empty", common::STEP_BOUND, || {
             std::fs::read_to_string(leaf.join("cgroup.events")).map_or(Some(()), |events| {
                 events.contains("populated 0").then_some(())
             })
@@ -1339,7 +1315,7 @@ fn l01_a_fork_storm_stopped_mid_flight_ends_at_verified_tree_death() {
     let init = pidfd(pid_at(&receipt, "namespace_init_pid"));
     let launcher = pidfd(pid_at(&receipt, "launcher_pid"));
     let leaf = leaf_of(&receipt);
-    poll_until(
+    common::eventually_some(
         "the storm to fill its ceiling",
         Duration::from_secs(30),
         || {
@@ -1351,10 +1327,10 @@ fn l01_a_fork_storm_stopped_mid_flight_ends_at_verified_tree_death() {
                 .filter(|current| *current >= 60)
         },
     );
-    let first = poll_until("a refused fork", Duration::from_secs(10), || {
+    let first = common::eventually_some("a refused fork", common::STEP_BOUND, || {
         pids_events_max(&leaf).filter(|count| *count > 0)
     });
-    let second = poll_until("the storm to keep forking", Duration::from_secs(10), || {
+    let second = common::eventually_some("the storm to keep forking", common::STEP_BOUND, || {
         pids_events_max(&leaf).filter(|count| *count > first)
     });
     assert_real_supervisor_catches(&attempt, libc::SIGTERM);
@@ -1654,7 +1630,7 @@ fn l02_the_agent_bridges_death_is_noted_once_fails_closed_and_the_tree_continues
         .and_then(|h| h["pid"].as_i64())
         .expect("the bridge is a charged helper");
     let bridge = pidfd(i32::try_from(bridge_pid).expect("a pid"));
-    let before = poll_until("the first connect", Duration::from_secs(20), || {
+    let before = common::eventually_some("the first connect", common::SETTLE_BOUND, || {
         std::fs::read_to_string(workspace.join("before")).ok()
     });
     kill_by_pidfd(&bridge, libc::SIGKILL);
@@ -2083,19 +2059,15 @@ fn l04_the_stop_grace_follows_the_boot_clock() {
         let mut attempt = Attempt::start(jail, false);
         attempt.await_kind("exec_confirmed");
         let tree = started_tree(&attempt.receipt());
-        poll_until(
-            "the target to catch SIGTERM",
-            Duration::from_secs(10),
-            || {
-                signal_mask(tree.launcher_pid, "SigCgt")
-                    .is_some_and(|mask| mask & bit(libc::SIGTERM) != 0)
-                    .then_some(())
-            },
-        );
+        common::eventually_some("the target to catch SIGTERM", common::STEP_BOUND, || {
+            signal_mask(tree.launcher_pid, "SigCgt")
+                .is_some_and(|mask| mask & bit(libc::SIGTERM) != 0)
+                .then_some(())
+        });
         signal_supervisor(&attempt, libc::SIGTERM);
-        poll_until(
+        common::eventually_some(
             "the cooperative SIGTERM to reach the target",
-            Duration::from_secs(10),
+            common::STEP_BOUND,
             || caught.exists().then_some(()),
         );
         let shifted = Instant::now();
@@ -2280,7 +2252,7 @@ fn c02_a_cleanup_interrupted_by_the_supervisors_death_stays_pending_and_gc_resum
         .join(prepared["attempt_id"].as_str().expect("an attempt id"));
     attempt.await_kind("exec_confirmed");
     let launcher = pidfd(pid_at(&attempt.receipt(), "launcher_pid"));
-    poll_until("the vendor state to fill", Duration::from_secs(120), || {
+    common::eventually_some("the vendor state to fill", Duration::from_secs(120), || {
         ready.exists().then_some(())
     });
     let many = root.join("vendor-state").join("many");

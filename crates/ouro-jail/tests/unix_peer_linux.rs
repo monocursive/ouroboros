@@ -207,12 +207,14 @@ impl Rig {
     /// response, so the child can report its result first: wait a bounded
     /// time for the record to land.
     fn records(&self, count: usize) -> Vec<ouro_jail::platform::linux::unixpeer::MediationRecord> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        /// How long a worker may take to record once the kernel took its
+        /// response.
+        const RECORD_BOUND: Duration = Duration::from_secs(5);
         let mut records = Vec::new();
-        while records.len() < count && Instant::now() < deadline {
+        let _ = common::within(RECORD_BOUND, || {
             records.extend(self.sink.drain());
-            std::thread::sleep(Duration::from_millis(5));
-        }
+            records.len() >= count
+        });
         records
     }
 }
@@ -246,6 +248,8 @@ impl Drop for KillOnDrop {
 
 impl Drop for Rig {
     fn drop(&mut self) {
+        /// How long the launcher gets to act on "Q".
+        const QUIT_GRACE: Duration = Duration::from_secs(3);
         // "Q" asks the launcher to exit, and closing the connection tells one
         // that missed it. A launcher already gone makes the send EPIPE, and
         // there is nothing to ask.
@@ -256,29 +260,23 @@ impl Drop for Rig {
         // blocked syscall would never read "Q", so give it a short grace and
         // then SIGKILL bwrap (--die-with-parent takes the sandbox with it)
         // rather than block the test forever.
-        let deadline = Instant::now() + Duration::from_secs(3);
         let mut st = 0;
-        loop {
+        let ended = common::within(QUIT_GRACE, || {
             // SAFETY: a non-blocking waitpid on the child this test forked,
             // with a pointer to a live local.
             let reaped = unsafe { libc::waitpid(self.child, &raw mut st, libc::WNOHANG) };
             // Reaped, or not this process's child to wait for at all (-1):
             // either way, signalling the number now could reach a stranger.
-            if reaped != 0 {
-                break;
+            reaped != 0
+        });
+        if !ended {
+            // SAFETY: as above, and the last waitpid said the child is not
+            // reaped, so the number is still its. As in `KillOnDrop`, a drop
+            // has nothing to do about a failure, so the results are not read.
+            unsafe {
+                libc::kill(self.child, libc::SIGKILL);
+                libc::waitpid(self.child, &raw mut st, 0);
             }
-            if Instant::now() >= deadline {
-                // SAFETY: as above, and the waitpid just said the child is
-                // not reaped, so the number is still its. As in
-                // `KillOnDrop`, a drop has nothing to do about a failure, so
-                // the results are not read.
-                unsafe {
-                    libc::kill(self.child, libc::SIGKILL);
-                    libc::waitpid(self.child, &raw mut st, 0);
-                }
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
         }
     }
 }
@@ -634,8 +632,7 @@ fn read_child_pid(info: &File) -> libc::pid_t {
 }
 
 fn find_launcher(init_pid: libc::pid_t, helper: &str) -> libc::pid_t {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
+    let search = || {
         let mut stack = vec![init_pid];
         let mut seen = std::collections::HashSet::new();
         while let Some(p) = stack.pop() {
@@ -647,7 +644,7 @@ fn find_launcher(init_pid: libc::pid_t, helper: &str) -> libc::pid_t {
                 // inside the sandbox the launcher's argv0 is "/helper"; the exe
                 // link still points at the bound host path.
                 if argv0 == b"/helper" || argv0 == helper.as_bytes() {
-                    return p;
+                    return Some(p);
                 }
             }
             if let Ok(kids) = std::fs::read_to_string(format!("/proc/{p}/task/{p}/children")) {
@@ -657,9 +654,14 @@ fn find_launcher(init_pid: libc::pid_t, helper: &str) -> libc::pid_t {
                 );
             }
         }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    0
+        None
+    };
+    let mut found = None;
+    let _ = common::within(common::STEP_BOUND, || {
+        found = search();
+        found.is_some()
+    });
+    found.unwrap_or(0)
 }
 
 fn bind_listen(name: &str, abstract_: bool) -> Option<OwnedFd> {

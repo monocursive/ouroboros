@@ -2003,16 +2003,9 @@ fn jail_json(attempt: &Path) -> (u64, String, Vec<u8>) {
 /// Returns whether it got there.
 fn temp_files_gone(attempt: &Path, within: Duration) -> bool {
     let dir = state::AttemptDir::from_root(attempt.to_path_buf());
-    let until = Instant::now() + within;
-    loop {
-        if state::leftover_temp_files(&dir).unwrap().is_empty() {
-            return true;
-        }
-        if Instant::now() >= until {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    common::within(within, || {
+        state::leftover_temp_files(&dir).unwrap().is_empty()
+    })
 }
 
 /// P1 (a). §13.3: "On failure or stall, stop the child with cause
@@ -2042,7 +2035,7 @@ fn j4_w3_p1a_abandoned_persistence_stops_at_the_next_step() {
     // The released sync completes; what the worker does next is either the
     // abandoned rename (the defect) or the removal of its temporary file.
     assert!(
-        temp_files_gone(&attempt, Duration::from_secs(10)),
+        temp_files_gone(&attempt, common::STEP_BOUND),
         "the released replacement neither landed nor cleaned up"
     );
     std::thread::sleep(Duration::from_millis(200));
@@ -2089,7 +2082,7 @@ fn j4_w3_p1b_the_lease_is_kept_while_persistence_is_in_flight() {
     let (by_gc, gc_phase, gc_bytes) = jail_json(&attempt);
     release(&stall);
     assert!(
-        temp_files_gone(&attempt, Duration::from_secs(10)),
+        temp_files_gone(&attempt, common::STEP_BOUND),
         "the released rename never finished"
     );
     let (landed, landed_phase, landed_bytes) = jail_json(&attempt);

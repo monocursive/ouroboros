@@ -1148,17 +1148,10 @@ fn r3_failed_regular_file_output_is_a_tool_error() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("a failed relay must stop the live target within its stop budget");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    if !common::within(common::STEP_BOUND, || child.try_wait().unwrap().is_some()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("a failed relay must stop the live target within its stop budget");
     }
     let output = child.wait_with_output().unwrap();
     assert_eq!(
@@ -1288,6 +1281,9 @@ fn r4_a_fork_burst_is_fully_reaped() {
 /// L02: killing the supervisor takes the contained tree down.
 #[test]
 fn r4_killing_the_supervisor_takes_the_tree_down() {
+    /// How long the kernel's death chain may take to end the contained tree
+    /// once the supervisor is killed.
+    const DEATH_CHAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
     if !live() {
         return;
     }
@@ -1318,11 +1314,9 @@ fn r4_killing_the_supervisor_takes_the_tree_down() {
         .expect("spawn");
     let supervisor = spawned.pid();
     // Wait for the marker so the target is certainly running.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !marker.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert!(marker.exists(), "the target never started");
+    common::eventually("the target to start", common::SETTLE_BOUND, || {
+        marker.exists()
+    });
     let descendants = descendant_pids(supervisor);
     eprintln!("supervisor {supervisor} descendants {descendants:?}");
     assert!(!descendants.is_empty());
@@ -1333,19 +1327,15 @@ fn r4_killing_the_supervisor_takes_the_tree_down() {
     unsafe { libc::kill(libc::pid_t::try_from(supervisor).unwrap(), libc::SIGKILL) };
     let _ = spawned.wait();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let mut alive: Vec<i32> = Vec::new();
-    while std::time::Instant::now() < deadline {
+    let _ = common::within(DEATH_CHAIN_BOUND, || {
         alive = descendants
             .iter()
             .copied()
             .filter(|pid| Path::new(&format!("/proc/{pid}")).exists())
             .collect();
-        if alive.is_empty() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+        alive.is_empty()
+    });
     if !alive.is_empty() {
         for pid in &alive {
             eprintln!(
@@ -2210,11 +2200,9 @@ fn r4_killing_the_backend_leaves_an_honest_receipt() {
         .spawn()
         .expect("spawn");
     let supervisor = spawned.pid();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !marker.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert!(marker.exists(), "the target never started");
+    common::eventually("the target to start", common::SETTLE_BOUND, || {
+        marker.exists()
+    });
 
     let tree = tree_of(supervisor);
     let bwrap = tree
@@ -2348,10 +2336,7 @@ fn r1_a_placeholder_the_run_filled_is_kept_not_removed() {
         .expect("spawn");
     // Wait for the placeholder mount point to appear, then change it.
     let git = workspace.join(".git");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !git.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let _ = common::within(common::SETTLE_BOUND, || git.exists());
     let planted = git.join("planted");
     let created = std::fs::write(&planted, b"not ours\n").is_ok();
     eprintln!("planted a file under the placeholder: {created}");

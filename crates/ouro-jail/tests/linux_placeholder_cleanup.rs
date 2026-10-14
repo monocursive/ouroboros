@@ -11,7 +11,6 @@
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use ouro_fixture::harness::Jail;
 
@@ -54,14 +53,11 @@ fn a_refusal_after_the_placeholders_were_made_removes_them() {
         .spawn()
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !rendezvous.join("pinned").exists() {
-        assert!(
-            Instant::now() < deadline,
-            "the mount-swap seam never signalled `pinned`"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    common::eventually(
+        "the mount-swap seam to signal `pinned`",
+        common::SETTLE_BOUND,
+        || rendezvous.join("pinned").exists(),
+    );
     for literal in [".git", ".ouroboros"] {
         assert!(
             workspace.join(literal).is_dir(),

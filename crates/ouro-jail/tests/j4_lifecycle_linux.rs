@@ -13,7 +13,7 @@
 use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ouro_fixture::harness::{self, Jail};
 use ouro_jail::platform::linux::cgroup::ExecutionCgroup;
@@ -34,16 +34,7 @@ fn sleeper() -> Child {
 }
 
 fn exited(child: &mut Child, within: Duration) -> bool {
-    let deadline = Instant::now() + within;
-    loop {
-        if child.try_wait().expect("try_wait").is_some() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    common::within(within, || child.try_wait().expect("try_wait").is_some())
 }
 
 fn members(cgroup_dir: &Path) -> Vec<i32> {
@@ -363,21 +354,17 @@ fn j4_a_contained_runs_watcher_holds_its_leafs_kill_file() {
             receipt["policy"]["digest"].as_str().unwrap(),
         )
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !marker.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(marker.exists(), "the target ran");
+    common::eventually("the target to run", common::STEP_BOUND, || marker.exists());
     assert!(!members(&leaf).is_empty(), "the leaf holds the tree");
     let supervisor = identity::pidfd_open(spawned.pid() as i32).unwrap();
     identity::pidfd_send_signal(supervisor.as_raw_fd(), libc::SIGKILL).unwrap();
     let run = spawned.wait().unwrap();
     assert_eq!(run.signal(), Some(libc::SIGKILL));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !members(&leaf).is_empty() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    let left = members(&leaf);
+    let mut left = Vec::new();
+    let _ = common::within(common::KILL_BOUND, || {
+        left = members(&leaf);
+        left.is_empty()
+    });
     assert!(
         left.is_empty(),
         "processes in the leaf outlived the killed supervisor: {left:?}"

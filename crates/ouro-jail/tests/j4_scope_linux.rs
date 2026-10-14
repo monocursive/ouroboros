@@ -18,7 +18,7 @@
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ouro_fixture::harness::{self, Jail, Run};
 use ouro_jail::platform::linux::cgroup;
@@ -32,6 +32,9 @@ mod common;
 const SEAM: &str = "OURO_JAIL_TEST_SUPERVISOR_SCOPE";
 /// The first component of every unit the step asks for.
 const UNIT_PREFIX: &str = "ouro-jail-";
+/// How long the supervisor's move into its scope may take, and the scope's
+/// end once the supervisor is gone.
+const SCOPE_BOUND: Duration = Duration::from_secs(3);
 
 fn uid() -> u32 {
     // SAFETY: getuid takes no arguments and cannot fail.
@@ -132,20 +135,15 @@ fn assert_leaf(receipt: &Value) {
 }
 
 /// Watch `pid`'s cgroup until it is `<delegated>/app.slice/<unit>` for a unit
-/// this step names for that pid, or `within` passes.
-fn wait_for_scope(pid: u32, within: Duration) -> Option<String> {
+/// this step names for that pid, or [`SCOPE_BOUND`] passes.
+fn wait_for_scope(pid: u32) -> Option<String> {
     let prefix = format!("{}/app.slice/{}{pid}-", delegated(), UNIT_PREFIX);
-    let deadline = Instant::now() + within;
-    while Instant::now() < deadline {
-        if let Some(now) = cgroup_of(pid)
-            && now.starts_with(&prefix)
-            && now.ends_with(".scope")
-        {
-            return Some(now);
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    None
+    let mut moved = None;
+    let _ = common::within(SCOPE_BOUND, || {
+        moved = cgroup_of(pid).filter(|now| now.starts_with(&prefix) && now.ends_with(".scope"));
+        moved.is_some()
+    });
+    moved
 }
 
 fn last_component(cgroup: &str) -> &str {
@@ -175,7 +173,7 @@ fn j4_scope_the_supervisor_enters_its_own_scope_and_its_attempt_gets_a_leaf() {
     .expect("the jail starts");
     let pid = spawned.pid();
     let born = start_time(pid).expect("the supervisor's start time");
-    let moved = wait_for_scope(pid, Duration::from_secs(3));
+    let moved = wait_for_scope(pid);
     // Read while the supervisor still runs its target.
     let after = (start_time(pid), parent_of(pid));
     let members = moved.as_ref().map(|cgroup| {
@@ -223,14 +221,11 @@ fn j4_scope_the_supervisor_enters_its_own_scope_and_its_attempt_gets_a_leaf() {
         "the seam is recorded like every OURO_JAIL_TEST_* variable"
     );
     // The transient scope ends with its last process.
-    let gone = Instant::now() + Duration::from_secs(3);
     let directory = PathBuf::from(format!("{}{moved}", cgroup::CGROUP_ROOT));
-    while directory.exists() && Instant::now() < gone {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        !directory.exists(),
-        "the scope {moved} outlived its supervisor"
+    common::eventually(
+        &format!("the scope {moved} to end with its supervisor"),
+        SCOPE_BOUND,
+        || !directory.exists(),
     );
 }
 

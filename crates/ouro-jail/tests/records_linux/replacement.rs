@@ -467,13 +467,10 @@ fn gc_crash(point: Point) -> Vec<String> {
         return problems;
     };
     // The lifetime watcher ends the dead supervisor's tree; wait for it.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::fs::read_to_string(leaf.join("cgroup.events"))
-        .is_ok_and(|events| events.lines().any(|line| line == "populated 1"))
-        && std::time::Instant::now() < deadline
-    {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let _ = common::within(common::STEP_BOUND, || {
+        !std::fs::read_to_string(leaf.join("cgroup.events"))
+            .is_ok_and(|events| events.lines().any(|line| line == "populated 1"))
+    });
     let crashed = gc_run(&data, &[(state::ABORT_AT_SEAM, label.as_str())]);
     let signal = {
         use std::os::unix::process::ExitStatusExt as _;

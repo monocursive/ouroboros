@@ -103,6 +103,16 @@ pub const POLL: std::time::Duration = std::time::Duration::from_millis(5);
 /// two events.
 pub const SETTLE_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// How long one step of a live run may take: a launcher appearing or
+/// blocking, a marker written, a process ending. Like [`SETTLE_BOUND`], a
+/// bound against a hang, never a way to order two events.
+pub const STEP_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long a tree or a cgroup takes to be gone once it was killed
+/// (`SIGKILL`, `cgroup.kill`) or let go: the kernel acts at once, so this
+/// only absorbs scheduling under load.
+pub const KILL_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Wait until `ready` holds, looking every [`POLL`]; fail the test naming
 /// `what` when `bound` passes first.
 pub fn eventually(what: &str, bound: std::time::Duration, ready: impl FnMut() -> bool) {
@@ -110,6 +120,22 @@ pub fn eventually(what: &str, bound: std::time::Duration, ready: impl FnMut() ->
         within(bound, ready),
         "timed out after {bound:?} waiting for {what}"
     );
+}
+
+/// [`eventually`] for a probe that finds something: wait until `probe`
+/// returns it, looking every [`POLL`], and hand it back; fail the test naming
+/// `what` when `bound` passes first.
+pub fn eventually_some<T>(
+    what: &str,
+    bound: std::time::Duration,
+    mut probe: impl FnMut() -> Option<T>,
+) -> T {
+    let mut found = None;
+    eventually(what, bound, || {
+        found = probe();
+        found.is_some()
+    });
+    found.expect("the wait ended on a probe that found it")
 }
 
 /// Whether `ready` came to hold within `bound`, looking every [`POLL`]: for a

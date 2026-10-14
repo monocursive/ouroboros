@@ -2944,6 +2944,9 @@ os.execv(sys.argv[1], sys.argv[1:])\n";
 /// a second gc has nothing left to do.
 #[test]
 fn review_gc_removes_a_crashed_agent_attempts_proxy_directory() {
+    /// How long the attempt, its proxy and bridge included, may take to be
+    /// enforced.
+    const ENFORCED_BOUND: Duration = Duration::from_secs(30);
     if !common::live() {
         return;
     }
@@ -2956,31 +2959,22 @@ fn review_gc_removes_a_crashed_agent_attempts_proxy_directory() {
     let mut spawned = c.jail.receipt().target(argv).spawn().unwrap();
     let data = spawned.root().join("data");
     let config = spawned.root().join("config");
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let enforced = loop {
-        if let Some(receipt) = spawned
+    let enforced = common::eventually_some("an enforced receipt", ENFORCED_BOUND, || {
+        spawned
             .receipt_value()
             .filter(|receipt| receipt["phase"] == "enforced")
-        {
-            break receipt;
-        }
-        assert!(std::time::Instant::now() < deadline, "never enforced");
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    });
     let bridge = details(&enforced)["helpers"][0]["pid"].as_i64().unwrap();
     let attempt = attempt_of(&data);
     let proxy = attempt.join("proxy");
     spawned.kill().unwrap();
     let run = spawned.wait().unwrap();
     assert_eq!(run.signal(), Some(libc::SIGKILL));
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while Path::new(&format!("/proc/{bridge}")).exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the bridge outlived its supervisor"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    common::eventually(
+        "the bridge to end with its supervisor",
+        common::STEP_BOUND,
+        || !Path::new(&format!("/proc/{bridge}")).exists(),
+    );
     let names = |dir: &Path| -> Vec<String> {
         std::fs::read_dir(dir)
             .map(|entries| {

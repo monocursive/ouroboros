@@ -236,7 +236,10 @@ fn j4_r02_an_exclusive_publication_never_replaces_an_existing_file() {
 fn j4_w3_p1a_work_given_up_mid_write_starts_no_further_step() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    /// How long the worker thread may take to reach the step this test
+    /// waits for.
+    const WORKER_BOUND: Duration = Duration::from_secs(5);
 
     use ouro_jail::state::{PersistIo, Persister, RealIo, Site};
 
@@ -290,24 +293,18 @@ fn j4_w3_p1a_work_given_up_mid_write_starts_no_further_step() {
         job_ended.store(true, Ordering::SeqCst);
         result
     });
-    let until = Instant::now() + Duration::from_secs(5);
-    while seam.writes.load(Ordering::SeqCst) == 0 {
-        assert!(Instant::now() < until, "the job never started writing");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    common::eventually("the job to start writing", WORKER_BOUND, || {
+        seam.writes.load(Ordering::SeqCst) > 0
+    });
     // The waiter gives up while the write is in the kernel, then it returns.
     drop(pending);
     *seam.release.0.lock().unwrap() = true;
     seam.release.1.notify_all();
-    let until = Instant::now() + Duration::from_secs(5);
-    while !ended.load(Ordering::SeqCst) {
-        assert!(
-            Instant::now() < until,
-            "the abandoned job never ended ({} writes)",
-            seam.writes.load(Ordering::SeqCst)
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    assert!(
+        common::within(WORKER_BOUND, || ended.load(Ordering::SeqCst)),
+        "the abandoned job never ended ({} writes)",
+        seam.writes.load(Ordering::SeqCst)
+    );
     assert_eq!(
         seam.writes.load(Ordering::SeqCst),
         1,
