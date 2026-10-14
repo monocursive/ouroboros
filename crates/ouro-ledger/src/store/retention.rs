@@ -43,7 +43,13 @@ impl Store {
         )
     }
 
-    pub fn gc_plan(&self, retain_days: u32, after: Option<&str>, limit: u32) -> Result<GcPlan> {
+    #[cfg(test)]
+    pub(crate) fn gc_plan(
+        &self,
+        retain_days: u32,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<GcPlan> {
         self.gc_plan_policy(Some(retain_days), None, after, limit)
     }
 

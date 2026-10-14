@@ -153,37 +153,6 @@ impl Stream {
 }
 
 impl Store {
-    /// Compatibility endpoint: a single bounded full-record response, never an
-    /// unbounded substitute for the catalog API.
-    pub fn legacy_runs(&self) -> Result<Vec<RunRecord>> {
-        struct Budget(usize);
-        impl std::io::Write for Budget {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                if bytes.len() > self.0 {
-                    return Err(std::io::Error::other(
-                        "legacy runs exceeds response bound; use catalog pagination",
-                    ));
-                }
-                self.0 -= bytes.len();
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        if self.streams.len() > MAX_CATALOG_LIMIT as usize {
-            return Err(LedgerError(
-                "legacy runs exceeds run count bound; use catalog pagination".into(),
-            ));
-        }
-        let mut budget = Budget(READ_OUTPUT_BYTES);
-        for stream in self.streams.values() {
-            serde_json::to_writer(&mut budget, &stream.run)?;
-            serde_json::to_writer(&mut budget, &poison_details(&stream.poisoned))?;
-        }
-        Ok(self.runs())
-    }
-
     pub fn catalog(&self, request: &CatalogRequest) -> Result<CatalogPage> {
         validate_filter(&request.filter)?;
         if !(1..=MAX_CATALOG_LIMIT).contains(&request.limit) {
@@ -546,14 +515,13 @@ mod tests {
     }
 
     #[test]
-    fn catalog_omits_large_receipts_while_legacy_response_and_catalog_scan_are_bounded() {
+    fn catalog_omits_large_receipts_and_bounds_its_scan() {
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(&temp.path().join("data")).unwrap();
         let run = store.prepare("bounded", &payload(), &peer()).unwrap();
         let template = store.streams[&run.run_id].clone();
         store.streams.get_mut(&run.run_id).unwrap().run.receipts =
             vec![json!({"large":"x".repeat(131072)})];
-        assert!(store.legacy_runs().is_err());
         assert_eq!(store.catalog(&request()).unwrap().runs.len(), 1);
         store.streams.clear();
         for i in 0..=MAX_CATALOG_RUNS {

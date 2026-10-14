@@ -268,23 +268,6 @@ struct Position {
 
 /// Every invocation verifies both streams afresh. Output pagination binds the
 /// two heads and run order; a changed head refuses rather than mixing snapshots.
-pub fn compare(
-    client: &mut Client,
-    left: &str,
-    right: &str,
-    after: Option<&str>,
-    limit: u32,
-) -> Result<Value> {
-    compare_mode(
-        client,
-        left,
-        right,
-        after,
-        limit,
-        ComparisonMode::EventCounts,
-    )
-}
-
 pub fn compare_mode(
     client: &mut Client,
     left: &str,

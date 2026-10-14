@@ -443,7 +443,8 @@ pub(super) fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
 }
 
 impl Store {
-    pub fn gc(
+    #[cfg(test)]
+    pub(crate) fn gc(
         &mut self,
         retain_days: u32,
         after: Option<&str>,

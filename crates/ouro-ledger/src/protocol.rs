@@ -433,7 +433,6 @@ pub enum Request {
     ShowWithTranscript {
         run_id: String,
     },
-    Runs,
     Catalog {
         request: CatalogRequest,
     },

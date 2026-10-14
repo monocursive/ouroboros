@@ -409,6 +409,29 @@ impl Fixture {
         Client::connect(&self.data).unwrap()
     }
 
+    /// Every run's projection, through the paginated catalog.
+    fn runs(&self) -> Vec<RunRecord> {
+        let mut client = self.client();
+        let mut runs = Vec::new();
+        let mut after = None;
+        loop {
+            let page = client
+                .catalog(&ouro_ledger::protocol::CatalogRequest {
+                    filter: Default::default(),
+                    after: after.take(),
+                    limit: 100,
+                })
+                .unwrap();
+            for summary in &page.runs {
+                runs.push(client.show(&summary.run_id).unwrap());
+            }
+            if page.done {
+                return runs;
+            }
+            after = page.next_after;
+        }
+    }
+
     fn events(&self, record: &RunRecord) -> Vec<Value> {
         fs::read(
             self.data
@@ -427,7 +450,7 @@ impl Fixture {
         let deadline = Instant::now() + COMMAND_LIMIT;
         loop {
             if self.workspace.join("started").exists() {
-                let runs = self.client().runs().unwrap();
+                let runs = self.runs();
                 assert_eq!(runs.len(), 1);
                 assert_eq!(
                     runs[0].state, "admitted",
@@ -750,7 +773,7 @@ fn invalid_inherited_stdout_is_denied_before_admission_and_never_executes() {
         .stderr(Stdio::piped());
     let first = Process::from_child(command.spawn().unwrap(), false).finish();
     assert_eq!(first.status.code(), Some(125));
-    let runs = fixture.client().runs().unwrap();
+    let runs = fixture.runs();
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
     assert_eq!(run.state, "denied");
@@ -1300,7 +1323,7 @@ fn an_unread_foreground_terminal_stops_forwarding_but_not_the_run() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(started.elapsed() < COMMAND_LIMIT);
-    let runs = fixture.client().runs().unwrap();
+    let runs = fixture.runs();
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
     assert_eq!(run.state, "settled");
@@ -1564,7 +1587,7 @@ fn detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt() {
         fs::read(fixture.workspace.join("executions")).unwrap(),
         b"x"
     );
-    assert_eq!(fixture.client().runs().unwrap().len(), 1);
+    assert_eq!(fixture.runs().len(), 1);
 }
 
 #[test]
@@ -1659,7 +1682,7 @@ fn detached_mode_refuses_a_session_bound_existing_writer() {
     let output = Process::spawn(&mut command, true).finish();
     assert!(!output.status.success());
     assert!(!fixture.workspace.join("must-not-execute").exists());
-    assert!(fixture.client().runs().unwrap().is_empty());
+    assert!(fixture.runs().is_empty());
 }
 
 #[test]

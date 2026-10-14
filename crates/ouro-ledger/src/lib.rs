@@ -1,7 +1,7 @@
 //! A local writer and an independent launch owner around the jail's existing protocol.
 pub mod bundle;
 pub mod comparison;
-pub mod config;
+mod config;
 pub mod daemon;
 pub mod discovery;
 #[cfg(test)]

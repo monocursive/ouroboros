@@ -715,7 +715,20 @@ fn locked_disposable_index_does_not_delay_the_next_daemon_request() {
         "retry keeps the original identities and receipt while the index stays locked"
     );
     assert_eq!(
-        serde_json::to_value(client.runs().unwrap()).unwrap(),
+        serde_json::to_value(
+            client
+                .catalog(&ouro_ledger::protocol::CatalogRequest {
+                    filter: Default::default(),
+                    after: None,
+                    limit: 100,
+                })
+                .unwrap()
+                .runs
+                .iter()
+                .map(|summary| client.show(&summary.run_id).unwrap())
+                .collect::<Vec<_>>()
+        )
+        .unwrap(),
         json!([original])
     );
     assert_eq!(original.chain.head_seq, 1);

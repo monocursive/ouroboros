@@ -192,8 +192,25 @@ impl Client {
             run_id: run_id.into(),
         })
     }
-    pub fn runs(&mut self) -> Result<Vec<RunRecord>> {
-        self.request(Request::Runs)
+    /// Every run's projection, through the paginated catalog.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn runs(&mut self) -> Result<Vec<RunRecord>> {
+        let mut runs = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.catalog(&CatalogRequest {
+                filter: Default::default(),
+                after: after.take(),
+                limit: crate::discovery::MAX_CATALOG_LIMIT,
+            })?;
+            for summary in &page.runs {
+                runs.push(self.show(&summary.run_id)?);
+            }
+            if page.done {
+                return Ok(runs);
+            }
+            after = page.next_after;
+        }
     }
     pub fn catalog(&mut self, request: &CatalogRequest) -> Result<CatalogPage> {
         self.request(Request::Catalog {
@@ -245,15 +262,6 @@ impl Client {
             request_id: request_id.into(),
         })
     }
-    pub fn gc_plan(&mut self, retain_days: u32, after: Option<&str>, limit: u32) -> Result<GcPlan> {
-        self.request(Request::Gc {
-            dry_run: true,
-            retain_days: Some(retain_days),
-            capture_retain_days: None,
-            after: after.map(str::to_owned),
-            limit,
-        })
-    }
     pub fn gc_plan_policy(
         &mut self,
         retain_days: Option<u32>,
@@ -280,15 +288,6 @@ impl Client {
             dry_run: false,
             retain_days,
             capture_retain_days,
-            after: after.map(str::to_owned),
-            limit,
-        })
-    }
-    pub fn gc(&mut self, retain_days: u32, after: Option<&str>, limit: u32) -> Result<GcResult> {
-        self.request(Request::Gc {
-            dry_run: false,
-            retain_days: Some(retain_days),
-            capture_retain_days: None,
             after: after.map(str::to_owned),
             limit,
         })
@@ -612,7 +611,6 @@ fn dispatch(
         }
         Request::Show { run_id } => Ok(serde_json::to_value(store.show(&run_id)?)?),
         Request::ShowWithTranscript { run_id } => store.show_with_transcript(&run_id),
-        Request::Runs => Ok(serde_json::to_value(store.legacy_runs()?)?),
         Request::Catalog { request } => Ok(serde_json::to_value(store.catalog(&request)?)?),
         Request::Discover { request } => Ok(serde_json::to_value(store.discover(&request)?)?),
         Request::Verify {
