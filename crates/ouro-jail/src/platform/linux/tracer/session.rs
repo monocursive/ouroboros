@@ -78,8 +78,8 @@ use super::closed_set::{self, ClosedOp, Entry, FlagSource};
 use super::proc;
 use super::sys::{self, Wait};
 use super::{
-    Args, GapReason, OpSet, PathSnapshot, SockaddrSnapshot, TracerConfig, TracerError, TracerEvent,
-    TracerSummary, elapsed_since, event_bytes,
+    Args, GapReason, KernelImage, OpSet, PathSnapshot, ShebangImage, SockaddrSnapshot,
+    TracerConfig, TracerError, TracerEvent, TracerSummary, elapsed_since, event_bytes,
 };
 use crate::platform::linux::{abi, seccomp};
 
@@ -140,12 +140,23 @@ pub(super) trait ProcView: Send {
     fn cmdline(&self, tid: pid_t) -> Option<Vec<u8>> {
         proc::cmdline_bytes(tid)
     }
-    /// The raw `/proc/<tid>/exe` link bytes (audit 6 N2).
-    fn exe(&self, tid: pid_t) -> Option<Vec<u8>> {
-        use std::os::unix::ffi::OsStrExt as _;
-        std::fs::read_link(format!("/proc/{tid}/exe"))
+    /// The image the kernel loaded for `tid` (`/proc/<tid>/exe`, raw, with
+    /// its identity) and each of `images`' identity in the tracee's root
+    /// (audit 3 A1, audit 4 B3).
+    fn kernel_image(&self, tid: pid_t, images: &[Vec<u8>]) -> Option<KernelImage> {
+        proc::kernel_exe(tid, images)
+    }
+    /// The `#!` or `binfmt_misc` interpreter a target candidate would load
+    /// (audit 2026-10-08 H2).
+    fn script_image(&self, tid: pid_t, candidate: &[u8]) -> Option<ShebangImage> {
+        proc::shebang_image(tid, candidate).or_else(|| proc::binfmt_image(tid, candidate))
+    }
+    /// The raw `/proc/<tid>/cwd` link bytes (§11.3).
+    fn cwd(&self, tid: pid_t) -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStringExt as _;
+        std::fs::read_link(format!("/proc/{tid}/cwd"))
             .ok()
-            .map(|link| link.as_os_str().as_bytes().to_vec())
+            .map(|link| link.into_os_string().into_vec())
     }
     /// The raw `/proc/<tid>/fd/<fd>` link bytes (audit 6 N1).
     fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>> {
@@ -737,6 +748,64 @@ fn exec_recheck(
     rules
         .check(Some(kernel), claimed)
         .or_else(|| rules.check(Some(kernel), image))
+}
+
+/// What the kernel shows of an exec at its event stop, read once while the
+/// tracee is stopped there: the new image has run no instruction and the
+/// exec has already destroyed every other thread, so nothing changes it
+/// between these reads and the kernel's own decision.
+struct ExecEvidence {
+    /// The image the kernel loaded (audit 3 A1), with the target candidates'
+    /// identities. `None` when the link could not be read.
+    image: Option<KernelImage>,
+    /// The kernel's copy of the new argv (audit 6 N2). `None` when nothing
+    /// needed it or it could not be read.
+    argv: Option<Vec<Vec<u8>>>,
+    /// The `#!` evidence per target candidate (audit 2026-10-08 H2); empty
+    /// unless this is the target's exec and its image could be read.
+    scripts: Vec<Option<ShebangImage>>,
+}
+
+impl ExecEvidence {
+    /// Read what this exec needs, each file once. `images` are the target's
+    /// candidates (empty for any other process); `rejudge` says the command
+    /// rules will re-check the exec against the kernel's argv and image.
+    fn read(procfs: &dyn ProcView, tid: pid_t, images: &[Vec<u8>], rejudge: bool) -> ExecEvidence {
+        let image = procfs.kernel_image(tid, images);
+        // A `#!` target loads the interpreter its script names, so the
+        // kernel image is not one of the target's own spellings: the first
+        // line of each candidate and the kernel's argv are the evidence of
+        // that rewrite. Only the target's own exec pays for them.
+        let script = image.is_some() && !images.is_empty();
+        let argv = if rejudge || script {
+            procfs.cmdline(tid).as_deref().and_then(proc::parse_cmdline)
+        } else {
+            None
+        };
+        let scripts = if script {
+            images
+                .iter()
+                .map(|candidate| procfs.script_image(tid, candidate))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        ExecEvidence {
+            image,
+            argv,
+            scripts,
+        }
+    }
+
+    /// The kernel's argv as the exec event carries it: only beside the `#!`
+    /// evidence it confirms a script target with.
+    fn event_argv(&self) -> Option<Vec<Vec<u8>>> {
+        if self.scripts.is_empty() {
+            None
+        } else {
+            self.argv.clone()
+        }
+    }
 }
 
 struct Session {
@@ -1587,7 +1656,8 @@ impl Session {
         let mut path = None;
         let mut dirfd = None;
         let mut syscall = None;
-        let mut command = None;
+        // The argv the entry-stop check judged, when the rules re-judge it.
+        let mut rejudge: Option<Vec<Vec<u8>>> = None;
         if let Some(task) = self.tasks.get_mut(&tid) {
             if let Some((pending, site)) = carried {
                 task.pending = Some(pending);
@@ -1607,28 +1677,8 @@ impl Session {
                 // argv and of the image are re-checked ([`exec_recheck`]).
                 // An entry the rules already denied never reaches this stop.
                 if !self.config.commands.is_empty() && pending.args.command.is_none() {
-                    let kernel_argv = self
-                        .procfs
-                        .cmdline(tid)
-                        .as_deref()
-                        .and_then(proc::parse_cmdline);
-                    let image = self.procfs.exe(tid);
-                    command = exec_recheck(
-                        &self.config.commands,
-                        pending.entry_argv.as_deref().unwrap_or(&[]),
-                        kernel_argv.as_deref(),
-                        pending.args.path.as_ref().map(|p| p.bytes.as_slice()),
-                        image.as_deref(),
-                    )
-                    .map(Box::new);
+                    rejudge = Some(pending.entry_argv.clone().unwrap_or_default());
                 }
-            }
-            if command.is_some() {
-                // The exec was observed whole and its event carries the
-                // verdict, so its entry leaves flight here: the death that
-                // follows has no call to abandon.
-                task.pending = None;
-                self.release_slot();
             }
         }
         // Security 2026-09-27 (audit 3 A1): the kernel has already installed
@@ -1643,49 +1693,50 @@ impl Session {
             .as_ref()
             .filter(|(pid, _)| *pid == tgid)
             .map_or(&[][..], |(_, images)| images.as_slice());
-        let kernel_image = proc::kernel_exe(tid, images);
-        // Audit 2026-10-08 H2: a `#!` target loads the interpreter its
-        // script names, so the kernel image is not one of the target's own
-        // spellings. The evidence for that rewrite — each candidate's first
-        // line read through the tracee's root, and the kernel's own copy of
-        // the new argv — is read in this same stopped window; the
-        // confirmation decision stays with the observer, which already owns
-        // the kernel image's.
-        let (shebangs, kernel_argv) = if kernel_image.is_some() && !images.is_empty() {
-            (
-                images
-                    .iter()
-                    .map(|candidate| {
-                        proc::shebang_image(tid, candidate)
-                            .or_else(|| proc::binfmt_image(tid, candidate))
-                    })
-                    .collect(),
-                self.procfs
-                    .cmdline(tid)
-                    .as_deref()
-                    .and_then(proc::parse_cmdline),
-            )
-        } else {
-            (Vec::new(), None)
-        };
-        if command.is_some() && !Self::kill_tracee(tid) {
-            // The hit is live: the process dies before its image runs an
-            // instruction — after the image was read above, so the event
-            // keeps the kernel's evidence — and the event records the verdict
-            // and stops the run for a `forbid`. A kill that could not be sent
-            // leaves the image free to run, which the gap says.
-            self.exec_denial_failed();
+        let evidence = ExecEvidence::read(&*self.procfs, tid, images, rejudge.is_some());
+        let command = rejudge
+            .and_then(|entry_argv| {
+                exec_recheck(
+                    &self.config.commands,
+                    &entry_argv,
+                    evidence.argv.as_deref(),
+                    path.as_ref().map(|p| p.bytes.as_slice()),
+                    evidence.image.as_ref().map(|image| image.path.as_slice()),
+                )
+            })
+            .map(Box::new);
+        if command.is_some() {
+            // The exec was observed whole and its event carries the verdict,
+            // so its entry leaves flight here: the death that follows has no
+            // call to abandon.
+            if self
+                .tasks
+                .get_mut(&tid)
+                .and_then(|task| task.pending.take())
+                .is_some()
+            {
+                self.release_slot();
+            }
+            if !Self::kill_tracee(tid) {
+                // The hit is live: the process dies before its image runs an
+                // instruction — after its evidence was read above, so the
+                // event keeps it — and the event records the verdict and
+                // stops the run for a `forbid`. A kill that could not be
+                // sent leaves the image free to run, which the gap says.
+                self.exec_denial_failed();
+            }
         }
+        let kernel_argv = evidence.event_argv();
         let start_ticks = self.birth_of(tgid);
         self.emit(TracerEvent::Exec {
             pid: tgid,
             start_ticks,
             syscall,
             path,
-            kernel_image,
+            kernel_image: evidence.image,
             dirfd,
             command,
-            shebangs,
+            shebangs: evidence.scripts,
             kernel_argv,
         });
     }
@@ -2804,7 +2855,7 @@ impl Session {
         // the thread's own cwd is resolved against that cwd at
         // classification; the snapshot itself stays the raw argument, so the
         // exit-side stability check compares what the tracee still holds.
-        args.cwd = Self::observed_cwd(tid, args.path.as_ref(), args.path2.as_ref());
+        args.cwd = self.observed_cwd(tid, args.path.as_ref(), args.path2.as_ref());
         if let Some((ptr, len)) = entry.sockaddr {
             let (snapshot, unreadable) =
                 self.read_sockaddr(tid, raw[ptr as usize], raw[len as usize]);
@@ -2829,11 +2880,11 @@ impl Session {
     /// the kernel resolves against it (§11.3). The true dirfd cases
     /// resolve against their descriptor instead and read nothing.
     fn observed_cwd(
+        &self,
         tid: pid_t,
         path: Option<&PathSnapshot>,
         path2: Option<&PathSnapshot>,
     ) -> Option<Box<[u8]>> {
-        use std::os::unix::ffi::OsStringExt as _;
         let relative = |snapshot: Option<&PathSnapshot>| {
             snapshot.is_some_and(|snapshot| {
                 snapshot.complete && snapshot.bytes.first().is_some_and(|byte| *byte != b'/')
@@ -2842,11 +2893,12 @@ impl Session {
         if !relative(path) && !relative(path2) {
             return None;
         }
-        std::fs::read_link(format!("/proc/{tid}/cwd"))
-            .ok()
-            .map(|link| link.into_os_string().into_vec().into_boxed_slice())
+        self.procfs
+            .cwd(tid)
             .filter(|bytes| bytes.first() == Some(&b'/'))
+            .map(Vec::into_boxed_slice)
     }
+
     /// A NUL-terminated pathname argument, bounded by `path_snapshot_max`.
     ///
     /// `complete` is false when the bytes ran out before a NUL or when the
@@ -2971,7 +3023,9 @@ impl Session {
         // for — the backend and any child gained after it attached; a child
         // it was attached beside is its owner's to wait for once this ends.
         let unreaped: Vec<pid_t> = match self.owed {
-            Owed::Every => proc::children(sys::getpid())
+            Owed::Every => self
+                .procfs
+                .children(sys::getpid())
                 .into_iter()
                 .filter(|pid| !self.tasks.contains_key(pid))
                 .collect(),
@@ -4986,6 +5040,16 @@ mod tests {
         cmdline: HashMap<pid_t, Vec<u8>>,
         exe: HashMap<pid_t, Vec<u8>>,
         fds: HashMap<(pid_t, i64), Vec<u8>>,
+        /// `#!` lines by candidate path.
+        scripts: HashMap<Vec<u8>, ShebangImage>,
+        /// How many times each `/proc` file was read, by name.
+        reads: Arc<std::sync::Mutex<HashMap<&'static str, usize>>>,
+    }
+
+    impl Kernel {
+        fn read(&self, file: &'static str) {
+            *self.reads.lock().unwrap().entry(file).or_default() += 1;
+        }
     }
 
     impl ProcView for Kernel {
@@ -4999,10 +5063,26 @@ mod tests {
             Vec::new()
         }
         fn cmdline(&self, tid: pid_t) -> Option<Vec<u8>> {
+            self.read("cmdline");
             self.cmdline.get(&tid).cloned()
         }
-        fn exe(&self, tid: pid_t) -> Option<Vec<u8>> {
-            self.exe.get(&tid).cloned()
+        fn kernel_image(&self, tid: pid_t, images: &[Vec<u8>]) -> Option<KernelImage> {
+            self.read("exe");
+            self.exe.get(&tid).map(|path| KernelImage {
+                path: path.clone(),
+                identity: None,
+                candidates: images
+                    .iter()
+                    .map(|path| super::super::CandidateImage {
+                        path: path.clone(),
+                        identity: None,
+                    })
+                    .collect(),
+            })
+        }
+        fn script_image(&self, _tid: pid_t, candidate: &[u8]) -> Option<ShebangImage> {
+            self.read("script");
+            self.scripts.get(candidate).cloned()
         }
         fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>> {
             self.fds.get(&(tid, fd)).cloned()
@@ -5359,6 +5439,87 @@ mod tests {
                 .any(|event| matches!(event, TracerEvent::Syscall { .. })),
             "no result is invented for a call whose return was never written"
         );
+    }
+
+    /// The exec stop reads the kernel's evidence once, through the `/proc`
+    /// seam: the command rules' re-check and the `#!` confirmation share
+    /// one read of the image link and one of the argv, and the event carries
+    /// what they were judged on.
+    #[test]
+    fn the_exec_evidence_is_read_once_and_carried_whole() {
+        const EXECER: pid_t = RECYCLED;
+        let reads = Arc::default();
+        let script = ShebangImage {
+            interpreter: b"/bin/sh".to_vec(),
+            argument: None,
+            identity: None,
+        };
+        let (mut session, rx) = kernel_session(
+            TracerConfig {
+                target: Some((EXECER, vec![b"/w/build.sh".to_vec()])),
+                commands: crate::commands::Rules {
+                    deny: vec!["git push".into()],
+                    forbid: Vec::new(),
+                },
+                ..TracerConfig::default()
+            },
+            Kernel {
+                tasks: [(EXECER, EXECER)].into(),
+                cmdline: [(EXECER, b"/bin/sh\0/w/build.sh\0".to_vec())].into(),
+                exe: [(EXECER, b"/usr/bin/dash".to_vec())].into(),
+                scripts: [(b"/w/build.sh".to_vec(), script.clone())].into(),
+                reads: Arc::clone(&reads),
+                ..Kernel::default()
+            },
+        );
+        session.tasks.get_mut(&EXECER).unwrap().pending = Some(InFlight::Closed(Pending {
+            entry: closed_set::lookup(libc::SYS_execve as u64).expect("execve"),
+            args: Args {
+                path: Some(PathSnapshot {
+                    bytes: b"/w/build.sh".to_vec(),
+                    complete: true,
+                }),
+                ..Args::default()
+            },
+            exec_confirmed: false,
+            path_unreadable: false,
+            path2_unreadable: false,
+            sockaddr_unreadable: false,
+            flags_unavailable: false,
+            raw: [0; 6],
+            entry_argv: Some(vec![b"/w/build.sh".to_vec()]),
+        }));
+        session.inflight += 1;
+        session.exec_transition(EXECER, EXECER);
+        assert_eq!(
+            *reads.lock().unwrap(),
+            HashMap::from([("exe", 1), ("cmdline", 1), ("script", 1)]),
+            "each file read once at the stop"
+        );
+        let events = drained(&rx, &mut session);
+        let Some(TracerEvent::Exec {
+            kernel_image,
+            command,
+            shebangs,
+            kernel_argv,
+            ..
+        }) = events
+            .iter()
+            .find(|event| matches!(event, TracerEvent::Exec { .. }))
+        else {
+            panic!("the exec event: {events:?}");
+        };
+        assert_eq!(
+            kernel_image.as_ref().map(|image| image.path.as_slice()),
+            Some(&b"/usr/bin/dash"[..])
+        );
+        assert_eq!(shebangs, &vec![Some(script)]);
+        assert_eq!(
+            kernel_argv.as_deref(),
+            Some(&[b"/bin/sh".to_vec(), b"/w/build.sh".to_vec()][..])
+        );
+        assert!(command.is_none(), "a script rewrite is not a hit");
+        assert_eq!(session.inflight, 1, "the exec's own exit is still owed");
     }
 
     /// Audit-6 review: the process an exec-time hit kills leaves flight at
