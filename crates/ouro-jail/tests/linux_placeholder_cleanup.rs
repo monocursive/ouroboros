@@ -126,7 +126,7 @@ fn a_workspace_past_the_receipt_mount_bound_is_refused_as_configuration() {
     // The 1100 nested `.git`, and `.git` and `.ouroboros` at the root of the
     // workspace and of the managed scratch, held by placeholders.
     assert!(
-        message.contains("holds 1104 protected segments")
+        message.contains("hold 1104 protected segments")
             && message.contains("would hold at least")
             && message.contains("1024"),
         "{message}"

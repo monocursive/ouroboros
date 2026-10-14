@@ -3115,9 +3115,10 @@ fn refuse_unrecordable_mounts(
         ErrorStage::Preparing,
         Remediation::Configuration,
         format!(
-            "the workspace holds {} protected segments, each bound read-only, so the boundary \
-             would hold at least {rows} mounts, more than the {MOUNT_TABLE_ROWS_MAX} a receipt's \
-             mount table records; run over a narrower workspace",
+            "the writable roots (workspace, scratch and read-write grants) hold {} protected \
+             segments, each bound read-only, so the boundary would hold at least {rows} mounts, \
+             more than the {MOUNT_TABLE_ROWS_MAX} a receipt's mount table records; run over a \
+             narrower workspace",
             segments + plan.placeholders.len() + hidden
         ),
     ))
@@ -5918,7 +5919,7 @@ mod tests {
         assert_eq!(error.stage, ErrorStage::Preparing);
         assert_eq!(error.remediation, Remediation::Configuration);
         assert!(
-            error.message.contains("1100 protected segments")
+            error.message.contains("hold 1100 protected segments")
                 && error
                     .message
                     .contains(&format!("at least {} mounts", fixed + 1100))
