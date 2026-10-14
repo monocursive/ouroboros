@@ -3,6 +3,8 @@ defmodule OuroFleet.Worker do
   use GenServer
   alias OuroFleet.{Command, InvalidRequest, Protocol, Reader, Request, Store}
 
+  # States the ledger never leaves: it refuses every transition out of them.
+  @terminal ["settled", "denied", "outcome_unknown"]
   # The longest any one ledger subprocess may run.
   @command_timeout 60_000
 
@@ -12,7 +14,11 @@ defmodule OuroFleet.Worker do
   def init(config) do
     path = Store.directory!(Path.join(config["state"], "attempts"))
     scratch = Store.directory!(Path.join(config["state"], "scratch"))
-    {:ok, Map.merge(config, %{"attempts" => path, "scratch" => scratch}), {:continue, :reconcile}}
+    # Job ids whose run this process has seen terminal. Private to this process and
+    # rebuilt by the first scan after a restart.
+    terminal = :ets.new(__MODULE__, [:set, :private])
+    state = %{"attempts" => path, "scratch" => scratch, "terminal" => terminal}
+    {:ok, Map.merge(config, state), {:continue, :reconcile}}
   end
 
   def handle_continue(:reconcile, config) do
@@ -69,15 +75,17 @@ defmodule OuroFleet.Worker do
              ["run"] ++
                Request.policy(request, workspace) ++ ["--label-only", "--"] ++ request["argv"]
            ),
-         {:ok, resolved, 0} <- launch_command(config, key, request, workspace, ["--plan-only"]) do
+         {:ok, resolved, 0} <- launch_command(config, key, request, workspace, ["--plan-only"]),
+         {:ok, active} <- active(config) do
       {:ok,
        %{
          "resolved" => resolved,
          "workspace" => workspace,
          "label" => label,
-         "active" => active(config)
+         "active" => active
        }}
     else
+      {:error, "attempt_catalog_exceeds_bounded_scan"} = refused -> refused
       _ -> {:error, "worker_required_capability_unavailable"}
     end
   end
@@ -173,16 +181,16 @@ defmodule OuroFleet.Worker do
     if Enum.any?(Map.values(records), &match?(%{"run_id" => run} when not is_nil(run), &1)),
       do: bounded(config, ["settle-orphans", "--json"], deadline)
 
-    Map.new(records, fn {key, record} -> {key, status(config, record, deadline)} end)
+    Map.new(records, fn {key, record} -> {key, status(config, key, record, deadline)} end)
   end
 
   defp reservation(config, key),
     do: if(Request.job?(key), do: Store.read!(checkpoint(config, key)), else: :invalid)
 
-  defp status(_config, :invalid, _deadline), do: {:error, "invalid_request"}
-  defp status(_config, nil, _deadline), do: {:error, "attempt_not_reserved"}
+  defp status(_config, _key, :invalid, _deadline), do: {:error, "invalid_request"}
+  defp status(_config, _key, nil, _deadline), do: {:error, "attempt_not_reserved"}
 
-  defp status(_config, %{"run_id" => nil} = record, _deadline) do
+  defp status(_config, _key, %{"run_id" => nil} = record, _deadline) do
     {:ok,
      Map.merge(record, %{
        "state" => "prepared",
@@ -191,31 +199,50 @@ defmodule OuroFleet.Worker do
      })}
   end
 
-  defp status(config, record, deadline) do
-    case bounded(config, ["show", record["run_id"], "--json"], deadline) do
-      {:ok, run, 0} -> {:ok, render(record, run)}
+  defp status(config, key, record, deadline) do
+    case show(config, key, record["run_id"], deadline) do
+      {:ok, run} -> {:ok, render(record, run)}
       :exhausted -> {:error, "status_budget_exhausted"}
       _ -> {:error, "ledger_unavailable_outcome_unknown"}
     end
   end
 
+  # Attempts that may still be running. A run once seen terminal is not read again, so
+  # a plan reads the ledger for live and unknown attempts rather than for all history.
+  # An attempt the ledger does not answer for counts as active.
   defp active(config) do
     attempts = Path.wildcard(Path.join(config["attempts"], "job_*.json"))
-    if length(attempts) > 4096, do: raise("attempt catalog exceeds bounded scan")
 
-    attempts
-    |> Enum.count(fn path ->
-      case Store.read!(path) do
-        %{"run_id" => run} when is_binary(run) ->
-          case command(config, ["show", run, "--json"]) do
-            {:ok, row, 0} -> row["state"] not in ["settled", "denied", "outcome_unknown"]
-            _ -> true
-          end
+    if length(attempts) > 4096 do
+      {:error, "attempt_catalog_exceeds_bounded_scan"}
+    else
+      {:ok,
+       Enum.count(attempts, fn path ->
+         key = Path.basename(path, ".json")
+         not :ets.member(config["terminal"], key) and live?(config, key, path)
+       end)}
+    end
+  end
 
-        _ ->
-          true
-      end
-    end)
+  defp live?(config, key, path) do
+    case Store.read!(path) do
+      %{"run_id" => run} when is_binary(run) ->
+        case show(config, key, run, :infinity) do
+          {:ok, row} -> row["state"] not in @terminal
+          _ -> true
+        end
+
+      _ ->
+        true
+    end
+  end
+
+  # One ledger read of a run. A terminal state is remembered for `active/1`.
+  defp show(config, key, run, deadline) do
+    with {:ok, row, 0} <- bounded(config, ["show", run, "--json"], deadline) do
+      if row["state"] in @terminal, do: :ets.insert(config["terminal"], {key})
+      {:ok, row}
+    end
   end
 
   defp bounded(config, args, :infinity), do: command(config, args)

@@ -69,6 +69,26 @@ defmodule OuroFleet.WorkerTest do
     assert Enum.any?(ledger_calls(context.log), &(&1 =~ " --profile tool "))
   end
 
+  test "placement reads a run's ledger state until it is terminal, then no more", context do
+    attempt(context.root, "c", "run-done")
+    attempt(context.root, "d", "run-live")
+    attempt(context.root, "e", nil)
+    key = "job_" <> String.duplicate("a", 64)
+
+    request = %{
+      "schema" => "ouro.fleet.request/1",
+      "request_id" => "place",
+      "argv" => ["/bin/true"]
+    }
+
+    # The live run and the attempt without a run count; the settled run does not.
+    assert {:ok, %{"active" => 2}} = Worker.call({:plan, key, request})
+    assert {:ok, %{"active" => 2}} = Worker.call({:plan, key, request})
+    calls = ledger_calls(context.log)
+    assert Enum.count(calls, &(&1 =~ " show run-done ")) == 1
+    assert Enum.count(calls, &(&1 =~ " show run-live ")) == 2
+  end
+
   test "a status batch settles once, reads each run once, and marks what it did not read",
        context do
     done = attempt(context.root, "c", "run-done")
