@@ -19,13 +19,30 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
-use crate::cli::ExecVia;
-use crate::ops::{Usage, close_fd, do_exec, image, raw_errno, sleep_ms, spawn_exec};
+use crate::cli::{ExecVia, PerfMode};
+use crate::ops::exec::{do_exec, image, spawn_exec};
+use crate::ops::process::sleep_ms;
+use crate::ops::{Usage, close_fd, raw_errno};
 use crate::raw::{self, Attempt};
 use crate::report::{OpReport, Reporter, path_value};
 
 /// The identifier of a [`PerfLaunchResult`].
 pub const PERF_LAUNCH_SCHEMA: &str = "ouro.fixture.perf-launch/2";
+
+/// Run one performance mode.
+pub(crate) fn run(rep: &Reporter, mode: PerfMode) -> Result<bool, Usage> {
+    match mode {
+        PerfMode::Fileops { rounds, dir } => fileops(rep, rounds, &dir),
+        PerfMode::SpawnTree { count, argv } => spawn_tree(rep, count, &argv),
+        PerfMode::PerfLaunch {
+            out,
+            data_dir,
+            sample_ms,
+            deadline_ms,
+            argv,
+        } => perf_launch(&out, data_dir.as_deref(), sample_ms, deadline_ms, &argv),
+    }
+}
 
 /// An `Option` that must be present, as `null` or a value: serde otherwise
 /// reads a missing `Option` field as `None`, so a renamed key would read as

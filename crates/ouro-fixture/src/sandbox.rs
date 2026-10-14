@@ -26,7 +26,8 @@
 use std::ffi::OsString;
 
 use crate::cli::ExecVia;
-use crate::ops::{Session, Usage, argv_report, do_exec, finish, image};
+use crate::ops::exec::{argv_report, do_exec, image};
+use crate::ops::{Session, Usage, finish};
 use crate::report::{Emitted, Expect, OpReport, Reporter};
 
 // ------------------------------------------------------------- the syscalls

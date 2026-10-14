@@ -1,5 +1,5 @@
-//! Network modes: unconnected UDP, a DNS query, and a minimal HTTP/1.1 client
-//! that honours the proxy variables.
+//! Network modes: a connect to a numeric address, unconnected UDP, a DNS
+//! query, and a minimal HTTP/1.1 client that honours the proxy variables.
 //!
 //! Every socket-level call (`socket`, `connect`, `sendto`) goes through
 //! [`crate::raw`] and gets its own report line, so a tracer or a seccomp
@@ -26,6 +26,7 @@ use std::os::unix::ffi::OsStrExt;
 use serde_json::Value;
 
 use crate::bounded::{self, Deadline, IoFail};
+use crate::cli::NetMode;
 use crate::ops::{Usage, finish};
 use crate::raw;
 use crate::report::{Emitted, Expect, OpReport, Reporter};
@@ -37,6 +38,52 @@ pub const MAX_UDP_BYTES: usize = 1 << 20;
 pub const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// Largest body the HTTP client counts before it stops reading.
 pub const MAX_BODY_BYTES: u64 = 16 << 20;
+
+/// Run one network mode.
+pub(crate) fn run(rep: &Reporter, mode: NetMode) -> Result<bool, Usage> {
+    match mode {
+        NetMode::Connect { addr, udp, expect } => connect(rep, &addr, udp, &expect),
+        NetMode::UdpSendto {
+            addr,
+            bytes,
+            expect,
+        } => udp_sendto(rep, &addr, bytes, &expect),
+        NetMode::DnsQuery {
+            resolver,
+            name,
+            timeout_ms,
+            expect,
+        } => dns_query(rep, &resolver, &name, timeout_ms, &expect),
+        NetMode::HttpGet {
+            url,
+            no_proxy,
+            host_header,
+            timeout_ms,
+            expect,
+        } => http_get(
+            rep,
+            &url,
+            no_proxy,
+            host_header.as_deref(),
+            timeout_ms,
+            &expect,
+        ),
+        NetMode::HttpConnect {
+            authority,
+            then_get,
+            host_header,
+            timeout_ms,
+            expect,
+        } => http_connect(
+            rep,
+            &authority,
+            then_get.as_deref(),
+            host_header.as_deref(),
+            timeout_ms,
+            &expect,
+        ),
+    }
+}
 
 // ------------------------------------------------------------ socket lines
 
@@ -87,6 +134,47 @@ pub(crate) fn open_socket(
     } else {
         Err(IoFail::Errno(errno.unwrap_or(libc::EIO)))
     }
+}
+
+/// Connect a socket to a numeric address, and report the socket and the
+/// connect.
+fn connect(rep: &Reporter, addr: &str, udp: bool, expect: &Expect) -> Result<bool, Usage> {
+    let sock: std::net::SocketAddr = addr.parse().map_err(|_| {
+        format!(
+            "`{addr}` is not a numeric ADDR:PORT. The fixture refuses names on purpose: \
+             resolving one would issue its own connects and pollute the trace."
+        )
+    })?;
+
+    let (domain, family) = if sock.is_ipv4() {
+        (libc::AF_INET, "AF_INET")
+    } else {
+        (libc::AF_INET6, "AF_INET6")
+    };
+    let (ty, type_name) = if udp {
+        (libc::SOCK_DGRAM, "SOCK_DGRAM")
+    } else {
+        (libc::SOCK_STREAM, "SOCK_STREAM")
+    };
+    // Through the raw layer, close-on-exec, reported like every other
+    // socket the fixture makes.
+    let Ok(fd) = open_socket(rep, domain, family, ty, type_name, true) else {
+        // Without a socket there is no connect to expect anything of.
+        return Ok(false);
+    };
+
+    let mut report = OpReport::new("connect");
+    report.set("addr", addr);
+    report.set("family", family);
+    report.set("type", type_name);
+    report.set("mechanism", raw::mechanism());
+    let sa = crate::sockaddr::SockAddr::inet(sock);
+    let attempt = raw::connect(fd, sa.as_ptr(), sa.len());
+    let emitted = finish(report, attempt);
+    // SAFETY: `fd` is the descriptor this function created and still owns.
+    unsafe { libc::close(fd) };
+    rep.emit(&emitted.report);
+    Ok(emitted.satisfies(expect))
 }
 
 /// Report a `sendto` of `payload` to `addr`.

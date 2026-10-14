@@ -19,9 +19,11 @@ use std::os::unix::ffi::OsStrExt;
 use serde_json::Value;
 
 use crate::bounded::{self, Deadline, IoFail};
-use crate::cli::{ExecVia, UnixLen};
+use crate::cli::{ExecVia, UnixLen, UnixMode};
 use crate::net::open_socket;
-use crate::ops::{Usage, finish, image, open_keep, spawn_exec, wait_report};
+use crate::ops::exec::{image, spawn_exec, wait_report};
+use crate::ops::fs::{OpenFlags, open_keep};
+use crate::ops::{Usage, check, close_fd, finish};
 use crate::raw;
 use crate::report::{Emitted, Expect, OpReport, Reporter, path_value};
 use crate::sockaddr::SockAddr;
@@ -31,6 +33,72 @@ use crate::sockaddr::SockAddr;
 pub const MAX_FDS: usize = 4;
 /// Longest line the echo reads before answering.
 pub const MAX_LINE: usize = 4096;
+
+/// Run one Unix-socket mode.
+pub(crate) fn run(rep: &Reporter, mode: UnixMode) -> Result<bool, Usage> {
+    match mode {
+        UnixMode::UnixConnect {
+            path,
+            seqpacket,
+            len,
+            exchange,
+            timeout_ms,
+            expect,
+        } => Ok(unix_connect(
+            rep,
+            &Target::Path(&path, len),
+            seqpacket,
+            exchange,
+            timeout_ms,
+            &expect,
+        )),
+        UnixMode::UnixAbstractConnect {
+            name,
+            seqpacket,
+            exchange,
+            timeout_ms,
+            expect,
+        } => Ok(unix_connect(
+            rep,
+            &Target::Abstract(&name),
+            seqpacket,
+            exchange,
+            timeout_ms,
+            &expect,
+        )),
+        UnixMode::UnixListen {
+            path,
+            seqpacket,
+            accept,
+            timeout_ms,
+            expect,
+            spawn,
+        } => unix_listen(rep, &path, seqpacket, accept, timeout_ms, &expect, &spawn),
+        UnixMode::UnixSocketDgram {
+            raw,
+            cloexec,
+            nonblock,
+            expect,
+        } => Ok(unix_socket_dgram(rep, raw, cloexec, nonblock, &expect)),
+        UnixMode::UnixSocketpairDgram {
+            raw,
+            cloexec,
+            nonblock,
+            expect,
+        } => Ok(unix_socketpair_dgram(rep, raw, cloexec, nonblock, &expect)),
+        UnixMode::ScmSend {
+            socket,
+            fd_path,
+            expect,
+        } => Ok(scm_send(rep, &socket, &fd_path, &expect)),
+        UnixMode::ScmRecv {
+            path,
+            timeout_ms,
+            expect,
+            spawn,
+        } => scm_recv(rep, &path, timeout_ms, &expect, &spawn),
+    }
+}
 
 fn unsupported(rep: &Reporter, op: &str, what: &str) -> bool {
     let mut report = OpReport::new(op);
@@ -415,8 +483,8 @@ pub(crate) fn unix_socket_dgram(
     let ty = dgram_type(raw_type, cloexec, nonblock, &mut report);
     report.set("mechanism", raw::mechanism());
     let emitted = finish(report, raw::socket(libc::AF_UNIX, ty, 0));
-    crate::ops::close_fd(emitted.report.ret);
-    crate::ops::check(rep, emitted, expect)
+    close_fd(emitted.report.ret);
+    check(rep, emitted, expect)
 }
 
 pub(crate) fn unix_socketpair_dgram(
@@ -443,7 +511,7 @@ pub(crate) fn unix_socketpair_dgram(
         bounded::close(sv[0]);
         bounded::close(sv[1]);
     }
-    crate::ops::check(rep, emitted, expect)
+    check(rep, emitted, expect)
 }
 
 // -------------------------------------------------------------- SCM_RIGHTS
@@ -607,12 +675,7 @@ pub(crate) fn scm_send(rep: &Reporter, socket: &OsStr, fd_path: &OsStr, expect: 
         Ok(a) => a,
         Err(e) => return refused(rep, "connect", "path", socket, e.reason),
     };
-    let opened = open_keep(
-        fd_path,
-        crate::cli::OpenVia::Openat,
-        crate::ops::OpenFlags::READ,
-        0,
-    );
+    let opened = open_keep(fd_path, crate::cli::OpenVia::Openat, OpenFlags::READ, 0);
     rep.emit(&opened.report);
     if opened.unusable || opened.report.ret < 0 {
         return false;
