@@ -279,46 +279,6 @@ fn close_range_cloexec() -> io::Result<()> {
     Ok(())
 }
 
-/// How a waited-for process ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WaitOutcome {
-    /// The process exited on its own before the deadline.
-    Exited,
-    /// The deadline passed first and the process was killed.
-    TimedOut,
-}
-
-/// Wait for `pid` until `deadline`, using a pidfd so that a reused pid cannot
-/// be mistaken for the one being waited on.
-///
-/// # Errors
-///
-/// The errno from `pidfd_open` or `poll`.
-pub fn wait_until(pid: libc::pid_t, deadline: Deadline) -> io::Result<WaitOutcome> {
-    let pidfd = pidfd_open(pid)?;
-    loop {
-        let timeout = deadline.remaining_millis_capped(i32::MAX);
-        let mut poll_fd = libc::pollfd {
-            fd: pidfd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: `poll_fd` is one live pollfd and the count matches.
-        let rc = unsafe { libc::poll(&raw mut poll_fd, 1, timeout) };
-        if rc < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-        if rc == 0 {
-            return Ok(WaitOutcome::TimedOut);
-        }
-        return Ok(WaitOutcome::Exited);
-    }
-}
-
 /// Reap `child` if it ends before `deadline`, without ever blocking on it.
 ///
 /// Every caller has already asked the child to die or knows it is dying, so
@@ -369,34 +329,176 @@ impl Captured {
 ///
 /// # Errors
 ///
-/// A failure to spawn, poll or reap.
+/// A failure to spawn, poll, read or reap.
 pub fn run_captured(command: &mut Command, deadline: Deadline) -> io::Result<Captured> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = command.spawn()?;
     finish_captured(child, deadline)
 }
 
+/// After a timeout kill, how long the pipes are still read for what the
+/// process wrote before it died; a descendant that holds them open cannot
+/// stretch the run past this.
+const CAPTURE_TAIL: Duration = Duration::from_millis(100);
+
 /// Wait for an already-spawned child with a deadline and capture its output.
+///
+/// Its pipes are read while it runs: a child that writes more than a pipe
+/// holds blocks until someone reads, so waiting for its exit first would
+/// turn every large output into a timeout. After the exit they are read to
+/// end-of-file, or until the deadline when a descendant still holds them.
 ///
 /// # Errors
 ///
-/// A failure to poll or reap.
-pub fn finish_captured(child: Child, deadline: Deadline) -> io::Result<Captured> {
+/// A failure to poll, read or reap.
+pub fn finish_captured(mut child: Child, deadline: Deadline) -> io::Result<Captured> {
     let pid =
         libc::pid_t::try_from(child.id()).map_err(|_| io::Error::other("pid out of range"))?;
     let pidfd = pidfd_open(pid)?;
-    let outcome = wait_until(pid, deadline)?;
-    let timed_out = outcome == WaitOutcome::TimedOut;
+    let mut pipes = [
+        CapturePipe::new(child.stdout.take().map(OwnedFd::from)),
+        CapturePipe::new(child.stderr.take().map(OwnedFd::from)),
+    ];
+    let mut exited = false;
+    while !(exited && pipes.iter().all(CapturePipe::is_closed)) && !deadline.expired() {
+        let timeout = deadline.remaining_millis_capped(i32::MAX);
+        exited |= capture_step(&pidfd, exited, &mut pipes, timeout)?.0;
+    }
+    let timed_out = !exited;
     if timed_out {
-        // Ignore the error: the process may have exited between the poll
-        // timing out and this call, which is not a failure of the run.
+        // Ignore the error: the process may have exited between the last
+        // poll and this call, which is not a failure of the run.
         let _ = pidfd_send_signal(pidfd.as_raw_fd(), libc::SIGKILL);
     }
-    let output = child.wait_with_output()?;
+    let status = child.wait()?;
+    let tail = Deadline::after(CAPTURE_TAIL);
+    while !pipes.iter().all(CapturePipe::is_closed)
+        && !tail.expired()
+        && capture_step(&pidfd, true, &mut pipes, 0)?.1
+    {}
+    let [stdout, stderr] = pipes;
     Ok(Captured {
-        status: output.status,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        status,
+        stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
         timed_out,
     })
+}
+
+/// One captured pipe: open until it reads end-of-file.
+struct CapturePipe {
+    file: Option<std::fs::File>,
+    bytes: Vec<u8>,
+}
+
+impl CapturePipe {
+    fn new(pipe: Option<OwnedFd>) -> Self {
+        Self {
+            file: pipe.map(std::fs::File::from),
+            bytes: Vec::new(),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.file.is_none()
+    }
+
+    /// One read, after `poll` said the pipe is readable or hung up, so it
+    /// does not block; end-of-file closes the pipe.
+    fn read_ready(&mut self) -> io::Result<()> {
+        use std::io::Read as _;
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        let mut buffer = [0u8; 16384];
+        match file.read(&mut buffer) {
+            Ok(0) => self.file = None,
+            Ok(read) => self.bytes.extend_from_slice(&buffer[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+}
+
+/// One `poll` of the open pipes and, until the process has `exited`, its
+/// pidfd, then one read of each pipe that is ready. Returns whether the
+/// process has now exited and whether any pipe was ready.
+fn capture_step(
+    pidfd: &OwnedFd,
+    exited: bool,
+    pipes: &mut [CapturePipe; 2],
+    timeout_ms: i32,
+) -> io::Result<(bool, bool)> {
+    let ready = libc::POLLIN | libc::POLLHUP | libc::POLLERR;
+    let mut fds = Vec::with_capacity(3);
+    for pipe in pipes.iter() {
+        if let Some(file) = &pipe.file {
+            fds.push(libc::pollfd {
+                fd: file.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+    }
+    if !exited {
+        fds.push(libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+    let count = libc::nfds_t::try_from(fds.len()).unwrap_or(0);
+    // SAFETY: `fds` holds `count` initialized pollfds and outlives the call.
+    if unsafe { libc::poll(fds.as_mut_ptr(), count, timeout_ms) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Ok((exited, false));
+        }
+        return Err(error);
+    }
+    let mut any_ready = false;
+    let mut polled = fds.iter();
+    for pipe in pipes.iter_mut() {
+        if pipe.file.is_some() && polled.next().is_some_and(|fd| fd.revents & ready != 0) {
+            any_ready = true;
+            pipe.read_ready()?;
+        }
+    }
+    let now_exited = exited || polled.next().is_some_and(|fd| fd.revents & ready != 0);
+    Ok((now_exited, any_ready))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child that writes more than a pipe holds finishes on its own: the
+    /// output is read while it runs, not after an exit it cannot reach.
+    /// Several MiB, beyond the largest pipe a host allows by default
+    /// (`/proc/sys/fs/pipe-max-size`, 1 MiB).
+    #[test]
+    fn output_beyond_a_pipe_capacity_is_captured_whole_and_in_time() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "yes | head -c 4194304; yes | head -c 2097152 >&2"]);
+        let captured =
+            run_captured(&mut command, Deadline::after(Duration::from_secs(20))).unwrap();
+        assert!(!captured.timed_out, "a large writer was reported timed out");
+        assert!(captured.status.success());
+        assert_eq!(captured.stdout.len(), 4_194_304);
+        assert_eq!(captured.stderr.len(), 2_097_152);
+    }
+
+    #[test]
+    fn a_process_past_its_deadline_is_killed_and_reported_timed_out() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "echo started; exec sleep 30"]);
+        let started = std::time::Instant::now();
+        let captured =
+            run_captured(&mut command, Deadline::after(Duration::from_millis(300))).unwrap();
+        assert!(captured.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(captured.status.code(), None, "ended by the kill");
+        assert_eq!(captured.stdout, "started\n");
+    }
 }
