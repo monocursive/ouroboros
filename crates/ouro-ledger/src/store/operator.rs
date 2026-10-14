@@ -1,6 +1,14 @@
 //! Independent operator assertions never update the launch owner's projections.
-use super::*;
-use crate::protocol::OperatorIntent;
+use serde_json::{Value, json};
+
+use super::{
+    Store, canonical,
+    stream::{Stream, rules::check_reserved},
+};
+use crate::{
+    discovery::valid_name,
+    protocol::{AppendReceipt, LedgerError, OperatorIntent, Peer, Result},
+};
 
 // The slash keeps internal operator effect indexes outside caller request-id space.
 pub(super) fn effect_key(record: &Value, effect: &str) -> String {

@@ -1,9 +1,16 @@
 //! Explicit, bounded inspection of terminal capture artifacts. The writer
 //! serializes this read with retention, so GC cannot remove a selected capture
 //! between its metadata snapshot and the read. Live streams are never opened.
-use super::*;
-use crate::bundle::files;
-use std::io::Read;
+use std::{io::Read, os::unix::fs::MetadataExt, path::Path};
+
+use serde_json::{Value, json};
+
+use super::Store;
+use crate::{
+    bundle::files,
+    protocol::{LedgerError, Result, RunRecord},
+    schemas,
+};
 
 const DISPLAY_BYTES: u64 = 65_536;
 

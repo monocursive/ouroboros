@@ -1,11 +1,20 @@
 //! Stateless positions in a growing canonical stream. No snapshot or retention pin.
 //! Each call verifies the records it emits against accepted sequence/digest anchors.
-use super::*;
-use crate::protocol::{
-    Chain, READ_CHUNK_BYTES, READ_SCAN_BYTES, READ_SCAN_FRAMES, TailPage, TailRequest,
-};
-use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
+
+use ouro_records::canonical::sha256_prefixed;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use super::Store;
+use crate::{
+    manifest::STREAM,
+    protocol::{
+        Chain, LedgerError, MAX_FRAME_BYTES, READ_CHUNK_BYTES, READ_SCAN_BYTES, READ_SCAN_FRAMES,
+        Result, TailPage, TailRequest,
+    },
+    schemas,
+};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

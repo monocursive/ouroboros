@@ -1,5 +1,7 @@
 use super::*;
+use crate::protocol::MAX_FRAME_BYTES;
 use crate::store::tests::{gc_fixture, gc_fixture_captures, gc_future, peer};
+use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::fs::symlink;
 
