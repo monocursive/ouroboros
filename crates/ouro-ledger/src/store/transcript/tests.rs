@@ -133,6 +133,7 @@ fn transcript_refuses_missing_changed_linked_and_public_files_without_blocking()
             "fifo" => {
                 fs::remove_file(&path).unwrap();
                 let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+                // SAFETY: mkfifo reads one NUL-terminated path that `c` keeps live.
                 assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
             }
             "public" => fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap(),

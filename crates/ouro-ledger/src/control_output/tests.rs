@@ -15,10 +15,15 @@ fn control_file_and_socket_deliver_one_exact_frame_without_changing_shared_flags
     let path = root.path().join("control");
     let file = File::create(&path).unwrap();
     let fd = file.into_raw_fd();
+    // SAFETY: F_GETFL only reads the flags of an open descriptor.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: into_raw_fd released the only owner of this descriptor, and take
+    // assumes that ownership.
     let control = unsafe { ControlOutput::take(fd) }.unwrap();
+    // SAFETY: F_GETFL only reads the flags of the descriptor `control` holds.
     assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFL) }, flags);
     assert_ne!(
+        // SAFETY: F_GETFD only reads the flags of the descriptor `control` holds.
         unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
         0
     );
@@ -33,6 +38,7 @@ fn control_file_and_socket_deliver_one_exact_frame_without_changing_shared_flags
     receiver
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
+    // SAFETY: into_raw_fd released the only owner of this descriptor.
     unsafe { ControlOutput::take(sender.into_raw_fd()) }
         .unwrap()
         .deliver(&json!({"code":7}))
@@ -45,28 +51,37 @@ fn control_file_and_socket_deliver_one_exact_frame_without_changing_shared_flags
 #[test]
 fn invalid_control_descriptors_refuse_before_delivery() {
     for fd in [-1, 0, 1, 2, i32::MAX] {
+        // SAFETY: take refuses stdio and closed descriptors before it
+        // assumes ownership of anything.
         assert!(unsafe { ControlOutput::take(fd) }.is_err());
     }
     let file = File::open("Cargo.toml").unwrap();
+    // SAFETY: into_raw_fd released the only owner of the descriptor, and take
+    // closes what it refuses; the same holds for each take below.
     assert!(unsafe { ControlOutput::take(file.into_raw_fd()) }.is_err());
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open("/dev/null")
         .unwrap();
+    // SAFETY: as above.
     assert!(unsafe { ControlOutput::take(file.into_raw_fd()) }.is_err());
     let datagram = UnixDatagram::unbound().unwrap();
+    // SAFETY: as above.
     assert!(unsafe { ControlOutput::take(datagram.into_raw_fd()) }.is_err());
     let root = tempfile::tempdir().unwrap();
     let listener = UnixListener::bind(root.path().join("socket")).unwrap();
+    // SAFETY: as above.
     assert!(unsafe { ControlOutput::take(listener.into_raw_fd()) }.is_err());
     let (sender, receiver) = UnixStream::pair().unwrap();
     drop(receiver);
+    // SAFETY: as above.
     assert!(unsafe { ControlOutput::take(sender.into_raw_fd()) }.is_err());
 }
 
 #[test]
 fn control_disconnect_after_validation_reports_failure_without_success_frame() {
     let (sender, receiver) = UnixStream::pair().unwrap();
+    // SAFETY: into_raw_fd released the only owner of this descriptor.
     let control = unsafe { ControlOutput::take(sender.into_raw_fd()) }.unwrap();
     drop(receiver);
     assert!(control.deliver(&json!({"code":0})).is_err());
@@ -77,6 +92,7 @@ fn stalled_control_delivery_has_a_deadline_and_bounded_frame_size() {
     let (sender, mut receiver) = UnixStream::pair().unwrap();
     let size: libc::c_int = 4096;
     assert_eq!(
+        // SAFETY: the option value is a live c_int and its exact size.
         unsafe {
             libc::setsockopt(
                 sender.as_raw_fd(),
@@ -88,6 +104,7 @@ fn stalled_control_delivery_has_a_deadline_and_bounded_frame_size() {
         },
         0
     );
+    // SAFETY: into_raw_fd released the only owner of this descriptor.
     let control = unsafe { ControlOutput::take(sender.into_raw_fd()) }.unwrap();
     let start = Instant::now();
     assert!(
@@ -104,6 +121,7 @@ fn stalled_control_delivery_has_a_deadline_and_bounded_frame_size() {
     receiver.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes.len(), MAX_FRAME_BYTES);
     let (sender, mut receiver) = UnixStream::pair().unwrap();
+    // SAFETY: into_raw_fd released the only owner of this descriptor.
     let control = unsafe { ControlOutput::take(sender.into_raw_fd()) }.unwrap();
     assert!(control.deliver(&"x".repeat(MAX_FRAME_BYTES)).is_err());
     let mut bytes = Vec::new();
@@ -124,8 +142,10 @@ fn nonblocking_control_backpressure_retries_without_changing_caller_flags() {
         }
     }
     let raw = sender.into_raw_fd();
+    // SAFETY: into_raw_fd released the only owner of this descriptor.
     let control = unsafe { ControlOutput::take(raw) }.unwrap();
     assert_ne!(
+        // SAFETY: F_GETFL only reads the flags of the descriptor `control` holds open.
         unsafe { libc::fcntl(raw, libc::F_GETFL) } & libc::O_NONBLOCK,
         0
     );
