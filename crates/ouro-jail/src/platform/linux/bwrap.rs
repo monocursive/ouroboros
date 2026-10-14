@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 
 use super::clock::Deadline;
 use super::exec::run_captured;
-use super::fs::{RootSpec, exists_resolved, path_within, resolve_runtime_root};
+use super::fs::{RootSpec, exists_resolved, resolve_runtime_root};
 use super::sys::{PathError, cstring_from_os, errno_name, last_errno};
 use crate::state::anchored::{Dir, Kind, Name, fstat};
 
@@ -951,11 +951,29 @@ impl fmt::Display for PlanError {
 /// socket its bridge connects through. Such a mask never narrows the child's
 /// authority; it attacks the next run's plumbing, so both the policy layer
 /// and this renderer refuse it.
+///
+/// The comparison is by path component, so `/run//ouro`, `/run/./ouro` and
+/// `///run` are the paths they name. A `..` component cannot be placed
+/// without resolving it, so a mask holding one is refused as if it reached
+/// the plumbing.
 fn shadows_plumbing(path: &Path) -> bool {
-    const PLUMBING: &[u8] = b"/run/ouro";
-    let bytes = path.as_os_str().as_bytes();
-    let root = !bytes.is_empty() && bytes.iter().all(|byte| *byte == b'/');
-    root || path_within(PLUMBING, bytes) || path_within(bytes, PLUMBING)
+    use std::path::Component;
+    let plumbing = [
+        Component::RootDir,
+        Component::Normal(OsStr::new("run")),
+        Component::Normal(OsStr::new("ouro")),
+    ];
+    let components: Vec<Component<'_>> = path.components().collect();
+    if components.is_empty() {
+        return false;
+    }
+    if components.contains(&Component::ParentDir) {
+        return true;
+    }
+    // One is a prefix of the other: the mask covers the plumbing, or lies
+    // beneath it.
+    let shared = components.len().min(plumbing.len());
+    components[..shared] == plumbing[..shared]
 }
 
 impl std::error::Error for PlanError {}
@@ -1740,12 +1758,18 @@ mod tests {
         for path in [
             "/",
             "//",
+            "///run",
+            "/./run",
             "/run",
             "/run/",
+            "/run//ouro",
+            "/run/./ouro",
             "/run/ouro",
             "/run/ouro/",
             "/run/ouro/jail",
             "/run/ouro/proxy/x.sock",
+            "/run/ouro/../ouro",
+            "/tmp/../run",
         ] {
             let mut plan = sample_plan();
             plan.masked.push(path.into());
