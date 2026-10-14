@@ -452,6 +452,7 @@ impl PreparedExecution for SimPrepared {
                 mode: self.sim.network.lock().unwrap().clone(),
                 mechanism: Some("simulation".into()),
                 allowed_hosts: Vec::new(),
+                tls_only: Vec::new(),
             },
             syscalls: Some(AppliedSyscalls {
                 mechanism: "simulation".into(),

@@ -254,6 +254,8 @@ pub struct AgentNet {
     baseline: super::bpf::Program,
     mediation_digest: String,
     allowed_hosts: Vec<String>,
+    /// The `allowed_hosts` the proxy enforces as TLS only.
+    tls_only: Vec<String>,
     rules: Rules,
     /// The registered proxy directory, bound read-only by descriptor.
     dir: Arc<OwnedFd>,
@@ -360,6 +362,7 @@ impl AgentNet {
             baseline,
             mediation_digest,
             allowed_hosts: snapshot.network.allow.clone(),
+            tls_only: snapshot.network.tls_only.clone(),
             rules,
             dir,
             dir_path: handoff.host_path.clone(),
@@ -958,6 +961,7 @@ impl AgentNet {
                     .to_owned(),
             ),
             allowed_hosts: self.allowed_hosts.clone(),
+            tls_only: self.tls_only.clone(),
         }
     }
 

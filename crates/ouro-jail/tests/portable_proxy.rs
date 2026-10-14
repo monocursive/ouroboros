@@ -841,12 +841,12 @@ fn n03_plaintext_http_requires_a_grant_that_named_its_port() {
     harness.stop(WAIT);
 }
 
-/// L21 through resolution: the `agent` proxy enforces the typed rules the
-/// resolver produced, not a re-parse of the snapshot's canonical strings,
-/// which always write the port. A host-only grant, from the command line or
-/// from a launch profile, refuses plaintext HTTP to port 443 before
-/// resolving and still lets CONNECT past the host rule; an explicit `:443`
-/// grant passes both. (Past the host rule the loopback answer is a
+/// L21 through resolution: the `agent` proxy enforces the rules the
+/// snapshot states, the canonical strings (which always write the port)
+/// with `tls_only`, not a re-parse of the strings alone. A host-only grant,
+/// from the command line or from a launch profile, refuses plaintext HTTP
+/// to port 443 before resolving and still lets CONNECT past the host rule;
+/// an explicit `:443` grant passes both. (Past the host rule the loopback answer is a
 /// forbidden address, which proves the rule let the request through.)
 #[test]
 fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
@@ -857,6 +857,11 @@ fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
     use ouro_jail::records::Os;
 
     let resolve = |layer: Layer| -> Rules {
+        let explicit = layer
+            .delta
+            .network_allow
+            .iter()
+            .all(|grant| grant.ends_with(":443"));
         let inputs = ResolveInputs {
             platform: Os::Linux,
             base_profile: ProfileName::Agent,
@@ -873,6 +878,14 @@ fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
             .expect("the policy resolves")
             .snapshot;
         assert_eq!(snapshot.network.allow, ["fixture.test:443"]);
+        // The snapshot itself says which: `tls_only` is all the proxy reads
+        // besides the canonical rules.
+        assert_eq!(
+            snapshot.network.tls_only.is_empty(),
+            explicit,
+            "{:?}",
+            snapshot.network.tls_only
+        );
         snapshot.network.proxy_rules().expect("the rules build")
     };
     let cli = |grant: &str| Layer {

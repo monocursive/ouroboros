@@ -180,6 +180,7 @@ impl PreparedExecution for SimPrepared {
                 mode: "none".into(),
                 mechanism: Some("simulation".into()),
                 allowed_hosts: Vec::new(),
+                tls_only: Vec::new(),
             },
             syscalls: Some(AppliedSyscalls {
                 mechanism: "simulation".into(),

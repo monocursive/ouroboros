@@ -79,6 +79,7 @@ fn settled_receipt(summary: &CoverageSummary) -> serde_json::Value {
                 mode: "none".to_owned(),
                 mechanism: Some("network_namespace".to_owned()),
                 allowed_hosts: Vec::new(),
+                tls_only: Vec::new(),
             },
             syscalls: Some(AppliedSyscalls {
                 mechanism: "seccomp-bpf".to_owned(),

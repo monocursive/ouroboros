@@ -171,7 +171,8 @@ fn project_host_narrowing_replaces_the_base_set_including_empty() {
 /// but not the reverse. `api.example.com:443` admits plaintext HTTP to port
 /// 443 and the omitted-port base `api.example.com` does not, so naming the
 /// port widens even though both spell `api.example.com:443` canonically.
-/// The typed rules keep the difference all the way to the proxy.
+/// The snapshot's `tls_only` keeps the difference, in the digest and all the
+/// way to the proxy.
 #[test]
 fn project_host_narrowing_cannot_name_a_port_the_base_omitted() {
     let workspace = Workspace::new();
@@ -202,11 +203,22 @@ fn project_host_narrowing_cannot_name_a_port_the_base_omitted() {
     ] {
         let resolved = narrow(base, allow).expect("narrows");
         assert_eq!(resolved.snapshot.network.allow, ["api.example.com:443"]);
+        let tls_only: &[&str] = if explicit {
+            &[]
+        } else {
+            &["api.example.com:443"]
+        };
+        assert_eq!(
+            resolved.snapshot.network.tls_only, tls_only,
+            "{base} narrowed by {allow}"
+        );
         assert_eq!(
             resolved
                 .snapshot
                 .network
-                .rules
+                .proxy_rules()
+                .expect("the rules build")
+                .allow()
                 .iter()
                 .map(|rule| rule.explicit_port)
                 .collect::<Vec<_>>(),

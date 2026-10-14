@@ -823,6 +823,7 @@ fn base_record(containment: Containment, os: Os) -> AttemptRecord {
                 },
                 mechanism: None,
                 allowed_hosts: Vec::new(),
+                tls_only: Vec::new(),
             },
             syscalls: None,
             limits: Vec::new(),
@@ -870,6 +871,7 @@ fn contained_application() -> Applied {
             mode: "none".to_owned(),
             mechanism: Some("fixture-network-namespace".to_owned()),
             allowed_hosts: Vec::new(),
+            tls_only: Vec::new(),
         },
         syscalls: Some(AppliedSyscalls {
             mechanism: "fixture-seccomp".to_owned(),

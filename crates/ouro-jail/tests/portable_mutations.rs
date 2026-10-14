@@ -436,6 +436,7 @@ fn minimal_record() -> AttemptRecord {
                 mode: "pending".to_owned(),
                 mechanism: None,
                 allowed_hosts: Vec::new(),
+                tls_only: Vec::new(),
             },
             syscalls: None,
             limits: Vec::new(),

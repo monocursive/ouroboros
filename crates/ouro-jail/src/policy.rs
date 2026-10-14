@@ -10,7 +10,7 @@
 //! writable parents, and an unknown or ambiguous subset relationship refuses
 //! instead of widening.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::ffi::OsStrExt as _;
 
 use serde::{Deserialize, Serialize};
@@ -232,29 +232,49 @@ pub struct NetworkSnapshot {
     pub mode: String,
     /// Canonical allow rules.
     pub allow: Vec<String>,
+    /// The `allow` rules every grant of which omitted its port: the TLS shape,
+    /// which admits no plaintext HTTP (network-rules.md, audit 2026-10-08
+    /// L21). The canonical spelling always writes the port, so this is the
+    /// only place the snapshot, and so its digest, says whether a grant named
+    /// it. Omitted when empty, so a policy without such a grant keeps its
+    /// digest (canonicalization.md).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tls_only: Vec<String>,
     /// `ouro.jail.network/1` for proxy mode, null otherwise.
     pub ruleset: Option<String>,
     /// Canonical IPv6 CIDRs from the host manifest.
     pub translation_prefixes: Vec<String>,
-    /// The typed rules `allow` spells, for the proxy. Not serialized and so
-    /// not digest input: the canonical spelling always writes the port, so it
-    /// cannot say whether a grant named it, and the proxy enforces exactly
-    /// that bit (plaintext HTTP needs an explicit port, audit 2026-10-08
-    /// L21). Two policies that differ only in it share a digest.
-    #[serde(skip)]
-    pub rules: Vec<HostRule>,
 }
 
 impl NetworkSnapshot {
-    /// The rules the `agent` proxy enforces: the typed allow rules, which
-    /// keep whether each grant named its port, and the translation prefixes.
-    /// Re-parsing `allow` would turn every omitted-port grant explicit.
+    /// The rules the `agent` proxy enforces: each `allow` rule, explicit
+    /// unless `tls_only` lists it, and the translation prefixes. Parsing a
+    /// canonical rule alone would make every omitted-port grant explicit.
     ///
     /// # Errors
-    /// [`HostRuleError::Malformed`] when a translation prefix is not an IPv6
-    /// CIDR.
+    /// [`HostRuleError`] when a rule does not parse, a `tls_only` entry is
+    /// not an `allow` rule, or a translation prefix is not an IPv6 CIDR.
     pub fn proxy_rules(&self) -> Result<Rules, HostRuleError> {
-        Rules::new(self.rules.clone(), &self.translation_prefixes)
+        if self
+            .tls_only
+            .iter()
+            .any(|entry| !self.allow.contains(entry))
+        {
+            return Err(HostRuleError::Malformed(
+                "a TLS-only rule is not one of the allow rules",
+            ));
+        }
+        let rules = self
+            .allow
+            .iter()
+            .map(|entry| {
+                HostRule::parse(entry).map(|rule| HostRule {
+                    explicit_port: !self.tls_only.contains(entry),
+                    ..rule
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Rules::new(rules, &self.translation_prefixes)
     }
 }
 
@@ -370,8 +390,7 @@ pub struct LaunchSnapshot {
 ///
 /// Its serialized form is the complete digest input. It carries no
 /// provenance, no capability measurement, no attempt id and no chosen backend
-/// (canonicalization.md). The one unserialized field,
-/// [`NetworkSnapshot::rules`], says what it cannot.
+/// (canonicalization.md).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct PolicySnapshot {
     /// Optional operator argv accident filters.
@@ -436,6 +455,12 @@ impl PolicySnapshot {
         ] {
             sort_at(&mut value, path, Absent::Never, Order::Set)?;
         }
+        sort_at(
+            &mut value,
+            &["network", "tls_only"],
+            Absent::WhenEmpty,
+            Order::Set,
+        )?;
         sort_at(
             &mut value,
             &["launch", "state_subdirs"],
@@ -1686,6 +1711,22 @@ fn build_snapshot(
     // ruleset, so narrowing a proxy to `none` cannot smuggle its former grants
     // into the digest.
     let proxy = authority.network_mode == NetworkMode::Proxy;
+    // A rule is TLS-only when no grant of it named its port: a second grant
+    // with the port written out admits plaintext, and the proxy admits
+    // plaintext when any explicit rule permits the destination.
+    let explicit: BTreeSet<String> = authority
+        .network_allow
+        .iter()
+        .filter(|rule| rule.explicit_port)
+        .map(HostRule::canonical)
+        .collect();
+    let tls_only: Vec<String> = authority
+        .network_allow
+        .iter()
+        .filter(|rule| !rule.explicit_port)
+        .map(HostRule::canonical)
+        .filter(|canonical| !explicit.contains(canonical))
+        .collect();
     Ok(PolicySnapshot {
         commands: crate::commands::Rules::default(),
         schema: SCHEMA_POLICY_SNAPSHOT.to_owned(),
@@ -1717,14 +1758,10 @@ fn build_snapshot(
                 // digest (canonicalization.md §"Policy input").
                 Vec::new()
             },
+            tls_only: if proxy { tls_only } else { Vec::new() },
             ruleset: proxy.then(|| SCHEMA_NETWORK.to_owned()),
             translation_prefixes: if proxy {
                 inputs.translation_prefixes.clone()
-            } else {
-                Vec::new()
-            },
-            rules: if proxy {
-                authority.network_allow.clone()
             } else {
                 Vec::new()
             },

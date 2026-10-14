@@ -305,8 +305,8 @@ pub struct HostRule {
     /// Whether the grant named the port itself, rather than the §10
     /// omitted-port expansion to 443. Plaintext HTTP requires an explicit
     /// port (audit 2026-10-08 L21): an omitted port is the TLS shape. The
-    /// canonical spelling always writes the port, so this bit survives only
-    /// in the typed rule, never in [`HostRule::canonical`].
+    /// canonical spelling always writes the port, so [`HostRule::canonical`]
+    /// drops this bit; the snapshot carries it in `network.tls_only`.
     pub explicit_port: bool,
 }
 
@@ -498,11 +498,11 @@ impl Rules {
 
     /// Builds rules from grant spellings, as an operator writes them.
     ///
-    /// Not for the snapshot's canonical `network.allow`: a canonical rule
-    /// always writes its port, so every omitted-port grant would come back
-    /// explicit and admit plaintext HTTP (L21). The resolved snapshot hands
-    /// the proxy its typed rules instead
-    /// ([`crate::policy::NetworkSnapshot::proxy_rules`]).
+    /// Not for the snapshot's canonical `network.allow` alone: a canonical
+    /// rule always writes its port, so every omitted-port grant would come
+    /// back explicit and admit plaintext HTTP (L21).
+    /// [`crate::policy::NetworkSnapshot::proxy_rules`] reads `tls_only` with
+    /// it.
     ///
     /// # Errors
     /// Returns [`HostRuleError`] for any entry that does not parse.

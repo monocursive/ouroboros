@@ -881,6 +881,11 @@ pub struct AppliedNetwork {
     pub mechanism: Option<String>,
     /// Canonical allowed host rules.
     pub allowed_hosts: Vec<String>,
+    /// The `allowed_hosts` entries applied as TLS only: every grant of them
+    /// omitted its port, so the proxy admits no plaintext HTTP to them
+    /// (network-rules.md). Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tls_only: Vec<String>,
 }
 
 /// Applied syscall filter, or null when none was installed.

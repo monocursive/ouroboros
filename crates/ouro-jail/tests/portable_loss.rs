@@ -176,6 +176,7 @@ impl PreparedExecution for Prepared {
                 mode: if self.0.proxy { "proxy" } else { "none" }.into(),
                 mechanism: Some("simulation".into()),
                 allowed_hosts: Vec::new(),
+                tls_only: Vec::new(),
             },
             syscalls: Some(AppliedSyscalls {
                 mechanism: "simulation".into(),

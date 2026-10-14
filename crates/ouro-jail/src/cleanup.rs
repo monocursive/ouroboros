@@ -1363,6 +1363,7 @@ mod tests {
                     mode: "none".into(),
                     mechanism: None,
                     allowed_hosts: Vec::new(),
+                    tls_only: Vec::new(),
                 },
                 syscalls: None,
                 limits: Vec::new(),
