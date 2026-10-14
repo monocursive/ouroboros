@@ -391,25 +391,61 @@ pub(super) fn relay_write(fd: RawFd, buffer: &[u8], socket: bool) -> std::io::Re
 /// How long relayed output gets, once the target has ended, to reach the
 /// operator's descriptors before the outcome is recorded.
 pub(super) const OUTPUT_DRAIN_BUDGET: Duration = Duration::from_millis(250);
-/// The pause between drain passes that moved nothing.
-pub(super) const OUTPUT_DRAIN_STEP: Duration = Duration::from_millis(1);
 
 /// Delivers what the child wrote through the output relays, within
 /// `budget`. Only output relays are waited for: a stdin relay finishes only
 /// at its origin's end-of-file or a broken pipe, which the target's end does
 /// not bring, so waiting for it would spend the whole budget on nothing. A
-/// pass that moves nothing sleeps a step rather than spin.
+/// pass that moves nothing waits in `poll` for a relay to have something to
+/// move, rather than spin.
 pub(super) fn drain_output_relays(
     relays: &mut [StdioRelay],
     budget: Duration,
 ) -> std::io::Result<()> {
     let deadline = clock::Deadline::after(budget);
-    while relays.iter().any(|relay| !relay.to_child && !relay.done()) && !deadline.expired() {
-        if !pump_stdio_relays(relays)? {
-            std::thread::sleep(OUTPUT_DRAIN_STEP);
+    loop {
+        let progress = pump_stdio_relays(relays)?;
+        let mut waits = output_waits(relays);
+        if waits.is_empty() || deadline.expired() {
+            return Ok(());
+        }
+        if !progress {
+            match super::sys::poll(&mut waits, deadline.remaining_millis_capped(i32::MAX)) {
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
         }
     }
-    Ok(())
+}
+
+/// What an unfinished output relay waits for: its pipe to be readable while
+/// there is room to stage, and its origin to be writable while bytes are
+/// staged. A closed pipe end reports `POLLHUP`, which wakes the wait too.
+fn output_waits(relays: &[StdioRelay]) -> Vec<libc::pollfd> {
+    let mut waits = Vec::new();
+    for relay in relays
+        .iter()
+        .filter(|relay| !relay.to_child && !relay.done())
+    {
+        if let Some(ours) = relay.ours.as_ref()
+            && relay.buffer.len() < RELAY_BUFFER
+        {
+            waits.push(libc::pollfd {
+                fd: ours.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        if !relay.buffer.is_empty() {
+            waits.push(libc::pollfd {
+                fd: relay.origin.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            });
+        }
+    }
+    waits
 }
 
 /// Visit every stream, including when an earlier stream made progress.
@@ -570,6 +606,37 @@ mod tests {
         stdout.read_to_string(&mut text).unwrap();
         assert_eq!(text, "last words");
         drop(child_end);
+    }
+
+    /// The drain waits on the relays themselves: output written while it
+    /// waits, and then the writer's close, each end the wait at once rather
+    /// than at the budget.
+    #[test]
+    fn the_output_drain_wakes_for_late_output_and_the_close() {
+        use std::io::{Read as _, Seek as _};
+        use std::os::fd::AsRawFd as _;
+        let mut stdout = tempfile::tempfile().unwrap();
+        let (out, writer) = output_relay(stdout.try_clone().unwrap());
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            super::relay_write(writer.as_raw_fd(), b"late words", false).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(writer);
+        });
+        let mut relays = [out];
+        let started = std::time::Instant::now();
+        super::drain_output_relays(&mut relays, std::time::Duration::from_secs(10)).unwrap();
+        let spent = started.elapsed();
+        late.join().unwrap();
+        assert!(
+            spent < std::time::Duration::from_secs(5),
+            "the drain did not wake for the writer's close ({spent:?})"
+        );
+        assert!(relays[0].done());
+        let mut text = String::new();
+        stdout.rewind().unwrap();
+        stdout.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "late words");
     }
 
     #[test]
