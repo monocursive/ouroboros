@@ -683,6 +683,11 @@ pub struct TestLog {
     pub paths: Vec<String>,
     /// Test binaries (`Running` and `Doc-tests` sections) in the log.
     pub binaries: usize,
+    /// `<crate>/<source>` of every `Running` section, in order. Cargo names
+    /// no package on a `Running tests/…` line, so the crate is the one whose
+    /// `src/lib.rs` or `src/main.rs` it printed last;
+    /// [`TestLog::check_attribution`] holds that guess against the tree.
+    pub sources: Vec<String>,
 }
 
 /// A log file as text. Test output may hold any bytes (X05's fixtures write
@@ -902,6 +907,8 @@ struct LogParser {
     list: FailuresList,
     /// The names of the failures list read so far.
     names: Vec<String>,
+    /// Every binary's `<crate>/<source>` (or `<crate>/doc`) so far.
+    seen: BTreeSet<String>,
 }
 
 impl LogParser {
@@ -912,7 +919,9 @@ impl LogParser {
                 self.package = Some(stem.replace('_', "-"));
             }
             let krate = self.package.clone().unwrap_or_else(|| "?".to_string());
-            self.open_binary(format!("{krate}/{source}"));
+            let prefix = format!("{krate}/{source}");
+            self.log.sources.push(prefix.clone());
+            self.open_binary(prefix);
             return;
         }
         if let Some(krate) = trimmed.strip_prefix("Doc-tests ") {
@@ -942,9 +951,23 @@ impl LogParser {
         self.pending_result(trimmed);
     }
 
-    /// A new test binary's section: the one before it ends.
+    /// A new test binary's section: the one before it ends. One cargo run
+    /// prints each binary once; a second section of the same name is another
+    /// crate's binary the print order attributed to this one, or a second
+    /// run, and neither can be told apart from the first.
     fn open_binary(&mut self, prefix: String) {
         self.close_binary();
+        if !self.seen.insert(prefix.clone()) {
+            self.log.anomalies.push(Anomaly {
+                test: None,
+                binary: Some(prefix.clone()),
+                text: format!(
+                    "`{prefix}` has two sections in the log: another crate's binary was \
+                     attributed to it, or the log holds two runs, so none of its results \
+                     can be trusted"
+                ),
+            });
+        }
         self.list = FailuresList::Off;
         self.log.binaries += 1;
         self.binary = Some(Binary {
@@ -1187,6 +1210,33 @@ impl Binary {
 }
 
 impl TestLog {
+    /// Hold the crate each `Running` section was attributed to against the
+    /// tree at `root`: a source that is not `crates/<crate>/<source>` there
+    /// was attributed by cargo's print order to a crate it is not in (a
+    /// package with no `src/lib.rs` or `src/main.rs` binary takes the
+    /// previous package's name), and none of its results can be trusted.
+    pub fn check_attribution(&mut self, root: &std::path::Path) {
+        for source in &self.sources {
+            let present = source.split_once('/').is_some_and(|(krate, path)| {
+                !source
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "..")
+                    && root.join("crates").join(krate).join(path).is_file()
+            });
+            if !present {
+                self.anomalies.push(Anomaly {
+                    test: None,
+                    binary: Some(source.clone()),
+                    text: format!(
+                        "`{source}` is not crates/{source} in this tree: cargo's print order \
+                         attributed the binary to a crate it is not in, so none of its results \
+                         can be trusted"
+                    ),
+                });
+            }
+        }
+    }
+
     /// Every test the log reports `ignored` (and nothing else). Two ignored
     /// doc-test blocks on one item share an id and count once.
     #[must_use]
@@ -2053,7 +2103,9 @@ pub fn run_cli(args: &GatesArgs, root: &std::path::Path) -> std::process::ExitCo
             Ok(t) => t,
             Err(e) => return fail(e),
         };
-        if logs.insert(lane, parse_log(&text)).is_some() {
+        let mut log = parse_log(&text);
+        log.check_attribution(root);
+        if logs.insert(lane, log).is_some() {
             return fail(format!("--log names the {} lane twice", lane.as_str()));
         }
     }
@@ -4465,5 +4517,76 @@ Unrelated prose.
             let g = gate(&v, &c.gate);
             assert_eq!(g.status, GateStatus::Fail, "{} is untested", c.id);
         }
+    }
+
+    /// A package with no `src/lib.rs` or `src/main.rs` binary: cargo's
+    /// `Running tests/…` line names no package, so the parser attributes
+    /// the binary to the package printed before it.
+    const PRINT_ORDER_LOG: &str = "\
+     Running unittests src/lib.rs (target/release/deps/alpha-0123456789abcdef)
+running 1 test
+test a ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/only_beta.rs (target/release/deps/only_beta-0123456789abcdef)
+running 1 test
+test b ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+
+    #[test]
+    fn a_binary_the_print_order_puts_in_the_wrong_crate_is_untrusted() {
+        let tree = tempfile::tempdir().unwrap();
+        let file = |path: &str| {
+            let path = tree.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        };
+        file("crates/alpha/src/lib.rs");
+        file("crates/beta/tests/only_beta.rs");
+        let mut log = parse_log(PRINT_ORDER_LOG);
+        assert_eq!(
+            log.sources,
+            vec!["alpha/src/lib.rs", "alpha/tests/only_beta.rs"]
+        );
+        assert!(log.anomalies.is_empty(), "{:?}", log.anomalies);
+        log.check_attribution(tree.path());
+        assert_eq!(log.anomalies.len(), 1, "{:?}", log.anomalies);
+        let a = &log.anomalies[0];
+        assert_eq!(a.binary.as_deref(), Some("alpha/tests/only_beta.rs"));
+        assert_eq!(a.test, None, "a binary-wide anomaly fails the run");
+        assert!(!log.clean());
+
+        // Where the guess names a file the tree has, it stands.
+        file("crates/alpha/tests/only_beta.rs");
+        let mut log = parse_log(PRINT_ORDER_LOG);
+        log.check_attribution(tree.path());
+        assert!(log.anomalies.is_empty(), "{:?}", log.anomalies);
+
+        // A source that climbs out of its crate is never taken as present.
+        let mut log =
+            parse_log(&PRINT_ORDER_LOG.replace("tests/only_beta.rs", "../beta/tests/only_beta.rs"));
+        log.check_attribution(tree.path());
+        assert_eq!(log.anomalies.len(), 1, "{:?}", log.anomalies);
+    }
+
+    #[test]
+    fn a_binary_with_two_sections_is_untrusted() {
+        let twice = format!("{PRINT_ORDER_LOG}{PRINT_ORDER_LOG}");
+        let log = parse_log(&twice);
+        let binaries: Vec<_> = log
+            .anomalies
+            .iter()
+            .map(|a| (a.test.as_deref(), a.binary.as_deref()))
+            .collect();
+        assert_eq!(
+            binaries,
+            vec![
+                (None, Some("alpha/src/lib.rs")),
+                (None, Some("alpha/tests/only_beta.rs"))
+            ],
+            "{:?}",
+            log.anomalies
+        );
+        assert!(!log.clean());
     }
 }

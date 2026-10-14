@@ -1735,7 +1735,9 @@ fn run_suite(
     let test_log = suite.log.as_ref().map(|log| {
         print!("{log}");
         write_evidence(opts, "test.log", log, evidence_errors);
-        gates::parse_log(log)
+        let mut parsed = gates::parse_log(log);
+        parsed.check_attribution(&opts.worktree);
+        parsed
     });
     let ended = suite.ended.map(|code| CommandResult {
         code: Some(code),
