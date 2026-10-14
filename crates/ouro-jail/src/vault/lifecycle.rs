@@ -335,15 +335,18 @@ impl Runtime {
                 .max_response_header_size(16384)
                 .build()
                 .into();
-            *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some("issuer_transport");
-            let (content_type, body) = grant_body(policy, &doc.refresh_token.0)?;
+            // Each failure names its own step.
+            const INVALID: &str = "issuer_invalid_response";
+            let unavailable = |label| self.failed(label, Reason::CredentialUnavailable);
+            let (content_type, body) = grant_body(policy, &doc.refresh_token.0)
+                .map_err(|reason| self.failed("grant_unencodable", reason))?;
             let mut response = agent
                 .post(&policy.token_url)
                 .header("Content-Type", content_type)
                 .send(body.as_slice())
-                .map_err(|_| Reason::CredentialUnavailable)?;
+                .map_err(|_| unavailable("issuer_transport"))?;
             if response.status().as_u16() != 200 {
-                let reason = match response.status().as_u16() {
+                return Err(unavailable(match response.status().as_u16() {
                     400 => "issuer_http_400",
                     401 => "issuer_http_401",
                     403 => "issuer_http_403",
@@ -351,53 +354,50 @@ impl Runtime {
                     500..=599 => "issuer_http_5xx",
                     300..=399 => "issuer_redirect_refused",
                     _ => "issuer_http_refused",
-                };
-                *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
-                return Err(Reason::CredentialUnavailable);
+                }));
             }
-            *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some("issuer_invalid_response");
             let mut bytes = Zeroizing::new(Vec::new());
             response
                 .body_mut()
                 .as_reader()
                 .take(u64::try_from(RESPONSE_MAX + 1).unwrap_or(u64::MAX))
                 .read_to_end(&mut bytes)
-                .map_err(|_| Reason::CredentialUnavailable)?;
+                .map_err(|_| unavailable(INVALID))?;
             if bytes.len() > RESPONSE_MAX {
-                return Err(Reason::CredentialUnavailable);
+                return Err(unavailable(INVALID));
             }
             let response: Response =
-                serde_json::from_slice(&bytes).map_err(|_| Reason::CredentialUnavailable)?;
+                serde_json::from_slice(&bytes).map_err(|_| unavailable(INVALID))?;
             if !valid(response.access_token.0.as_bytes())
                 || response
                     .token_type
                     .as_ref()
                     .is_some_and(|t| !t.eq_ignore_ascii_case("bearer"))
             {
-                return Err(Reason::CredentialUnavailable);
+                return Err(unavailable(INVALID));
             }
-            let expiry = expiry(&response)?;
+            let expiry = expiry(&response).map_err(|_| unavailable(INVALID))?;
             doc.access_token = response.access_token;
             if response.id_token.is_some() {
                 doc.id_token = response.id_token;
             }
             if let Some(token) = response.refresh_token {
                 if !valid(token.0.as_bytes()) {
-                    return Err(Reason::CredentialUnavailable);
+                    return Err(unavailable(INVALID));
                 }
                 doc.refresh_token = token;
             }
             doc.expires_at = expiry;
             doc.refresh_pending = false;
-            let replacement = encode(&doc)?;
+            let replacement =
+                encode(&doc).map_err(|reason| self.failed("document_unencodable", reason))?;
             update_vault_source(path, forbidden, &pending, identity, &replacement)
-                .map_err(|_| Reason::CredentialRevoked)?;
+                .map_err(|_| self.failed("source_commit_failed", Reason::CredentialRevoked))?;
             // Deletion/replacement during exchange or commit never releases a token.
             let check = read_vault_source(path, forbidden, SOURCE_MAX)
-                .map_err(|_| Reason::CredentialRevoked)?;
+                .map_err(|_| self.failed("source_changed", Reason::CredentialRevoked))?;
             if check.as_slice() != replacement.as_slice() {
-                return Err(Reason::CredentialRevoked);
+                return Err(self.failed("source_changed", Reason::CredentialRevoked));
             }
             let generation = self
                 .state
@@ -405,7 +405,7 @@ impl Runtime {
                 .unwrap_or_else(|e| e.into_inner())
                 .generation;
             if !self.emit(generation, "refreshed") {
-                return Err(Reason::CredentialUnavailable);
+                return Err(unavailable("audit_unavailable"));
             }
             *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
             Ok(Zeroizing::new(doc.access_token.0.as_bytes().to_vec()))
@@ -421,6 +421,11 @@ impl Runtime {
             let _ = self.emit(generation, "refresh_failed");
         }
         result
+    }
+    /// Records `label` as the refresh's last error and returns `reason`.
+    fn failed(&self, label: &'static str, reason: Reason) -> Reason {
+        *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(label);
+        reason
     }
     fn live(&self, generation: u64) -> bool {
         // Never start a network exchange from a stream's revocation check.
@@ -884,6 +889,55 @@ mod tests {
             b"grant_type=refresh_token&client_id=test%20client&refresh_token=old-refresh"
         );
         assert!(notes.lock().unwrap().contains(&"refreshed"));
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refresh_failure_is_labelled_by_the_step_that_failed() {
+        let (_dir, path) = file(&doc(now()));
+        let source = std::ffi::OsStr::from_bytes(&path).to_owned();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        // The issuer answers well, but the source is replaced while it
+        // does: the commit failed, not the issuer's response.
+        let issuer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut b = [0];
+                socket.read_exact(&mut b).unwrap();
+                head.push(b[0]);
+            }
+            let length = String::from_utf8_lossy(&head)
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|n| n.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            socket.read_exact(&mut vec![0; length]).unwrap();
+            fs::write(&source, doc(now() + 3600)).unwrap();
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{SUCCESS}",
+                SUCCESS.len()
+            )
+            .unwrap();
+        });
+        let refresh = RefreshPolicy {
+            token_url: url,
+            client_id: "test".into(),
+            refresh_before_seconds: 0,
+            encoding: TokenEncoding::Form,
+        };
+        let Err(error) = Runtime::source(path, vec![], Some(refresh)) else {
+            panic!("a replaced source must not publish the refreshed token");
+        };
+        issuer.join().unwrap();
+        assert!(error.contains("(source_commit_failed)"), "{error}");
     }
     #[cfg(target_os = "linux")]
     #[test]
