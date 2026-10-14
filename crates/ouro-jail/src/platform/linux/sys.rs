@@ -244,7 +244,11 @@ pub fn poll(fds: &mut [libc::pollfd], timeout_ms: i32) -> io::Result<usize> {
 ///
 /// # Errors
 /// The errno of a failed `poll`, other than `EINTR`.
-pub fn poll_one(fd: BorrowedFd<'_>, events: libc::c_short, timeout_ms: i32) -> io::Result<libc::c_short> {
+pub fn poll_one(
+    fd: BorrowedFd<'_>,
+    events: libc::c_short,
+    timeout_ms: i32,
+) -> io::Result<libc::c_short> {
     let mut entry = [libc::pollfd {
         fd: fd.as_raw_fd(),
         events,

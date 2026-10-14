@@ -1782,7 +1782,9 @@ fn check_stat(path: &str) -> String {
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `c` is NUL-terminated and `st` is writable storage for a stat
     // buffer, which nothing reads: only the call's result matters.
-    outcome(i64::from(unsafe { libc::stat(c.as_ptr(), st.as_mut_ptr()) }))
+    outcome(i64::from(unsafe {
+        libc::stat(c.as_ptr(), st.as_mut_ptr())
+    }))
 }
 
 fn check_listdir(path: &str) -> String {

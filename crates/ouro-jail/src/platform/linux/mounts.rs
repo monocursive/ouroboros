@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::policy::{EnvValue, PathRef, PolicySnapshot, ProfileName, ProtectedCoverage, RootToken};
 use crate::records::{AppliedMount, ErrorCode, ErrorStage, JailError, NativeString, Remediation};
+use crate::state::mountinfo;
 
 use super::bwrap::{self, BwrapPlan, Placeholder, PlaceholderSet};
 use super::exec::{self};
@@ -200,6 +201,11 @@ pub(super) fn recordable_mounts(mounts: Vec<AppliedMount>) -> Result<Vec<Applied
     ))
 }
 
+/// The largest `mountinfo` this module reads, the launcher's or this
+/// process's own: far beyond a table of [`MOUNT_TABLE_ROWS_MAX`] rows, and
+/// still a bound.
+const MOUNTINFO_MAX: usize = 4 * 1024 * 1024;
+
 /// The mount table the launcher actually sees, from `/proc/<pid>/mountinfo`
 /// read as bytes (P01.8): one mount point that is not UTF-8 must not cost
 /// the whole table.
@@ -207,71 +213,41 @@ pub(super) fn recordable_mounts(mounts: Vec<AppliedMount>) -> Result<Vec<Applied
 /// # Errors
 /// The read's error, or [`parse_mount_table`]'s.
 pub(super) fn read_mount_table(pid: libc::pid_t) -> std::io::Result<Vec<AppliedMount>> {
-    parse_mount_table(&std::fs::read(format!("/proc/{pid}/mountinfo"))?)
+    let rows = mountinfo::read(
+        Path::new(&format!("/proc/{pid}/mountinfo")),
+        MOUNTINFO_MAX,
+        usize::MAX,
+    )?;
+    applied_mounts(rows)
 }
 
-/// The `(mount point, mode)` rows of a `mountinfo` file's bytes. Fields are
-/// separated by single spaces; a space, tab, newline or backslash inside a
-/// path is an octal escape, so splitting on the byte is exact.
+/// The `(mount point, mode)` rows of a `mountinfo` file's bytes, parsed by
+/// [`mountinfo::rows`].
 ///
 /// # Errors
-/// [`std::io::ErrorKind::InvalidData`] for a row without a mount point and
-/// options, or a mount point holding a NUL: the table is read whole or not
-/// at all.
-pub(super) fn parse_mount_table(raw: &[u8]) -> std::io::Result<Vec<AppliedMount>> {
-    let invalid = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidData, what);
-    let mut out = Vec::new();
-    for line in raw
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let fields: Vec<&[u8]> = line
-            .split(|byte| *byte == b' ')
-            .filter(|field| !field.is_empty())
-            .collect();
-        let (Some(point), Some(options)) = (fields.get(4), fields.get(5)) else {
-            return Err(invalid(format!(
-                "a mountinfo row has {} fields, not a mount point and options",
-                fields.len()
-            )));
-        };
-        let mode = if options
-            .split(|byte| *byte == b',')
-            .any(|item| item == b"ro")
-        {
-            "ro"
-        } else {
-            "rw"
-        };
-        let native = NativeString::from_bytes(decode_mountinfo_path(point))
-            .map_err(|_| invalid("a mount point holds a NUL byte".to_owned()))?;
-        out.push(AppliedMount {
-            path: native,
-            mode: mode.to_owned(),
-        });
-    }
-    Ok(out)
+/// [`std::io::ErrorKind::InvalidData`] for a row the parser refuses, or a
+/// mount point holding a NUL: the table is read whole or not at all.
+#[cfg(test)]
+fn parse_mount_table(raw: &[u8]) -> std::io::Result<Vec<AppliedMount>> {
+    applied_mounts(mountinfo::rows(raw, usize::MAX)?)
 }
 
-/// `mountinfo` escapes space, tab, newline and backslash as octal.
-pub(super) fn decode_mountinfo_path(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\\'
-            && index + 3 < bytes.len()
-            && let Some(value) = std::str::from_utf8(&bytes[index + 1..index + 4])
-                .ok()
-                .and_then(|digits| u8::from_str_radix(digits, 8).ok())
-        {
-            out.push(value);
-            index += 4;
-            continue;
-        }
-        out.push(bytes[index]);
-        index += 1;
-    }
-    out
+fn applied_mounts(rows: Vec<mountinfo::Row>) -> std::io::Result<Vec<AppliedMount>> {
+    rows.into_iter()
+        .map(|row| {
+            let mode = if row.has_option(b"ro") { "ro" } else { "rw" };
+            let path = NativeString::from_bytes(row.mount_point).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "a mount point holds a NUL byte",
+                )
+            })?;
+            Ok(AppliedMount {
+                path,
+                mode: mode.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// Where a contained plan's paths are: what it binds that the snapshot does
@@ -644,33 +620,23 @@ pub(super) fn source_on_pseudo_fs(resolved: &Path) -> bool {
 /// cgroup (v1 or v2) mount, every devtmpfs mount, and every tmpfs mounted at
 /// or beneath `/run` (the operator's runtime tree — `/run` alone, nowhere
 /// else, so a tmpfs-backed `/tmp` or scratch stays grantable), from
-/// `/proc/self/mountinfo` read as bytes. The fstype is the field after the
-/// ` - ` separator.
+/// `/proc/self/mountinfo` read as bytes.
 ///
 /// # Errors
-/// The read's error: an unreadable table is not one without such mounts.
+/// The read's error, or a table the parser refuses: an unreadable table is
+/// not one without such mounts.
 pub(super) fn pseudo_fs_mount_points() -> std::io::Result<Vec<PathBuf>> {
-    Ok(parse_pseudo_fs_mount_points(&std::fs::read(
-        "/proc/self/mountinfo",
-    )?))
+    let rows = mountinfo::read(Path::new("/proc/self/mountinfo"), MOUNTINFO_MAX, usize::MAX)?;
+    Ok(pseudo_fs_points(&rows))
 }
 
-/// The pseudo-filesystem mount points of a `mountinfo` file's bytes, `/run`
-/// always among them.
-pub(super) fn parse_pseudo_fs_mount_points(raw: &[u8]) -> Vec<PathBuf> {
+/// The pseudo-filesystem mount points of a mount table, `/run` always among
+/// them.
+pub(super) fn pseudo_fs_points(rows: &[mountinfo::Row]) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for line in raw.split(|byte| *byte == b'\n') {
-        let Some(separator) = line.windows(3).position(|w| w == b" - ") else {
-            continue;
-        };
-        let fields: Vec<&[u8]> = line.split(|byte| *byte == b' ').collect();
-        let Some(point) = fields.get(4) else { continue };
-        let fstype = line[separator + 3..]
-            .split(|byte| *byte == b' ')
-            .next()
-            .unwrap_or_default();
-        let point = decode_mountinfo_path(point);
-        let matches = match fstype {
+    for row in rows {
+        let point = row.mount_point.as_slice();
+        let matches = match row.fstype.as_slice() {
             b"proc" | b"sysfs" | b"cgroup" | b"cgroup2" | b"devtmpfs" => true,
             // `/run` and its submounts only: a tmpfs anywhere else is an
             // ordinary place for a grant (tests use /tmp tempdirs).
@@ -678,7 +644,7 @@ pub(super) fn parse_pseudo_fs_mount_points(raw: &[u8]) -> Vec<PathBuf> {
             _ => false,
         };
         if matches {
-            out.push(PathBuf::from(std::ffi::OsStr::from_bytes(&point)));
+            out.push(PathBuf::from(OsStr::from_bytes(point)));
         }
     }
     // Security 2026-09-27 (audit 4 B7): the runtime tree is refused by its
@@ -1085,7 +1051,9 @@ mod tests {
     fn audit4_run_is_refused_by_path_whatever_its_fstype() {
         for mounts in [
             super::pseudo_fs_mount_points().unwrap(),
-            super::parse_pseudo_fs_mount_points(b"22 1 0:1 / / rw - ext4 /dev/vda1 rw\n"),
+            super::pseudo_fs_points(
+                &mountinfo::rows(b"22 1 0:1 / / rw - ext4 /dev/vda1 rw\n", 16).unwrap(),
+            ),
         ] {
             assert!(
                 mounts
@@ -1309,15 +1277,6 @@ mod tests {
             map.add(fd, target).unwrap();
         }
         drop(placeholders);
-    }
-
-    #[test]
-    fn mountinfo_paths_decode_their_octal_escapes() {
-        assert_eq!(
-            decode_mountinfo_path(b"/work/a\\040b"),
-            b"/work/a b".to_vec()
-        );
-        assert_eq!(decode_mountinfo_path(b"/plain"), b"/plain".to_vec());
     }
 
     // P01.8
