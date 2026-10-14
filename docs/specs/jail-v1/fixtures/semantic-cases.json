@@ -1,19 +1,19 @@
 {
   "rules": {
     "native_string": "canonicalization.md \"Native strings\": a byte object is canonical padded base64 of bytes that are not UTF-8, and no native value holds NUL",
-    "credential_id_unique": "jail-v1.md:1833 (\u00a713.2) and canonicalization.md: staged credentials have unique logical ids",
-    "limit_key_unique": "jail-v1.md:703 and :1895-1897 (\u00a76.4, \u00a713.2): one limit per key, each stating its own scope and hit",
-    "coverage_source_unsupported": "jail-v1.md:1561-1563 (\u00a711.4): an active, supported or degraded class names its assigned source, which cannot then be unsupported",
-    "gap_interval_reversed": "jail-v1.md:1627-1629 (\u00a711.4) and :1791 (\u00a713.1): a gap is the interval from the last healthy point to recovery, so it does not end before it starts",
-    "trace_attempt_mixed": "jail-v1.md:1774 (\u00a713.1) and :1909-1911 (\u00a713.3): a trace is the one stream of one attempt",
-    "source_seq_order": "jail-v1.md:1775-1776 (\u00a713.1): source_seq never restarts within an attempt, so it increases per source",
-    "source_seq_gap": "jail-v1.md:1775-1776 (\u00a713.1) and :1938-1940 (\u00a713.3): each source counts from 1; a missing number is lost evidence, which the stream's first loss records as a trace_transport_loss note",
-    "receipt_note_order": "jail-v1.md:837-851 (\u00a78.1) and :1817-1821, :1846-1849 (\u00a713.2): receipt notes follow the lifecycle; nothing after exec is a refusal, nothing leaves settled or refused",
-    "trace_final_receipt": "jail-v1.md:1792-1795 (\u00a713.1) and :1948-1949 (\u00a713.3): a complete trace ends on the jail.receipt note naming the final receipt's phase and canonical digest",
-    "control_attempt_mixed": "jail-v1.md:923-924 (\u00a78.2): control output carries one attempt's messages",
-    "control_seq_order": "jail-v1.md:923-924 (\u00a78.2): the message number increases monotonically",
-    "trace_loss_recorded": "jail-v1.md:1928-1931 and :1938-1940 (\u00a713.3): the first loss writes one trace_transport_loss note from the last healthy point, and every later receipt records that loss on each covered evidence class",
-    "control_kind_order": "jail-v1.md:923-931 (\u00a78.2) and :847-851 (\u00a78.1): prepared, then exec_confirmed, then one terminal message; refused never after exec; nothing after a terminal message"
+    "credential_id_unique": "jail-v1.md \u00a712 \"IDs are unique logical names\" and canonicalization.md \"Ids are unique.\": staged credentials have unique logical ids",
+    "limit_key_unique": "jail-v1.md \u00a76.4 \"CLI duplicates refuse.\", \u00a79.3 \"The receipt gives requested value, applied mechanism, scope and observed hit/unknown status.\" and \u00a713.2 \"Limits report hits in `applied.limits[].hit`\": one limit per key, each stating its own scope and hit",
+    "coverage_source_unsupported": "jail-v1.md \u00a711.4 \"Active/supported/degraded classes name their assigned source; unsupported classes name none.\": an active, supported or degraded class names its assigned source, which cannot then be unsupported",
+    "gap_interval_reversed": "jail-v1.md \u00a711.4 \"Bound the affected interval conservatively from the last known healthy point to recovery.\" and \u00a713.1 \"with `fields.kind=coverage_gap`, classes, interval, reason\": a gap is the interval from the last healthy point to recovery, so it does not end before it starts",
+    "trace_attempt_mixed": "jail-v1.md \u00a713.1 \"There is one writer per trace stream.\" and \u00a713.3 \"write a bounded standalone `trace.ndjson` under private attempt state\": a trace is the one stream of one attempt",
+    "source_seq_order": "jail-v1.md \u00a713.1 \"`source_seq` starts at 1 independently for each source and never restarts within an attempt\": source_seq never restarts within an attempt, so it increases per source",
+    "source_seq_gap": "jail-v1.md \u00a713.1 \"its numbers are consecutive except after the stream's recorded transport loss\" and \u00a713.3 \"The first loss writes one wrapper `coverage_gap` note (`trace_transport_loss`)\": each source counts from 1; a missing number is lost evidence, which the stream's first loss records as a trace_transport_loss note",
+    "receipt_note_order": "jail-v1.md \u00a78.1 \"Termination after target exec cannot be reclassified as a pre-exec refusal.\" and \u00a713.2 \"Normal phases are `prepared`, `enforced`, `settled`.\": receipt notes follow the lifecycle; nothing after exec is a refusal, nothing leaves settled or refused",
+    "trace_final_receipt": "jail-v1.md \u00a713.1 \"Receipt updates are wrapper `jail.receipt` events referencing receipt digest and phase\" and \u00a713.3 \"A trace is complete only if its last frame is the `jail.receipt` note of the attempt's final receipt.\": a complete trace ends on the jail.receipt note naming the final receipt's phase and canonical digest",
+    "control_attempt_mixed": "jail-v1.md \u00a78.2 \"Control output uses NDJSON, with schema `ouro.jail.control/1`, attempt id\": control output carries one attempt's messages",
+    "control_seq_order": "jail-v1.md \u00a78.2 \"monotonically increasing message number starting at 1\": the message number increases monotonically",
+    "trace_loss_recorded": "jail-v1.md \u00a713.3 \"Once a trace loss is known, every later receipt records it\" and \"starting from the last point every accepted frame had been delivered\": the first loss writes one trace_transport_loss note from the last healthy point, and every later receipt records that loss on each covered evidence class",
+    "control_kind_order": "jail-v1.md \u00a78.2 \"`refused` is sent only while the target has not executed\" and \"once the target has executed, the terminal message is `settled` or `unsettled`\", and \u00a78.1 \"Termination after target exec cannot be reclassified as a pre-exec refusal.\": prepared, then exec_confirmed, then one terminal message; refused never after exec; nothing after a terminal message"
   },
   "cases": [
     {

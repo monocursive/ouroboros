@@ -323,9 +323,56 @@ def apply(record, change):
     return record
 
 
+def section_text(document, number):
+    """One numbered section of a specification, subsections included."""
+    inside, text = False, []
+    for line in document.splitlines():
+        heading = re.match(r"#+ (\d+(?:\.\d+)*)\.? ", line)
+        if heading:
+            found = heading.group(1)
+            inside = found == number or found.startswith(number + ".")
+        if inside:
+            text.append(line)
+    assert text, ("not a section", number)
+    return "\n".join(text)
+
+
+def check_rule_citations(rules):
+    """A citation names a document and section and quotes it, never a line
+    number a later revision can move; each quote is in the section it follows."""
+    documents = {
+        "jail-v1.md": (ROOT.parent / "jail-v1.md").read_text(),
+        "canonicalization.md": (ROOT / "canonicalization.md").read_text(),
+    }
+
+    def flat(text):
+        return " ".join(text.split())
+
+    for rule, citation in rules.items():
+        document, number, quotes = None, None, 0
+        for index, part in enumerate(citation.split('"')):
+            if index % 2:
+                text = documents[document]
+                if document == "jail-v1.md":
+                    assert number, (rule, "quotes no section")
+                    text = section_text(text, number)
+                assert flat(part) in flat(text), (rule, document, number, part)
+                quotes += 1
+                continue
+            for word in part.split():
+                word = word.rstrip(",:")
+                assert ".md:" not in word, (rule, "cites a line", word)
+                if word.endswith(".md"):
+                    document, number = word, None
+                elif word.startswith("§"):
+                    number = word[1:]
+        assert quotes, (rule, "quotes no specification text")
+
+
 def check_semantic_corpus(validators):
     corpus = read("fixtures/semantic-cases.json")
     rules = set(corpus["rules"])
+    check_rule_citations(corpus["rules"])
     named = set()
     positive = 0
     schema_of = {"receipt": "jail-receipt", "trace": "jail-event", "control": "jail-control"}
