@@ -1696,6 +1696,25 @@ fn doctor_reports_every_probe_and_the_manifest_agrees() {
         statuses.insert(name, status);
     }
 
+    // Every requirement of the selected profile is reported, on any host.
+    for requirement in report["requirements"]
+        .as_array()
+        .expect("doctor lists requirements")
+    {
+        let name = requirement.as_str().expect("a requirement name");
+        assert!(
+            statuses.contains_key(name),
+            "doctor reports no capability for its own requirement {name}"
+        );
+    }
+
+    // The statuses themselves are the provisioned host's: the manifest pins
+    // what §3.2's reference host reports (its AppArmor userns restriction,
+    // its delegated cgroup subtree), which another kernel or session
+    // legitimately reports otherwise.
+    if !common::reference_host("the capability statuses the conformance manifest pins") {
+        return;
+    }
     let manifest_text = std::fs::read_to_string(specs_dir().join("conformance-manifest.toml"))
         .expect("the manifest is checked in");
     for line in manifest_text.lines() {
@@ -1713,18 +1732,6 @@ fn doctor_reports_every_probe_and_the_manifest_agrees() {
             Some(expected),
             "doctor reports {name} as {:?}, the manifest pins {expected}",
             statuses.get(name)
-        );
-    }
-
-    // Every requirement of the selected profile is reported too.
-    for requirement in report["requirements"]
-        .as_array()
-        .expect("doctor lists requirements")
-    {
-        let name = requirement.as_str().expect("a requirement name");
-        assert!(
-            statuses.contains_key(name),
-            "doctor reports no capability for its own requirement {name}"
         );
     }
     assert_eq!(report["ready"], Value::Bool(true), "{report:#}");

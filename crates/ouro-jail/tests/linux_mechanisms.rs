@@ -2065,29 +2065,20 @@ fn the_probes_report_the_statuses_this_host_warrants() {
         ("cgroup_memory", cgroup_status),
         ("cgroup_swap", cgroup_status),
         ("cgroup_cpu", cgroup_status),
-        // `available` here means the restriction is on.
-        ("apparmor_userns_restriction", ProbeStatus::Available),
-        // Which is why nesting is denied.
-        ("nested_user_namespace", ProbeStatus::Unavailable),
     ];
-    for (name, status) in expected {
-        let result = by_name[name];
-        assert_eq!(
-            result.status, status,
-            "{name}: expected {status}, got {} ({}): {}",
-            result.status, result.reason_code, result.evidence
-        );
-        assert!(!result.evidence.is_empty(), "{name} reported no evidence");
-        eprintln!("{name} = {} ({})", result.status, result.evidence);
-    }
-    assert_eq!(
-        by_name["nested_user_namespace"].reason_code,
-        "nested_sandbox_denied"
-    );
-    assert_eq!(
-        by_name["apparmor_userns_restriction"].reason_code,
-        "restriction_on"
-    );
+    let assert_statuses = |expected: &[(&str, ProbeStatus)]| {
+        for &(name, status) in expected {
+            let result = by_name[name];
+            assert_eq!(
+                result.status, status,
+                "{name}: expected {status}, got {} ({}): {}",
+                result.status, result.reason_code, result.evidence
+            );
+            assert!(!result.evidence.is_empty(), "{name} reported no evidence");
+            eprintln!("{name} = {} ({})", result.status, result.evidence);
+        }
+    };
+    assert_statuses(&expected);
     // The storage-ceiling probe reads this host's own filesystem layout,
     // which the suite does not control; either §3.1 outcome is honest, the
     // reason code decides which.
@@ -2100,5 +2091,27 @@ fn the_probes_report_the_statuses_this_host_warrants() {
         "storage_ceiling: unexpected {} ({})",
         ceiling.status,
         ceiling.evidence
+    );
+
+    // Ubuntu's AppArmor restriction on unprivileged user namespaces is a
+    // property of the provisioned host (§3.2), not of Linux: a kernel
+    // without it reports the restriction off and nesting available, which
+    // is as honest.
+    if !reference_host("Ubuntu's AppArmor userns restriction") {
+        return;
+    }
+    assert_statuses(&[
+        // `available` here means the restriction is on.
+        ("apparmor_userns_restriction", ProbeStatus::Available),
+        // Which is why nesting is denied.
+        ("nested_user_namespace", ProbeStatus::Unavailable),
+    ]);
+    assert_eq!(
+        by_name["nested_user_namespace"].reason_code,
+        "nested_sandbox_denied"
+    );
+    assert_eq!(
+        by_name["apparmor_userns_restriction"].reason_code,
+        "restriction_on"
     );
 }
