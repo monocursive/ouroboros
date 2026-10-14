@@ -501,46 +501,85 @@ impl Started {
     /// The placeholders a teardown did not remove, for a refusal's message;
     /// `None` when every one is gone.
     fn placeholders_left(&self) -> Option<String> {
-        if self.placeholder_outcomes.is_empty() {
-            if self.placeholders.is_empty() {
-                return None;
-            }
-            let paths: Vec<String> = self
-                .placeholders
+        let kept = kept_placeholders(&self.placeholders, &self.placeholder_outcomes);
+        if kept.is_empty() {
+            return None;
+        }
+        let paths = |kept: &[(&Path, String)]| {
+            kept.iter()
+                .map(|(path, reason)| format!("{} ({reason})", path.display()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        Some(if self.placeholder_outcomes.is_empty() {
+            let paths: Vec<String> = kept
                 .iter()
-                .map(|placeholder| placeholder.destination().display().to_string())
+                .map(|(path, _)| path.display().to_string())
                 .collect();
-            return Some(format!(
+            format!(
                 "the placeholder directories {} are left in the workspace: the boundary's tree \
                  was not shown dead within its budget",
                 paths.join(", ")
-            ));
-        }
-        let kept: Vec<String> = self
-            .placeholder_outcomes
-            .iter()
-            .filter_map(|outcome| match outcome {
-                PlaceholderOutcome::Removed(_) | PlaceholderOutcome::AlreadyGone(_) => None,
-                PlaceholderOutcome::KeptChanged(path, reason) => {
-                    Some(format!("{} ({reason})", path.display()))
-                }
-                PlaceholderOutcome::KeptNotEmpty(path) => {
-                    Some(format!("{} (not empty)", path.display()))
-                }
-                PlaceholderOutcome::KeptError(path, errno) => Some(format!(
-                    "{} ({})",
-                    path.display(),
-                    super::sys::errno_name(*errno)
-                )),
-            })
-            .collect();
-        (!kept.is_empty()).then(|| {
+            )
+        } else {
             format!(
                 "the placeholder directories {} are kept in the workspace",
-                kept.join(", ")
+                paths(&kept)
             )
         })
     }
+}
+
+/// The placeholders still in the operator's workspace, each with why: every
+/// one when none was removed (the tree was not shown dead), else those a
+/// removal kept.
+fn kept_placeholders<'a>(
+    placeholders: &'a [Placeholder],
+    outcomes: &'a [PlaceholderOutcome],
+) -> Vec<(&'a Path, String)> {
+    if outcomes.is_empty() {
+        return placeholders
+            .iter()
+            .map(|placeholder| (placeholder.destination(), "tree_not_shown_dead".to_owned()))
+            .collect();
+    }
+    outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            PlaceholderOutcome::Removed(_) | PlaceholderOutcome::AlreadyGone(_) => None,
+            PlaceholderOutcome::KeptChanged(path, reason) => Some((path.as_path(), reason.clone())),
+            PlaceholderOutcome::KeptNotEmpty(path) => {
+                Some((path.as_path(), "not empty".to_owned()))
+            }
+            PlaceholderOutcome::KeptError(path, errno) => {
+                Some((path.as_path(), super::sys::errno_name(*errno).into_owned()))
+            }
+        })
+        .collect()
+}
+
+/// The receipt's account of the placeholders left in the operator's
+/// workspace when the run settled (§9.1: the evaluation records any visible
+/// workspace side effect of the mechanism); `None` when there are none. A
+/// placeholder left because the tree was not shown dead may still go when
+/// the boundary is dropped and its death then shows; the receipt says what
+/// settlement left.
+fn placeholders_left_detail(
+    placeholders: &[Placeholder],
+    outcomes: &[PlaceholderOutcome],
+) -> Option<Value> {
+    let kept = kept_placeholders(placeholders, outcomes);
+    (!kept.is_empty()).then(|| {
+        Value::Array(
+            kept.into_iter()
+                .filter_map(|(path, reason)| {
+                    let path =
+                        NativeString::from_bytes(path.as_os_str().as_bytes().to_vec()).ok()?;
+                    Some(serde_json::json!({ "path": path, "reason": reason }))
+                })
+                .collect(),
+        )
+    })
 }
 
 /// Whose account a teardown records into: the run's, which also has an
@@ -2764,6 +2803,12 @@ impl Tree for Boundary {
         if let Some(agent) = self.started.agent.as_ref() {
             details.insert("helpers".to_owned(), agent.details().1);
         }
+        if let Some(left) = placeholders_left_detail(
+            &self.started.placeholders,
+            &self.started.placeholder_outcomes,
+        ) {
+            details.insert("placeholders_left".to_owned(), left);
+        }
         let observer = run.tracer_summary.as_ref();
         // Security 2026-09-27 (audit 4 B9): the honest count of read-only
         // open verdicts the observer certified (register-sourced flags, and
@@ -2986,6 +3031,31 @@ mod tests {
                 None
             )
             .is_err()
+        );
+    }
+
+    /// The receipt names each placeholder settlement left in the workspace,
+    /// with why, and says nothing when every one was removed or none made.
+    #[test]
+    fn the_placeholders_settlement_left_are_named_in_the_receipt() {
+        use std::path::PathBuf;
+        assert_eq!(placeholders_left_detail(&[], &[]), None);
+        let removed = [
+            PlaceholderOutcome::Removed(PathBuf::from("/work/.git")),
+            PlaceholderOutcome::AlreadyGone(PathBuf::from("/work/.ouroboros")),
+        ];
+        assert_eq!(placeholders_left_detail(&[], &removed), None);
+        let kept = [
+            PlaceholderOutcome::Removed(PathBuf::from("/work/.git")),
+            PlaceholderOutcome::KeptNotEmpty(PathBuf::from("/work/.ouroboros")),
+            PlaceholderOutcome::KeptError(PathBuf::from("/work/r/.git"), libc::EBUSY),
+        ];
+        assert_eq!(
+            placeholders_left_detail(&[], &kept),
+            Some(serde_json::json!([
+                {"path": "/work/.ouroboros", "reason": "not empty"},
+                {"path": "/work/r/.git", "reason": "EBUSY"},
+            ]))
         );
     }
 
