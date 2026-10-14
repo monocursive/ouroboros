@@ -69,7 +69,9 @@ defmodule OuroFleet.Epmd do
   given a way to dial that peer, and is reported as such rather than guessed at.
   """
 
-  # The distribution protocol version `erl_epmd` reports, and the only one ERTS speaks.
+  # The distribution version answered alongside a port. `erl_epmd` answers 6 on OTP 28
+  # and 29, whose `dist_util` stores this value without acting on it, so answering 5
+  # here does not change the handshake.
   @dist_version 5
 
   # `register_node/2,3` must answer with a creation, which tells one incarnation of a

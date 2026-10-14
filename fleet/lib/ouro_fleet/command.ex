@@ -46,9 +46,8 @@ defmodule OuroFleet.Command do
   end
 
   # Closing a port only closes its pipes, which a child that is not writing never
-  # notices: it would keep running after its reply was already reported unknown. So
-  # the child is killed first. Only the direct child is signalled; anything it spawned
-  # and detached is its own.
+  # notices: it would keep running after its outcome was already reported unknown. So
+  # the child is killed first. Only that child is signalled, not anything it started.
   defp stop(port) do
     with {:os_pid, pid} <- Port.info(port, :os_pid) do
       System.cmd("/bin/kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
