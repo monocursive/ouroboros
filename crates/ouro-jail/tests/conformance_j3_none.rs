@@ -1358,6 +1358,9 @@ fn the_boundary_itself_refuses_a_restriction_it_would_not_apply() {
             config_dir: root.path().join("config"),
             launch: None,
             proxy: None,
+            prepare_deadline: ouro_jail::platform::ContinuousDeadline::after(Duration::from_secs(
+                10,
+            )),
         };
         let deadline = ouro_jail::platform::linux::clock::Deadline::after(Duration::from_secs(10));
         let Err(error) =

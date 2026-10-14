@@ -27,7 +27,8 @@ use crate::launch_profile;
 use crate::network::NetworkMode;
 use crate::observer::CoverageSummary;
 use crate::platform::{
-    BoundaryIdentity, PlanRequest, Platform, PreparedPlan, RunEvent, Sinks, StopReason, Teardown,
+    BoundaryIdentity, ContinuousDeadline, PlanRequest, Platform, PreparedPlan, RunEvent, Sinks,
+    StopReason, Teardown,
 };
 use crate::policy::{
     self, Layer, LayerOrigin, LimitKey, PolicyDelta, ProfileName, ResolveInputs, Resolved,
@@ -1285,6 +1286,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             attempt_dir: attempt_dir.root().to_path_buf(),
             request,
             argv,
+            prepare_deadline: budget.deadline,
             workspace: plan.workspace.clone(),
             config_dir: plan.config_dir.clone(),
             // The staged objects, bound by descriptor
@@ -2791,31 +2793,6 @@ fn prior_receipt_copy(path: &Path) -> bool {
 
 /// The longest single wait for the gate between deadline checks.
 const GATE_POLL_STEP: Duration = Duration::from_millis(250);
-
-/// A deadline on the platform's continuous clock: `CLOCK_BOOTTIME` on Linux,
-/// so suspend counts and a wall-clock step does not (§6.4: "Linux measures
-/// execution wall, preparation/gate/stop budgets ... using CLOCK_BOOTTIME").
-/// `Instant` is `CLOCK_MONOTONIC`, which stops during suspend.
-#[derive(Clone, Copy, Debug)]
-struct ContinuousDeadline {
-    end_ns: u128,
-}
-
-impl ContinuousDeadline {
-    fn after(budget: Duration) -> Self {
-        ContinuousDeadline {
-            end_ns: crate::platform::elapsed_since_start_ns().saturating_add(budget.as_nanos()),
-        }
-    }
-
-    /// Time left, zero once expired.
-    fn remaining(self) -> Duration {
-        let left = self
-            .end_ns
-            .saturating_sub(crate::platform::elapsed_since_start_ns());
-        Duration::from_nanos(u64::try_from(left).unwrap_or(u64::MAX))
-    }
-}
 
 /// A preparation budget with a stage-appropriate refusal (§8.2), on the
 /// continuous clock (§6.4).

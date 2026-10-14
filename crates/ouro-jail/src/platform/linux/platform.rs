@@ -107,8 +107,6 @@ fn random_trace_data() -> u16 {
     }
 }
 
-/// Preparation budget (§8.2).
-const PREPARE_BUDGET: Duration = Duration::from_secs(30);
 /// Cooperative termination grace (§9.3).
 const STOP_GRACE: Duration = Duration::from_secs(2);
 /// How long a natural finish is awaited before the tree is terminated.
@@ -580,7 +578,9 @@ impl Platform for LinuxPlatform {
         plan: PreparedPlan,
         sinks: Sinks,
     ) -> Result<Box<dyn PreparedExecution>, JailError> {
-        let deadline = clock::Deadline::after(PREPARE_BUDGET);
+        // §8.2: what the supervisor's preparation budget has left, on the
+        // same boot clock.
+        let deadline = clock::Deadline::after(plan.prepare_deadline.remaining());
         // The uncontained profile has its own registered boundary (§9.3)
         if plan.request.snapshot.profile == ProfileName::None {
             return super::uncontained::prepare(plan, sinks, deadline);

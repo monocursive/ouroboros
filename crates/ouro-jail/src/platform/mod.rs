@@ -60,6 +60,33 @@ pub fn mark_supervisor_start() {
 #[cfg(not(target_os = "linux"))]
 static FALLBACK_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
+/// A deadline on the supervisor's continuous clock
+/// ([`elapsed_since_start_ns`]): `CLOCK_BOOTTIME` on Linux, so suspend
+/// counts and a wall-clock step does not (§6.4: "Linux measures execution
+/// wall, preparation/gate/stop budgets ... using CLOCK_BOOTTIME").
+/// `Instant` is `CLOCK_MONOTONIC`, which stops during suspend.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ContinuousDeadline {
+    end_ns: u128,
+}
+
+impl ContinuousDeadline {
+    /// The deadline `budget` from now.
+    #[must_use]
+    pub fn after(budget: Duration) -> Self {
+        ContinuousDeadline {
+            end_ns: elapsed_since_start_ns().saturating_add(budget.as_nanos()),
+        }
+    }
+
+    /// Time left, zero once expired.
+    #[must_use]
+    pub fn remaining(self) -> Duration {
+        let left = self.end_ns.saturating_sub(elapsed_since_start_ns());
+        Duration::from_nanos(u64::try_from(left).unwrap_or(u64::MAX))
+    }
+}
+
 // `linux` is declared unconditionally: its `bpf` and `seccomp` modules describe
 // a Linux ABI without calling into it, so they build and test on every host;
 // everything that touches Linux is gated inside `platform/linux/mod.rs`.
@@ -98,6 +125,10 @@ pub struct PreparedPlan {
     pub request: PlanRequest,
     /// The literal operator argv, including `PROGRAM`.
     pub argv: Vec<Vec<u8>>,
+    /// What is left of the §8.2 preparation budget, which runs from the
+    /// supervisor's step 1: steps 3 to 5 spend the same 30 seconds, never a
+    /// fresh budget of their own.
+    pub prepare_deadline: ContinuousDeadline,
     /// The absolute resolved workspace.
     pub workspace: PathBuf,
     /// The operator's config directory (`config.toml` and `launch/` live

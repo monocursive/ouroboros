@@ -141,6 +141,9 @@ mod tests {
                 attempt_dir: std::path::PathBuf::from("/nonexistent"),
                 request: plan,
                 argv: vec![b"/bin/true".to_vec()],
+                prepare_deadline: crate::platform::ContinuousDeadline::after(
+                    std::time::Duration::from_secs(30),
+                ),
                 workspace: std::path::PathBuf::from("/work"),
                 config_dir: std::path::PathBuf::from("/nonexistent"),
                 launch: None,

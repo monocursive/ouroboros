@@ -1019,6 +1019,9 @@ fn j4_n7_a_failed_leaf_registration_refuses_and_leaves_no_leaf() {
             config_dir: attempt.parent().unwrap().parent().unwrap().join("config"),
             launch: None,
             proxy: None,
+            prepare_deadline: ouro_jail::platform::ContinuousDeadline::after(Duration::from_secs(
+                10,
+            )),
         };
         let seam = std::sync::Arc::new(FailAt {
             site,
