@@ -162,14 +162,20 @@ pub const LAUNCH_SUPPORT_REASON: &str = "no_recorded_run";
 pub struct Plan {
     /// The resolved policy, digest, provenance and requirements.
     pub resolved: Resolved,
-    /// The base built-in profile.
-    pub profile: ProfileName,
     /// The absolute workspace.
     pub workspace: PathBuf,
     /// The configuration directory in use.
     pub config_dir: PathBuf,
     /// The state directory in use.
     pub data_dir: PathBuf,
+}
+
+impl Plan {
+    /// The base built-in profile, as the snapshot records it.
+    #[must_use]
+    pub fn profile(&self) -> ProfileName {
+        self.resolved.snapshot.profile
+    }
 }
 
 fn usage(key: &str, message: impl Into<String>) -> JailError {
@@ -589,7 +595,6 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
 
     Ok(Plan {
         resolved,
-        profile,
         workspace,
         config_dir,
         data_dir,
@@ -927,7 +932,7 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
 fn plan_request(plan: &Plan) -> PlanRequest {
     PlanRequest {
         snapshot: plan.resolved.snapshot.clone(),
-        profile: plan.profile,
+        profile: plan.profile(),
         requirements: plan.resolved.requirements.clone(),
     }
 }
@@ -1160,7 +1165,7 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
     let policy_written = write_policy_file(&attempt_dir, &plan);
 
     let now = SystemTime::now();
-    let containment = if plan.profile.is_contained() {
+    let containment = if plan.profile().is_contained() {
         Containment::Pending
     } else {
         // I08: `none` is unprotected in every receipt, including a refusal.
@@ -1325,7 +1330,7 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
         release_own_stdout();
     }
     let boundary = prepared.boundary();
-    apply_boundary(&mut record, &boundary, plan.profile);
+    apply_boundary(&mut record, &boundary, plan.profile());
     // J4-R: §13.2 row 4 — the application is part of the boundary's facts:
     // a refusal after this point reports what was actually applied. It used
     // to be read after the registration below, so a failed registration
@@ -1475,7 +1480,7 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
     // it drops, after the run's tree is gone (it is declared before
     // `running`, so it drops after it), and every later run refuses trusted
     // files that do not postdate that (`refuse_stale_trusted_file`).
-    let _uncontained_run = if plan.profile == ProfileName::None {
+    let _uncontained_run = if plan.profile() == ProfileName::None {
         match state::UncontainedRun::arm(&[&plan.data_dir, &plan.config_dir], attempt_id.as_str()) {
             Ok(run) => Some(run),
             Err(error) => {
@@ -1658,7 +1663,7 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
                 // teardown verification": every contained attempt verifies the
                 // teardown of a failed exec, so the refused receipt says what
                 // it established and vendor state can be removed.
-                if plan.profile.is_contained() {
+                if plan.profile().is_contained() {
                     let tree = running.wait_tree(TREE_BUDGET);
                     record_tree(&mut record, &tree);
                 }
@@ -2467,7 +2472,7 @@ fn check_launch_isolation(plan: &Plan, roots: &ChildRoots) -> Result<(), JailErr
 
 /// Executable code must not be replaceable through a writable child root.
 fn check_binary_isolation(plan: &Plan, roots: &ChildRoots) -> Result<(), JailError> {
-    if plan.profile == ProfileName::None {
+    if plan.profile() == ProfileName::None {
         return Ok(());
     }
     let mut binaries = vec![std::env::current_exe().map_err(|e| usage("binaries", e.to_string()))?];
@@ -2521,7 +2526,7 @@ fn check_binary_isolation(plan: &Plan, roots: &ChildRoots) -> Result<(), JailErr
 /// the workspace, the scratch root or any host grant, or reaches it through
 /// a bind alias.
 fn check_config_isolation(plan: &Plan, roots: &ChildRoots) -> Result<(), JailError> {
-    if plan.profile == ProfileName::None {
+    if plan.profile() == ProfileName::None {
         let mut trusted = Vec::new();
         let config = plan.config_dir.join("config.toml");
         if config.symlink_metadata().is_ok() {
@@ -3084,7 +3089,7 @@ fn finish_control(control: Option<&mut ControlSink>) -> u64 {
 }
 
 fn pending_applied(plan: &Plan) -> Applied {
-    let mode = if plan.profile.is_contained() {
+    let mode = if plan.profile().is_contained() {
         // Nothing has been applied yet.
         "pending"
     } else {
@@ -4897,7 +4902,6 @@ mod tests {
     fn a_none_profile_receipt_is_unprotected_before_anything_is_applied() {
         let applied = pending_applied(&Plan {
             resolved: minimal_resolved(ProfileName::None),
-            profile: ProfileName::None,
             workspace: PathBuf::from("/work"),
             config_dir: PathBuf::from("/config"),
             data_dir: PathBuf::from("/data"),
@@ -4917,7 +4921,6 @@ mod tests {
         std::fs::create_dir_all(&launch).unwrap();
         let plan = |workspace: PathBuf| Plan {
             resolved: minimal_resolved(ProfileName::Tool),
-            profile: ProfileName::Tool,
             workspace,
             config_dir: config_dir.clone(),
             data_dir: root.path().join("data"),
@@ -4947,7 +4950,6 @@ mod tests {
         std::fs::create_dir_all(&config_dir).unwrap();
         let plan = |workspace: PathBuf| Plan {
             resolved: minimal_resolved(ProfileName::Tool),
-            profile: ProfileName::Tool,
             workspace,
             config_dir: config_dir.clone(),
             data_dir: root.path().join("data"),
@@ -5057,7 +5059,6 @@ mod tests {
         attempt_dir.create(&data).unwrap();
         let plan = Plan {
             resolved: minimal_resolved(ProfileName::Tool),
-            profile: ProfileName::Tool,
             workspace: root.path().join("workspace"),
             config_dir: root.path().join("config"),
             data_dir: data,

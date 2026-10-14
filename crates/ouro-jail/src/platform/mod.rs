@@ -87,9 +87,11 @@ impl ContinuousDeadline {
     }
 }
 
-// `linux` is declared unconditionally: its `bpf` and `seccomp` modules describe
-// a Linux ABI without calling into it, so they build and test on every host;
-// everything that touches Linux is gated inside `platform/linux/mod.rs`.
+// `linux` is declared unconditionally: `abi`, `bpf`, `bridge`, `freeze`,
+// `host`, `scope` and `seccomp` describe a Linux ABI or make a portable
+// decision without calling into Linux, so they build and test on every host
+// (the Linux-only parts of `bridge`, `host` and `scope` are gated inside
+// them); every other module is gated in `platform/linux/mod.rs`.
 pub mod linux;
 
 /// The reason code of a capability this platform has no backend for (§3.2):
