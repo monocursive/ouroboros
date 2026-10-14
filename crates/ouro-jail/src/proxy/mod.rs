@@ -759,6 +759,9 @@ pub fn start_with_vault(
             use crate::vault::origin::{FDS_PER_PIN, MAX_PINNED};
             let open = sys::open_descriptor_count()?;
             let (soft, _) = sys::nofile_limits()?;
+            // At most `configure`'s limit of processes are pinned at once,
+            // each with its descriptors and, until claimed, its connection's
+            // socket; a published refusal holds none.
             let needed = budgets.descriptors_needed().saturating_add(
                 budgets
                     .max_connections

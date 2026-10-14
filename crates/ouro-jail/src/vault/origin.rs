@@ -6,12 +6,15 @@
 //! calling process before it connects ([`Origins::prepare`]) and, once the
 //! connect succeeded, publishes what it established under the connection's
 //! key, its whole loopback 4-tuple ([`Origins::connected`]): the pinned
-//! process, or why there is none. The sealed bridge writes the same key
-//! ahead of the stream it relays ([`preamble`]), and the proxy claims the
-//! outcome published under exactly that key ([`Origins::receive`]). TCP accept and the preamble can beat the
+//! process, held with the socket of the connection it made, or why there is
+//! none. The sealed bridge writes the same key ahead of the stream it relays
+//! ([`preamble`]), and the proxy claims the outcome published under exactly
+//! that key ([`Origins::receive`]); an authority only while its socket still
+//! carries that connection. TCP accept and the preamble can beat the
 //! publication, so the proxy waits for it, at most [`RENDEZVOUS`]; because
-//! every completed bridge connect publishes, refusals included, the wait
-//! ends as soon as the mediator is done.
+//! every completed bridge connect whose caller the mediator identified
+//! publishes, refusals included, the wait ends as soon as the mediator is
+//! done.
 //!
 //! The bridge and the proxy agree by construction: the supervisor seals the
 //! bridge with the vault byte exactly when it starts the proxy with a vault,
@@ -21,9 +24,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read as _};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream};
-use std::os::fd::{AsFd as _, OwnedFd};
 #[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd as _, BorrowedFd};
+use std::os::fd::AsRawFd as _;
+use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -37,14 +40,27 @@ use crate::proxy::Reason;
 /// share it.
 pub(crate) const RENDEZVOUS: Duration = Duration::from_secs(2);
 /// How long a published outcome waits for its connection to claim it.
+///
+/// No authority depends on it: one is handed only to the connection its
+/// socket still carries, however long it waits (see [`Origins::publish`]).
+/// It bounds how long an unclaimed outcome, and an authority's descriptors,
+/// are kept. It must outlast a live connection's way from its connect to
+/// its claim, which [`RENDEZVOUS`] does not bound, since the proxy's wait
+/// starts only once it accepted: the bridge's accept, the bridge's own
+/// connect to the proxy (mediated, so bounded by the mediator's connect
+/// deadline) and the proxy's accept. An outcome that outlives it leaves its
+/// connection unverified, never another connection authorized, so it is
+/// kept at several times that path rather than close to it.
 #[cfg(target_os = "linux")]
 const RETENTION: Duration = Duration::from_secs(10);
 /// The most processes pinned at once.
 pub(crate) const MAX_PINNED: usize = 128;
-/// Descriptors one pinned process holds: its pidfd and its executable.
-pub(crate) const FDS_PER_PIN: usize = 2;
+/// Descriptors one pinned process holds: its pidfd and its executable, and,
+/// until its connection claims its authority, that connection's socket.
+pub(crate) const FDS_PER_PIN: usize = 3;
 /// Published outcomes waiting for their connection. Each authority holds a
-/// pin, so the pin budget already bounds those; this bounds refusals too.
+/// pin, so the pin budget already bounds those and their descriptors; this
+/// bounds refusals too, which hold none.
 #[cfg(target_os = "linux")]
 const MAX_ENTRIES: usize = MAX_PINNED;
 const MAGIC: &[u8; 8] = b"OUROPID2";
@@ -208,28 +224,46 @@ impl Initiator {
     }
 }
 
-/// What the mediator established about one bridged connection.
+/// What the mediator published about one bridged connection.
 #[cfg_attr(
     not(target_os = "linux"),
     expect(dead_code, reason = "only the Linux mediator publishes")
 )]
 enum Outcome {
-    Authority(Process),
+    /// The pinned process, held with its own duplicate of the socket of the
+    /// connection it made: the authority is that connection's.
+    Authority(Process, OwnedFd),
     Refused(Reason),
 }
 impl From<Outcome> for Initiator {
     fn from(outcome: Outcome) -> Self {
         match outcome {
-            Outcome::Authority(process) => Initiator::Pinned(process),
+            // Claimed: the socket has served its purpose and is released.
+            Outcome::Authority(process, _) => Initiator::Pinned(process),
             Outcome::Refused(reason) => Initiator::Unverified(reason),
         }
     }
 }
 
-/// What the mediator established before connecting, published once the
-/// connect succeeded.
+/// What the mediator established before connecting: the pinned process, or
+/// why there is none. Published once the connect succeeded.
 #[cfg(target_os = "linux")]
-pub(crate) struct Prepared(Outcome);
+pub(crate) struct Prepared(Result<Process, Reason>);
+#[cfg(target_os = "linux")]
+impl Prepared {
+    /// The outcome published for the connection made on `socket`.
+    fn bind(self, socket: BorrowedFd<'_>) -> Outcome {
+        match self.0 {
+            Ok(process) => match socket.try_clone_to_owned() {
+                Ok(socket) => Outcome::Authority(process, socket),
+                // An authority without its socket could not be told from a
+                // later connection's on the same address: none is published.
+                Err(_) => Outcome::Refused(Reason::ResourceExhausted),
+            },
+            Err(reason) => Outcome::Refused(reason),
+        }
+    }
+}
 
 #[cfg_attr(
     not(target_os = "linux"),
@@ -238,6 +272,17 @@ pub(crate) struct Prepared(Outcome);
 struct Entry {
     at: Instant,
     outcome: Outcome,
+}
+impl Entry {
+    /// Whether this outcome may still go to the connection `key` names. A
+    /// refusal grants nothing, so it may; an authority only while its socket
+    /// still carries that connection.
+    fn current(&self, key: Key) -> bool {
+        match &self.outcome {
+            Outcome::Authority(_, socket) => carries(socket.as_fd(), key),
+            Outcome::Refused(_) => true,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -331,12 +376,9 @@ impl Origins {
         let outcome = match reserved {
             // Published all the same, so the proxy learns at once that the
             // pin budget, not the process, is why there is no authority.
-            Err(_) => Outcome::Refused(Reason::ResourceExhausted),
+            Err(_) => Err(Reason::ResourceExhausted),
             Ok(_) => Process::capture(pid, start, Some(Reservation(Arc::clone(&self.pins))))
-                .map_or(
-                    Outcome::Refused(Reason::CredentialProcessUnverified),
-                    Outcome::Authority,
-                ),
+                .ok_or(Reason::CredentialProcessUnverified),
         };
         Some(Prepared(outcome))
     }
@@ -345,7 +387,7 @@ impl Origins {
     #[cfg(target_os = "linux")]
     pub(crate) fn connected(&self, prepared: Prepared, socket: BorrowedFd<'_>) {
         if let Some(key) = bridge_key(socket) {
-            self.publish(key, prepared.0);
+            self.publish(key, prepared.bind(socket));
         }
     }
     #[cfg(target_os = "linux")]
@@ -356,10 +398,10 @@ impl Origins {
         }
         prune(&mut table.entries);
         if table.entries.len() >= MAX_ENTRIES && !table.entries.contains_key(&key) {
-            // Receivers claim their outcomes as soon as they read their
-            // preamble, so the oldest one most likely belongs to a
-            // connection the bridge or the proxy turned away; at worst its
-            // connection waits out the rendezvous and goes unverified.
+            // The prune dropped every authority whose connection is gone,
+            // so what is left are refusals and connections still on their
+            // way to the proxy. The oldest goes: at worst its connection
+            // waits out the rendezvous and goes unverified.
             let oldest = table
                 .entries
                 .iter()
@@ -369,9 +411,37 @@ impl Origins {
                 table.entries.remove(&oldest);
             }
         }
-        // A key names one live connection: an outcome already under it
-        // belongs to an earlier connection that closed unclaimed and whose
-        // address was reused, never to this one.
+        // Why an authority reaches only its own connection. A key names one
+        // connection only while that connection lasts: once it is gone,
+        // another can take the same 4-tuple (a contained process picks its
+        // source port, and Linux reuses a loopback TIME_WAIT 4-tuple), and
+        // the one that is gone may never have claimed its outcome: the
+        // bridge turns a client away at capacity, or when the proxy is
+        // unreachable, after its connect published and before any preamble.
+        // Nor are publication and claim ordered: one mediator worker
+        // publishes once its connect returned, while the bridge accepts the
+        // connection, connects to the proxy (mediated on another worker) and
+        // the proxy claims, so a connection's claim can come before its own
+        // publication and find whatever is under its key.
+        //
+        // So an outcome already under this key belongs to an earlier
+        // connection and is replaced, and an authority holds its
+        // connection's socket and is handed out only while that socket
+        // still carries the key's connection ([`carries`]). Two sockets are
+        // never connected on one 4-tuple at once (the kernel refuses such a
+        // connect); the duplicate held here keeps the socket from being
+        // freed whatever its process closes; and a socket that is not freed
+        // lets go of its 4-tuple only once both its directions are shut
+        // down, it is reset or timed out, or it is disconnected, each of
+        // which polls as a hang-up from then on. So by the time another
+        // connection on the same 4-tuple exists to claim, this authority
+        // shows its own is gone, and the claim drops it and waits for its
+        // own. A client the bridge turned away sees the bridge's end of
+        // stream at once, so its authority goes at the next prune.
+        //
+        // What this cannot tell apart is the same socket disconnected and
+        // connected again by a process that holds it, inherited or passed:
+        // whoever holds a connection's socket holds what it may do.
         table.entries.insert(
             key,
             Entry {
@@ -414,8 +484,12 @@ impl Origins {
                 return Ok(Initiator::default());
             }
             // Claimed before the deadline is checked: an outcome published
-            // just as the wait timed out still counts.
-            if let Some(entry) = table.entries.remove(&key) {
+            // just as the wait timed out still counts. An authority whose
+            // connection is gone is dropped, never handed out: this
+            // connection's own outcome is still to come.
+            if let Some(entry) = table.entries.remove(&key)
+                && entry.current(key)
+            {
                 return Ok(entry.outcome.into());
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -449,6 +523,13 @@ fn bridge_port(port: u16) -> bool {
 /// the bridge.
 #[cfg(target_os = "linux")]
 fn bridge_key(socket: BorrowedFd<'_>) -> Option<Key> {
+    connection_key(socket).filter(|key| bridge_port(key.bridge_port))
+}
+
+/// The key of the connection on `socket` now, when its peer is on the
+/// bridge's loopback address, whatever the port.
+#[cfg(target_os = "linux")]
+fn connection_key(socket: BorrowedFd<'_>) -> Option<Key> {
     use std::os::fd::FromRawFd as _;
     // SAFETY: `from_raw_fd` needs an open descriptor, which the borrow
     // guarantees while the stream lives, and `ManuallyDrop` keeps the stream
@@ -458,18 +539,36 @@ fn bridge_key(socket: BorrowedFd<'_>) -> Option<Key> {
     let stream = std::mem::ManuallyDrop::new(unsafe { TcpStream::from_raw_fd(socket.as_raw_fd()) });
     let (local, peer) = (stream.local_addr().ok()?, stream.peer_addr().ok()?);
     let loopback = IpAddr::V4(crate::platform::linux::bridge::LOOPBACK);
-    (peer.ip().to_canonical() == loopback && bridge_port(peer.port()))
-        .then(|| Key::new(local, peer.port()))
+    (peer.ip().to_canonical() == loopback).then(|| Key::new(local, peer.port()))
 }
 
-/// Drops outcomes no connection claimed within [`RETENTION`], and releases
-/// the pin of a process that has exited: its connection gets the denial
+/// Whether `socket` still carries the connection `key` names: connected on
+/// that 4-tuple, and polling neither an error, a hang-up nor its peer's end
+/// of stream. A live bridged connection shows none of these before its
+/// claim: the bridge ends a relayed client's stream only once the proxy
+/// ended its own or the relay failed, and the proxy claims before it
+/// answers anything. Only a client that shuts down its own reading or both
+/// directions first loses its authority this way.
+#[cfg(target_os = "linux")]
+fn carries(socket: BorrowedFd<'_>, key: Key) -> bool {
+    crate::proxy::sys::ready(socket, libc::POLLRDHUP).is_ok_and(|ended| !ended)
+        && connection_key(socket) == Some(key)
+}
+/// Off Linux nothing is published, so no socket carries an authority.
+#[cfg(not(target_os = "linux"))]
+fn carries(_: BorrowedFd<'_>, _: Key) -> bool {
+    false
+}
+
+/// Drops outcomes no connection claimed within [`RETENTION`] and
+/// authorities whose connection is gone, and releases the pin and socket of
+/// a process that has exited: its connection gets the denial
 /// [`Process::permits`] would give, without descriptors held for it.
 #[cfg(target_os = "linux")]
 fn prune(entries: &mut HashMap<Key, Entry>) {
-    entries.retain(|_, entry| entry.at.elapsed() < RETENTION);
+    entries.retain(|key, entry| entry.at.elapsed() < RETENTION && entry.current(*key));
     for entry in entries.values_mut() {
-        if matches!(&entry.outcome, Outcome::Authority(process) if !process.alive()) {
+        if matches!(&entry.outcome, Outcome::Authority(process, _) if !process.alive()) {
             entry.outcome = Outcome::Refused(Reason::CredentialProcessDenied);
         }
     }
@@ -627,6 +726,7 @@ mod tests {
 mod linux_tests {
     use super::*;
     use std::io::Write as _;
+    use std::net::TcpListener;
     use std::sync::mpsc;
 
     /// A bridge-port destination, as the mediator would pass it.
@@ -658,25 +758,141 @@ mod linux_tests {
         let start = crate::platform::linux::identity::start_time_ticks(pid).unwrap();
         (pid, start)
     }
+    fn me() -> i32 {
+        this_process().0
+    }
 
+    /// Process `pid`, which started at `start`, pinned as the mediator would
+    /// pin its connect.
+    fn pin(origins: &Origins, pid: i32, start: u64) -> Process {
+        match origins.prepare(pid, start, BRIDGE).unwrap().0 {
+            Ok(process) => process,
+            Err(reason) => panic!("not pinned: {reason:?}"),
+        }
+    }
     /// This test process, pinned as the mediator would pin a connect.
-    fn pinned(origins: &Origins) -> Outcome {
+    fn pinned(origins: &Origins) -> Process {
         let (pid, start) = this_process();
-        let outcome = origins.prepare(pid, start, BRIDGE).unwrap().0;
-        assert!(matches!(outcome, Outcome::Authority(_)));
-        outcome
+        pin(origins, pid, start)
+    }
+    /// The outcome the mediator publishes once `process` connected `client`.
+    fn authority(process: Process, client: &TcpStream) -> Outcome {
+        Prepared(Ok(process)).bind(client.as_fd())
+    }
+
+    /// A loopback TCP connection to a stand-in for the bridge: the client
+    /// end, the end the bridge accepted, and the connection's key.
+    struct Connection {
+        client: TcpStream,
+        accepted: TcpStream,
+        key: Key,
+    }
+    fn connected_to(listener: &TcpListener, client: TcpStream) -> Connection {
+        let (accepted, _) = listener.accept().unwrap();
+        let key = Key::new(
+            client.local_addr().unwrap(),
+            listener.local_addr().unwrap().port(),
+        );
+        Connection {
+            client,
+            accepted,
+            key,
+        }
+    }
+    fn connection() -> Connection {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        connected_to(&listener, client)
+    }
+
+    /// A connection to `listener` from exactly `local`, as a contained
+    /// process that picks its own source port makes it.
+    fn connect_from(local: SocketAddr, listener: &TcpListener) -> io::Result<TcpStream> {
+        use std::os::fd::FromRawFd as _;
+        let sockaddr = |address: SocketAddr| {
+            let SocketAddr::V4(address) = address else {
+                panic!("an IPv4 loopback address");
+            };
+            libc::sockaddr_in {
+                sin_family: libc::sa_family_t::try_from(libc::AF_INET).unwrap(),
+                sin_port: address.port().to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from(*address.ip()).to_be(),
+                },
+                sin_zero: [0; 8],
+            }
+        };
+        let (from, to) = (sockaddr(local), sockaddr(listener.local_addr()?));
+        let len = libc::socklen_t::try_from(std::mem::size_of::<libc::sockaddr_in>()).unwrap();
+        // SAFETY: socket takes three scalars and dereferences nothing.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` was just created by socket and nothing else owns it.
+        let stream = unsafe { TcpStream::from_raw_fd(fd) };
+        // SAFETY: `from` is a `sockaddr_in` of `len` bytes that outlives the
+        // call, and the descriptor is owned by `stream`, open for the call.
+        if unsafe { libc::bind(stream.as_raw_fd(), (&raw const from).cast(), len) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: as for bind, with `to`.
+        if unsafe { libc::connect(stream.as_raw_fd(), (&raw const to).cast(), len) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(stream)
+    }
+
+    /// Waits until `socket` polls one of `events` (a hang-up or an error
+    /// always counts).
+    fn until(socket: &TcpStream, events: libc::c_short) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !crate::proxy::sys::ready(socket.as_fd(), events).unwrap() {
+            assert!(Instant::now() < deadline, "the socket never ended");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A process that is not this one, killed when dropped.
+    struct Other(std::process::Child);
+    impl Other {
+        fn spawn() -> Self {
+            Self(
+                std::process::Command::new("sleep")
+                    .arg("60")
+                    .spawn()
+                    .unwrap(),
+            )
+        }
+        fn pid(&self) -> i32 {
+            i32::try_from(self.0.id()).unwrap()
+        }
+        fn start(&self) -> u64 {
+            crate::platform::linux::identity::start_time_ticks(self.pid()).unwrap()
+        }
+    }
+    impl Drop for Other {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn refused() -> Outcome {
+        Outcome::Refused(Reason::ResourceExhausted)
     }
 
     #[derive(Debug, PartialEq, Eq)]
     enum Seen {
-        Pinned,
+        /// Pinned, with the pinned process's pid.
+        Pinned(i32),
         Unverified(Reason),
         NoRequest,
     }
     fn seen(received: Result<Option<Initiator>, Reason>) -> Result<Seen, Reason> {
         received.map(|initiator| match initiator {
             None => Seen::NoRequest,
-            Some(Initiator::Pinned(_)) => Seen::Pinned,
+            Some(Initiator::Pinned(process)) => Seen::Pinned(process.0.pid),
             Some(Initiator::Unverified(reason)) => Seen::Unverified(reason),
         })
     }
@@ -697,6 +913,9 @@ mod linux_tests {
         });
         let deadline = Instant::now() + Duration::from_secs(5);
         while origins.table().waiting == 0 {
+            if let Ok(early) = rx.try_recv() {
+                panic!("the receiver never waited: it received {early:?}");
+            }
             assert!(Instant::now() < deadline, "the receiver never waited");
             std::thread::yield_now();
         }
@@ -729,14 +948,14 @@ mod linux_tests {
     #[test]
     fn a_bridge_preamble_before_connect_publication_waits_for_pinned_authority() {
         let origins = configured(true, RENDEZVOUS);
-        let key = loopback(40001, 3128);
-        let (_bridge, proxy) = bridged(key);
+        let connection = connection();
+        let (_bridge, proxy) = bridged(connection.key);
         let (rx, thread) = receiving(&origins, proxy);
-        let outcome = pinned(&origins);
-        origins.publish(key, outcome);
+        let outcome = authority(pinned(&origins), &connection.client);
+        origins.publish(connection.key, outcome);
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Ok(Seen::Pinned)
+            Ok(Seen::Pinned(me()))
         );
         thread.join().unwrap();
         assert!(origins.table().entries.is_empty());
@@ -748,10 +967,11 @@ mod linux_tests {
         // A zero rendezvous: the deadline has passed by the time the table
         // is consulted, yet the published authority is there.
         let origins = configured(true, Duration::ZERO);
-        let key = loopback(40002, 3128);
-        origins.publish(key, pinned(&origins));
+        let connection = connection();
+        let key = connection.key;
+        origins.publish(key, authority(pinned(&origins), &connection.client));
         let (_bridge, proxy) = bridged(key);
-        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned));
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
         assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
     }
 
@@ -759,10 +979,11 @@ mod linux_tests {
     fn a_published_origin_is_single_use_and_a_missing_origin_times_out() {
         let rendezvous = Duration::from_millis(50);
         let origins = configured(true, rendezvous);
-        let key = loopback(40003, 3128);
-        origins.publish(key, pinned(&origins));
+        let connection = connection();
+        let key = connection.key;
+        origins.publish(key, authority(pinned(&origins), &connection.client));
         let (_bridge, proxy) = bridged(key);
-        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned));
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
         let (_replay_bridge, replay_proxy) = bridged(key);
         let began = Instant::now();
         assert_eq!(
@@ -778,7 +999,11 @@ mod linux_tests {
         let origins = configured(true, RENDEZVOUS);
         let (_bridge, proxy) = bridged(loopback(40004, 3128));
         let (rx, thread) = receiving(&origins, proxy);
-        origins.publish(loopback(40005, 3128), pinned(&origins));
+        let connection = connection();
+        origins.publish(
+            connection.key,
+            authority(pinned(&origins), &connection.client),
+        );
         assert!(matches!(
             rx.recv_timeout(Duration::from_millis(100)),
             Err(mpsc::RecvTimeoutError::Timeout)
@@ -798,14 +1023,15 @@ mod linux_tests {
     #[test]
     fn a_later_connection_replaces_an_unclaimed_outcome_and_stop_is_terminal() {
         let origins = configured(true, RENDEZVOUS);
-        let key = loopback(40006, 3129);
+        let connection = connection();
+        let key = connection.key;
         // An earlier connection on the same 4-tuple closed unclaimed; its
         // outcome is not the new connection's.
-        origins.publish(key, Outcome::Refused(Reason::ResourceExhausted));
-        origins.publish(key, pinned(&origins));
+        origins.publish(key, refused());
+        origins.publish(key, authority(pinned(&origins), &connection.client));
         let (_bridge, proxy) = bridged(key);
-        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned));
-        let pending = pinned(&origins);
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
+        let pending = authority(pinned(&origins), &connection.client);
         origins.stop();
         origins.publish(key, pending);
         // Stop is terminal: configuring again does not reopen it.
@@ -820,17 +1046,24 @@ mod linux_tests {
     #[test]
     fn an_authority_is_never_claimed_from_another_loopback_address() {
         let origins = configured(true, Duration::from_millis(50));
+        let connection = connection();
         // Same client port, same bridge port, another source address: a
         // different connection, which may be live at the same time.
-        let elsewhere = Key::new(SocketAddr::from(([127, 0, 0, 2], 40011)), 3128);
-        origins.publish(loopback(40011, 3128), pinned(&origins));
+        let elsewhere = Key::new(
+            SocketAddr::from(([127, 0, 0, 2], connection.key.client.port())),
+            connection.key.bridge_port,
+        );
+        origins.publish(
+            connection.key,
+            authority(pinned(&origins), &connection.client),
+        );
         let (_bridge, proxy) = bridged(elsewhere);
         assert_eq!(
             seen(origins.receive(&proxy)),
             Ok(Seen::Unverified(Reason::CredentialProcessUnverified))
         );
-        let (_bridge, proxy) = bridged(loopback(40011, 3128));
-        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned));
+        let (_bridge, proxy) = bridged(connection.key);
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
     }
 
     #[test]
@@ -852,15 +1085,18 @@ mod linux_tests {
         let origins = configured(true, RENDEZVOUS);
         let held = [pinned(&origins), pinned(&origins)];
         let (pid, start) = this_process();
-        let refused = origins.prepare(pid, start, BRIDGE).unwrap().0;
+        let prepared = origins.prepare(pid, start, BRIDGE).unwrap();
+        assert!(matches!(prepared.0, Err(Reason::ResourceExhausted)));
+        let connection = connection();
+        let (_bridge, proxy) = bridged(connection.key);
+        let (rx, thread) = receiving(&origins, proxy);
+        // Refused without a descriptor taken for it.
+        let outcome = prepared.bind(connection.client.as_fd());
         assert!(matches!(
-            refused,
+            outcome,
             Outcome::Refused(Reason::ResourceExhausted)
         ));
-        let key = loopback(40008, 3128);
-        let (_bridge, proxy) = bridged(key);
-        let (rx, thread) = receiving(&origins, proxy);
-        origins.publish(key, refused);
+        origins.publish(connection.key, outcome);
         // Learned at once, not after the whole rendezvous.
         assert_eq!(
             rx.recv_timeout(Duration::from_millis(500)).unwrap(),
@@ -890,25 +1126,21 @@ mod linux_tests {
     #[test]
     fn an_exited_process_releases_its_pin_and_is_denied() {
         let origins = configured(true, RENDEZVOUS);
-        let mut child = std::process::Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .unwrap();
-        let pid = i32::try_from(child.id()).unwrap();
-        let start = crate::platform::linux::identity::start_time_ticks(pid).unwrap();
-        let outcome = origins.prepare(pid, start, BRIDGE).unwrap().0;
-        assert!(matches!(outcome, Outcome::Authority(_)));
-        let key = loopback(40009, 3128);
-        origins.publish(key, outcome);
+        let mut child = Other::spawn();
+        let process = pin(&origins, child.pid(), child.start());
+        let connection = connection();
+        let key = connection.key;
+        origins.publish(key, authority(process, &connection.client));
         assert_eq!(origins.pins.load(Ordering::SeqCst), 1);
-        child.kill().unwrap();
-        child.wait().unwrap();
-        // The next publication prunes it.
-        origins.publish(
-            loopback(40010, 3128),
-            Outcome::Refused(Reason::ResourceExhausted),
-        );
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        // The next publication prunes it, and its socket with it.
+        origins.publish(loopback(40010, 3128), refused());
         assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            origins.table().entries[&key].outcome,
+            Outcome::Refused(Reason::CredentialProcessDenied)
+        ));
         let (_bridge, proxy) = bridged(key);
         assert_eq!(
             seen(origins.receive(&proxy)),
@@ -945,5 +1177,124 @@ mod linux_tests {
             Err(Reason::ResourceExhausted)
         );
         assert!(Process::capture(pid, start + 1, None).is_none());
+    }
+
+    #[test]
+    fn a_live_connection_keeps_its_authority_until_it_claims_it() {
+        let origins = configured(true, Duration::from_millis(50));
+        let mut connection = connection();
+        origins.publish(
+            connection.key,
+            authority(pinned(&origins), &connection.client),
+        );
+        // The client sends its request and ends its side, as some clients
+        // do, and the bridge reads it all; none of that ends the connection.
+        connection
+            .client
+            .write_all(b"GET / HTTP/1.1\r\n\r\n")
+            .unwrap();
+        connection
+            .client
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap();
+        let mut request = Vec::new();
+        connection.accepted.read_to_end(&mut request).unwrap();
+        origins.publish(loopback(40012, 3128), refused());
+        assert!(origins.table().entries.contains_key(&connection.key));
+        // The same live socket is no authority for a connection it does not
+        // carry.
+        let elsewhere = Key::new(
+            SocketAddr::from(([127, 0, 0, 1], connection.key.client.port() ^ 1)),
+            connection.key.bridge_port,
+        );
+        origins.publish(elsewhere, authority(pinned(&origins), &connection.client));
+        let (_bridge, proxy) = bridged(elsewhere);
+        assert_eq!(
+            seen(origins.receive(&proxy)),
+            Ok(Seen::Unverified(Reason::CredentialProcessUnverified))
+        );
+        let (_bridge, proxy) = bridged(connection.key);
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
+        assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_connection_the_bridge_turned_away_releases_its_authority_at_once() {
+        let origins = configured(true, RENDEZVOUS);
+        let mut connection = connection();
+        origins.publish(
+            connection.key,
+            authority(pinned(&origins), &connection.client),
+        );
+        // The bridge's answer at capacity: a response, then both directions
+        // shut down, long before the retention runs out.
+        connection
+            .accepted
+            .write_all(b"HTTP/1.1 503 \r\n\r\n")
+            .unwrap();
+        connection
+            .accepted
+            .shutdown(std::net::Shutdown::Both)
+            .unwrap();
+        drop(connection.accepted);
+        until(&connection.client, libc::POLLRDHUP);
+        origins.publish(loopback(40013, 3128), refused());
+        assert!(!origins.table().entries.contains_key(&connection.key));
+        assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn an_authority_is_never_claimed_by_a_later_connection_on_its_reused_address() {
+        let origins = configured(true, RENDEZVOUS);
+        let bridge = TcpListener::bind("127.0.0.1:0").unwrap();
+        // An allowed process connects, and its authority is published.
+        let allowed = Other::spawn();
+        let mut first = connected_to(
+            &bridge,
+            TcpStream::connect(bridge.local_addr().unwrap()).unwrap(),
+        );
+        let key = first.key;
+        let process = pin(&origins, allowed.pid(), allowed.start());
+        origins.publish(key, authority(process, &first.client));
+        // The bridge turns it away at capacity without reading its request,
+        // so closing resets it, before any preamble: nothing claims it.
+        first.client.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+        first.accepted.peek(&mut [0]).unwrap();
+        first.accepted.write_all(b"HTTP/1.1 503 \r\n\r\n").unwrap();
+        first.accepted.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(first.accepted);
+        until(&first.client, 0);
+        // Another process connects from the same address and port, and its
+        // claim comes before its own publication.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let reused = loop {
+            match connect_from(key.client, &bridge) {
+                Ok(client) => break connected_to(&bridge, client),
+                Err(error) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the address stayed taken: {error}"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        };
+        assert_eq!(reused.key, key);
+        let (_bridge, proxy) = bridged(key);
+        let (rx, thread) = receiving(&origins, proxy);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        // The stale authority was dropped, not handed out.
+        assert!(!origins.table().entries.contains_key(&key));
+        assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
+        origins.publish(key, authority(pinned(&origins), &reused.client));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok(Seen::Pinned(me()))
+        );
+        thread.join().unwrap();
+        assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
     }
 }
