@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use super::{
-    ConnectFacts, Decision, Delivery, MediationRecord, MediationSink, NON_UNIX_NOTE, PeerAddr,
-    base_for, classify, mediation_program, peer_of, relative_bytes,
+    ConnectFacts, Decision, Delivery, MediationRecord, MediationSink, NON_UNIX_NOTE, Peer,
+    PeerAddr, base_for, classify, mediation_program, peer_of, relative_bytes,
 };
 use crate::platform::linux::identity::{self, pidfd_open};
 use crate::platform::linux::sockdiag::{SockDiag, VfsId};

@@ -2154,4 +2154,27 @@ mod tests {
         assert_eq!(class.status, SourceStatus::Active);
         assert_eq!(class.observed_count, Some(1));
     }
+
+    /// A command hit whose argv could not be read whole names no digest:
+    /// the digest is null and the note says why (§11.3), never a
+    /// placeholder value.
+    #[test]
+    fn a_command_hit_without_an_argv_digest_names_the_reason() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let trace = crate::trace::shared(crate::trace::FileSink::new(file.reopen().unwrap()));
+        let mut writer = AuditWriter::new("att_test", Some(trace), b"/work/space", b"/tmp");
+        let hit = crate::commands::Hit {
+            pattern: "<unreadable-or-oversized-argv>".to_owned(),
+            digest: None,
+            forbidden: false,
+        };
+        writer.record_command_rule(10, &hit, CommandEnforcement::EntryDenied);
+        let events = trace_events(file.path());
+        assert_eq!(events.len(), 1, "{events:?}");
+        let fields = &events[0]["fields"];
+        assert_eq!(fields["kind"], "command_denied");
+        assert_eq!(fields["argv_digest"], Value::Null, "{fields}");
+        assert_eq!(fields["argv_digest_reason"], "argv_unreadable_or_oversized");
+        assert_eq!(fields["errno"], "EPERM");
+    }
 }
