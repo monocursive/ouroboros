@@ -402,12 +402,23 @@ pub(super) fn drain_output_relays(
     relays: &mut [StdioRelay],
     budget: Duration,
 ) -> std::io::Result<()> {
+    drain_output_relays_counted(relays, budget).map(drop)
+}
+
+/// [`drain_output_relays`], returning how many passes over the relays it
+/// took: a drain that waits in `poll` takes one per wake, not one per tick.
+fn drain_output_relays_counted(
+    relays: &mut [StdioRelay],
+    budget: Duration,
+) -> std::io::Result<usize> {
     let deadline = clock::Deadline::after(budget);
+    let mut passes = 0;
     loop {
+        passes += 1;
         let progress = pump_stdio_relays(relays)?;
         let mut waits = output_waits(relays);
         if waits.is_empty() || deadline.expired() {
-            return Ok(());
+            return Ok(passes);
         }
         if !progress {
             match super::sys::poll(&mut waits, deadline.remaining_millis_capped(i32::MAX)) {
@@ -610,7 +621,9 @@ mod tests {
 
     /// The drain waits on the relays themselves: output written while it
     /// waits, and then the writer's close, each end the wait at once rather
-    /// than at the budget.
+    /// than at the budget, and nothing else wakes it: over 200 ms of
+    /// waiting it passes over the relays a handful of times, where a drain
+    /// that napped a millisecond at a time would pass two hundred.
     #[test]
     fn the_output_drain_wakes_for_late_output_and_the_close() {
         use std::io::{Read as _, Seek as _};
@@ -625,13 +638,16 @@ mod tests {
         });
         let mut relays = [out];
         let started = std::time::Instant::now();
-        super::drain_output_relays(&mut relays, std::time::Duration::from_secs(10)).unwrap();
+        let passes =
+            super::drain_output_relays_counted(&mut relays, std::time::Duration::from_secs(10))
+                .unwrap();
         let spent = started.elapsed();
         late.join().unwrap();
         assert!(
             spent < std::time::Duration::from_secs(5),
             "the drain did not wake for the writer's close ({spent:?})"
         );
+        assert!(passes <= 10, "{passes} passes: the drain polled by napping");
         assert!(relays[0].done());
         let mut text = String::new();
         stdout.rewind().unwrap();
