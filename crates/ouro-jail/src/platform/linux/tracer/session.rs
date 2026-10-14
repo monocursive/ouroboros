@@ -262,15 +262,188 @@ impl Owed {
 struct Task {
     tgid: pid_t,
     start_ticks: Option<u64>,
-    pending: Option<InFlight>,
-    /// Where `pending` entered the kernel.
-    site: Site,
-    /// `pending` was taken at the stop not yet resumed: a resume that fails
-    /// with `ESRCH` means the kernel will skip it (J4 O-3).
-    entry_fresh: bool,
+    /// Changed only by [`Tasks`], which keeps the in-flight count with it.
+    state: TaskState,
+}
+
+impl Task {
+    fn state(&self) -> &TaskState {
+        &self.state
+    }
+}
+
+/// Where a traced thread is in the one call the observer follows for it at
+/// a time.
+enum TaskState {
+    /// Between calls: nothing of this thread's is in flight.
+    Idle,
+    /// A call entered the kernel at `site` and has not returned.
+    InFlight {
+        call: Call,
+        site: Site,
+        /// The call was taken at the stop not yet resumed: a resume that
+        /// fails with `ESRCH` means the kernel will skip it (J4 O-3).
+        fresh: bool,
+    },
     /// A call whose exit carried a restart code, waiting for the kernel's
-    /// decision. While it is set the thread is single-stepped.
-    restart: Option<RestartWait>,
+    /// decision ([`RestartWait`]). While it waits for the decision itself
+    /// the thread is single-stepped.
+    Restarting(RestartWait),
+}
+
+impl TaskState {
+    /// Whether the thread holds one of the `inflight_max` slots: from a
+    /// call's entry until its result, its loss or its end is settled.
+    fn holds_slot(&self) -> bool {
+        !matches!(self, TaskState::Idle)
+    }
+}
+
+/// The traced threads by tid, and how many of them hold an in-flight slot.
+///
+/// A thread holds a slot exactly while its state is not
+/// [`TaskState::Idle`]. A state is changed or dropped only here, and every
+/// change keeps the count with it, so the count cannot drift from the
+/// states it counts; a slot is released in one place, [`Tasks::release`].
+#[derive(Default)]
+struct Tasks {
+    map: HashMap<pid_t, Task>,
+    in_flight: usize,
+}
+
+impl Tasks {
+    fn get(&self, tid: pid_t) -> Option<&Task> {
+        self.map.get(&tid)
+    }
+
+    fn contains(&self, tid: pid_t) -> bool {
+        self.map.contains_key(&tid)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    fn tids(&self) -> Vec<pid_t> {
+        self.map.keys().copied().collect()
+    }
+
+    /// How many threads hold an in-flight slot.
+    fn in_flight(&self) -> usize {
+        self.in_flight
+    }
+
+    /// Track `tid`, a thread of `tgid` born at `start_ticks`, between calls.
+    fn insert(&mut self, tid: pid_t, tgid: pid_t, start_ticks: Option<u64>) {
+        self.remove(tid);
+        self.map.insert(
+            tid,
+            Task {
+                tgid,
+                start_ticks,
+                state: TaskState::Idle,
+            },
+        );
+    }
+
+    /// Stop tracking `tid`, releasing the slot its state held.
+    fn remove(&mut self, tid: pid_t) -> Option<Task> {
+        let task = self.map.remove(&tid)?;
+        if task.state.holds_slot() {
+            self.release();
+        }
+        Some(task)
+    }
+
+    /// Put `tid` into `state` and return the state it leaves; `None`, with
+    /// nothing changed, when `tid` is not tracked. Entering a state that
+    /// holds a slot from one that does not takes a slot, and the other way
+    /// round releases it.
+    fn set_state(&mut self, tid: pid_t, state: TaskState) -> Option<TaskState> {
+        let task = self.map.get_mut(&tid)?;
+        let takes = state.holds_slot();
+        let left = std::mem::replace(&mut task.state, state);
+        match (left.holds_slot(), takes) {
+            (false, true) => self.in_flight += 1,
+            (true, false) => self.release(),
+            _ => {}
+        }
+        Some(left)
+    }
+
+    fn release(&mut self) {
+        debug_assert!(self.in_flight > 0, "a slot released that was never taken");
+        self.in_flight = self.in_flight.saturating_sub(1);
+    }
+
+    /// The call `tid` has in flight and where it entered, leaving the
+    /// thread between calls; `None`, with nothing changed, when it has none.
+    fn take_call(&mut self, tid: pid_t) -> Option<(Call, Site)> {
+        let task = self.map.get_mut(&tid)?;
+        match std::mem::replace(&mut task.state, TaskState::Idle) {
+            TaskState::InFlight { call, site, .. } => {
+                self.release();
+                Some((call, site))
+            }
+            other => {
+                task.state = other;
+                None
+            }
+        }
+    }
+
+    /// The restart wait of `tid`, leaving the thread between calls; `None`,
+    /// with nothing changed, when it has none.
+    fn take_restart(&mut self, tid: pid_t) -> Option<RestartWait> {
+        let task = self.map.get_mut(&tid)?;
+        match std::mem::replace(&mut task.state, TaskState::Idle) {
+            TaskState::Restarting(wait) => {
+                self.release();
+                Some(wait)
+            }
+            other => {
+                task.state = other;
+                None
+            }
+        }
+    }
+
+    /// The call `tid` has in flight, to amend in place.
+    fn call_mut(&mut self, tid: pid_t) -> Option<&mut Call> {
+        match &mut self.map.get_mut(&tid)?.state {
+            TaskState::InFlight { call, .. } => Some(call),
+            _ => None,
+        }
+    }
+
+    /// The restart wait of `tid`.
+    fn wait(&self, tid: pid_t) -> Option<&RestartWait> {
+        match &self.map.get(&tid)?.state {
+            TaskState::Restarting(wait) => Some(wait),
+            _ => None,
+        }
+    }
+
+    /// The restart wait of `tid`, to amend in place.
+    fn wait_mut(&mut self, tid: pid_t) -> Option<&mut RestartWait> {
+        match &mut self.map.get_mut(&tid)?.state {
+            TaskState::Restarting(wait) => Some(wait),
+            _ => None,
+        }
+    }
+
+    /// Whether the call `tid` has in flight was taken at the stop it is now
+    /// being resumed from. Once asked, it no longer is.
+    fn take_fresh(&mut self, tid: pid_t) -> bool {
+        match self.map.get_mut(&tid).map(|task| &mut task.state) {
+            Some(TaskState::InFlight { fresh, .. }) => std::mem::take(fresh),
+            _ => false,
+        }
+    }
 }
 
 /// Where a call entered the kernel: its ABI, its number and the user
@@ -341,7 +514,7 @@ impl Site {
 ///
 /// The call keeps its in-flight slot until then.
 struct RestartWait {
-    call: InFlight,
+    call: Call,
     /// The positive restart code.
     code: i64,
     site: Site,
@@ -421,13 +594,14 @@ fn verdict_at_handler(code: i64, frame: Option<(u64, u64)>, site: Site) -> Verdi
     }
 }
 
-/// A call that stopped at its entry and has not yet returned.
+/// A call the observer follows from its entry stop to its return: what the
+/// entry said it was.
 ///
-/// One entry exists per in-flight syscall, so the variants' size difference
-/// (the closed-set call's captured arguments) costs at most a few hundred
-/// bytes per stopped task.
+/// One exists per in-flight syscall, so the variants' size difference (the
+/// closed-set call's captured arguments) costs at most a few hundred bytes
+/// per stopped task.
 #[allow(clippy::large_enum_variant)]
-enum InFlight {
+enum Call {
     /// A closed-set call, with the arguments read at its entry.
     Closed(Pending),
     /// A syscall under another ABI (J4 D2): never decoded, so its return is
@@ -441,14 +615,14 @@ enum InFlight {
     Untraced,
 }
 
-impl InFlight {
+impl Call {
     /// The operations a hole left by this call could have held: the row's
     /// own for a closed-set call, all of them for a call nothing decoded or
     /// a listener that could hide any of them.
     fn ops(&self) -> OpSet {
         match self {
-            InFlight::Closed(pending) => OpSet::of(pending.entry.op),
-            InFlight::Foreign | InFlight::Listener | InFlight::Untraced => OpSet::ALL,
+            Call::Closed(pending) => OpSet::of(pending.entry.op),
+            Call::Foreign | Call::Listener | Call::Untraced => OpSet::ALL,
         }
     }
 }
@@ -883,7 +1057,7 @@ struct Session {
     /// from here, which is what §11.4 means by the last known healthy point.
     last_healthy_ns: u64,
     summary: TracerSummary,
-    tasks: HashMap<pid_t, Task>,
+    tasks: Tasks,
     procs: HashMap<pid_t, Process>,
     /// Threads the kernel destroyed for a reason we saw, with the moment we
     /// may stop expecting their notification. Bounded, and pruned, so a
@@ -893,7 +1067,6 @@ struct Session {
     /// with the moment the late fork event can no longer follow. Fork-order
     /// races: the child stopped nothing, ran nothing, and is not loss.
     tracee_deaths: HashMap<pid_t, Instant>,
-    inflight: usize,
     scratch: Vec<u8>,
     /// Where task identity comes from: `/proc`, or a test's script.
     procfs: Box<dyn ProcView>,
@@ -938,11 +1111,10 @@ impl Session {
             epoch_boottime_ns,
             last_healthy_ns: elapsed_since(epoch_boottime_ns),
             summary: TracerSummary::default(),
-            tasks: HashMap::new(),
+            tasks: Tasks::default(),
             procs: HashMap::new(),
             retired: HashMap::new(),
             tracee_deaths: HashMap::new(),
-            inflight: 0,
             scratch,
             procfs,
             force_truncate_marker: seam_marker(TRUNCATE_PATH_SEAM),
@@ -1276,7 +1448,7 @@ impl Session {
         self.procfs
             .children(sys::getpid())
             .into_iter()
-            .filter(|pid| !self.tasks.contains_key(pid))
+            .filter(|pid| !self.tasks.contains(*pid))
             .filter(|pid| {
                 !self.beside.iter().any(|(known, birth)| {
                     known == pid && self.procfs.start_ticks(*pid) == Some(*birth)
@@ -1298,7 +1470,7 @@ impl Session {
     /// The shutdown budget expired with tracees still alive. End them rather
     /// than leave them stopped at a ptrace stop nobody will answer.
     fn force_stop(&mut self) {
-        let alive: Vec<pid_t> = self.tasks.keys().copied().collect();
+        let alive: Vec<pid_t> = self.tasks.tids();
         if alive.is_empty() {
             return;
         }
@@ -1354,10 +1526,7 @@ impl Session {
         // child stopped before its parent reported the event that created it.
         self.register(pid);
 
-        if self
-            .tasks
-            .get(&pid)
-            .is_some_and(|task| task.restart.is_some())
+        if self.tasks.wait(pid).is_some()
             && let Some(inject) = self.handle_restart_stop(pid, signal, event)
         {
             self.restart(pid, inject);
@@ -1407,23 +1576,16 @@ impl Session {
         // instruction at a time, so that decision is a stop (`RestartWait`);
         // a call in flight is stepped to its syscall exit; anything else
         // runs to its next traced event.
-        let (request, fresh) = match self.tasks.get(&pid) {
-            Some(Task {
-                restart:
-                    Some(RestartWait {
-                        awaiting: Awaiting::Decision,
-                        ..
-                    }),
+        let request = match self.tasks.get(pid).map(Task::state) {
+            Some(TaskState::Restarting(RestartWait {
+                awaiting: Awaiting::Decision,
                 ..
-            }) => (sys::PTRACE_SINGLESTEP, false),
-            Some(task) if task.pending.is_some() => (sys::PTRACE_SYSCALL, task.entry_fresh),
-            _ => (sys::PTRACE_CONT, false),
+            })) => sys::PTRACE_SINGLESTEP,
+            Some(TaskState::InFlight { .. }) => sys::PTRACE_SYSCALL,
+            _ => sys::PTRACE_CONT,
         };
-        let result = sys::restart(pid, request, signal);
-        if let Some(task) = self.tasks.get_mut(&pid) {
-            task.entry_fresh = false;
-        }
-        match result {
+        let fresh = self.tasks.take_fresh(pid);
+        match sys::restart(pid, request, signal) {
             Ok(()) => {}
             Err(err) if err.raw_os_error() == Some(libc::ESRCH) => {
                 if fresh {
@@ -1442,13 +1604,7 @@ impl Session {
 
     /// J4 O-3: forget the entry of a thread killed at its seccomp stop.
     fn entry_never_ran(&mut self, tid: pid_t) {
-        if self
-            .tasks
-            .get_mut(&tid)
-            .and_then(|task| task.pending.take())
-            .is_some()
-        {
-            self.release_slot();
+        if self.tasks.take_call(tid).is_some() {
             self.summary.killed_at_entry += 1;
         }
     }
@@ -1501,7 +1657,7 @@ impl Session {
     /// Make sure `tid` is tracked, learning its thread group and birth from
     /// `/proc`.
     fn register(&mut self, tid: pid_t) {
-        if self.tasks.contains_key(&tid) {
+        if self.tasks.contains(tid) {
             return;
         }
         self.summary.tracees += 1;
@@ -1514,17 +1670,7 @@ impl Session {
                 (tid, false)
             }
         };
-        self.tasks.insert(
-            tid,
-            Task {
-                tgid,
-                start_ticks,
-                pending: None,
-                site: Site::default(),
-                entry_fresh: false,
-                restart: None,
-            },
-        );
+        self.tasks.insert(tid, tgid, start_ticks);
         // A new group's birth is its leader's start time: the task itself
         // when it is the leader (a fork child), else the leader read now.
         // An existing group keeps the birth it was registered with.
@@ -1550,7 +1696,7 @@ impl Session {
     }
 
     fn tgid_of(&self, tid: pid_t) -> pid_t {
-        self.tasks.get(&tid).map_or(tid, |task| task.tgid)
+        self.tasks.get(tid).map_or(tid, |task| task.tgid)
     }
 
     /// The birth of the process `tgid` names now.
@@ -1591,7 +1737,7 @@ impl Session {
         self.register(child);
         let parent = self.tgid_of(parent_tid);
         let child_tgid = self.tgid_of(child);
-        let child_start_ticks = self.tasks.get(&child).and_then(|task| task.start_ticks);
+        let child_start_ticks = self.tasks.get(child).and_then(|task| task.start_ticks);
         self.emit(TracerEvent::Fork {
             parent,
             parent_tid,
@@ -1618,13 +1764,14 @@ impl Session {
     fn exec_transition(&mut self, tid: pid_t, former: pid_t) {
         self.summary.exec_transitions += 1;
         let non_leader = former != tid && former > 0;
-        let mut carried: Option<(InFlight, Site)> = None;
-        if non_leader && let Some(task) = self.tasks.remove(&former) {
-            carried = task.pending.map(|pending| (pending, task.site));
-            if let Some(wait) = task.restart {
+        let mut carried: Option<(Call, Site)> = None;
+        if non_leader && let Some(task) = self.tasks.remove(former) {
+            match task.state {
+                TaskState::InFlight { call, site, .. } => carried = Some((call, site)),
                 // Not reachable: the thread that execs is in its `execve`,
                 // not waiting for a restart decision. Kept exact anyway.
-                self.restart_ended(wait);
+                TaskState::Restarting(wait) => self.restart_ended(wait),
+                TaskState::Idle => {}
             }
             // That task did not die: it is this one now, under the leader's
             // id. Nothing will ever report it, so it is not retired — a
@@ -1642,26 +1789,20 @@ impl Session {
         // review finding 1: when it was refused an in-flight slot, the
         // leader's stale entry used to be paired with that exit, an invented
         // result). The gap names the call, because the entry is in hand.
-        let (stale, stale_wait) = match self.tasks.get_mut(&tid) {
-            Some(task) if non_leader => (task.pending.take(), task.restart.take()),
+        if non_leader {
+            match self.tasks.set_state(tid, TaskState::Idle) {
+                Some(TaskState::InFlight { call, .. }) => {
+                    self.summary.loss.abandoned_entries += 1;
+                    self.gap(GapReason::EntryAbandoned, call.ops(), Some(1));
+                }
+                Some(TaskState::Restarting(wait)) => self.restart_ended(wait),
+                Some(TaskState::Idle) | None => {}
+            }
+        } else if let Some(wait) = self.tasks.take_restart(tid) {
             // A leader's own exec: a wait would have been settled at its
             // `execve` entry, so one here is out of sequence.
-            Some(task) => (None, task.restart.take()),
-            None => (None, None),
-        };
-        if let Some(call) = stale {
-            self.release_slot();
-            self.summary.loss.abandoned_entries += 1;
-            self.gap(GapReason::EntryAbandoned, call.ops(), Some(1));
-        }
-        match stale_wait {
-            Some(wait) if non_leader => self.restart_ended(wait),
-            Some(wait) => {
-                self.release_slot();
-                self.summary.loss.restart_unresolved += 1;
-                self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
-            }
-            None => {}
+            self.summary.loss.restart_unresolved += 1;
+            self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
         }
         let tgid = self.tgid_of(tid);
         let mut destroyed = Vec::new();
@@ -1681,19 +1822,16 @@ impl Session {
             // already on its way.
             self.retired.insert(thread, Instant::now() + KILL_GRACE);
             self.summary.tasks_destroyed_by_exec += 1;
-            let Some(task) = self.tasks.remove(&thread) else {
-                continue;
-            };
-            if let Some(pending) = task.pending {
-                // The entry is in hand: the gap names the call it would have
-                // reported, not an anonymous hole (§11.4).
-                self.release_slot();
-                self.summary.loss.abandoned_entries += 1;
-                self.gap(GapReason::EntryAbandoned, pending.ops(), Some(1));
-            }
-            if let Some(wait) = task.restart {
+            match self.tasks.remove(thread).map(|task| task.state) {
+                Some(TaskState::InFlight { call, .. }) => {
+                    // The entry is in hand: the gap names the call it would
+                    // have reported, not an anonymous hole (§11.4).
+                    self.summary.loss.abandoned_entries += 1;
+                    self.gap(GapReason::EntryAbandoned, call.ops(), Some(1));
+                }
                 // Destroyed while its restart was owed: as a death.
-                self.restart_ended(wait);
+                Some(TaskState::Restarting(wait)) => self.restart_ended(wait),
+                Some(TaskState::Idle) | None => {}
             }
         }
         let mut path = None;
@@ -1701,27 +1839,31 @@ impl Session {
         let mut syscall = None;
         // The argv the entry-stop check judged, when the rules re-judge it.
         let mut rejudge: Option<Vec<Vec<u8>>> = None;
-        if let Some(task) = self.tasks.get_mut(&tid) {
-            if let Some((pending, site)) = carried {
-                task.pending = Some(pending);
-                task.site = site;
-            }
-            if let Some(InFlight::Closed(pending)) = task.pending.as_mut()
-                && pending.entry.op == ClosedOp::Exec
-            {
-                pending.exec_confirmed = true;
-                path = pending.args.path.clone();
-                dirfd = pending.args.dirfd;
-                syscall = Some(pending.entry.name);
-                // Security 2026-09-29 (audit 6 N2): the argv the entry-stop
-                // check judged is tracee memory, which a sibling thread can
-                // rewrite for the kernel's own copy. The image is installed
-                // here and has run nothing, so the kernel's own copy of the
-                // argv and of the image are re-checked ([`exec_recheck`]).
-                // An entry the rules already denied never reaches this stop.
-                if !self.config.commands.is_empty() && pending.args.command.is_none() {
-                    rejudge = Some(pending.entry_argv.clone().unwrap_or_default());
-                }
+        if let Some((call, site)) = carried {
+            self.tasks.set_state(
+                tid,
+                TaskState::InFlight {
+                    call,
+                    site,
+                    fresh: false,
+                },
+            );
+        }
+        if let Some(Call::Closed(pending)) = self.tasks.call_mut(tid)
+            && pending.entry.op == ClosedOp::Exec
+        {
+            pending.exec_confirmed = true;
+            path = pending.args.path.clone();
+            dirfd = pending.args.dirfd;
+            syscall = Some(pending.entry.name);
+            // Security 2026-09-29 (audit 6 N2): the argv the entry-stop
+            // check judged is tracee memory, which a sibling thread can
+            // rewrite for the kernel's own copy. The image is installed
+            // here and has run nothing, so the kernel's own copy of the
+            // argv and of the image are re-checked ([`exec_recheck`]).
+            // An entry the rules already denied never reaches this stop.
+            if !self.config.commands.is_empty() && pending.args.command.is_none() {
+                rejudge = Some(pending.entry_argv.clone().unwrap_or_default());
             }
         }
         // Security 2026-09-27 (audit 3 A1): the kernel has already installed
@@ -1752,14 +1894,7 @@ impl Session {
             // The exec was observed whole and its event carries the verdict,
             // so its entry leaves flight here: the death that follows has no
             // call to abandon.
-            if self
-                .tasks
-                .get_mut(&tid)
-                .and_then(|task| task.pending.take())
-                .is_some()
-            {
-                self.release_slot();
-            }
+            self.tasks.take_call(tid);
             if !Self::kill_tracee(tid) {
                 // The hit is live: the process dies before its image runs an
                 // instruction — after its evidence was read above, so the
@@ -1798,7 +1933,7 @@ impl Session {
     /// `SECCOMP_USER_NOTIF_FLAG_CONTINUE` and no trace stop at all — which is
     /// the open-ended [`GapReason::ChildNotificationListener`] gap, not the
     /// bounded `foreign_abi` interval a plain foreign call costs.
-    fn compat_special(info: &sys::SyscallInfo) -> Option<InFlight> {
+    fn compat_special(info: &sys::SyscallInfo) -> Option<Call> {
         use super::filter::{
             ARM_CLONE_SYSCALL, ARM_LISTENER_SYSCALL, CLONE_UNTRACED, CLONE3_SYSCALL,
             I386_CLONE_SYSCALL, I386_LISTENER_SYSCALL, SECCOMP_FILTER_FLAG_NEW_LISTENER,
@@ -1817,12 +1952,12 @@ impl Session {
         if nr == u64::from(listener)
             && info.args[1] & u64::from(SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
         {
-            return Some(InFlight::Listener);
+            return Some(Call::Listener);
         }
         if nr == u64::from(CLONE3_SYSCALL.1)
             || (nr == u64::from(clone) && info.args[0] & u64::from(CLONE_UNTRACED) != 0)
         {
-            return Some(InFlight::Untraced);
+            return Some(Call::Untraced);
         }
         None
     }
@@ -1900,7 +2035,7 @@ impl Session {
                 self.follow(tid, special, site);
                 return;
             }
-            self.follow(tid, InFlight::Foreign, site);
+            self.follow(tid, Call::Foreign, site);
             return;
         }
         // J4 D1: a child asking for its own notification listener. The flags
@@ -1909,7 +2044,7 @@ impl Session {
         if info.nr == u64::from(super::filter::LISTENER_SYSCALL.1)
             && info.args[1] & u64::from(super::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
         {
-            self.follow(tid, InFlight::Listener, site);
+            self.follow(tid, Call::Listener, site);
             return;
         }
         // J4 S4: a clone the kernel will not attach to this tracer. The flags
@@ -1918,7 +2053,7 @@ impl Session {
         if info.nr == u64::from(super::filter::CLONE_SYSCALL.1)
             && info.args[0] & u64::from(super::filter::CLONE_UNTRACED) != 0
         {
-            self.follow(tid, InFlight::Untraced, site);
+            self.follow(tid, Call::Untraced, site);
             return;
         }
         let Some(entry) = closed_set::lookup(info.nr) else {
@@ -1957,7 +2092,7 @@ impl Session {
                     info.args,
                 )
             };
-            self.begin(tid, InFlight::Closed(pending), site);
+            self.begin(tid, Call::Closed(pending), site);
             return;
         }
         if !self.admit(OpSet::of(entry.op)) {
@@ -1999,7 +2134,7 @@ impl Session {
                 return;
             }
         }
-        self.begin(tid, InFlight::Closed(pending), site);
+        self.begin(tid, Call::Closed(pending), site);
     }
 
     /// Whether a tracee is stopped at its `PTRACE_EVENT_EXIT` notification:
@@ -2011,19 +2146,11 @@ impl Session {
         )
     }
 
-    /// A call in flight left it: returned, abandoned, settled or forgotten.
-    /// Every path that takes a call out of a task's `pending` or `restart`
-    /// releases its one slot here, and only here.
-    fn release_slot(&mut self) {
-        debug_assert!(self.inflight > 0, "a slot released that was never taken");
-        self.inflight = self.inflight.saturating_sub(1);
-    }
-
     /// Whether another call may be followed to its return. When the
     /// in-flight bound is reached the entry is refused, and the gap names
     /// what that call could have been.
     fn admit(&mut self, ops: OpSet) -> bool {
-        if self.inflight >= self.config.inflight_max {
+        if self.tasks.in_flight() >= self.config.inflight_max {
             self.summary.loss.inflight_rejected += 1;
             self.gap(GapReason::InflightExhausted, ops, Some(1));
             return false;
@@ -2042,20 +2169,20 @@ impl Session {
     /// never a one-count `inflight_exhausted` gap with an end, which would
     /// claim coverage back that the listener or the descendant can take. A
     /// foreign call is one call: `inflight_exhausted`, as for any other.
-    fn follow(&mut self, tid: pid_t, call: InFlight, site: Site) {
-        if self.inflight < self.config.inflight_max {
+    fn follow(&mut self, tid: pid_t, call: Call, site: Site) {
+        if self.tasks.in_flight() < self.config.inflight_max {
             self.begin(tid, call, site);
             return;
         }
         self.summary.loss.inflight_rejected += 1;
         match call {
-            InFlight::Listener => {
+            Call::Listener => {
                 self.gap(GapReason::ChildNotificationListener, OpSet::ALL, None);
             }
-            InFlight::Untraced => {
+            Call::Untraced => {
                 self.gap(GapReason::UntracedDescendant, OpSet::ALL, None);
             }
-            InFlight::Foreign | InFlight::Closed(_) => {
+            Call::Foreign | Call::Closed(_) => {
                 self.gap(GapReason::InflightExhausted, call.ops(), Some(1));
             }
         }
@@ -2063,34 +2190,27 @@ impl Session {
 
     /// Record `call`, which entered the kernel at `site`, as this thread's
     /// call in flight.
-    fn begin(&mut self, tid: pid_t, call: InFlight, site: Site) {
-        if self
-            .tasks
-            .get(&tid)
-            .is_some_and(|task| task.restart.is_some())
-        {
+    fn begin(&mut self, tid: pid_t, call: Call, site: Site) {
+        if self.tasks.wait(tid).is_some() {
             // A new entry while a restart decision is still owed: the entry
             // stop that could have been the re-entry was judged in
             // `handle_restart_stop`, so this is out of sequence.
             self.settle_restart(tid, Verdict::Unknown);
         }
-        let replaced = self
-            .tasks
-            .get(&tid)
-            .and_then(|task| task.pending.as_ref().map(InFlight::ops));
-        if let Some(ops) = replaced {
+        if let Some((replaced, _)) = self.tasks.take_call(tid) {
             // The previous entry for this thread never returned, and the gap
             // names the call it was (§11.4).
             self.summary.loss.abandoned_entries += 1;
-            self.release_slot();
-            self.gap(GapReason::EntryAbandoned, ops, Some(1));
+            self.gap(GapReason::EntryAbandoned, replaced.ops(), Some(1));
         }
-        if let Some(task) = self.tasks.get_mut(&tid) {
-            task.pending = Some(call);
-            task.site = site;
-            task.entry_fresh = true;
-            self.inflight += 1;
-        }
+        self.tasks.set_state(
+            tid,
+            TaskState::InFlight {
+                call,
+                site,
+                fresh: true,
+            },
+        );
     }
 
     /// A stop for a number the narrowing filter never traces. The trace
@@ -2132,8 +2252,8 @@ impl Session {
                 if err.raw_os_error() == Some(libc::ESRCH)
                     && self
                         .tasks
-                        .get(&tid)
-                        .is_some_and(|task| task.pending.is_some()) =>
+                        .get(tid)
+                        .is_some_and(|task| matches!(task.state(), TaskState::InFlight { .. })) =>
             {
                 // J4 O-3, at the exit: killed after its call ran, before the
                 // return could be read. The result is lost, and the entry in
@@ -2164,11 +2284,7 @@ impl Session {
 
     fn handle_exit(&mut self, tid: pid_t, mut rval: i64) {
         let tgid = self.tgid_of(tid);
-        let Some(call) = self
-            .tasks
-            .get_mut(&tid)
-            .and_then(|task| task.pending.take())
-        else {
+        let Some((call, site)) = self.tasks.take_call(tid) else {
             // A syscall exit with no entry to pair it with: either the entry
             // was never seen or this thread is not one we track.
             self.summary.loss.unmatched_exits += 1;
@@ -2179,21 +2295,21 @@ impl Session {
             // Not a result yet (J4 O-2): the kernel decides after this stop
             // whether to re-enter the call or to return EINTR, and the call
             // stays in flight until the observer has seen which.
-            if let Some(task) = self.tasks.get_mut(&tid) {
-                task.restart = Some(RestartWait {
+            self.tasks.set_state(
+                tid,
+                TaskState::Restarting(RestartWait {
                     call,
                     code: -rval,
-                    site: task.site,
+                    site,
                     delivered: None,
                     awaiting: Awaiting::Decision,
-                });
-            }
+                }),
+            );
             return;
         }
-        self.release_slot();
         let mut pending = match call {
-            InFlight::Closed(pending) => pending,
-            InFlight::Foreign => {
+            Call::Closed(pending) => pending,
+            Call::Foreign => {
                 if rval == -i64::from(libc::ENOSYS) {
                     // No such call in its table, or an ABI this kernel lacks
                     // (x32 on the reference host): it had no effect, and a
@@ -2206,7 +2322,7 @@ impl Session {
                 }
                 return;
             }
-            InFlight::Listener => {
+            Call::Listener => {
                 if rval >= 0 {
                     // The return is the listener's descriptor. From here on
                     // any closed-set call may be continued with no stop, for
@@ -2220,7 +2336,7 @@ impl Session {
                 }
                 return;
             }
-            InFlight::Untraced => {
+            Call::Untraced => {
                 if rval > 0 {
                     // The return is the new task's id. Nothing traces it: not
                     // its calls (they fail with ENOSYS, a trace stop with no
@@ -2503,7 +2619,7 @@ impl Session {
         event: libc::c_int,
     ) -> Option<libc::c_int> {
         let (code, site, delivered, awaiting) = {
-            let wait = self.tasks.get(&tid)?.restart.as_ref()?;
+            let wait = self.tasks.wait(tid)?;
             (wait.code, wait.site, wait.delivered, wait.awaiting)
         };
         if event == sys::PTRACE_EVENT_SECCOMP {
@@ -2538,9 +2654,7 @@ impl Session {
                         match verdict_at_handler(code, frame, site) {
                             Verdict::Restarted => {
                                 // Believed at the re-entry itself (R1).
-                                if let Some(wait) =
-                                    self.tasks.get_mut(&tid).and_then(|t| t.restart.as_mut())
-                                {
+                                if let Some(wait) = self.tasks.wait_mut(tid) {
                                     wait.awaiting = Awaiting::Reentry {
                                         by_kernel: code == sys::ERESTARTNOINTR,
                                     };
@@ -2561,7 +2675,7 @@ impl Session {
                 }
                 // A signal on its way: deliver it, still stepping, so the
                 // handler it may run announces itself.
-                if let Some(wait) = self.tasks.get_mut(&tid).and_then(|t| t.restart.as_mut()) {
+                if let Some(wait) = self.tasks.wait_mut(tid) {
                     wait.delivered = Some(signal);
                 }
                 Some(signal)
@@ -2640,11 +2754,7 @@ impl Session {
 
     /// Judge an entry stop of a thread whose restart wait is still open.
     fn judge_entry_stop(&mut self, tid: pid_t, seen: EntryStop) {
-        let Some((site, awaiting)) = self
-            .tasks
-            .get(&tid)
-            .and_then(|task| task.restart.as_ref())
-            .map(|wait| (wait.site, wait.awaiting))
+        let Some((site, awaiting)) = self.tasks.wait(tid).map(|wait| (wait.site, wait.awaiting))
         else {
             return;
         };
@@ -2657,14 +2767,7 @@ impl Session {
             // not a second time as a restart that never finished (J4 W3,
             // tracer review R2).
             (EntryStop::Killed, Awaiting::Decision | Awaiting::Reentry { by_kernel: true }) => {
-                if self
-                    .tasks
-                    .get_mut(&tid)
-                    .and_then(|task| task.restart.take())
-                    .is_some()
-                {
-                    self.release_slot();
-                }
+                self.tasks.take_restart(tid);
             }
             _ => self.settle_restart(tid, Verdict::Unknown),
         }
@@ -2672,31 +2775,29 @@ impl Session {
 
     /// Settle a thread's restart wait with `verdict`.
     fn settle_restart(&mut self, tid: pid_t, verdict: Verdict) {
-        let Some(wait) = self
-            .tasks
-            .get_mut(&tid)
-            .and_then(|task| task.restart.take())
-        else {
+        let Some(wait) = self.tasks.take_restart(tid) else {
             return;
         };
         match verdict {
             Verdict::Restarted => {
                 // The re-entered call is a new entry with its own slot.
-                self.release_slot();
                 self.summary.restarts += 1;
             }
             Verdict::Interrupted => {
-                // The call's result is EINTR, delivered as any other result
-                // (which also releases its slot).
+                // The call's result is EINTR, delivered as any other result:
+                // back in flight, to its exit.
                 self.summary.interrupted += 1;
-                if let Some(task) = self.tasks.get_mut(&tid) {
-                    task.pending = Some(wait.call);
-                    task.site = wait.site;
-                }
+                self.tasks.set_state(
+                    tid,
+                    TaskState::InFlight {
+                        call: wait.call,
+                        site: wait.site,
+                        fresh: false,
+                    },
+                );
                 self.handle_exit(tid, -i64::from(libc::EINTR));
             }
             Verdict::Unknown => {
-                self.release_slot();
                 self.summary.loss.restart_unresolved += 1;
                 self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
             }
@@ -2704,13 +2805,13 @@ impl Session {
     }
 
     /// A restart wait whose thread ended — died, or was destroyed by another
-    /// thread's `execve` — before the wait was settled. Before the kernel's
-    /// decision the call did nothing and returned nothing, and so after a
-    /// restart the kernel alone decided: neither a result nor a loss. After
-    /// a restart read from the frame, the `EINTR` the program may have seen
-    /// was never observed: a gap (J4 W3, R1).
+    /// thread's `execve` — before the wait was settled, and that has already
+    /// left its thread. Before the kernel's decision the call did nothing and
+    /// returned nothing, and so after a restart the kernel alone decided:
+    /// neither a result nor a loss. After a restart read from the frame, the
+    /// `EINTR` the program may have seen was never observed: a gap (J4 W3,
+    /// R1).
     fn restart_ended(&mut self, wait: RestartWait) {
-        self.release_slot();
         match wait.awaiting {
             Awaiting::Decision | Awaiting::Reentry { by_kernel: true } => {
                 self.summary.restarts_unfinished += 1;
@@ -2723,7 +2824,7 @@ impl Session {
     }
 
     fn handle_death(&mut self, pid: pid_t, status: libc::c_int) {
-        let Some(task) = self.tasks.remove(&pid) else {
+        let Some(task) = self.tasks.remove(pid) else {
             if self.retired.remove(&pid).is_some() {
                 // A thread the kernel destroyed at a non-leader exec.
                 return;
@@ -2756,17 +2857,17 @@ impl Session {
             return;
         };
         self.summary.reaped_tasks += 1;
-        if let Some(pending) = task.pending {
-            // The entry can no longer return, and the gap names the call it
-            // was, because the entry is in hand (§11.4).
-            self.release_slot();
-            self.summary.loss.abandoned_entries += 1;
-            self.gap(GapReason::EntryAbandoned, pending.ops(), Some(1));
-        }
-        if let Some(wait) = task.restart {
+        match task.state {
+            TaskState::InFlight { call, .. } => {
+                // The entry can no longer return, and the gap names the call
+                // it was, because the entry is in hand (§11.4).
+                self.summary.loss.abandoned_entries += 1;
+                self.gap(GapReason::EntryAbandoned, call.ops(), Some(1));
+            }
             // Died while its restart was owed (a fatal signal's delivery is
             // exactly such a decision point).
-            self.restart_ended(wait);
+            TaskState::Restarting(wait) => self.restart_ended(wait),
+            TaskState::Idle => {}
         }
         let Some(process) = self.procs.get_mut(&task.tgid) else {
             // A task whose thread group we no longer hold: its death cannot
@@ -3062,7 +3163,7 @@ impl Session {
                 .procfs
                 .children(sys::getpid())
                 .into_iter()
-                .filter(|pid| !self.tasks.contains_key(pid))
+                .filter(|pid| !self.tasks.contains(*pid))
                 .collect(),
             Owed::Backend {
                 pid,
@@ -3299,12 +3400,23 @@ mod tests {
 
     /// Make `pending` the call `tid` has in flight, as its entry stop would.
     fn plant(session: &mut Session, tid: pid_t, pending: Pending) {
+        let state = TaskState::InFlight {
+            call: Call::Closed(pending),
+            site: Site::default(),
+            fresh: false,
+        };
         session
             .tasks
-            .get_mut(&tid)
-            .expect("a registered task")
-            .pending = Some(InFlight::Closed(pending));
-        session.inflight += 1;
+            .set_state(tid, state)
+            .expect("a registered task");
+    }
+
+    /// Whether `tid` is between calls, with nothing in flight.
+    fn idle(session: &Session, tid: pid_t) -> bool {
+        matches!(
+            session.tasks.get(tid).map(Task::state),
+            Some(TaskState::Idle)
+        )
     }
 
     /// Shutdown signals the tracer thread with the wake signal, so a tracer
@@ -3837,7 +3949,7 @@ mod tests {
             "{:?}",
             session.summary.loss
         );
-        assert_eq!(session.inflight, 0, "no entry carried over");
+        assert_eq!(session.tasks.in_flight(), 0, "no entry carried over");
         assert!(session.tasks.is_empty() && session.procs.is_empty());
     }
 
@@ -3849,10 +3961,10 @@ mod tests {
             TracerConfig::default(),
             &FakeProc::default().task(RECYCLED, RECYCLED, 1000),
         );
-        session.begin(RECYCLED, InFlight::Untraced, Site::default());
+        session.begin(RECYCLED, Call::Untraced, Site::default());
         session.handle_exit(RECYCLED, -i64::from(libc::EPERM));
         assert_eq!(session.summary.untraced_clone_refused, 1);
-        session.begin(RECYCLED, InFlight::Untraced, Site::default());
+        session.begin(RECYCLED, Call::Untraced, Site::default());
         session.handle_exit(RECYCLED, 4242);
         let gaps: Vec<(GapReason, OpSet, Option<u64>)> = drained(&rx, &mut session)
             .into_iter()
@@ -3984,7 +4096,11 @@ mod tests {
             libc::SYS_openat as u64,
             "/w/interrupted",
         );
-        assert_eq!(session.inflight, 1, "still in flight while waiting");
+        assert_eq!(
+            session.tasks.in_flight(),
+            1,
+            "still in flight while waiting"
+        );
         assert!(drained(&rx, &mut session).is_empty(), "no result yet");
         session.settle_restart(RECYCLED, Verdict::Interrupted);
         let events = drained(&rx, &mut session);
@@ -3995,7 +4111,7 @@ mod tests {
             ),
             "{events:?}"
         );
-        assert_eq!(session.inflight, 0);
+        assert_eq!(session.tasks.in_flight(), 0);
 
         waiting(
             &mut session,
@@ -4005,7 +4121,7 @@ mod tests {
         );
         session.settle_restart(RECYCLED, Verdict::Restarted);
         assert!(drained(&rx, &mut session).is_empty());
-        assert_eq!(session.inflight, 0);
+        assert_eq!(session.tasks.in_flight(), 0);
 
         waiting(
             &mut session,
@@ -4023,7 +4139,7 @@ mod tests {
             ),
             "{events:?}"
         );
-        assert_eq!(session.inflight, 0);
+        assert_eq!(session.tasks.in_flight(), 0);
 
         waiting(
             &mut session,
@@ -4033,7 +4149,7 @@ mod tests {
         );
         session.handle_death(RECYCLED, libc::SIGKILL);
         assert!(drained(&rx, &mut session).is_empty(), "no result, no gap");
-        assert_eq!(session.inflight, 0);
+        assert_eq!(session.tasks.in_flight(), 0);
 
         assert_eq!(session.summary.interrupted, 1);
         assert_eq!(session.summary.restarts, 1);
@@ -4055,11 +4171,7 @@ mod tests {
     /// restart code alone.
     fn announced(session: &mut Session, tid: pid_t, by_kernel: bool) {
         waiting(session, tid, libc::SYS_openat as u64, "/w/fifo");
-        let wait = session
-            .tasks
-            .get_mut(&tid)
-            .and_then(|task| task.restart.as_mut())
-            .expect("a restart wait");
+        let wait = session.tasks.wait_mut(tid).expect("a restart wait");
         wait.awaiting = Awaiting::Reentry { by_kernel };
     }
 
@@ -4136,7 +4248,7 @@ mod tests {
                 &FakeProc::default().task(RECYCLED, RECYCLED, 1000),
             );
             announced(&mut session, RECYCLED, by_kernel);
-            assert_eq!(session.inflight, 1, "{label}: still in flight");
+            assert_eq!(session.tasks.in_flight(), 1, "{label}: still in flight");
             step(&mut session);
             let events = drained(&rx, &mut session);
             assert_eq!(gaps_of(&events), gaps, "{label}: {events:?}");
@@ -4148,7 +4260,11 @@ mod tests {
             );
             assert_eq!(session.summary.restarts, restarts, "{label}");
             assert_eq!(session.summary.restarts_unfinished, unfinished, "{label}");
-            assert_eq!(session.inflight, 0, "{label}: the slot is released");
+            assert_eq!(
+                session.tasks.in_flight(),
+                0,
+                "{label}: the slot is released"
+            );
         }
     }
 
@@ -4167,7 +4283,7 @@ mod tests {
         assert!(drained(&rx, &mut session).is_empty());
         assert_eq!(session.summary.restarts_unfinished, 0);
         assert_eq!(session.summary.restarts, 0);
-        assert_eq!(session.inflight, 0);
+        assert_eq!(session.tasks.in_flight(), 0);
     }
 
     const LEADER: pid_t = 5_000_011;
@@ -4209,32 +4325,32 @@ mod tests {
                 TracerEvent::Exec { pid, path, .. } => Some((*pid, path.clone())),
                 _ => None,
             });
-            let leader = session
-                .tasks
-                .get(&LEADER)
-                .expect("the leader's id lives on");
+            let leader = session.tasks.get(LEADER).expect("the leader's id lives on");
             if carried {
                 assert!(
                     matches!(
-                        leader.pending,
-                        Some(InFlight::Closed(Pending {
-                            exec_confirmed: true,
+                        leader.state(),
+                        TaskState::InFlight {
+                            call: Call::Closed(Pending {
+                                exec_confirmed: true,
+                                ..
+                            }),
                             ..
-                        }))
+                        }
                     ),
                     "the carried execve is the one entry left"
                 );
-                assert_eq!(session.inflight, 1);
+                assert_eq!(session.tasks.in_flight(), 1);
                 assert_eq!(
                     exec_path.map(|(pid, path)| (pid, path.map(|p| p.bytes))),
                     Some((LEADER, Some(b"/bin/image".to_vec())))
                 );
             } else {
-                assert!(leader.pending.is_none(), "nothing to pair the exit with");
-                assert_eq!(session.inflight, 0);
+                assert!(idle(&session, LEADER), "nothing to pair the exit with");
+                assert_eq!(session.tasks.in_flight(), 0);
                 assert_eq!(exec_path, Some((LEADER, None)));
             }
-            assert!(!session.tasks.contains_key(&PEER));
+            assert!(!session.tasks.contains(PEER));
             assert_eq!(session.summary.loss.abandoned_entries, 1);
         }
         for (by_kernel, gaps) in [
@@ -4253,8 +4369,8 @@ mod tests {
             session.exec_transition(LEADER, PEER);
             let events = drained(&rx, &mut session);
             assert_eq!(gaps_of(&events), gaps, "by kernel {by_kernel}: {events:?}");
-            assert_eq!(session.inflight, 0);
-            assert!(session.tasks[&LEADER].restart.is_none());
+            assert_eq!(session.tasks.in_flight(), 0);
+            assert!(idle(&session, LEADER));
         }
     }
 
@@ -4271,9 +4387,9 @@ mod tests {
             &leader_and_peer(),
         );
         pend(&mut session, LEADER, libc::SYS_openat as u64, "/w/fifo");
-        session.follow(PEER, InFlight::Listener, Site::default());
-        session.follow(PEER, InFlight::Untraced, Site::default());
-        session.follow(PEER, InFlight::Foreign, Site::default());
+        session.follow(PEER, Call::Listener, Site::default());
+        session.follow(PEER, Call::Untraced, Site::default());
+        session.follow(PEER, Call::Foreign, Site::default());
         assert_eq!(
             gaps_of(&drained(&rx, &mut session)),
             vec![
@@ -4283,8 +4399,8 @@ mod tests {
             ]
         );
         assert_eq!(session.summary.loss.inflight_rejected, 3);
-        assert!(session.tasks[&PEER].pending.is_none());
-        assert_eq!(session.inflight, 1);
+        assert!(idle(&session, PEER));
+        assert_eq!(session.tasks.in_flight(), 1);
     }
 
     /// J4 W3, loss review finding 4, at the session: what was handed to the
@@ -4516,11 +4632,11 @@ mod tests {
     #[test]
     fn audit4_compat_abi_listener_and_untraced_clone_route_to_their_gaps() {
         use crate::platform::linux::tracer::filter as tfilter;
-        let kind = |of: Option<InFlight>| match of {
-            Some(InFlight::Listener) => "listener",
-            Some(InFlight::Untraced) => "untraced",
-            Some(InFlight::Foreign) => "foreign",
-            Some(InFlight::Closed(_)) => "closed",
+        let kind = |of: Option<Call>| match of {
+            Some(Call::Listener) => "listener",
+            Some(Call::Untraced) => "untraced",
+            Some(Call::Foreign) => "foreign",
+            Some(Call::Closed(_)) => "closed",
             None => "none",
         };
         let info = |arch: u32, nr: u64, a0: u64, a1: u64| sys::SyscallInfo {
@@ -4714,7 +4830,7 @@ mod tests {
             session.summary.loss
         );
         assert_eq!(session.summary.killed_at_entry, 1, "{:?}", session.summary);
-        assert_eq!(session.inflight, 0);
+        assert_eq!(session.tasks.in_flight(), 0);
     }
 
     /// J4 O-3, the second window: the entry was read (the tracer holds it)
@@ -4742,14 +4858,14 @@ mod tests {
             assert!(is_seccomp_stop(status), "status {status:#x}");
             session.register(child.pid);
             session.handle_entry(child.pid);
-            assert_eq!(session.inflight, 1, "the entry is in hand");
+            assert_eq!(session.tasks.in_flight(), 1, "the entry is in hand");
             child.kill();
             session.restart(child.pid, 0);
             let met_the_killed_stop = session.summary.killed_at_entry == 1;
             child.reap_into(&mut session);
             let events = drained(&rx, &mut session);
             assert!(!target.exists(), "the kernel skipped the call");
-            assert_eq!(session.inflight, 0);
+            assert_eq!(session.tasks.in_flight(), 0);
             if !met_the_killed_stop {
                 assert_eq!(
                     gaps_of(&events),
@@ -4819,7 +4935,7 @@ mod tests {
             "{:?}",
             session.summary.loss
         );
-        assert_eq!(session.inflight, 0);
+        assert_eq!(session.tasks.in_flight(), 0);
     }
 
     /// Whether `pid` is asleep inside syscall `nr`, by `/proc`.
@@ -4899,7 +5015,7 @@ mod tests {
             "{:?}",
             session.summary.loss
         );
-        assert_eq!(session.inflight, 0);
+        assert_eq!(session.tasks.in_flight(), 0);
     }
 
     #[test]
@@ -5480,7 +5596,11 @@ mod tests {
             Some(&[b"/bin/sh".to_vec(), b"/w/build.sh".to_vec()][..])
         );
         assert!(command.is_none(), "a script rewrite is not a hit");
-        assert_eq!(session.inflight, 1, "the exec's own exit is still owed");
+        assert_eq!(
+            session.tasks.in_flight(),
+            1,
+            "the exec's own exit is still owed"
+        );
     }
 
     /// Audit-6 review: the process an exec-time hit kills leaves flight at
@@ -5520,8 +5640,8 @@ mod tests {
         };
         plant(&mut session, EXECER, pending);
         session.exec_transition(EXECER, EXECER);
-        assert!(session.tasks[&EXECER].pending.is_none());
-        assert_eq!(session.inflight, 0);
+        assert!(idle(&session, EXECER));
+        assert_eq!(session.tasks.in_flight(), 0);
         session.handle_death(EXECER, libc::SIGKILL);
         let events = drained(&rx, &mut session);
         assert!(gaps_of(&events).is_empty(), "{events:?}");
