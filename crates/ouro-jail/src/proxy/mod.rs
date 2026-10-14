@@ -221,6 +221,11 @@ pub enum Reason {
     UpstreamProtocol,
     /// No host rule permits the destination.
     HostNotAllowed,
+    /// A host rule permits the destination, but only as TLS: every rule that
+    /// does omitted its port, and the request is plaintext HTTP, either an
+    /// absolute-form request or a tunnel whose first flight is HTTP
+    /// (network-rules.md §Normalization).
+    PlaintextNotGranted,
     /// Every answer is forbidden or unusable.
     ForbiddenAddress,
     /// Allowed and forbidden answers were mixed.
@@ -277,6 +282,7 @@ impl Reason {
             Reason::ConnectTimeout => "connect_timeout",
             Reason::UpstreamProtocol => "upstream_protocol",
             Reason::HostNotAllowed => "host_not_allowed",
+            Reason::PlaintextNotGranted => "plaintext_not_granted",
             Reason::ForbiddenAddress => "forbidden_address",
             Reason::MixedAnswers => "mixed_answers",
             Reason::ResolveEmpty => "resolve_empty",
@@ -309,6 +315,7 @@ impl Reason {
             | Reason::OriginUnverified
             | Reason::OriginTimeout
             | Reason::HostNotAllowed
+            | Reason::PlaintextNotGranted
             | Reason::ForbiddenAddress
             | Reason::MixedAnswers => (403, "Forbidden"),
             Reason::ResolveEmpty
@@ -1257,13 +1264,14 @@ fn serve(
     // port explicitly (network-rules.md §Normalization). The omitted-port
     // expansion to 443 is the TLS shape — a plain request riding it has no
     // explicit rule that permits it — while an explicit `host:PORT` grant
-    // serves whatever scheme its operator named the port for.
+    // serves whatever scheme its operator named the port for. The host rule
+    // did permit the destination, so the refusal says which part did not.
     if request.kind() == RequestKind::Http
         && !shared
             .rules
             .permits_destination_explicit(&request.destination)
     {
-        return Err(Reason::HostNotAllowed);
+        return Err(Reason::PlaintextNotGranted);
     }
     // Step 2: resolve on the host, once.
     let answers = match &request.destination.host {
@@ -1360,6 +1368,17 @@ fn connect_and_relay(
     } else {
         None
     };
+    // A tunnel whose first flight is HTTP carries plaintext HTTP, which the
+    // TLS shape of an omitted-port grant does not admit any more than an
+    // absolute-form request (above). A tunnel to an address is not inspected
+    // (`explicit_ip`), so this holds for named destinations only.
+    if flight.as_ref().is_some_and(|flight| flight.http.is_some())
+        && !shared
+            .rules
+            .permits_destination_explicit(&request.destination)
+    {
+        return Err(Reason::PlaintextNotGranted);
+    }
     let mut forwarded = request.clone();
     let mut lease = crate::vault::lifecycle::Lease::default();
     if let Some(vault) = &shared.vault {
