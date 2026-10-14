@@ -1,7 +1,7 @@
 defmodule OuroFleet.Worker do
   @moduledoc "Worker reservations route to Rust; only the Rust owner can launch or settle."
   use GenServer
-  alias OuroFleet.{Command, InvalidRequest, Reader, Request, Store}
+  alias OuroFleet.{Command, InvalidRequest, Protocol, Reader, Request, Store}
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)
   def call(message), do: GenServer.call(__MODULE__, message, 120_000)
 
@@ -33,8 +33,7 @@ defmodule OuroFleet.Worker do
     end
   end
 
-  defp dispatch(:version, _),
-    do: {:ok, %{"schema" => "ouro.fleet.rpc/1", "run" => "ouro.ledger.run/1"}}
+  defp dispatch(:version, _), do: {:ok, Protocol.version()}
 
   defp dispatch(:doctor, config) do
     with {:ok, ledger, 0} <- command(config, ["doctor", "--json"]),
@@ -57,7 +56,7 @@ defmodule OuroFleet.Worker do
     workspace = workspace!(key, request, config)
 
     with {:ok, version, 0} <- Command.json(config["ledger_bin"], ["version", "--json"]),
-         true <- version["schemas"]["run"] == "ouro.ledger.run/1",
+         true <- version["schemas"]["run"] == Protocol.ledger_run(),
          {:ok, doctor, 0} <- command(config, ["doctor", "--json"]),
          true <- doctor["ready"] and doctor["detached_owner"]["available"],
          {:ok, label, 0} <-

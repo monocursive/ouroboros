@@ -76,7 +76,7 @@ defmodule OuroFleet.WorkerTest do
     #!/bin/sh
     printf '%s\\n' "$*" >> '#{log}'
     case " $* " in
-      *" version --json "*) echo '{"schemas":{"run":"ouro.ledger.run/1"}}' ;;
+      *" version --json "*) echo '{"schemas":{"run":"#{OuroFleet.Protocol.ledger_run()}"}}' ;;
       *" doctor --json "*) echo '{"ready":true,"detached_owner":{"available":true}}' ;;
       *" show run-live "*) echo '{"state":"admitted"}' ;;
       *" show "*) echo '{"state":"settled"}' ;;

@@ -13,13 +13,7 @@ message = case request do
   %{"operation" => "doctor"} -> :doctor
   _ -> raise("unsupported operation")
 end
-result = try do
-  {:ok, %{"schema" => "ouro.fleet.rpc/1", "run" => "ouro.ledger.run/1"}} =
-    :erpc.call(String.to_atom(config["controller"]), OuroFleet.Controller, :call, [:version], 10_000)
-  :erpc.call(String.to_atom(config["controller"]), OuroFleet.Controller, :call, [message], 185_000)
-catch
-  _, _ -> {:error, "controller_unreachable_or_reply_lost_retry_same_request"}
-end
+result = OuroFleet.Client.call(String.to_atom(config["controller"]), message)
 case result do
   {:ok, value} -> IO.puts(OuroFleet.JSON.encode(%{"ok" => true, "result" => value}))
   {:error, reason} -> IO.puts(OuroFleet.JSON.encode(%{"ok" => false, "error" => reason})); System.halt(1)

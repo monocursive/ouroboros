@@ -1,7 +1,7 @@
 defmodule OuroFleet.Controller do
   @moduledoc "Durable placement identity. An unreachable worker is never replaced."
   use GenServer
-  alias OuroFleet.{InvalidRequest, Request, Store, Worker}
+  alias OuroFleet.{InvalidRequest, Protocol, Request, Store, Worker}
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)
   def call(message), do: GenServer.call(__MODULE__, message, 180_000)
 
@@ -114,8 +114,7 @@ defmodule OuroFleet.Controller do
      end)}
   end
 
-  defp dispatch(:version, _),
-    do: {:ok, %{"schema" => "ouro.fleet.rpc/1", "run" => "ouro.ledger.run/1"}}
+  defp dispatch(:version, _), do: {:ok, Protocol.version()}
 
   defp dispatch(_, _), do: {:error, "unsupported_controller_operation"}
 
@@ -184,11 +183,9 @@ defmodule OuroFleet.Controller do
         else: :erpc.call(remote, Worker, :call, [operation], 125_000)
     end
 
-    with {:ok, %{"schema" => "ouro.fleet.rpc/1", "run" => "ouro.ledger.run/1"}} <- call.(:version) do
-      if message == :version, do: call.(:version), else: call.(message)
-    else
-      _ -> {:error, "worker_schema_mismatch"}
-    end
+    if Protocol.compatible?(call.(:version)),
+      do: call.(message),
+      else: {:error, "worker_schema_mismatch"}
   catch
     _, _ -> {:error, "worker_unreachable_or_reply_lost"}
   end

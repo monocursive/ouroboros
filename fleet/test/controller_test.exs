@@ -1,6 +1,6 @@
 defmodule OuroFleet.ControllerTest do
   use ExUnit.Case, async: false
-  alias OuroFleet.{Controller, Store}
+  alias OuroFleet.{Controller, Protocol, Store}
 
   defmodule StubWorker do
     use GenServer
@@ -11,14 +11,12 @@ defmodule OuroFleet.ControllerTest do
     def init(state), do: {:ok, state}
 
     def handle_call(:version, _, %{incompatible: true} = state),
-      do:
-        {:reply, {:ok, %{"schema" => "ouro.fleet.rpc/999", "run" => "ouro.ledger.run/1"}}, state}
+      do: {:reply, {:ok, Map.put(Protocol.version(), "schema", "ouro.fleet.rpc/999")}, state}
 
     def handle_call({:status, _}, _, state),
       do: {:reply, {:error, "test_worker_unavailable"}, state}
 
-    def handle_call(:version, _, state),
-      do: {:reply, {:ok, %{"schema" => "ouro.fleet.rpc/1", "run" => "ouro.ledger.run/1"}}, state}
+    def handle_call(:version, _, state), do: {:reply, {:ok, Protocol.version()}, state}
 
     def handle_call({:plan, _, _}, _, state),
       do:
