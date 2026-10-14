@@ -122,3 +122,11 @@ fn public_key_is_a_bounded_explicit_pin_and_refuses_forged_fingerprint() {
     symlink(path.join("private-key.pk8"), &key).unwrap();
     assert!(trusted_key(&key).is_err());
 }
+
+#[test]
+fn a_signature_signs_its_schema_domain_then_the_manifest() {
+    assert_eq!(
+        signed_message(b"{}"),
+        b"ouro.ledger.bundle-signature/1\0{}".to_vec()
+    );
+}

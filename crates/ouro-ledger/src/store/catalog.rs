@@ -183,7 +183,8 @@ impl Store {
             }
         }
         let mut hash = Sha256::new();
-        hash.update(b"ouro.ledger.catalog/1\0");
+        hash.update(schemas::CATALOG.as_bytes());
+        hash.update(b"\0");
         let mut runs = Vec::new();
         let mut bytes = 0;
         let mut full = false;

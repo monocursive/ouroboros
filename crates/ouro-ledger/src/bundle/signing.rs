@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs::File, io::Write, path::Path};
 
-pub(super) const DOMAIN: &[u8] = b"ouro.ledger.bundle-signature/1\0";
+/// What a bundle signature signs: the signature schema id, a NUL, and the
+/// exact manifest bytes, so a signature over one is never one over another.
+fn signed_message(manifest: &[u8]) -> Vec<u8> {
+    [crate::schemas::BUNDLE_SIGNATURE.as_bytes(), b"\0", manifest].concat()
+}
 const MAX_KEY_BYTES: u64 = 4096;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -132,7 +136,7 @@ impl Signer {
     }
     pub(super) fn sign(&self, manifest: &[u8]) -> Value {
         let public = self.public();
-        let message = [DOMAIN, manifest].concat();
+        let message = signed_message(manifest);
         json!({"schema":crate::schemas::BUNDLE_SIGNATURE, "algorithm":"ed25519",
             "key_id":public.key_id, "public_key":public.public_key,
             "manifest_digest":sha256_prefixed(manifest), "signature":hex(self.0.sign(&message).as_ref())})
@@ -155,7 +159,7 @@ pub(super) fn verify(value: Value, manifest: &[u8], trusted: Option<&PublicKey>)
     }
     let signature = unhex::<64>(&envelope.signature)?;
     signature::UnparsedPublicKey::new(&signature::ED25519, public_bytes)
-        .verify(&[DOMAIN, manifest].concat(), &signature)
+        .verify(&signed_message(manifest), &signature)
         .map_err(|_| error("invalid bundle signature"))?;
     if trusted.is_some_and(|key| key != &public) {
         return Err(error("bundle signer does not match the trusted public key"));
