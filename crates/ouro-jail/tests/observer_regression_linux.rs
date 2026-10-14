@@ -59,10 +59,11 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
 }
 
 use ouro_fixture::harness;
+use ouro_jail::platform::linux::clock;
 #[cfg(target_arch = "x86_64")]
 use ouro_jail::platform::linux::seccomp;
 use ouro_jail::platform::linux::tracer::{
-    ClosedOp, GapReason, OpSet, Tracer, TracerConfig, TracerEvent, TracerSummary, clock,
+    ClosedOp, GapReason, OpSet, Tracer, TracerConfig, TracerEvent, TracerSummary,
     narrowing_filter_bytes,
 };
 

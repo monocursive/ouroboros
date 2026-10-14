@@ -14,6 +14,8 @@ use std::path::PathBuf;
 
 use libc::pid_t;
 
+use crate::platform::linux::identity;
+
 /// Cap on a single descendant walk, so a fork storm cannot make this
 /// function unbounded work.
 const MAX_DESCENDANTS: usize = 4096;
@@ -25,17 +27,10 @@ fn proc_path(pid: pid_t, rest: &str) -> PathBuf {
     PathBuf::from(format!("/proc/{pid}/{rest}"))
 }
 
-/// The value of a `/proc/<pid>/status` line, without the key or the tab.
+/// The value of a `/proc/<pid>/status` line, or `None` when the task is
+/// gone or the line is absent.
 fn status_field(pid: pid_t, key: &str) -> Option<String> {
-    let text = fs::read_to_string(proc_path(pid, "status")).ok()?;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix(key)
-            && rest.starts_with(':')
-        {
-            return Some(rest[1..].trim().to_string());
-        }
-    }
-    None
+    identity::status_field(pid, key).ok()
 }
 
 /// The thread group this task belongs to, in this process's pid namespace.
@@ -398,13 +393,7 @@ pub fn nspid(pid: pid_t) -> Option<Vec<pid_t>> {
 /// (jail-v1 §11.3, "internal attribution includes boot/birth identity").
 #[must_use]
 pub fn start_ticks(pid: pid_t) -> Option<u64> {
-    let raw = fs::read_to_string(proc_path(pid, "stat")).ok()?;
-    // The second field is the executable name in parentheses and may itself
-    // contain spaces and parentheses, so the fields are counted from the last
-    // closing parenthesis: field 3 (state) is the first one after it, and
-    // field 22 is therefore the twentieth.
-    let tail = &raw[raw.rfind(')')? + 1..];
-    tail.split_whitespace().nth(19)?.parse().ok()
+    identity::start_time_ticks(pid).ok()
 }
 
 /// `/proc/<pid>/cmdline` split on NUL. Bytes, not text: an argv is not

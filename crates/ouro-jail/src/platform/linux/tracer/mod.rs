@@ -56,7 +56,6 @@
 //! [`TracerEvent::Gap`] with a reason and, when it is known, a count. There
 //! is no path in this module that invents a return value, a path or a status.
 
-pub mod clock;
 mod closed_set;
 pub(super) mod filter;
 mod proc;
@@ -83,6 +82,23 @@ pub use filter::{
 };
 pub use proc::{children, cmdline, descendants, nspid, ppid, start_ticks, tgid, tracer_pid};
 pub use table::closed_set_table;
+
+/// Nanoseconds of `CLOCK_BOOTTIME` since `epoch_boottime_ns`: the base of
+/// every gap endpoint the observer reports (§11.4 bounds a gap from the last
+/// known healthy point, which is an age, not an instant on the boot clock).
+/// The supervisor passes its own start as the epoch, so these are the same
+/// numbers as every other `monotonic_ns` in the trace (§13.1).
+///
+/// The clock is [`clock::boottime_ns`](crate::platform::linux::clock::boottime_ns),
+/// which panics rather than invent a time if the kernel refuses
+/// `CLOCK_BOOTTIME` (it cannot on any kernel this crate runs on). On the
+/// tracer thread that panic is fail-closed: the thread ends, the summary
+/// says `thread_panicked` and every class degrades, and `PTRACE_O_EXITKILL`
+/// kills the traced tree.
+#[must_use]
+pub fn elapsed_since(epoch_boottime_ns: u64) -> u64 {
+    crate::platform::linux::clock::boottime_ns().saturating_sub(epoch_boottime_ns)
+}
 
 /// Bounds on what the observer will hold, from jail-v1 §11.4.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1324,6 +1340,21 @@ mod tests {
             kernel_argv: Some(kernel_argv),
         };
         assert!(event_bytes(&event) >= allocated + size_of::<TracerEvent>());
+    }
+
+    /// Gap endpoints are ages since the epoch: never a boot-clock instant
+    /// once an epoch is given, and never negative.
+    #[test]
+    fn elapsed_since_counts_from_the_epoch() {
+        use crate::platform::linux::clock::boottime_ns;
+        let epoch = boottime_ns();
+        let age = elapsed_since(epoch);
+        assert!(
+            age <= boottime_ns() - epoch,
+            "{age} is not an age since {epoch}"
+        );
+        assert!(elapsed_since(0) >= epoch, "an epoch of 0 is the boot clock");
+        assert_eq!(elapsed_since(u64::MAX), 0, "an epoch ahead saturates");
     }
 
     #[test]

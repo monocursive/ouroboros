@@ -80,7 +80,7 @@ use super::proc;
 use super::sys::{self, Wait};
 use super::{
     Args, GapReason, OpSet, PathSnapshot, SockaddrSnapshot, TracerConfig, TracerError, TracerEvent,
-    TracerSummary, clock, event_bytes,
+    TracerSummary, elapsed_since, event_bytes,
 };
 use crate::platform::linux::{abi, seccomp};
 
@@ -810,7 +810,7 @@ impl Session {
             disconnected: false,
             coalesced: Vec::new(),
             epoch_boottime_ns,
-            last_healthy_ns: clock::boottime_ns().saturating_sub(epoch_boottime_ns),
+            last_healthy_ns: elapsed_since(epoch_boottime_ns),
             summary: TracerSummary::default(),
             tasks: HashMap::new(),
             procs: HashMap::new(),
@@ -832,7 +832,7 @@ impl Session {
     /// endpoint is reported on. §11.4 bounds a gap from the last known
     /// healthy point, which is an age and not an instant on the boot clock.
     fn now_ns(&self) -> u64 {
-        clock::boottime_ns().saturating_sub(self.epoch_boottime_ns)
+        elapsed_since(self.epoch_boottime_ns)
     }
 
     // ---------------------------------------------------------- the outbox
