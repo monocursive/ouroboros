@@ -6,9 +6,8 @@
 //! the trusted supervisor, whether the child may reach the named peer. The
 //! mechanism was proved on the reference host before this module was written;
 //! the measurements are in
-//! `docs/specs/jail-v1/evidence/unixpeer-spike-2026-09-22-ouro-ci.txt` (draft in
-//! the J3 scratch as of this writing) and every decision below cites the step
-//! it implements.
+//! `docs/specs/jail-v1/evidence/unixpeer-spike-2026-09-22-ouro-ci.txt` and every
+//! decision below cites the step it implements.
 //!
 //! The decision, per connect (§3.4 step 3):
 //!
@@ -101,9 +100,9 @@ pub use super::seccomp::{NR_CONNECT, SOCK_SEQPACKET, SOCK_STREAM, SOCK_TYPE_MASK
 /// for `agent`: the agent baseline leaves `socket` to it.
 ///
 /// The program is **safe on its own**: it validates the architecture before
-/// any syscall number and denies (`EPERM`) every ABI other than native x86_64,
-/// and denies the x32 numbering (which shares the x86_64 audit arch), exactly
-/// as the `tool` baseline does. It does not rely on a companion filter to
+/// any syscall number and denies (`EPERM`) every ABI other than this build's
+/// native one (x86_64 or aarch64), and on x86_64 the x32 numbering (which
+/// shares the x86_64 audit arch), exactly as the `tool` baseline does. It does not rely on a companion filter to
 /// reject a compat ABI — the reference host does accept an i386 (int 0x80)
 /// ABI, and a non-native `connect` there would otherwise fall through to
 /// `SECCOMP_RET_ALLOW` and escape mediation entirely.
@@ -249,27 +248,16 @@ pub fn relative_bytes(path: &[u8]) -> Vec<u8> {
     }
 }
 
-/// A response delivery status for the wave-2 evidence sink.
+/// What the mediator established about one `connect` while the calling
+/// thread was parked in its notification: the facts the audit event and the
+/// helper attribution are made of (the tracer never sees a mediated
+/// connect).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Verdict {
-    /// The connected result was accepted by the notification listener.
-    Allowed,
-    /// The errno result was accepted by the notification listener.
-    Denied(i32),
-    /// The listener did not accept the response; no child return is known.
-    Undelivered,
-}
-
-/// One mediation decision and its delivery status, sent to the sink so the
-/// platform can emit `net.connect` evidence or a gap honestly (the tracer
-/// never sees a mediated connect).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MediationRecord {
-    /// The connecting task's host pid (a thread id).
-    pub pid: libc::pid_t,
-    // What the audit event needs besides the verdict
-    /// The thread group the task belonged to while its notification was
-    /// pending, read before the verdict was sent; `None` when `/proc` would
+pub struct ConnectFacts {
+    /// The connecting thread's host id (`seccomp_notif.pid` names a thread).
+    pub tid: libc::pid_t,
+    /// The thread group the thread belonged to while its notification was
+    /// pending, read before the answer was sent; `None` when `/proc` would
     /// not say. The platform uses it to tell a helper's connect (the bridge)
     /// from the target's.
     pub tgid: Option<libc::pid_t>,
@@ -284,10 +272,48 @@ pub struct MediationRecord {
     /// The address fact read from the `sockaddr` (issue drafts 13/14): the
     /// AF_UNIX path, the abstract name, or the internet address.
     pub peer: Option<Peer>,
+}
+
+/// The mediator's answer to one `connect`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// The mediator connected the child's socket: its `connect` returns 0.
+    Allowed,
+    /// The child's `connect` fails with this errno.
+    Denied(i32),
+}
+
+impl Decision {
+    /// The child's `connect` return this answer stands for: 0 or `-errno`.
+    #[must_use]
+    pub fn ret(self) -> i64 {
+        match self {
+            Decision::Allowed => 0,
+            Decision::Denied(errno) => -i64::from(errno),
+        }
+    }
+}
+
+/// What became of the response that carried a decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// The listener accepted it: the child's `connect` returned the
+    /// decision.
+    Delivered(Decision),
+    /// The listener did not accept it; no child return is known.
+    Undelivered,
+}
+
+/// One decided `connect` and what became of its answer, sent to the sink so
+/// the platform can emit `net.connect` evidence or a gap honestly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediationRecord {
+    /// What was established about the call.
+    pub facts: ConnectFacts,
     /// A short, safe reason code (never a path or payload).
     pub reason: &'static str,
-    /// The verdict.
-    pub verdict: Verdict,
+    /// Whether the answer reached the child.
+    pub delivery: Delivery,
 }
 
 /// A pinned connection origin, prepared while the notification is valid.
@@ -313,7 +339,7 @@ pub trait MediationSink: Send + Sync {
     fn record(&self, record: MediationRecord);
 }
 
-/// A sink that keeps the last decisions, for tests and doctor output.
+/// A sink that keeps every decision, for tests.
 #[derive(Default)]
 pub struct CollectingSink {
     records: std::sync::Mutex<Vec<MediationRecord>>,

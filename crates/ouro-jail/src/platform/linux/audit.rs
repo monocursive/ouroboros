@@ -18,6 +18,7 @@ use crate::records::{CLOSED_SET_LINUX_V1, Completion, Event, EventOutcome, Gap, 
 use crate::trace::{Priority, SharedTrace};
 
 use super::tracer::{Args, ClosedOp, GapReason, OpSet, PathSnapshot, TracerSummary};
+use super::unixpeer::{ConnectFacts, Decision, Peer};
 
 /// The observer backend name recorded in the receipt.
 pub const OBSERVER_BACKEND: &str = "ptrace";
@@ -42,29 +43,6 @@ enum PathClass {
 struct NamedRoot {
     bytes: Vec<u8>,
     label: String,
-}
-
-// One mediated connect, as the audit writer needs it
-/// One `connect` whose mediated response the kernel accepted.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MediatedConnect {
-    /// The connecting thread.
-    pub tid: libc::pid_t,
-    /// Its thread group, when `/proc` said.
-    pub tgid: Option<libc::pid_t>,
-    /// That thread group's birth (field 22 of `/proc/<tgid>/stat`), read in
-    /// the same window as `tgid`: with it, the process's name (§11.3).
-    pub tgid_start: Option<u64>,
-    /// The address family the child named.
-    pub family: Option<u16>,
-    /// Whether the whole address was read.
-    pub address_complete: bool,
-    /// The address fact read from the `sockaddr` (issue drafts 13/14).
-    pub peer: Option<super::unixpeer::Peer>,
-    /// The value accepted as the child's `connect` response: 0 or `-errno`.
-    pub ret: i64,
-    /// The mediator's safe reason code.
-    pub reason: &'static str,
 }
 
 /// One completed closed-set call, as the observer witnessed it.
@@ -508,30 +486,39 @@ impl AuditWriter {
     /// draft 14). The audit `decision` stays null (§13.1). Proxy-source
     /// facts are never merged into it: the proxy emits its own `net.connect`
     /// results.
-    pub fn record_mediated_connect(&mut self, record: &MediatedConnect) {
-        let errno = errno_of(record.ret);
+    ///
+    /// Only a decision the kernel accepted as the child's response is a
+    /// result; an undelivered one is [`AuditWriter::record_mediation_response_loss`].
+    pub fn record_mediated_connect(
+        &mut self,
+        facts: &ConnectFacts,
+        decision: Decision,
+        reason: &str,
+    ) {
+        let ret = decision.ret();
+        let errno = errno_of(ret);
         let mut fields = Map::new();
         fields.insert("syscall".to_owned(), Value::from("connect"));
         fields.insert(
             "pid".to_owned(),
-            record
+            facts
                 .tgid
                 .map_or(Value::Null, |pid| Value::from(i64::from(pid))),
         );
-        insert_birth(&mut fields, record.tgid.and(record.tgid_start));
-        fields.insert("tid".to_owned(), Value::from(i64::from(record.tid)));
+        insert_birth(&mut fields, facts.tgid.and(facts.tgid_start));
+        fields.insert("tid".to_owned(), Value::from(i64::from(facts.tid)));
         fields.insert(
             "path_basis".to_owned(),
             Value::from("argument_snapshot".to_owned()),
         );
-        let unix_path = record.peer.as_ref().and_then(|peer| match peer {
-            crate::platform::linux::unixpeer::Peer::UnixPath(bytes) => Some(snap_bytes(bytes)),
+        let unix_path = facts.peer.as_ref().and_then(|peer| match peer {
+            Peer::UnixPath(bytes) => Some(snap_bytes(bytes)),
             _ => None,
         });
-        if record
+        if facts
             .peer
             .as_ref()
-            .is_some_and(|peer| matches!(peer, crate::platform::linux::unixpeer::Peer::Abstract(_)))
+            .is_some_and(|peer| matches!(peer, Peer::Abstract(_)))
         {
             let mut abstracted = Map::new();
             abstracted.insert("kind".to_owned(), Value::from("unavailable"));
@@ -544,9 +531,7 @@ impl AuditWriter {
         } else {
             self.describe_path(&mut fields, "path", unix_path.as_ref(), None);
         }
-        if let Some(crate::platform::linux::unixpeer::Peer::Internet { port, address }) =
-            record.peer.as_ref()
-        {
+        if let Some(Peer::Internet { port, address }) = facts.peer.as_ref() {
             fields.insert(
                 "address".to_owned(),
                 Value::from(format!("{address}:{port}")),
@@ -560,24 +545,20 @@ impl AuditWriter {
         }
         fields.insert(
             "address_family".to_owned(),
-            record
+            facts
                 .family
                 .map_or(Value::Null, |family| Value::from(i64::from(family))),
         );
         fields.insert(
             "address_complete".to_owned(),
-            Value::from(record.address_complete),
+            Value::from(facts.address_complete),
         );
         fields.insert(
             "observation".to_owned(),
             Value::from("seccomp_user_notification"),
         );
-        fields.insert("mediator_reason".to_owned(), Value::from(record.reason));
-        self.emit_result(
-            ClosedOperation::NetConnect,
-            syscall_outcome(record.ret),
-            fields,
-        );
+        fields.insert("mediator_reason".to_owned(), Value::from(reason));
+        self.emit_result(ClosedOperation::NetConnect, syscall_outcome(ret), fields);
     }
 
     /// Mediation records that never reached this writer (the bounded queue
@@ -1390,34 +1371,36 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let trace = crate::trace::shared(crate::trace::FileSink::new(file.reopen().unwrap()));
         let mut writer = AuditWriter::new("att_test", Some(trace), b"/work/space", b"/tmp");
-        writer.record_mediated_connect(&MediatedConnect {
-            tid: 12,
-            tgid: Some(12),
-            tgid_start: Some(99),
-            family: Some(1),
-            address_complete: true,
-            peer: Some(crate::platform::linux::unixpeer::Peer::UnixPath(
-                b"/work/space/run/nscd".to_vec(),
-            )),
-            ret: -i64::from(libc::EACCES),
-            reason: "path_unresolved",
-        });
+        writer.record_mediated_connect(
+            &ConnectFacts {
+                tid: 12,
+                tgid: Some(12),
+                tgid_start: Some(99),
+                family: Some(1),
+                address_complete: true,
+                peer: Some(Peer::UnixPath(b"/work/space/run/nscd".to_vec())),
+            },
+            Decision::Denied(libc::EACCES),
+            "path_unresolved",
+        );
         assert_eq!(writer.count(CoverageClass::Net), 1);
         assert_eq!(writer.count(CoverageClass::FsDeny), 0);
 
-        writer.record_mediated_connect(&MediatedConnect {
-            tid: 13,
-            tgid: Some(12),
-            tgid_start: Some(99),
-            family: Some(2),
-            address_complete: true,
-            peer: Some(crate::platform::linux::unixpeer::Peer::Internet {
-                port: 80,
-                address: "169.254.169.254".parse().unwrap(),
-            }),
-            ret: -i64::from(libc::ENETUNREACH),
-            reason: "non_unix",
-        });
+        writer.record_mediated_connect(
+            &ConnectFacts {
+                tid: 13,
+                tgid: Some(12),
+                tgid_start: Some(99),
+                family: Some(2),
+                address_complete: true,
+                peer: Some(Peer::Internet {
+                    port: 80,
+                    address: "169.254.169.254".parse().unwrap(),
+                }),
+            },
+            Decision::Denied(libc::ENETUNREACH),
+            "non_unix",
+        );
         let events = trace_events(file.path());
         let unix_deny = events
             .iter()
@@ -1436,18 +1419,18 @@ mod tests {
         assert_eq!(blocked["fields"]["egress"], "blocked");
         assert_eq!(blocked["outcome"]["errno"], "ENETUNREACH");
 
-        writer.record_mediated_connect(&MediatedConnect {
-            tid: 14,
-            tgid: Some(12),
-            tgid_start: Some(99),
-            family: Some(1),
-            address_complete: true,
-            peer: Some(crate::platform::linux::unixpeer::Peer::Abstract(
-                b"ouro".to_vec(),
-            )),
-            ret: 0,
-            reason: "abstract",
-        });
+        writer.record_mediated_connect(
+            &ConnectFacts {
+                tid: 14,
+                tgid: Some(12),
+                tgid_start: Some(99),
+                family: Some(1),
+                address_complete: true,
+                peer: Some(Peer::Abstract(b"ouro".to_vec())),
+            },
+            Decision::Allowed,
+            "abstract",
+        );
         let events = trace_events(file.path());
         let abstracted = events
             .iter()
@@ -2121,26 +2104,30 @@ mod tests {
             )
         });
         writer.record_exit(10, None, 0);
-        writer.record_mediated_connect(&MediatedConnect {
-            tid: 12,
-            tgid: Some(12),
-            tgid_start: Some(4343),
-            family: Some(2),
-            address_complete: true,
-            peer: None,
-            ret: 0,
-            reason: "non_unix",
-        });
-        writer.record_mediated_connect(&MediatedConnect {
-            tid: 13,
-            tgid: None,
-            tgid_start: Some(1),
-            family: Some(2),
-            address_complete: true,
-            peer: None,
-            ret: 0,
-            reason: "non_unix",
-        });
+        writer.record_mediated_connect(
+            &ConnectFacts {
+                tid: 12,
+                tgid: Some(12),
+                tgid_start: Some(4343),
+                family: Some(2),
+                address_complete: true,
+                peer: None,
+            },
+            Decision::Allowed,
+            "non_unix",
+        );
+        writer.record_mediated_connect(
+            &ConnectFacts {
+                tid: 13,
+                tgid: None,
+                tgid_start: Some(1),
+                family: Some(2),
+                address_complete: true,
+                peer: None,
+            },
+            Decision::Allowed,
+            "non_unix",
+        );
         let events = trace_events(file.path());
         let births: Vec<&Value> = events
             .iter()

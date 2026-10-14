@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use ouro_fixture::harness;
 use ouro_jail::platform::linux::identity::pidfd_open;
 use ouro_jail::platform::linux::unixpeer::{
-    CollectingSink, LauncherFds, Verdict, filter_bytes, spawn, take_from_launcher,
+    CollectingSink, Decision, Delivery, LauncherFds, filter_bytes, spawn, take_from_launcher,
 };
 
 // ---------------------------------------------------------------- unit tests
@@ -430,8 +430,8 @@ impl Rig {
         recv(self.coord)
     }
 
-    fn verdicts(&self) -> Vec<Verdict> {
-        self.sink.drain().into_iter().map(|r| r.verdict).collect()
+    fn deliveries(&self) -> Vec<Delivery> {
+        self.sink.drain().into_iter().map(|r| r.delivery).collect()
     }
 
     /// The next `count` records. A worker records after the kernel took its
@@ -930,16 +930,17 @@ fn host_pathname_sockets_and_aliases_are_unreachable_but_attempt_sockets_work() 
     assert_eq!(rig.run('d', "-"), libc::EPERM.to_string(), "dgram create");
     assert_eq!(rig.run('r', "-"), libc::EPERM.to_string(), "raw create");
 
-    // The mediator recorded a verdict per mediated connect: the allowed ones
-    // Allowed, the denied ones Denied(EACCES) for pathname identity failures.
-    let verdicts = rig.verdicts();
+    // The mediator recorded a delivered decision per mediated connect: the
+    // allowed ones Allowed, the denied ones Denied(EACCES) for pathname
+    // identity failures.
+    let deliveries = rig.deliveries();
     assert!(
-        verdicts.contains(&Verdict::Allowed),
-        "expected at least one Allowed verdict: {verdicts:?}"
+        deliveries.contains(&Delivery::Delivered(Decision::Allowed)),
+        "expected at least one delivered Allowed: {deliveries:?}"
     );
     assert!(
-        verdicts.contains(&Verdict::Denied(libc::EACCES)),
-        "expected a Denied(EACCES) for a host pathname: {verdicts:?}"
+        deliveries.contains(&Delivery::Delivered(Decision::Denied(libc::EACCES))),
+        "expected a delivered Denied(EACCES) for a host pathname: {deliveries:?}"
     );
 }
 
@@ -1075,7 +1076,10 @@ fn a_connect_on_a_non_socket_is_refused_before_any_mediated_connect() {
     let records = rig.records(1);
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(records[0].reason, "fd_not_a_socket");
-    assert_eq!(records[0].verdict, Verdict::Denied(libc::ENOTSOCK));
+    assert_eq!(
+        records[0].delivery,
+        Delivery::Delivered(Decision::Denied(libc::ENOTSOCK))
+    );
 }
 
 /// Review fix 3, mutation M9 (domain check): a TCP connect is decided by the

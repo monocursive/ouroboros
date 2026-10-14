@@ -57,12 +57,14 @@ use crate::records::{ErrorCode, ErrorStage, Event, Gap, JailError, Remediation, 
 use crate::state::PROXY_SOCKET_NAME;
 use crate::trace::{Priority, SharedTrace};
 
-use super::audit::{AuditWriter, MediatedConnect};
+use super::audit::AuditWriter;
 use super::bridge;
 use super::identity;
 use super::probe::{self, ProbeStatus};
 use super::seccomp::{self, AgentVariant};
-use super::unixpeer::{self, LauncherFds, MediationRecord, MediationSink, MediatorHandle, Verdict};
+use super::unixpeer::{
+    self, Delivery, LauncherFds, MediationRecord, MediationSink, MediatorHandle,
+};
 
 /// Descriptor the proxy directory is handed to bubblewrap on.
 pub const PROXY_DIR_FD: RawFd = 17;
@@ -732,26 +734,16 @@ impl AgentNet {
             // §11.4: `--observe off` emits no audit source.
             return false;
         }
-        let ret = match record.verdict {
-            Verdict::Allowed => 0,
-            Verdict::Denied(errno) => -i64::from(errno),
-            Verdict::Undelivered => {
+        let decision = match record.delivery {
+            Delivery::Delivered(decision) => decision,
+            Delivery::Undelivered => {
                 let now =
                     u64::try_from(crate::platform::elapsed_since_start_ns()).unwrap_or(u64::MAX);
                 audit.record_mediation_response_loss(now);
                 return true;
             }
         };
-        audit.record_mediated_connect(&MediatedConnect {
-            tid: record.pid,
-            tgid: record.tgid,
-            tgid_start: record.tgid_start, // J4-O: the birth identity (slice O)
-            family: record.family,
-            address_complete: record.address_complete,
-            peer: record.peer.clone(),
-            ret,
-            reason: record.reason,
-        });
+        audit.record_mediated_connect(&record.facts, decision, record.reason);
         false
     }
 
@@ -1060,7 +1052,7 @@ pub fn boundary_up(
 /// number and the same start time, both read while the task was parked.
 #[must_use]
 pub fn is_bridge(record: &MediationRecord, pid: libc::pid_t, start_ticks: u64) -> bool {
-    record.tgid == Some(pid) && record.tgid_start == Some(start_ticks)
+    record.facts.tgid == Some(pid) && record.facts.tgid_start == Some(start_ticks)
 }
 
 /// The bridge runs under exactly the agent baseline and the mediation
@@ -1469,14 +1461,16 @@ mod tests {
     #[test]
     fn a_record_is_the_bridges_by_number_and_start_time_never_by_liveness() {
         let record = |tgid: Option<i32>, start: Option<u64>| MediationRecord {
-            pid: 7,
-            tgid,
-            tgid_start: start,
-            family: Some(1),
-            address_complete: true,
-            peer: None,
+            facts: unixpeer::ConnectFacts {
+                tid: 7,
+                tgid,
+                tgid_start: start,
+                family: Some(1),
+                address_complete: true,
+                peer: None,
+            },
             reason: "authorized_proxy",
-            verdict: Verdict::Allowed,
+            delivery: Delivery::Delivered(unixpeer::Decision::Allowed),
         };
         assert!(is_bridge(&record(Some(40), Some(9)), 40, 9));
         assert!(

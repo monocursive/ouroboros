@@ -8,11 +8,12 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use super::{
-    MediationRecord, MediationSink, NON_UNIX_NOTE, Peer, PeerAddr, Verdict, base_for, classify,
-    mediation_program, peer_of, relative_bytes,
+    ConnectFacts, Decision, Delivery, MediationRecord, MediationSink, NON_UNIX_NOTE, PeerAddr,
+    base_for, classify, mediation_program, peer_of, relative_bytes,
 };
-use crate::platform::linux::identity::pidfd_open;
+use crate::platform::linux::identity::{self, pidfd_open};
 use crate::platform::linux::sockdiag::{SockDiag, VfsId};
+use crate::platform::linux::sys::last_errno;
 
 // ---- constants not in this libc ------------------------------------------
 /// `SECCOMP_FILTER_FLAG_NEW_LISTENER`.
@@ -232,11 +233,10 @@ const POLL_TICK_MS: libc::c_int = 500;
 /// run, because closing the listener makes the child's `connect` fail `ENOSYS`
 /// (fail-closed, spike §5/Q5).
 pub struct MediatorHandle {
-    // Held so the listener stays open until every worker has joined; then its
-    // drop closes the listener, which is the fail-closed teardown.
-    _listener: OwnedFd,
     stop_w: OwnedFd,
-    workers: std::sync::Arc<Workers>,
+    // The workers own the listener: it closes when the last of them and
+    // this handle let go, which is after every worker has joined.
+    workers: Arc<Workers>,
     joins: Vec<JoinHandle<()>>,
 }
 
@@ -285,10 +285,12 @@ impl Drop for MediatorHandle {
     }
 }
 
-/// State shared by the mediation workers.
+/// State shared by the mediation workers. It owns the listener and the stop
+/// pipe's read end, so neither number can be closed, or reused, under a
+/// worker still polling it.
 struct Workers {
-    listener: RawFd,
-    stop_r: RawFd,
+    listener: OwnedFd,
+    stop_r: OwnedFd,
     // One `NETLINK_SOCK_DIAG` socket, serialized: the netns lookup is fast and
     // the slow part (connect) is outside the lock, so this does not serialize
     // whole requests.
@@ -304,8 +306,10 @@ struct Workers {
     /// a live test hung joining `ouro-unixpeer-1`). Under this lock a worker
     /// receives only after a zero-timeout `poll` shows a notification still
     /// pending, and only lock holders receive, so RECV finds it (or `ENOENT`
-    /// if its task died meanwhile) and never waits. The slow part of a
-    /// mediation runs outside the lock.
+    /// if its task died meanwhile: the kernel counts every queued request,
+    /// so the receive does not wait for a new one) and never waits. This
+    /// lock, not a descriptor flag, is the guarantee that RECV never blocks
+    /// a worker. The slow part of a mediation runs outside the lock.
     recv: std::sync::Mutex<()>,
     // Security 2026-09-25 (audit F2): the authorized proxy socket is
     // connectable through the mediation only by the bridge itself. The
@@ -315,75 +319,59 @@ struct Workers {
     // bridge's identity; before that every connect to the authorized node
     // is refused (fail closed; the target is not released yet).
     authorized_connector: std::sync::Mutex<Option<(libc::pid_t, u64)>>,
-    // Kept alive so the stop pipe read end outlives every worker.
-    _stop_r_owned: OwnedFd,
 }
 
 /// Start the mediation pool (§3.4 step 3).
 ///
+/// The listener stays as the launcher made it: RECV ignores `O_NONBLOCK`, so
+/// what keeps a worker from blocking in it is [`Workers::recv`].
+///
 /// # Errors
 ///
-/// The errno of `pipe2`.
+/// The errno of `pipe2`, or of a worker thread that could not be started
+/// (the workers already started are stopped and joined first).
 pub fn spawn(authority: PeerAuthority, sink: Arc<dyn MediationSink>) -> io::Result<MediatorHandle> {
     let PeerAuthority {
         listener,
         sockdiag,
         authorized,
     } = authority;
-    let mut pipe = [0i32; 2];
-    // SAFETY: `pipe` is a two-element array; pipe2 writes two fds or returns -1.
-    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: both fds were just created by pipe2 and are owned here.
-    let (stop_r, stop_w) =
-        unsafe { (OwnedFd::from_raw_fd(pipe[0]), OwnedFd::from_raw_fd(pipe[1])) };
-    let listener_raw = listener.as_raw_fd();
-    let stop_r_raw = stop_r.as_raw_fd();
-    // Non-blocking: after a poll wakeup the RECV must never block a worker, or a
-    // stop request would not be seen and the fail-closed teardown would hang.
-    // SAFETY: fcntl on a live owned fd with scalar arguments.
-    unsafe {
-        let flags = libc::fcntl(listener_raw, libc::F_GETFL);
-        libc::fcntl(listener_raw, libc::F_SETFL, flags | libc::O_NONBLOCK);
-    }
-    let workers = Arc::new(Workers {
-        listener: listener_raw,
-        stop_r: stop_r_raw,
-        sockdiag: std::sync::Mutex::new(sockdiag),
-        sink,
-        authorized,
-        authorized_connector: std::sync::Mutex::new(None),
-        recv: std::sync::Mutex::new(()),
-        _stop_r_owned: stop_r,
-    });
-    let mut joins = Vec::with_capacity(WORKERS);
-    for i in 0..WORKERS {
-        let w = Arc::clone(&workers);
-        joins.push(
-            std::thread::Builder::new()
-                .name(format!("ouro-unixpeer-{i}"))
-                .spawn(move || worker_loop(&w))?,
-        );
-    }
-    Ok(MediatorHandle {
-        _listener: listener,
+    let (stop_r, stop_w) = crate::platform::linux::exec::pipe()?;
+    let mut handle = MediatorHandle {
         stop_w,
-        workers,
-        joins,
-    })
+        workers: Arc::new(Workers {
+            listener,
+            stop_r,
+            sockdiag: std::sync::Mutex::new(sockdiag),
+            sink,
+            authorized,
+            authorized_connector: std::sync::Mutex::new(None),
+            recv: std::sync::Mutex::new(()),
+        }),
+        joins: Vec::with_capacity(WORKERS),
+    };
+    for i in 0..WORKERS {
+        let w = Arc::clone(&handle.workers);
+        // On failure `handle` drops: it stops and joins the workers already
+        // running before the listener can close.
+        let join = std::thread::Builder::new()
+            .name(format!("ouro-unixpeer-{i}"))
+            .spawn(move || worker_loop(&w))?;
+        handle.joins.push(join);
+    }
+    Ok(handle)
 }
 
 fn worker_loop(w: &Workers) {
     loop {
         let mut pfds = [
             libc::pollfd {
-                fd: w.listener,
+                fd: w.listener.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
             libc::pollfd {
-                fd: w.stop_r,
+                fd: w.stop_r.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -414,7 +402,7 @@ fn worker_loop(w: &Workers) {
 /// Service exactly one notification. Returns `Err` only when the listener is
 /// gone (the loop then exits and the child's connects fail `ENOSYS`).
 fn service_one(w: &Workers) -> io::Result<()> {
-    let listener = w.listener;
+    let listener = w.listener.as_fd();
     let sink = w.sink.as_ref();
     // Receive only what is still pending (see `Workers::recv`)
     let received = {
@@ -433,18 +421,14 @@ fn service_one(w: &Workers) -> io::Result<()> {
     };
     let notif = match received {
         Ok(n) => n,
-        // A stale notification (the task went away) or a spurious poll wakeup on
-        // the non-blocking listener is not fatal: skip and return to poll, where
-        // the stop request is seen. Never let a RECV block the thread.
-        // EAGAIN == EWOULDBLOCK on Linux, so one arm covers the non-blocking
-        // "nothing pending" case.
-        Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::EAGAIN)) => {
-            return Ok(());
-        }
+        // The notification `pending` saw was withdrawn because its task died
+        // before this receive: not fatal; return to poll, where a stop
+        // request is seen.
+        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
         Err(e) => return Err(e),
     };
     let id = notif.id;
-    let pid = notif.pid as libc::pid_t;
+    let tid = notif.pid as libc::pid_t;
     let sockfd = notif.data.args[0] as RawFd;
     let uaddr = notif.data.args[1];
     let ualen = notif.data.args[2] as usize;
@@ -462,24 +446,23 @@ fn service_one(w: &Workers) -> io::Result<()> {
     }
     // Read while the task is parked in its notification, so
     // the thread group named is the one that asked (validated again below).
-    let tgid = task_tgid(pid);
-    let mut facts = Facts {
-        pid,
+    let tgid = task_tgid(tid);
+    let mut facts = ConnectFacts {
+        tid,
         tgid,
-        tgid_start: tgid
-            .and_then(|tgid| crate::platform::linux::identity::start_time_ticks(tgid).ok()),
+        tgid_start: tgid.and_then(|tgid| identity::start_time_ticks(tgid).ok()),
         family: None,
         address_complete: false,
         peer: None,
     };
-    let Ok(child_pidfd) = open_notifying_thread(pid, tgid) else {
+    let Ok(child_pidfd) = open_notifying_thread(tid, tgid) else {
         respond_and_record(
             listener,
             id,
             sink,
-            &facts,
+            facts,
             "task_gone",
-            Verdict::Denied(libc::ESRCH),
+            Decision::Denied(libc::ESRCH),
         );
         return Ok(());
     };
@@ -490,14 +473,14 @@ fn service_one(w: &Workers) -> io::Result<()> {
                 listener,
                 id,
                 sink,
-                &facts,
+                facts,
                 "fd_unavailable",
-                Verdict::Denied(libc::EBADF),
+                Decision::Denied(libc::EBADF),
             );
             return Ok(());
         }
     };
-    let sockaddr = read_child_mem(pid, uaddr, ualen.min(256)).unwrap_or_default();
+    let sockaddr = read_child_mem(tid, uaddr, ualen.min(256)).unwrap_or_default();
     // Re-validate again after the reads, before acting.
     if !notif_id_valid(listener, id) {
         return Ok(());
@@ -517,17 +500,17 @@ fn service_one(w: &Workers) -> io::Result<()> {
     if !notif_id_valid(listener, id) {
         return Ok(());
     }
-    let (verdict, reason) = decide(w, &facts, &dup, &sockaddr, ualen);
-    if verdict.is_ok()
+    let (result, reason) = decide(w, &facts, &dup, &sockaddr, ualen);
+    if result.is_ok()
         && let Some(origin) = origin
     {
         origin.connected(dup.as_fd());
     }
-    let verdict = match verdict {
-        Ok(()) => Verdict::Allowed,
-        Err(errno) => Verdict::Denied(errno),
+    let decision = match result {
+        Ok(()) => Decision::Allowed,
+        Err(errno) => Decision::Denied(errno),
     };
-    respond_and_record(listener, id, sink, &facts, reason, verdict);
+    respond_and_record(listener, id, sink, facts, reason, decision);
     Ok(())
 }
 
@@ -562,12 +545,12 @@ fn route(domain: io::Result<libc::c_int>) -> Route {
 /// `Ok(())` means "connected"; `Err(errno)` means "denied/failed with errno".
 fn decide(
     w: &Workers,
-    facts: &Facts,
+    facts: &ConnectFacts,
     dup: &OwnedFd,
     sockaddr: &[u8],
     ualen: usize,
 ) -> (Result<(), i32>, &'static str) {
-    match route(getsockopt_domain(dup.as_raw_fd())) {
+    match route(getsockopt_domain(dup.as_fd())) {
         Route::Unix => {}
         Route::NonUnix => {
             // Non-AF_UNIX: the mediator performs the connect on the
@@ -575,7 +558,7 @@ fn decide(
             // escape it; it does run in the mediator's LSM context (see
             // NON_UNIX_NOTE).
             let _ = NON_UNIX_NOTE;
-            let result = bounded_connect(dup.as_raw_fd(), sockaddr, ualen, w.stop_r);
+            let result = bounded_connect(dup.as_fd(), sockaddr, ualen, w.stop_r.as_fd());
             return (result, "non_unix");
         }
         Route::Refuse(errno, reason) => return (Err(errno), reason),
@@ -592,7 +575,7 @@ fn decide(
         PeerAddr::Abstract(_) | PeerAddr::Unnamed => {
             // Abstract names are netns-scoped; connect the duplicate directly.
             (
-                bounded_connect(dup.as_raw_fd(), sockaddr, ualen, w.stop_r),
+                bounded_connect(dup.as_fd(), sockaddr, ualen, w.stop_r.as_fd()),
                 "abstract",
             )
         }
@@ -603,11 +586,11 @@ fn decide(
 
 fn mediate_pathname(
     w: &Workers,
-    facts: &Facts,
+    facts: &ConnectFacts,
     dup: &OwnedFd,
     path: &[u8],
 ) -> (Result<(), i32>, &'static str) {
-    let pid = facts.pid;
+    let pid = facts.tid;
     let root = base_for(pid, path);
     let Ok(root_fd) = open_o_path(&root) else {
         return (Err(libc::EACCES), "base_unopenable");
@@ -655,7 +638,7 @@ fn mediate_pathname(
             return (Err(libc::EACCES), "proxy_bridge_only");
         }
         drop(connector);
-        return match connect_pinned(dup, &node, w.stop_r) {
+        return match connect_pinned(dup, &node, w.stop_r.as_fd()) {
             Ok(()) => (Ok(()), "authorized_proxy"),
             Err(errno) => (Err(errno), "proxy_connect_failed"),
         };
@@ -670,14 +653,14 @@ fn mediate_pathname(
         let Ok(mut sd) = w.sockdiag.lock() else {
             return (Err(libc::EACCES), "sock_diag_poisoned");
         };
-        sd.has_listener_for(want, w.stop_r)
+        sd.has_listener_for(want, w.stop_r.as_raw_fd())
     };
     match listener_present {
         Ok(true) => {}
         Ok(false) => return (Err(libc::EACCES), "no_attempt_listener"),
         Err(_) => return (Err(libc::EACCES), "sock_diag_failed"),
     }
-    match connect_pinned(dup, &node, w.stop_r) {
+    match connect_pinned(dup, &node, w.stop_r.as_fd()) {
         Ok(()) => (Ok(()), "attempt_listener"),
         Err(e) => (Err(e), "connect_failed"),
     }
@@ -685,7 +668,7 @@ fn mediate_pathname(
 
 /// Connects the duplicate through the pinned node, so the kernel reaches
 /// exactly the checked inode and not a path the child could swap.
-fn connect_pinned(dup: &OwnedFd, node: &OwnedFd, stop_r: RawFd) -> Result<(), i32> {
+fn connect_pinned(dup: &OwnedFd, node: &OwnedFd, stop_r: BorrowedFd<'_>) -> Result<(), i32> {
     let procpath = format!("/proc/self/fd/{}", node.as_raw_fd());
     let (addr, addr_len) = sockaddr_un(procpath.as_bytes());
     // SAFETY: `addr` is a live sockaddr_un; view its exact bytes as a slice for
@@ -693,7 +676,7 @@ fn connect_pinned(dup: &OwnedFd, node: &OwnedFd, stop_r: RawFd) -> Result<(), i3
     let addr_bytes = unsafe {
         std::slice::from_raw_parts(std::ptr::from_ref(&addr).cast::<u8>(), addr_len as usize)
     };
-    bounded_connect(dup.as_raw_fd(), addr_bytes, addr_len as usize, stop_r)
+    bounded_connect(dup.as_fd(), addr_bytes, addr_len as usize, stop_r)
 }
 
 /// Perform a connect on `fd` without ever blocking a worker.
@@ -705,7 +688,13 @@ fn connect_pinned(dup: &OwnedFd, node: &OwnedFd, stop_r: RawFd) -> Result<(), i3
 /// listener backlog returns `EAGAIN` immediately and becomes the child's
 /// result — either way one slow or hostile peer cannot wedge the mediator
 /// (review fix 2). A stop mid-connect fails the request closed.
-fn bounded_connect(fd: RawFd, sockaddr: &[u8], ualen: usize, stop_r: RawFd) -> Result<(), i32> {
+fn bounded_connect(
+    fd: BorrowedFd<'_>,
+    sockaddr: &[u8],
+    ualen: usize,
+    stop_r: BorrowedFd<'_>,
+) -> Result<(), i32> {
+    let (fd, stop_r) = (fd.as_raw_fd(), stop_r.as_raw_fd());
     let len = u32::try_from(ualen.min(sockaddr.len())).unwrap_or(0);
     // SAFETY: fcntl with scalar arguments on a live fd.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -776,73 +765,44 @@ fn so_error(fd: RawFd) -> i32 {
 
 // ---- syscall helpers ------------------------------------------------------
 
-// The facts a record carries beside its verdict
-struct Facts {
-    pid: libc::pid_t,
-    tgid: Option<libc::pid_t>,
-    tgid_start: Option<u64>,
-    family: Option<u16>,
-    address_complete: bool,
-    peer: Option<Peer>,
-}
-
 /// `Tgid:` of a task in `/proc/<tid>/status`, or `None`.
 fn task_tgid(tid: libc::pid_t) -> Option<libc::pid_t> {
-    let text = std::fs::read_to_string(format!("/proc/{tid}/status")).ok()?;
-    text.lines()
-        .find_map(|line| line.strip_prefix("Tgid:"))
-        .and_then(|value| value.trim().parse().ok())
+    identity::status_field(tid, "Tgid").ok()?.parse().ok()
 }
 
-fn record(sink: &dyn MediationSink, facts: &Facts, reason: &'static str, verdict: Verdict) {
+/// Sends `decision` as the child's `connect` return and records it with what
+/// became of it: only a response the listener accepted is a known return.
+fn respond_and_record(
+    listener: BorrowedFd<'_>,
+    id: u64,
+    sink: &dyn MediationSink,
+    facts: ConnectFacts,
+    reason: &'static str,
+    decision: Decision,
+) {
+    let error = match decision {
+        Decision::Allowed => 0,
+        Decision::Denied(errno) => -errno,
+    };
+    let delivery = match notif_send(listener, id, 0, error) {
+        Ok(()) => Delivery::Delivered(decision),
+        Err(_) => Delivery::Undelivered,
+    };
     sink.record(MediationRecord {
-        pid: facts.pid,
-        tgid: facts.tgid,
-        tgid_start: facts.tgid_start,
-        family: facts.family,
-        address_complete: facts.address_complete,
-        peer: facts.peer.clone(),
+        facts,
         reason,
-        verdict,
+        delivery,
     });
 }
 
-fn respond_and_record(
-    listener: RawFd,
-    id: u64,
-    sink: &dyn MediationSink,
-    facts: &Facts,
-    reason: &'static str,
-    verdict: Verdict,
-) {
-    let error = match verdict {
-        Verdict::Allowed => 0,
-        Verdict::Denied(errno) => -errno,
-        Verdict::Undelivered => unreachable!("a response requires a decision"),
-    };
-    let delivered = notif_send(listener, id, 0, error).is_ok();
-    record(
-        sink,
-        facts,
-        reason,
-        if delivered {
-            verdict
-        } else {
-            Verdict::Undelivered
-        },
-    );
-}
-
-fn last_errno() -> i32 {
-    io::Error::last_os_error().raw_os_error().unwrap_or(0)
-}
-
-fn notif_recv(listener: RawFd) -> io::Result<libc::seccomp_notif> {
+fn notif_recv(listener: BorrowedFd<'_>) -> io::Result<libc::seccomp_notif> {
     // SAFETY: `n` is a live, zeroed seccomp_notif the ioctl fills in.
     let mut n: libc::seccomp_notif = unsafe { std::mem::zeroed() };
+    // SAFETY: `listener` is a live descriptor and `n` a live seccomp_notif
+    // of the size SECCOMP_IOCTL_NOTIF_RECV writes.
     let rc = unsafe {
         libc::ioctl(
-            listener,
+            listener.as_raw_fd(),
             libc::SECCOMP_IOCTL_NOTIF_RECV,
             std::ptr::from_mut(&mut n),
         )
@@ -857,9 +817,9 @@ fn notif_recv(listener: RawFd) -> io::Result<libc::seccomp_notif> {
 /// Whether a notification is waiting to be received, by a `poll` that does
 /// not wait. A closed or broken listener counts as pending, so the caller's
 /// RECV reports the failure instead of this hiding it.
-fn pending(listener: RawFd) -> bool {
+fn pending(listener: BorrowedFd<'_>) -> bool {
     let mut pfd = libc::pollfd {
-        fd: listener,
+        fd: listener.as_raw_fd(),
         events: libc::POLLIN,
         revents: 0,
     };
@@ -892,19 +852,19 @@ fn open_notifying_thread(tid: libc::pid_t, tgid: Option<libc::pid_t>) -> io::Res
     pidfd_open(tgid)
 }
 
-fn notif_id_valid(listener: RawFd, id: u64) -> bool {
+fn notif_id_valid(listener: BorrowedFd<'_>, id: u64) -> bool {
     let mut id = id;
     // SAFETY: the ioctl reads one u64 through the pointer; `id` is live.
     unsafe {
         libc::ioctl(
-            listener,
+            listener.as_raw_fd(),
             libc::SECCOMP_IOCTL_NOTIF_ID_VALID,
             std::ptr::from_mut(&mut id),
         ) == 0
     }
 }
 
-fn notif_send(listener: RawFd, id: u64, val: i64, error: i32) -> io::Result<()> {
+fn notif_send(listener: BorrowedFd<'_>, id: u64, val: i64, error: i32) -> io::Result<()> {
     let mut resp = libc::seccomp_notif_resp {
         id,
         val,
@@ -914,7 +874,7 @@ fn notif_send(listener: RawFd, id: u64, val: i64, error: i32) -> io::Result<()> 
     // SAFETY: `resp` is a live seccomp_notif_resp the ioctl reads.
     let rc = unsafe {
         libc::ioctl(
-            listener,
+            listener.as_raw_fd(),
             libc::SECCOMP_IOCTL_NOTIF_SEND,
             std::ptr::from_mut(&mut resp),
         )
@@ -945,13 +905,13 @@ fn read_child_mem(pid: libc::pid_t, addr: u64, len: usize) -> io::Result<Vec<u8>
     Ok(buf)
 }
 
-fn getsockopt_domain(fd: RawFd) -> io::Result<libc::c_int> {
+fn getsockopt_domain(fd: BorrowedFd<'_>) -> io::Result<libc::c_int> {
     let mut val: libc::c_int = 0;
     let mut len = u32::try_from(std::mem::size_of::<libc::c_int>()).unwrap();
     // SAFETY: `val`/`len` are live and correctly sized for SO_DOMAIN.
     let rc = unsafe {
         libc::getsockopt(
-            fd,
+            fd.as_raw_fd(),
             libc::SOL_SOCKET,
             libc::SO_DOMAIN,
             std::ptr::from_mut(&mut val).cast(),
@@ -1118,18 +1078,28 @@ mod tests {
     #[test]
     fn a_failed_notification_send_never_records_a_delivered_return() {
         let sink = CollectingSink::default();
-        let facts = Facts {
-            pid: 1,
+        let facts = ConnectFacts {
+            tid: 1,
             tgid: Some(1),
             tgid_start: None,
             family: Some(libc::AF_UNIX as u16),
             address_complete: true,
             peer: None,
         };
-        respond_and_record(-1, 1, &sink, &facts, "attempt_listener", Verdict::Allowed);
+        // Not a notification listener: the send fails (ENOTTY).
+        let not_a_listener = std::fs::File::open("/dev/null").unwrap();
+        respond_and_record(
+            not_a_listener.as_fd(),
+            1,
+            &sink,
+            facts.clone(),
+            "attempt_listener",
+            Decision::Allowed,
+        );
         let records = sink.drain();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].verdict, Verdict::Undelivered);
+        assert_eq!(records[0].delivery, Delivery::Undelivered);
+        assert_eq!(records[0].facts, facts);
     }
 
     /// Only a domain the kernel reported may reach the mediator's own
