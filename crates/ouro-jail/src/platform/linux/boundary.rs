@@ -1009,6 +1009,9 @@ impl Planned {
             )
         })?;
 
+        // A guard: `prepare_mounts` refused before pinning anything a plan
+        // whose binds no receipt can record, and nothing since adds a bind.
+        // A bind added here later is still refused before the spawn.
         refuse_unrecordable_mounts(
             &bplan,
             0,

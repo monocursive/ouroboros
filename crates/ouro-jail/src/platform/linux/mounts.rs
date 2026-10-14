@@ -852,7 +852,13 @@ pub(super) fn prepare_mounts(
         segments + holders,
         segments + holders + plan.placeholders.len(),
         hidden,
-    )?;
+    )
+    .map_err(|mut refusal| {
+        refusal
+            .message
+            .push_str("; refused before any protected segment was pinned or any placeholder made");
+        refusal
+    })?;
     // A pin per segment; a placeholder holds its own handle and its holder.
     reserve_mount_descriptors(segments + 2 * holders, segments + holders)?;
 
