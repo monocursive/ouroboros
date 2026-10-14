@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 
 use super::clock::Deadline;
 use super::exec::run_captured;
-use super::fs::{RootSpec, exists_resolved, resolve_runtime_root};
+use super::fs::{RootSpec, exists_resolved, path_within, resolve_runtime_root};
 use super::sys::{PathError, cstring_from_os, errno_name, last_errno};
 use crate::state::anchored::{Dir, Kind, Name, fstat};
 
@@ -733,25 +733,20 @@ impl fmt::Display for PlanError {
     }
 }
 
-/// Audit 2026-09-25-2, S3: whether a `deny_read` mask destination would
-/// cover the boundary's own plumbing. The jail binary
-/// ([`JAIL_INSIDE_PATH`]), the proxy directory ([`PROXY_INSIDE_PATH`]) and
-/// staged vendor state ([`VENDOR_STATE_INSIDE_PATH`]) all live under
-/// `/run/ouro` in the sandbox view, so a tmpfs at `/`, `/run` or `/run/ouro`
-/// shadows them all and one beneath `/run/ouro` shadows part of it — the
-/// launcher's own binary or the socket its bridge connects through. Such a
-/// mask never narrows the child's authority; it attacks the next run's
-/// plumbing, so both the policy layer and this renderer refuse it.
+/// Whether a `deny_read` mask destination would cover the boundary's own
+/// plumbing. The jail binary ([`JAIL_INSIDE_PATH`]), the proxy directory
+/// ([`PROXY_INSIDE_PATH`]) and staged vendor state
+/// ([`VENDOR_STATE_INSIDE_PATH`]) all live under `/run/ouro` in the sandbox
+/// view, so a tmpfs at `/`, `/run` or `/run/ouro` shadows them all and one
+/// beneath `/run/ouro` shadows part of it — the launcher's own binary or the
+/// socket its bridge connects through. Such a mask never narrows the child's
+/// authority; it attacks the next run's plumbing, so both the policy layer
+/// and this renderer refuse it.
 fn shadows_plumbing(path: &Path) -> bool {
+    const PLUMBING: &[u8] = b"/run/ouro";
     let bytes = path.as_os_str().as_bytes();
-    bytes == b"/" || bytes == b"/run" || under_run_ouro(bytes)
-}
-
-/// Whether `bytes` is `/run/ouro` or a path beneath it, respecting component
-/// boundaries (`/run/ouroboros` is not).
-fn under_run_ouro(bytes: &[u8]) -> bool {
-    const PREFIX: &[u8] = b"/run/ouro";
-    bytes.starts_with(PREFIX) && (bytes.len() == PREFIX.len() || bytes[PREFIX.len()] == b'/')
+    let root = !bytes.is_empty() && bytes.iter().all(|byte| *byte == b'/');
+    root || path_within(PLUMBING, bytes) || path_within(bytes, PLUMBING)
 }
 
 impl std::error::Error for PlanError {}
@@ -1536,8 +1531,11 @@ mod tests {
     fn a_mask_over_the_boundary_plumbing_refuses_the_plan() {
         for path in [
             "/",
+            "//",
             "/run",
+            "/run/",
             "/run/ouro",
+            "/run/ouro/",
             "/run/ouro/jail",
             "/run/ouro/proxy/x.sock",
         ] {

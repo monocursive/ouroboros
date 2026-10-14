@@ -14,6 +14,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+use super::fs::path_within;
+
 /// The unified cgroup v2 mount point.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
@@ -80,19 +82,14 @@ pub fn process_cgroup(pid: libc::pid_t) -> io::Result<String> {
     })
 }
 
-/// Whether the cgroup path `member` is `boundary` or lies beneath it.
-///
-/// Component-wise, like [`common_ancestor_ok`]: `/a/leaf.x` is not inside
-/// `/a/leaf`. A process in a cgroup the child created inside the boundary is
-/// still inside it: population, `cgroup.kill` and the limits are recursive.
+/// Whether the cgroup path `member` is `boundary` or lies beneath it
+/// ([`path_within`]): `/a/leaf.x` is not inside `/a/leaf`, and an empty
+/// boundary or the root contains nothing. A process in a cgroup the child
+/// created inside the boundary is still inside it: population, `cgroup.kill`
+/// and the limits are recursive.
 #[must_use]
 pub fn within(member: &str, boundary: &str) -> bool {
-    let boundary = boundary.trim_end_matches('/');
-    !boundary.is_empty()
-        && (member == boundary
-            || member
-                .strip_prefix(boundary)
-                .is_some_and(|rest| rest.starts_with('/')))
+    path_within(member.as_bytes(), boundary.as_bytes())
 }
 
 /// Whether a process in `own` may move a process into `leaf`.
@@ -100,12 +97,11 @@ pub fn within(member: &str, boundary: &str) -> bool {
 /// cgroup v2 requires write access to `cgroup.procs` of the common ancestor of
 /// the source and destination cgroups. The only common ancestor a delegated
 /// user can write is one inside the delegated subtree, so the rule reduces to:
-/// the writer's own cgroup must lie inside the delegated root.
+/// the writer's own cgroup must lie inside the delegated root — by the same
+/// predicate as [`within`], so an empty or root delegation admits nothing.
 #[must_use]
 pub fn common_ancestor_ok(own_cgroup: &str, delegated_relative: &str) -> bool {
-    let own = own_cgroup.trim_end_matches('/');
-    let delegated = delegated_relative.trim_end_matches('/');
-    own == delegated || own.starts_with(&format!("{delegated}/"))
+    path_within(own_cgroup.as_bytes(), delegated_relative.as_bytes())
 }
 
 /// Whether a cgroup has any process in it, recursively.
@@ -1056,6 +1052,12 @@ mod tests {
             delegated
         ));
         assert!(!common_ancestor_ok("/", delegated));
+        // The two predicates agree on a boundary that names nothing: an
+        // empty or root delegation contains no cgroup.
+        for empty in ["", "/"] {
+            assert!(!common_ancestor_ok(delegated, empty), "{empty:?}");
+            assert!(!within(delegated, empty), "{empty:?}");
+        }
         // A prefix that is not a path component must not count.
         assert!(!common_ancestor_ok(
             "/user.slice/user-1001.slice/user@1001.service.evil",

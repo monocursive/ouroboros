@@ -20,6 +20,26 @@ use crate::state::anchored::{Dir, Kind, Name, Stat, fstat};
 /// The two path segments the `tool` profile protects (north-star §4.4).
 pub const PROTECTED_LITERALS: [&str; 2] = [".git", ".ouroboros"];
 
+/// Whether `member` is `boundary` or lies beneath it, component by
+/// component: `/run/ouroboros` is not beneath `/run/ouro`. Trailing slashes
+/// on either side do not matter. An empty boundary, and `/` (which trims to
+/// one), contain nothing: a containment check that admits every path is
+/// never what a caller asking it means.
+#[must_use]
+pub fn path_within(member: &[u8], boundary: &[u8]) -> bool {
+    fn trimmed(path: &[u8]) -> &[u8] {
+        let end = path
+            .iter()
+            .rposition(|byte| *byte != b'/')
+            .map_or(0, |at| at + 1);
+        &path[..end]
+    }
+    let (member, boundary) = (trimmed(member), trimmed(boundary));
+    !boundary.is_empty()
+        && member.starts_with(boundary)
+        && (member.len() == boundary.len() || member[boundary.len()] == b'/')
+}
+
 /// Bounds on one walk. jail-v1 §9.1 fixes the initial values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScanLimits {
@@ -1120,6 +1140,35 @@ mod tests {
                 assert!(!message.contains("ESTALE"), "{message}");
             }
             other => panic!("expected a changed-tree refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn containment_is_by_component_and_never_by_an_empty_boundary() {
+        for (member, boundary) in [
+            ("/run/ouro", "/run/ouro"),
+            ("/run/ouro/jail", "/run/ouro"),
+            ("/run/ouro/", "/run/ouro"),
+            ("/run/ouro", "/run/ouro/"),
+            ("/a/leaf/child", "/a/leaf"),
+        ] {
+            assert!(
+                path_within(member.as_bytes(), boundary.as_bytes()),
+                "{member} in {boundary}"
+            );
+        }
+        for (member, boundary) in [
+            ("/run/ouroboros", "/run/ouro"),
+            ("/run", "/run/ouro"),
+            ("/a/leaf.x", "/a/leaf"),
+            ("/anything", ""),
+            ("/anything", "/"),
+            ("", ""),
+        ] {
+            assert!(
+                !path_within(member.as_bytes(), boundary.as_bytes()),
+                "{member} not in {boundary:?}"
+            );
         }
     }
 
