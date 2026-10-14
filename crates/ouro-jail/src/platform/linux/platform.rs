@@ -72,10 +72,12 @@ const TRACE_DATA_FD: RawFd = 9;
 pub(crate) const SECCOMP_FD: RawFd = 10;
 /// Descriptor bubblewrap writes its JSON status to.
 pub(crate) const STATUS_FD: RawFd = 11;
-/// Descriptor the launcher blocks reading.
-const RELEASE_FD: RawFd = 12;
-/// Descriptor the launcher writes a failed exec's errno to.
-const ERROR_FD: RawFd = 13;
+/// Descriptor the launcher blocks reading (`__launch --release-fd`), and the
+/// one a gate checks it is blocked on.
+pub(super) const RELEASE_FD: RawFd = 12;
+/// Descriptor the launcher writes a failed exec's errno to
+/// (`__launch --error-fd`).
+pub(super) const ERROR_FD: RawFd = 13;
 /// Descriptor a long argument list is handed over.
 pub(crate) const ARGS_FD: RawFd = 14;
 /// Descriptor the vendor-state directory is handed to bubblewrap on
