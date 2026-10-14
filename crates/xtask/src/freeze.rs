@@ -330,7 +330,11 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
             "\n# The observer's closed set, from {EVIDENCE}/{closed_set_table}"
         );
         let _ = writeln!(w, "[{prefix}closed_set]");
-        let _ = writeln!(w, "name = \"linux-closed-v1\"");
+        let _ = writeln!(
+            w,
+            "name = {}",
+            quote(ouro_jail::records::CLOSED_SET_LINUX_V1)
+        );
         let _ = writeln!(w, "narrowing_filter = {}", quote(&narrowing));
         let _ = writeln!(
             w,

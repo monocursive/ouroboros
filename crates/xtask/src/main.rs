@@ -15,6 +15,7 @@ mod i02;
 mod manifest;
 mod perf;
 mod stamp;
+mod util;
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Repository tasks for the ouro workspace")]

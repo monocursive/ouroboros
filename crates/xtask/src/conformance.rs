@@ -16,9 +16,12 @@ use std::process::Command;
 
 use serde_json::Value;
 
+use ouro_jail::records::{OutcomeKind, Phase};
+
 use crate::gates;
 use crate::manifest::{self, Manifest};
 use crate::stamp;
+use crate::util::wire;
 
 /// The remote parent of every run directory, relative to the account's home.
 pub const REMOTE_RUNS: &str = "ouro-ci/runs";
@@ -653,34 +656,47 @@ pub fn smoke_problems(smoke: &Smoke) -> Vec<String> {
             p.push(format!("the smoke {profile} run left no receipt"));
             continue;
         };
-        let Ok(r) = serde_json::from_str::<Value>(text) else {
-            p.push(format!("the smoke {profile} receipt is not JSON"));
-            continue;
+        let r = match crate::perf::read_receipt(text.as_bytes()) {
+            Ok(r) => r,
+            Err(e) => {
+                p.push(format!("the smoke {profile} receipt is unreadable: {e}"));
+                continue;
+            }
         };
-        if r["phase"] != "settled" {
+        if r.phase != Phase::Settled {
             p.push(format!(
                 "the smoke {profile} receipt is {}, not settled",
-                r["phase"]
+                wire(r.phase)
             ));
         }
-        if r["outcome"]["kind"] != "exited" || r["outcome"]["code"] != 0 {
+        if r.outcome.kind != OutcomeKind::Exited || r.outcome.code != Some(0) {
             p.push(format!(
-                "the smoke {profile} target did not exit 0: {}",
-                r["outcome"]
+                "the smoke {profile} target did not exit 0: {} (code {:?})",
+                wire(r.outcome.kind),
+                r.outcome.code
             ));
         }
-        let details = &r["lifetime"]["native"]["details"];
-        let scope = &details["supervisor_scope"];
-        if scope["state"] != "entered" {
+        // The native details are an open map in the record; the Linux
+        // boundary writes these entries.
+        let details = r.lifetime.native.as_ref().map(|native| &native.details);
+        let detail = |key: &str| details.and_then(|d| d.get(key));
+        let scope = detail("supervisor_scope");
+        let field = |key: &str| scope.and_then(|s| s.get(key)).unwrap_or(&Value::Null);
+        if field("state") != "entered" {
             p.push(format!(
                 "the smoke {profile} supervisor's scope step is {} (reason {}), not entered",
-                scope["state"], scope["reason_code"]
+                field("state"),
+                field("reason_code")
             ));
         }
-        if scope.get("test_seam").is_some() {
+        // A seam of the scope step, or any test seam the run recorded.
+        if scope.is_some_and(|s| s.get("test_seam").is_some()) || detail("test_seams").is_some() {
             p.push(format!("the smoke {profile} run recorded a test seam"));
         }
-        if !details["execution_cgroup"]["path"].is_string() {
+        if !detail("execution_cgroup")
+            .and_then(|c| c.get("path"))
+            .is_some_and(Value::is_string)
+        {
             p.push(format!("the smoke {profile} attempt has no execution leaf"));
         }
     }
@@ -2659,24 +2675,29 @@ smoke none 0
 smoke doctor 0
 ";
 
-    /// A settled receipt from the plain session, trimmed to what the smoke
-    /// leg reads (the shape measured on the reference host, 2026-09-24).
+    /// A settled receipt from the plain session: the checked-in example
+    /// with the native details the smoke leg reads (the shape measured on
+    /// the reference host, 2026-09-24).
     fn smoke_receipt() -> Value {
-        serde_json::json!({
-            "phase": "settled",
-            "outcome": {"kind": "exited", "code": 0, "signal": null},
-            "lifetime": {"native": {"details": {
-                "supervisor_scope": {
-                    "state": "entered",
-                    "unit": "ouro-jail-3546133-b8e991b5ed034daf.scope",
-                    "reason_code": null,
-                    "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-3546133-b8e991b5ed034daf.scope"
-                },
-                "execution_cgroup": {
-                    "path": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-att_c38d4ec4-7acf-4eb9-be7a-9538b066f6e7.leaf"
-                }
-            }}}
-        })
+        let mut receipt: Value = serde_json::from_slice(
+            &std::fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../docs/specs/jail-v1/examples/receipt-tool.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let details = &mut receipt["lifetime"]["native"]["details"];
+        details["supervisor_scope"] = serde_json::json!({
+            "state": "entered",
+            "unit": "ouro-jail-3546133-b8e991b5ed034daf.scope",
+            "reason_code": null,
+            "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-3546133-b8e991b5ed034daf.scope"
+        });
+        details["execution_cgroup"] = serde_json::json!({
+            "path": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-att_c38d4ec4-7acf-4eb9-be7a-9538b066f6e7.leaf"
+        });
+        receipt
     }
 
     fn smoke_doctor() -> Value {
@@ -3683,11 +3704,26 @@ smoke doctor 0
                 "seam",
             ),
             (
+                "none",
+                Box::new(|r: &mut Value| {
+                    r["lifetime"]["native"]["details"]["test_seams"] =
+                        serde_json::json!({"OURO_TEST_X": "1"});
+                }),
+                "seam",
+            ),
+            (
                 "tool",
                 Box::new(|r: &mut Value| {
                     r["lifetime"]["native"]["details"]["execution_cgroup"] = Value::Null;
                 }),
                 "leaf",
+            ),
+            (
+                "tool",
+                Box::new(|r: &mut Value| {
+                    r.as_object_mut().unwrap().remove("errors");
+                }),
+                "unreadable",
             ),
         ];
         for (profile, edit, needle) in edits {
@@ -3718,7 +3754,7 @@ smoke doctor 0
         assert!(
             smoke_problems(&s)
                 .iter()
-                .any(|p| p.contains("none") && p.contains("JSON"))
+                .any(|p| p.contains("none") && p.contains("unreadable"))
         );
         let mut s = clean_smoke();
         s.transcript.stdout = SMOKE_TRANSCRIPT.replace("smoke none 0", "smoke none 125");

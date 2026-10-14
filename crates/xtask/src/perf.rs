@@ -35,6 +35,13 @@ use std::process::{Command, ExitCode, Stdio};
 
 use clap::{Args, Subcommand, ValueEnum};
 use ouro_fixture::perf::{HarvestedAttempt, PerfLaunchResult, TraceHarvest};
+use ouro_jail::observer::CoverageClass;
+use ouro_jail::records::{
+    Coverage, CoverageEntry, Gap, OutcomeKind, Phase, Receipt, SCHEMA_RECEIPT, SourceStatus,
+    StateCleanup,
+};
+
+use crate::util::wire;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -61,8 +68,14 @@ pub const EXEC_UNCONFIRMED: &str = "the backend ended without independent eviden
 /// J5-B1 made it a coded tool error (stage `running`, exit 1).
 pub const EXEC_UNCONFIRMED_CODE: &str = "exec_unconfirmed";
 
-/// The closed-set classes an attached observer must report active.
-const CLOSED_SET: [&str; 4] = ["exec", "fs.write", "fs.deny", "net"];
+/// The closed-set classes an attached observer must report active: the
+/// classes the audit source observes (§11.4).
+fn closed_set() -> impl Iterator<Item = &'static str> {
+    CoverageClass::ALL
+        .into_iter()
+        .filter(|class| class.source() == "audit")
+        .map(CoverageClass::as_str)
+}
 
 // ----------------------------------------------------------------------- CLI
 
@@ -717,61 +730,83 @@ pub fn target_facts(stdout: &[u8], workload: Workload) -> TargetFacts {
     facts
 }
 
-/// The facts of a receipt document.
+/// A final receipt, read strictly: every field the schema requires, nothing
+/// it does not know. A receipt that is not one is no receipt, never one
+/// with no errors, no gaps and no coverage.
 ///
 /// # Errors
-/// When the document is not a receipt with a phase and an outcome.
-pub fn receipt_facts(r: &Value) -> Result<ReceiptFacts, String> {
-    let text = |v: &Value| v.as_str().map(str::to_owned);
-    let gaps_of = |v: &Value| v.as_array().map_or(0, Vec::len);
-    let lost_of = |v: &Value| {
-        v.as_array().map_or(0, |gaps| {
-            gaps.iter()
-                .filter_map(|g| g["lost_count"].as_u64())
-                .sum::<u64>()
-        })
-    };
-    let phase = text(&r["phase"]).ok_or("the receipt has no phase")?;
-    let outcome_kind = text(&r["outcome"]["kind"]).ok_or("the receipt has no outcome kind")?;
-    let mut coverage = BTreeMap::new();
-    if let Some(classes) = r["coverage"].as_object() {
-        for (name, c) in classes {
-            coverage.insert(
-                name.clone(),
-                ClassFacts {
-                    status: text(&c["status"]).unwrap_or_default(),
-                    observed_count: c["observed_count"].as_u64(),
-                    gaps: gaps_of(&c["gaps"]),
-                    lost: lost_of(&c["gaps"]),
-                },
-            );
-        }
+/// Bytes that are not an `ouro.jail.receipt/1` record.
+pub fn read_receipt(bytes: &[u8]) -> Result<Receipt, String> {
+    let receipt: Receipt =
+        serde_json::from_slice(bytes).map_err(|e| format!("not a receipt: {e}"))?;
+    if receipt.schema != SCHEMA_RECEIPT {
+        return Err(format!(
+            "the schema is {:?}, not {SCHEMA_RECEIPT:?}",
+            receipt.schema
+        ));
     }
-    let details = &r["lifetime"]["native"]["details"];
-    Ok(ReceiptFacts {
-        attempt_id: text(&r["attempt_id"]).unwrap_or_default(),
-        phase,
-        policy_name: text(&r["policy"]["name"]),
-        policy_observe: text(&r["policy"]["observe"]),
-        outcome_kind,
-        outcome_code: r["outcome"]["code"].as_i64(),
-        outcome_cause: text(&r["outcome"]["cause"]),
-        errors: r["errors"].as_array().map_or_else(Vec::new, |errors| {
-            errors
-                .iter()
-                .map(|e| e["code"].as_str().unwrap_or("?").to_owned())
-                .collect()
-        }),
-        integrity: text(&r["lifetime"]["integrity"]),
-        tree_empty: r["lifetime"]["tree_empty"].as_bool(),
-        observer_attached: r["observer"]["attached"].as_bool().unwrap_or(false),
-        observer_gaps: gaps_of(&r["observer"]["gaps"]),
-        observer_lost: lost_of(&r["observer"]["gaps"]),
+    Ok(receipt)
+}
+
+/// The coverage entry of `class`.
+fn coverage_entry(coverage: &Coverage, class: CoverageClass) -> &CoverageEntry {
+    match class {
+        CoverageClass::Exec => &coverage.exec,
+        CoverageClass::FsWrite => &coverage.fs_write,
+        CoverageClass::FsDeny => &coverage.fs_deny,
+        CoverageClass::Net => &coverage.net,
+        CoverageClass::ProxyNet => &coverage.proxy_net,
+        CoverageClass::Limits => &coverage.limits,
+    }
+}
+
+/// The facts of a receipt the harness uses.
+#[must_use]
+pub fn receipt_facts(r: &Receipt) -> ReceiptFacts {
+    let lost = |gaps: &[Gap]| gaps.iter().filter_map(|g| g.lost_count).sum::<u64>();
+    let coverage = CoverageClass::ALL
+        .into_iter()
+        .map(|class| {
+            let c = coverage_entry(&r.coverage, class);
+            let facts = ClassFacts {
+                status: wire(c.status),
+                observed_count: c.observed_count,
+                gaps: c.gaps.len(),
+                lost: lost(&c.gaps),
+            };
+            (class.as_str().to_owned(), facts)
+        })
+        .collect();
+    // The native details are an open map in the record: what the Linux
+    // boundary records there is read by name.
+    let detail = |group: &str, key: &str| {
+        r.lifetime
+            .native
+            .as_ref()
+            .and_then(|native| native.details.get(group))
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    ReceiptFacts {
+        attempt_id: r.attempt_id.clone(),
+        phase: wire(r.phase),
+        policy_name: Some(r.policy.name.clone()),
+        policy_observe: Some(wire(r.policy.observe)),
+        outcome_kind: wire(r.outcome.kind),
+        outcome_code: r.outcome.code.map(i64::from),
+        outcome_cause: r.outcome.cause.clone(),
+        errors: r.errors.iter().map(|e| e.code.clone()).collect(),
+        integrity: Some(r.lifetime.integrity.clone()),
+        tree_empty: r.lifetime.tree_empty,
+        observer_attached: r.observer.attached,
+        observer_gaps: r.observer.gaps.len(),
+        observer_lost: lost(&r.observer.gaps),
         coverage,
-        supervisor_scope: text(&details["supervisor_scope"]["state"]),
-        leaf_path: text(&details["execution_cgroup"]["path"]),
-        state_cleanup: text(&r["state_cleanup"]),
-    })
+        supervisor_scope: detail("supervisor_scope", "state"),
+        leaf_path: detail("execution_cgroup", "path"),
+        state_cleanup: Some(wire(r.state_cleanup)),
+    }
 }
 
 // ------------------------------------------------------------------ validity
@@ -858,7 +893,7 @@ fn validate_jailed(
         reasons.push(Reason::NoReceipt);
         return;
     };
-    if r.phase != "settled" {
+    if r.phase != wire(Phase::Settled) {
         reasons.push(Reason::NotSettled);
     }
     if r.policy_name.as_deref() != Some(profile.name())
@@ -869,9 +904,9 @@ fn validate_jailed(
     if r.supervisor_scope.as_deref() != Some(rec.session.expected_scope_state()) {
         reasons.push(Reason::SessionMismatch);
     }
-    let exited_zero = r.outcome_kind == "exited" && r.outcome_code == Some(0);
+    let exited_zero = r.outcome_kind == wire(OutcomeKind::Exited) && r.outcome_code == Some(0);
     let unconfirmed = observe == Observe::Off
-        && r.outcome_kind == "unknown"
+        && r.outcome_kind == wire(OutcomeKind::Unknown)
         && r.outcome_cause.as_deref() == Some(EXEC_UNCONFIRMED);
     if exited_zero {
         if !(l.status.exited && l.status.code == Some(0)) {
@@ -896,7 +931,10 @@ fn validate_jailed(
     if r.integrity.as_deref() != Some("verified") || r.tree_empty != Some(true) {
         reasons.push(Reason::TreeNotVerified);
     }
-    if r.coverage.values().any(|c| c.status == "degraded") {
+    if r.coverage
+        .values()
+        .any(|c| c.status == wire(SourceStatus::Degraded))
+    {
         reasons.push(Reason::CoverageDegraded);
     }
     if r.coverage.values().any(|c| c.gaps > 0) {
@@ -912,10 +950,11 @@ fn validate_jailed(
         if !r.observer_attached {
             reasons.push(Reason::ObserverDetached);
         }
-        if CLOSED_SET
-            .iter()
-            .any(|class| r.coverage.get(*class).is_none_or(|c| c.status != "active"))
-        {
+        if closed_set().any(|class| {
+            r.coverage
+                .get(class)
+                .is_none_or(|c| c.status != wire(SourceStatus::Active))
+        }) {
             reasons.push(Reason::ClassNotActive);
         }
     }
@@ -977,30 +1016,33 @@ pub fn counts_match(rec: &LaunchRecord, observe: Observe) -> bool {
         // Missing facts are excluded by their own reasons.
         return true;
     };
-    let class = |k: &str| r.coverage.get(k).and_then(|c| c.observed_count);
+    let class = |k: CoverageClass| r.coverage.get(k.as_str()).and_then(|c| c.observed_count);
     let op = |k: &str| trace.by_operation.get(k).copied().unwrap_or(0);
     let audit = trace.by_source.get("audit").copied().unwrap_or(0);
     // No limit is hit and nothing is proxied by these workloads.
-    if class("limits").is_some_and(|c| c != 0) || class("proxy.net").is_some_and(|c| c != 0) {
+    if class(CoverageClass::Limits).is_some_and(|c| c != 0)
+        || class(CoverageClass::ProxyNet).is_some_and(|c| c != 0)
+    {
         return false;
     }
     if observe == Observe::Off {
         return audit == 0;
     }
-    if CLOSED_SET
-        .iter()
-        .any(|k| r.coverage.get(*k).is_none_or(|c| c.status != "active"))
-    {
+    if closed_set().any(|class| {
+        r.coverage
+            .get(class)
+            .is_none_or(|c| c.status != wire(SourceStatus::Active))
+    }) {
         // An inactive class is excluded as `class_not_active`; its count
         // means nothing.
         return true;
     }
     let e = Expected::of(rec);
     let fs_write = e.created + e.renamed + e.unlinked;
-    class("exec") == Some(2 * e.execs)
-        && class("fs.write") == Some(fs_write)
-        && class("fs.deny") == Some(0)
-        && class("net") == Some(0)
+    class(CoverageClass::Exec) == Some(2 * e.execs)
+        && class(CoverageClass::FsWrite) == Some(fs_write)
+        && class(CoverageClass::FsDeny) == Some(0)
+        && class(CoverageClass::Net) == Some(0)
         && op("proc.exec") == e.execs
         && op("proc.exit") == e.execs
         && op("fs.create") == e.created
@@ -3191,12 +3233,14 @@ fn launch(
         .and_then(|l| l.attempts.clone())
         .unwrap_or_default();
     if let [only] = attempts.as_slice() {
-        let bytes = std::fs::read(Path::new(&only.dir).join("jail.json"));
-        if let Some(receipt) = bytes
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        let path = Path::new(&only.dir).join("jail.json");
+        // No readable receipt is excluded as `no_receipt`; say why here.
+        match std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| read_receipt(&b))
         {
-            rec.receipt = receipt_facts(&receipt).ok();
+            Ok(receipt) => rec.receipt = Some(receipt_facts(&receipt)),
+            Err(e) => eprintln!("perf: {}: {e}", path.display()),
         }
     }
     rec.validity = validate(&rec);
@@ -3244,8 +3288,10 @@ fn launch(
 #[must_use]
 pub fn keep_attempt(rec: &LaunchRecord) -> bool {
     let cleaned = rec.receipt.as_ref().is_some_and(|r| {
-        r.phase == "settled"
-            && matches!(r.state_cleanup.as_deref(), Some("complete" | "not_needed"))
+        r.phase == wire(Phase::Settled)
+            && [StateCleanup::Complete, StateCleanup::NotNeeded]
+                .into_iter()
+                .any(|done| r.state_cleanup.as_deref() == Some(wire(done).as_str()))
     });
     !validate(rec).valid || !cleaned
 }
@@ -3766,7 +3812,7 @@ mod tests {
         let mut r = jailed(Observe::On, 100, 900);
         r.receipt.as_mut().unwrap().observer_attached = false;
         assert_eq!(reasons(&r), vec![Reason::ObserverDetached]);
-        for missing in CLOSED_SET {
+        for missing in closed_set() {
             let mut r = jailed(Observe::On, 100, 900);
             r.receipt
                 .as_mut()
@@ -4113,42 +4159,123 @@ not json
         assert_eq!(t.end_ns, None);
     }
 
+    fn example_receipt() -> Vec<u8> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1/examples");
+        std::fs::read(root.join("receipt-tool.json")).unwrap()
+    }
+
     #[test]
     fn the_checked_in_receipt_example_reads_as_facts() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1/examples");
-        let v: Value =
-            serde_json::from_slice(&std::fs::read(root.join("receipt-tool.json")).unwrap())
-                .unwrap();
-        let f = receipt_facts(&v).unwrap();
+        let f = receipt_facts(&read_receipt(&example_receipt()).unwrap());
         assert_eq!(f.phase, "settled");
         assert_eq!(f.policy_name.as_deref(), Some("tool"));
         assert_eq!(f.policy_observe.as_deref(), Some("on"));
         assert_eq!(f.outcome_kind, "exited");
         assert_eq!(f.outcome_code, Some(0));
         assert_eq!(f.integrity.as_deref(), Some("verified"));
+        assert_eq!(f.tree_empty, Some(true));
         assert_eq!(f.coverage["exec"].status, "active");
         assert_eq!(f.coverage["exec"].observed_count, Some(1));
         assert_eq!(f.coverage["proxy.net"].observed_count, None);
+        assert_eq!(f.coverage.len(), 6);
+        assert!(f.coverage.values().all(|c| c.gaps == 0 && c.lost == 0));
         assert!(f.observer_attached);
+        assert_eq!((f.observer_gaps, f.observer_lost), (0, 0));
+        assert!(f.errors.is_empty());
+        // The example records no native scope details.
+        assert_eq!(f.supervisor_scope, None);
         assert_eq!(f.state_cleanup.as_deref(), Some("not_needed"));
-        assert!(receipt_facts(&json!({})).is_err());
+    }
+
+    /// Review XT4: a receipt missing a field is no receipt. Read as untyped
+    /// JSON it was one with no errors, no gaps and no coverage.
+    #[test]
+    fn a_receipt_is_read_strictly() {
+        let good: Value = serde_json::from_slice(&example_receipt()).unwrap();
+        // (An absent `Option` field, such as `tree_empty`, still reads as
+        // null: that is the records crate's own rule.)
+        let broken: [(&str, &[&str]); 4] = [
+            ("errors", &["errors"]),
+            ("observer gaps", &["observer", "gaps"]),
+            ("a coverage class", &["coverage", "fs.write"]),
+            ("a class's gaps", &["coverage", "exec", "gaps"]),
+        ];
+        for (label, path) in broken {
+            let mut v = good.clone();
+            let (last, parents) = path.split_last().unwrap();
+            let parent = parents.iter().fold(&mut v, |node, key| &mut node[*key]);
+            parent.as_object_mut().unwrap().remove(*last);
+            let bytes = serde_json::to_vec(&v).unwrap();
+            assert!(read_receipt(&bytes).is_err(), "{label} missing was read");
+        }
+        let mut other = good;
+        other["schema"] = "ouro.jail.receipt/0".into();
+        assert!(read_receipt(&serde_json::to_vec(&other).unwrap()).is_err());
+        assert!(read_receipt(b"{}").is_err());
     }
 
     #[test]
-    fn gaps_and_their_losses_are_summed() {
-        let v = json!({
-            "phase": "settled",
-            "outcome": {"kind": "exited", "code": 0},
-            "observer": {"attached": true, "gaps": [{"lost_count": 3}, {"lost_count": null}]},
-            "coverage": {"fs.write": {"status": "degraded", "observed_count": null,
-                                      "gaps": [{"lost_count": 5}]}},
-            "errors": [{"code": "evidence_lost"}],
-        });
-        let f = receipt_facts(&v).unwrap();
+    fn gaps_errors_and_the_scope_are_read() {
+        let mut r = read_receipt(&example_receipt()).unwrap();
+        let gap = |lost: Option<u64>| Gap {
+            classes: vec!["fs.write".to_owned()],
+            source: "audit".to_owned(),
+            start_ns: "1".to_owned(),
+            end_ns: Some("2".to_owned()),
+            reason: "ring overflow".to_owned(),
+            lost_count: lost,
+        };
+        r.observer.gaps = vec![gap(Some(3)), gap(None)];
+        r.coverage.fs_write.status = SourceStatus::Degraded;
+        r.coverage.fs_write.gaps = vec![gap(Some(5))];
+        r.errors = vec![ouro_jail::records::ErrorObject {
+            code: "evidence_lost".to_owned(),
+            stage: "running".to_owned(),
+            message: "m".to_owned(),
+            key_path: None,
+            remediation_category: ouro_jail::records::Remediation::InspectState,
+        }];
+        r.lifetime.tree_empty = None;
+        let details = &mut r.lifetime.native.as_mut().unwrap().details;
+        details.insert(
+            "supervisor_scope".to_owned(),
+            json!({"state": "already_delegated"}),
+        );
+        details.insert("execution_cgroup".to_owned(), json!({"path": "/leaf"}));
+        let f = receipt_facts(&r);
         assert_eq!((f.observer_gaps, f.observer_lost), (2, 3));
+        assert_eq!(f.coverage["fs.write"].status, "degraded");
         assert_eq!(f.coverage["fs.write"].gaps, 1);
         assert_eq!(f.coverage["fs.write"].lost, 5);
         assert_eq!(f.errors, vec!["evidence_lost".to_owned()]);
+        assert_eq!(f.tree_empty, None);
+        assert_eq!(f.supervisor_scope.as_deref(), Some("already_delegated"));
+        assert_eq!(f.leaf_path.as_deref(), Some("/leaf"));
+    }
+
+    /// The class names the facts use are the receipt's own keys, and the
+    /// closed set is the four audit classes.
+    #[test]
+    fn coverage_classes_are_the_receipts_keys() {
+        let keys: Vec<String> = serde_json::to_value(Coverage::all_unsupported())
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let mut ours: Vec<String> = CoverageClass::ALL
+            .iter()
+            .map(|c| c.as_str().to_owned())
+            .collect();
+        ours.sort();
+        let mut keys = keys;
+        keys.sort();
+        assert_eq!(ours, keys);
+        assert_eq!(
+            closed_set().collect::<Vec<_>>(),
+            ["exec", "fs.write", "fs.deny", "net"]
+        );
     }
 
     #[test]
