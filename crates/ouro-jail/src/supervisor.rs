@@ -228,29 +228,13 @@ pub fn resolve_learning_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, J
 fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, JailError> {
     let config_dir = state::config_dir(&ctx.env_settings, ctx.home.as_deref())?;
     let data_dir = state::data_dir(&ctx.env_settings, ctx.home.as_deref())?;
-    // Security 2026-09-29 (audit 6 F1): a `--profile none` child sees the
-    // whole host, so every trusted file that predates the end of the last
-    // uncontained run could have been written by that child, and none can be
-    // dated while such a run is live. The markers sit in both directories,
-    // which are chosen independently: a run sharing either sees them.
-    let uncontained_epoch = state::uncontained_epoch(&[&data_dir, &config_dir])?;
-    // §6.2 step 2 — the operator launch profile, read once
-    // through a no-follow walk; its content is what the snapshot records.
-    let launch = match &args.launch {
-        Some(name) => {
-            refuse_stale_trusted_file(
-                &launch_profile::launch_directory(&config_dir).join(format!("{name}.toml")),
-                &uncontained_epoch,
-                "--launch",
-            )?;
-            Some(launch_profile::load(
-                &config_dir,
-                name,
-                ctx.home.as_deref(),
-            )?)
-        }
-        None => None,
-    };
+    // Audit 6 F1: a `--profile none` child sees the whole host, so every
+    // trusted file that predates the end of the last uncontained run could
+    // have been written by that child, and none can be dated while such a run
+    // is live. The markers sit in both directories, which are chosen
+    // independently: a run sharing either sees them.
+    let epoch = state::uncontained_epoch(&[&data_dir, &config_dir])?;
+    let launch = read_launch_profile(ctx, args, &config_dir, &epoch)?;
     let workspace = canonical_root(&ctx.cwd, args.workspace.as_deref(), "--workspace")?;
     if !workspace.is_dir() {
         return Err(usage(
@@ -260,262 +244,36 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
     }
 
     // 1. Operator config, then the selected profile.
-    let config_path = config_dir.join("config.toml");
-    refuse_stale_trusted_file(&config_path, &uncontained_epoch, "config")?;
-    let operator = match read_operator_file(&config_path, "config")? {
-        Some(text) => config::parse_operator_config(&text)?,
-        None => config::OperatorConfig::default(),
-    };
+    let operator = read_operator_config(&config_dir, &epoch)?;
     let operator_jail = operator.jail.clone().unwrap_or_default();
-    config::check_schema("jail.schema", operator_jail.schema.as_deref())?;
-    if operator_jail.extends.is_some() {
-        return Err(usage(
-            "jail.extends",
-            "`extends` belongs in a profile file, not in config.toml",
-        ));
-    }
-
-    // §6.1: `--profile none` is the only way to select `none`; files and
-    // environment cannot select it. `config.toml` is a defaults file, so a
-    // `none` written there would drop the operator onto the uncontained
-    // profile without the explicit act the clause demands, and it refuses
-    // instead — the same rule the profile-file `extends = "none"` refusal
-    // below applies.
-    let selection = match (args.profile.as_deref(), operator_jail.profile.as_deref()) {
-        (Some(cli), _) => cli.to_owned(),
-        (None, Some("none")) => {
-            return Err(JailError::new(
-                ErrorCode::PolicyWidening,
-                ErrorStage::Resolving,
-                Remediation::Configuration,
-                "config.toml may not select the `none` profile; pass `--profile none` explicitly"
-                    .to_owned(),
-            )
-            .with_key_path("jail.profile"));
-        }
-        (None, Some(configured)) => configured.to_owned(),
-        // §6.1 "Default profile: `tool`, or the launch
-        // profile's `jail` when `--launch` is set." Precedence: `--profile`,
-        // then the operator's configured profile, then the launch default,
-        // then `tool`; a configured profile that disagrees with the launch
-        // default refuses below instead of being replaced (J3 review M3).
-        (None, None) => launch.as_ref().map_or_else(
-            || "tool".to_owned(),
-            |launch| launch.jail.as_str().to_owned(),
-        ),
-    };
-
-    let mut layers: Vec<Layer> = Vec::new();
-    let (profile, policy_name) = match ProfileName::parse(&selection) {
-        Some(profile) => (profile, selection.clone()),
-        None => {
-            let path = if args.profile.is_some() {
-                absolutize(&ctx.cwd, Path::new(&selection))
-            } else if let Some(suffix) = selection.strip_prefix("~/") {
-                let home = ctx
-                    .home
-                    .as_ref()
-                    .ok_or_else(|| usage("jail.profile", "operator home is unavailable"))?;
-                config::absolute_dir(config::HOME_VAR, home)?.join(suffix)
-            } else {
-                absolutize(&config_dir, Path::new(&selection))
-            };
-            refuse_stale_trusted_file(&path, &uncontained_epoch, "--profile")?;
-            let text = read_operator_file(&path, "--profile")?
-                .ok_or_else(|| usage("--profile", format!("{} does not exist", path.display())))?;
-            let file = config::parse_policy_file(&text)?;
-            let base = ProfileName::parse(&file.extends).ok_or_else(|| {
-                usage(
-                    "extends",
-                    format!("`{}` is not a built-in profile", file.extends),
-                )
-            })?;
-            if base == ProfileName::None {
-                // §6.1: `--profile none` is the only way to select `none`.
-                return Err(JailError::new(
-                    ErrorCode::PolicyWidening,
-                    ErrorStage::Resolving,
-                    Remediation::Configuration,
-                    "a profile file may not extend `none`".to_owned(),
-                )
-                .with_key_path("extends"));
-            }
-            let delta = config::delta_from_sections(
-                "",
-                &file.filesystem,
-                &file.network,
-                &file.limits,
-                &file.observation,
-            )?;
-            let base_dir = path.parent().map(os_bytes);
-            let name = path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "profile".to_owned());
-            layers.push(Layer {
-                origin: LayerOrigin::OperatorProfileFile(name.clone()),
-                base_dir,
-                delta,
-            });
-            (base, name)
-        }
-    };
-    // §6.1 — the selected base must permit the launch
-    // profile's credentials and network, and `none` never runs one. A
-    // configured profile is never silently replaced by a launch default, and
-    // never silently replaces one either: when they name different bases the
-    // operator chooses with `--profile`.
+    let selection = select_profile(args, &operator_jail, launch.as_ref())?;
+    let base = select_base(ctx, args, &config_dir, &epoch, selection)?;
+    let profile = base.profile;
     if let Some(launch) = &launch {
-        if args.profile.is_none()
-            && let Some(configured) = operator_jail.profile.as_deref()
-            && launch.jail != profile
-        {
-            return Err(usage(
-                "jail.profile",
-                format!(
-                    "config.toml selects `{configured}` (base `{}`), but launch profile `{}` \
-                     defaults to `{}`; pass `--profile` to choose one",
-                    profile.as_str(),
-                    launch.name,
-                    launch.jail.as_str()
-                ),
-            ));
-        }
-        launch_profile::check_jail_permits(profile, launch)?;
+        check_launch_base(args, &operator_jail, profile, launch)?;
     }
-
+    let mut layers: Vec<Layer> = base.layer.into_iter().collect();
     // The operator's own `[jail]` table is a trusted layer: it may grant.
     if operator.jail.is_some() {
-        let delta = config::delta_from_sections(
-            "jail.",
-            &operator_jail.filesystem,
-            &operator_jail.network,
-            &operator_jail.limits,
-            &operator_jail.observation,
-        )?;
-        layers.push(Layer {
-            origin: LayerOrigin::OperatorConfig("config.toml".to_owned()),
-            // §6.2: apply paths relative to the file containing them, and
-            // `config.toml` sits in `config_dir` itself — not its parent.
-            base_dir: Some(os_bytes(&config_dir)),
-            delta,
-        });
+        layers.push(operator_layer(&operator_jail, &config_dir)?);
     }
-
-    // 2. The launch profile's allowed hosts, an operator
-    // grant, before the environment, CLI and project layers.
-    if let Some(layer) = launch.as_ref().and_then(launch_profile::network_layer) {
-        layers.push(layer);
-    }
-
+    // 2. The launch profile's allowed hosts, an operator grant, before the
+    // environment, CLI and project layers.
+    layers.extend(launch.as_ref().and_then(launch_profile::network_layer));
     // 3. The environment allow-list.
-    if ctx.env_settings.observe.is_some() || ctx.env_settings.evidence.is_some() {
-        layers.push(Layer {
-            origin: LayerOrigin::Environment,
-            base_dir: None,
-            delta: PolicyDelta {
-                observe: ctx.env_settings.observe,
-                evidence: ctx.env_settings.evidence,
-                ..PolicyDelta::default()
-            },
-        });
-    }
-
+    layers.extend(environment_layer(&ctx.env_settings));
     // 4. Explicit CLI grants and limits.
-    let cli_delta = PolicyDelta {
-        read_write: args.rw.iter().map(|path| os_bytes(path)).collect(),
-        read_only: args.ro.iter().map(|path| os_bytes(path)).collect(),
-        deny_read: args.deny_read.iter().map(|path| os_bytes(path)).collect(),
-        network_allow: args.allow_host.clone(),
-        limits: config::ceilings_from_cli(&args.limit)?,
-        observe: args.observe.map(Into::into),
-        evidence: args.evidence.map(Into::into),
-        ..PolicyDelta::default()
-    };
-    let has_cli = !cli_delta.read_write.is_empty()
-        || !cli_delta.read_only.is_empty()
-        || !cli_delta.deny_read.is_empty()
-        || !cli_delta.network_allow.is_empty()
-        || cli_delta.limits != policy::Ceilings::default()
-        || cli_delta.observe.is_some()
-        || cli_delta.evidence.is_some();
-    if has_cli {
-        layers.push(Layer {
-            origin: LayerOrigin::CommandLine,
-            base_dir: Some(os_bytes(&ctx.cwd)),
-            delta: cli_delta,
-        });
-    }
-
+    layers.extend(command_line_layer(ctx, args)?);
     // 5. The workspace-root `ouro.toml`, which may only narrow.
-    let project_path = workspace.join("ouro.toml");
-    if let Some(text) = read_project_file(&project_path)? {
-        // P02.9 — §6.3 "Add credentials ... Refuse": a key of
-        // the operator's launch layer in the workspace-owned narrowing file
-        // is a widening, refused with its exact key path, not a typo.
-        if let Some(key) = launch_layer_key_in_project(&text) {
-            return Err(JailError::new(
-                ErrorCode::PolicyWidening,
-                ErrorStage::Resolving,
-                Remediation::Configuration,
-                format!(
-                    "`{key}` is staged only from an operator launch profile (§12); a project \
-                     file may only narrow"
-                ),
-            )
-            .with_key_path(key));
-        }
-        let project = config::parse_project_config(&text)?;
-        if let Some(section) = project.jail {
-            config::check_schema("jail.schema", section.schema.as_deref())?;
-            let delta = config::delta_from_sections(
-                "jail.",
-                &section.filesystem,
-                &section.network,
-                &section.limits,
-                &section.observation,
-            )?;
-            layers.push(Layer {
-                origin: LayerOrigin::ProjectConfig("ouro.toml".to_owned()),
-                base_dir: Some(os_bytes(&workspace)),
-                delta,
-            });
-        }
-    }
+    layers.extend(project_layer(&workspace)?);
 
-    let scratch = match &args.scratch {
-        Some(path) => ScratchRoot::Host {
-            path: crate::records::NativeString::from_bytes(os_bytes(&canonical_root(
-                &ctx.cwd,
-                Some(path),
-                "--scratch",
-            )?))
-            .map_err(|error| usage("--scratch", error.to_string()))?,
-        },
-        None => ScratchRoot::Managed,
-    };
-
-    // §6.2: `[jail_host.network] translation_prefixes` is host configuration,
-    // merged into proxy policy before digest creation. Each entry is parsed
-    // and re-rendered in canonical RFC 5952 form so equivalent spellings of
-    // one prefix cannot yield two digests (§6.3).
-    let translation_prefixes = match operator
-        .jail_host
-        .and_then(|host| host.network)
-        .map(|network| network.translation_prefixes)
-    {
-        Some(entries) => config::canonical_translation_prefixes(
-            "jail_host.network.translation_prefixes",
-            &entries,
-        )?,
-        None => Vec::new(),
-    };
-
+    let scratch = scratch_root(ctx, args)?;
+    let translation_prefixes = translation_prefixes(operator.jail_host)?;
     let platform_os = ctx.platform.identity().os;
     let inputs = ResolveInputs {
         platform: platform_os,
         base_profile: profile,
-        policy_name,
+        policy_name: base.policy_name,
         baseline: profiles::baseline(profile, platform_os, ctx.env_lookup.as_ref()),
         workspace: os_bytes(&workspace),
         scratch,
@@ -524,65 +282,17 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
         translation_prefixes,
         layers,
     };
-    let resolved = policy::resolve(&inputs)?;
-    // The launch environment, vendor state and `launch`
-    // field group, then the digest and requirements over the result.
-    let mut resolved = match &launch {
-        Some(launch) => launch_profile::apply(resolved, launch)?,
-        None => resolved,
-    };
-
-    // jail-v2 §7.2: operator command rules, validated here so a refusal
-    // names its key; the Linux platform compiles the same rules for the
-    // observer.
+    let mut resolved = policy::resolve(&inputs)?;
+    // The launch environment, vendor state and `launch` field group, then
+    // the digest and requirements over the result.
+    if let Some(launch) = &launch {
+        resolved = launch_profile::apply(resolved, launch)?;
+    }
     if !operator_jail.commands.is_empty() {
-        operator_jail
-            .commands
-            .compile()
-            .map_err(|e| usage("jail.commands", e))?;
-        if resolved.snapshot.platform != crate::records::Os::Linux
-            || profile == ProfileName::None
-            || resolved.snapshot.observation.mode != crate::records::ObserveMode::On
-        {
-            return Err(usage(
-                "jail.commands",
-                "command rules require contained Linux execution with --observe on",
-            ));
-        }
-        let rules = operator_jail.commands.clone();
-        resolved.amend(
-            vec![policy::ProvenanceEntry {
-                origin: LayerOrigin::OperatorConfig("config.toml".to_owned()).label(),
-                key: "jail.commands".to_owned(),
-                detail: None,
-            }],
-            |snapshot| {
-                snapshot.commands = rules;
-                Ok(())
-            },
-        )?;
+        apply_command_rules(&mut resolved, &operator_jail.commands, profile)?;
     }
     if learning {
-        if profile == ProfileName::None || resolved.snapshot.platform != crate::records::Os::Linux {
-            return Err(usage(
-                "learn",
-                "learning requires a contained Linux run with the real observer",
-            ));
-        }
-        if resolved.snapshot.observation.mode != crate::records::ObserveMode::On {
-            return Err(usage("learn", "learning requires observation on"));
-        }
-        resolved.amend(
-            vec![policy::ProvenanceEntry {
-                origin: LayerOrigin::CommandLine.label(),
-                key: "observation.learning".to_owned(),
-                detail: Some("learn".to_owned()),
-            }],
-            |snapshot| {
-                snapshot.observation.learning = true;
-                Ok(())
-            },
-        )?;
+        enable_learning(&mut resolved, profile)?;
     }
     // §6.4: `build` requires an explicit memory ceiling; the baseline leaves it
     // absent so that this refuses rather than inventing one.
@@ -592,32 +302,8 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
             "the `build` profile requires an explicit memory ceiling",
         ));
     }
-
-    // §12 "A launch profile path inside any child-writable
-    // grant refuses", and north star §4.5 refuses one inside the workspace.
     if let Some(launch) = &launch {
-        launch_profile::check_outside_writable(
-            launch,
-            &child_writable_roots(&resolved, &workspace),
-        )?;
-        // The same rule for every credential source, by identity (M2 of the
-        // J3 review): the child must not be able to change what it is given.
-        // A source that cannot be walked now is left to staging and doctor,
-        // which report it by reason.
-        let forbidden = forbidden_identities(&resolved, &workspace)?;
-        for credential in &launch.credentials {
-            if let Ok(chain) = crate::credentials::source_chain(credential.source.as_bytes())
-                && chain.iter().any(|identity| forbidden.contains(identity))
-            {
-                return Err(usage(
-                    &format!("launch.credentials.{}.source", credential.id),
-                    format!(
-                        "credential `{}` lies inside a grant the child can write",
-                        credential.id
-                    ),
-                ));
-            }
-        }
+        check_launch_placement(&resolved, &workspace, launch)?;
     }
 
     Ok(Plan {
@@ -626,6 +312,457 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
         config_dir,
         data_dir,
     })
+}
+
+/// §6.2 step 2: the operator launch profile `--launch NAME`, read once
+/// through a no-follow walk; its content is what the snapshot records.
+///
+/// # Errors
+/// The launch profile's refusal, or [`ErrorCode::UnsafeConfigPath`] for one
+/// an uncontained run's child could have written.
+fn read_launch_profile(
+    ctx: &Context,
+    args: &PolicyArgs,
+    config_dir: &Path,
+    epoch: &state::UncontainedEpoch,
+) -> Result<Option<launch_profile::LaunchProfile>, JailError> {
+    let Some(name) = &args.launch else {
+        return Ok(None);
+    };
+    refuse_stale_trusted_file(
+        &launch_profile::launch_directory(config_dir).join(format!("{name}.toml")),
+        epoch,
+        "--launch",
+    )?;
+    launch_profile::load(config_dir, name, ctx.home.as_deref()).map(Some)
+}
+
+/// The operator's `config.toml`, or the empty configuration when there is
+/// none.
+///
+/// # Errors
+/// The read's and the parser's refusals, and [`ErrorCode::InvalidConfig`] at
+/// `jail.extends`, which belongs in a profile file.
+fn read_operator_config(
+    config_dir: &Path,
+    epoch: &state::UncontainedEpoch,
+) -> Result<config::OperatorConfig, JailError> {
+    let config_path = config_dir.join("config.toml");
+    refuse_stale_trusted_file(&config_path, epoch, "config")?;
+    let operator = match read_operator_file(&config_path, "config")? {
+        Some(text) => config::parse_operator_config(&text)?,
+        None => config::OperatorConfig::default(),
+    };
+    if let Some(jail) = &operator.jail {
+        config::check_schema("jail.schema", jail.schema.as_deref())?;
+        if jail.extends.is_some() {
+            return Err(usage(
+                "jail.extends",
+                "`extends` belongs in a profile file, not in config.toml",
+            ));
+        }
+    }
+    Ok(operator)
+}
+
+/// The profile selection, by precedence: `--profile`, then the operator's
+/// configured profile, then the launch profile's default, then `tool` (§6.1:
+/// "Default profile: `tool`, or the launch profile's `jail` when `--launch`
+/// is set").
+///
+/// # Errors
+/// [`ErrorCode::PolicyWidening`] at `jail.profile` for a `config.toml` that
+/// selects `none`.
+fn select_profile(
+    args: &PolicyArgs,
+    operator_jail: &config::JailSection,
+    launch: Option<&launch_profile::LaunchProfile>,
+) -> Result<String, JailError> {
+    Ok(
+        match (args.profile.as_deref(), operator_jail.profile.as_deref()) {
+            (Some(cli), _) => cli.to_owned(),
+            // §6.1: `--profile none` is the only way to select `none`; files
+            // and environment cannot select it. `config.toml` is a defaults
+            // file, so a `none` written there would drop the operator onto the
+            // uncontained profile without the explicit act the clause
+            // demands, and it refuses instead, as a profile file's
+            // `extends = "none"` does.
+            (None, Some("none")) => {
+                return Err(JailError::new(
+                    ErrorCode::PolicyWidening,
+                    ErrorStage::Resolving,
+                    Remediation::Configuration,
+                    "config.toml may not select the `none` profile; pass `--profile none` \
+                     explicitly"
+                        .to_owned(),
+                )
+                .with_key_path("jail.profile"));
+            }
+            (None, Some(configured)) => configured.to_owned(),
+            // A configured profile that disagrees with the launch default
+            // refuses in `check_launch_base` instead of being replaced.
+            (None, None) => launch.map_or_else(
+                || "tool".to_owned(),
+                |launch| launch.jail.as_str().to_owned(),
+            ),
+        },
+    )
+}
+
+/// The base profile a selection names, its display name, and the operator
+/// profile file's layer when the selection names a file.
+struct Base {
+    profile: ProfileName,
+    policy_name: String,
+    layer: Option<Layer>,
+}
+
+/// Resolves a selection to its base profile: a built-in name, or an
+/// operator profile file that extends one (§6.2).
+///
+/// # Errors
+/// The profile file's refusals, [`ErrorCode::InvalidConfig`] for a base that
+/// is not built in, and [`ErrorCode::PolicyWidening`] at `extends` for a file
+/// that extends `none`.
+fn select_base(
+    ctx: &Context,
+    args: &PolicyArgs,
+    config_dir: &Path,
+    epoch: &state::UncontainedEpoch,
+    selection: String,
+) -> Result<Base, JailError> {
+    if let Some(profile) = ProfileName::parse(&selection) {
+        return Ok(Base {
+            profile,
+            policy_name: selection,
+            layer: None,
+        });
+    }
+    let path = if args.profile.is_some() {
+        absolutize(&ctx.cwd, Path::new(&selection))
+    } else if let Some(suffix) = selection.strip_prefix("~/") {
+        let home = ctx
+            .home
+            .as_ref()
+            .ok_or_else(|| usage("jail.profile", "operator home is unavailable"))?;
+        config::absolute_dir(config::HOME_VAR, home)?.join(suffix)
+    } else {
+        absolutize(config_dir, Path::new(&selection))
+    };
+    refuse_stale_trusted_file(&path, epoch, "--profile")?;
+    let text = read_operator_file(&path, "--profile")?
+        .ok_or_else(|| usage("--profile", format!("{} does not exist", path.display())))?;
+    let file = config::parse_policy_file(&text)?;
+    let profile = ProfileName::parse(&file.extends).ok_or_else(|| {
+        usage(
+            "extends",
+            format!("`{}` is not a built-in profile", file.extends),
+        )
+    })?;
+    if profile == ProfileName::None {
+        // §6.1: `--profile none` is the only way to select `none`.
+        return Err(JailError::new(
+            ErrorCode::PolicyWidening,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            "a profile file may not extend `none`".to_owned(),
+        )
+        .with_key_path("extends"));
+    }
+    let delta = config::delta_from_sections(
+        "",
+        &file.filesystem,
+        &file.network,
+        &file.limits,
+        &file.observation,
+    )?;
+    let name = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "profile".to_owned());
+    Ok(Base {
+        profile,
+        policy_name: name.clone(),
+        layer: Some(Layer {
+            origin: LayerOrigin::OperatorProfileFile(name),
+            base_dir: path.parent().map(os_bytes),
+            delta,
+        }),
+    })
+}
+
+/// §6.1: the selected base must permit the launch profile's credentials and
+/// network, and `none` never runs one. A configured profile is never
+/// silently replaced by a launch default, and never silently replaces one
+/// either: when they name different bases the operator chooses with
+/// `--profile`.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] at `jail.profile` for that disagreement, and
+/// the launch profile's own refusal of the base.
+fn check_launch_base(
+    args: &PolicyArgs,
+    operator_jail: &config::JailSection,
+    profile: ProfileName,
+    launch: &launch_profile::LaunchProfile,
+) -> Result<(), JailError> {
+    if args.profile.is_none()
+        && let Some(configured) = operator_jail.profile.as_deref()
+        && launch.jail != profile
+    {
+        return Err(usage(
+            "jail.profile",
+            format!(
+                "config.toml selects `{configured}` (base `{}`), but launch profile `{}` \
+                 defaults to `{}`; pass `--profile` to choose one",
+                profile.as_str(),
+                launch.name,
+                launch.jail.as_str()
+            ),
+        ));
+    }
+    launch_profile::check_jail_permits(profile, launch)
+}
+
+/// The operator's own `[jail]` table, a trusted layer that may grant.
+///
+/// # Errors
+/// The table's own refusals.
+fn operator_layer(
+    operator_jail: &config::JailSection,
+    config_dir: &Path,
+) -> Result<Layer, JailError> {
+    let delta = config::delta_from_sections(
+        "jail.",
+        &operator_jail.filesystem,
+        &operator_jail.network,
+        &operator_jail.limits,
+        &operator_jail.observation,
+    )?;
+    Ok(Layer {
+        origin: LayerOrigin::OperatorConfig("config.toml".to_owned()),
+        // §6.2: apply paths relative to the file containing them, and
+        // `config.toml` sits in `config_dir` itself, not its parent.
+        base_dir: Some(os_bytes(config_dir)),
+        delta,
+    })
+}
+
+/// The environment allow-list's layer, when it sets anything (§6.2 step 3).
+fn environment_layer(settings: &EnvSettings) -> Option<Layer> {
+    (settings.observe.is_some() || settings.evidence.is_some()).then(|| Layer {
+        origin: LayerOrigin::Environment,
+        base_dir: None,
+        delta: PolicyDelta {
+            observe: settings.observe,
+            evidence: settings.evidence,
+            ..PolicyDelta::default()
+        },
+    })
+}
+
+/// The explicit CLI grants and limits' layer, when there are any (§6.2
+/// step 4).
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] for a `--limit` that does not parse.
+fn command_line_layer(ctx: &Context, args: &PolicyArgs) -> Result<Option<Layer>, JailError> {
+    let delta = PolicyDelta {
+        read_write: args.rw.iter().map(|path| os_bytes(path)).collect(),
+        read_only: args.ro.iter().map(|path| os_bytes(path)).collect(),
+        deny_read: args.deny_read.iter().map(|path| os_bytes(path)).collect(),
+        network_allow: args.allow_host.clone(),
+        limits: config::ceilings_from_cli(&args.limit)?,
+        observe: args.observe.map(Into::into),
+        evidence: args.evidence.map(Into::into),
+        ..PolicyDelta::default()
+    };
+    let any = !delta.read_write.is_empty()
+        || !delta.read_only.is_empty()
+        || !delta.deny_read.is_empty()
+        || !delta.network_allow.is_empty()
+        || delta.limits != policy::Ceilings::default()
+        || delta.observe.is_some()
+        || delta.evidence.is_some();
+    Ok(any.then(|| Layer {
+        origin: LayerOrigin::CommandLine,
+        base_dir: Some(os_bytes(&ctx.cwd)),
+        delta,
+    }))
+}
+
+/// The workspace-root `ouro.toml`'s layer, which may only narrow (§6.2
+/// step 5), when the file has a `[jail]` table.
+///
+/// # Errors
+/// The read's and the parser's refusals, and [`ErrorCode::PolicyWidening`]
+/// for a key of the operator's launch layer (§6.3: "Add credentials ...
+/// Refuse"), refused with its exact key path, not as a typo.
+fn project_layer(workspace: &Path) -> Result<Option<Layer>, JailError> {
+    let Some(text) = read_project_file(&workspace.join("ouro.toml"))? else {
+        return Ok(None);
+    };
+    if let Some(key) = launch_layer_key_in_project(&text) {
+        return Err(JailError::new(
+            ErrorCode::PolicyWidening,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            format!(
+                "`{key}` is staged only from an operator launch profile (§12); a project \
+                 file may only narrow"
+            ),
+        )
+        .with_key_path(key));
+    }
+    let Some(section) = config::parse_project_config(&text)?.jail else {
+        return Ok(None);
+    };
+    config::check_schema("jail.schema", section.schema.as_deref())?;
+    let delta = config::delta_from_sections(
+        "jail.",
+        &section.filesystem,
+        &section.network,
+        &section.limits,
+        &section.observation,
+    )?;
+    Ok(Some(Layer {
+        origin: LayerOrigin::ProjectConfig("ouro.toml".to_owned()),
+        base_dir: Some(os_bytes(workspace)),
+        delta,
+    }))
+}
+
+/// The scratch root: `--scratch`, canonical, or the managed one.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] at `--scratch` for a path that cannot be
+/// resolved or recorded.
+fn scratch_root(ctx: &Context, args: &PolicyArgs) -> Result<ScratchRoot, JailError> {
+    let Some(path) = &args.scratch else {
+        return Ok(ScratchRoot::Managed);
+    };
+    let path = canonical_root(&ctx.cwd, Some(path), "--scratch")?;
+    Ok(ScratchRoot::Host {
+        path: crate::records::NativeString::from_bytes(os_bytes(&path))
+            .map_err(|error| usage("--scratch", error.to_string()))?,
+    })
+}
+
+/// §6.2: `[jail_host.network] translation_prefixes` is host configuration,
+/// merged into proxy policy before digest creation. Each entry is parsed and
+/// re-rendered in canonical RFC 5952 form so equivalent spellings of one
+/// prefix cannot yield two digests (§6.3).
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] for an entry that is not a prefix.
+fn translation_prefixes(host: Option<config::JailHostSection>) -> Result<Vec<String>, JailError> {
+    match host
+        .and_then(|host| host.network)
+        .map(|network| network.translation_prefixes)
+    {
+        Some(entries) => config::canonical_translation_prefixes(
+            "jail_host.network.translation_prefixes",
+            &entries,
+        ),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// jail-v2 §7.2: the operator's command rules, validated here so a refusal
+/// names its key; the Linux platform compiles the same rules for the
+/// observer.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] at `jail.commands` for a rule that does not
+/// compile, or a run that cannot match it (only a contained Linux run with
+/// observation on sees each exec).
+fn apply_command_rules(
+    resolved: &mut Resolved,
+    rules: &crate::commands::Rules,
+    profile: ProfileName,
+) -> Result<(), JailError> {
+    rules.compile().map_err(|e| usage("jail.commands", e))?;
+    if resolved.snapshot.platform != crate::records::Os::Linux
+        || profile == ProfileName::None
+        || resolved.snapshot.observation.mode != crate::records::ObserveMode::On
+    {
+        return Err(usage(
+            "jail.commands",
+            "command rules require contained Linux execution with --observe on",
+        ));
+    }
+    let rules = rules.clone();
+    resolved.amend(
+        vec![policy::ProvenanceEntry {
+            origin: LayerOrigin::OperatorConfig("config.toml".to_owned()).label(),
+            key: "jail.commands".to_owned(),
+            detail: None,
+        }],
+        |snapshot| {
+            snapshot.commands = rules;
+            Ok(())
+        },
+    )
+}
+
+/// `learn`: the observer also captures read-only opens for the proposal.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] at `learn` where learning cannot run: it
+/// needs a contained Linux run with the real observer on.
+fn enable_learning(resolved: &mut Resolved, profile: ProfileName) -> Result<(), JailError> {
+    if profile == ProfileName::None || resolved.snapshot.platform != crate::records::Os::Linux {
+        return Err(usage(
+            "learn",
+            "learning requires a contained Linux run with the real observer",
+        ));
+    }
+    if resolved.snapshot.observation.mode != crate::records::ObserveMode::On {
+        return Err(usage("learn", "learning requires observation on"));
+    }
+    resolved.amend(
+        vec![policy::ProvenanceEntry {
+            origin: LayerOrigin::CommandLine.label(),
+            key: "observation.learning".to_owned(),
+            detail: Some("learn".to_owned()),
+        }],
+        |snapshot| {
+            snapshot.observation.learning = true;
+            Ok(())
+        },
+    )
+}
+
+/// §12 "A launch profile path inside any child-writable grant refuses", and
+/// north star §4.5 refuses one inside the workspace; the same rule holds for
+/// every credential source, by identity: the child must not be able to
+/// change what it is given. A source that cannot be walked now is left to
+/// staging and doctor, which report it by reason.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] for a launch profile or a credential source
+/// inside a grant the child can write.
+fn check_launch_placement(
+    resolved: &Resolved,
+    workspace: &Path,
+    launch: &launch_profile::LaunchProfile,
+) -> Result<(), JailError> {
+    launch_profile::check_outside_writable(launch, &child_writable_roots(resolved, workspace))?;
+    let forbidden = forbidden_identities(resolved, workspace)?;
+    for credential in &launch.credentials {
+        if let Ok(chain) = crate::credentials::source_chain(credential.source.as_bytes())
+            && chain.iter().any(|identity| forbidden.contains(identity))
+        {
+            return Err(usage(
+                &format!("launch.credentials.{}.source", credential.id),
+                format!(
+                    "credential `{}` lies inside a grant the child can write",
+                    credential.id
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Every root the child can write under the resolved policy: the workspace,
