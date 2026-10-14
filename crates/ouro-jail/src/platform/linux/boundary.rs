@@ -945,10 +945,16 @@ impl Planned {
             },
         )?;
         let mut agent = agent_network(snapshot, plan, sinks, exe, bwrap_path)?;
+        let mut vault_ca = None;
         if let Some(handoff) = &plan.launch
             && !handoff.vault.is_empty()
         {
-            stage_vault(&mut bplan, agent.as_mut(), &plan.attempt_id, handoff)?;
+            vault_ca = Some(stage_vault(
+                &mut bplan,
+                agent.as_mut(),
+                &plan.attempt_id,
+                handoff,
+            )?);
         }
         // The staged vendor state and bind_ro sources, bound by the
         // descriptors staging examined (§9.1, §12).
@@ -986,6 +992,7 @@ impl Planned {
         // which removes the directories it made in the operator's workspace.
         let (scan, pins, pinned_fds, placeholders) = prepare_mounts(
             &mut bplan,
+            vault_ca.into_iter().collect(),
             &plan.attempt_dir,
             &name_refs,
             snapshot.filesystem.protected_coverage,
@@ -1151,6 +1158,7 @@ fn agent_network(
 
 /// Stages the vault's public CA in the vendor state, binds it read-only and
 /// points the CA variables at it, and hands the vault to the `agent` proxy.
+/// Returns the pin of the CA file it wrote, which the bind takes.
 ///
 /// # Errors
 /// A vault that cannot be built or staged, or no `agent` network to run it.
@@ -1159,7 +1167,7 @@ fn stage_vault(
     agent: Option<&mut AgentNet>,
     attempt_id: &str,
     handoff: &crate::credentials::LaunchHandoff,
-) -> Result<(), JailError> {
+) -> Result<jfs::PinnedPath, JailError> {
     let vault_io = |e| {
         preparing(
             ErrorCode::CredentialUnavailable,
@@ -1177,14 +1185,10 @@ fn stage_vault(
     let dir = crate::state::anchored::Dir::from_owned(
         vendor.fd.as_fd().try_clone_to_owned().map_err(vault_io)?,
     );
-    let name = crate::state::anchored::Name::new(b".ouro-vault-ca.pem").map_err(vault_io)?;
-    let mut cert = dir.create_file_at(&name, 0o600).map_err(vault_io)?;
-    std::io::Write::write_all(&mut cert, vault.ca_pem().as_bytes()).map_err(vault_io)?;
+    let source = vendor.host_path.join(VAULT_CA_NAME);
+    let pin = write_vault_ca(&dir, &source, vault.ca_pem().as_bytes()).map_err(vault_io)?;
     let destination = PathBuf::from("/run/ouro/vault-ca.pem");
-    bplan.extra_ro_binds.push((
-        vendor.host_path.join(".ouro-vault-ca.pem"),
-        destination.clone(),
-    ));
+    bplan.extra_ro_binds.push((source, destination.clone()));
     for (name, value) in vault.environment() {
         bplan.env.push((name.into(), value.into()));
     }
@@ -1197,7 +1201,35 @@ fn stage_vault(
     agent
         .ok_or_else(|| preparing(ErrorCode::InvalidConfig, "vault requires agent network"))?
         .configure_vault(vault);
-    Ok(())
+    Ok(pin)
+}
+
+/// The vault CA's name in the vendor state directory.
+const VAULT_CA_NAME: &str = ".ouro-vault-ca.pem";
+
+/// Writes `pem` as [`VAULT_CA_NAME`] in the vendor state `dir`, whose host
+/// path makes `source`, and pins the file written. The directory is the
+/// agent's own writable state, which another run of it may change while
+/// this one prepares: the pin is taken through the directory and checked
+/// against the written file, the bind takes the pinned object rather than
+/// whatever `source` names when the mounts are pinned, and the handoff
+/// check refuses a `source` that no longer names it.
+fn write_vault_ca(
+    dir: &crate::state::anchored::Dir,
+    source: &Path,
+    pem: &[u8],
+) -> std::io::Result<jfs::PinnedPath> {
+    let name = crate::state::anchored::Name::new(VAULT_CA_NAME.as_bytes())?;
+    let mut cert = dir.create_file_at(&name, 0o600)?;
+    std::io::Write::write_all(&mut cert, pem)?;
+    let handle = dir.open_path_at(&name)?;
+    let written = crate::state::anchored::fstat(cert.as_fd())?.identity();
+    if crate::state::anchored::fstat(handle.as_fd())?.identity() != written {
+        return Err(std::io::Error::other(
+            "the CA file was replaced as it was written",
+        ));
+    }
+    jfs::PinnedPath::adopt(handle, source)
 }
 
 /// Operator grants are enforced, not merely recorded (I02, north-star §4.2):
@@ -2853,6 +2885,27 @@ impl Tree for Boundary {
 mod tests {
     use super::super::platform::tests::plan_request;
     use super::*;
+
+    /// The vault CA's pin is the file written, held through the vendor
+    /// directory: a name replaced afterwards does not move it, and its
+    /// handoff check refuses.
+    #[test]
+    fn the_vault_ca_pin_is_the_file_written() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = crate::state::anchored::Dir::open_trusted(temp.path()).unwrap();
+        let source = temp.path().join(VAULT_CA_NAME);
+        let pin = write_vault_ca(&dir, &source, b"pem").unwrap();
+        let written = std::fs::metadata(&source).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"pem");
+        assert_eq!(pin.identity(), (written.dev(), written.ino()));
+        pin.verify().unwrap();
+        let swap = temp.path().join("swap");
+        std::fs::write(&swap, b"planted").unwrap();
+        std::fs::rename(&swap, &source).unwrap();
+        assert_eq!(pin.identity(), (written.dev(), written.ino()));
+        assert!(pin.verify().is_err());
+    }
 
     #[test]
     fn a_launcher_setup_failure_names_the_mechanism_it_could_not_establish() {

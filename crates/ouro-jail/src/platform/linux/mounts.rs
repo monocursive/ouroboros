@@ -730,8 +730,11 @@ pub(super) fn sanitize_resolv_conf(bytes: Option<&[u8]>) -> (String, &'static st
 
 /// Pin every source once, scan the pinned writable roots, then give each bind
 /// its own descriptor. Bubblewrap validates the mounted inode against that fd.
+/// `pinned` are sources this process pinned already, from objects it made:
+/// they are bound as pinned, never pinned again by path.
 pub(super) fn prepare_mounts(
     plan: &mut BwrapPlan,
+    pinned: Vec<jfs::PinnedPath>,
     attempt_dir: &Path,
     names: &[&str],
     coverage: ProtectedCoverage,
@@ -743,7 +746,10 @@ pub(super) fn prepare_mounts(
             format!("mount source pinning failed: {err}"),
         )
     };
-    let mut pins = BTreeMap::<PathBuf, jfs::PinnedPath>::new();
+    let mut pins: BTreeMap<PathBuf, jfs::PinnedPath> = pinned
+        .into_iter()
+        .map(|pin| (pin.path().to_owned(), pin))
+        .collect();
     let mut roots: Vec<(PathBuf, PathBuf)> = plan
         .extra_rw_binds
         .iter()
@@ -1137,6 +1143,7 @@ mod tests {
         }
         let (scan, _pins, fds, placeholders) = prepare_mounts(
             &mut plan,
+            Vec::new(),
             &root.join("attempt"),
             &jfs::PROTECTED_LITERALS,
             ProtectedCoverage::ExistingAndRoot,
@@ -1176,6 +1183,7 @@ mod tests {
         let attempt = root.join("attempt");
         let (_scan, _pins, _fds, placeholders) = prepare_mounts(
             &mut plan,
+            Vec::new(),
             &attempt,
             &jfs::PROTECTED_LITERALS,
             ProtectedCoverage::ExistingAndRoot,
@@ -1227,6 +1235,7 @@ mod tests {
         std::fs::create_dir(&attempt).unwrap();
         let Err(error) = prepare_mounts(
             &mut plan,
+            Vec::new(),
             &attempt,
             &jfs::PROTECTED_LITERALS,
             ProtectedCoverage::ExistingAndRoot,
@@ -1248,6 +1257,7 @@ mod tests {
         assert!(
             prepare_mounts(
                 &mut plan,
+                Vec::new(),
                 &root.join("attempt"),
                 &jfs::PROTECTED_LITERALS,
                 ProtectedCoverage::ExistingAndRoot
@@ -1266,6 +1276,7 @@ mod tests {
         }
         let (_, _pins, fds, placeholders) = prepare_mounts(
             &mut plan,
+            Vec::new(),
             &root.join("attempt"),
             &jfs::PROTECTED_LITERALS,
             ProtectedCoverage::ExistingAndRoot,
@@ -1276,6 +1287,40 @@ mod tests {
         for (fd, target) in fds {
             map.add(fd, target).unwrap();
         }
+        drop(placeholders);
+    }
+
+    /// A source this process pinned before the mounts were prepared is bound
+    /// as that pin: a name replaced since is not pinned in its place, and
+    /// the handoff check of the pin refuses it.
+    #[test]
+    fn a_source_pinned_beforehand_is_bound_as_pinned_and_not_pinned_again() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut plan = mount_plan(root);
+        let source = root.join("external/ca.pem");
+        std::fs::write(&source, b"written").unwrap();
+        let written = std::fs::metadata(&source).unwrap();
+        let pin = jfs::PinnedPath::open(&source).unwrap();
+        let swap = root.join("external/swap.pem");
+        std::fs::write(&swap, b"planted").unwrap();
+        std::fs::rename(&swap, &source).unwrap();
+        plan.bind_read_only(source.clone(), PathBuf::from("/run/ouro/vault-ca.pem"));
+        let (_, pins, _fds, placeholders) = prepare_mounts(
+            &mut plan,
+            vec![pin],
+            &root.join("attempt"),
+            &jfs::PROTECTED_LITERALS,
+            ProtectedCoverage::None,
+        )
+        .unwrap();
+        let bound = pins
+            .iter()
+            .find(|pin| pin.path() == source)
+            .expect("the source is pinned");
+        assert_eq!(bound.identity(), (written.dev(), written.ino()));
+        assert!(bound.verify().is_err(), "the replaced name is refused");
         drop(placeholders);
     }
 

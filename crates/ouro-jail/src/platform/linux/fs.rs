@@ -924,6 +924,22 @@ impl PinnedPath {
         })
     }
 
+    /// Pin an object this process holds already, under the path that names
+    /// it: the bind takes that object, and [`PinnedPath::verify`] checks the
+    /// path still names it.
+    ///
+    /// # Errors
+    ///
+    /// The errno from `fstat`.
+    pub fn adopt(fd: OwnedFd, path: &Path) -> Result<Self, io::Error> {
+        let stat = fstat(fd.as_fd())?;
+        Ok(Self {
+            fd,
+            path: path.to_owned(),
+            stat,
+        })
+    }
+
     /// Executable owner/mode must stay fixed as well as its pinned identity.
     ///
     /// # Errors
