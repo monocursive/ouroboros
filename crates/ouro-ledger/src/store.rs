@@ -43,12 +43,7 @@ pub(crate) use verification::{VerifyPlan, verify_page};
 pub use writer::Store;
 
 fn check_run_id(id: &str) -> Result<()> {
-    if !id.starts_with("run_")
-        || id.len() != 36
-        || !id[4..]
-            .bytes()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-    {
+    if !crate::protocol::run_id(id) {
         return Err(LedgerError::refused("invalid run id"));
     }
     Ok(())

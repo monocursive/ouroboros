@@ -290,15 +290,8 @@ fn compare_with(
             "diff limit must be between 1 and 1000",
         ));
     }
-    for run in [left, right] {
-        if run.len() != 36
-            || !run.starts_with("run_")
-            || !run.as_bytes()[4..]
-                .iter()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
-        {
-            return Err(LedgerError::refused("diff requires canonical run ids"));
-        }
+    if !(crate::protocol::run_id(left) && crate::protocol::run_id(right)) {
+        return Err(LedgerError::refused("diff requires canonical run ids"));
     }
     let position: Option<Position> =
         paging::position(after, POSITION_BYTES, "diff position exceeds bound")?;

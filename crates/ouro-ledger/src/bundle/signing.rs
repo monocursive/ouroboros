@@ -50,11 +50,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex<const N: usize>(value: &str) -> Result<[u8; N]> {
-    if value.len() != N * 2
-        || !value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
+    if !crate::protocol::lower_hex(value, N * 2) {
         return Err(error("invalid Ed25519 key or signature encoding"));
     }
     let mut result = [0; N];

@@ -299,11 +299,7 @@ mod linux {
     fn valid_unit(unit: &str) -> bool {
         unit.strip_prefix("ouro-ledger-owner-")
             .and_then(|s| s.strip_suffix(".service"))
-            .is_some_and(|s| {
-                s.len() == 32
-                    && s.bytes()
-                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-            })
+            .is_some_and(|s| crate::protocol::lower_hex(s, 32))
     }
 
     pub fn launch(options: &runner::RunOptions) -> Result<RunRecord> {

@@ -148,10 +148,7 @@ fn epoch_seconds() -> Result<u64> {
 }
 
 fn token_valid(value: &str) -> bool {
-    value.len() == 32
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    crate::protocol::lower_hex(value, 32)
 }
 
 fn durable_digest(value: &impl Serialize) -> Result<String> {
@@ -620,11 +617,7 @@ impl Readers {
         self.sessions
             .retain(|id, _| durable.valid.iter().any(|s| &s.id == id));
         let (id, token) = if let Some(cursor) = &request.cursor {
-            if cursor.len() != 64
-                || !cursor
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-            {
+            if !crate::protocol::lower_hex(cursor, 64) {
                 return Err(LedgerError::refused("invalid reader cursor"));
             }
             let id = cursor[..32].to_owned();

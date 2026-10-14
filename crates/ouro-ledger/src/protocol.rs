@@ -116,14 +116,28 @@ pub fn read_bounded(reader: impl io::Read, max: u64, refusal: &str) -> Result<Ve
     Ok(bytes)
 }
 
+/// Whether `value` is exactly `digits` lower-case hexadecimal digits: the
+/// one spelling of every digest, id and token the ledger issues.
+pub(crate) fn lower_hex(value: &str, digits: usize) -> bool {
+    value.len() == digits
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// A `sha256:` digest in lower-case hexadecimal, as every ledger record
 /// writes one.
 pub(crate) fn sha256_digest(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..]
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| lower_hex(hex, 64))
+}
+
+/// A run id as the writer issues one: `run_` and 32 lower-case hex digits.
+pub(crate) fn run_id(value: &str) -> bool {
+    value
+        .strip_prefix("run_")
+        .is_some_and(|hex| lower_hex(hex, 32))
 }
 
 /// A closed vocabulary of the wire: an enum whose serde spelling is its
@@ -681,4 +695,25 @@ pub enum Request {
 pub enum Response {
     Ok { value: Value },
     Error { message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issued_ids_and_digests_are_exactly_lower_case_hex() {
+        let hex = "0123456789abcdef".repeat(2);
+        assert!(lower_hex(&hex, 32));
+        assert!(!lower_hex(&hex.to_uppercase(), 32));
+        assert!(!lower_hex(&hex, 31));
+        assert!(!lower_hex(&format!("{}g", &hex[1..]), 32));
+        assert!(run_id(&format!("run_{hex}")));
+        assert!(!run_id(&format!("run_{}", hex.to_uppercase())));
+        assert!(!run_id(&format!("rum_{hex}")));
+        assert!(!run_id(&format!("run_{hex}0")));
+        assert!(sha256_digest(&format!("sha256:{hex}{hex}")));
+        assert!(!sha256_digest(&format!("sha256:{hex}")));
+        assert!(!sha256_digest(&format!("sha512:{hex}{hex}")));
+    }
 }
