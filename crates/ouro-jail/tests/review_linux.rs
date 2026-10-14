@@ -1,10 +1,10 @@
-//! Independent review of the J1 Linux execution slice, adopted as regression
-//! tests.
+//! An independent review of the Linux execution path, adopted as regression
+//! tests: each checks one promise the spec makes, written by a reviewer
+//! rather than the author of the code it checks.
 //!
-//! Written by the slice's reviewer, not by its author, and kept as written:
-//! every test here is a check of one promise the spec makes, and the three
-//! that failed are the two HIGH defects and the exec-outcome defect this
-//! branch fixes. Live tests need `OURO_CONFORMANCE=1` and the reference host.
+//! Live tests run where `common::live()` finds a working backend and skip
+//! elsewhere with the reason; `OURO_CONFORMANCE=1` turns a skip into a
+//! failure on the reference host.
 //!
 //! Known mutation survivor, recorded here because there is no honest test for
 //! it: deleting the SIGKILL of the namespace init in `hard_kill` leaves every
@@ -426,7 +426,9 @@ print(json.dumps(out))
 // 2. Launch and exec confirmation
 // ===========================================================================
 
-/// X04: the four exec failures are distinguishable and exit 125 is an exit.
+/// X04: the three exec failures (a missing executable, a file that is not
+/// executable, a script whose interpreter is missing) are refusals the
+/// receipt tells apart, and exit 125 is an exit.
 #[test]
 fn r2_exec_failures_are_distinguishable_and_exit_125_is_an_exit() {
     if !live() {
@@ -473,17 +475,25 @@ fn r2_exec_failures_are_distinguishable_and_exit_125_is_an_exit() {
         .run()
         .expect("run");
     let f = exec_failure_facts(&run, "missing interpreter");
+    assert_eq!(run.code(), Some(125));
     facts.push(("missing interpreter", f.0, f.1, f.2));
 
-    for (name, phase, _kind, message) in &facts {
+    for (name, phase, kind, message) in &facts {
         assert_eq!(phase, "refused", "{name}: phase");
+        assert_eq!(kind, "exec_error", "{name}: outcome kind");
         assert!(
             !message.is_empty(),
             "{name}: nothing says why the exec failed"
         );
     }
+    // The same outcome kind for all three, so what tells them apart is the
+    // reason the receipt gives: one per failure.
     let messages: BTreeSet<&String> = facts.iter().map(|(_, _, _, m)| m).collect();
-    eprintln!("distinct messages: {messages:?}");
+    assert_eq!(
+        messages.len(),
+        facts.len(),
+        "two exec failures read the same: {facts:#?}"
+    );
 
     // Exit 125 is an exit, never a refusal.
     let c = case();

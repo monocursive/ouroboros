@@ -1,12 +1,13 @@
 #![cfg(target_os = "linux")]
-//! J5 milestone proof: the process, gate-protocol and lifetime clauses that
-//! J1 and J2 left without a live test (gap analysis §1.2, slice J5-B1).
+//! The process, gate-protocol and lifetime clauses of jail-v1 §15, each with
+//! a live test.
 //!
 //! Each test names the §15 row and clause it closes and drives the real
 //! `ouro-jail` binary on the reference host through the harness. Every run
 //! uses private state; every process a test signals is one it started (the
 //! jail it spawned, or a pid the jail's own receipt names for that attempt).
-//! Live tests need `OURO_CONFORMANCE=1` on the reference host.
+//! Live tests run where `common::live()` says the host can, skip elsewhere
+//! with the reason, and fail instead of skipping under `OURO_CONFORMANCE=1`.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

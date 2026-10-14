@@ -1412,22 +1412,14 @@ fn m03_doctor_refuses_when_the_backend_is_not_on_the_operators_path() {
     // not provisioned the backend, and saying so is the whole point of the
     // command; reaching past PATH to a well-known location would report a
     // capability the operator did not offer.
-    let empty = harness::fixture_path()
-        .parent()
-        .expect("the fixture has a directory")
-        .join("no-backend-here");
-    std::fs::create_dir_all(&empty).expect("an empty directory");
+    let state = common::private_tempdir();
+    let empty = state.path().join("no-backend-here");
+    std::fs::create_dir(&empty).expect("an empty directory");
     let output = std::process::Command::new(harness::jail_path())
         .args(["doctor", "--json"])
         .env("PATH", &empty)
-        .env(
-            "OURO_DATA_DIR",
-            std::env::temp_dir().join("ouro-doctor-nobwrap-data"),
-        )
-        .env(
-            "OURO_CONFIG_DIR",
-            std::env::temp_dir().join("ouro-doctor-nobwrap-cfg"),
-        )
+        .env("OURO_DATA_DIR", state.path().join("data"))
+        .env("OURO_CONFIG_DIR", state.path().join("config"))
         .output()
         .expect("doctor runs");
     let report: Value = serde_json::from_slice(&output.stdout).expect("one JSON document");
@@ -1685,16 +1677,11 @@ fn doctor_reports_every_probe_and_the_manifest_agrees() {
     if !live() {
         return;
     }
+    let state = common::private_tempdir();
     let output = std::process::Command::new(harness::jail_path())
         .args(["doctor", "--json"])
-        .env(
-            "OURO_DATA_DIR",
-            std::env::temp_dir().join("ouro-doctor-data"),
-        )
-        .env(
-            "OURO_CONFIG_DIR",
-            std::env::temp_dir().join("ouro-doctor-cfg"),
-        )
+        .env("OURO_DATA_DIR", state.path().join("data"))
+        .env("OURO_CONFIG_DIR", state.path().join("config"))
         .output()
         .expect("doctor runs");
     let report: Value =

@@ -1545,7 +1545,8 @@ fn pressure_case(opens: usize, sleep_ms: u64) -> (Case, Vec<OsString>) {
 /// recognisable prefix (never a torn frame followed by more bytes) — the
 /// supervision loop never waits on the full/partial trace write. The
 /// enforcement point is the nonblocking external trace fd
-/// (`trace.rs FdSink::from_raw_fd` calls `set_nonblocking`): with a blocking fd
+/// (`FdSink::new`, which `FdSink::for_attempt` builds on, calls
+/// `set_nonblocking` on the `OwnedFd` it takes): with a blocking fd
 /// the write to the full pipe blocks the supervision loop forever (the
 /// consumer reads nothing until after exit), the wall never fires, and the run
 /// hits the harness timeout (verified RED on the host by removing
@@ -1618,7 +1619,7 @@ fn r03_a_wall_fires_on_time_under_a_saturated_trace() {
 /// — the wall is enforced while the trace is saturated but before the loss is
 /// declared. Saturation is guaranteed by the event volume, not timed by a
 /// sleep. The enforcement point is the nonblocking external trace fd
-/// (`trace.rs FdSink::from_raw_fd set_nonblocking`): a blocking fd hangs the
+/// (`FdSink::new`'s `set_nonblocking`): a blocking fd hangs the
 /// supervision loop on the full pipe and the wall never fires (harness
 /// timeout).
 #[test]

@@ -1,7 +1,6 @@
 #![cfg(target_os = "linux")]
-//! J5 milestone proof: the lifetime clauses of jail-v1 §15 (L01, L02, L03,
-//! L04, X07, C02) that J1 to J4 left without a test that can fail (slice
-//! J5-B3, after the J5 acceptance-map review and the J5-B1 review).
+//! The lifetime clauses of jail-v1 §15 (L01, L02, L03, L04, X07, C02), each
+//! with a live test that can fail.
 //!
 //! Every test drives the real `ouro-jail run` (or `gc`) on the reference host
 //! and observes the tree itself, never only the receipt's word for it: the
@@ -21,7 +20,9 @@
 //! gate above it), so parallel tests never cross-wire channels and a test
 //! can wait for any control message kind while the run is still going.
 //!
-//! Live tests need `OURO_CONFORMANCE=1` on the reference host.
+//! Live tests run where `common::live()` (and, for `none`, a delegated leaf)
+//! says the host can, skip elsewhere with the reason, and fail instead of
+//! skipping under `OURO_CONFORMANCE=1`.
 
 use std::io::Write as _;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};

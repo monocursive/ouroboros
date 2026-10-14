@@ -22,10 +22,10 @@ use tempfile::TempDir;
 /// their own. The check stays strict; the tests stop handing it a directory
 /// that fails it for reasons that have nothing to do with what they test.
 ///
-/// Every test file uses this, not only the ones that build a state root today:
-/// which temporary directory ends up as a state-root ancestor is a detail that
-/// changes when a test is edited, and the umask of the machine running it is
-/// not something a test should depend on either way.
+/// Use it for every temporary directory a test makes, not only for one that
+/// builds a state root: which directory ends up a state-root ancestor is a
+/// detail that changes when a test is edited, and the umask of the machine
+/// running it is not something a test should depend on either way.
 pub fn private_tempdir() -> TempDir {
     tempfile::Builder::new()
         .permissions(Permissions::from_mode(0o700))
@@ -112,7 +112,7 @@ pub fn rerun_self(name: &str, env: &[(&str, &std::ffi::OsStr)]) -> String {
 // backend and a user namespace says so and skips where it cannot have them,
 // and under `OURO_CONFORMANCE=1` — the provisioned host — the same call fails
 // instead, because there a missing capability is a real result. One answer to
-// "can this host run these?", shared by all three Linux test binaries.
+// "can this host run these?", shared by every live suite.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -353,11 +353,11 @@ fn which(program: &str) -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// J4-R, J5-C: the record checks the schema cannot express (R01)
+// The record checks the schema cannot express (R01)
 // ---------------------------------------------------------------------------
 
 /// The rules a receipt's schema cannot state, as the library checks them
-/// (`ouro_jail::records::semantic::receipt`, J5-C): canonical native byte
+/// (`ouro_jail::records::semantic::receipt`): canonical native byte
 /// strings, unique credential ids and limit keys, a counted class's source
 /// not unsupported, and gap intervals in order. `validate_contract.py` holds
 /// the port of the same rules, over the same corpus.
@@ -389,7 +389,7 @@ pub fn native_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
 
 /// Every `*.schema.json` in `dir`, by stem.
 ///
-/// J5-C review item 1: a second file declaring an `$id` that another file
+/// A second file declaring an `$id` that another file
 /// already declares is refused. The registry keeps one resource per `$id`, so
 /// an unfrozen file could otherwise silently replace a frozen schema, with no
 /// frozen sha256 changing and the winner decided by directory order.
@@ -518,7 +518,7 @@ pub fn read_receipt(path: &std::path::Path) -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// J5-C: traces, control transcripts and whole runs (R01, §8.2, §13.1, §13.3)
+// Traces, control transcripts and whole runs (R01, §8.2, §13.1, §13.3)
 // ---------------------------------------------------------------------------
 
 fn schema_errors(schema: &str, value: &serde_json::Value) -> Vec<String> {

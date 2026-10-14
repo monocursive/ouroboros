@@ -1542,11 +1542,17 @@ fn c02_a_replaced_vendor_state_directory_is_never_deleted() {
     assert!(attempt.join("parked/a").is_dir());
 }
 
+/// A launch profile that stages credentials is refused, when the platform
+/// refuses before any boundary, exactly as a plain `--profile agent` run is,
+/// and stages nothing first.
+///
+/// The real platform for this OS refuses here: macOS because execution is
+/// not implemented there, Linux because its capability probes run the
+/// current executable, which in this test is the test binary rather than
+/// `ouro-jail`, so `tree_termination` is reported missing at probing. Both
+/// refusals come before staging.
 #[test]
-fn an_agent_launch_profile_resolves_and_then_refuses_exactly_as_agent_does_today() {
-    // The real platform for this OS: macOS refuses execution as unsupported,
-    // Linux refuses `agent` before any boundary (wave 2 enables it). Either
-    // way nothing is staged and no vendor state is created.
+fn an_agent_launch_profile_is_refused_before_staging_as_plain_agent_is() {
     let fixture = Fixture::new();
     let auth = fixture.credential("auth.json", b"a");
     let config = fixture.credential("config.toml", b"b");
@@ -1594,12 +1600,21 @@ fn an_agent_launch_profile_resolves_and_then_refuses_exactly_as_agent_does_today
             &args,
         )
     };
-    assert_eq!(launched.exit_code, 125);
-    assert_eq!(launched.exit_code, plain.exit_code);
-    assert_eq!(
-        launched.error.as_ref().map(|error| error.code),
-        plain.error.as_ref().map(|error| error.code)
-    );
+    let code = if cfg!(target_os = "linux") {
+        ErrorCode::MissingCapability
+    } else {
+        ErrorCode::UnsupportedPlatform
+    };
+    let stage = ouro_jail::records::ErrorStage::Probing;
+    for (label, report) in [("plain", &plain), ("launched", &launched)] {
+        assert_eq!(report.exit_code, 125, "{label}");
+        let error = report.error.as_ref().expect("a refusal");
+        assert_eq!(
+            (error.code, error.stage),
+            (code, stage),
+            "{label}: {error:?}"
+        );
+    }
     let receipt = receipt_json(&launched);
     assert_eq!(receipt["phase"], "refused");
     assert_eq!(receipt["state_cleanup"], "not_needed");
@@ -1610,7 +1625,7 @@ fn an_agent_launch_profile_resolves_and_then_refuses_exactly_as_agent_does_today
 }
 
 // ---------------------------------------------------------------------------
-// Staging, directly (the API the platform and wave 2 call)
+// Staging, directly (the API the platforms call)
 // ---------------------------------------------------------------------------
 
 fn stage_one_source(fixture: &Fixture, source: &Path) -> Result<(), (JailError, usize)> {
