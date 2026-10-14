@@ -2912,6 +2912,27 @@ fn relay_write(fd: RawFd, buffer: &[u8], socket: bool) -> std::io::Result<usize>
     }
 }
 
+/// How long relayed output gets, once the target has ended, to reach the
+/// operator's descriptors before the outcome is recorded.
+const OUTPUT_DRAIN_BUDGET: Duration = Duration::from_millis(250);
+/// The pause between drain passes that moved nothing.
+const OUTPUT_DRAIN_STEP: Duration = Duration::from_millis(1);
+
+/// Delivers what the child wrote through the output relays, within
+/// `budget`. Only output relays are waited for: a stdin relay finishes only
+/// at its origin's end-of-file or a broken pipe, which the target's end does
+/// not bring, so waiting for it would spend the whole budget on nothing. A
+/// pass that moves nothing sleeps a step rather than spin.
+fn drain_output_relays(relays: &mut [StdioRelay], budget: Duration) -> std::io::Result<()> {
+    let deadline = clock::Deadline::after(budget);
+    while relays.iter().any(|relay| !relay.to_child && !relay.done()) && !deadline.expired() {
+        if !pump_stdio_relays(relays)? {
+            std::thread::sleep(OUTPUT_DRAIN_STEP);
+        }
+    }
+    Ok(())
+}
+
 /// Visit every stream, including when an earlier stream made progress.
 fn pump_stdio_relays(relays: &mut [StdioRelay]) -> std::io::Result<bool> {
     let mut progress = false;
@@ -4147,23 +4168,14 @@ impl RunningExecution for LinuxRunning {
             self.sample_limits(true);
             // The child's end has closed by now; deliver what it wrote
             // through the relays before the outcome is recorded.
-            let drain = clock::Deadline::after(Duration::from_millis(250));
-            while self.boundary.stdio_relays.iter().any(|relay| !relay.done()) && !drain.expired() {
-                self.pump_stdio();
-                if self
-                    .boundary
-                    .stdio_relays
-                    .iter()
-                    .all(|relay| relay.buffer.is_empty())
-                    && self
-                        .boundary
-                        .stdio_relays
-                        .iter()
-                        .all(|relay| relay.finished)
-                {
-                    break;
-                }
-                std::thread::yield_now();
+            if let Err(err) =
+                drain_output_relays(&mut self.boundary.stdio_relays, OUTPUT_DRAIN_BUDGET)
+            {
+                self.pending.push_back(RunEvent::StdioFailed {
+                    reason: format!("a stdio relay failed: {err}"),
+                    after_target_end: true,
+                });
+                self.boundary.stdio_relays.clear();
             }
             if self
                 .boundary
@@ -5082,6 +5094,43 @@ mod tests {
         stdout.rewind().unwrap();
         stdout.read_to_string(&mut text).unwrap();
         assert_eq!(text, "stdout remains active");
+    }
+
+    #[test]
+    fn the_output_drain_waits_for_output_only() {
+        use std::io::{Read as _, Seek as _};
+        use std::os::fd::AsRawFd as _;
+        let mut stdout = tempfile::tempfile().unwrap();
+        let (out, writer) = output_relay(stdout.try_clone().unwrap());
+        super::relay_write(writer.as_raw_fd(), b"last words", false).unwrap();
+        drop(writer);
+        // A stdin origin that never reaches end-of-file while its peer lives.
+        let (origin, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (child_end, ours) = super::exec::pipe().unwrap();
+        super::set_nonblocking(ours.as_raw_fd()).unwrap();
+        let stdin = super::StdioRelay {
+            origin: origin.into(),
+            origin_socket: true,
+            ours: Some(ours),
+            to_child: true,
+            buffer: Vec::new(),
+            origin_eof: false,
+            finished: false,
+        };
+        let mut relays = [out, stdin];
+        let started = std::time::Instant::now();
+        super::drain_output_relays(&mut relays, std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the drain waited for a stdin relay the target's end cannot finish"
+        );
+        assert!(relays[0].done());
+        assert!(!relays[1].done(), "stdin stays open, unwaited for");
+        let mut text = String::new();
+        stdout.rewind().unwrap();
+        stdout.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "last words");
+        drop(child_end);
     }
 
     #[test]
