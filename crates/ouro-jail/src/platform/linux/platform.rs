@@ -687,14 +687,17 @@ struct Boundary {
     child: Option<BootstrapChild>,
     bootstrap_spawn: BootstrapSpawn,
     bwrap_pid: libc::pid_t,
-    /// A descriptor for bubblewrap, taken while it was known to be itself. A
-    /// pid number can come to mean another process; a pidfd cannot (§9.3).
-    bwrap_fd: Option<OwnedFd>,
+    /// A descriptor for bubblewrap, taken while it was this process's
+    /// unreaped child. A pid number can come to mean another process; a
+    /// pidfd cannot (§9.3).
+    bwrap_fd: OwnedFd,
     init_pid: libc::pid_t,
-    /// The same, for the namespace init.
+    /// The same, for the namespace init. Discovery refuses without it, so it
+    /// is missing only before discovery.
     init_fd: Option<OwnedFd>,
     launcher: identity::ProcessIdentity,
-    /// The launcher's own descriptor, for the cooperative stop.
+    /// The launcher's own descriptor, for the cooperative stop. Discovery
+    /// refuses without it, so it is missing only before discovery.
     launcher_fd: Option<OwnedFd>,
     launcher_argv: Vec<Vec<u8>>,
     /// The paths the launcher will try to `execve`, derived from the same
@@ -747,9 +750,7 @@ impl Boundary {
     /// Whether the backend's pidfd reports its exit, independent of whether
     /// its status has been collected yet.
     fn backend_exited(&self) -> bool {
-        self.bwrap_fd
-            .as_ref()
-            .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
+        super::watch::readable(self.bwrap_fd.as_raw_fd())
     }
     /// The watcher stays until released or until this supervisor is gone
     /// (§9.3). It is released only once the backend has ended, so its end
@@ -1382,6 +1383,14 @@ impl Boundary {
                 format!("the backend's pid {} does not fit a pid_t", child.id()),
             )
         })?;
+        // Taken while the backend is this process's unreaped child, so the
+        // descriptor names it; every later signal and exit check uses it.
+        let bwrap_fd = identity::pidfd_open(bwrap_pid).map_err(|err| {
+            preparing(
+                ErrorCode::BackendUnavailable,
+                format!("the backend's pidfd could not be opened: {err}"),
+            )
+        })?;
         // Root the cgroup namespace in this attempt's leaf. Moving only the
         // target after bubblewrap unshares exposes a /../../host-leaf path in
         // /proc/self/cgroup. Direct creation still requires the same parent
@@ -1428,7 +1437,7 @@ impl Boundary {
             child: Some(child.hand_over()),
             bootstrap_spawn,
             bwrap_pid,
-            bwrap_fd: identity::pidfd_open(bwrap_pid).ok(),
+            bwrap_fd,
             init_pid: -1,
             init_fd: None,
             launcher: identity::ProcessIdentity {
@@ -1606,9 +1615,16 @@ impl Boundary {
         };
         self.init_pid = init_pid;
         // Taken now, while the kernel has just named this pid as the
-        // namespace init: every later signal goes through the descriptor, so
-        // it cannot reach a process that merely inherited the number.
-        self.init_fd = identity::pidfd_open(init_pid).ok();
+        // namespace init: every later signal and liveness check goes through
+        // the descriptor, so neither can reach a process that merely
+        // inherited the number. Without it the tree's death could not be
+        // verified, so its absence refuses.
+        self.init_fd = Some(identity::pidfd_open(init_pid).map_err(|err| {
+            preparing(
+                ErrorCode::BackendUnavailable,
+                format!("the namespace init's pidfd could not be opened: {err}"),
+            )
+        })?);
 
         // The launcher is the init's child whose argv is the one we asked for.
         let launcher = loop {
@@ -1654,11 +1670,18 @@ impl Boundary {
                 format!("the launcher's identity could not be recorded: {err}"),
             )
         })?;
+        // The cooperative stop and the `agent` mediation hand-off go through
+        // this descriptor; without it neither could, so its absence refuses.
+        let launcher_fd = identity::pidfd_open(launcher).map_err(|err| {
+            preparing(
+                ErrorCode::BackendUnavailable,
+                format!("the launcher's pidfd could not be opened: {err}"),
+            )
+        })?;
         // bubblewrap reports the namespace ids it created; `/proc` says which
         // namespaces the launcher is actually in. Recording the first without
         // checking the second would be taking the backend's word for the
         // boundary, so both are read and they must agree.
-        self.launcher_fd = identity::pidfd_open(launcher).ok();
         self.ns_ids = identity::ns_ids(launcher);
         // Every namespace the plan asked for has to be one the launcher is
         // actually in, and a different one from this process's.
@@ -1764,14 +1787,7 @@ impl Boundary {
         // listener and sock_diag socket, start the mediator, and read back
         // the bridge it started (§10). Either one missing refuses, naming it.
         if let Some(agent) = self.agent.as_mut() {
-            let Some(launcher_fd) = self.launcher_fd.as_ref() else {
-                return Err(preparing(
-                    ErrorCode::MissingCapability,
-                    "the `agent` unix-peer mediation could not be established: the launcher \
-                     has no pidfd",
-                ));
-            };
-            agent.take_mediation(std::os::fd::AsFd::as_fd(launcher_fd))?;
+            agent.take_mediation(std::os::fd::AsFd::as_fd(&launcher_fd))?;
             let bridge = agent.discover_bridge(self.init_pid, self.ns_ids, &deadline)?;
             if let Some(leaf) = self.cgroup.as_ref() {
                 // Charged to the attempt (§9.3): the bridge is in the leaf.
@@ -1786,6 +1802,7 @@ impl Boundary {
                 })?;
             }
         }
+        self.launcher_fd = Some(launcher_fd);
 
         // Keep this fresh readback: a process can create a new platform after
         // a backend upgrade, while its minimum-version decision is cached.
@@ -1909,11 +1926,11 @@ impl Boundary {
         self.status.text.clone()
     }
 
+    /// Whether the backend has exited, collecting its status. Only for
+    /// discovery: from the observer's attach on, its thread owns every
+    /// `waitpid` in this process.
     fn exited(&mut self) -> bool {
-        if self.tracer.is_some() {
-            // The tracer thread owns every waitpid in this process.
-            return !std::path::Path::new(&format!("/proc/{}", self.bwrap_pid)).exists();
-        }
+        debug_assert!(self.tracer.is_none(), "the observer owns waitpid");
         match self.child.as_mut() {
             Some(child) => matches!(child.try_wait(), Ok(Some(_))),
             None => true,
@@ -1984,10 +2001,7 @@ impl Boundary {
         if let Some(leaf) = &self.cgroup {
             let _ = leaf.kill();
         }
-        for fd in [self.init_fd.as_ref(), self.bwrap_fd.as_ref()]
-            .into_iter()
-            .flatten()
-        {
+        for fd in self.init_fd.iter().chain([&self.bwrap_fd]) {
             let _ = identity::pidfd_send_signal(fd.as_raw_fd(), libc::SIGKILL);
         }
     }
@@ -2017,7 +2031,10 @@ impl Boundary {
     }
 
     fn remove_placeholders(&mut self) {
-        if init_alive(self.init_pid) || !self.observer_verified_the_tree() || !self.cgroup_empty() {
+        if init_alive(self.init_fd.as_ref(), self.init_pid)
+            || !self.observer_verified_the_tree()
+            || !self.cgroup_empty()
+        {
             return;
         }
         if self.placeholder_outcomes.is_empty() {
@@ -2060,10 +2077,9 @@ impl Boundary {
                     // The tracer's `waitpid(-1)` reaped it before it was
                     // stopped. Nothing else in this process waits, so an
                     // exited backend whose status is gone was reaped here.
-                    Err(error) if error.raw_os_error() == Some(libc::ECHILD) => self
-                        .bwrap_fd
-                        .as_ref()
-                        .is_some_and(|fd| super::watch::readable(fd.as_raw_fd())),
+                    Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                        self.backend_exited()
+                    }
                     _ => false,
                 }
             }
@@ -2077,11 +2093,7 @@ impl Boundary {
         loop {
             // As release_watcher_after_backend, by field: `init_dead` holds
             // a borrow of the init's pidfd.
-            if self
-                .bwrap_fd
-                .as_ref()
-                .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
-            {
+            if super::watch::readable(self.bwrap_fd.as_raw_fd()) {
                 self.watcher.release();
             }
             let settled = init_dead() && self.watcher.ended() && self.cgroup_empty();
@@ -4144,7 +4156,7 @@ impl RunningExecution for LinuxRunning {
         // Measured on this host: a SIGTERM sent to the outer bubblewrap kills
         // bubblewrap itself and never reaches the target, while a SIGTERM to
         // the target's own host pid runs its handler. So the cooperative stop
-        // goes to the target.
+        // goes to the target, through the pidfd discovery required.
         if let Some(fd) = self.boundary.launcher_fd.as_ref() {
             let _ = identity::pidfd_send_signal(fd.as_raw_fd(), libc::SIGTERM);
         }
@@ -4166,7 +4178,7 @@ impl RunningExecution for LinuxRunning {
             let tracer_done = self.boundary.tracer.is_none() || self.finished;
             if tracer_done
                 && self.bwrap_status.is_some()
-                && !init_alive(self.boundary.init_pid)
+                && !init_alive(self.boundary.init_fd.as_ref(), self.boundary.init_pid)
                 && self.boundary.cgroup_empty()
             {
                 natural = true;
@@ -4203,7 +4215,7 @@ impl RunningExecution for LinuxRunning {
         self.boundary.remove_placeholders();
 
         let mut tree = verdict(&TreeInputs {
-            init_alive: init_alive(self.boundary.init_pid),
+            init_alive: init_alive(self.boundary.init_fd.as_ref(), self.boundary.init_pid),
             backend_reaped: self.bwrap_status.is_some() && self.boundary.watcher.ended(),
             tracer_finished: self.boundary.tracer.is_none() || self.finished,
             natural_end: natural,
@@ -4501,8 +4513,15 @@ fn wrong_guess_stops_detail(summary: Option<&TracerSummary>) -> Value {
     })
 }
 
-fn init_alive(init: libc::pid_t) -> bool {
-    init > 0 && Path::new(&format!("/proc/{init}")).exists()
+/// Whether the namespace init is still running: from its pidfd once
+/// discovery took one, which turns readable at its exit and cannot come to
+/// name another process; before that, whether bubblewrap named an init whose
+/// `/proc` entry is still there.
+fn init_alive(init_fd: Option<&OwnedFd>, init_pid: libc::pid_t) -> bool {
+    match init_fd {
+        Some(fd) => !super::watch::readable(fd.as_raw_fd()),
+        None => init_pid > 0 && Path::new(&format!("/proc/{init_pid}")).exists(),
+    }
 }
 
 fn image_changed(pid: libc::pid_t) -> bool {
@@ -6039,6 +6058,37 @@ mod tests {
     #[should_panic(expected = "without its observer's account")]
     fn summarizing_an_observed_run_without_its_account_is_a_defect() {
         let _ = shared::observer_account(None);
+    }
+
+    /// The init's liveness comes from its pidfd once one is held: a zombie
+    /// has exited although its `/proc` entry is still there, and a pid
+    /// number can come to name another process, while the descriptor
+    /// cannot.
+    #[test]
+    fn init_liveness_is_read_from_its_pidfd() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        let fd = identity::pidfd_open(pid).unwrap();
+        assert!(init_alive(Some(&fd), pid));
+        child.kill().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !super::super::watch::readable(fd.as_raw_fd()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "SIGKILL not delivered"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            Path::new(&format!("/proc/{pid}")).exists(),
+            "the unreaped zombie keeps its /proc entry"
+        );
+        assert!(!init_alive(Some(&fd), pid), "an exited init is not alive");
+        child.wait().unwrap();
+        assert!(!init_alive(None, -1), "no init named: none alive");
     }
 
     /// A storage ceiling adds the hard-link denials to the `agent` baseline
