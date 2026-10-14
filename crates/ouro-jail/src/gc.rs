@@ -810,17 +810,37 @@ pub enum ScratchStep {
     AfterCgroup,
 }
 
+/// What [`decide`] established about the recorded supervisor.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum OwnerVerdict {
+    /// Alive: the same boot, pid and birth time.
+    Alive,
+    /// Its liveness cannot be established; why.
+    Unknown(String),
+    /// Dead: another boot, no process with its pid, a reused pid, or an
+    /// exited process; which.
+    Dead(String),
+}
+
+impl OwnerVerdict {
+    /// The report's spelling: `alive`, `unknown: <why>` or `dead: <how>`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            OwnerVerdict::Alive => "alive".to_owned(),
+            OwnerVerdict::Unknown(why) => format!("unknown: {why}"),
+            OwnerVerdict::Dead(how) => format!("dead: {how}"),
+        }
+    }
+}
+
 /// What [`decide`] allows for one attempt.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Decision {
     /// `Some`: touch nothing (and do not resume J3 cleanup either).
     pub retain: Option<Retention>,
-    /// What was established about the owner, for the report.
-    pub owner: Option<String>,
-    /// Whether the owner was established dead: another boot, no process
-    /// with its pid, a reused pid, or an exited process (J4 wave 2: what
-    /// permits removing its leftover temporary files).
-    pub owner_dead: bool,
+    /// What was established about the owner, when it was asked.
+    pub owner: Option<OwnerVerdict>,
     /// The execution cgroup.
     pub cgroup: CgroupStep,
     /// Managed scratch.
@@ -834,22 +854,27 @@ pub struct Decision {
     pub tree_never_existed: bool,
 }
 
-fn retained(reason: String, failed_access: bool, owner: Option<String>) -> Next {
+impl Decision {
+    /// Whether the owner was established dead (J4 wave 2: what permits
+    /// removing its leftover temporary files).
+    #[must_use]
+    pub fn owner_dead(&self) -> bool {
+        matches!(self.owner, Some(OwnerVerdict::Dead(_)))
+    }
+}
+
+fn retained(reason: String, failed_access: bool, owner: Option<OwnerVerdict>) -> Next {
     Next::Decided(Decision {
         retain: Some(Retention {
             reason,
             failed_access,
         }),
         owner,
-        owner_dead: false,
         cgroup: CgroupStep::Nothing,
         scratch: ScratchStep::NotApplicable,
         tree_never_existed: false,
     })
 }
-
-/// The owner text of every owner [`decide`] established dead starts so.
-const OWNER_DEAD: &str = "dead: ";
 
 /// The basis of a scratch removal the receipt itself permits.
 const RECEIPT_PROVES_END: &str = "the receipt proves the tree's end";
@@ -890,23 +915,20 @@ impl ScratchRule {
     }
 }
 
-fn decided(owner: Option<String>, cgroup: CgroupStep, scratch: ScratchStep) -> Next {
+fn decided(owner: OwnerVerdict, cgroup: CgroupStep, scratch: ScratchStep) -> Next {
     decided_with(owner, cgroup, scratch, false)
 }
 
 /// `decided` with the S4 fact: see [`Decision::tree_never_existed`].
 fn decided_with(
-    owner: Option<String>,
+    owner: OwnerVerdict,
     cgroup: CgroupStep,
     scratch: ScratchStep,
     tree_never_existed: bool,
 ) -> Next {
     Next::Decided(Decision {
         retain: None,
-        owner_dead: owner
-            .as_deref()
-            .is_some_and(|owner| owner.starts_with(OWNER_DEAD)),
-        owner,
+        owner: Some(owner),
         cgroup,
         scratch,
         tree_never_existed,
@@ -1008,14 +1030,14 @@ pub fn decide(facts: &Facts) -> Next {
     };
     let Some(owner) = &state.owner else {
         return decided(
-            Some("unknown: jail state records no owner birth identity".to_owned()),
+            OwnerVerdict::Unknown("jail state records no owner birth identity".to_owned()),
             keep_leaf("the owner cannot be identified".to_owned()),
             keep_scratch("the tree's end is not verified"),
         );
     };
     let Some(host_boot) = &facts.host.boot_id else {
         return decided(
-            Some("unknown: this host's boot identity cannot be read".to_owned()),
+            OwnerVerdict::Unknown("this host's boot identity cannot be read".to_owned()),
             keep_leaf("the boot cannot be compared".to_owned()),
             keep_scratch("the tree's end is not verified"),
         );
@@ -1024,7 +1046,7 @@ pub fn decide(facts: &Facts) -> Next {
         && *receipt_boot != owner.boot_id
     {
         return decided(
-            Some("unknown: jail state and the receipt name different boots".to_owned()),
+            OwnerVerdict::Unknown("jail state and the receipt name different boots".to_owned()),
             keep_leaf("the records disagree about the boot, so no cgroup is identified".to_owned()),
             keep_scratch("the tree's end is not verified"),
         );
@@ -1046,7 +1068,7 @@ pub fn decide(facts: &Facts) -> Next {
             (true, false) => CgroupStep::Settled(text.to_owned()),
         };
         return decided(
-            Some(format!("{OWNER_DEAD}recorded in another boot")),
+            OwnerVerdict::Dead("recorded in another boot".to_owned()),
             cgroup,
             scratch,
         );
@@ -1065,12 +1087,12 @@ pub fn decide(facts: &Facts) -> Next {
                     owner.pid
                 ),
                 false,
-                Some("alive".to_owned()),
+                Some(OwnerVerdict::Alive),
             );
         }
         Liveness::Unknown(reason) => {
             return decided(
-                Some(format!("unknown: {reason}")),
+                OwnerVerdict::Unknown(reason.clone()),
                 keep_leaf(format!("the owner's liveness is unknown ({reason})")),
                 keep_scratch("the tree's end is not verified"),
             );
@@ -1079,10 +1101,12 @@ pub fn decide(facts: &Facts) -> Next {
         Liveness::Reused => "its pid was reused (another birth time)",
         Liveness::Exited => "exited, not yet reaped",
     };
-    let owner_text = Some(format!("{OWNER_DEAD}{owner_text}"));
+    let verdict = OwnerVerdict::Dead(owner_text.to_owned());
 
-    let leaf = match source {
-        LeafSource::Recorded(leaf) => leaf,
+    let key = match source {
+        LeafSource::Recorded(leaf) => LeafKey::Identified(leaf),
+        // J4 W2-S: N7
+        LeafSource::NamedOnly(path) => LeafKey::Named(path),
         LeafSource::NotRecorded(reason) => {
             let cgroup = if tree_verified {
                 CgroupStep::Nothing
@@ -1095,29 +1119,24 @@ pub fn decide(facts: &Facts) -> Next {
             // receipt, even one claiming an unverified tree, keeps the
             // retention (its claim may be the only witness of a tree this
             // state root never learned to name).
-            let never = receipt_is_none && owner_dead_text(owner_text.as_deref());
             return decided_with(
-                owner_text,
+                verdict,
                 cgroup,
                 keep_scratch("no registered leaf verifies the tree's end"),
-                never,
+                receipt_is_none,
             );
         }
         LeafSource::Malformed(reason) => {
             return decided(
-                owner_text,
+                verdict,
                 CgroupStep::Report(format!("retained: {reason}")),
                 keep_scratch("no registered leaf verifies the tree's end"),
             );
         }
-        // J4 W2-S: N7
-        LeafSource::NamedOnly(path) => {
-            return decide_named(facts, state, path, owner_text, tree_verified, scratch);
-        }
     };
     if integrity_lost {
         return decided(
-            owner_text,
+            verdict,
             CgroupStep::Report(
                 "retained: the receipt records lost boundary integrity; the leaf is kept for \
                  explicit recovery"
@@ -1126,147 +1145,49 @@ pub fn decide(facts: &Facts) -> Next {
             keep_scratch("boundary integrity was lost"),
         );
     }
-    if state.gc_removed.contains(&leaf) {
+    if key.removed_earlier(state) {
         return decided(
-            owner_text,
+            verdict,
             CgroupStep::Settled("removed by gc earlier".to_owned()),
-            scratch.or(ScratchStep::Now(
-                "an earlier gc verified the leaf empty and removed it".to_owned(),
-            )),
+            scratch.or(ScratchStep::Now(key.removed_earlier_basis().to_owned())),
         );
     }
     let Some(probe) = &facts.leaf else {
-        return Next::ProbeLeaf(leaf);
+        return key.probe();
     };
-    match probe {
+    match (probe, key) {
         // J4 wave 3 (G3): an earlier pass saw this leaf empty and began to
         // remove it (or killed its tree and saw it empty), and it is gone: a
         // crash or a failed record after its `rmdir` finishes here.
-        LeafProbe::Absent
-            if state
-                .gc_verified
-                .iter()
-                .any(|verified| verified.is_of(&leaf)) =>
-        {
-            decided(
-                owner_text,
-                CgroupStep::Settled(GONE_AFTER_GC.to_owned()),
-                scratch.or(ScratchStep::Now(GONE_AFTER_GC.to_owned())),
-            )
-        }
-        LeafProbe::Absent => decided(
-            owner_text,
+        (LeafProbe::Absent, key) if key.verified_earlier(state) => decided(
+            verdict,
+            CgroupStep::Settled(GONE_AFTER_GC.to_owned()),
+            scratch.or(ScratchStep::Now(GONE_AFTER_GC.to_owned())),
+        ),
+        (LeafProbe::Absent, key) => decided(
+            verdict,
             if tree_verified {
                 CgroupStep::Nothing
             } else {
-                CgroupStep::Settled(
-                    "absent: the recorded leaf no longer exists, so the tree's end cannot be \
-                     verified through it"
-                        .to_owned(),
-                )
+                CgroupStep::Settled(key.absent().to_owned())
             },
-            keep_scratch("the recorded leaf is gone"),
+            keep_scratch(key.absent_scratch()),
         ),
-        LeafProbe::Replaced => decided(
-            owner_text,
+        (LeafProbe::Replaced, LeafKey::Identified(_)) => decided(
+            verdict,
             CgroupStep::Report(
                 "retained: replaced; the path names another cgroup, which is never touched"
                     .to_owned(),
             ),
             keep_scratch("the recorded leaf was replaced"),
         ),
-        LeafProbe::Unverifiable(reason) => decided(
-            owner_text,
+        (LeafProbe::Unverifiable(reason), LeafKey::Identified(_)) => decided(
+            verdict,
             CgroupStep::Report(format!("retained: {reason}")),
             keep_scratch("the recorded leaf cannot be verified"),
         ),
-        LeafProbe::Identified { populated: true } if tree_verified => decided(
-            owner_text,
-            CgroupStep::Report(
-                "retained: populated after the supervisor verified the tree's end, so what is in \
-                 it is not this attempt's orphan"
-                    .to_owned(),
-            ),
-            keep_scratch("the recorded leaf is populated by something else"),
-        ),
-        LeafProbe::Identified { populated: true } => decided(
-            owner_text,
-            CgroupStep::Terminate(leaf),
-            ScratchStep::AfterCgroup,
-        ),
-        LeafProbe::Identified { populated: false } => decided(
-            owner_text,
-            CgroupStep::Remove(leaf),
-            scratch.or(ScratchStep::AfterCgroup),
-        ),
-    }
-}
-
-/// The report of a leaf an earlier pass verified empty that is now gone.
-const GONE_AFTER_GC: &str = "removed: gone after an earlier gc verified it empty \
-                             (gc_terminated_orphan or gc_removing_cgroup), so the tree's end \
-                             is verified";
-
-// N7
-/// [`decide`] for a leaf jail state registers by name only: the supervisor
-/// died between naming it (P15) and identifying it (P16), before anything
-/// could be placed in it. Nothing identifies it beyond its name and place,
-/// so it is never killed; an empty one is removed, a populated one (which
-/// this attempt never put there) is retained and reported.
-fn decide_named(
-    facts: &Facts,
-    state: &StateView,
-    path: std::path::PathBuf,
-    owner_text: Option<String>,
-    tree_verified: bool,
-    scratch: ScratchRule,
-) -> Next {
-    let keep_scratch = |reason: &str| scratch.keep(reason);
-    if scratch.integrity_lost {
-        return decided(
-            owner_text,
-            CgroupStep::Report(
-                "retained: the receipt records lost boundary integrity; the leaf is kept for \
-                 explicit recovery"
-                    .to_owned(),
-            ),
-            keep_scratch("boundary integrity was lost"),
-        );
-    }
-    if state.gc_removed.iter().any(|leaf| leaf.path == path) {
-        return decided(
-            owner_text,
-            CgroupStep::Settled("removed by gc earlier".to_owned()),
-            scratch.or(ScratchStep::Now(
-                "an earlier gc removed the leaf registered by name only, empty".to_owned(),
-            )),
-        );
-    }
-    let Some(probe) = &facts.leaf else {
-        return Next::ProbeNamedLeaf(path);
-    };
-    match probe {
-        // J4 wave 3 (G3), as in `decide`.
-        LeafProbe::Absent if state.gc_verified.iter().any(|leaf| leaf.path == path) => decided(
-            owner_text,
-            CgroupStep::Settled(GONE_AFTER_GC.to_owned()),
-            scratch.or(ScratchStep::Now(GONE_AFTER_GC.to_owned())),
-        ),
-        LeafProbe::Absent => decided(
-            owner_text,
-            if tree_verified {
-                CgroupStep::Nothing
-            } else {
-                CgroupStep::Settled(
-                    "absent: registered by name before its creation, and no cgroup of that \
-                     name exists"
-                        .to_owned(),
-                )
-            },
-            keep_scratch("the registered leaf does not exist"),
-        ),
-        LeafProbe::Replaced | LeafProbe::Unverifiable(_) => decided(
-            owner_text,
+        (LeafProbe::Replaced | LeafProbe::Unverifiable(_), LeafKey::Named(_)) => decided(
+            verdict,
             CgroupStep::Report(format!(
                 "retained: registered by name only, and {}",
                 match probe {
@@ -1276,8 +1197,11 @@ fn decide_named(
             )),
             keep_scratch("the registered leaf cannot be verified"),
         ),
-        LeafProbe::Identified { populated: true } => decided(
-            owner_text,
+        // Nothing identifies a leaf registered by name only beyond its name
+        // and place, and this attempt placed nothing in it: it is never
+        // killed.
+        (LeafProbe::Identified { populated: true }, LeafKey::Named(_)) => decided(
+            verdict,
             CgroupStep::Report(
                 "retained: registered by name only (its identity was never recorded, and \
                  this attempt placed nothing in it), yet populated: a cgroup gc cannot \
@@ -1286,11 +1210,110 @@ fn decide_named(
             ),
             keep_scratch("the registered leaf is populated by something else"),
         ),
-        LeafProbe::Identified { populated: false } => decided(
-            owner_text,
-            CgroupStep::RemoveNamed(path),
-            scratch.or(ScratchStep::AfterCgroup),
+        (LeafProbe::Identified { populated: true }, LeafKey::Identified(_)) if tree_verified => {
+            decided(
+                verdict,
+                CgroupStep::Report(
+                    "retained: populated after the supervisor verified the tree's end, so what \
+                     is in it is not this attempt's orphan"
+                        .to_owned(),
+                ),
+                keep_scratch("the recorded leaf is populated by something else"),
+            )
+        }
+        (LeafProbe::Identified { populated: true }, LeafKey::Identified(leaf)) => decided(
+            verdict,
+            CgroupStep::Terminate(leaf),
+            ScratchStep::AfterCgroup,
         ),
+        (LeafProbe::Identified { populated: false }, key) => {
+            decided(verdict, key.removal(), scratch.or(ScratchStep::AfterCgroup))
+        }
+    }
+}
+
+/// The report of a leaf an earlier pass verified empty that is now gone.
+const GONE_AFTER_GC: &str = "removed: gone after an earlier gc verified it empty \
+                             (gc_terminated_orphan or gc_removing_cgroup), so the tree's end \
+                             is verified";
+
+/// The registered execution leaf [`decide`] acts on.
+enum LeafKey {
+    /// Identified right after `mkdir`, before anything was placed in it.
+    Identified(LeafRecord),
+    /// N7: registered by name only. The supervisor died between naming it
+    /// (P15) and identifying it (P16), before anything could be placed in
+    /// it: an empty one is removed, a populated one (which this attempt never
+    /// put there) is retained, and it is never killed.
+    Named(std::path::PathBuf),
+}
+
+impl LeafKey {
+    /// Whether an earlier pass removed it (`gc_removed_cgroup`).
+    fn removed_earlier(&self, state: &StateView) -> bool {
+        match self {
+            LeafKey::Identified(leaf) => state.gc_removed.contains(leaf),
+            LeafKey::Named(path) => state.gc_removed.iter().any(|leaf| leaf.path == *path),
+        }
+    }
+
+    /// The scratch basis of a leaf an earlier pass removed.
+    fn removed_earlier_basis(&self) -> &'static str {
+        match self {
+            LeafKey::Identified(_) => "an earlier gc verified the leaf empty and removed it",
+            LeafKey::Named(_) => "an earlier gc removed the leaf registered by name only, empty",
+        }
+    }
+
+    /// Whether an earlier pass verified it empty (J4 wave 3, G3).
+    fn verified_earlier(&self, state: &StateView) -> bool {
+        match self {
+            LeafKey::Identified(leaf) => state
+                .gc_verified
+                .iter()
+                .any(|verified| verified.is_of(leaf)),
+            LeafKey::Named(path) => state
+                .gc_verified
+                .iter()
+                .any(|verified| verified.path == *path),
+        }
+    }
+
+    /// The question to ask the host about it.
+    fn probe(self) -> Next {
+        match self {
+            LeafKey::Identified(leaf) => Next::ProbeLeaf(leaf),
+            LeafKey::Named(path) => Next::ProbeNamedLeaf(path),
+        }
+    }
+
+    /// The report of a leaf that is absent.
+    fn absent(&self) -> &'static str {
+        match self {
+            LeafKey::Identified(_) => {
+                "absent: the recorded leaf no longer exists, so the tree's end cannot be verified \
+                 through it"
+            }
+            LeafKey::Named(_) => {
+                "absent: registered by name before its creation, and no cgroup of that name exists"
+            }
+        }
+    }
+
+    /// Why scratch is kept when the leaf is absent.
+    fn absent_scratch(&self) -> &'static str {
+        match self {
+            LeafKey::Identified(_) => "the recorded leaf is gone",
+            LeafKey::Named(_) => "the registered leaf does not exist",
+        }
+    }
+
+    /// The removal of an empty one.
+    fn removal(self) -> CgroupStep {
+        match self {
+            LeafKey::Identified(leaf) => CgroupStep::Remove(leaf),
+            LeafKey::Named(path) => CgroupStep::RemoveNamed(path),
+        }
     }
 }
 
@@ -1323,6 +1346,55 @@ impl Meter {
             given
         });
     }
+}
+
+/// What `gc` did with one attempt, rendered as the entry's `action`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Action {
+    Skipped,
+    Retained,
+    Pending,
+    TerminatedOrphan,
+    RemovedCgroup,
+    RemovedScratch,
+    RemovedVendorState,
+    CompletedCleanup,
+    WouldTerminateOrphan,
+    WouldRemoveCgroup,
+    WouldRemoveScratch,
+    WouldRemoveVendorState,
+    WouldCompleteCleanup,
+}
+
+impl Action {
+    /// The report's spelling.
+    fn as_str(self) -> &'static str {
+        match self {
+            Action::Skipped => "skipped",
+            Action::Retained => "retained",
+            Action::Pending => "pending",
+            Action::TerminatedOrphan => "terminated_orphan",
+            Action::RemovedCgroup => "removed_cgroup",
+            Action::RemovedScratch => "removed_scratch",
+            Action::RemovedVendorState => "removed_vendor_state",
+            Action::CompletedCleanup => "completed_cleanup",
+            Action::WouldTerminateOrphan => "would_terminate_orphan",
+            Action::WouldRemoveCgroup => "would_remove_cgroup",
+            Action::WouldRemoveScratch => "would_remove_scratch",
+            Action::WouldRemoveVendorState => "would_remove_vendor_state",
+            Action::WouldCompleteCleanup => "would_complete_cleanup",
+        }
+    }
+}
+
+/// What one invocation works with: where it looks, whom it asks, and what
+/// it may do.
+struct Pass<'a> {
+    data_dir: &'a Path,
+    attempts: &'a Path,
+    host: &'a dyn Host,
+    options: Options,
+    dry_run: bool,
 }
 
 fn state_access(path: &Path, detail: impl std::fmt::Display) -> JailError {
@@ -1422,17 +1494,15 @@ pub fn gc_with(
         }
     }
     names.sort();
+    let pass = Pass {
+        data_dir: &data_dir,
+        attempts: &attempts,
+        host,
+        options,
+        dry_run: args.dry_run,
+    };
     for name in names {
-        let entry = visit(
-            &data_dir,
-            &attempts,
-            &name,
-            host,
-            options,
-            args.dry_run,
-            &mut meter,
-            &mut report.incomplete,
-        );
+        let entry = visit(&pass, &name, &mut meter, &mut report.incomplete);
         report.entries.push(entry);
     }
     if !report.budget.listing_complete {
@@ -1448,52 +1518,51 @@ pub fn gc_with(
 }
 
 /// One name read from `attempts/`.
-#[allow(clippy::too_many_arguments)]
 fn visit(
-    data_dir: &Path,
-    attempts: &Path,
+    pass: &Pass<'_>,
     name: &std::ffi::OsStr,
-    host: &dyn Host,
-    options: Options,
-    dry_run: bool,
     meter: &mut Meter,
     incomplete: &mut Vec<String>,
 ) -> Entry {
+    let dry_run = pass.dry_run;
     let display = name.to_string_lossy().into_owned();
     let mut entry = Entry {
         attempt_id: display.clone(),
         ..Entry::default()
     };
-    let mut finish = |action: &str, reason: String| {
-        entry.action = action.to_owned();
+    let mut finish = |action: Action, reason: String| {
+        entry.action = action.as_str().to_owned();
         entry.reason = reason;
     };
     let Some(id) = name.to_str().and_then(|text| AttemptId::parse(text).ok()) else {
         finish(
-            "skipped",
+            Action::Skipped,
             "the directory name is not an attempt id".to_owned(),
         );
         return entry;
     };
     // Never follow a link out of the state root: the entry itself must be a
     // private directory this operator owns.
-    let path = attempts.join(name);
+    let path = pass.attempts.join(name);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) => {
-            finish("skipped", format!("the entry cannot be inspected: {error}"));
+            finish(
+                Action::Skipped,
+                format!("the entry cannot be inspected: {error}"),
+            );
             return entry;
         }
     };
     if metadata.file_type().is_symlink() {
         finish(
-            "skipped",
+            Action::Skipped,
             "a symlink, which gc never follows out of the state root".to_owned(),
         );
         return entry;
     }
     if !metadata.is_dir() {
-        finish("skipped", "not a directory".to_owned());
+        finish(Action::Skipped, "not a directory".to_owned());
         return entry;
     }
     {
@@ -1505,13 +1574,13 @@ fn visit(
             state::DIRECTORY_MODE,
         ) {
             finish(
-                "retained",
+                Action::Retained,
                 format!("not a private attempt root: {}", error.message),
             );
             return entry;
         }
     }
-    let dir = AttemptDir::new(data_dir, &id);
+    let dir = AttemptDir::new(pass.data_dir, &id);
     // J4-G: the claim race (§7). The supervisor creates `jail.lock`, locks
     // it, and only then claims `jail-state.json`. A root without the claim is
     // never locked here: between the supervisor's create and its lock, a
@@ -1535,7 +1604,7 @@ fn visit(
                 Err(error) => error.message,
             };
             finish(
-                "retained",
+                Action::Retained,
                 format!(
                     "no jail.lock, so no lease protects this attempt and gc leaves it untouched: \
                      {reason}"
@@ -1544,11 +1613,14 @@ fn visit(
             return entry;
         }
         Ok(state::LeaseProbe::Held) => {
-            finish("retained", "a live supervisor holds the lease".to_owned());
+            finish(
+                Action::Retained,
+                "a live supervisor holds the lease".to_owned(),
+            );
             return entry;
         }
         Err(error) => {
-            finish("skipped", error.message);
+            finish(Action::Skipped, error.message);
             return entry;
         }
     };
@@ -1563,7 +1635,7 @@ fn visit(
     if let Ok(view) = &state
         && let Some(at) = &view.gc_finished
     {
-        entry.action = "retained".to_owned();
+        entry.action = Action::Retained.as_str().to_owned();
         entry.reason = format!(
             "{FINISHED}: gc found nothing left to do at {at}; receipts, policy and trace are \
              retained, and the attempt root is not listed again"
@@ -1572,7 +1644,7 @@ fn visit(
         return entry;
     }
     let facts = Facts {
-        host: host.identity(),
+        host: pass.host.identity(),
         state,
         receipt: read_view(&dir.receipt_path(), RECORD_MAX, |bytes| {
             parse_receipt(bytes, &display)
@@ -1580,26 +1652,27 @@ fn visit(
         owner: None,
         leaf: None,
     };
-    let decision = settle(facts, host);
-    entry.owner.clone_from(&decision.owner);
+    let decision = settle(facts, pass.host);
+    entry.owner = decision.owner.as_ref().map(OwnerVerdict::describe);
     if let Some(retention) = &decision.retain {
         if retention.failed_access {
             incomplete.push(format!("{display} (corrupt_state)"));
         }
-        entry.action = "retained".to_owned();
+        entry.action = Action::Retained.as_str().to_owned();
         entry.reason.clone_from(&retention.reason);
         drop(lease);
         return entry;
     }
 
-    let done = reconcile(&dir, &decision, host, options, dry_run, meter, &mut entry);
+    let done = reconcile(pass, &dir, &decision, meter, &mut entry);
     if let Some(failure) = &done.failure {
         incomplete.push(format!("{display} ({failure})"));
     }
     // J4 W2-S: what crashed durable replacements left, removed only because
     // the owner is dead and this pass holds the lease.
-    let leftover_failure = leftovers(&dir, decision.owner_dead, dry_run, meter, &mut entry);
-    if let Some(failure) = &leftover_failure {
+    let leftover = leftovers(&dir, decision.owner_dead(), dry_run, meter, &mut entry);
+    entry.temp_files = leftover.outcome.as_ref().map(TempFiles::describe);
+    if let Some(failure) = &leftover.failure {
         incomplete.push(format!("{display} ({failure})"));
     }
     // J4 W2-S: gc's own verification of the registered leaf (this pass's or
@@ -1610,7 +1683,7 @@ fn visit(
     // which unblocks the cleanup a supervisor SIGKILL between staging and
     // preparation would otherwise retain forever.
     let gc_verified = match done.action {
-        Some("would_terminate_orphan" | "would_remove_cgroup") if dry_run => true,
+        Some(Action::WouldTerminateOrphan | Action::WouldRemoveCgroup) if dry_run => true,
         _ => verified_by_gc(&dir) || decision.tree_never_existed,
     };
     // J3: the dead supervisor's proxy directory, then vendor state.
@@ -1623,7 +1696,7 @@ fn visit(
         Resumption {
             limits: cleanup::Limits {
                 max_entries: meter.remaining(),
-                max_depth: options.max_depth,
+                max_depth: pass.options.max_depth,
             },
             gc_verified,
         },
@@ -1631,7 +1704,7 @@ fn visit(
     // S7: what the resumption visited is charged to this invocation.
     meter.charge(visited);
     let (action, reason) = combine(action, reason, &done);
-    entry.action = action;
+    entry.action = action.as_str().to_owned();
     entry.reason = reason;
     // What is left after the resumption, which may remove managed scratch
     // too. Scratch whose kind cannot be read may be managed scratch nothing
@@ -1646,14 +1719,11 @@ fn visit(
     // or vendor state remains, and nothing failed. Recorded last, so a crash
     // before it only costs the next pass this one's (idempotent) work.
     let finished = !dry_run
-        && decision.owner_dead
+        && decision.owner_dead()
         && done.failure.is_none()
         && done.cgroup_final
-        && leftover_failure.is_none()
-        && entry
-            .temp_files
-            .as_deref()
-            .is_none_or(|text| text.starts_with("removed "))
+        && leftover.failure.is_none()
+        && matches!(leftover.outcome, None | Some(TempFiles::Removed(_)))
         && resumed_settled
         && scratch.is_gone();
     if finished {
@@ -1696,10 +1766,10 @@ fn read_view<T>(
 }
 
 /// The report for a root nobody has claimed (§7, §14.2; N5).
-fn unclaimed(dir: &AttemptDir) -> (&'static str, String) {
+fn unclaimed(dir: &AttemptDir) -> (Action, String) {
     match std::fs::symlink_metadata(dir.lock_path()) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
-            "retained",
+            Action::Retained,
             match state::check_fresh_attempt(dir) {
                 Ok(()) => "no jail.lock and no jail-owned artifact: an unclaimed attempt root, \
                            which gc leaves untouched and claimable"
@@ -1711,7 +1781,7 @@ fn unclaimed(dir: &AttemptDir) -> (&'static str, String) {
             },
         ),
         _ => (
-            "retained",
+            Action::Retained,
             "jail.lock but no jail-state.json: an unclaimed root, which a live supervisor may \
              be claiming now or whose supervisor died before claiming it; gc takes no lease on \
              an unclaimed root and leaves it untouched"
@@ -1722,9 +1792,9 @@ fn unclaimed(dir: &AttemptDir) -> (&'static str, String) {
 
 /// What [`reconcile`] did, for the entry's summary.
 struct Done {
-    /// The most significant step, as an action word: `terminated_orphan`,
-    /// `removed_cgroup`, `removed_scratch` or their `would_` forms.
-    action: Option<&'static str>,
+    /// The most significant step: a terminated orphan, a removed cgroup or
+    /// removed scratch, or what a dry run would do.
+    action: Option<Action>,
     /// What failed, when something did: the cleanup is incomplete (§6.4).
     failure: Option<String>,
     /// J4 wave 3 (G4): nothing is left for gc to do with the cgroup.
@@ -1735,14 +1805,13 @@ struct Done {
 
 /// Performs the cgroup and scratch steps of a decision and records them.
 fn reconcile(
+    pass: &Pass<'_>,
     dir: &AttemptDir,
     decision: &Decision,
-    host: &dyn Host,
-    options: Options,
-    dry_run: bool,
     meter: &mut Meter,
     entry: &mut Entry,
 ) -> Done {
+    let (host, dry_run) = (pass.host, pass.dry_run);
     let mut done = Done {
         action: None,
         failure: None,
@@ -1758,19 +1827,19 @@ fn reconcile(
             entry.cgroup = Some(text.clone());
             done.cgroup_final = true;
         }
-        CgroupStep::Terminate(leaf) if dry_run => {
+        CgroupStep::Terminate(_) if dry_run => {
             entry.cgroup = Some("would_terminate_orphan".to_owned());
-            done.action = Some("would_terminate_orphan");
+            done.action = Some(Action::WouldTerminateOrphan);
         }
         CgroupStep::Remove(_) | CgroupStep::RemoveNamed(_) if dry_run => {
             entry.cgroup = Some("would_remove".to_owned());
-            done.action = Some("would_remove_cgroup");
+            done.action = Some(Action::WouldRemoveCgroup);
         }
         CgroupStep::Terminate(leaf) => {
-            match terminate(dir, leaf, host, options, meter, &mut entry.recorded) {
+            match terminate(pass, dir, leaf, meter, &mut entry.recorded) {
                 Ok(()) => {
                     entry.cgroup = Some("terminated_orphan_and_removed".to_owned());
-                    done.action = Some("terminated_orphan");
+                    done.action = Some(Action::TerminatedOrphan);
                     done.cgroup_final = true;
                     verified = Some("gc ended the orphan and verified its leaf empty");
                 }
@@ -1783,7 +1852,7 @@ fn reconcile(
         CgroupStep::Remove(leaf) => match remove(dir, leaf, host, meter, &mut entry.recorded) {
             Ok(()) => {
                 entry.cgroup = Some("removed".to_owned());
-                done.action = Some("removed_cgroup");
+                done.action = Some(Action::RemovedCgroup);
                 done.cgroup_final = true;
                 verified = Some("gc verified the leaf empty and removed it");
             }
@@ -1797,7 +1866,7 @@ fn reconcile(
             match remove_named(dir, path, host, meter, &mut entry.recorded) {
                 Ok(()) => {
                     entry.cgroup = Some("removed".to_owned());
-                    done.action = Some("removed_cgroup");
+                    done.action = Some(Action::RemovedCgroup);
                     done.cgroup_final = true;
                     verified = Some(
                         "gc removed the empty leaf registered by name only; this attempt \
@@ -1834,7 +1903,7 @@ fn reconcile(
         }
     };
     if let Some(basis) = basis {
-        remove_scratch(dir, &basis, options, dry_run, meter, entry, &mut done);
+        remove_scratch(pass, dir, &basis, meter, entry, &mut done);
     }
     done
 }
@@ -1885,19 +1954,19 @@ fn coalesce(actions: &mut Vec<state::GcAction>, item: state::GcAction) {
 /// never loses the fact that gc killed; the result is recorded after the leaf
 /// was seen empty, and only then is the leaf removed.
 fn terminate(
+    pass: &Pass<'_>,
     dir: &AttemptDir,
     leaf: &LeafRecord,
-    host: &dyn Host,
-    options: Options,
     meter: &mut Meter,
     recorded: &mut Vec<String>,
 ) -> Result<(), String> {
+    let host = pass.host;
     let killing = state::GcAction {
         execution_cgroup: state::Field::Set(leaf_entry(leaf)),
         ..act("gc_terminating_orphan")
     };
     record(dir, killing, recorded).map_err(|error| format!("{error}; nothing was killed"))?;
-    host.terminate_leaf(leaf, options.kill_budget)?;
+    host.terminate_leaf(leaf, pass.options.kill_budget)?;
     let killed = state::GcAction {
         execution_cgroup: state::Field::Set(leaf_entry(leaf)),
         verified_empty: state::Field::Set(true),
@@ -1985,10 +2054,9 @@ fn present(scratch: &cleanup::Scratch) -> &[&'static str] {
 /// remove it later." Only managed scratch and placeholders, through the
 /// anchored traversal, within what is left of the entry bound.
 fn remove_scratch(
+    pass: &Pass<'_>,
     dir: &AttemptDir,
     basis: &str,
-    options: Options,
-    dry_run: bool,
     meter: &mut Meter,
     entry: &mut Entry,
     done: &mut Done,
@@ -1997,9 +2065,9 @@ fn remove_scratch(
     if present.is_empty() {
         return;
     }
-    if dry_run {
+    if pass.dry_run {
         entry.scratch = Some("would_remove".to_owned());
-        done.action.get_or_insert("would_remove_scratch");
+        done.action.get_or_insert(Action::WouldRemoveScratch);
         return;
     }
     for name in present {
@@ -2017,7 +2085,7 @@ fn remove_scratch(
             name,
             cleanup::Limits {
                 max_entries: given,
-                max_depth: options.max_depth,
+                max_depth: pass.options.max_depth,
             },
         );
         meter.charge_removal(&removal, given);
@@ -2041,7 +2109,7 @@ fn remove_scratch(
     match record(dir, removed, &mut entry.recorded) {
         Ok(()) => {
             entry.scratch = Some("removed".to_owned());
-            done.action.get_or_insert("removed_scratch");
+            done.action.get_or_insert(Action::RemovedScratch);
         }
         Err(failure) => {
             entry.scratch = Some(format!("removed; {failure}"));
@@ -2066,7 +2134,7 @@ fn proxy_then_resume(
     incomplete: &mut Vec<String>,
     entry: &mut Entry,
     resumption: Resumption,
-) -> (String, String, usize, bool) {
+) -> (Action, String, usize, bool) {
     let mut settled = true;
     entry.proxy_dir = match state::gc_proxy_dir(dir, dry_run) {
         Ok(outcome) => {
@@ -2103,14 +2171,14 @@ fn proxy_then_resume(
     );
     let (action, reason) = match outcome {
         Ok(cleanup::Resume::NothingPending) => (
-            "retained".to_owned(),
+            Action::Retained,
             "no vendor-state cleanup is pending; receipts, policy and trace are retained"
                 .to_owned(),
         ),
         Ok(cleanup::Resume::Completed {
             receipt_updated: true,
         }) => (
-            "removed_vendor_state".to_owned(),
+            Action::RemovedVendorState,
             "the pending vendor-state cleanup completed and the receipt records it".to_owned(),
         ),
         // J4 wave 3 (G1, S6): permitted by gc's own verification of the
@@ -2119,42 +2187,42 @@ fn proxy_then_resume(
         Ok(cleanup::Resume::Completed {
             receipt_updated: false,
         }) => (
-            "removed_vendor_state".to_owned(),
+            Action::RemovedVendorState,
             "the pending vendor-state cleanup completed; jail state and this report record it \
              (gc's own verification of the leaf permitted it, and gc never rewrites a receipt \
              that is not refused or settled)"
                 .to_owned(),
         ),
         Ok(cleanup::Resume::WouldRemove) => (
-            "would_remove_vendor_state".to_owned(),
+            Action::WouldRemoveVendorState,
             "the records permit the pending vendor-state cleanup".to_owned(),
         ),
         Ok(cleanup::Resume::ReceiptCompleted) => (
-            "completed_cleanup".to_owned(),
+            Action::CompletedCleanup,
             "no vendor state was registered and no managed scratch is left, so the receipt's \
              pending cleanup is complete and the receipt records it"
                 .to_owned(),
         ),
         Ok(cleanup::Resume::WouldCompleteReceipt) => (
-            "would_complete_cleanup".to_owned(),
+            Action::WouldCompleteCleanup,
             "no vendor state was registered and no managed scratch is left, so the receipt's \
              pending cleanup would be recorded complete"
                 .to_owned(),
         ),
         Ok(cleanup::Resume::Retained(reason)) => (
-            "retained".to_owned(),
+            Action::Retained,
             format!("vendor-state cleanup is not permitted: {reason}"),
         ),
         Ok(cleanup::Resume::StillPending(reason)) => {
             incomplete.push(format!("{name} ({reason})"));
             (
-                "pending".to_owned(),
+                Action::Pending,
                 format!("vendor-state cleanup stopped again: {reason}"),
             )
         }
         Err(error) => {
             incomplete.push(format!("{name} ({})", error.code.as_str()));
-            ("skipped".to_owned(), error.message)
+            (Action::Skipped, error.message)
         }
     };
     (action, reason, visited, settled)
@@ -2189,39 +2257,86 @@ fn verified_by_gc(dir: &AttemptDir) -> bool {
     })
 }
 
-/// Whether the owner text is one `decide` established dead.
-fn owner_dead_text(owner: Option<&str>) -> bool {
-    owner.is_some_and(|owner| owner.starts_with(OWNER_DEAD))
+/// What became of the temporary files a crash left in an attempt root,
+/// rendered as the entry's `temp_files`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum TempFiles {
+    /// Removed and recorded: `removed <count>`.
+    Removed(usize),
+    /// Removed, but the record failed: `removed; <failure>`.
+    RemovedUnrecorded(String),
+    /// A dry run: `would_remove`.
+    WouldRemove,
+    /// Kept: `retained: <why>`.
+    Retained(&'static str),
+    /// Not all of them listed: `pending: <why>`.
+    Pending(&'static str),
+    /// The listing or a removal failed: `failed: <why>`.
+    Failed(String),
 }
+
+impl TempFiles {
+    fn describe(&self) -> String {
+        match self {
+            TempFiles::Removed(count) => format!("removed {count}"),
+            TempFiles::RemovedUnrecorded(failure) => format!("removed; {failure}"),
+            TempFiles::WouldRemove => "would_remove".to_owned(),
+            TempFiles::Retained(why) => format!("retained: {why}"),
+            TempFiles::Pending(why) => format!("pending: {why}"),
+            TempFiles::Failed(why) => format!("failed: {why}"),
+        }
+    }
+}
+
+/// What [`leftovers`] found and did.
+struct Leftovers {
+    /// `None` when there were no temporary files.
+    outcome: Option<TempFiles>,
+    /// A failure that leaves the cleanup incomplete.
+    failure: Option<String>,
+}
+
 /// Lists the temporary files crashed durable replacements left in the
 /// attempt root (charged to the bound, S7), and removes those of this
 /// tool's records when the owner is dead: the caller holds the lease, so no
 /// supervisor can be writing one. Records what it removed (S6, P14).
-/// Returns a failure that leaves the cleanup incomplete.
 fn leftovers(
     dir: &AttemptDir,
     owner_dead: bool,
     dry_run: bool,
     meter: &mut Meter,
     entry: &mut Entry,
-) -> Option<String> {
+) -> Leftovers {
+    let settled = |outcome| Leftovers {
+        outcome: Some(outcome),
+        failure: None,
+    };
     let listing = match state::leftover_temp_files_within(dir, meter.remaining()) {
         Ok(listing) => listing,
         Err(error) => {
-            let failure = format!("temporary files: the attempt root cannot be listed: {error}");
-            entry.temp_files = Some(format!("failed: {error}"));
-            return Some(failure);
+            return Leftovers {
+                outcome: Some(TempFiles::Failed(error.to_string())),
+                failure: Some(format!(
+                    "temporary files: the attempt root cannot be listed: {error}"
+                )),
+            };
         }
     };
     meter.charge(listing.read);
     entry.leftover_temp_files.clone_from(&listing.names);
     if !listing.complete {
-        entry.temp_files =
-            Some("pending: the per-invocation entry bound ended the listing".to_owned());
-        return Some("temporary files: the listing is incomplete".to_owned());
+        return Leftovers {
+            outcome: Some(TempFiles::Pending(
+                "the per-invocation entry bound ended the listing",
+            )),
+            failure: Some("temporary files: the listing is incomplete".to_owned()),
+        };
     }
     if listing.names.is_empty() {
-        return None;
+        return Leftovers {
+            outcome: None,
+            failure: None,
+        };
     }
     let ours: Vec<&String> = listing
         .names
@@ -2229,26 +2344,28 @@ fn leftovers(
         .filter(|name| state::is_record_temp_name(name))
         .collect();
     if !owner_dead {
-        entry.temp_files = Some("retained: the attempt's owner is not established dead".to_owned());
-        return None;
+        return settled(TempFiles::Retained(
+            "the attempt's owner is not established dead",
+        ));
     }
     if ours.is_empty() {
-        entry.temp_files =
-            Some("retained: none is a temporary file of this tool's records".to_owned());
-        return None;
+        return settled(TempFiles::Retained(
+            "none is a temporary file of this tool's records",
+        ));
     }
     if dry_run {
-        entry.temp_files = Some("would_remove".to_owned());
-        return None;
+        return settled(TempFiles::WouldRemove);
     }
     let attempt = match state::open_attempt_dir(dir) {
         Ok(attempt) => attempt,
         Err(error) => {
-            entry.temp_files = Some(format!("failed: {}", error.message));
-            return Some(format!(
-                "temporary files: the attempt root cannot be opened: {}",
-                error.message
-            ));
+            return Leftovers {
+                failure: Some(format!(
+                    "temporary files: the attempt root cannot be opened: {}",
+                    error.message
+                )),
+                outcome: Some(TempFiles::Failed(error.message)),
+            };
         }
     };
     let mut removed = Vec::new();
@@ -2264,15 +2381,17 @@ fn leftovers(
             continue;
         }
         if let Err(error) = attempt.unlink_at(&component) {
-            entry.temp_files = Some(format!("failed: {name}: {error}"));
-            return Some(format!("temporary files: {name}: {error}"));
+            return Leftovers {
+                outcome: Some(TempFiles::Failed(format!("{name}: {error}"))),
+                failure: Some(format!("temporary files: {name}: {error}")),
+            };
         }
         removed.push(name.clone());
     }
     if removed.is_empty() {
-        entry.temp_files =
-            Some("retained: none is a regular file of this tool's records".to_owned());
-        return None;
+        return settled(TempFiles::Retained(
+            "none is a regular file of this tool's records",
+        ));
     }
     let count = removed.len();
     let record_of = state::GcAction {
@@ -2280,26 +2399,23 @@ fn leftovers(
         ..act("gc_removed_temp_files")
     };
     match record(dir, record_of, &mut entry.recorded) {
-        Ok(()) => {
-            entry.temp_files = Some(format!("removed {count}"));
-            None
-        }
-        Err(failure) => {
-            entry.temp_files = Some(format!("removed; {failure}"));
-            Some(failure)
-        }
+        Ok(()) => settled(TempFiles::Removed(count)),
+        Err(failure) => Leftovers {
+            outcome: Some(TempFiles::RemovedUnrecorded(failure.clone())),
+            failure: Some(failure),
+        },
     }
 }
 
 /// The entry's action and reason: a failed gc step makes it `pending`; a gc
 /// step that did something names the action when the J3 resumption had
 /// nothing to do (`retained`), and the resumption's own reason is kept.
-fn combine(action: String, reason: String, done: &Done) -> (String, String) {
+fn combine(action: Action, reason: String, done: &Done) -> (Action, String) {
     if let Some(failure) = &done.failure {
-        return ("pending".to_owned(), format!("{failure}; {reason}"));
+        return (Action::Pending, format!("{failure}; {reason}"));
     }
     match done.action {
-        Some(step) if action == "retained" => (step.to_owned(), reason),
+        Some(step) if action == Action::Retained => (step, reason),
         _ => (action, reason),
     }
 }
@@ -2909,8 +3025,8 @@ mod tests {
             charged: 0,
         };
         let mut entry = Entry::default();
-        let failure = leftovers(&attempt, true, false, &mut meter, &mut entry);
-        assert!(failure.is_none(), "{failure:?}");
+        let leftover = leftovers(&attempt, true, false, &mut meter, &mut entry);
+        assert!(leftover.failure.is_none(), "{:?}", leftover.outcome);
         assert!(
             std::fs::symlink_metadata(&linked).is_ok(),
             "the symlink survives gc"
