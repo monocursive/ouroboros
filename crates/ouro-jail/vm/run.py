@@ -18,6 +18,24 @@ MAX_BYTES = 32 * 1024 * 1024
 MAX_FILE = 512 * 1024
 MAX_FILES = 5000
 EXCLUDED = {'.git', 'target', 'node_modules', '.venv', '__pycache__', '.DS_Store'}
+# Exact field types per event: `type(value) is int` keeps JSON booleans out of
+# integer fields. Fields the launcher does not read are not constrained.
+HELPER_EVENTS = {
+    'owner': {'pid': int, 'audit_token': list},
+    'stopped': {'error': str},
+    'data': {'data': str},
+    'error': {'error': str},
+}
+GUEST_EVENTS = {
+    'ready': {'kernel': str},
+    'pong': {'sequence': int},
+    'put': {'path': str},
+    'running': {'supervisor_pid': int},
+    'stdout': {'data': str},
+    'stderr': {'data': str},
+    'file': {'group': str, 'path': str, 'executable': bool, 'data': str},
+    'done': {'exit_code': int},
+}
 
 
 def terminate_owner(token):
@@ -38,6 +56,11 @@ def terminate_owner(token):
 def digest(path):
     with path.open('rb') as source:
         return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def clone_disk(base, destination):
+    # APFS clone: one private writable disk per attempt. Never boot the base.
+    subprocess.run(['cp', '-c', str(base), str(destination)], check=True)
 
 
 def snapshot(root):
@@ -76,25 +99,65 @@ def output_path(root, group, name):
     return root.joinpath(group, *parts)
 
 
+def parse_message(line, events, source, unknown_allowed):
+    """Decode one protocol line into an object with a string event and typed fields.
+
+    Any other shape raises ValueError, so malformed helper or guest output
+    ends the attempt through the same path as any other transport failure.
+    """
+    message = json.loads(line)
+    if not isinstance(message, dict) or type(message.get('event')) is not str:
+        raise ValueError(f'malformed {source} message: not an object with a string event')
+    kind = message['event']
+    if kind not in events:
+        if unknown_allowed:
+            return message
+        raise ValueError(f'unexpected {source} event: {kind}')
+    for name, expected in events[kind].items():
+        if type(message.get(name)) is not expected:
+            raise ValueError(f'invalid {source} {kind} message: {name} must be {expected.__name__}')
+    return message
+
+
+def parse_helper_message(line):
+    # The helper also reports lifecycle events (booted, connected, stopping,
+    # guest_stopped) that are only kept in events.ndjson.
+    return parse_message(line, HELPER_EVENTS, 'helper', unknown_allowed=True)
+
+
+def parse_guest_message(line):
+    return parse_message(line, GUEST_EVENTS, 'guest', unknown_allowed=False)
+
+
+def field(value, *keys):
+    """Follow object keys through guest JSON; a missing key or non-object step gives None."""
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
 def verify_receipt(receipt, profile):
     """Never relabel a transport success as successful jail enforcement."""
-    if receipt.get('schema') != 'ouro.jail.receipt/1' or receipt.get('platform', {}).get('os') != 'linux':
+    if field(receipt, 'schema') != 'ouro.jail.receipt/1' or field(receipt, 'platform', 'os') != 'linux':
         raise ValueError('missing Linux jail receipt')
-    if receipt.get('policy', {}).get('name') != profile:
+    if field(receipt, 'policy', 'name') != profile:
         raise ValueError('guest receipt profile mismatch')
-    if (receipt.get('containment') != 'enforced' or receipt.get('child_protection') != 'enforced'
-            or receipt.get('exec_observed') is not True):
+    if (field(receipt, 'containment') != 'enforced' or field(receipt, 'child_protection') != 'enforced'
+            or field(receipt, 'exec_observed') is not True):
         raise ValueError('guest did not confirm contained execution')
-    lifetime = receipt.get('lifetime', {})
-    if lifetime.get('tree_empty') is not True or lifetime.get('integrity') != 'verified':
+    if field(receipt, 'lifetime', 'tree_empty') is not True or field(receipt, 'lifetime', 'integrity') != 'verified':
         raise ValueError('guest process-tree cleanup was not verified')
-    if receipt.get('state_cleanup') != 'complete' or receipt.get('errors'):
+    if field(receipt, 'state_cleanup') != 'complete' or field(receipt, 'errors'):
         raise ValueError('guest evidence or cleanup failed')
-    applied = receipt.get('applied', {})
-    if applied.get('network', {}).get('mode') != 'none':
+    if field(receipt, 'applied', 'network', 'mode') != 'none':
         raise ValueError('guest receipt did not enforce offline execution')
-    limits = {limit['key']: limit for limit in applied.get('limits', [])}
-    if any(limits.get(key, {}).get('applied') is not True for key in ('wall', 'pids', 'mem', 'swap')):
+    limits = field(receipt, 'applied', 'limits')
+    if not isinstance(limits, list) or any(type(field(limit, 'key')) is not str for limit in limits):
+        raise ValueError('malformed guest receipt limits')
+    applied = {limit['key']: limit.get('applied') for limit in limits}
+    if any(applied.get(key) is not True for key in ('wall', 'pids', 'mem', 'swap')):
         raise ValueError('guest did not apply every required limit')
 
 
@@ -112,8 +175,7 @@ def execute(args):
     if metadata['status'] != 'prepared' or digest(image / 'base.raw') != metadata['disk_sha256'] or digest(image / 'vz') != metadata['helper_sha256'] or digest(image / 'custodian') != metadata.get('custodian_sha256') or digest(image / 'seed.iso') != metadata.get('seed_sha256'):
         raise ValueError('image/helper does not match prepared metadata')
     output.mkdir(parents=True, exist_ok=False)
-    # APFS clone: one private writable disk per attempt. Never boot the base.
-    subprocess.run(['cp', '-c', str(image / 'base.raw'), str(output / 'guest.raw')], check=True)
+    clone_disk(image / 'base.raw', output / 'guest.raw')
     started = time.monotonic()
     report = {'schema': 'ouro.vm.attempt/1', 'status': 'starting', 'host': list(os.uname()),
               'guest_os': 'linux', 'native_macos_execution': False, 'network': False,
@@ -244,7 +306,7 @@ def execute(args):
                     raise ValueError('oversized helper message')
                 while b'\n' in outer_buffer:
                     line, outer_buffer = outer_buffer.split(b'\n', 1)
-                    message = json.loads(line)
+                    message = parse_helper_message(line)
                     kind = message['event']
                     if kind == 'owner':
                         owner_token = message['audit_token']
@@ -263,7 +325,7 @@ def execute(args):
                             raise ValueError('oversized guest message')
                         while b'\n' in guest_buffer:
                             line, guest_buffer = guest_buffer.split(b'\n', 1)
-                            response = json.loads(line)
+                            response = parse_guest_message(line)
                             kind = response['event']
                             if kind == 'ready':
                                 guest_ready = True
@@ -301,7 +363,7 @@ def execute(args):
                                     destination.write(payload)
                                 path.chmod(0o700 if response['executable'] else 0o600)
                             elif kind == 'done':
-                                if guest_done or type(response['exit_code']) is not int:
+                                if guest_done:
                                     raise ValueError('invalid guest completion')
                                 guest_done = True
                                 report['guest_exit_code'] = response['exit_code']
@@ -322,6 +384,11 @@ def execute(args):
                 raise RuntimeError('VM ended without guest completion and acknowledged stop')
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
         report.update(status='failed', error=str(error))
+    except BaseException as error:
+        # An unforeseen failure still ends this attempt: the saved record must
+        # not keep saying booting, ready or running.
+        report.update(status='failed', error=f'{type(error).__name__}: {error}')
+        raise
     finally:
         if custody_write is not None:
             os.close(custody_write)

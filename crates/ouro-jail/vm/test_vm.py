@@ -96,6 +96,67 @@ class ReceiptTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 run.verify_receipt(receipt, 'tool')
 
+    def test_rejects_ill_typed_receipts_without_type_errors(self):
+        for mutate in [lambda r: r.update(platform='linux'),
+                       lambda r: r.update(lifetime=['verified']),
+                       lambda r: r['applied'].update(network='none'),
+                       lambda r: r['applied'].update(limits={'wall': True}),
+                       lambda r: r['applied']['limits'].append('swap'),
+                       lambda r: r['applied']['limits'].append({'key': ['wall'], 'applied': True}),
+                       lambda r: r['applied']['limits'].append({'applied': True})]:
+            receipt = copy.deepcopy(self.receipt)
+            mutate(receipt)
+            with self.subTest(receipt=receipt), self.assertRaises(ValueError):
+                run.verify_receipt(receipt, 'tool')
+        for receipt in ([], 'receipt', None, 7):
+            with self.subTest(receipt=receipt), self.assertRaises(ValueError):
+                run.verify_receipt(receipt, 'tool')
+
+
+class ProtocolMessageTests(unittest.TestCase):
+    def test_accepts_every_guest_event_the_controller_sends(self):
+        for message in [{'event': 'ready', 'kernel': '7.0.0', 'lease_seconds': 2.0},
+                        {'event': 'pong', 'sequence': 0}, {'event': 'put', 'path': 'a/b'},
+                        {'event': 'running', 'supervisor_pid': 42}, {'event': 'stdout', 'data': ''},
+                        {'event': 'stderr', 'data': 'eA=='},
+                        {'event': 'file', 'group': 'evidence', 'path': 'jail.json', 'executable': False, 'data': ''},
+                        {'event': 'done', 'exit_code': -9}]:
+            with self.subTest(message=message):
+                self.assertEqual(run.parse_guest_message(json.dumps(message).encode()), message)
+
+    def test_rejects_guest_lines_that_are_not_objects_with_a_string_event(self):
+        for line in (b'[1]', b'"ready"', b'7', b'null', b'{}', b'{"event": 5}', b'{"event": null}',
+                     b'{"event": ["ready"]}', b'{"event": {"name": "ready"}}', b'not json', b'\xff'):
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                run.parse_guest_message(line)
+
+    def test_rejects_wrongly_typed_or_missing_guest_fields(self):
+        for message in [{'event': 'ready'}, {'event': 'ready', 'kernel': 7},
+                        {'event': 'pong', 'sequence': '0'}, {'event': 'pong', 'sequence': True},
+                        {'event': 'pong', 'sequence': 1.0}, {'event': 'put', 'path': ['a']},
+                        {'event': 'running', 'supervisor_pid': None}, {'event': 'stdout', 'data': 5},
+                        {'event': 'stderr', 'data': ['eA==']},
+                        {'event': 'file', 'group': 'workspace', 'path': 'a', 'executable': 'yes', 'data': ''},
+                        {'event': 'file', 'group': 'workspace', 'path': 'a', 'executable': 1, 'data': ''},
+                        {'event': 'file', 'group': ['workspace'], 'path': 'a', 'executable': False, 'data': ''},
+                        {'event': 'done', 'exit_code': False}, {'event': 'done', 'exit_code': '0'},
+                        {'event': 'unknown'}]:
+            with self.subTest(message=message), self.assertRaises(ValueError):
+                run.parse_guest_message(json.dumps(message).encode())
+
+    def test_helper_lifecycle_events_pass_but_read_fields_are_typed(self):
+        for message in [{'event': 'booted', 'pid': 1, 'network': False}, {'event': 'connected'},
+                        {'event': 'stopping', 'reason': 'eof'}, {'event': 'guest_stopped'},
+                        {'event': 'stopped', 'error': ''}, {'event': 'data', 'data': 'eA=='},
+                        {'event': 'owner', 'pid': 1, 'audit_token': [0] * 8}, {'event': 'error', 'error': 'x'}]:
+            with self.subTest(message=message):
+                self.assertEqual(run.parse_helper_message(json.dumps(message).encode()), message)
+        for message in [[], {'event': 1}, {'event': 'data', 'data': None}, {'event': 'stopped', 'error': None},
+                        {'event': 'owner', 'pid': True, 'audit_token': [0] * 8},
+                        {'event': 'owner', 'pid': 1, 'audit_token': {}}, {'event': 'error'}]:
+            with self.subTest(message=message), self.assertRaises(ValueError):
+                run.parse_helper_message(json.dumps(message).encode())
+
 
 class PackageTests(unittest.TestCase):
     def test_expansion_does_not_delete_an_existing_image(self):
