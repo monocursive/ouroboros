@@ -1635,7 +1635,7 @@ impl RunningExecution for Uncontained {
         // only covers a caller that skipped it.
         self.stop_observer(TREE_BUDGET);
         if self.observe_on {
-            let summary = self.tracer_summary.clone().unwrap_or_default();
+            let summary = shared::observer_account(self.tracer_summary.as_ref());
             return Some(self.audit.summary(&summary, true));
         }
         // §11.4: observation off makes every audit class unsupported with a

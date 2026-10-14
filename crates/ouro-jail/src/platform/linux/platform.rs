@@ -4366,7 +4366,7 @@ impl RunningExecution for LinuxRunning {
         // without the observer (§11.4)
         self.boundary.stop_agent(TREE_BUDGET);
         let mut summary = if self.boundary.observe_on {
-            let tracer = self.boundary.tracer_summary.clone().unwrap_or_default();
+            let tracer = shared::observer_account(self.boundary.tracer_summary.as_ref());
             self.boundary.audit.summary(&tracer, true)
         } else {
             // §11.4: observation off makes every audit class unsupported
@@ -4830,6 +4830,30 @@ pub(super) mod shared {
         *exec_confirmed = true;
         pending.push_back(outcome);
         Some(RunEvent::ExecConfirmed)
+    }
+
+    /// The observer's account for the coverage summary of an observed run.
+    /// Every such run stops its observer and keeps the account before it is
+    /// summarized, so a missing one is a defect, and it reads as
+    /// [`missing_account`], never as a clean, loss-free one.
+    pub(in crate::platform::linux) fn observer_account(
+        summary: Option<&TracerSummary>,
+    ) -> TracerSummary {
+        debug_assert!(
+            summary.is_some(),
+            "an observed run was summarized without its observer's account"
+        );
+        summary.cloned().unwrap_or_else(missing_account)
+    }
+
+    /// What a missing observer account stands for: no account at all, which
+    /// is a panicked observer's (every field unreliable, so every audit
+    /// class degraded, with a gap and a null count).
+    pub(in crate::platform::linux) fn missing_account() -> TracerSummary {
+        TracerSummary {
+            thread_panicked: true,
+            ..TracerSummary::default()
+        }
     }
 
     /// What one read of the execution cgroup's counters established.
@@ -6005,6 +6029,47 @@ mod tests {
             None,
             "an unread counter claims no `false`"
         );
+    }
+
+    /// A missing observer account is no account: every audit class of an
+    /// observed run reads degraded with a null count, never active and
+    /// loss-free.
+    #[test]
+    fn a_missing_observer_account_degrades_every_audit_class() {
+        use crate::observer::CoverageClass;
+        let audit = AuditWriter::new(
+            "att_00000000-0000-4000-8000-000000000001",
+            None,
+            b"/work",
+            b"/tmp",
+        );
+        let summary = audit.summary(&shared::missing_account(), true);
+        for class in [
+            CoverageClass::Exec,
+            CoverageClass::FsWrite,
+            CoverageClass::FsDeny,
+            CoverageClass::Net,
+        ] {
+            let row = &summary.classes[&class];
+            assert_eq!(
+                row.status,
+                crate::records::SourceStatus::Degraded,
+                "{class:?}"
+            );
+            assert_eq!(row.observed_count, None, "{class:?}");
+            assert!(!row.gaps.is_empty(), "{class:?} names no gap");
+        }
+        let clean = audit.summary(&TracerSummary::default(), true);
+        assert_eq!(
+            clean.classes[&CoverageClass::Exec].status,
+            crate::records::SourceStatus::Active
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "without its observer's account")]
+    fn summarizing_an_observed_run_without_its_account_is_a_defect() {
+        let _ = shared::observer_account(None);
     }
 
     /// A storage ceiling adds the hard-link denials to the `agent` baseline
