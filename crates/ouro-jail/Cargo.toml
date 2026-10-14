@@ -19,31 +19,31 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-ouro-records = { path = "../ouro-records" }
-base64 = "0.22.1"
-clap = { version = "4.6.6", features = ["derive"] }
-libc = "0.2.189"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-sha2 = "0.10.9"
+ouro-records.workspace = true
+base64.workspace = true
+clap = { workspace = true, features = ["derive"] }
+libc.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
 sha1 = "0.10.6"
-toml = "0.8.23"
+toml.workspace = true
 toml_edit = "0.22.27"
 zeroize = "1.8"
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = "0.14.10"
 webpki-roots = "1.0"
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
-uuid = { version = "1.24.0", features = ["v4"] }
+uuid = { workspace = true, features = ["v4"] }
 
-# J5-D: build.rs digests the build inputs (build provenance, jail-v1 §16).
+# build.rs digests the build inputs (build provenance, jail-v1 §16).
 [build-dependencies]
-sha2 = "0.10.9"
+sha2.workspace = true
 
 [dev-dependencies]
-jsonschema = { version = "0.57.0", default-features = false }
+jsonschema.workspace = true
 # The conformance suite drives the real jail through the shared harness and
 # runs the shared fixture inside it. No cycle: `ouro-fixture` does not depend
 # on `ouro-jail`, and this is a dev-dependency, so nothing ships with it.
-ouro-fixture = { path = "../ouro-fixture" }
-tempfile = "3.27.0"
+ouro-fixture.workspace = true
+tempfile.workspace = true

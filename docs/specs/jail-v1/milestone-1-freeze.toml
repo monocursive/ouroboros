@@ -944,6 +944,27 @@ sections = '''
       "debug": false,
       "opt-level": 3
     }
+  },
+  "workspace.dependencies": {
+    "base64": "0.22.1",
+    "clap": "4.6.6",
+    "jsonschema": {
+      "default-features": false,
+      "version": "0.57.0"
+    },
+    "libc": "0.2.189",
+    "ouro-fixture": {
+      "path": "crates/ouro-fixture"
+    },
+    "ouro-records": {
+      "path": "crates/ouro-records"
+    },
+    "serde": "1.0.229",
+    "serde_json": "1.0.151",
+    "sha2": "0.10.9",
+    "tempfile": "3.27.0",
+    "toml": "0.8.23",
+    "uuid": "1.24.0"
   }
 }
 '''
@@ -957,22 +978,28 @@ sections = '''
       "features": [
         "derive"
       ],
-      "version": "4"
+      "workspace": true
     },
-    "libc": "0.2",
+    "libc": {
+      "workspace": true
+    },
     "ouro-records": {
-      "path": "../ouro-records"
+      "workspace": true
     },
     "serde": {
       "features": [
         "derive"
       ],
-      "version": "1"
+      "workspace": true
     },
-    "serde_json": "1"
+    "serde_json": {
+      "workspace": true
+    }
   },
   "dev-dependencies": {
-    "tempfile": "3"
+    "tempfile": {
+      "workspace": true
+    }
   }
 }
 '''
@@ -982,19 +1009,25 @@ file = "crates/ouro-jail/Cargo.toml"
 sections = '''
 {
   "build-dependencies": {
-    "sha2": "0.10.9"
+    "sha2": {
+      "workspace": true
+    }
   },
   "dependencies": {
-    "base64": "0.22.1",
+    "base64": {
+      "workspace": true
+    },
     "clap": {
       "features": [
         "derive"
       ],
-      "version": "4.6.6"
+      "workspace": true
     },
-    "libc": "0.2.189",
+    "libc": {
+      "workspace": true
+    },
     "ouro-records": {
-      "path": "../ouro-records"
+      "workspace": true
     },
     "rcgen": "0.14.10",
     "rustls": {
@@ -1010,12 +1043,18 @@ sections = '''
       "features": [
         "derive"
       ],
-      "version": "1.0.229"
+      "workspace": true
     },
-    "serde_json": "1.0.151",
+    "serde_json": {
+      "workspace": true
+    },
     "sha1": "0.10.6",
-    "sha2": "0.10.9",
-    "toml": "0.8.23",
+    "sha2": {
+      "workspace": true
+    },
+    "toml": {
+      "workspace": true
+    },
     "toml_edit": "0.22.27",
     "ureq": {
       "default-features": false,
@@ -1028,20 +1067,21 @@ sections = '''
       "features": [
         "v4"
       ],
-      "version": "1.24.0"
+      "workspace": true
     },
     "webpki-roots": "1.0",
     "zeroize": "1.8"
   },
   "dev-dependencies": {
     "jsonschema": {
-      "default-features": false,
-      "version": "0.57.0"
+      "workspace": true
     },
     "ouro-fixture": {
-      "path": "../ouro-fixture"
+      "workspace": true
     },
-    "tempfile": "3.27.0"
+    "tempfile": {
+      "workspace": true
+    }
   }
 }
 '''
@@ -1055,15 +1095,16 @@ sections = '''
       "features": [
         "derive"
       ],
-      "version": "4.6.6"
+      "workspace": true
     },
     "jsonschema": {
-      "default-features": false,
-      "version": "0.57.0"
+      "workspace": true
     },
-    "libc": "0.2.189",
+    "libc": {
+      "workspace": true
+    },
     "ouro-records": {
-      "path": "../ouro-records"
+      "workspace": true
     },
     "ring": "0.17.14",
     "rusqlite": {
@@ -1077,23 +1118,31 @@ sections = '''
       "features": [
         "derive"
       ],
-      "version": "1.0.229"
+      "workspace": true
     },
-    "serde_json": "1.0.151",
-    "sha2": "0.10.9",
-    "toml": "0.8.23",
+    "serde_json": {
+      "workspace": true
+    },
+    "sha2": {
+      "workspace": true
+    },
+    "toml": {
+      "workspace": true
+    },
     "uuid": {
       "features": [
         "v4"
       ],
-      "version": "1.24.0"
+      "workspace": true
     }
   },
   "dev-dependencies": {
     "ouro-fixture": {
-      "path": "../ouro-fixture"
+      "workspace": true
     },
-    "tempfile": "3.27.0"
+    "tempfile": {
+      "workspace": true
+    }
   }
 }
 '''
@@ -1103,15 +1152,21 @@ file = "crates/ouro-records/Cargo.toml"
 sections = '''
 {
   "dependencies": {
-    "base64": "0.22.1",
+    "base64": {
+      "workspace": true
+    },
     "serde": {
       "features": [
         "derive"
       ],
-      "version": "1.0.229"
+      "workspace": true
     },
-    "serde_json": "1.0.151",
-    "sha2": "0.10.9"
+    "serde_json": {
+      "workspace": true
+    },
+    "sha2": {
+      "workspace": true
+    }
   }
 }
 '''
@@ -1125,12 +1180,14 @@ sections = '''
       "features": [
         "derive"
       ],
-      "version": "4.6.6"
+      "workspace": true
     },
     "ouro-records": {
-      "path": "../ouro-records"
+      "workspace": true
     },
-    "serde_json": "1.0.151"
+    "serde_json": {
+      "workspace": true
+    }
   }
 }
 '''
@@ -1144,10 +1201,10 @@ sections = '''
       "features": [
         "derive"
       ],
-      "version": "4"
+      "workspace": true
     },
     "ouro-fixture": {
-      "path": "../ouro-fixture"
+      "workspace": true
     },
     "ouro-jail": {
       "path": "../ouro-jail"
@@ -1156,14 +1213,22 @@ sections = '''
       "features": [
         "derive"
       ],
-      "version": "1"
+      "workspace": true
     },
-    "serde_json": "1",
-    "sha2": "0.10.9",
-    "toml": "0.8"
+    "serde_json": {
+      "workspace": true
+    },
+    "sha2": {
+      "workspace": true
+    },
+    "toml": {
+      "workspace": true
+    }
   },
   "dev-dependencies": {
-    "tempfile": "3.27.0"
+    "tempfile": {
+      "workspace": true
+    }
   }
 }
 '''

@@ -11,6 +11,6 @@ publish = false
 workspace = true
 
 [dependencies]
-clap = { version = "4.6.6", features = ["derive"] }
-ouro-records = { path = "../ouro-records" }
-serde_json = "1.0.151"
+clap = { workspace = true, features = ["derive"] }
+ouro-records.workspace = true
+serde_json.workspace = true

@@ -3,6 +3,7 @@ name = "ouro-fixture"
 description = "Conformance child binary and test harness for ouro-jail (jail-v1 §15). Never packaged."
 edition.workspace = true
 version.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 
@@ -26,14 +27,14 @@ name = "stand-in-jail"
 path = "src/bin/stand-in-jail.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-libc = "0.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+clap = { workspace = true, features = ["derive"] }
+libc.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 # The product's record contracts: canonical bytes and receipt digests, the
 # §13.3 trace rule, the gate frame and the record types. No cycle: the
 # records crate depends on nothing in this workspace.
-ouro-records = { path = "../ouro-records" }
+ouro-records.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
