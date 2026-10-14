@@ -200,6 +200,32 @@ defmodule OuroFleet.ControllerTest do
     assert row["last_observed"]["run_id"] == "same-run"
   end
 
+  test "a slow worker spends its own time in a catalog refresh, not the others'", context do
+    assert {:ok, %{"job_id" => near}} = Controller.call({:run, request("near")})
+
+    # A job on a second machine, whose node sorts after this one. This VM runs without
+    # distribution, so that worker answers at once: its node is not connected.
+    far = "job_" <> String.duplicate("f", 64)
+    row = Store.read!(Path.join([context.root, "jobs", near <> ".json"]))
+    elsewhere = %{"machine" => "elsewhere", "node" => "worker@elsewhere"}
+
+    Store.write!(
+      Path.join([context.root, "jobs", far <> ".json"]),
+      %{row | "job_id" => far, "worker" => elsewhere, "snapshot" => nil}
+    )
+
+    :sys.replace_state(context.worker, &Map.merge(&1, %{observed: %{}, delay: 2_000}))
+    started = System.monotonic_time(:millisecond)
+    assert {:ok, rows} = GenServer.call(Controller, {:call, :status, started + 300})
+    assert System.monotonic_time(:millisecond) - started < 1_500
+    replies = Map.new(rows, &{&1["job_id"], &1})
+
+    assert %{"stale" => true, "reason" => "worker_unreachable_or_reply_lost"} = replies[near]
+    # The other worker's own answer, not the budget the slow one used up.
+    assert %{"worker" => "elsewhere", "reason" => "worker_unreachable_or_reply_lost"} =
+             replies[far]
+  end
+
   defp request(id),
     do: %{"schema" => "ouro.fleet.request/1", "request_id" => id, "argv" => ["/bin/true"]}
 

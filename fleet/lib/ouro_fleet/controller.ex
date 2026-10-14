@@ -11,6 +11,10 @@ defmodule OuroFleet.Controller do
   # No single worker call waits longer than this, whatever budget remains. The worker
   # bounds its own work by the same timeout (`OuroFleet.Worker.call/2`).
   @rpc_timeout 125_000
+  # Worker calls end by the deadline on their own (`rpc/3`); a status batch still
+  # running this long past it is stopped. The margin lets a batch that ended on time,
+  # or found no time left, report that itself.
+  @batch_grace 1_000
 
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)
 
@@ -119,14 +123,30 @@ defmodule OuroFleet.Controller do
       {:error, "job_catalog_exceeds_bounded_scan"}
     else
       rows = Enum.map(paths, &Store.read!/1)
+      groups = Enum.group_by(rows, & &1["worker"]["node"])
 
       # One status batch per worker rather than one call per job, so a catalog refresh
-      # costs what the number of machines costs, not what the history costs.
+      # costs what the number of machines costs, not what the history costs. The batches
+      # run together, so a slow worker spends its own time and not that of the others.
       replies =
-        rows
-        |> Enum.group_by(& &1["worker"]["node"])
-        |> Enum.flat_map(fn {_node, [row | _] = group} ->
-          statuses(row["worker"], Enum.map(group, & &1["job_id"]), deadline)
+        groups
+        |> Task.async_stream(
+          fn {_node, [row | _] = group} ->
+            statuses(row["worker"], Enum.map(group, & &1["job_id"]), deadline)
+          end,
+          # Each batch's timeout counts from its own start, so none may wait for a slot.
+          max_concurrency: max(map_size(groups), 1),
+          timeout: max(deadline - System.monotonic_time(:millisecond), 0) + @batch_grace,
+          on_timeout: :kill_task,
+          zip_input_on_exit: true
+        )
+        |> Enum.flat_map(fn
+          {:ok, replies} ->
+            replies
+
+          # A stopped batch's reply is lost, as `rpc/3` reports a call that timed out.
+          {:exit, {{_node, group}, :timeout}} ->
+            Enum.map(group, &{&1["job_id"], {:error, "worker_unreachable_or_reply_lost"}})
         end)
         |> Map.new()
 
