@@ -586,6 +586,19 @@ fn a_thread_starts_and_joins() {
     }
 }
 
+/// Review FX7: `--rdwr` used to win silently over `--write`; the two are
+/// refused together, as are `--fifo` and `--regular`.
+#[test]
+fn contradictory_open_and_mknod_flags_are_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f");
+    let out = run(&osargs!["open", &path, "--create", "--write", "--rdwr"]);
+    assert_eq!(code(&out), EXIT_USAGE);
+    assert!(!path.exists(), "nothing ran");
+    let out = run(&osargs!["mknod", &path, "--fifo", "--regular"]);
+    assert_eq!(code(&out), EXIT_USAGE);
+}
+
 #[test]
 fn exit_and_raise_produce_the_status_they_report() {
     let out = run(&osargs!["exit", "42"]);
@@ -1184,6 +1197,26 @@ fn a_malformed_script_is_a_usage_error() {
 
     std::fs::write(&script, r#"[["nosuchmode"]]"#).unwrap();
     assert_eq!(code(&run(&osargs!["script", &script])), EXIT_USAGE);
+
+    // Review FX8: a usage error in a later step refuses the script before
+    // an earlier step acts.
+    let made = dir.at("made-by-step-0");
+    std::fs::write(
+        &script,
+        serde_json::to_vec(&serde_json::json!([
+            ["open", made.to_str().unwrap(), "--create", "--write"],
+            ["nosuchmode"]
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let out = run(&osargs!["script", &script]);
+    assert_eq!(code(&out), EXIT_USAGE);
+    assert!(lines(&out).is_empty(), "no step ran");
+    assert!(
+        !std::path::Path::new(&made).exists(),
+        "step 0 acted before step 1 was refused"
+    );
 
     assert_eq!(
         code(&run(&osargs!["script", &dir.at("absent.json")])),

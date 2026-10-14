@@ -6,6 +6,7 @@
 //! emits several lines, in the order they ran.
 
 use std::ffi::{CString, OsStr, OsString, c_char, c_int};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use serde_json::Value;
@@ -59,7 +60,11 @@ pub(crate) fn raw_errno() -> c_int {
     }
 }
 
-/// A usage error: the fixture refuses before doing anything. Exit code 2.
+/// Why a mode stopped without its result: a usage error, refused before
+/// any operation, or an operation the fixture needed for itself (a
+/// directory descriptor, a pipe, a fork, writing its result file) that
+/// failed, after its own report line where it has one. Exit code 2 either
+/// way: neither is the outcome of the operation under test.
 pub type Usage = String;
 
 /// State shared by every step of one fixture process.
@@ -70,7 +75,6 @@ pub type Usage = String;
 pub struct Session<'a> {
     pub(crate) rep: &'a Reporter,
     failed: std::cell::Cell<bool>,
-    in_script: std::cell::Cell<bool>,
 }
 
 impl<'a> Session<'a> {
@@ -79,7 +83,6 @@ impl<'a> Session<'a> {
         Session {
             rep,
             failed: std::cell::Cell::new(false),
-            in_script: std::cell::Cell::new(false),
         }
     }
 
@@ -154,11 +157,18 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
             expect,
         } => {
             let mode = parse_mode(&mode)?;
-            Ok(check(
-                rep,
-                open(&path, via, create, trunc, write, rdwr, mode),
-                &expect,
-            ))
+            // clap refuses `--write` with `--rdwr`.
+            let access = match (write, rdwr) {
+                (_, true) => Access::ReadWrite,
+                (true, false) => Access::Write,
+                (false, false) => Access::Read,
+            };
+            let flags = OpenFlags {
+                access,
+                create,
+                trunc,
+            };
+            Ok(check(rep, open(&path, via, flags, mode), &expect))
         }
         Mode::Mkdir {
             path,
@@ -172,9 +182,11 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
                 return Err("--dirfd needs --via mkdirat".to_string());
             }
             let dir = open_dirfd(rep, dirfd.as_deref())?;
-            let ok = check(rep, mkdir(&path, via, mode, dir), &expect);
-            close_dirfd(dir);
-            Ok(ok)
+            Ok(check(
+                rep,
+                mkdir(&path, via, mode, raw_fd(dir.as_ref())),
+                &expect,
+            ))
         }
         Mode::Rename {
             from,
@@ -188,12 +200,15 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
             if (dirfd.is_some() || dirfd2.is_some()) && via == RenameVia::Rename {
                 return Err("--dirfd and --dirfd2 need --via renameat or renameat2".to_string());
             }
+            // Owned: the first is closed even when the second cannot open.
             let dir = open_dirfd(rep, dirfd.as_deref())?;
             let dir2 = open_dirfd(rep, dirfd2.as_deref())?;
-            let ok = check(rep, rename(&from, &to, via, noreplace, dir, dir2), &expect);
-            close_dirfd(dir);
-            close_dirfd(dir2);
-            Ok(ok)
+            let (fd, fd2) = (raw_fd(dir.as_ref()), raw_fd(dir2.as_ref()));
+            Ok(check(
+                rep,
+                rename(&from, &to, via, noreplace, fd, fd2),
+                &expect,
+            ))
         }
         Mode::Unlink { path, via, expect } => Ok(check(rep, unlink(&path, via), &expect)),
         Mode::Rmdir { path, via, expect } => Ok(check(rep, rmdir(&path, via), &expect)),
@@ -212,14 +227,20 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
         Mode::Mknod {
             path,
             via,
-            fifo,
+            // `--fifo` only spells out the default; clap refuses it with
+            // `--regular`.
+            fifo: _,
             regular,
             mode,
             expect,
         } => {
-            let _ = fifo; // the default kind; `--regular` is what changes it
+            let kind = if regular {
+                NodeKind::Regular
+            } else {
+                NodeKind::Fifo
+            };
             let perm = parse_mode(&mode)?;
-            Ok(check(rep, mknod(&path, via, regular, perm), &expect))
+            Ok(check(rep, mknod(&path, via, kind, perm), &expect))
         }
         Mode::Truncate {
             path,
@@ -440,31 +461,55 @@ pub(crate) fn check(rep: &Reporter, emitted: Emitted, expect: &Expect) -> bool {
 
 // ---------------------------------------------------------------- filesystem
 
+/// The access an open requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+/// What an open asks for besides its path and creation mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OpenFlags {
+    pub(crate) access: Access,
+    pub(crate) create: bool,
+    pub(crate) trunc: bool,
+}
+
+impl OpenFlags {
+    /// Read-only, creating and truncating nothing.
+    pub(crate) const READ: OpenFlags = OpenFlags {
+        access: Access::Read,
+        create: false,
+        trunc: false,
+    };
+
+    fn bits(self) -> c_int {
+        let mut flags = match self.access {
+            Access::Read => libc::O_RDONLY,
+            Access::Write => libc::O_WRONLY,
+            Access::ReadWrite => libc::O_RDWR,
+        };
+        if self.create {
+            flags |= libc::O_CREAT;
+        }
+        if self.trunc {
+            flags |= libc::O_TRUNC;
+        }
+        flags
+    }
+}
+
 /// Open, and close the descriptor again. Most modes only want the result.
-fn open(
-    path: &OsStr,
-    via: OpenVia,
-    create: bool,
-    trunc: bool,
-    write: bool,
-    rdwr: bool,
-    mode: u32,
-) -> Emitted {
-    let emitted = open_keep(path, via, create, trunc, write, rdwr, mode);
+fn open(path: &OsStr, via: OpenVia, flags: OpenFlags, mode: u32) -> Emitted {
+    let emitted = open_keep(path, via, flags, mode);
     close_fd(emitted.report.ret);
     emitted
 }
 
 /// Open and hand the descriptor back in `report.ret`. The caller closes it.
-pub(crate) fn open_keep(
-    path: &OsStr,
-    via: OpenVia,
-    create: bool,
-    trunc: bool,
-    write: bool,
-    rdwr: bool,
-    mode: u32,
-) -> Emitted {
+pub(crate) fn open_keep(path: &OsStr, via: OpenVia, flags: OpenFlags, mode: u32) -> Emitted {
     let name = match via {
         OpenVia::Openat => "openat",
         OpenVia::Open => "open",
@@ -483,20 +528,7 @@ pub(crate) fn open_keep(
         return Emitted::unusable(report);
     }
 
-    let access = if rdwr {
-        libc::O_RDWR
-    } else if write {
-        libc::O_WRONLY
-    } else {
-        libc::O_RDONLY
-    };
-    let mut flags = access;
-    if create {
-        flags |= libc::O_CREAT;
-    }
-    if trunc {
-        flags |= libc::O_TRUNC;
-    }
+    let mut flags = flags.bits();
     if via == OpenVia::Creat {
         flags = libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC;
         report.set("implied_flags", true);
@@ -523,7 +555,7 @@ pub(crate) fn open_keep(
 /// the open as its own line: the descriptor is part of what the next call
 /// names, so a reader must be able to see where it came from. A read-only
 /// open is outside the closed set, so a tracer reports nothing for it.
-fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<c_int>, Usage> {
+fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<OwnedFd>, Usage> {
     let Some(dir) = dir else {
         return Ok(None);
     };
@@ -544,13 +576,16 @@ fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<c_int>, Usag
             emitted.report.errno
         ));
     }
-    Ok(Some(emitted.report.ret as c_int))
+    let fd = c_int::try_from(emitted.report.ret)
+        .map_err(|_| format!("openat returned {}, not a descriptor", emitted.report.ret))?;
+    // SAFETY: `fd` was just returned by a successful `openat` and nothing
+    // else owns it.
+    Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
 
-fn close_dirfd(fd: Option<c_int>) {
-    if let Some(fd) = fd {
-        close_fd(i64::from(fd));
-    }
+/// The number of a descriptor the caller keeps open for the call.
+fn raw_fd(fd: Option<&OwnedFd>) -> Option<c_int> {
+    fd.map(AsRawFd::as_raw_fd)
 }
 
 /// The directory a path argument is resolved against: a descriptor the
@@ -777,20 +812,18 @@ fn symlink(target: &OsStr, linkpath: &OsStr, via: SymlinkVia) -> Emitted {
 /// necessary on one platform is a lint on the other. Both cfg arms are kept
 /// here rather than at every use.
 #[cfg(target_os = "linux")]
-const fn file_type_bits(regular: bool) -> u32 {
-    if regular {
-        libc::S_IFREG
-    } else {
-        libc::S_IFIFO
+const fn file_type_bits(kind: NodeKind) -> u32 {
+    match kind {
+        NodeKind::Regular => libc::S_IFREG,
+        NodeKind::Fifo => libc::S_IFIFO,
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-const fn file_type_bits(regular: bool) -> u32 {
-    (if regular {
-        libc::S_IFREG
-    } else {
-        libc::S_IFIFO
+const fn file_type_bits(kind: NodeKind) -> u32 {
+    (match kind {
+        NodeKind::Regular => libc::S_IFREG,
+        NodeKind::Fifo => libc::S_IFIFO,
     }) as u32
 }
 
@@ -805,7 +838,14 @@ const fn file_type_mask() -> u32 {
     libc::S_IFMT as u32
 }
 
-fn mknod(path: &OsStr, via: MknodVia, regular: bool, perm: u32) -> Emitted {
+/// The kind of node `mknod` makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeKind {
+    Fifo,
+    Regular,
+}
+
+fn mknod(path: &OsStr, via: MknodVia, kind: NodeKind, perm: u32) -> Emitted {
     let name = match via {
         MknodVia::Mknod => "mknod",
         MknodVia::Mknodat => "mknodat",
@@ -825,13 +865,19 @@ fn mknod(path: &OsStr, via: MknodVia, regular: bool, perm: u32) -> Emitted {
     // The file-type bits are part of `mode`, not a separate argument. Only
     // S_IFIFO and S_IFREG are offered: S_IFCHR and S_IFBLK need CAP_MKNOD, and
     // a fixture that always fails would prove nothing.
-    let mode = file_type_bits(regular) | (perm & 0o7777);
+    let mode = file_type_bits(kind) | (perm & 0o7777);
     let dev: u64 = 0;
 
     path_value(&mut report.args, "path", path);
     report.set("mode", format!("{mode:o}"));
     report.set("dev", dev);
-    report.set("kind", if regular { "S_IFREG" } else { "S_IFIFO" });
+    report.set(
+        "kind",
+        match kind {
+            NodeKind::Regular => "S_IFREG",
+            NodeKind::Fifo => "S_IFIFO",
+        },
+    );
     report.set("mechanism", raw::mechanism());
 
     let attempt = match via {
@@ -863,7 +909,16 @@ fn truncate(path: &OsStr, length: i64) -> Emitted {
 /// attribute the first and not the second, which is the distinction this mode
 /// exists to make visible. `--expect` applies to the `ftruncate`.
 fn ftruncate(rep: &Reporter, path: &OsStr, length: i64, expect: &Expect) -> bool {
-    let opened = open_keep(path, OpenVia::Openat, false, false, false, true, 0o600);
+    let opened = open_keep(
+        path,
+        OpenVia::Openat,
+        OpenFlags {
+            access: Access::ReadWrite,
+            create: false,
+            trunc: false,
+        },
+        0o600,
+    );
     rep.emit(&opened.report);
     if opened.unusable || opened.report.ret < 0 {
         return false;
@@ -1915,7 +1970,16 @@ fn write_mmap(rep: &Reporter, path: &OsStr) -> bool {
     const LEN: usize = 4096;
     // One open, one reported line: reopening silently would put a second
     // `openat` in a tracer's view that no report line accounts for.
-    let opened = open_keep(path, OpenVia::Openat, true, true, false, true, 0o600);
+    let opened = open_keep(
+        path,
+        OpenVia::Openat,
+        OpenFlags {
+            access: Access::ReadWrite,
+            create: true,
+            trunc: true,
+        },
+        0o600,
+    );
     rep.emit(&opened.report);
     if opened.unusable || opened.report.ret < 0 {
         return false;
@@ -2037,8 +2101,10 @@ fn script(session: &Session<'_>, file: &OsStr) -> Result<bool, Usage> {
     let steps: Vec<Vec<String>> = serde_json::from_str(&text)
         .map_err(|e| format!("script must be a JSON array of argv arrays: {e}"))?;
     let count = steps.len();
-    session.in_script.set(true);
-    let mut all_ok = true;
+    // Every step is parsed before any runs: a usage error in step 3 used to
+    // be found after steps 0..2 had already acted, and still exit 2 as if
+    // nothing had.
+    let mut parsed = Vec::with_capacity(count);
     for (i, argv) in steps.into_iter().enumerate() {
         if argv.is_empty() {
             return Err(format!("script step {i} is empty"));
@@ -2054,7 +2120,11 @@ fn script(session: &Session<'_>, file: &OsStr) -> Result<bool, Usage> {
                 count - i - 1
             ));
         }
-        all_ok &= run_in(session, step.mode)?;
+        parsed.push(step.mode);
+    }
+    let mut all_ok = true;
+    for mode in parsed {
+        all_ok &= run_in(session, mode)?;
     }
     Ok(all_ok)
 }
@@ -2149,7 +2219,7 @@ mod tests {
         // does not hide it.
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("f");
-        let e = mknod(fifo.as_os_str(), MknodVia::Mknod, false, 0o600);
+        let e = mknod(fifo.as_os_str(), MknodVia::Mknod, NodeKind::Fifo, 0o600);
         if e.unusable {
             // An architecture without the legacy number; it says so and the
             // `unavailable` tests above cover that classification.
@@ -2159,8 +2229,11 @@ mod tests {
         let mode = e.report.args.get("mode").unwrap().as_str().unwrap();
         let mode = u32::from_str_radix(mode, 8).unwrap();
         assert_eq!(mode & 0o7777, 0o600);
-        assert_eq!(mode & file_type_mask(), file_type_bits(false));
-        assert_ne!(file_type_bits(true), file_type_bits(false));
+        assert_eq!(mode & file_type_mask(), file_type_bits(NodeKind::Fifo));
+        assert_ne!(
+            file_type_bits(NodeKind::Regular),
+            file_type_bits(NodeKind::Fifo)
+        );
         assert_eq!(e.report.args.get("dev").unwrap(), 0);
         assert_eq!(e.report.args.get("kind").unwrap(), "S_IFIFO");
     }
@@ -2183,7 +2256,16 @@ mod tests {
         bytes.extend_from_slice(b"\0ignored");
         let bad = OsString::from_vec(bytes);
 
-        let e = open(&bad, OpenVia::Openat, true, false, true, false, 0o600);
+        let e = open(
+            &bad,
+            OpenVia::Openat,
+            OpenFlags {
+                access: Access::Write,
+                create: true,
+                trunc: false,
+            },
+            0o600,
+        );
         assert!(e.unusable, "a refused path must satisfy nothing");
         assert_eq!(e.report.args.get("refused").unwrap(), "interior_nul");
         assert_eq!(e.report.ret, -1);

@@ -119,7 +119,7 @@ pub enum Mode {
         #[arg(long)]
         trunc: bool,
         /// Request write access (`O_WRONLY`); without it the open is read-only.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rdwr")]
         write: bool,
         /// Request read and write access (`O_RDWR`).
         #[arg(long)]

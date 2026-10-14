@@ -286,10 +286,12 @@ fn perf_launch_reads_the_clock_before_fork_and_again_after_exec() {
     let (start, _) = start_and_summary(&launch.out, "spawn-tree");
     let (t0, exec) = (n(r, &["t0_ns"]), n(r, &["exec_ns"]));
     // fork and exec take time, so the pre-fork reading is strictly earlier
-    // than the one taken once the exec is confirmed, which precedes the
-    // target's own entry reading.
+    // than the one taken once the exec is confirmed, and than the target's
+    // own entry reading. The launcher learns of the exec only when it is
+    // scheduled again, so the target may well read the clock first: the
+    // two later readings have no order.
     assert!(t0 < exec, "{t0} {exec}");
-    assert!(exec <= u64_at(&start, "monotonic_ns"), "{r:#} {start}");
+    assert!(t0 < u64_at(&start, "monotonic_ns"), "{r:#} {start}");
 }
 
 /// Linux only: sampling reads /proc. On macOS the test does not exist rather

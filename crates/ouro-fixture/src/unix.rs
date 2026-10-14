@@ -604,10 +604,7 @@ pub(crate) fn scm_send(rep: &Reporter, socket: &OsStr, fd_path: &OsStr, expect: 
     let opened = open_keep(
         fd_path,
         crate::cli::OpenVia::Openat,
-        false,
-        false,
-        false,
-        false,
+        crate::ops::OpenFlags::READ,
         0,
     );
     rep.emit(&opened.report);
