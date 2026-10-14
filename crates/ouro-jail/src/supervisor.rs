@@ -3664,43 +3664,43 @@ fn claim_attempt(
             "the Linux supervisor birth identity could not be read".to_owned(),
         ));
     }
-    let mut state = serde_json::json!({
-        "schema": state::SCHEMA_STATE,
-        "attempt_id": attempt_id.as_str(),
-        "os": identity.os.as_str(),
-        "arch": identity.arch,
-        "kernel": identity.kernel,
-        "component_version": env!("CARGO_PKG_VERSION"),
-        "claimed_at": rfc3339_utc(SystemTime::now()),
+    let state = state::JailState {
+        schema: state::Field::Set(state::SCHEMA_STATE.to_owned()),
+        attempt_id: state::Field::Set(attempt_id.as_str().to_owned()),
+        os: state::Field::Set(identity.os.as_str().to_owned()),
+        arch: state::Field::Set(identity.arch),
+        kernel: state::Field::Set(identity.kernel),
+        component_version: state::Field::Set(env!("CARGO_PKG_VERSION").to_owned()),
+        claimed_at: state::Field::Set(rfc3339_utc(SystemTime::now())),
         // §7: boot identity and the live owner's birth identity, so a
         // reconciler can tell this attempt's supervisor from a recycled pid
         // without parsing a receipt.
-        "owner": owner.map_or(serde_json::Value::Null, |owner| {
-            serde_json::json!({
-                "pid": owner.pid,
-                "boot_id": owner.boot_id,
-                "start_time_ticks": owner.start_time_ticks,
-            })
-        }),
-        "boundary": serde_json::Value::Null,
+        owner: state::Field::or_null(owner.map(|owner| state::Owner {
+            pid: owner.pid,
+            boot_id: owner.boot_id,
+            start_time_ticks: owner.start_time_ticks,
+            rest: serde_json::Map::new(),
+        })),
+        boundary: state::Field::Null,
         // J4 W2-S: N7 — the execution leaf, registered by the platform before
         // it exists (`state::register_execution_leaf`).
-        "execution_cgroup": serde_json::Value::Null,
-        "vendor_state": serde_json::Value::Null,
-        "state_cleanup": "not_needed",
-    });
-    // J4-R: S9 — a test seam in force is recorded where gc and a reader of
-    // jail state see it, from the claim on.
-    if let Some(seams) = test_seams {
-        state["test_seams"] = seams.clone();
-    }
+        execution_cgroup: state::Field::Null,
+        vendor_state: state::Field::Null,
+        state_cleanup: state::Field::Set(StateCleanup::NotNeeded),
+        // J4-R: S9 — a test seam in force is recorded where gc and a reader
+        // of jail state see it, from the claim on.
+        test_seams: test_seams
+            .cloned()
+            .map_or(state::Field::Absent, state::Field::Set),
+        ..state::JailState::default()
+    };
     let path = attempt_dir.state_path();
     // J4-R: §7, R02 — the claim is written and synced under a temporary name
     // and then linked into place, which fails when a claim exists. The link is
     // exclusive and atomic, so the claim is never visible, and never left by a
     // crash, with fewer than all its bytes (it used to be created empty and
     // then written, so every run had an unparseable claim for a moment).
-    let bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
+    let bytes = state.to_bytes().map_err(|error| {
         JailError::new(
             ErrorCode::InternalError,
             ErrorStage::Preparing,
@@ -3728,13 +3728,13 @@ fn register_boundary_in_state(
     boundary: &crate::platform::BoundaryIdentity,
 ) -> Result<(), JailError> {
     state::update_attempt_state(state::Site::Boundary, attempt_dir, |state| {
-        state["boundary"] = serde_json::json!({
+        state.boundary = state::Field::Set(serde_json::json!({
             "kind": boundary.boundary,
             "verification_scope": boundary.verification_scope,
             "backend": boundary.backend,
             "backend_version": boundary.backend_version,
             "process": boundary.process,
-        });
+        }));
     })
 }
 

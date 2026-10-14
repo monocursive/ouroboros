@@ -65,8 +65,6 @@ pub fn leaf_name_of(attempt_id: &str) -> String {
     format!("{LEAF_PREFIX}{attempt_id}{LEAF_SUFFIX}")
 }
 
-/// Largest `jail-state.json` gc reads.
-const STATE_MAX: u64 = 1024 * 1024;
 /// Largest `jail.json` or `policy.json` gc reads.
 const RECORD_MAX: u64 = cleanup::RECEIPT_MAX;
 
@@ -499,125 +497,106 @@ fn leaf_from(value: &Value) -> Option<LeafRecord> {
     })
 }
 
-fn leaf_json(leaf: &LeafRecord) -> Value {
-    serde_json::json!({
-        "path": leaf.path,
-        "device": leaf.device,
-        "inode": leaf.inode,
+/// The jail-state entry of a leaf gc identified.
+fn leaf_entry(leaf: &LeafRecord) -> state::LeafEntry {
+    state::LeafEntry::new(leaf.path.clone(), Some((leaf.device, leaf.inode)))
+}
+
+/// A leaf jail state records with its device and inode.
+fn identified(entry: &state::LeafEntry) -> Option<LeafRecord> {
+    let (device, inode) = entry.identity()?;
+    Some(LeafRecord {
+        path: entry.path.clone(),
+        device,
+        inode,
     })
 }
 
-/// Parses jail state for the attempt named `id`.
+/// Parses jail state for the attempt named `id`: the projection of
+/// [`state::JailState`] gc decides on.
 ///
 /// # Errors
 /// Why the state is corrupt: not JSON, another schema, another attempt, or
 /// a field without the shape the supervisor writes.
 pub fn parse_state(bytes: &[u8], id: &str) -> Result<StateView, String> {
-    let state: Value = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-    if state.get("schema").and_then(Value::as_str) != Some("ouro.jail.state/1") {
-        return Err("the schema is not ouro.jail.state/1".to_owned());
+    let state = state::JailState::parse(bytes).map_err(|error| error.to_string())?;
+    if state.schema.get().map(String::as_str) != Some(state::SCHEMA_STATE) {
+        return Err(format!("the schema is not {}", state::SCHEMA_STATE));
     }
-    if state.get("attempt_id").and_then(Value::as_str) != Some(id) {
+    if state.attempt_id.get().map(String::as_str) != Some(id) {
         return Err("it names another attempt".to_owned());
     }
-    let text = |key: &str| {
-        state
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::to_owned)
+    let text = |field: &state::Field<String>, key: &str| {
+        field
+            .get()
+            .cloned()
             .ok_or_else(|| format!("`{key}` is missing"))
     };
-    let owner = match state.get("owner") {
-        None | Some(Value::Null) => None,
-        Some(owner) => Some(
-            (|| {
-                Some(OwnerRecord {
-                    pid: u32::try_from(owner.get("pid")?.as_u64()?).ok()?,
-                    boot_id: owner.get("boot_id")?.as_str()?.to_owned(),
-                    start_time_ticks: owner.get("start_time_ticks")?.as_u64()?,
-                })
-            })()
-            .ok_or("`owner` is not a birth identity")?,
-        ),
-    };
-    // J4 W2-S: N7 — `{path, device, inode}`, or `{path, null, null}` for a
-    // leaf named before `mkdir` whose identity was never recorded.
-    let leaf = match state.get("execution_cgroup") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(
-            match (value.get("device"), value.get("inode")) {
-                (Some(Value::Null), Some(Value::Null)) => value
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .map(|path| RegisteredLeaf::Named(path.into())),
-                _ => leaf_from(value).map(RegisteredLeaf::Identified),
-            }
-            .ok_or("`execution_cgroup` is malformed")?,
+    let owner = state.owner.get().map(|owner| OwnerRecord {
+        pid: owner.pid,
+        boot_id: owner.boot_id.clone(),
+        start_time_ticks: owner.start_time_ticks,
+    });
+    // N7: `{path, device, inode}`, or `{path, null, null}` for a leaf named
+    // before `mkdir` whose identity was never recorded.
+    let leaf = match state.execution_cgroup.get() {
+        None => None,
+        Some(entry) if entry.is_name_only() => Some(RegisteredLeaf::Named(entry.path.clone())),
+        Some(entry) => Some(
+            identified(entry)
+                .map(RegisteredLeaf::Identified)
+                .ok_or("`execution_cgroup` is malformed")?,
         ),
     };
     let mut gc_removed = Vec::new();
     let mut gc_verified = Vec::new();
     let mut gc_removed_scratch = false;
     let mut gc_finished = None;
-    match state.get("gc_actions") {
-        None | Some(Value::Null) => {}
-        Some(Value::Array(actions)) => {
-            for action in actions {
-                match action.get("action").and_then(Value::as_str) {
-                    Some("gc_removed_cgroup") => {
-                        if let Some(leaf) = action.get("execution_cgroup").and_then(leaf_from) {
-                            gc_verified.push(leaf.clone());
-                            gc_removed.push(leaf);
-                        }
-                    }
-                    Some("gc_terminated_orphan")
-                        if action.get("verified_empty") == Some(&Value::Bool(true)) =>
-                    {
-                        if let Some(leaf) = action.get("execution_cgroup").and_then(leaf_from) {
-                            gc_verified.push(leaf);
-                        }
-                    }
-                    // J4 wave 3 (G3): the intent, recorded after the leaf was
-                    // seen empty and before its `rmdir`; by name only (no
-                    // device and inode) for a leaf registered by name only.
-                    Some("gc_removing_cgroup")
-                        if action.get("verified_empty") == Some(&Value::Bool(true)) =>
-                    {
-                        let cgroup = action.get("execution_cgroup");
-                        let leaf = cgroup.and_then(leaf_from).or_else(|| {
-                            let cgroup = cgroup?;
-                            (cgroup.get("device") == Some(&Value::Null)
-                                && cgroup.get("inode") == Some(&Value::Null))
-                            .then_some(())?;
-                            Some(LeafRecord {
-                                path: cgroup.get("path")?.as_str()?.into(),
-                                device: 0,
-                                inode: 0,
-                            })
-                        });
-                        gc_verified.extend(leaf);
-                    }
-                    Some("gc_removed_scratch") => gc_removed_scratch = true,
-                    // J4 wave 3 (G4)
-                    Some("gc_finished") => {
-                        gc_finished = Some(
-                            action
-                                .get("at")
-                                .and_then(Value::as_str)
-                                .unwrap_or("an unrecorded time")
-                                .to_owned(),
-                        );
-                    }
-                    _ => {}
+    for action in state.gc_actions.get().into_iter().flatten() {
+        let verified_empty = action.verified_empty.get() == Some(&true);
+        let leaf = action.execution_cgroup.get();
+        match action.action.as_str() {
+            "gc_removed_cgroup" => {
+                if let Some(leaf) = leaf.and_then(identified) {
+                    gc_verified.push(leaf.clone());
+                    gc_removed.push(leaf);
                 }
             }
+            "gc_terminated_orphan" if verified_empty => {
+                gc_verified.extend(leaf.and_then(identified));
+            }
+            // J4 wave 3 (G3): the intent, recorded after the leaf was seen
+            // empty and before its `rmdir`; by name only (no device and
+            // inode) for a leaf registered by name only.
+            "gc_removing_cgroup" if verified_empty => {
+                gc_verified.extend(leaf.and_then(|leaf| {
+                    identified(leaf).or_else(|| {
+                        leaf.is_name_only().then(|| LeafRecord {
+                            path: leaf.path.clone(),
+                            device: 0,
+                            inode: 0,
+                        })
+                    })
+                }));
+            }
+            "gc_removed_scratch" => gc_removed_scratch = true,
+            // J4 wave 3 (G4)
+            "gc_finished" => {
+                gc_finished = Some(
+                    action
+                        .at
+                        .get()
+                        .cloned()
+                        .unwrap_or_else(|| "an unrecorded time".to_owned()),
+                );
+            }
+            _ => {}
         }
-        Some(_) => return Err("`gc_actions` is not a list".to_owned()),
     }
     Ok(StateView {
         attempt_id: id.to_owned(),
-        os: text("os")?,
-        arch: text("arch")?,
+        os: text(&state.os, "os")?,
+        arch: text(&state.arch, "arch")?,
         owner,
         leaf,
         gc_removed,
@@ -1549,7 +1528,7 @@ fn visit(
         }
     };
 
-    let state = read_view(&dir.state_path(), STATE_MAX, |bytes| {
+    let state = read_view(&dir.state_path(), state::STATE_FILE_MAX, |bytes| {
         parse_state(bytes, &display)
     })
     .and_then(|state| state.ok_or_else(|| "the file vanished".to_owned()));
@@ -1648,7 +1627,7 @@ fn visit(
         && resumed_settled
         && scratch.is_gone();
     if finished {
-        match record(&dir, "gc_finished", Value::Null, &mut entry.recorded) {
+        match record(&dir, act("gc_finished"), &mut entry.recorded) {
             Ok(()) => {}
             Err(failure) => incomplete.push(format!("{display} ({failure})")),
         }
@@ -1830,45 +1809,28 @@ fn reconcile(
     done
 }
 
-fn record(
-    dir: &AttemptDir,
-    action: &str,
-    detail: Value,
-    recorded: &mut Vec<String>,
-) -> Result<(), String> {
-    let mut item = serde_json::json!({
-        "action": action,
-        "at": rfc3339_utc(SystemTime::now()),
-    });
-    if let (Some(item), Value::Object(detail)) = (item.as_object_mut(), detail) {
-        item.extend(detail);
+/// A gc record of `action`, made now.
+fn act(action: &str) -> state::GcAction {
+    state::GcAction {
+        action: action.to_owned(),
+        at: state::Field::Set(rfc3339_utc(SystemTime::now())),
+        ..state::GcAction::default()
     }
-    // J4 W2-S: P14, gc's reconciliation records' own persistence site.
-    state::update_attempt_state(state::Site::GcRecord, dir, |state| {
-        match state.get_mut("gc_actions").and_then(Value::as_array_mut) {
-            Some(actions) => coalesce(actions, item),
-            None => state["gc_actions"] = Value::Array(vec![item]),
-        }
-    })
-    .map_err(|error| format!("jail state could not record {action}: {}", error.message))?;
-    recorded.push(action.to_owned());
-    Ok(())
 }
 
-/// The fields of a gc record that say when and how often it happened.
-const RECORD_TIMES: [&str; 3] = ["at", "last_at", "count"];
-
-/// Whether two gc records say the same thing, whenever they said it.
-fn same_record(a: &Value, b: &Value) -> bool {
-    fn what(record: &Value) -> Option<BTreeMap<&String, &Value>> {
-        record.as_object().map(|fields| {
-            fields
-                .iter()
-                .filter(|(key, _)| !RECORD_TIMES.contains(&key.as_str()))
-                .collect()
-        })
-    }
-    what(a).is_some() && what(a) == what(b)
+fn record(
+    dir: &AttemptDir,
+    item: state::GcAction,
+    recorded: &mut Vec<String>,
+) -> Result<(), String> {
+    let action = item.action.clone();
+    // J4 W2-S: P14, gc's reconciliation records' own persistence site.
+    state::update_attempt_state(state::Site::GcRecord, dir, |state| {
+        coalesce(state.gc_actions.get_or_insert_default(), item);
+    })
+    .map_err(|error| format!("jail state could not record {action}: {}", error.message))?;
+    recorded.push(action);
+    Ok(())
 }
 
 /// J4 wave 3 (G5): appends `item`, unless a record saying the same thing is
@@ -1877,19 +1839,12 @@ fn same_record(a: &Value, b: &Value) -> bool {
 /// did (a kill that cannot be verified, an intent whose removal fails) adds
 /// no record, so jail state stays far below its read cap however many
 /// passes run.
-fn coalesce(actions: &mut Vec<Value>, item: Value) {
-    match actions
-        .iter_mut()
-        .find(|existing| same_record(existing, &item))
-    {
+fn coalesce(actions: &mut Vec<state::GcAction>, item: state::GcAction) {
+    match actions.iter_mut().find(|existing| existing.same_act(&item)) {
         Some(existing) => {
-            let count = existing
-                .get("count")
-                .and_then(Value::as_u64)
-                .unwrap_or(1)
-                .saturating_add(1);
-            existing["count"] = Value::from(count);
-            existing["last_at"] = item.get("at").cloned().unwrap_or(Value::Null);
+            let count = existing.count.get().copied().unwrap_or(1).saturating_add(1);
+            existing.count = state::Field::Set(count);
+            existing.last_at = state::Field::or_null(item.at.get().cloned());
         }
         None => actions.push(item),
     }
@@ -1907,13 +1862,18 @@ fn terminate(
     meter: &mut Meter,
     recorded: &mut Vec<String>,
 ) -> Result<(), String> {
-    let cgroup = serde_json::json!({ "execution_cgroup": leaf_json(leaf) });
-    record(dir, "gc_terminating_orphan", cgroup.clone(), recorded)
-        .map_err(|error| format!("{error}; nothing was killed"))?;
+    let killing = state::GcAction {
+        execution_cgroup: state::Field::Set(leaf_entry(leaf)),
+        ..act("gc_terminating_orphan")
+    };
+    record(dir, killing, recorded).map_err(|error| format!("{error}; nothing was killed"))?;
     host.terminate_leaf(leaf, options.kill_budget)?;
-    let mut verified = cgroup;
-    verified["verified_empty"] = Value::Bool(true);
-    record(dir, "gc_terminated_orphan", verified, recorded)?;
+    let killed = state::GcAction {
+        execution_cgroup: state::Field::Set(leaf_entry(leaf)),
+        verified_empty: state::Field::Set(true),
+        ..act("gc_terminated_orphan")
+    };
+    record(dir, killed, recorded)?;
     remove(dir, leaf, host, meter, recorded)
 }
 
@@ -1928,24 +1888,22 @@ fn remove(
     meter: &mut Meter,
     recorded: &mut Vec<String>,
 ) -> Result<(), String> {
-    record(
-        dir,
-        "gc_removing_cgroup",
-        serde_json::json!({ "execution_cgroup": leaf_json(leaf), "verified_empty": true }),
-        recorded,
-    )
-    .map_err(|error| format!("{error}; nothing was removed"))?;
+    let removing = state::GcAction {
+        execution_cgroup: state::Field::Set(leaf_entry(leaf)),
+        verified_empty: state::Field::Set(true),
+        ..act("gc_removing_cgroup")
+    };
+    record(dir, removing, recorded).map_err(|error| format!("{error}; nothing was removed"))?;
     let mut left = meter.remaining();
     let given = left;
     let removed = host.remove_leaf(leaf, &mut left);
     meter.charge(given - left.min(given));
     removed?;
-    record(
-        dir,
-        "gc_removed_cgroup",
-        serde_json::json!({ "execution_cgroup": leaf_json(leaf) }),
-        recorded,
-    )
+    let gone = state::GcAction {
+        execution_cgroup: state::Field::Set(leaf_entry(leaf)),
+        ..act("gc_removed_cgroup")
+    };
+    record(dir, gone, recorded)
 }
 
 // N7
@@ -1957,37 +1915,31 @@ fn remove_named(
     recorded: &mut Vec<String>,
 ) -> Result<(), String> {
     // J4 wave 3 (G3): the intent first, by name (no identity is recorded).
-    record(
-        dir,
-        "gc_removing_cgroup",
-        serde_json::json!({
-            "execution_cgroup": { "path": path, "device": null, "inode": null },
-            "registered": "name_only",
-            "verified_empty": true,
-        }),
-        recorded,
-    )
-    .map_err(|error| format!("{error}; nothing was removed"))?;
+    let removing = state::GcAction {
+        execution_cgroup: state::Field::Set(state::LeafEntry::new(path.to_path_buf(), None)),
+        registered: state::Field::Set(NAME_ONLY.to_owned()),
+        verified_empty: state::Field::Set(true),
+        ..act("gc_removing_cgroup")
+    };
+    record(dir, removing, recorded).map_err(|error| format!("{error}; nothing was removed"))?;
     let mut left = meter.remaining();
     let given = left;
     let removed = host.remove_named_leaf(path, &mut left);
     meter.charge(given - left.min(given));
-    let (device, inode) = removed?;
-    let leaf = LeafRecord {
-        path: path.to_path_buf(),
-        device,
-        inode,
+    let identity = removed?;
+    let gone = state::GcAction {
+        execution_cgroup: state::Field::Set(state::LeafEntry::new(
+            path.to_path_buf(),
+            Some(identity),
+        )),
+        registered: state::Field::Set(NAME_ONLY.to_owned()),
+        ..act("gc_removed_cgroup")
     };
-    record(
-        dir,
-        "gc_removed_cgroup",
-        serde_json::json!({
-            "execution_cgroup": leaf_json(&leaf),
-            "registered": "name_only",
-        }),
-        recorded,
-    )
+    record(dir, gone, recorded)
 }
+
+/// How a gc record marks a leaf jail state registered by name only.
+const NAME_ONLY: &str = "name_only";
 
 /// The managed directories present, or none when scratch is not managed (an
 /// operator `--scratch` is never deleted) or cannot be read ([`visit`]
@@ -2052,12 +2004,11 @@ fn remove_scratch(
         }
     }
     done.scratch = done.scratch.recheck(dir);
-    match record(
-        dir,
-        "gc_removed_scratch",
-        serde_json::json!({ "basis": basis }),
-        &mut entry.recorded,
-    ) {
+    let removed = state::GcAction {
+        basis: state::Field::Set(basis.to_owned()),
+        ..act("gc_removed_scratch")
+    };
+    match record(dir, removed, &mut entry.recorded) {
         Ok(()) => {
             entry.scratch = Some("removed".to_owned());
             done.action.get_or_insert("removed_scratch");
@@ -2195,7 +2146,7 @@ fn verified_by_gc(dir: &AttemptDir) -> bool {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let Ok(Some(state)) = read_view(&dir.state_path(), STATE_MAX, |bytes| {
+    let Ok(Some(state)) = read_view(&dir.state_path(), state::STATE_FILE_MAX, |bytes| {
         parse_state(bytes, &name)
     }) else {
         return false;
@@ -2291,14 +2242,14 @@ fn leftovers(
             Some("retained: none is a regular file of this tool's records".to_owned());
         return None;
     }
-    match record(
-        dir,
-        "gc_removed_temp_files",
-        serde_json::json!({ "names": removed }),
-        &mut entry.recorded,
-    ) {
+    let count = removed.len();
+    let record_of = state::GcAction {
+        names: state::Field::Set(removed),
+        ..act("gc_removed_temp_files")
+    };
+    match record(dir, record_of, &mut entry.recorded) {
         Ok(()) => {
-            entry.temp_files = Some(format!("removed {}", removed.len()));
+            entry.temp_files = Some(format!("removed {count}"));
             None
         }
         Err(failure) => {
@@ -2797,18 +2748,26 @@ mod tests {
     fn a_repeated_record_is_kept_once_with_a_count() {
         let mut actions = Vec::new();
         let record = |at: &str, inode: u64| {
-            serde_json::json!({"action": "gc_terminating_orphan", "at": at,
-                "execution_cgroup": {"path": "/p", "device": 1, "inode": inode}})
+            serde_json::from_value::<state::GcAction>(serde_json::json!({
+                "action": "gc_terminating_orphan", "at": at,
+                "execution_cgroup": {"path": "/p", "device": 1, "inode": inode}}))
+            .unwrap()
         };
         coalesce(&mut actions, record("t1", 2));
         coalesce(&mut actions, record("t2", 2));
         coalesce(&mut actions, record("t3", 3));
         coalesce(&mut actions, record("t4", 2));
         assert_eq!(actions.len(), 2, "{actions:#?}");
-        assert_eq!(actions[0]["at"], "t1");
-        assert_eq!(actions[0]["count"], 3);
-        assert_eq!(actions[0]["last_at"], "t4");
-        assert!(actions[1].get("count").is_none());
+        let first = serde_json::to_value(&actions[0]).unwrap();
+        assert_eq!(first["at"], "t1");
+        assert_eq!(first["count"], 3);
+        assert_eq!(first["last_at"], "t4");
+        assert!(
+            serde_json::to_value(&actions[1])
+                .unwrap()
+                .get("count")
+                .is_none()
+        );
     }
 
     #[test]

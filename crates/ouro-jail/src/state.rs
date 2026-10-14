@@ -1370,6 +1370,12 @@ impl Drop for Lease {
 
 pub mod anchored;
 pub mod mount_alias;
+pub mod record;
+
+pub use record::{
+    CredentialEntry, Decimal, Field, GcAction, JailState, LeafEntry, Owner, ProxyDirEntry,
+    SocketEntry, VendorStateEntry,
+};
 
 use crate::records::StateCleanup;
 
@@ -1381,7 +1387,7 @@ pub const SCHEMA_STATE: &str = "ouro.jail.state/1";
 
 /// Largest `jail-state.json` this tool reads back. It writes the file itself;
 /// the bound is there so a replaced file cannot grow a read without limit.
-const STATE_FILE_MAX: u64 = 1024 * 1024;
+pub const STATE_FILE_MAX: u64 = 1024 * 1024;
 
 /// What jail state records about an attempt's vendor state.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1429,46 +1435,39 @@ fn state_parse_failed(detail: impl std::fmt::Display) -> JailError {
     )
 }
 
-/// Reads `jail-state.json` back as JSON.
+/// Reads `jail-state.json` back.
 ///
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when the file is missing,
-/// unreadable, oversized, a symlink or not JSON.
-pub fn read_attempt_state(attempt_dir: &AttemptDir) -> Result<serde_json::Value, JailError> {
+/// unreadable, oversized, a symlink, not JSON or of another shape than the
+/// one this tool writes.
+pub fn read_attempt_state(attempt_dir: &AttemptDir) -> Result<JailState, JailError> {
     let path = attempt_dir.state_path();
     let bytes = read_capped(&path, STATE_FILE_MAX)
         .map_err(state_parse_failed)?
         .ok_or_else(|| state_parse_failed("the file is absent"))?;
-    serde_json::from_slice(&bytes).map_err(state_parse_failed)
+    JailState::parse(&bytes).map_err(state_parse_failed)
 }
 
 /// Read-modify-write of `jail-state.json` through the durable replacement.
 ///
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be read,
-/// parsed or durably replaced.
+/// parsed or durably replaced, or names another schema.
 pub fn update_attempt_state(
     site: Site,
     attempt_dir: &AttemptDir,
-    change: impl FnOnce(&mut serde_json::Value),
+    change: impl FnOnce(&mut JailState),
 ) -> Result<(), JailError> {
     let mut state = read_attempt_state(attempt_dir)?;
-    if state.get("schema").and_then(serde_json::Value::as_str) != Some(SCHEMA_STATE) {
+    if state.schema.get().map(String::as_str) != Some(SCHEMA_STATE) {
         return Err(state_parse_failed(format!(
             "the schema is not {SCHEMA_STATE}"
         )));
     }
     change(&mut state);
-    let bytes = serde_json::to_vec_pretty(&state).map_err(state_parse_failed)?;
+    let bytes = state.to_bytes().map_err(state_parse_failed)?;
     replace_atomically_at(site, &attempt_dir.state_path(), &bytes)
-}
-
-fn cleanup_word(status: StateCleanup) -> &'static str {
-    match status {
-        StateCleanup::NotNeeded => "not_needed",
-        StateCleanup::Pending => "pending",
-        StateCleanup::Complete => "complete",
-    }
 }
 
 /// What jail state says about vendor state, or `None` when none was ever
@@ -1481,38 +1480,23 @@ pub fn vendor_registration(
     attempt_dir: &AttemptDir,
 ) -> Result<Option<VendorRegistration>, JailError> {
     let state = read_attempt_state(attempt_dir)?;
-    let Some(vendor) = state.get("vendor_state").filter(|value| !value.is_null()) else {
+    let Some(vendor) = state.vendor_state.get() else {
         return Ok(None);
     };
-    let number = |key: &str| {
-        vendor
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .and_then(|text| text.parse::<u64>().ok())
-    };
-    let identity = number("dev").zip(number("ino"));
-    let state_cleanup = match state
-        .get("state_cleanup")
-        .and_then(serde_json::Value::as_str)
-    {
-        Some("pending") => StateCleanup::Pending,
-        Some("complete") => StateCleanup::Complete,
-        // Registered vendor state is never `not_needed`; anything else is a
-        // state file this tool did not write.
+    let state_cleanup = match state.state_cleanup.get() {
+        Some(status @ (StateCleanup::Pending | StateCleanup::Complete)) => *status,
+        // Registered vendor state is never `not_needed`; no status at all is
+        // a state file this tool did not write.
         other => {
             return Err(state_parse_failed(format!(
                 "vendor state is registered with cleanup status {other:?}"
             )));
         }
     };
-    let reason = state
-        .get("cleanup_reason")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
     Ok(Some(VendorRegistration {
-        identity,
+        identity: vendor.identity(),
         state_cleanup,
-        reason,
+        reason: state.cleanup_reason.get().cloned(),
     }))
 }
 
@@ -1548,15 +1532,16 @@ pub fn open_attempt_dir(attempt_dir: &AttemptDir) -> Result<anchored::Dir, JailE
 /// directory fails its checks or `vendor-state` already exists.
 pub fn create_vendor_state(attempt_dir: &AttemptDir) -> Result<anchored::Dir, JailError> {
     update_attempt_state(Site::LaunchState, attempt_dir, |state| {
-        state["vendor_state"] = serde_json::json!({
-            "name": VENDOR_STATE_NAME,
-            "registered_at": crate::records::rfc3339_utc(std::time::SystemTime::now()),
-            "dev": null,
-            "ino": null,
-            "credentials": [],
+        state.vendor_state = Field::Set(VendorStateEntry {
+            name: Field::Set(VENDOR_STATE_NAME.to_owned()),
+            registered_at: Field::Set(crate::records::rfc3339_utc(SystemTime::now())),
+            dev: Field::Null,
+            ino: Field::Null,
+            credentials: Field::Set(Vec::new()),
+            rest: serde_json::Map::new(),
         });
-        state["state_cleanup"] = serde_json::Value::from(cleanup_word(StateCleanup::Pending));
-        state["cleanup_reason"] = serde_json::Value::Null;
+        state.state_cleanup = Field::Set(StateCleanup::Pending);
+        state.cleanup_reason = Field::Null;
     })?;
     let attempt = open_attempt_dir(attempt_dir)?;
     let name = anchored::Name::new(VENDOR_STATE_NAME.as_bytes())
@@ -1591,8 +1576,9 @@ pub fn create_vendor_state(attempt_dir: &AttemptDir) -> Result<anchored::Dir, Ja
         .stat()
         .map_err(|error| write_failed(&attempt_dir.vendor_state_path(), &error))?;
     update_attempt_state(Site::LaunchState, attempt_dir, |state| {
-        state["vendor_state"]["dev"] = serde_json::Value::from(stat.dev.to_string());
-        state["vendor_state"]["ino"] = serde_json::Value::from(stat.ino.to_string());
+        let vendor = state.vendor_state.get_or_insert_default();
+        vendor.dev = Field::Set(Decimal(stat.dev));
+        vendor.ino = Field::Set(Decimal(stat.ino));
     })?;
     attempt
         .sync()
@@ -1604,11 +1590,11 @@ pub fn create_vendor_state(attempt_dir: &AttemptDir) -> Result<anchored::Dir, Ja
 /// create: jail state no longer names it, so nothing will ever clean it.
 fn withdraw_vendor_registration(attempt_dir: &AttemptDir) -> Result<(), JailError> {
     update_attempt_state(Site::LaunchState, attempt_dir, |state| {
-        state["vendor_state"] = serde_json::Value::Null;
-        state["vendor_state_withdrawn"] =
-            serde_json::Value::from("the directory was not created by this attempt");
-        state["state_cleanup"] = serde_json::Value::from(cleanup_word(StateCleanup::NotNeeded));
-        state["cleanup_reason"] = serde_json::Value::Null;
+        state.vendor_state = Field::Null;
+        state.vendor_state_withdrawn =
+            Field::Set("the directory was not created by this attempt".to_owned());
+        state.state_cleanup = Field::Set(StateCleanup::NotNeeded);
+        state.cleanup_reason = Field::Null;
     })
 }
 
@@ -1653,12 +1639,13 @@ pub fn create_proxy_dir_observed(
     between: &mut dyn FnMut(&AttemptDir),
 ) -> Result<anchored::Dir, JailError> {
     update_attempt_state(Site::LaunchState, attempt_dir, |state| {
-        state["proxy_dir"] = serde_json::json!({
-            "name": PROXY_DIR_NAME,
-            "registered_at": crate::records::rfc3339_utc(std::time::SystemTime::now()),
-            "dev": null,
-            "ino": null,
-            "removed": false,
+        state.proxy_dir = Field::Set(ProxyDirEntry {
+            name: Field::Set(PROXY_DIR_NAME.to_owned()),
+            registered_at: Field::Set(crate::records::rfc3339_utc(SystemTime::now())),
+            dev: Field::Null,
+            ino: Field::Null,
+            removed: Field::Set(false),
+            ..ProxyDirEntry::default()
         });
     })?;
     between(attempt_dir);
@@ -1670,9 +1657,9 @@ pub fn create_proxy_dir_observed(
         Err(error) => {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 update_attempt_state(Site::LaunchState, attempt_dir, |state| {
-                    state["proxy_dir"] = serde_json::Value::Null;
-                    state["proxy_dir_withdrawn"] =
-                        serde_json::Value::from("the directory was not created by this attempt");
+                    state.proxy_dir = Field::Null;
+                    state.proxy_dir_withdrawn =
+                        Field::Set("the directory was not created by this attempt".to_owned());
                 })?;
                 return Err(unsafe_path(
                     &attempt_dir.proxy_dir_path(),
@@ -1686,8 +1673,9 @@ pub fn create_proxy_dir_observed(
         .stat()
         .map_err(|error| write_failed(&attempt_dir.proxy_dir_path(), &error))?;
     update_attempt_state(Site::LaunchState, attempt_dir, |state| {
-        state["proxy_dir"]["dev"] = serde_json::Value::from(stat.dev.to_string());
-        state["proxy_dir"]["ino"] = serde_json::Value::from(stat.ino.to_string());
+        let proxy = state.proxy_dir.get_or_insert_default();
+        proxy.dev = Field::Set(Decimal(stat.dev));
+        proxy.ino = Field::Set(Decimal(stat.ino));
     })?;
     attempt
         .sync()
@@ -1731,11 +1719,12 @@ pub fn record_proxy_socket(
     socket: &ProxySocketIdentity,
 ) -> Result<(), JailError> {
     update_attempt_state(Site::LaunchState, attempt_dir, |state| {
-        state["proxy_dir"]["socket"] = serde_json::json!({
-            "dev": socket.dev.to_string(),
-            "ino": socket.ino.to_string(),
-            "ctime_sec": socket.ctime.0.to_string(),
-            "ctime_nsec": socket.ctime.1.to_string(),
+        state.proxy_dir.get_or_insert_default().socket = Field::Set(SocketEntry {
+            dev: Decimal(socket.dev),
+            ino: Decimal(socket.ino),
+            ctime_sec: Decimal(socket.ctime.0),
+            ctime_nsec: Decimal(socket.ctime.1),
+            rest: serde_json::Map::new(),
         });
     })
 }
@@ -1783,39 +1772,31 @@ impl ProxyDirGc {
 /// [`ErrorCode::StateWriteFailed`] when jail state cannot be read or updated.
 pub fn gc_proxy_dir(attempt_dir: &AttemptDir, dry_run: bool) -> Result<ProxyDirGc, JailError> {
     let state = read_attempt_state(attempt_dir)?;
-    let Some(proxy) = state.get("proxy_dir").filter(|value| !value.is_null()) else {
+    let Some(proxy) = state.proxy_dir.get() else {
         return Ok(ProxyDirGc::Nothing);
     };
-    if proxy.get("removed").and_then(serde_json::Value::as_bool) == Some(true) {
+    if proxy.removed.get() == Some(&true) {
         return Ok(ProxyDirGc::Nothing);
     }
-    let text = |value: &serde_json::Value, key: &str| {
-        value
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    };
-    let number = |value: &serde_json::Value, key: &str| text(value, key)?.parse::<u64>().ok();
-    let signed = |value: &serde_json::Value, key: &str| text(value, key)?.parse::<i64>().ok();
-    let registered = number(proxy, "dev").zip(number(proxy, "ino"));
-    let socket = proxy.get("socket").and_then(|socket| {
-        Some(ProxySocketIdentity {
-            dev: number(socket, "dev")?,
-            ino: number(socket, "ino")?,
-            ctime: (signed(socket, "ctime_sec")?, signed(socket, "ctime_nsec")?),
-        })
+    let socket = proxy.socket.get().map(|socket| ProxySocketIdentity {
+        dev: socket.dev.0,
+        ino: socket.ino.0,
+        ctime: (socket.ctime_sec.0, socket.ctime_nsec.0),
     });
-    let outcome = gc_removal(attempt_dir, registered, socket, dry_run);
+    let outcome = gc_removal(attempt_dir, proxy.identity(), socket, dry_run);
     if !dry_run {
-        update_attempt_state(Site::GcProxyDir, attempt_dir, |state| match &outcome {
-            ProxyDirGc::Removed => {
-                state["proxy_dir"]["removed"] = serde_json::Value::from(true);
-                state["proxy_dir"]["removed_by"] = serde_json::Value::from("gc");
+        update_attempt_state(Site::GcProxyDir, attempt_dir, |state| {
+            let proxy = state.proxy_dir.get_or_insert_default();
+            match &outcome {
+                ProxyDirGc::Removed => {
+                    proxy.removed = Field::Set(true);
+                    proxy.removed_by = Field::Set("gc".to_owned());
+                }
+                ProxyDirGc::Retained(reason) | ProxyDirGc::Failed(reason) => {
+                    proxy.retained = Field::Set((*reason).to_owned());
+                }
+                ProxyDirGc::Nothing | ProxyDirGc::WouldRemove => {}
             }
-            ProxyDirGc::Retained(reason) | ProxyDirGc::Failed(reason) => {
-                state["proxy_dir"]["retained"] = serde_json::Value::from(*reason);
-            }
-            ProxyDirGc::Nothing | ProxyDirGc::WouldRemove => {}
         })?;
     }
     Ok(outcome)
@@ -1912,28 +1893,20 @@ pub enum ProxyDirRemoval {
 /// [`ErrorCode::StateWriteFailed`] when jail state cannot be read or updated.
 pub fn remove_proxy_dir(attempt_dir: &AttemptDir) -> Result<ProxyDirRemoval, JailError> {
     let state = read_attempt_state(attempt_dir)?;
-    let Some(proxy) = state.get("proxy_dir").filter(|value| !value.is_null()) else {
+    let Some(proxy) = state.proxy_dir.get() else {
         return Ok(ProxyDirRemoval::NotRegistered);
     };
-    if proxy.get("removed").and_then(serde_json::Value::as_bool) == Some(true) {
+    if proxy.removed.get() == Some(&true) {
         return Ok(ProxyDirRemoval::Removed);
     }
-    let number = |key: &str| {
-        proxy
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .and_then(|text| text.parse::<u64>().ok())
-    };
-    let registered = number("dev").zip(number("ino"));
-    let outcome = removal(attempt_dir, registered);
-    update_attempt_state(Site::LaunchState, attempt_dir, |state| match outcome {
-        ProxyDirRemoval::Removed => {
-            state["proxy_dir"]["removed"] = serde_json::Value::from(true);
+    let outcome = removal(attempt_dir, proxy.identity());
+    update_attempt_state(Site::LaunchState, attempt_dir, |state| {
+        let proxy = state.proxy_dir.get_or_insert_default();
+        match outcome {
+            ProxyDirRemoval::Removed => proxy.removed = Field::Set(true),
+            ProxyDirRemoval::Retained(reason) => proxy.retained = Field::Set(reason.to_owned()),
+            ProxyDirRemoval::NotRegistered => {}
         }
-        ProxyDirRemoval::Retained(reason) => {
-            state["proxy_dir"]["retained"] = serde_json::Value::from(reason);
-        }
-        ProxyDirRemoval::NotRegistered => {}
     })?;
     Ok(outcome)
 }
@@ -2026,21 +1999,20 @@ pub fn record_staged_credentials(
     attempt_dir: &AttemptDir,
     staged: &[PrivateCredential],
 ) -> Result<(), JailError> {
-    let rows: Vec<serde_json::Value> = staged
+    let rows: Vec<CredentialEntry> = staged
         .iter()
-        .map(|row| {
-            serde_json::json!({
-                "id": row.id,
-                "mode": row.mode,
-                "source_dev": row.source_dev.to_string(),
-                "source_ino": row.source_ino.to_string(),
-                "source_size": row.source_size.to_string(),
-                "content_digest": row.content_digest,
-            })
+        .map(|row| CredentialEntry {
+            id: row.id.clone(),
+            mode: row.mode.clone(),
+            source_dev: Decimal(row.source_dev),
+            source_ino: Decimal(row.source_ino),
+            source_size: Decimal(row.source_size),
+            content_digest: Field::or_null(row.content_digest.clone()),
+            rest: serde_json::Map::new(),
         })
         .collect();
     update_attempt_state(Site::LaunchState, attempt_dir, |state| {
-        state["vendor_state"]["credentials"] = serde_json::Value::from(rows);
+        state.vendor_state.get_or_insert_default().credentials = Field::Set(rows);
     })
 }
 
@@ -2060,23 +2032,19 @@ pub fn register_execution_leaf(
     path: &Path,
     identity: Option<(u64, u64)>,
 ) -> Result<(), JailError> {
-    let Some(text) = path.to_str() else {
+    if path.to_str().is_none() {
         return Err(state_parse_failed(format!(
             "the execution leaf path {} is not UTF-8",
             path.display()
         )));
-    };
+    }
     let site = if identity.is_some() {
         Site::ExecutionLeafIdentity
     } else {
         Site::ExecutionLeaf
     };
     update_attempt_state(site, attempt_dir, |state| {
-        state["execution_cgroup"] = serde_json::json!({
-            "path": text,
-            "device": identity.map(|(device, _)| device),
-            "inode": identity.map(|(_, inode)| inode),
-        });
+        state.execution_cgroup = Field::Set(LeafEntry::new(path.to_path_buf(), identity));
     })
 }
 
@@ -2103,8 +2071,8 @@ pub fn record_cleanup_at(
     reason: Option<&str>,
 ) -> Result<(), JailError> {
     update_attempt_state(site, attempt_dir, |state| {
-        state["state_cleanup"] = serde_json::Value::from(cleanup_word(status));
-        state["cleanup_reason"] = reason.map_or(serde_json::Value::Null, serde_json::Value::from);
+        state.state_cleanup = Field::Set(status);
+        state.cleanup_reason = Field::or_null(reason.map(str::to_owned));
     })
 }
 
@@ -2485,6 +2453,11 @@ mod tests {
         }
     }
 
+    /// Jail state as the JSON on disk.
+    fn raw_state(attempt: &AttemptDir) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(attempt.state_path()).unwrap()).unwrap()
+    }
+
     fn claimed_attempt() -> (tempfile::TempDir, AttemptDir) {
         let dir = private_tempdir();
         let data = dir.path().canonicalize().unwrap().join("data");
@@ -2537,7 +2510,7 @@ mod tests {
         let error = create_vendor_state(&attempt).unwrap_err();
         assert_eq!(error.code, ErrorCode::UnsafeStatePath);
         assert_eq!(vendor_registration(&attempt).unwrap(), None);
-        let state = read_attempt_state(&attempt).unwrap();
+        let state = raw_state(&attempt);
         assert_eq!(state["state_cleanup"], "not_needed");
         assert!(attempt.vendor_state_path().join("precious").exists());
     }
@@ -2571,7 +2544,7 @@ mod tests {
         let proxy = create_proxy_dir(&attempt).unwrap();
         let metadata = std::fs::metadata(attempt.proxy_dir_path()).unwrap();
         assert_eq!(metadata.mode() & 0o7777, 0o700);
-        let state = read_attempt_state(&attempt).unwrap();
+        let state = raw_state(&attempt);
         assert_eq!(state["proxy_dir"]["dev"], metadata.dev().to_string());
         assert_eq!(state["proxy_dir"]["ino"], metadata.ino().to_string());
         assert_eq!(
@@ -2601,10 +2574,7 @@ mod tests {
             ProxyDirRemoval::Removed
         );
         assert!(!attempt.proxy_dir_path().exists());
-        assert_eq!(
-            read_attempt_state(&attempt).unwrap()["proxy_dir"]["removed"],
-            true
-        );
+        assert_eq!(raw_state(&attempt)["proxy_dir"]["removed"], true);
         assert_eq!(
             remove_proxy_dir(&attempt).unwrap(),
             ProxyDirRemoval::Removed
@@ -2616,7 +2586,7 @@ mod tests {
         let (_dir, attempt) = claimed_attempt();
         let mut seen = None;
         let _proxy = create_proxy_dir_observed(&attempt, &mut |attempt| {
-            let state = read_attempt_state(attempt).unwrap();
+            let state = raw_state(attempt);
             seen = Some((
                 state["proxy_dir"]["name"].clone(),
                 state["proxy_dir"]["ino"].clone(),
@@ -2636,8 +2606,9 @@ mod tests {
         let (_dir, attempt) = claimed_attempt();
         drop(create_proxy_dir(&attempt).unwrap());
         update_attempt_state(Site::Unnamed, &attempt, |state| {
-            state["proxy_dir"]["dev"] = serde_json::Value::Null;
-            state["proxy_dir"]["ino"] = serde_json::Value::Null;
+            let proxy = state.proxy_dir.get_or_insert_default();
+            proxy.dev = Field::Null;
+            proxy.ino = Field::Null;
         })
         .unwrap();
         assert_eq!(
@@ -2646,7 +2617,7 @@ mod tests {
         );
         assert!(attempt.proxy_dir_path().exists());
         assert_eq!(
-            read_attempt_state(&attempt).unwrap()["proxy_dir"]["retained"],
+            raw_state(&attempt)["proxy_dir"]["retained"],
             "proxy_directory_unrecorded"
         );
         // Registered and never created (the supervisor died in between):
@@ -2686,7 +2657,7 @@ mod tests {
         );
         assert_eq!(gc_proxy_dir(&attempt, false).unwrap(), ProxyDirGc::Removed);
         assert!(!attempt.proxy_dir_path().exists());
-        let state = read_attempt_state(&attempt).unwrap();
+        let state = raw_state(&attempt);
         assert_eq!(state["proxy_dir"]["removed"], true);
         assert_eq!(state["proxy_dir"]["removed_by"], "gc");
         assert_eq!(gc_proxy_dir(&attempt, false).unwrap(), ProxyDirGc::Nothing);
