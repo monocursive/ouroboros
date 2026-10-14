@@ -253,10 +253,8 @@ fn an_agent_storage_ceiling_installs_and_names_the_hard_link_denials() {
     let path = CString::new(ws.as_os_str().as_bytes()).unwrap();
     let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
     // SAFETY: terminated path and writable statfs output.
-    assert_eq!(
-        unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) },
-        0
-    );
+    let rc = unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) };
+    assert_eq!(rc, 0);
     // SAFETY: successful statfs initialized the structure.
     let stats = unsafe { stats.assume_init() };
     if stats.f_type != libc::TMPFS_MAGIC || stats.f_blocks == 0 || stats.f_files == 0 {
