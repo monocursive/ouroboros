@@ -541,34 +541,45 @@ fn o01_steps(c: &Case) -> Value {
         ["exec", "--via", "execve", "--", fixture, "exit", "0"],
         ["exec", "--via", "execveat", "--", fixture, "exit", "0"]
     ]);
-    #[cfg(target_arch = "aarch64")]
-    let steps = {
-        let mut steps = steps;
-        // Preserve every operation and dependency in the matrix while using
-        // only native ABI variants. The observer must name the actual *at
-        // syscall, which the fixture and strace independently verify.
-        for step in steps.as_array_mut().unwrap() {
-            let args = step.as_array_mut().unwrap();
-            if let Some(via) = args.iter().position(|arg| arg == "--via") {
-                let native = match args[via + 1].as_str().unwrap() {
-                    "open" | "creat" => "openat",
-                    "mkdir" => "mkdirat",
-                    "rename" => "renameat",
-                    "link" => "linkat",
-                    "symlink" => "symlinkat",
-                    "mknod" => "mknodat",
-                    "unlink" | "rmdir" => "unlinkat",
-                    _ => continue,
-                };
-                if args[via + 1] == "creat" {
+    let mut steps = steps;
+    // Preserve every operation and dependency in the matrix while using only
+    // the variants this architecture has. The observer must name the actual
+    // syscall, which the fixture and strace independently verify.
+    for step in steps.as_array_mut().unwrap() {
+        let args = step.as_array_mut().unwrap();
+        if let Some(via) = args.iter().position(|arg| arg == "--via") {
+            let asked = args[via + 1].as_str().unwrap().to_owned();
+            let native = native_via(&asked);
+            if native != asked {
+                if asked == "creat" {
                     args.extend(["--create".into(), "--write".into(), "--trunc".into()]);
                 }
                 args[via + 1] = native.into();
             }
         }
-        steps
-    };
+    }
     steps
+}
+
+/// The spelling of a path call this architecture has. x86_64, where the
+/// closed-set evidence was taken, keeps the legacy calls; Linux aarch64 has
+/// only their `*at` forms, which resolve the same names against `AT_FDCWD`
+/// (`creat` is `openat` with create, write and truncate). A test asks for,
+/// and expects the observer to name, the call the kernel can actually see.
+fn native_via(via: &str) -> &str {
+    if ouro_fixture::raw::has_legacy_syscalls() {
+        return via;
+    }
+    match via {
+        "open" | "creat" => "openat",
+        "mkdir" => "mkdirat",
+        "rename" => "renameat",
+        "link" => "linkat",
+        "symlink" => "symlinkat",
+        "mknod" => "mknodat",
+        "unlink" | "rmdir" => "unlinkat",
+        other => other,
+    }
 }
 
 /// O01 for one profile: every fixture line of a closed-set call matches
@@ -1106,8 +1117,14 @@ fn j4_o06_renamed_cwd() {
     let steps = serde_json::json!([
         ["mkdir", c.ws("cwd-a")],
         ["chdir", c.ws("cwd-a")],
-        ["rename", c.ws("cwd-a"), c.ws("cwd-b"), "--via", "rename"],
-        ["mkdir", "made", "--via", "mkdir"],
+        [
+            "rename",
+            c.ws("cwd-a"),
+            c.ws("cwd-b"),
+            "--via",
+            native_via("rename")
+        ],
+        ["mkdir", "made", "--via", native_via("mkdir")],
         ["open", "file.txt", "--create", "--write"]
     ]);
     let run = c.script("cwd", &steps);
@@ -1116,12 +1133,18 @@ fn j4_o06_renamed_cwd() {
     assert!(workspace.join("cwd-b/made").is_dir(), "{context}");
     assert!(!workspace.join("cwd-a").exists(), "{context}");
     let events = audit_results(&run);
-    let rename = event_for(&events, "rename", 0);
+    let rename = event_for(&events, native_via("rename"), 0);
     assert_eq!(rename["fields"]["path"]["value"], "cwd-a", "{context}");
     assert_eq!(rename["fields"]["path2"]["value"], "cwd-b", "{context}");
     // Entry-time /proc cwd snapshots reflect the renamed directory, rather
     // than the obsolete name from the earlier chdir.
-    let made = event_for(&events, "mkdir", 0);
+    // The `made` call is the first of its spelling after the rename: on
+    // aarch64 the earlier `cwd-a` step is spelled `mkdirat` too.
+    let made = *events
+        .iter()
+        .skip_while(|e| e["fields"]["syscall"] != native_via("rename"))
+        .find(|e| e["fields"]["syscall"] == native_via("mkdir"))
+        .unwrap_or_else(|| panic!("no mkdir after the rename\n{context}"));
     assert_eq!(
         made["fields"]["path"],
         serde_json::json!({"kind":"workspace_relative", "value":"cwd-b/made"}),
@@ -1371,12 +1394,12 @@ fn j4_o06_racing_pathname_is_only_a_literal_snapshot() {
     let lines: Vec<Value> = run
         .fixture_lines()
         .into_iter()
-        .filter(|l| l["op"] == "mkdir")
+        .filter(|l| l["op"] == native_via("mkdir"))
         .collect();
     assert_eq!(lines.len(), CALLS, "{context}");
     let events: Vec<&Value> = audit_results(&run)
         .into_iter()
-        .filter(|e| e["fields"]["syscall"] == "mkdir")
+        .filter(|e| e["fields"]["syscall"] == native_via("mkdir"))
         .collect();
     let unstable: u64 = receipt["coverage"]["fs.write"]["gaps"]
         .as_array()

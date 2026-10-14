@@ -485,7 +485,9 @@ pub enum Mode {
     /// the single byte in which A and B differ, so the name the kernel
     /// consumes races the name a tracer snapshots. A and B must have the
     /// same length and differ in exactly one byte, so every snapshot of the
-    /// buffer is literally one of the two. One `mkdir` line per call.
+    /// buffer is literally one of the two. One line per call: `mkdir` where
+    /// the architecture has the legacy call, `mkdirat` against `AT_FDCWD`
+    /// where it does not (Linux aarch64).
     RaceMkdir {
         a: OsString,
         b: OsString,
