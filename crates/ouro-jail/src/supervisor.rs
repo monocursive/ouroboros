@@ -1207,17 +1207,32 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
         errors: Vec::new(),
         credentials: Vec::new(),
     };
+    // From here on every refusal writes the `refused` receipt (I01); one
+    // after the boundary exists first tears it down and records what the
+    // teardown established (§13.2 row 4).
+    macro_rules! refused {
+        ($error:expr) => {
+            return Ok(refuse(
+                &attempt_dir,
+                &mut record,
+                &$error,
+                args,
+                control.as_mut(),
+                &mut journal,
+            ))
+        };
+    }
+    macro_rules! torn_down_and_refused {
+        ($prepared:expr, $error:expr) => {{
+            let teardown = $prepared.abort();
+            record_teardown(&mut record, &teardown);
+            refused!($error)
+        }};
+    }
 
     // N6
     if let Err(error) = policy_written {
-        return Ok(refuse(
-            &attempt_dir,
-            &mut record,
-            &error,
-            args,
-            control.as_mut(),
-            &mut journal,
-        ));
+        refused!(error);
     }
 
     // Step 2: probe the selected mechanisms.
@@ -1225,25 +1240,11 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
         .check(ErrorStage::Probing)
         .and(interrupted(signals.as_ref(), ErrorStage::Probing))
     {
-        return Ok(refuse(
-            &attempt_dir,
-            &mut record,
-            &error,
-            args,
-            control.as_mut(),
-            &mut journal,
-        ));
+        refused!(error);
     }
     let capabilities = ctx.platform.probe(&request);
     if let Some(error) = first_unsatisfied(&plan.resolved.requirements, &capabilities) {
-        return Ok(refuse(
-            &attempt_dir,
-            &mut record,
-            &error,
-            args,
-            control.as_mut(),
-            &mut journal,
-        ));
+        refused!(error);
     }
 
     // §8.1 step 2 and §12 — register vendor state before
@@ -1252,42 +1253,17 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
         .check(ErrorStage::Preparing)
         .and(interrupted(signals.as_ref(), ErrorStage::Preparing))
     {
-        return Ok(refuse(
-            &attempt_dir,
-            &mut record,
-            &error,
-            args,
-            control.as_mut(),
-            &mut journal,
-        ));
+        refused!(error);
     }
     let launch_handoff = match prepare_launch(&attempt_dir, &plan, &mut record, budget.deadline) {
         Ok(handoff) => handoff,
-        Err(error) => {
-            return Ok(refuse(
-                &attempt_dir,
-                &mut record,
-                &error,
-                args,
-                control.as_mut(),
-                &mut journal,
-            ));
-        }
+        Err(error) => refused!(error),
     };
     // §10 — the proxy directory is registered before it is
     // created, outside every shared root, for a proxy-mode profile only.
     let proxy_handoff = match prepare_proxy_dir(&attempt_dir, &plan) {
         Ok(handoff) => handoff,
-        Err(error) => {
-            return Ok(refuse(
-                &attempt_dir,
-                &mut record,
-                &error,
-                args,
-                control.as_mut(),
-                &mut journal,
-            ));
-        }
+        Err(error) => refused!(error),
     };
 
     // Steps 3 to 5: create the boundary and the blocked launcher.
@@ -1309,16 +1285,7 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
         },
     ) {
         Ok(prepared) => prepared,
-        Err(error) => {
-            return Ok(refuse(
-                &attempt_dir,
-                &mut record,
-                &error,
-                args,
-                control.as_mut(),
-                &mut journal,
-            ));
-        }
+        Err(error) => refused!(error),
     };
 
     // X05.3 — §8.3 "The supervisor must not retain writable
@@ -1359,46 +1326,19 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
         .and_then(|handoff| handoff.socket.get())
         && let Err(error) = state::record_proxy_socket(&attempt_dir, socket)
     {
-        let teardown = prepared.abort();
-        record_teardown(&mut record, &teardown);
-        return Ok(refuse(
-            &attempt_dir,
-            &mut record,
-            &error,
-            args,
-            control.as_mut(),
-            &mut journal,
-        ));
+        torn_down_and_refused!(prepared, error);
     }
     // §7: the state file names the registered execution boundary once it
     // exists, so crash reconciliation and GC can identify resources without
     // parsing a receipt.
     if let Err(error) = register_boundary_in_state(&attempt_dir, &boundary) {
-        let teardown = prepared.abort();
-        record_teardown(&mut record, &teardown);
-        return Ok(refuse(
-            &attempt_dir,
-            &mut record,
-            &error,
-            args,
-            control.as_mut(),
-            &mut journal,
-        ));
+        torn_down_and_refused!(prepared, error);
     }
     // §8.2: the preparation budget covers steps 1 to 5. A budget spent by
     // now refuses before anything announces `prepared`: an owner must never
     // be told an attempt is ready after its preparation ran out of time.
     if let Err(error) = budget.check(ErrorStage::Preparing) {
-        let teardown = prepared.abort();
-        record_teardown(&mut record, &teardown);
-        return Ok(refuse(
-            &attempt_dir,
-            &mut record,
-            &error,
-            args,
-            control.as_mut(),
-            &mut journal,
-        ));
+        torn_down_and_refused!(prepared, error);
     }
     merge_wall_limit(&mut record, &plan);
     journal.lifecycle("prepared");
@@ -1415,18 +1355,7 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
         &mut journal,
     ) {
         Ok(receipt) => receipt,
-        Err(error) => {
-            let teardown = prepared.abort();
-            record_teardown(&mut record, &teardown);
-            return Ok(refuse(
-                &attempt_dir,
-                &mut record,
-                &error,
-                args,
-                control.as_mut(),
-                &mut journal,
-            ));
-        }
+        Err(error) => torn_down_and_refused!(prepared, error),
     };
     send_control(control.as_mut(), ControlKind::Prepared, &prepared_receipt);
 
@@ -1445,16 +1374,7 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
         },
     };
     if let Err(error) = gate {
-        let teardown = prepared.abort();
-        record_teardown(&mut record, &teardown);
-        return Ok(refuse(
-            &attempt_dir,
-            &mut record,
-            &error,
-            args,
-            control.as_mut(),
-            &mut journal,
-        ));
+        torn_down_and_refused!(prepared, error);
     }
 
     // J5 §9.3 / X06: before the untrusted target execs, the supervisor makes
@@ -1483,18 +1403,7 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
     let _uncontained_run = if plan.profile() == ProfileName::None {
         match state::UncontainedRun::arm(&[&plan.data_dir, &plan.config_dir], attempt_id.as_str()) {
             Ok(run) => Some(run),
-            Err(error) => {
-                let teardown = prepared.abort();
-                record_teardown(&mut record, &teardown);
-                return Ok(refuse(
-                    &attempt_dir,
-                    &mut record,
-                    &error,
-                    args,
-                    control.as_mut(),
-                    &mut journal,
-                ));
-            }
+            Err(error) => torn_down_and_refused!(prepared, error),
         }
     } else {
         None
@@ -1510,14 +1419,7 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
             if let Some(teardown) = teardown {
                 record_teardown(&mut record, &Ok(teardown));
             }
-            return Ok(refuse(
-                &attempt_dir,
-                &mut record,
-                &error,
-                args,
-                control.as_mut(),
-                &mut journal,
-            ));
+            refused!(error);
         }
     };
 
@@ -1692,14 +1594,7 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
                 {
                     record.errors.push(failure.to_object());
                 }
-                return Ok(refuse(
-                    &attempt_dir,
-                    &mut record,
-                    &error,
-                    args,
-                    control.as_mut(),
-                    &mut journal,
-                ));
+                refused!(error);
             }
             RunEvent::CommandForbidden { pattern } => {
                 let error = JailError::new(
