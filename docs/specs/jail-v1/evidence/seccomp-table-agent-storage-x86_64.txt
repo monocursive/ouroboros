@@ -1,0 +1,89 @@
+ouro-jail `agent` seccomp baseline (x86_64), variant unprivileged_inner, with a storage ceiling
+jail-v1 §9.2 and §10; stacked with the mediation filter below
+
+arch != AUDIT_ARCH_X86_64  EPERM   (0xc000003e required)
+nr & 0x40000000           EPERM   (x32 ABI)
+
+syscall                nr     action
+ptrace                 101    EPERM
+process_vm_readv       310    EPERM
+process_vm_writev      311    EPERM
+bpf                    321    EPERM
+perf_event_open        298    EPERM
+kexec_load             246    EPERM
+kexec_file_load        320    EPERM
+init_module            175    EPERM
+finit_module           313    EPERM
+delete_module          176    EPERM
+keyctl                 250    EPERM
+add_key                248    EPERM
+request_key            249    EPERM
+io_uring_setup         425    EPERM
+io_uring_enter         426    EPERM
+io_uring_register      427    EPERM
+mount                  165    EPERM
+umount2                166    EPERM
+move_mount             429    EPERM
+open_tree              428    EPERM
+fsopen                 430    EPERM
+fsmount                432    EPERM
+fspick                 433    EPERM
+fsconfig               431    EPERM
+mount_setattr          442    EPERM
+pivot_root             155    EPERM
+chroot                 161    EPERM
+unshare                272    EPERM
+setns                  308    EPERM
+userfaultfd            323    EPERM
+open_by_handle_at      304    EPERM
+name_to_handle_at      303    EPERM
+syslog                 103    EPERM
+pidfd_send_signal      424    EPERM
+pidfd_open             434    EPERM
+pidfd_getfd            438    EPERM
+process_madvise        440    EPERM
+kcmp                   312    EPERM
+move_pages             279    EPERM
+migrate_pages          256    EPERM
+statmount              457    EPERM
+listmount              458    EPERM
+quotactl               179    EPERM
+quotactl_fd            443    EPERM
+adjtimex               159    EPERM
+clock_settime          227    EPERM
+clock_adjtime          305    EPERM
+settimeofday           164    EPERM
+setxattrat             463    EPERM
+getxattrat             464    EPERM
+listxattrat            465    EPERM
+removexattrat          466    EPERM
+open_tree_attr         467    EPERM
+file_getattr           468    EPERM
+file_setattr           469    EPERM
+listns                 470    EPERM
+link                   86     EPERM
+linkat                 265    EPERM
+clone3                 435    ENOSYS  (argument struct not inspectable)
+clone                  56     EPERM when args[0] & 0x00800000 != 0 (CLONE_UNTRACED)
+clone                  56     EPERM when args[0] & 0x7e020080 != 0
+ioctl                  16     EPERM when args[1] == 0x5412 (TIOCSTI)
+prctl(PR_SET_NO_NEW_PRIVS)     ALLOW   (unprivileged inner sandbox)
+seccomp                        ALLOW   (unprivileged inner sandbox)
+landlock_create_ruleset        ALLOW   (unprivileged inner sandbox)
+landlock_add_rule              ALLOW   (unprivileged inner sandbox)
+landlock_restrict_self         ALLOW   (unprivileged inner sandbox)
+socket, socketpair     41,53  ALLOW when args[0] in {1 (AF_UNIX, restricted by the mediation filter), 2 (AF_INET), 10 (AF_INET6)}
+                              ALLOW when args[0] == 16 (AF_NETLINK) and args[2] == 4 (NETLINK_SOCK_DIAG; the launcher's, refused after it by the mediation filter)
+                              EAFNOSUPPORT for every other family
+
+everything else        ALLOW
+
+instructions: 88
+digest: sha256:b8d55644080a5d26e141108d05f07eac3f8bf44e6843a41df9ceacb7f74957aa
+
+mediation filter (installed by the launcher with its own listener)
+connect                42     USER_NOTIF
+socket, socketpair     AF_UNIX: ALLOW only (type & 0xf) in {STREAM, SEQPACKET}, else EPERM
+socket, socketpair     AF_NETLINK: EAFNOSUPPORT (any protocol)
+instructions: 20
+digest: sha256:28c98e72b91a22c212d5dfdddfcc1f1ca153c5a8e89c15833c26724b263ebeff
