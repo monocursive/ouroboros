@@ -440,7 +440,7 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/j5_process_linux.rs::x02_every_malformed_release_refuses_without_running_the_target",
 ]
-note = "Parser only today (portable_gate.rs::x02_framing_faults_refuse), no live marker check. Owned by J5-B1."
+note = "Live, with the target marker checked; the parser's own rule is portable_gate.rs::x02_framing_faults_refuse."
 
 [[clause]]
 id = "X02.5"
@@ -450,7 +450,7 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/j5_process_linux.rs::x02_a_closed_and_a_withheld_gate_differ_and_neither_runs_the_target",
 ]
-note = "Parser only today (portable_gate.rs::x02_a_gate_that_never_delivers_times_out_rather_than_waiting_forever), no target. Owned by J5-B1."
+note = "Live: the withheld leg waits the real 60 s gate budget, refuses `prepare_timeout` and leaves the target marker absent. The parser's own bound is portable_gate.rs::x02_a_gate_that_never_delivers_times_out_rather_than_waiting_forever."
 
 [[clause]]
 id = "X02.6"
@@ -488,7 +488,7 @@ tag = "portable"
 tests = [
   "ouro-jail/tests/portable_records.rs::x02_the_gate_frame_corpus_gets_the_verdicts_it_expects",
 ]
-note = "parser level only; the target-marker checks are J5-B1's live tests"
+note = "parser level only; the target-marker checks are X02.1-X02.5's live tests"
 
 # ------------------------------------------------------------------ X03
 
