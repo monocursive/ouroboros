@@ -77,3 +77,67 @@ fn a_later_script_step_refused_when_it_runs_is_not_a_usage_error() {
     assert_eq!(code(&out), EXIT_USAGE, "{out:?}");
     assert!(lines(&out).is_empty());
 }
+
+#[test]
+fn a_perf_launch_result_that_cannot_be_written_is_the_fixtures_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    // The launch runs; only the result file's directory is missing.
+    let out = run(&[
+        OsString::from("perf-launch"),
+        OsString::from("--sample-ms"),
+        OsString::from("0"),
+        OsString::from("--out"),
+        dir.path().join("absent/result.json").into_os_string(),
+        OsString::from("--"),
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        OsString::from("exit 0"),
+    ]);
+    assert_eq!(code(&out), EXIT_FIXTURE_FAILED, "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot write"),
+        "{out:?}"
+    );
+}
+
+/// A fork the fixture needs for itself, refused by the kernel: with
+/// `RLIMIT_NPROC` at 0 the fixture still starts (exec does not check the
+/// limit) and its own `fork` fails with `EAGAIN`. Root is not bound by the
+/// limit, so as root the forks succeed and the modes run.
+#[test]
+fn a_fork_the_fixture_cannot_make_is_its_own_failure() {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: `geteuid` takes no arguments and cannot fail.
+    let root = unsafe { libc::geteuid() } == 0;
+    for args in [
+        &["exec", "--", "/bin/sh", "-c", "exit 0"][..],
+        &["background", "0"],
+    ] {
+        let mut command = common::command(args);
+        // SAFETY: the closure runs in the forked child before exec and calls
+        // only `setrlimit`, which is async-signal-safe, on a live struct.
+        unsafe {
+            command.pre_exec(|| {
+                let none = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::setrlimit(libc::RLIMIT_NPROC, &raw const none) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+        let out = command.output().expect("the fixture starts");
+        if root {
+            assert_eq!(code(&out), 0, "{args:?}: {out:?}");
+        } else {
+            assert_eq!(code(&out), EXIT_FIXTURE_FAILED, "{args:?}: {out:?}");
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("fork failed"),
+                "{args:?}: {out:?}"
+            );
+        }
+    }
+}
