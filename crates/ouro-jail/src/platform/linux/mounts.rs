@@ -516,15 +516,82 @@ pub(super) fn staged_mounts(
     })
 }
 
-/// A read-only bind of an object this process made and pinned itself, such
-/// as the vault's public CA. The bind and its pin are one value, so the bind
-/// can only ever take the pinned object: [`prepare_mounts`] adds the bind
-/// from it and never pins its source again by path.
+/// A read-only bind of a file this process wrote and pinned itself, such as
+/// the vault's public CA. The bind and its pin are one value, and the only
+/// way to make one is [`PinnedBind::write`], so the bind can only ever take
+/// the file written: [`prepare_mounts`] adds the bind from it and never
+/// pins its source again by path.
 pub(super) struct PinnedBind {
-    /// The object, pinned through the directory it was written in.
-    pub(super) pin: jfs::PinnedPath,
+    /// The file, pinned through the directory it was written in.
+    pin: jfs::PinnedPath,
     /// Where it appears inside the sandbox.
-    pub(super) destination: PathBuf,
+    destination: PathBuf,
+}
+
+impl PinnedBind {
+    /// Writes `bytes` as the new file `name` in `dir`, whose host path is
+    /// `dir_path`, and pins the file written, to be bound read-only at
+    /// `destination`.
+    ///
+    /// The caller's directory is supervisor state no sandbox exists to
+    /// reach while this runs, so only a same-UID host process could replace
+    /// the name between the write and the pin. The pin is therefore taken
+    /// through the directory and checked against the written file, the bind
+    /// takes the pinned object rather than whatever the name says when the
+    /// mounts are pinned, and the handoff check refuses a name that no
+    /// longer says it.
+    ///
+    /// # Errors
+    /// The file exists already, cannot be written or reopened, or was
+    /// replaced between the write and the pin.
+    pub(super) fn write(
+        dir: &crate::state::anchored::Dir,
+        dir_path: &Path,
+        name: &str,
+        bytes: &[u8],
+        destination: PathBuf,
+    ) -> std::io::Result<PinnedBind> {
+        Self::write_then(dir, dir_path, name, bytes, destination, || {})
+    }
+
+    /// [`PinnedBind::write`], running `between` after the write and before
+    /// the file is opened again to be pinned: the window the identity check
+    /// closes.
+    fn write_then(
+        dir: &crate::state::anchored::Dir,
+        dir_path: &Path,
+        name: &str,
+        bytes: &[u8],
+        destination: PathBuf,
+        between: impl FnOnce(),
+    ) -> std::io::Result<PinnedBind> {
+        use std::os::fd::AsFd as _;
+        let component = crate::state::anchored::Name::new(name.as_bytes())?;
+        let mut file = dir.create_file_at(&component, 0o600)?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        between();
+        let handle = dir.open_path_at(&component)?;
+        let written = crate::state::anchored::fstat(file.as_fd())?.identity();
+        if crate::state::anchored::fstat(handle.as_fd())?.identity() != written {
+            return Err(std::io::Error::other(format!(
+                "{name} was replaced as it was written"
+            )));
+        }
+        Ok(PinnedBind {
+            pin: jfs::PinnedPath::adopt(handle, &dir_path.join(name))?,
+            destination,
+        })
+    }
+
+    /// The host path the bind takes its file from.
+    pub(super) fn source(&self) -> &Path {
+        self.pin.path()
+    }
+
+    /// Where the file appears inside the sandbox.
+    pub(super) fn destination(&self) -> &Path {
+        &self.destination
+    }
 }
 
 pub(super) type MountPreparation = (
@@ -782,10 +849,10 @@ pub(super) fn prepare_mounts(
         )
     };
     let mut pins: BTreeMap<PathBuf, jfs::PinnedPath> = BTreeMap::new();
-    for PinnedBind { pin, destination } in pinned {
-        plan.extra_ro_binds
-            .push((pin.path().to_owned(), destination));
-        pins.insert(pin.path().to_owned(), pin);
+    for bind in pinned {
+        let source = bind.source().to_owned();
+        plan.extra_ro_binds.push((source.clone(), bind.destination));
+        pins.insert(source, bind.pin);
     }
     let mut roots: Vec<(PathBuf, PathBuf)> = plan
         .extra_rw_binds
@@ -1340,6 +1407,55 @@ mod tests {
             map.add(fd, target).unwrap();
         }
         drop(placeholders);
+    }
+
+    /// The pin is the file written, held through its directory: a name
+    /// replaced afterwards does not move it, and its handoff check refuses.
+    #[test]
+    fn a_written_bind_is_pinned_to_the_file_written() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = crate::state::anchored::Dir::open_trusted(temp.path()).unwrap();
+        let bind = PinnedBind::write(
+            &dir,
+            temp.path(),
+            "ca.pem",
+            b"pem",
+            PathBuf::from("/run/ouro/vault-ca.pem"),
+        )
+        .unwrap();
+        let source = temp.path().join("ca.pem");
+        assert_eq!(bind.source(), source);
+        let written = std::fs::metadata(&source).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), b"pem");
+        assert_eq!(bind.pin.identity(), (written.dev(), written.ino()));
+        bind.pin.verify().unwrap();
+        let swap = temp.path().join("swap");
+        std::fs::write(&swap, b"planted").unwrap();
+        std::fs::rename(&swap, &source).unwrap();
+        assert_eq!(bind.pin.identity(), (written.dev(), written.ino()));
+        assert!(bind.pin.verify().is_err());
+    }
+
+    /// A file replaced between its write and the pin is refused, never
+    /// pinned in place of the file written.
+    #[test]
+    fn a_written_file_replaced_before_its_pin_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = crate::state::anchored::Dir::open_trusted(temp.path()).unwrap();
+        let source = temp.path().join("ca.pem");
+        let swap = temp.path().join("swap");
+        std::fs::write(&swap, b"planted").unwrap();
+        let result = PinnedBind::write_then(
+            &dir,
+            temp.path(),
+            "ca.pem",
+            b"pem",
+            PathBuf::from("/run/ouro/vault-ca.pem"),
+            || std::fs::rename(&swap, &source).unwrap(),
+        );
+        let error = result.err().expect("a replaced file was pinned");
+        assert!(error.to_string().contains("replaced"), "{error}");
     }
 
     /// A source this process pinned before the mounts were prepared is bound
