@@ -11,7 +11,7 @@
 
 use std::fmt::Write as _;
 
-use super::closed_set::{CLOSED_SET, Entry, FlagSource};
+use super::closed_set::{CLOSED_SET, ClosedOp, Entry, FlagSource, implied_creat_flags};
 use super::filter::{
     CLONE_SYSCALL, CLONE_UNTRACED, CLONE3_SYSCALL, LISTENER_SYSCALL, NARROWING_TRACE_DATA,
     SECCOMP_FILTER_FLAG_NEW_LISTENER, narrowing_filter, narrowing_filter_digest,
@@ -95,17 +95,29 @@ fn arguments(entry: &Entry) -> String {
     parts.join(" ")
 }
 
+/// The audit operation column: the mapping's own name, with what decides it
+/// spelled out for the rows where the call alone does not.
 fn operation(entry: &Entry) -> String {
-    match entry.flags {
-        FlagSource::ImpliedCreat => "fs.create".to_owned(),
-        _ if entry.op == super::ClosedOp::Open => {
-            "fs.create if O_CREAT, else fs.write; none if read-only".to_owned()
-        }
-        _ if entry.op == super::ClosedOp::Truncate => "fs.write (action truncated)".to_owned(),
-        _ if entry.op == super::ClosedOp::Exec => {
-            "proc.exec (confirmed transition, or failed return)".to_owned()
-        }
-        _ => entry.op.audit_operation(None).to_owned(),
+    let op = entry.op;
+    match (op, entry.flags) {
+        (ClosedOp::Open, FlagSource::ImpliedCreat) => op
+            .audit_operation(Some(implied_creat_flags()))
+            .as_str()
+            .to_owned(),
+        (ClosedOp::Open, _) => "fs.create if O_CREAT, else fs.write; none if read-only".to_owned(),
+        (ClosedOp::Truncate, _) => "fs.write (action truncated)".to_owned(),
+        (ClosedOp::Exec, _) => "proc.exec (confirmed transition, or failed return)".to_owned(),
+        (
+            ClosedOp::Rename
+            | ClosedOp::Unlink
+            | ClosedOp::Rmdir
+            | ClosedOp::Mkdir
+            | ClosedOp::Mknod
+            | ClosedOp::Link
+            | ClosedOp::Symlink
+            | ClosedOp::Connect,
+            _,
+        ) => op.audit_operation(None).as_str().to_owned(),
     }
 }
 
