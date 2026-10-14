@@ -1,17 +1,19 @@
-//! J4 wave 2, slice W2-S: the receipts and the trace after a trace loss
-//! (jail-v1 §§13.2, 13.3), found by the adversarial review of slice T.
+//! The receipts and the trace after a trace loss (jail-v1 §§13.2, 13.3).
 //!
 //! - (A) §13.3: "A trace is complete only if its last frame is the
 //!   `jail.receipt` note of the attempt's final receipt", and the reserve
 //!   exists for the final notes. The note of the final receipt is reserve
 //!   priority whatever its phase: an attempt that ends unsettled keeps its
-//!   last nonsettled phase (`enforced`, `prepared`), and its final note used
-//!   to be refused after a loss although the reserve had room.
+//!   last nonsettled phase (`enforced`, `prepared`), and its final note is
+//!   written after a loss while the reserve has room.
 //! - (B) Once a trace loss is known, every receipt written afterwards carries
 //!   the degraded wrapper source and its `trace_transport_loss` gap: the
 //!   `enforced` receipt written while the target runs, and the `refused`
-//!   receipt of an exec error, used to read wrapper `supported` with no gap
-//!   when the run loop had already taken the loss.
+//!   receipt of an exec error.
+//!
+//! A binary of its own: it sets the trace-cap seam in its environment, which
+//! no test that spawns a process or reads the environment may share a
+//! process with.
 //!
 //! The platform is simulated and the filesystem is real. The trace loss is
 //! real too: the simulated platform writes filler events into the shared

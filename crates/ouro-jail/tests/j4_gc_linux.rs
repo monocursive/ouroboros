@@ -794,7 +794,7 @@ fn leaves(root: &Path) -> Vec<(String, u64)> {
 }
 
 /// One `tool` attempt aborted by `OURO_JAIL_TEST_ABORT_AT=<point>` (S9),
-/// exactly as `j4_records_linux` crashes one: no core file, the release
+/// exactly as `records_linux`'s `replacement` crashes one: no core file, the release
 /// binary, the harness's own private state root.
 fn crashed_tool_run(point: &str) -> Run {
     let jail = Jail::with_program("/bin/sh")

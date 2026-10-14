@@ -2006,7 +2006,7 @@ fn r8_a_second_run_with_the_same_attempt_id_refuses() {
 // §7: "a receipt is replaced atomically". `r8_receipts_are_never_left_truncated`
 // killed the jail after a sleep of varying length and could pass without having
 // checked any receipt (J4 finding N10). It is superseded by
-// `j4_records_linux::j4_r02_a_crash_at_each_replacement_leaves_a_valid_prior_file`,
+// `records_linux::replacement::j4_r02_a_crash_at_each_replacement_leaves_a_valid_prior_file`,
 // which aborts the supervisor at each named point of each persistence site
 // through `OURO_JAIL_TEST_ABORT_AT` and fails when a point is never reached.
 

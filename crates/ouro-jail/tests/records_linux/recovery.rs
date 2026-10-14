@@ -1,9 +1,10 @@
-//! J5-C, R02.3 and R02.4: the persistence sites the J4 crash and fault
-//! matrices never reached (jail-v1 §7, §13.2, §14.2; R02).
+//! R02.3 and R02.4, gc and the execution leaf: the persistence sites the
+//! run's own crash matrix does not reach (jail-v1 §7, §13.2, §14.2).
 //!
 //! R02.3, live: the release binary is aborted by
-//! `OURO_JAIL_TEST_ABORT_AT=<site>:<point>[:<n>]` (S9; the ordinal is J5-C's,
-//! `state::persist::parse_abort_at`) at each named point of
+//! `OURO_JAIL_TEST_ABORT_AT=<site>:<point>[:<n>]` (S9; the ordinal picks the
+//! n-th replacement at the site, `state::persist::parse_abort_at`) at each
+//! named point of
 //!
 //! - P7, the receipt recording a detected lifetime-integrity loss, written
 //!   while a `none` target that moved itself out of its leaf still runs;
@@ -16,8 +17,7 @@
 //!   (`gc_terminating_orphan`, `gc_terminated_orphan`, `gc_removing_cgroup`,
 //!   `gc_removed_cgroup`, ..., `gc_finished`) and over a dead `tool`
 //!   supervisor's empty leaf and managed scratch (`gc_removing_cgroup`,
-//!   `gc_removed_cgroup`, `gc_removed_scratch`, `gc_finished`). The J4
-//!   matrix crashed only the first.
+//!   `gc_removed_cgroup`, `gc_removed_scratch`, `gc_finished`).
 //!
 //! After each crash every record present parses, `jail.json` passes the
 //! frozen contract, the replaced record shows the prior content before the
@@ -35,12 +35,9 @@
 //! delegated cgroup. Those two sites are reached only by the Linux platform,
 //! which the portable matrix (R02.2) cannot run.
 //!
-//! Needs `OURO_CONFORMANCE=1` and the reference host. Every process these
-//! tests signal is their own jail's supervisor, by the pidfd of the process
+//! Every process these tests signal is their own jail's supervisor, by the pidfd of the process
 //! the harness spawned; every cgroup they touch is one their own attempt
 //! registered (checked by inode) or one they made.
-
-#![cfg(target_os = "linux")]
 
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
@@ -57,57 +54,13 @@ use ouro_jail::records::ErrorCode;
 use ouro_jail::state::{self, AttemptDir, AttemptId, PersistIo, Site};
 use serde_json::Value;
 
-mod common;
-
-use common::PYTHON;
-
-/// A crash point and what the records must show after it.
-#[derive(Clone, Copy, Debug)]
-struct Point {
-    name: &'static str,
-    /// The new content is visible under the target name.
-    published: bool,
-    /// The temporary name is still there.
-    temp_left: bool,
-}
-
-const POINTS: [Point; 4] = [
-    Point {
-        name: "temp_written",
-        published: false,
-        temp_left: true,
-    },
-    Point {
-        name: "temp_synced",
-        published: false,
-        temp_left: true,
-    },
-    Point {
-        name: "renamed",
-        published: true,
-        temp_left: false,
-    },
-    Point {
-        name: "dir_synced",
-        published: true,
-        temp_left: false,
-    },
-];
+use super::{POINTS, Point, parse};
+use crate::common::{self, PYTHON};
 
 /// A delegated leaf (`common::delegated_leaf`) and the interpreter the
 /// fixtures are written in.
 fn live() -> bool {
     common::delegated_leaf() && common::python()
-}
-
-fn parse(path: &Path) -> Result<Option<Value>, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| format!("{} does not parse: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("{} cannot be read: {error}", path.display())),
-    }
 }
 
 fn read_json(path: &Path) -> Value {

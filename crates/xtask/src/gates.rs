@@ -4247,6 +4247,33 @@ Unrelated prose.
         })
     }
 
+    /// A test in a suite's submodule file is found there; one in an inline
+    /// module, in the suite's own file; and a name defined in neither is not.
+    #[test]
+    fn a_test_in_a_suite_module_file_is_found_in_that_file() {
+        let root = tempfile::tempdir().unwrap();
+        let tests = root.path().join("crates/k/tests");
+        std::fs::create_dir_all(tests.join("suite")).unwrap();
+        std::fs::write(
+            tests.join("suite.rs"),
+            "#[path = \"suite/part.rs\"]\nmod part;\nmod inline {\n#[test]\nfn here() {}\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tests.join("suite/part.rs"),
+            "#[test]\nfn there() {}\nmod deeper {\n#[test]\nfn below() {}\n}\n",
+        )
+        .unwrap();
+        assert!(test_exists(root.path(), "k/tests/suite.rs::part::there"));
+        assert!(test_exists(
+            root.path(),
+            "k/tests/suite.rs::part::deeper::below"
+        ));
+        assert!(test_exists(root.path(), "k/tests/suite.rs::inline::here"));
+        assert!(!test_exists(root.path(), "k/tests/suite.rs::part::here"));
+        assert!(!test_exists(root.path(), "k/tests/suite.rs::there"));
+    }
+
     #[test]
     fn a_cited_test_must_be_a_test() {
         let text = "fn helper() {}\n\n/// Doc.\n#[test]\n#[should_panic(\n    expected = \"x\"\n)]\nfn real() {}\n";
@@ -4276,6 +4303,21 @@ Unrelated prose.
         let (fn_name, modules) = segments.split_last().unwrap();
         let read = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap_or_default();
         if source.starts_with("tests/") || source.starts_with("src/bin/") {
+            // A test of a module the suite keeps in its own file, by the
+            // `#[path = "<suite>/<module>.rs"]` layout, is defined in the
+            // file of the longest module path that names one (an inline
+            // module inside that file included); otherwise in the suite's
+            // own file.
+            if let Some(stem) = source.strip_suffix(".rs") {
+                for n in (1..=modules.len()).rev() {
+                    let mut file = crate_dir.join(stem);
+                    file.extend(modules[..n].iter());
+                    let file = file.with_extension("rs");
+                    if file.is_file() {
+                        return defines_test(&read(file), fn_name);
+                    }
+                }
+            }
             return defines_test(&read(crate_dir.join(source)), fn_name);
         }
         // A unit test: the longest module path prefix that names a file.

@@ -1,9 +1,7 @@
-//! J5-C, R01 and O01 live: every record the real jail writes, under every
+//! R01 and O01, live: every record the real jail writes, under every
 //! profile, passes the frozen contract, and the live output carries each kind
 //! of event the examples freeze.
 //!
-//! jail-v1 §17 "Before J5" asks to "finish the executable schema constraints,
-//! verify all source-specific event semantics and freeze the wire versions".
 //! The frozen schemas and `ouro_jail::records::semantic` state those rules and
 //! the examples show one instance of each kind of record. This file runs the
 //! real `ouro-jail` on the reference host, releases each attempt through the
@@ -17,15 +15,13 @@
 //! run that never produced it.
 //!
 //! The note kinds a normal run does not write are held to the same contract
-//! where they are produced: `coverage_gap` in `j4_loss_linux.rs` (whose
-//! helper runs these checks since J5-C), `lifetime` in the R06 tests, `limit`
+//! where they are produced: `coverage_gap` in `j4_loss_linux.rs`,
+//! `lifetime` in the R06 tests, `limit`
 //! only on a host without a delegated pids controller, `helper` only when an
 //! `agent` helper dies.
 //!
 //! Every process these tests start is their own jail's; nothing on the host
 //! is inspected or changed.
-
-#![cfg(target_os = "linux")]
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -36,8 +32,7 @@ use ouro_fixture::harness::{self, HttpServer, Jail, Release, Run, TraceConsumer}
 use ouro_jail::policy::ProfileName;
 use serde_json::Value;
 
-mod common;
-use common::PYTHON;
+use crate::common::{self, PYTHON};
 
 /// One gated `ouro-jail run --profile <profile>` over a private workspace
 /// holding the fixture, with trace, control, gate and `--receipt` plumbed.

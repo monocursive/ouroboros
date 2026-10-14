@@ -17,6 +17,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jsonschema::Validator;
 
 mod common;
+
+/// The supervisor's own records: receipts, `gc` and canonical bytes over a
+/// simulated platform.
+#[path = "portable_records/supervisor.rs"]
+mod supervisor;
 use ouro_jail::observer::CoverageSummary;
 use ouro_jail::records::{
     Applied, AppliedFilesystem, AppliedLimit, AppliedMount, AppliedNetwork, AppliedSyscalls,

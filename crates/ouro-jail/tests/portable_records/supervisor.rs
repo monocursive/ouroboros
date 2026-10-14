@@ -27,8 +27,7 @@ use ouro_jail::state::{AttemptDir, AttemptId};
 use ouro_jail::{cli, supervisor};
 use serde_json::Value;
 
-mod common;
-use common::sim;
+use crate::common::{self, sim};
 
 // ---------------------------------------------------------------------------
 // A scripted platform
