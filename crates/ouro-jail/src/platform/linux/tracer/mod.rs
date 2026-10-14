@@ -1259,6 +1259,18 @@ impl Tracer {
     pub fn finish_within_draining(
         mut self,
         budget: Duration,
+        consume: impl FnMut(TracerEvent),
+    ) -> TracerSummary {
+        self.shutdown(budget, consume)
+    }
+
+    /// The one shutdown `finish*` and `Drop` share: tell the thread to stop
+    /// within `budget`, keep waking it, hand every event it still delivers
+    /// to `consume`, and take its summary. A second call finds no thread and
+    /// returns an empty summary.
+    fn shutdown(
+        &mut self,
+        budget: Duration,
         mut consume: impl FnMut(TracerEvent),
     ) -> TracerSummary {
         self.shutdown_ns.store(
@@ -1306,23 +1318,9 @@ impl Tracer {
 
 impl Drop for Tracer {
     fn drop(&mut self) {
-        if self.handle.is_none() {
-            return;
-        }
         // Dropping must never hang, including when the consumer is
         // panicking, so it is the same bounded shutdown as `finish`.
-        let taken = Tracer {
-            launcher: self.launcher,
-            events: std::mem::replace(
-                &mut self.events,
-                Events::new(sync_channel(1).1, Arc::default()),
-            ),
-            handle: self.handle.take(),
-            stop: Arc::clone(&self.stop),
-            shutdown_ns: Arc::clone(&self.shutdown_ns),
-            tid: Arc::clone(&self.tid),
-        };
-        let _ = taken.finish_within(Tracer::DEFAULT_SHUTDOWN);
+        let _ = self.shutdown(Tracer::DEFAULT_SHUTDOWN, |_| {});
     }
 }
 
