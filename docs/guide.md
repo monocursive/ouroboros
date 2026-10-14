@@ -488,14 +488,19 @@ before repeating work that might have side effects.
 refusal, or a problem with evidence or cleanup. Read the receipt alongside
 the exit code. A child's own exit code can overlap the jail's codes.
 
-**A policy or workspace is too large to record.** Every receipt and resolved
-policy is held to 4 MiB. A policy whose records could not fit, such as one
-with thousands of long `--ro` paths, refuses with `invalid_config` before
-anything runs, in `explain` and `--label-only` as in `run`; a workspace whose
+**A policy, workspace or environment is too large to record.** Every
+receipt and resolved policy is held to 4 MiB, and a receipt lists at most
+1024 grants, credentials, allowed hosts or environment names. A policy
+whose records could not fit, such as one with thousands of `--ro` paths,
+refuses with `invalid_config` before anything runs, in `explain` and
+`--label-only` as in `run`; so does a `--profile none` run started from an
+environment with more than 1024 variables, or with names too long to
+record, since its receipt lists every name it inherits. A workspace whose
 mount table would not fit refuses with `invalid_config` while it is
-prepared. Narrow the grants or the workspace. A refused run whose error
-messages alone would not fit still writes its receipt: messages are cut and
-say so, and every error is printed whole on stderr.
+prepared. Narrow the grants or the workspace, or start the run with fewer
+variables. A refused run whose error messages alone would not fit still
+writes its receipt: messages are cut and say so, and every error is printed
+whole on stderr.
 
 ## For agents and scripts
 

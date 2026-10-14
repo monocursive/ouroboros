@@ -5,11 +5,12 @@
 //! sync failed after the exclusive link landed and that has no receipt).
 //! From the claim on, [`Attempt::run`] returns a report, never an error,
 //! and each phase hands its failure back to it: one before the boundary
-//! exists ([`Attempt::prepare`]) ends in [`Attempt::refuse`]; one while the
-//! boundary waits for release ([`Attempt::register`], [`Attempt::gate`]) in
-//! [`Attempt::abort_and_refuse`]; a failed release or a failed target exec
-//! in [`Attempt::refuse`], with what the teardown or the tree's
-//! verification established; and an attempt whose target ran in
+//! exists ([`Attempt::prepare`]) ends in [`Attempt::refuse`]; a boundary
+//! whose report cannot be recorded in [`Attempt::abort_unrecordable`]; one
+//! while the boundary waits for release ([`Attempt::register`],
+//! [`Attempt::gate`]) in [`Attempt::abort_and_refuse`]; a failed release or
+//! a failed target exec in [`Attempt::refuse`], with what the teardown or
+//! the tree's verification established; and an attempt whose target ran in
 //! [`Attempt::settle`].
 
 use std::collections::VecDeque;
@@ -18,14 +19,15 @@ use std::time::{Instant, SystemTime};
 
 use super::{
     Budget, Context, ControlSink, GATE_WAIT, InFlight, Journal, Plan, RELEASE_STDOUT_AFTER_PREPARE,
-    RunReport, TREE_BUDGET, Unpersisted, apply_boundary, await_release, claim_attempt,
-    degrade_trace_coverage, finish_control, first_unsatisfied, interrupted, merge_wall_limit,
-    not_held, open_control, open_trace, pending_applied, persist_terminal, persistence_failed,
-    persistence_failed_after, platform_record, prepare_launch, prepare_proxy_dir, record_teardown,
-    record_tree, refuse_vendor_state, register_boundary_in_state, release_own_stdout,
-    remove_managed_scratch, remove_proxy_directory, retain_vendor_state, send_control,
-    settle_in_flight, settlement_loss, signals, stop, storage_loss_error, stream_classes,
-    submit_receipt, unrecorded, wall_deadline, write_policy_file,
+    RunReport, TREE_BUDGET, Unpersisted, apply_boundary, await_release, check_applied_bounds,
+    claim_attempt, degrade_trace_coverage, finish_control, first_unsatisfied, interrupted,
+    merge_wall_limit, not_held, open_control, open_trace, pending_applied, persist_terminal,
+    persistence_failed, persistence_failed_after, platform_record, prepare_launch,
+    prepare_proxy_dir, record_teardown, record_tree, refuse_vendor_state,
+    register_boundary_in_state, release_own_stdout, remove_managed_scratch, remove_proxy_directory,
+    retain_vendor_state, send_control, settle_in_flight, settlement_loss, signals, stop,
+    storage_loss_error, stream_classes, submit_receipt, unrecorded, wall_deadline,
+    write_policy_file,
 };
 use crate::cleanup;
 use crate::cli::RunArgs;
@@ -33,7 +35,7 @@ use crate::lifecycle::{Integrity, TreeEnd};
 use crate::observer::CoverageSummary;
 use crate::platform::{
     Deadline, PlanRequest, PreparedExecution, PreparedPlan, ProxyDirHandoff, ReleaseFailure,
-    RunEvent, RunningExecution, Sinks, StopReason,
+    RunEvent, RunningExecution, Sinks, StopReason, Teardown,
 };
 use crate::policy::{LimitKey, ProfileName};
 use crate::records::{
@@ -198,6 +200,16 @@ impl<'a> Attempt<'a> {
             Ok(prepared) => prepared,
             Err(error) => return self.refuse(&error),
         };
+        // I01: nothing the boundary reports is recorded unless all of it can
+        // be.
+        if let Err(error) = check_applied_bounds(
+            &self.record,
+            &self.plan,
+            &prepared.execution.boundary(),
+            prepared.execution.applied().as_ref(),
+        ) {
+            return self.abort_unrecordable(prepared, &error);
+        }
         // §8.1 step 5 is the last point at which nothing has been created:
         // from here on a refusal tears the boundary down first.
         if let Err(error) = self.register(&prepared).and_then(|()| self.gate()) {
@@ -284,7 +296,8 @@ impl<'a> Attempt<'a> {
     }
 
     /// Records the boundary that now exists and announces `prepared`: the
-    /// boundary's facts and what it applied, the proxy socket and the
+    /// boundary's facts and what it applied (which
+    /// [`check_applied_bounds`] found recordable), the proxy socket and the
     /// boundary in jail state (§7), then the prepared receipt and its control
     /// message (§8.2). A failure is refused after the boundary's teardown, and
     /// the refused receipt reports what was actually applied (§13.2 row 4).
@@ -493,6 +506,32 @@ impl<'a> Attempt<'a> {
     fn abort_and_refuse(&mut self, prepared: Prepared, error: &JailError) -> RunReport {
         let teardown = prepared.execution.abort();
         record_teardown(&mut self.record, &teardown);
+        self.refuse(error)
+    }
+
+    /// [`Attempt::refuse`] for a boundary whose report cannot be recorded
+    /// ([`check_applied_bounds`]): torn down without running the target and,
+    /// since none of it was recorded, refused as never established, as a
+    /// refusal of the platform's own preparation is. A pending boundary has
+    /// no tree facts, so a teardown that did not verify the tree's end is
+    /// recorded as an error instead.
+    fn abort_unrecordable(&mut self, prepared: Prepared, error: &JailError) -> RunReport {
+        match prepared.execution.abort() {
+            Ok(Teardown { tree: Some(tree) })
+                if tree.tree_empty == Some(true) && tree.integrity == Integrity::Verified => {}
+            Ok(_) => self.record.errors.push(
+                JailError::new(
+                    ErrorCode::TreeUnknown,
+                    ErrorStage::Preparing,
+                    Remediation::InspectState,
+                    "the boundary prepared for this attempt was torn down without verifying that \
+                     its tree ended"
+                        .to_owned(),
+                )
+                .to_object(),
+            ),
+            Err(teardown) => self.record.errors.push(teardown.to_object()),
+        }
         self.refuse(error)
     }
 

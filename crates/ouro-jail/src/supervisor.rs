@@ -327,56 +327,258 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
 
 /// What a run adds to a receipt beyond what its plan fixes and the mount
 /// table: its errors, the boundary's native identities and process, the
-/// environment names, the rest of the applied group the platform reports,
-/// and the indentation the mount table's rows take in the receipt.
+/// environment names of a contained profile, the rest of the applied group
+/// the platform reports, and the indentation the mount table's rows take in
+/// the receipt. Once the boundary exists ([`check_applied_bounds`]), what a
+/// run still adds after it.
 const RECEIPT_RESERVE: u64 = 512 * 1024;
+
+/// The receipt schema's `maxItems` for every list a receipt carries but
+/// `errors`, the gaps and `applied.limits`.
+const RECEIPT_LIST_MAX: usize = 1024;
+
+/// The receipt schema's `maxItems` for `applied.limits`.
+const RECEIPT_LIMITS_MAX: usize = 7;
+
+/// A list of a receipt past its schema's `maxItems`.
+struct ListPastItsBound {
+    what: &'static str,
+    len: usize,
+    max: usize,
+}
+
+/// The first list of the receipts of `record` that is longer than the
+/// receipt schema allows. `errors` and the gaps are not among them: every
+/// receipt is rendered within their bounds ([`render_receipt`]).
+fn list_past_its_bound(record: &AttemptRecord) -> Option<ListPastItsBound> {
+    let applied = &record.applied;
+    let mounts = applied
+        .filesystem
+        .as_ref()
+        .map_or(0, |filesystem| filesystem.mounts.len());
+    [
+        (
+            "requirements",
+            record.policy.requirements.len(),
+            RECEIPT_LIST_MAX,
+        ),
+        (
+            "operator grants",
+            record.policy.grants.len(),
+            RECEIPT_LIST_MAX,
+        ),
+        ("credentials", record.credentials.len(), RECEIPT_LIST_MAX),
+        ("mount table rows", mounts, RECEIPT_LIST_MAX),
+        (
+            "allowed hosts",
+            applied.network.allowed_hosts.len(),
+            RECEIPT_LIST_MAX,
+        ),
+        (
+            "TLS-only hosts",
+            applied.network.tls_only.len(),
+            RECEIPT_LIST_MAX,
+        ),
+        ("limits", applied.limits.len(), RECEIPT_LIMITS_MAX),
+        (
+            "environment names",
+            applied.environment_names.len(),
+            RECEIPT_LIST_MAX,
+        ),
+        (
+            "removed environment names",
+            applied.removed_environment_names.len(),
+            RECEIPT_LIST_MAX,
+        ),
+    ]
+    .into_iter()
+    .find(|(_, len, max)| len > max)
+    .map(|(what, len, max)| ListPastItsBound { what, len, max })
+}
+
+/// The length of `value` as a receipt renders it.
+fn pretty_len(value: &impl serde::Serialize) -> u64 {
+    serde_json::to_vec_pretty(value)
+        .ok()
+        .and_then(|bytes| u64::try_from(bytes.len()).ok())
+        .unwrap_or(u64::MAX)
+}
 
 /// §7 and I01: the records of this plan's attempt stay within the bound
 /// every writer writes receipts and `policy.json` within
-/// ([`cleanup::RECEIPT_WRITE_MAX`]). Checked while the plan is resolved, so
+/// ([`cleanup::RECEIPT_WRITE_MAX`]), and every list its receipts carry
+/// within the schema's `maxItems`. Checked while the plan is resolved, so
 /// `run`, `--label-only`, `explain` and `doctor` agree, and no attempt is
 /// claimed whose refusal could not be recorded.
 ///
-/// `policy.json` is known exactly. The receipt is not built yet, so its size
-/// is projected from what the plan fixes: the refused receipt the attempt
-/// would start from (it carries the operator grants), the most a boundary's
-/// mount table may take ([`MOUNT_TABLE_BYTES_MAX`], which the platform
-/// enforces while it prepares the boundary, before any of it is recorded),
-/// and [`RECEIPT_RESERVE`] for what a run adds.
+/// `policy.json` is known exactly. The receipt is not built yet, so it is
+/// projected from what the plan fixes: the refused receipt the attempt
+/// would start from (it carries the operator grants), the allow rules the
+/// boundary applies, the credentials the launch profile declares, for a
+/// profile that inherits the host environment the names it inherits, as
+/// the platform will read them back from its launcher
+/// ([`crate::environment::inherited_names`]), for a contained profile the
+/// most a boundary's mount table may take ([`MOUNT_TABLE_BYTES_MAX`], which
+/// the platform enforces while it prepares the boundary, before any of it
+/// is recorded), and [`RECEIPT_RESERVE`] for what a run adds. What the
+/// platform reports once the boundary exists is checked again before any of
+/// it is recorded ([`check_applied_bounds`]).
 ///
 /// # Errors
-/// [`ErrorCode::InvalidConfig`] when either would be past the bound.
+/// [`ErrorCode::InvalidConfig`] when either would be past the bound, or a
+/// list past its `maxItems`.
 fn check_record_bounds(ctx: &Context, plan: &Plan) -> Result<(), JailError> {
-    fn pretty_len(value: &impl serde::Serialize) -> u64 {
-        serde_json::to_vec_pretty(value)
-            .ok()
-            .and_then(|bytes| u64::try_from(bytes.len()).ok())
-            .unwrap_or(u64::MAX)
-    }
-    let envelope = pretty_len(&policy_envelope(plan)?);
-    let start = first_record(
+    check_record_bounds_in(ctx, plan, std::env::vars_os())
+}
+
+/// [`check_record_bounds`] with the host environment a profile that
+/// inherits it would inherit given.
+fn check_record_bounds_in(
+    ctx: &Context,
+    plan: &Plan,
+    host: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<(), JailError> {
+    let refuse = |message: String| {
+        JailError::new(
+            ErrorCode::InvalidConfig,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            message,
+        )
+    };
+    let snapshot = &plan.resolved.snapshot;
+    let mut start = first_record(
         ctx,
         plan,
         &AttemptId::generate(),
         Some(crate::canonical::argv_digest(&[])),
     );
-    let receipt = pretty_len(&start.receipt(Phase::Refused))
-        .saturating_add(MOUNT_TABLE_BYTES_MAX)
-        .saturating_add(RECEIPT_RESERVE);
-    let bound = cleanup::RECEIPT_WRITE_MAX;
-    if envelope <= bound && receipt <= bound {
-        return Ok(());
+    start
+        .applied
+        .network
+        .allowed_hosts
+        .clone_from(&snapshot.network.allow);
+    start
+        .applied
+        .network
+        .tls_only
+        .clone_from(&snapshot.network.tls_only);
+    let credentials = snapshot
+        .launch
+        .as_ref()
+        .map_or(0, |launch| launch.credentials.len());
+    if credentials > RECEIPT_LIST_MAX {
+        return Err(refuse(format!(
+            "the resolved policy cannot be recorded: its launch profile declares {credentials} \
+             credentials, and a receipt lists at most {RECEIPT_LIST_MAX}"
+        )));
     }
-    Err(JailError::new(
-        ErrorCode::InvalidConfig,
-        ErrorStage::Resolving,
-        Remediation::Configuration,
-        format!(
+    if let Some(list) = list_past_its_bound(&start) {
+        return Err(refuse(format!(
+            "the resolved policy cannot be recorded: its receipt would list {} {}, and a \
+             receipt lists at most {}",
+            list.len, list.what, list.max
+        )));
+    }
+    let bound = cleanup::RECEIPT_WRITE_MAX;
+    let envelope = pretty_len(&policy_envelope(plan)?);
+    let mount_table = if plan.profile().is_contained() {
+        MOUNT_TABLE_BYTES_MAX
+    } else {
+        0
+    };
+    let receipt = pretty_len(&start.receipt(Phase::Refused))
+        .saturating_add(mount_table)
+        .saturating_add(RECEIPT_RESERVE);
+    if envelope > bound || receipt > bound {
+        return Err(refuse(format!(
             "the resolved policy is too large to record: its policy.json would be {envelope} \
              bytes and its receipt about {receipt}, and every one is written within {bound}; \
              grant fewer or shorter paths"
-        ),
-    ))
+        )));
+    }
+    if !snapshot.environment.inherit_host {
+        return Ok(());
+    }
+    let (names, removed) = crate::environment::inherited_names(
+        host,
+        snapshot
+            .environment
+            .bindings
+            .iter()
+            .map(|binding| binding.name.as_str()),
+    );
+    start.applied.environment_names = names;
+    start.applied.removed_environment_names = removed;
+    let inherited = start.applied.environment_names.len();
+    if let Some(list) = list_past_its_bound(&start) {
+        return Err(refuse(format!(
+            "this environment cannot be recorded: the profile inherits it, its receipt would \
+             list {} {}, and a receipt lists at most {}; run it with fewer variables",
+            list.len, list.what, list.max
+        )));
+    }
+    let receipt = pretty_len(&start.receipt(Phase::Refused))
+        .saturating_add(mount_table)
+        .saturating_add(RECEIPT_RESERVE);
+    if receipt > bound {
+        return Err(refuse(format!(
+            "this environment cannot be recorded: the profile inherits it, and the names of its \
+             {inherited} variables take its receipt to about {receipt} bytes, past the {bound} \
+             every one is written within; run it with fewer or shorter variable names"
+        )));
+    }
+    Ok(())
+}
+
+/// §7 and I01, once the boundary exists: the receipts that record it, with
+/// what the platform reports it applied, stay within the bound every writer
+/// writes them within and every list within the schema's `maxItems`, with
+/// [`RECEIPT_RESERVE`] left for what the run still adds. The plan's check
+/// ([`check_record_bounds`]) projected all but the platform's report; this
+/// holds the report itself to it. Checked before any of it is recorded, so
+/// the refusal that follows records the boundary as never established, as a
+/// refusal of the platform's own preparation does, in a receipt the plan's
+/// check already fitted.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] when the report cannot be recorded.
+fn check_applied_bounds(
+    record: &AttemptRecord,
+    plan: &Plan,
+    boundary: &BoundaryIdentity,
+    applied: Option<&Applied>,
+) -> Result<(), JailError> {
+    let refuse = |message: String| {
+        JailError::new(
+            ErrorCode::InvalidConfig,
+            ErrorStage::Preparing,
+            Remediation::Configuration,
+            message,
+        )
+    };
+    let mut projected = record.clone();
+    apply_boundary(&mut projected, boundary, plan.profile());
+    if let Some(applied) = applied {
+        projected.applied = applied.clone();
+    }
+    merge_wall_limit(&mut projected, plan);
+    if let Some(list) = list_past_its_bound(&projected) {
+        return Err(refuse(format!(
+            "the boundary cannot be recorded: it reports {} {}, and a receipt lists at most {}",
+            list.len, list.what, list.max
+        )));
+    }
+    let bound = cleanup::RECEIPT_WRITE_MAX;
+    let receipt = pretty_len(&projected.receipt(Phase::Prepared)).saturating_add(RECEIPT_RESERVE);
+    if receipt > bound {
+        return Err(refuse(format!(
+            "the boundary cannot be recorded: what it reports takes its receipt to about \
+             {receipt} bytes with the room a run needs, past the {bound} every one is written \
+             within"
+        )));
+    }
+    Ok(())
 }
 
 /// §6.2 step 2: the operator launch profile `--launch NAME`, read once
@@ -5369,6 +5571,110 @@ mod tests {
         // Fits beside both.
         starting_at(&mut plan, bound - RECEIPT_RESERVE - MOUNT_TABLE_BYTES_MAX);
         check_record_bounds(&ctx, &plan).expect("room for both");
+    }
+
+    /// The pre-claim check holds every list the plan fixes to the schema's
+    /// `maxItems`, however few bytes it takes (1025 short grants, 1025
+    /// declared credentials), and for a profile that inherits the host
+    /// environment counts and measures the names it inherits: the host's and
+    /// those its bindings add, as the launcher will have them.
+    #[test]
+    fn the_record_bound_counts_every_list_the_plan_fixes() {
+        use crate::policy::{CredentialDecl, EnvBinding, EnvValue, LaunchSnapshot};
+        use crate::records::NativeString;
+        let (_root, _attempt_dir, mut plan) = scratch_fixture();
+        let ctx = Context {
+            platform: Box::new(LinuxIdentity),
+            env_settings: EnvSettings::default(),
+            cwd: plan.workspace.clone(),
+            home: None,
+            env_lookup: Box::new(|_| None),
+        };
+        let refused = |plan: &Plan, says: &str| {
+            let error = check_record_bounds(&ctx, plan).expect_err(says);
+            assert_eq!(error.code, ErrorCode::InvalidConfig, "{error:?}");
+            assert_eq!(error.stage, ErrorStage::Resolving);
+            assert!(error.message.contains(says), "{}", error.message);
+        };
+        let grants = |count: usize| {
+            (0..count)
+                .map(|index| crate::records::Grant {
+                    kind: "read_only".to_owned(),
+                    value: NativeString::Text(format!("/g{index}")),
+                    by: "operator".to_owned(),
+                })
+                .collect()
+        };
+        plan.resolved.grants = grants(RECEIPT_LIST_MAX + 1);
+        refused(&plan, "1025 operator grants");
+        plan.resolved.grants = grants(RECEIPT_LIST_MAX);
+        check_record_bounds(&ctx, &plan).expect("1024 grants");
+        plan.resolved.grants.clear();
+
+        let launch = |count: usize| LaunchSnapshot {
+            state_var: None,
+            home_is_state: false,
+            state_subdirs: Vec::new(),
+            credentials: (0..count)
+                .map(|index| CredentialDecl {
+                    vault: None,
+                    id: format!("c{index}"),
+                    source: NativeString::Text(format!("/c{index}")),
+                    dest: NativeString::Text(format!("c{index}")),
+                    mode: CredentialMode::BindRo,
+                })
+                .collect(),
+        };
+        plan.resolved.snapshot.launch = Some(launch(RECEIPT_LIST_MAX + 1));
+        refused(&plan, "1025 credentials");
+        plan.resolved.snapshot.launch = Some(launch(RECEIPT_LIST_MAX));
+        check_record_bounds(&ctx, &plan).expect("1024 credentials");
+        plan.resolved.snapshot.launch = None;
+
+        // The inheriting shape of `none`: the host's names, no bindings.
+        plan.resolved.snapshot.environment.inherit_host = true;
+        plan.resolved.snapshot.environment.bindings.clear();
+        let host = |names: Vec<String>| {
+            names
+                .into_iter()
+                .map(|name| (OsString::from(name), OsString::from("v")))
+                .collect::<Vec<_>>()
+        };
+        let names = |prefix: &str, count: usize| {
+            (0..count)
+                .map(|index| format!("{prefix}{index}"))
+                .collect::<Vec<_>>()
+        };
+        let inheriting =
+            |plan: &Plan, env: Vec<(OsString, OsString)>| check_record_bounds_in(&ctx, plan, env);
+        let refused_in = |plan: &Plan, env: Vec<(OsString, OsString)>, says: &str| {
+            let error = inheriting(plan, env).expect_err(says);
+            assert_eq!(error.code, ErrorCode::InvalidConfig, "{error:?}");
+            assert!(error.message.contains(says), "{}", error.message);
+        };
+        refused_in(&plan, host(names("V", 1025)), "1025 environment names");
+        inheriting(&plan, host(names("V", 1024))).expect("1024 environment names");
+        refused_in(
+            &plan,
+            host(names("OURO_V", 1025)),
+            "1025 removed environment names",
+        );
+        inheriting(&plan, host(names("OURO_V", 1024))).expect("1024 removed names");
+        // A binding is one more name the launcher has.
+        plan.resolved.snapshot.environment.bindings = vec![EnvBinding {
+            name: "BOUND".to_owned(),
+            value: EnvValue::Native(NativeString::Text(String::new())),
+        }];
+        refused_in(&plan, host(names("V", 1024)), "1025 environment names");
+        plan.resolved.snapshot.environment.bindings.clear();
+        // Ten names of 100000 control characters, each escaped to six bytes.
+        let bomb = host(names(&"\u{1}".repeat(100_000), 10));
+        refused_in(&plan, bomb.clone(), "names of its 10 variables");
+        // A profile that does not inherit the host environment has none of
+        // it.
+        plan.resolved.snapshot.environment.inherit_host = false;
+        inheriting(&plan, bomb).expect("nothing inherited");
+        inheriting(&plan, host(names("V", 2000))).expect("nothing inherited");
     }
 
     /// A platform that only names itself: resolution asks nothing else.

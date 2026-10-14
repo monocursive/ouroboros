@@ -1,12 +1,13 @@
 //! The bound every reader holds a receipt and `policy.json` to
 //! (`cleanup::RECEIPT_MAX`), over whole runs: the enforced receipt the worker
-//! persists, a policy too large to record, and a refusal that would pass the
-//! bound. Simulated platform, portable.
+//! persists, a policy too large to record, a refusal that would pass the
+//! bound, and a boundary whose report no receipt could hold. Simulated
+//! platform, portable.
 
 use std::path::{Path, PathBuf};
 
 use clap::Parser as _;
-use ouro_jail::cleanup::RECEIPT_MAX;
+use ouro_jail::cleanup::{RECEIPT_MAX, RECEIPT_WRITE_MAX};
 use ouro_jail::config::EnvSettings;
 use ouro_jail::platform::{RunEvent, StopReason};
 use ouro_jail::records::{ErrorCode, ErrorStage, Phase};
@@ -265,4 +266,79 @@ fn a_settled_receipt_past_128_errors_leaves_what_it_omits_to_stderr() {
     let bytes = std::fs::read(report.receipt_path.unwrap()).unwrap();
     let on_disk: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(on_disk["errors"].as_array().map(Vec::len), Some(128));
+}
+
+/// I01: what the platform reports once the boundary exists is held to the
+/// receipt's bounds before any of it is recorded. A boundary that reports
+/// more environment names than a receipt lists, or names too large for one
+/// (control characters, escaped to six bytes each), is torn down without
+/// running the target and refused as a configuration (exit 2), in a
+/// schema-valid refused receipt within the write bound that records the
+/// boundary as never established. A teardown that verified the tree adds
+/// nothing; one that did not is an error of its own.
+#[test]
+fn a_boundary_whose_report_cannot_be_recorded_is_refused_with_a_receipt() {
+    use ouro_jail::lifecycle::VerificationScope;
+    let many: Vec<String> = (0..1025).map(|index| format!("V{index}")).collect();
+    let long: Vec<String> = (0..10)
+        .map(|index| format!("{}{index}", "\u{1}".repeat(100_000)))
+        .collect();
+    for (names, says, verified) in [
+        (many.clone(), "1025 environment names", true),
+        (long, "bytes", true),
+        (many, "1025 environment names", false),
+    ] {
+        let (_root, root_path, workspace) = roots();
+        let mut platform =
+            sim::ScriptedPlatform::new("bound simulation", sim::namespace_boundary());
+        if verified {
+            platform = platform.abort_tree(sim::verified_tree(VerificationScope::AttemptTree));
+        }
+        let mut applied = sim::contained_applied("none");
+        applied.environment_names = names;
+        platform.applied = Some(applied);
+        let calls = platform.calls.clone();
+        let cli::Command::Run(args) = command(&[
+            "run".to_owned(),
+            "--workspace".to_owned(),
+            workspace.display().to_string(),
+            "--".to_owned(),
+            "simulated-target".to_owned(),
+        ]) else {
+            unreachable!()
+        };
+        let report = supervisor::run(&context(platform, &root_path, &workspace), &args);
+        let error = report.error.as_ref().expect("refused");
+        assert_eq!(report.exit_code, 2, "{error:?}");
+        assert_eq!(error.code, ErrorCode::InvalidConfig, "{error:?}");
+        assert_eq!(error.stage, ErrorStage::Preparing);
+        assert!(error.message.contains(says), "{}", error.message);
+        assert_eq!(
+            *calls.aborts.lock().unwrap(),
+            1,
+            "the boundary is torn down"
+        );
+        assert!(report.unrecorded.is_empty(), "{:?}", report.unrecorded);
+        let bytes = std::fs::read(report.receipt_path.expect("a claimed attempt")).unwrap();
+        assert!(u64::try_from(bytes.len()).unwrap() <= RECEIPT_WRITE_MAX);
+        let receipt: Value = serde_json::from_slice(&bytes).unwrap();
+        common::check_receipt(&receipt).unwrap_or_else(|error| panic!("{error}\n{receipt:#}"));
+        assert_eq!(receipt["phase"], "refused");
+        assert_eq!(receipt["lifetime"]["boundary"], "pending");
+        assert_eq!(
+            receipt["applied"]["environment_names"],
+            serde_json::json!([])
+        );
+        let codes: Vec<&str> = receipt["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|error| error["code"].as_str().unwrap())
+            .collect();
+        if verified {
+            assert_eq!(codes, ["invalid_config"]);
+        } else {
+            assert_eq!(codes, ["tree_unknown", "invalid_config"]);
+        }
+    }
 }

@@ -39,7 +39,6 @@ pub fn is_reserved(name: &OsStr) -> bool {
 /// name that is not UTF-8 is rendered lossily: the receipt's name lists are
 /// JSON strings, which is how `environment_names` renders such a name too.
 /// Only the `none` boundary, which inherits the host environment, strips it.
-#[cfg(any(target_os = "linux", test))]
 pub fn strip_reserved(
     env: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> (Vec<(std::ffi::OsString, std::ffi::OsString)>, Vec<String>) {
@@ -55,6 +54,27 @@ pub fn strip_reserved(
     removed.sort();
     removed.dedup();
     (kept, removed)
+}
+
+/// The names a launcher started with `host` (stripped of every reserved
+/// name, [`strip_reserved`]) and the `bound` names has, as the platform
+/// reads them back from it: sorted, without duplicates, a name that is not
+/// UTF-8 rendered lossily; and the reserved names stripped. What the
+/// receipts of a run that inherits `host` list (`environment_names`,
+/// `removed_environment_names`), known before anything is claimed.
+pub fn inherited_names<'a>(
+    host: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    bound: impl IntoIterator<Item = &'a str>,
+) -> (Vec<String>, Vec<String>) {
+    let (kept, removed) = strip_reserved(host);
+    let mut names: Vec<String> = kept
+        .iter()
+        .map(|(name, _)| String::from_utf8_lossy(name.as_bytes()).into_owned())
+        .chain(bound.into_iter().map(str::to_owned))
+        .collect();
+    names.sort();
+    names.dedup();
+    (names, removed)
 }
 
 #[cfg(test)]
@@ -91,6 +111,22 @@ mod tests {
         ] {
             assert!(!is_reserved(OsStr::new(name)), "{name:?}");
         }
+    }
+
+    /// The names an inheriting run's receipts list are the ones its
+    /// launcher has: kept and bound, sorted and unique, lossy past UTF-8;
+    /// the reserved ones are listed apart, never with a value.
+    #[test]
+    fn inherited_names_are_the_launchers_names() {
+        let env = vec![
+            (os("PATH"), os("/usr/bin")),
+            (os("OURO_TOKEN"), os("secret")),
+            (OsString::from_vec(b"BYTES\xff".to_vec()), os("x")),
+            (os("HOME"), os("/home")),
+        ];
+        let (names, removed) = inherited_names(env, ["TERM", "HOME"]);
+        assert_eq!(names, ["BYTES\u{fffd}", "HOME", "PATH", "TERM"]);
+        assert_eq!(removed, ["OURO_TOKEN"]);
     }
 
     #[test]

@@ -724,10 +724,15 @@ execute anything, and distinguishes requested policy from measured capability.
 `run`, `--label-only`, `explain` and `doctor` resolve a policy the same way,
 and that resolution refuses with `invalid_config` (stage `resolving`) a policy
 whose records could not be written within the bound of §13.2 (4 MiB less
-256 bytes): `policy.json` measured exactly, the receipt projected from the
-refused receipt the attempt would start from, plus 1 MiB for the mount table
-and 512 KiB for what a run adds. Such a policy is refused before any attempt
-is claimed, so no claim is left without a receipt.
+256 bytes): `policy.json` measured exactly, and the receipt projected from
+what the plan fixes (the refused receipt the attempt would start from, the
+network rules it applies, for `none` the names of the environment it
+inherits, §12, and for a contained profile 1 MiB for the mount table) plus
+512 KiB for what a run adds. It refuses the same way a plan whose receipt
+would list more than the schema's `maxItems` allows: more than 1024
+grants, declared credentials, allowed hosts, or environment names
+inherited or removed. Such a plan is refused before any attempt is claimed,
+so an attempt is claimed only when its receipts fit.
 Its output carries environment names, never values (canonicalization.md).
 `--label-only` rejects `--gate-fd` and `--attempt-id` as usage errors.
 Inspection JSON goes to stdout; diagnostics go to stderr. `run` preserves child
@@ -2382,8 +2387,10 @@ proxy variables are recorded by name only. The contained environment starts
 empty and admits PATH, LANG, TERM, TZ, required generated paths and the explicit
 launch environment. Unlisted SSH/cloud/provider environment credentials are
 absent. `none` inherits the host environment except reserved Ouroboros state,
-socket and token names (every `OURO_*` name); the receipt lists removed names,
-never values. This is hygiene and does not protect uncontained state. A launch
+socket and token names (every `OURO_*` name); the receipt lists the inherited
+and the removed names, never values, so an environment whose names a receipt
+cannot hold is refused before the claim (§6.1). This is hygiene and does not
+protect uncontained state. A launch
 profile may not bind the contained environment's own names (PATH, LANG, TERM,
 TZ, TMPDIR, HOME), the proxy variables in any case, `LD_*`/`DYLD_*`, or the C
 library's loader and runtime controls (for example `GLIBC_TUNABLES`,
@@ -2653,8 +2660,16 @@ table takes at most 1 MiB of a receipt, as its rows render: the row count
 does not bound a table whose paths are long, escaped (a control character
 takes six bytes) or base64-encoded, so a boundary whose table is larger is
 refused as `invalid_config` while it is prepared, before any of it is
-recorded, and its refused receipt carries no table. A policy too large to
-record is refused before the claim (§6.1).
+recorded, and its refused receipt carries no table. A plan whose receipts
+could not be recorded, `none`'s inherited environment included, is refused
+before the claim (§6.1). Once the boundary exists, everything the platform
+reports (the boundary and what it applied) is held to the same bounds
+before any of it is recorded: each list within the schema's `maxItems`, and
+the receipt recording it within the write bound with 512 KiB left for the
+rest of the run. A report that is not is refused as `invalid_config` after
+the boundary's teardown, and its refused receipt records the boundary as
+never established, as a refusal of the platform's own preparation does (a
+teardown that did not verify the tree's end adds a `tree_unknown` error).
 
 Every receipt, whatever its phase, is rendered within the schema's item
 bounds:
@@ -2672,12 +2687,11 @@ bounds:
   merged.
 
 A `refused` receipt is also fitted to the write bound as it is written, the
-pending one written before vendor-state removal included, so a claimed
-attempt always ends with one: past the bound the longest messages (in
-`errors` and `outcome.error`) are cut, each to no less than 256 bytes, and
-each ends `[... N bytes omitted to keep this receipt within 4194048 bytes;
-the run that wrote this receipt prints the whole message on stderr]`. No
-error is omitted for its size.
+pending one written before vendor-state removal included: past it the
+longest messages (in `errors` and `outcome.error`) are cut, each to no less
+than 256 bytes, and each ends `[... N bytes omitted to keep this receipt
+within 4194048 bytes; the run that wrote this receipt prints the whole
+message on stderr]`. No error is omitted for its size.
 
 The run prints whole on stderr every error its last receipt holds cut or
 not at all, counting an error raised twice as two. Any other receipt past
@@ -2687,7 +2701,9 @@ worker stops the tree for `state_write_failed`, and a terminal receipt
 leaves the last one written on disk (§7). A write that fails after its
 receipt became visible (its directory sync, the `--receipt` copy, a write
 reported stalled that lands later) may leave that receipt on disk, so what
-it holds cut or not at all is printed too.
+it holds cut or not at all is printed too. A claimed attempt therefore ends
+with a receipt unless writing one fails, which the run reports on stderr,
+or the supervisor is killed first.
 
 Native lifetime details live under an OS-tagged object. Linux may record cgroup
 and namespace identities; macOS will define its own. `pidfd`, `/proc` paths,
