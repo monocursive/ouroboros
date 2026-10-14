@@ -266,6 +266,8 @@ struct Sim {
     release_teardown_verified: bool,
     /// Whether a failed release reports a teardown that lost integrity.
     release_teardown_lost: bool,
+    /// How many bytes of padding the release failure's message carries.
+    release_error_padding: usize,
     /// When set, the data directory in whose (single) attempt a
     /// `vendor-state` directory appears during probing: an operator process
     /// racing the claim.
@@ -415,7 +417,10 @@ impl PreparedExecution for SimPrepared {
                     ErrorCode::BackendUnavailable,
                     ouro_jail::records::ErrorStage::Released,
                     Remediation::Retry,
-                    "simulated release failure",
+                    format!(
+                        "simulated release failure{}",
+                        "x".repeat(self.sim.release_error_padding)
+                    ),
                 ),
                 teardown: tree.map(|tree| Teardown { tree: Some(tree) }),
             }));
@@ -1354,6 +1359,46 @@ fn c02_a_release_failure_after_setup_retains_and_an_exec_error_with_verified_tea
     assert_eq!(receipt["lifetime"]["tree_empty"], true);
     assert_eq!(receipt["state_cleanup"], "complete");
     assert!(cleanup::absent(&attempt_dir(&report).join("vendor-state")));
+}
+
+/// A refusal whose own message would take its receipt past the reader bound
+/// still cleans up vendor state after a verified teardown: the pending
+/// refused receipt written before the removal is fitted (its messages cut,
+/// saying so) like the final one, so neither write refuses and the staged
+/// credentials do not outlive the attempt.
+#[test]
+fn an_oversized_refusal_still_cleans_up_vendor_state() {
+    let fixture = Fixture::new();
+    let auth = fixture.credential("auth.json", b"a");
+    let config = fixture.credential("config.toml", b"b");
+    agent_profile(&fixture, &auth, &config);
+    let report = fixture.run(
+        Sim {
+            release_fails: true,
+            release_teardown_verified: true,
+            release_error_padding: usize::try_from(cleanup::RECEIPT_MAX).unwrap(),
+            ..Sim::default()
+        },
+        &["--launch", "fixture"],
+    );
+    assert_eq!(report.exit_code, 125, "{:?}", report.error);
+    let receipt = receipt_json(&report);
+    assert_schema("jail-receipt", &receipt);
+    assert_eq!(
+        receipt["state_cleanup"], "complete",
+        "{}",
+        receipt["cleanup_error"]
+    );
+    assert_eq!(receipt["cleanup_error"], serde_json::Value::Null);
+    assert!(cleanup::absent(&attempt_dir(&report).join("vendor-state")));
+    let bytes = std::fs::read(report.receipt_path.as_ref().unwrap()).unwrap();
+    assert!(u64::try_from(bytes.len()).unwrap() <= cleanup::RECEIPT_MAX);
+    assert!(
+        receipt["outcome"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("the whole message was reported on stderr]")
+    );
 }
 
 /// Leaves one entry vendor-state cleanup cannot remove on its first pass.

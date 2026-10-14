@@ -147,11 +147,12 @@ fn a_policy_too_large_to_record_is_refused_before_any_claim() {
     );
 }
 
-/// I01: a refusal whose receipt the errors raised before it would take past
-/// the bound is still recorded. Those errors are omitted, newest first, an
-/// error says how many, and they reach stderr instead (`unrecorded`).
+/// I01: a refusal whose receipt an error raised before it would take past
+/// the bound is still recorded. That error's message is cut, saying so, no
+/// error is omitted, and the whole message reaches stderr instead
+/// (`unrecorded`).
 #[test]
-fn a_refusal_past_the_bound_omits_earlier_errors_and_is_recorded() {
+fn a_refusal_past_the_bound_cuts_the_oversized_message_and_is_recorded() {
     let (_root, root_path, workspace) = roots();
     let mut platform = sim::ScriptedPlatform::new("bound simulation", sim::namespace_boundary())
         .events([
@@ -187,16 +188,20 @@ fn a_refusal_past_the_bound_omits_earlier_errors_and_is_recorded() {
         .iter()
         .map(|error| error.code.as_str())
         .collect();
-    assert_eq!(codes, ["state_write_failed", "exec_failed"], "{codes:?}");
+    assert_eq!(codes, ["evidence_lost", "exec_failed"], "{codes:?}");
+    let cut = &receipt.errors[0].message;
     assert!(
-        receipt.errors[0]
-            .message
-            .starts_with("1 earlier error(s) are omitted"),
+        cut.ends_with("the whole message was reported on stderr]"),
         "{}",
-        receipt.errors[0].message
+        &cut[cut.len().saturating_sub(160)..]
     );
     assert_eq!(report.unrecorded.len(), 1);
     assert_eq!(report.unrecorded[0].code, "evidence_lost");
+    assert_eq!(
+        report.unrecorded[0].message.len(),
+        usize::try_from(RECEIPT_MAX).unwrap(),
+        "stderr gets the whole message"
+    );
     let bytes = std::fs::read(report.receipt_path.unwrap()).unwrap();
     assert!(u64::try_from(bytes.len()).unwrap() <= RECEIPT_MAX);
     let on_disk: Value = serde_json::from_slice(&bytes).unwrap();

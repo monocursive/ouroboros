@@ -19,14 +19,13 @@ use std::time::{Instant, SystemTime};
 use super::{
     Budget, Context, ControlSink, GATE_WAIT, InFlight, Journal, Plan, RELEASE_STDOUT_AFTER_PREPARE,
     RunReport, TREE_BUDGET, Unpersisted, apply_boundary, await_release, claim_attempt,
-    degrade_trace_coverage, finish_control, first_unsatisfied, fit_refused_receipt, interrupted,
-    merge_wall_limit, open_control, open_trace, pending_applied, persist_terminal,
-    persistence_failed, persistence_failed_after, platform_record, prepare_launch,
-    prepare_proxy_dir, record_teardown, record_tree, refuse_vendor_state,
-    register_boundary_in_state, release_own_stdout, remove_managed_scratch, remove_proxy_directory,
-    retain_vendor_state, send_control, settle_in_flight, settlement_loss, signals, stop,
-    storage_loss_error, stream_classes, submit_receipt, unrecorded, wall_deadline,
-    write_policy_file,
+    degrade_trace_coverage, finish_control, first_unsatisfied, interrupted, merge_wall_limit,
+    not_held, open_control, open_trace, pending_applied, persist_terminal, persistence_failed,
+    persistence_failed_after, platform_record, prepare_launch, prepare_proxy_dir, record_teardown,
+    record_tree, refuse_vendor_state, register_boundary_in_state, release_own_stdout,
+    remove_managed_scratch, remove_proxy_directory, retain_vendor_state, send_control,
+    settle_in_flight, settlement_loss, signals, stop, storage_loss_error, stream_classes,
+    submit_receipt, unrecorded, wall_deadline, write_policy_file,
 };
 use crate::cleanup;
 use crate::cli::RunArgs;
@@ -423,7 +422,6 @@ impl<'a> Attempt<'a> {
         } else {
             Outcome::refused(error)
         };
-        let refusal_at = record.errors.len();
         record.errors.push(error.to_object());
         record.exec_observed = false;
         self.journal.lifecycle("refused");
@@ -436,7 +434,6 @@ impl<'a> Attempt<'a> {
         );
         // The proxy stopped with the boundary's teardown.
         let _ = remove_proxy_directory(&self.attempt_dir, &mut self.record);
-        let omitted = fit_refused_receipt(&mut self.record, refusal_at);
         let receipt = self.persist_terminal(state::Site::RefusedReceipt, Phase::Refused);
         // Everything that reaches here refused before the target executed,
         // so a persistence failure exits 125 like the refusal itself.
@@ -444,14 +441,22 @@ impl<'a> Attempt<'a> {
         match receipt {
             Ok(receipt) => {
                 send_control(self.control.as_mut(), ControlKind::Refused, &receipt);
+                let trace_error = self.journal.loss.clone();
+                // What the receipt holds cut or not at all (it was fitted to
+                // the reader bound) reaches stderr whole.
+                let unrecorded = not_held(
+                    &self.record.errors,
+                    &receipt,
+                    &[Some(error), trace_error.as_ref()],
+                );
                 RunReport {
                     exit_code,
                     receipt: Some(receipt),
                     error: Some(error.clone()),
                     receipt_path: Some(self.attempt_dir.receipt_path()),
-                    trace_error: self.journal.loss.clone(),
+                    trace_error,
                     control_dropped: finish_control(self.control.as_mut()),
-                    unrecorded: omitted,
+                    unrecorded,
                     ..RunReport::default()
                 }
             }
@@ -464,12 +469,11 @@ impl<'a> Attempt<'a> {
                 let trace_error = self.journal.loss.clone();
                 // The refusal and the failed write are in `error`; any other
                 // error no durable receipt carries reaches stderr too.
-                let mut unrecorded = unrecorded(
+                let unrecorded = unrecorded(
                     &self.record,
                     &self.journal,
                     &[Some(error), trace_error.as_ref()],
                 );
-                unrecorded.splice(0..0, omitted);
                 RunReport {
                     exit_code,
                     error: Some(reported),
