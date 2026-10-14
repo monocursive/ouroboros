@@ -1276,7 +1276,7 @@ fn best_effort_dead_owner_without_exit_record_stays_unknown() {
 }
 
 #[test]
-fn an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever() {
+fn an_unread_foreground_terminal_stops_forwarding_but_not_the_run() {
     let Some(jail) = live_jail() else {
         return;
     };
@@ -1290,18 +1290,33 @@ fn an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever() {
         "--",
         "/bin/sh",
         "-c",
-        "head -c 2097152 /dev/zero; sleep 30",
+        "head -c 2097152 /dev/zero",
     ]);
     let started = Instant::now();
     let output = Process::spawn(&mut command, false).finish();
-    assert!(!output.status.success());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(started.elapsed() < COMMAND_LIMIT);
     let runs = fixture.client().runs().unwrap();
     assert_eq!(runs.len(), 1);
-    let run = fixture.assert_unknown(&runs[0].run_id);
-    fixture.assert_tree_stopped(&run);
-    assert_eq!(run.capture["stdout"]["state"], "incomplete");
-    assert!(run.capture["stdout"]["stored_bytes"].as_u64().unwrap() <= 8);
+    let run = &runs[0];
+    assert_eq!(run.state, "settled");
+    let stdout = &run.capture["stdout"];
+    assert_eq!(stdout["state"], "captured");
+    assert_eq!(stdout["stored_bytes"], 8);
+    assert_eq!(stdout["observed_bytes"], 2_097_152);
+    let forwarding = &stdout["forwarding"];
+    assert_eq!(forwarding["reason"], "queue_full");
+    assert_ne!(forwarding["state"], "complete");
+    assert_eq!(
+        forwarding["delivered_bytes"].as_u64().unwrap()
+            + forwarding["undelivered_bytes"].as_u64().unwrap(),
+        2_097_152
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("stdout forwarding"));
 }
 
 fn detached_fixture() -> Option<Fixture> {

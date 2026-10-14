@@ -414,15 +414,28 @@ fn read_receipt(path: &Path, phase: &str) -> Result<Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+/// Foreground forwarding is display, not evidence. A terminal slower than the
+/// child or a lost terminal stops it; the owner keeps draining and capturing,
+/// and the capture records what was not delivered instead of failing the run.
 #[cfg(target_os = "linux")]
 struct Tee {
     sender: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
     finished: std::sync::mpsc::Receiver<std::io::Result<()>>,
+    result: Option<std::io::Result<()>>,
+    delivered: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    stopped: Option<&'static str>,
 }
+
+/// After the child's streams end, queued output gets this long to reach the
+/// terminal before the run is recorded; the rest is reported undelivered.
+#[cfg(target_os = "linux")]
+const FORWARDING_GRACE: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const HEARTBEAT: Duration = Duration::from_millis(250);
 
 #[cfg(target_os = "linux")]
 impl Tee {
-    fn new(name: &str) -> Result<Self> {
+    fn stdio(name: &str) -> Result<Self> {
         use std::os::fd::FromRawFd as _;
         let source = if name == "stdout" {
             libc::STDOUT_FILENO
@@ -435,7 +448,12 @@ impl Tee {
             return Err(std::io::Error::last_os_error().into());
         }
         // SAFETY: fcntl returned a new descriptor exclusively owned here.
-        let mut sink = unsafe { File::from_raw_fd(fd) };
+        Ok(Self::new(unsafe { File::from_raw_fd(fd) }))
+    }
+    fn new(mut sink: File) -> Self {
+        use std::sync::atomic::Ordering;
+        let delivered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let written = delivered.clone();
         // At most 1 MiB queued per selected stream. The owner never waits on a client write.
         let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(128);
         let (done, finished) = std::sync::mpsc::sync_channel(1);
@@ -443,37 +461,69 @@ impl Tee {
             let result = (|| {
                 for bytes in receiver {
                     sink.write_all(&bytes)?;
+                    written.fetch_add(bytes.len() as u64, Ordering::Release);
                 }
                 Ok(())
             })();
             let _ = done.send(result);
         });
-        Ok(Self {
+        Self {
             sender: Some(sender),
             finished,
-        })
-    }
-    fn forward(&mut self, bytes: &[u8]) -> Result<()> {
-        if self
-            .sender
-            .as_ref()
-            .is_none_or(|s| s.try_send(bytes.to_vec()).is_err())
-        {
-            self.sender.take();
-            return Err(error(
-                "foreground output forwarding exceeded its bound or lost its sink",
-            ));
+            result: None,
+            delivered,
+            stopped: None,
         }
-        Ok(())
     }
-    fn finish(&mut self) -> Result<()> {
-        self.sender.take();
-        self.finished
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| {
-                error("foreground output forwarding did not finish within two seconds")
-            })??;
-        Ok(())
+    fn forward(&mut self, bytes: &[u8]) {
+        use std::sync::mpsc::TrySendError;
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        let reason = match sender.try_send(bytes.to_vec()) {
+            Ok(()) => return,
+            Err(TrySendError::Full(_)) => "queue_full",
+            Err(TrySendError::Disconnected(_)) => "sink_failed",
+        };
+        self.sender = None;
+        self.stopped = Some(reason);
+    }
+    /// No more bytes; the sink drains what is already queued.
+    fn close(&mut self) {
+        self.sender = None;
+    }
+    /// Whether the sink has drained or failed, without waiting for it.
+    fn done(&mut self) -> bool {
+        use std::sync::mpsc::TryRecvError;
+        if self.result.is_none() {
+            self.result = match self.finished.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(std::io::ErrorKind::BrokenPipe.into())),
+            };
+        }
+        self.result.is_some()
+    }
+    /// What reached the terminal by now. Delivery is never an owner failure.
+    fn report(&mut self, observed: u64) -> Value {
+        self.close();
+        self.done();
+        let state = match &self.result {
+            Some(Ok(())) if self.stopped.is_none() => "complete",
+            Some(Ok(())) => "stopped",
+            Some(Err(_)) => {
+                self.stopped.get_or_insert("sink_failed");
+                "stopped"
+            }
+            None => "unfinished",
+        };
+        let delivered = self.delivered.load(std::sync::atomic::Ordering::Acquire);
+        let mut forwarding = json!({"state":state,"delivered_bytes":delivered,
+            "undelivered_bytes":observed.saturating_sub(delivered)});
+        if let Some(reason) = self.stopped {
+            forwarding["reason"] = json!(reason);
+        }
+        forwarding
     }
 }
 
@@ -545,7 +595,7 @@ impl Capture {
                 write_capture(file, &buffer[..keep], &mut self.stored)?;
             }
             if let Some(tee) = self.tee.as_mut() {
-                tee.forward(&buffer[..n])?;
+                tee.forward(&buffer[..n]);
             }
         }
         Ok(())
@@ -554,14 +604,23 @@ impl Capture {
         if let Some(file) = self.file.as_mut() {
             file.sync_all()?;
         }
-        if let Some(tee) = self.tee.as_mut() {
-            tee.finish()?;
-        }
-        Ok(if self.file.is_some() {
+        let mut metadata = if self.file.is_some() {
             json!({"state":if complete && self.eof {"captured"} else {"incomplete"},"limit_bytes":self.limit,"observed_bytes":self.observed,"stored_bytes":self.stored,"truncated":self.observed>self.stored,"path":format!("artifacts/{}.bin",self.name)})
         } else {
             json!({"state":"not_captured","observed_bytes":self.observed})
-        })
+        };
+        if let Some(tee) = self.tee.as_mut() {
+            metadata["forwarding"] = tee.report(self.observed);
+        }
+        Ok(metadata)
+    }
+    fn close_forwarding(&mut self) {
+        if let Some(tee) = self.tee.as_mut() {
+            tee.close();
+        }
+    }
+    fn forwarding_done(&mut self) -> bool {
+        self.tee.as_mut().is_none_or(Tee::done)
     }
 }
 
@@ -851,7 +910,7 @@ fn run_owned(
                 tee: if options.batch {
                     None
                 } else {
-                    Some(Tee::new(name)?)
+                    Some(Tee::stdio(name)?)
                 },
             });
         } else if name == "stdout" {
@@ -1025,7 +1084,7 @@ fn run_owned(
             for capture in &mut captures {
                 capture.drain()?;
             }
-            if last_heartbeat.elapsed() >= Duration::from_millis(250) {
+            if last_heartbeat.elapsed() >= HEARTBEAT {
                 evidence.heartbeat(client)?;
                 last_heartbeat = Instant::now();
             }
@@ -1064,6 +1123,22 @@ fn run_owned(
         gate.take();
         drop(gate_parent);
         terminate(&mut child.0);
+    }
+    // Give the terminal a bounded grace to show what is queued, keeping the
+    // writer connection alive meanwhile; whatever it has not shown by then
+    // is recorded as undelivered.
+    for item in &mut captures {
+        item.close_forwarding();
+    }
+    let grace = Instant::now() + FORWARDING_GRACE;
+    while !captures.iter_mut().all(Capture::forwarding_done) && Instant::now() < grace {
+        if failure.is_none() && last_heartbeat.elapsed() >= HEARTBEAT {
+            if let Err(problem) = evidence.heartbeat(client) {
+                failure = Some(problem);
+            }
+            last_heartbeat = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
     let mut capture = serde_json::Map::new();
     capture.insert("argv".into(), argv_capture);
@@ -1219,6 +1294,75 @@ pub fn jail_binary(explicit: Option<PathBuf>) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_blocked_terminal_stops_forwarding_but_never_capture_or_the_owner() {
+        let (source, mut child) = output_pipe().unwrap();
+        // Nothing reads this terminal, so its writer blocks once the pipe is full.
+        let (unread_terminal, terminal) = output_pipe().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut capture = Capture {
+            stream: source,
+            file: Some(File::create(temp.path().join("stdout.bin")).unwrap()),
+            observed: 0,
+            stored: 0,
+            limit: 16 * 1_048_576,
+            eof: false,
+            name: "stdout",
+            tee: Some(Tee::new(terminal)),
+        };
+        let chunk = vec![b'x'; 32 * 1024];
+        for _ in 0..96 {
+            child.write_all(&chunk).unwrap();
+            capture.drain().unwrap();
+        }
+        drop(child);
+        while !capture.eof {
+            capture.drain().unwrap();
+        }
+        let observed = 96 * chunk.len() as u64;
+        assert_eq!((capture.observed, capture.stored), (observed, observed));
+        capture.close_forwarding();
+        assert!(!capture.forwarding_done());
+        let metadata = capture.finish(true).unwrap();
+        assert_eq!(metadata["state"], "captured");
+        let forwarding = &metadata["forwarding"];
+        assert_eq!(forwarding["reason"], "queue_full");
+        assert_eq!(forwarding["state"], "unfinished");
+        let delivered = forwarding["delivered_bytes"].as_u64().unwrap();
+        assert!(delivered < observed);
+        assert_eq!(forwarding["undelivered_bytes"], observed - delivered);
+        drop(unread_terminal);
+
+        // A terminal that goes away stops forwarding the same way.
+        let (unread_terminal, terminal) = output_pipe().unwrap();
+        drop(unread_terminal);
+        let mut tee = Tee::new(terminal);
+        tee.forward(b"lost");
+        tee.close();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !tee.done() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let forwarding = tee.report(4);
+        assert_eq!(forwarding["state"], "stopped");
+        assert_eq!(forwarding["reason"], "sink_failed");
+        assert_eq!(forwarding["delivered_bytes"], 0);
+        assert_eq!(forwarding["undelivered_bytes"], 4);
+
+        // A terminal that keeps up shows everything.
+        let mut tee = Tee::new(File::create(temp.path().join("terminal")).unwrap());
+        tee.forward(b"shown");
+        tee.close();
+        while !tee.done() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            tee.report(5),
+            json!({"state":"complete","delivered_bytes":5,"undelivered_bytes":0})
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
