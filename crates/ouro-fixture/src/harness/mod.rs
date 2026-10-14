@@ -878,11 +878,26 @@ impl Spawned {
 
     /// The receipt written to `--receipt PATH`, when it is there yet, held
     /// to the installed [`RecordContract`].
+    ///
+    /// `None` means only that the jail has not written the copy yet. It
+    /// replaces the copy atomically, as it does `jail.json` (§7), so a copy
+    /// that exists and cannot be read or parsed panics, as in
+    /// [`Run::receipts`]: a wait for some phase would otherwise read a broken
+    /// receipt as one not written yet, until its bound ran out. Panics, too,
+    /// when the run asked for no copy: call `Jail::receipt()`.
     #[must_use]
     pub fn receipt_value(&self) -> Option<Value> {
-        let path = self.receipt.as_ref()?;
-        let text = std::fs::read_to_string(path).ok()?;
-        let value = serde_json::from_str(&text).ok()?;
+        let path = self
+            .receipt
+            .as_ref()
+            .expect("this run has no --receipt copy: call Jail::receipt()");
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+            Err(e) => panic!("the --receipt copy {} cannot be read: {e}", path.display()),
+        };
+        let value = receipt_document(text.as_bytes())
+            .unwrap_or_else(|e| panic!("the --receipt copy {} is {e}: {text:?}", path.display()));
         contract::receipt(&value);
         Some(value)
     }

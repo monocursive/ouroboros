@@ -191,6 +191,50 @@ fn a_withheld_gate_refuses_and_the_target_never_runs() {
     assert_eq!(refused["error"]["code"], "gate_closed");
 }
 
+/// The panic `read` raises, as text; fails the test when it returns.
+fn panic_text(what: &str, read: impl FnOnce()) -> String {
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read))
+        .err()
+        .unwrap_or_else(|| panic!("{what} returned instead of panicking"));
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+        .unwrap_or_default()
+}
+
+/// The jail replaces its `--receipt` copy atomically, so a copy that is
+/// there but is not a receipt is a finding, never "not written yet": a
+/// wait for some phase would read it as absent until its bound ran out.
+#[test]
+fn a_receipt_copy_that_is_not_json_panics_rather_than_reading_as_absent() {
+    let case = Case::new();
+    let mut spawned = case.jail().spawn().unwrap();
+    spawned.owner().await_prepared().unwrap();
+    assert_eq!(spawned_receipt(&spawned)["phase"], "prepared");
+    std::fs::write(spawned.root().join("receipt.json"), b"{\"phase\":").unwrap();
+    let text = panic_text("Spawned::receipt_value", || {
+        let _ = spawned.receipt_value();
+    });
+    assert!(text.contains("not one JSON document"), "{text}");
+    spawned.owner().withhold();
+    let run = spawned.wait().unwrap();
+    assert_eq!(run.code(), Some(EXIT_REFUSED), "{}", run.stderr_text());
+
+    // A run that asked for no copy has none to wait for.
+    let spawned = Jail::with_program(stand_in())
+        .unwrap()
+        .gate()
+        .target_fixture(["exit", "0"])
+        .spawn()
+        .unwrap();
+    let text = panic_text("Spawned::receipt_value", || {
+        let _ = spawned.receipt_value();
+    });
+    assert!(text.contains("Jail::receipt()"), "{text}");
+    let _ = spawned.wait();
+}
+
 #[test]
 fn every_malformed_release_refuses_and_leaves_no_marker() {
     let variants: Vec<(&str, Release)> = vec![
