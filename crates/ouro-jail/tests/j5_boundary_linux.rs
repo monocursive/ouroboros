@@ -467,15 +467,10 @@ fn k04_backend_replacement_and_mode_change_refuse_before_spawn() {
         // distribution backend without changing its file or AppArmor profile.
         let source = backend_dir.join("forward.c");
         let actual = serde_json::to_string(common::bwrap_path().to_str().unwrap()).unwrap();
-        std::fs::write(
-            &source,
-            format!(
-                "#include <unistd.h>\nint main(int argc, char **argv) {{ (void)argc; execv({actual}, argv); return 127; }}\n"
-            ),
-        )
-        .unwrap();
+        std::fs::write(&source, include_str!("fixtures/forward_exec.c")).unwrap();
         let compiled = std::process::Command::new("cc")
             .args(["-O2", "-Wall", "-Wextra", "-Werror"])
+            .arg(format!("-DFORWARD_TO={actual}"))
             .arg(&source)
             .arg("-o")
             .arg(&backend)

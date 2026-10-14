@@ -1878,42 +1878,14 @@ fn l03_a_preferred_pids_ceiling_without_a_leaf_is_recorded_absent_and_the_run_pr
 // L04: the execution deadline's clock (L04.4, L04.5, L04.6)
 // ===========================================================================
 
-/// An `LD_PRELOAD` shim over libc's `clock_gettime`: once the trigger file
-/// exists, it adds a fixed offset to one clock id only, in every process
-/// that loads it. The supervisor reads its clocks through libc, so this makes
-/// CLOCK_BOOTTIME, CLOCK_MONOTONIC and CLOCK_REALTIME differ inside the jail
-/// on a host where they do not otherwise (never suspended, clock never set).
-/// The test's own clocks are not shifted.
-const SHIM: &str = r#"
-#define _GNU_SOURCE
-#include <dlfcn.h>
-#include <stdlib.h>
-#include <time.h>
-#include <unistd.h>
-static int (*real)(clockid_t, struct timespec *);
-static const char *trigger;
-static int shifted = -1;
-static long long offset;
-static volatile int fired;
-__attribute__((constructor)) static void init(void) {
-    real = (int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_gettime");
-    trigger = getenv("OURO_B3_CLOCK_TRIGGER");
-    const char *id = getenv("OURO_B3_CLOCK_ID");
-    const char *ns = getenv("OURO_B3_CLOCK_OFFSET_NS");
-    if (id) shifted = atoi(id);
-    if (ns) offset = atoll(ns);
-}
-int clock_gettime(clockid_t id, struct timespec *ts) {
-    int rc = real(id, ts);
-    if (rc != 0 || id != shifted || !trigger) return rc;
-    if (!fired && access(trigger, F_OK) == 0) fired = 1;
-    if (!fired) return rc;
-    long long total = (long long)ts->tv_sec * 1000000000LL + ts->tv_nsec + offset;
-    ts->tv_sec = total / 1000000000LL;
-    ts->tv_nsec = total % 1000000000LL;
-    return rc;
-}
-"#;
+/// An `LD_PRELOAD` shim over libc's `clock_gettime`
+/// (`tests/fixtures/clock_shim.c`): once the trigger file exists, it adds a
+/// fixed offset to one clock id only, in every process that loads it. The
+/// supervisor reads its clocks through libc, so this makes CLOCK_BOOTTIME,
+/// CLOCK_MONOTONIC and CLOCK_REALTIME differ inside the jail on a host where
+/// they do not otherwise (never suspended, clock never set). The test's own
+/// clocks are not shifted.
+const SHIM: &str = include_str!("fixtures/clock_shim.c");
 
 /// Build the shim with the host's compiler into `dir`.
 fn build_shim(dir: &Path) -> PathBuf {
