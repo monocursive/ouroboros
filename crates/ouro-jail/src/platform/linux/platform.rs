@@ -579,8 +579,15 @@ impl Platform for LinuxPlatform {
         sinks: Sinks,
     ) -> Result<Box<dyn PreparedExecution>, JailError> {
         // §8.2: what the supervisor's preparation budget has left, on the
-        // same boot clock.
+        // same boot clock. A budget already spent refuses before anything
+        // is built, rather than at the first wait that notices it.
         let deadline = clock::Deadline::after(plan.prepare_deadline.remaining());
+        if deadline.expired() {
+            return Err(prepare_timeout(
+                "preparation did not complete within its budget: it was spent before the \
+                 boundary was built",
+            ));
+        }
         // The uncontained profile has its own registered boundary (§9.3)
         if plan.request.snapshot.profile == ProfileName::None {
             return super::uncontained::prepare(plan, sinks, deadline);
@@ -6260,6 +6267,56 @@ mod tests {
             super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&moved)).is_err()
         );
     }
+    /// §8.2: steps 3 to 5 spend what is left of the supervisor's one
+    /// preparation budget. A plan whose budget is already spent refuses as
+    /// the platform's own `prepare_timeout` (remediation `retry`), for both
+    /// boundaries, before anything is built; a fresh budget of its own would
+    /// go on to build one.
+    #[test]
+    fn a_spent_preparation_budget_refuses_before_any_boundary_is_built() {
+        use crate::platform::{ContinuousDeadline, Platform as _, PreparedPlan, Sinks};
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        for profile in [ProfileName::Tool, ProfileName::None] {
+            let workspace = root.join(format!("{}-workspace", profile.as_str()));
+            let attempt_dir = root.join(format!("{}-attempt", profile.as_str()));
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::create_dir(&attempt_dir).unwrap();
+            let marker = workspace.join("target-ran");
+            let plan = PreparedPlan {
+                attempt_id: "att_00000000-0000-4000-8000-000000000001".to_owned(),
+                attempt_dir,
+                request: plan_for(profile, false),
+                argv: vec![
+                    b"/usr/bin/touch".to_vec(),
+                    marker.as_os_str().as_bytes().to_vec(),
+                ],
+                prepare_deadline: ContinuousDeadline::after(Duration::ZERO),
+                workspace,
+                config_dir: root.join("config"),
+                launch: None,
+                proxy: None,
+            };
+            let Err(error) = LinuxPlatform::new().prepare(plan, Sinks { trace: None }) else {
+                panic!("{profile:?}: a boundary was prepared on a spent budget");
+            };
+            assert_eq!(
+                error.code,
+                ErrorCode::PrepareTimeout,
+                "{profile:?}: {error:?}"
+            );
+            assert_eq!(error.remediation, Remediation::Retry);
+            assert!(!marker.exists(), "{profile:?}: the target ran");
+            assert_eq!(
+                std::fs::read_dir(root.join(format!("{}-attempt", profile.as_str())))
+                    .unwrap()
+                    .count(),
+                0,
+                "{profile:?}: preparation wrote into the attempt"
+            );
+        }
+    }
+
     /// Unreadable counters leave every `hit: false` unsupported (§11.4). The
     /// sample both boundaries take records the `limits` gap, so the class
     /// reads degraded with a null count in a contained run exactly as in
