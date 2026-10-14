@@ -6,11 +6,14 @@
 //! Linux slice supplies a platform and this file keeps owning every lifecycle
 //! transition, every receipt and every budget.
 //!
-//! I01 is the shape of this file: nothing reaches `release` until resolution,
-//! state, probing, preparation and the gate have all succeeded. A failure
-//! before the attempt is claimed returns its error and leaves no claim; from
-//! the claim on, every early exit goes through [`refuse`], which writes a
-//! `refused` receipt.
+//! I01 is the shape of this module: nothing reaches `release` until
+//! resolution, state, probing, preparation and the gate have all succeeded.
+//! A failure before the attempt is claimed returns its error and leaves no
+//! claim. From the claim on, the claimed [`attempt::Attempt`] returns a
+//! report, never an error: every exit before the target runs goes through
+//! its `refuse` (after tearing the boundary down, once one exists), which
+//! writes the `refused` receipt or reports that it could not, and an attempt
+//! whose target ran ends in its settlement.
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -27,10 +30,8 @@ use crate::cli::{DoctorArgs, ExplainArgs, PolicyArgs, RunArgs};
 use crate::config::{self, EnvSettings};
 use crate::launch_profile;
 use crate::network::NetworkMode;
-use crate::observer::CoverageSummary;
 use crate::platform::{
-    BoundaryIdentity, ContinuousDeadline, PlanRequest, Platform, PreparedPlan, RunEvent, Sinks,
-    StopReason, Teardown,
+    BoundaryIdentity, ContinuousDeadline, PlanRequest, Platform, StopReason, Teardown,
 };
 use crate::policy::{
     self, Layer, LayerOrigin, PolicyDelta, ProfileName, ResolveInputs, Resolved, ScratchRoot,
@@ -39,11 +40,15 @@ use crate::profiles;
 use crate::records::StateCleanup;
 use crate::records::{
     Applied, AppliedLimit, AppliedNetwork, AttemptRecord, Containment, ControlKind, ControlMessage,
-    ErrorCode, ErrorStage, GateExpectation, JailError, JailRecord, Lifetime, Outcome, OutcomeKind,
-    Phase, PlatformRecord, PolicyRecord, Receipt, Remediation, SCHEMA_POLICY_FILE, rfc3339_utc,
+    ErrorCode, ErrorStage, GateExpectation, JailError, Lifetime, Phase, PlatformRecord, Receipt,
+    Remediation, SCHEMA_POLICY_FILE, rfc3339_utc,
 };
 use crate::state::{self, AttemptDir, AttemptId};
 use crate::trace::{self, FdSink, FileSink, Priority, SharedTrace, TraceSink};
+
+mod attempt;
+
+use attempt::Attempt;
 
 /// External gate wait after `prepared` (§8.2).
 pub const GATE_WAIT: Duration = Duration::from_secs(60);
@@ -1000,7 +1005,7 @@ fn first_unsatisfied(requirements: &[String], capabilities: &[Capability]) -> Op
 
 /// Runs one attempt, or refuses before the target executes (§8.1).
 ///
-/// Every path that claims the attempt and does not reach `release` writes a
+/// Every path that claims the attempt and does not run its target writes a
 /// `refused` receipt with the §13.2 tuple for the stage it failed at; a
 /// refusal before the claim (usage, resolution, the state root, the output
 /// channels) has no attempt to write one for. The return value carries the
@@ -1019,9 +1024,9 @@ pub fn run_learning(ctx: &Context, args: &RunArgs) -> RunReport {
 fn run_with(ctx: &Context, args: &RunArgs, learning: bool) -> RunReport {
     match run_inner(ctx, args, learning) {
         Ok(report) => report,
-        // Every early return of `run_inner` happens before the claim; after
-        // it, every path builds its own report. J4-R, S5: so a persistence
-        // failure here (the claim itself) refuses with 125.
+        // Every error of `run_inner` comes before the claim; after it, the
+        // attempt builds its own report. So a persistence failure here (the
+        // claim itself) refuses with 125.
         Err(error) => RunReport {
             exit_code: error.refusal_exit_code(),
             error: Some(error),
@@ -1030,11 +1035,52 @@ fn run_with(ctx: &Context, args: &RunArgs, learning: bool) -> RunReport {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport, JailError> {
     // §13.1: pin the shared monotonic base before anything writes a trace
     // event, so wrapper, audit and gap intervals all count from here.
     crate::platform::mark_supervisor_start();
+    let supplied_attempt_id = check_run_usage(args)?;
+    // §8.3, H9: the handlers go on before anything exists, so INT/TERM/HUP
+    // during resolution, preparation or the 60-second gate wait is a refusal,
+    // never the default disposition killing the supervisor with a prepared
+    // receipt and a blocked launcher left behind.
+    let signals = signals::install();
+
+    let plan = resolve(ctx, &args.policy, learning)?;
+    let request = plan_request(&plan);
+    let argv: Vec<Vec<u8>> = args
+        .argv
+        .iter()
+        .map(|argument| argument.clone().into_vec())
+        .collect();
+    let argv_digest = (!argv.is_empty()).then(|| crate::canonical::argv_digest(&argv));
+
+    validate_channels(args)?;
+    check_isolation(args, &plan)?;
+
+    if args.label_only {
+        return Ok(label_only(ctx, &plan, &request));
+    }
+
+    // §8.2: "Initial preparation budget: 30 seconds". It covers steps 1 to 5
+    // and is checked at each boundary, so a step that hangs on a child-created
+    // object cannot hold the attempt open indefinitely.
+    let budget = Budget::new(PREPARE_BUDGET);
+    // Step 1: allocate and lock private state before anything else exists.
+    let attempt_id = supplied_attempt_id.unwrap_or_else(AttemptId::generate);
+    let attempt = Attempt::claim(ctx, args, plan, attempt_id, budget, signals, argv_digest)?;
+    // From the claim on, every exit writes a receipt (I01): `run` returns a
+    // report, never an error.
+    Ok(attempt.run(request, argv))
+}
+
+/// The usage rules of §6.1 that clap does not express, and the supplied
+/// attempt id, parsed before any path derives from it.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] for a usage error, and the id grammar's
+/// refusal.
+fn check_run_usage(args: &RunArgs) -> Result<Option<AttemptId>, JailError> {
     // §6.1: PROGRAM is mandatory except with --label-only.
     if !args.label_only && args.argv.is_empty() {
         return Err(usage("PROGRAM", "a program to run is required"));
@@ -1054,932 +1100,48 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
     // §7: validate the id grammar before deriving any path, and before any
     // other check, so a malformed id is the usage error X02 expects rather than
     // whatever the next check happens to find first.
-    let supplied_attempt_id = match &args.attempt_id {
-        Some(text) => Some(AttemptId::parse(text)?),
-        None => None,
-    };
+    args.attempt_id.as_deref().map(AttemptId::parse).transpose()
+}
 
-    // §8.3, H9: the handlers go on before anything exists. They used to be
-    // installed just before `release`, so INT/TERM/HUP during resolution,
-    // preparation or the 60-second gate wait killed the supervisor with the
-    // default disposition and left a prepared receipt and a blocked launcher
-    // behind.
-    let signals = signals::install();
+/// Every isolation rule a run's paths must meet before anything is created
+/// (§6.2, §7, §9.1), over the child's roots computed once.
+///
+/// # Errors
+/// The first rule's refusal.
+fn check_isolation(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
+    let roots = ChildRoots::of(plan);
+    check_state_isolation(plan, &roots)?;
+    // Audit 3 A2: every run, not only a `--launch` one.
+    check_launch_isolation(plan, &roots)?;
+    // Audit 4 B1: the config directory holds the trusted, widening
+    // `config.toml`, read on every run.
+    check_config_isolation(plan, &roots)?;
+    check_binary_isolation(plan, &roots)?;
+    validate_receipt_path(args, plan, &roots)
+}
 
-    let plan = resolve(ctx, &args.policy, learning)?;
-    let request = plan_request(&plan);
-    let argv: Vec<Vec<u8>> = args
-        .argv
-        .iter()
-        .map(|argument| argument.clone().into_vec())
-        .collect();
-    let argv_digest = (!argv.is_empty()).then(|| crate::canonical::argv_digest(&argv));
-
-    validate_channels(args)?;
-    let roots = ChildRoots::of(&plan);
-    check_state_isolation(&plan, &roots)?;
-    // Security 2026-09-27 (audit 3 A2): every run, not only a `--launch` one.
-    check_launch_isolation(&plan, &roots)?;
-    // Security 2026-09-27 (audit 4 B1): the config directory holds the
-    // trusted, widening `config.toml`, read on every run.
-    check_config_isolation(&plan, &roots)?;
-    check_binary_isolation(&plan, &roots)?;
-    validate_receipt_path(args, &plan, &roots)?;
-
-    if args.label_only {
-        // §6.1: resolve and probe, print the label, execute nothing and copy no
-        // credential. No attempt state is allocated, so nothing to clean up.
-        let capabilities = ctx.platform.probe(&request);
-        let refusal = first_unsatisfied(&plan.resolved.requirements, &capabilities);
-        return Ok(RunReport {
-            exit_code: refusal.as_ref().map_or(0, JailError::exit_code),
-            error: refusal,
-            label: Some(format!(
-                "label {}@{} observe={} digest={}",
-                plan.resolved.policy_name,
-                plan.resolved.snapshot.platform.as_str(),
-                match plan.resolved.snapshot.observation.mode {
-                    crate::records::ObserveMode::On => "on",
-                    crate::records::ObserveMode::Off => "off",
-                },
-                plan.resolved.digest
-            )),
-            capabilities,
-            ..RunReport::default()
-        });
-    }
-
-    // §8.2: "Initial preparation budget: 30 seconds". It covers steps 1 to 5
-    // and is checked at each boundary, so a step that hangs on a child-created
-    // object cannot hold the attempt open indefinitely.
-    let budget = Budget::new(PREPARE_BUDGET);
-
-    // Step 1: allocate and lock private state before anything else exists.
-    let attempt_id = supplied_attempt_id.unwrap_or_else(AttemptId::generate);
-    let attempt_dir = AttemptDir::new(&plan.data_dir, &attempt_id);
-    attempt_dir.create(&plan.data_dir)?;
-    // §7 — an existing attempt root must hold no jail-owned
-    // artifact at all, not only no `jail-state.json` (J3 review H2). Checked
-    // before the lease, so a `jail.lock` found here is not this supervisor's.
-    state::check_fresh_attempt(&attempt_dir)?;
-    let Some(lease) = state::Lease::acquire(&attempt_dir.lock_path())? else {
-        return Err(JailError::new(
-            ErrorCode::AttemptExists,
-            ErrorStage::Resolving,
-            Remediation::InspectState,
-            "another live supervisor holds this attempt's lease".to_owned(),
-        ));
-    };
-    // J4-R: §13.3 — from here on every durable write runs on the persistence
-    // worker, and this thread waits for each step within its progress
-    // budget: a stalled disk ends a wait, it never holds the supervisor.
-    let mut persister = state::Persister::start().map_err(|error| {
-        JailError::new(
-            ErrorCode::StateWriteFailed,
-            ErrorStage::Preparing,
-            Remediation::Retry,
-            format!("the persistence worker could not be started: {error}"),
-        )
-    })?;
-    // J4 W3, P1 (b): the lease lives as long as persistence work may: when
-    // the run returns with a write stalled in the kernel, it is not released
-    // (only the end of the whole process frees it), so no `gc` can write the
-    // attempt's records under a rename that may still land.
-    persister.hold_lease(lease);
-    let _forwarding = state::install(persister.forwarding());
-    // I01: the channels that carry a refusal are opened before the claim,
-    // so once an attempt is claimed, every exit can write its receipt.
-    let mut control = open_control(args)?;
-    let trace = open_trace(ctx, args, &attempt_dir)?;
-    // Review item 15, a loss note names what this attempt covers
-    if let Ok(mut writer) = trace.lock() {
-        writer.set_stream_classes(&stream_classes(&plan));
-    }
-    let mut journal = Journal::new(attempt_id.as_str(), Arc::clone(&trace));
-    // J4-R: S9 — every OURO_JAIL_TEST_* variable in force, read once at the
-    // attempt's start and recorded in jail state and in every receipt that
-    // has native details (lifetime.native.details.test_seams).
-    let test_seams = state::test_seams();
-    claim_attempt(&attempt_dir, &attempt_id, ctx, test_seams.as_ref())?;
-    // J4-R: N6 — a failed policy.json write is a refusal like every other
-    // failure before exec: it is reported through `refuse` below, once the
-    // record that carries a refusal exists.
-    let policy_written = write_policy_file(&attempt_dir, &plan);
-
-    let now = SystemTime::now();
-    let containment = if plan.profile().is_contained() {
-        Containment::Pending
-    } else {
-        // I08: `none` is unprotected in every receipt, including a refusal.
-        Containment::None
-    };
-    let mut record = AttemptRecord {
-        attempt_id: attempt_id.as_str().to_owned(),
-        revision: 1,
-        platform: platform_record(ctx),
-        jail: JailRecord {
-            component: "ouro-jail".to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            backend: None,
-            backend_version: None,
-        },
-        policy: PolicyRecord {
-            name: plan.resolved.policy_name.clone(),
-            digest: plan.resolved.digest.clone(),
-            observe: plan.resolved.snapshot.observation.mode,
-            evidence: plan.resolved.snapshot.observation.evidence,
-            requirements: plan.resolved.requirements.clone(),
-            // §13.2: the receipt's grants are the explicit operator grants,
-            // not the profile baseline every `tool` run gets.
-            grants: plan.resolved.grants.clone(),
-        },
-        containment,
-        exec_observed: false,
-        argv_digest,
-        applied: pending_applied(&plan),
-        observer: CoverageSummary::unobserved().to_observer_record(),
-        coverage: CoverageSummary::unobserved().to_coverage(),
-        process: None,
-        lifetime: Lifetime::pending(),
-        outcome: Outcome::pending(),
-        state_cleanup: cleanup::not_needed(),
-        cleanup_error: None,
-        created_at: now,
-        updated_at: now,
-        errors: Vec::new(),
-        credentials: Vec::new(),
-    };
-    // From here on every refusal writes the `refused` receipt (I01); one
-    // after the boundary exists first tears it down and records what the
-    // teardown established (§13.2 row 4).
-    macro_rules! refused {
-        ($error:expr) => {
-            return Ok(refuse(
-                &attempt_dir,
-                &mut record,
-                &$error,
-                args,
-                control.as_mut(),
-                &mut journal,
-            ))
-        };
-    }
-    macro_rules! torn_down_and_refused {
-        ($prepared:expr, $error:expr) => {{
-            let teardown = $prepared.abort();
-            record_teardown(&mut record, &teardown);
-            refused!($error)
-        }};
-    }
-
-    // N6
-    if let Err(error) = policy_written {
-        refused!(error);
-    }
-
-    // Step 2: probe the selected mechanisms.
-    if let Err(error) = budget
-        .check(ErrorStage::Probing)
-        .and(interrupted(signals.as_ref(), ErrorStage::Probing))
-    {
-        refused!(error);
-    }
-    let capabilities = ctx.platform.probe(&request);
-    if let Some(error) = first_unsatisfied(&plan.resolved.requirements, &capabilities) {
-        refused!(error);
-    }
-
-    // §8.1 step 2 and §12 — register vendor state before
-    // creating it, then stage credentials into it, before any boundary.
-    if let Err(error) = budget
-        .check(ErrorStage::Preparing)
-        .and(interrupted(signals.as_ref(), ErrorStage::Preparing))
-    {
-        refused!(error);
-    }
-    let launch_handoff = match prepare_launch(&attempt_dir, &plan, &mut record, budget.deadline) {
-        Ok(handoff) => handoff,
-        Err(error) => refused!(error),
-    };
-    // §10 — the proxy directory is registered before it is
-    // created, outside every shared root, for a proxy-mode profile only.
-    let proxy_handoff = match prepare_proxy_dir(&attempt_dir, &plan) {
-        Ok(handoff) => handoff,
-        Err(error) => refused!(error),
-    };
-
-    // Steps 3 to 5: create the boundary and the blocked launcher.
-    let prepared = match ctx.platform.prepare(
-        PreparedPlan {
-            attempt_id: attempt_id.as_str().to_owned(),
-            attempt_dir: attempt_dir.root().to_path_buf(),
-            request,
-            argv,
-            prepare_deadline: budget.deadline,
-            workspace: plan.workspace.clone(),
-            config_dir: plan.config_dir.clone(),
-            // The staged objects, bound by descriptor
-            launch: launch_handoff,
-            proxy: proxy_handoff.clone(),
-        },
-        Sinks {
-            trace: Some(Arc::clone(&trace)),
-        },
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) => refused!(error),
-    };
-
-    // X05.3 — §8.3 "The supervisor must not retain writable
-    // copies that postpone EOF". Every process that needs the caller's stdout
-    // has it by now; the `ouro-jail` binary's `run` never writes stdout, so it
-    // lets its copy go and a target that closes its stdout gives the caller
-    // EOF. Only the binary opts in: an in-process caller keeps its stdout.
-    if RELEASE_STDOUT_AFTER_PREPARE.load(std::sync::atomic::Ordering::SeqCst) {
-        release_own_stdout();
-    }
-    let boundary = prepared.boundary();
-    apply_boundary(&mut record, &boundary, plan.profile());
-    // J4-R: §13.2 row 4 — the application is part of the boundary's facts:
-    // a refusal after this point reports what was actually applied. It used
-    // to be read after the registration below, so a failed registration
-    // wrote a refused receipt claiming `enforced` containment with nothing
-    // applied, which the receipt schema rejects.
-    if let Some(applied) = prepared.applied() {
-        record.applied = applied;
-    }
-    // J4-R: S9 — the test seams in force are recorded in every receipt that
-    // has native details (a receipt before any boundary has none; jail state
-    // records them from the claim on).
-    if let (Some(seams), Some(native)) = (test_seams.as_ref(), record.lifetime.native.as_mut()) {
-        native
-            .details
-            .insert("test_seams".to_owned(), seams.clone());
-    }
-    // The proxy socket node the platform bound, recorded so
-    // `gc` can remove exactly it after a crash (§14.2). J4 W3, P2: recorded
-    // once the boundary and its application are in the record, as for the
-    // registration below: a failure here is a refusal after setup (§13.2 row
-    // 4), whose receipt names the boundary its teardown verified. It used to
-    // come first, so the refused receipt carried the verified tree with the
-    // boundary still `pending`, which the receipt schema rejects.
-    if let Some(socket) = proxy_handoff
-        .as_ref()
-        .and_then(|handoff| handoff.socket.get())
-        && let Err(error) = state::record_proxy_socket(&attempt_dir, socket)
-    {
-        torn_down_and_refused!(prepared, error);
-    }
-    // §7: the state file names the registered execution boundary once it
-    // exists, so crash reconciliation and GC can identify resources without
-    // parsing a receipt.
-    if let Err(error) = register_boundary_in_state(&attempt_dir, &boundary) {
-        torn_down_and_refused!(prepared, error);
-    }
-    // §8.2: the preparation budget covers steps 1 to 5. A budget spent by
-    // now refuses before anything announces `prepared`: an owner must never
-    // be told an attempt is ready after its preparation ran out of time.
-    if let Err(error) = budget.check(ErrorStage::Preparing) {
-        torn_down_and_refused!(prepared, error);
-    }
-    merge_wall_limit(&mut record, &plan);
-    journal.lifecycle("prepared");
-
-    // A failure from here on has a boundary to tear down: §8.1 step 5 is the
-    // last point at which nothing has been created, and every exit after it
-    // goes through `abort`.
-    let prepared_receipt = match persist(
-        state::Site::PreparedReceipt,
-        &attempt_dir,
-        &mut record,
-        Phase::Prepared,
-        args,
-        &mut journal,
-    ) {
-        Ok(receipt) => receipt,
-        Err(error) => torn_down_and_refused!(prepared, error),
-    };
-    send_control(control.as_mut(), ControlKind::Prepared, &prepared_receipt);
-
-    // Step 6: wait for a valid external release, or release locally.
-    let gate = match budget.check(ErrorStage::Prepared) {
-        Err(error) => Err(error),
-        Ok(()) => match args.gate_fd {
-            None => interrupted(signals.as_ref(), ErrorStage::Prepared),
-            Some(fd) => {
-                let expectation = GateExpectation {
-                    attempt_id: attempt_id.as_str().to_owned(),
-                    policy_digest: plan.resolved.digest.clone(),
-                };
-                await_release(fd, &expectation, GATE_WAIT, signals.as_ref())
-            }
-        },
-    };
-    if let Err(error) = gate {
-        torn_down_and_refused!(prepared, error);
-    }
-
-    // J5 §9.3 / X06: before the untrusted target execs, the supervisor makes
-    // itself non-dumpable so a same-uid peer that can address it (a `none`
-    // child, whose target shares the host pid namespace) cannot read its
-    // /proc/<pid>/{fd,environ,mem} — its live trace and control channels and
-    // the operator environment — nor `ptrace` it. The lock is the kernel's
-    // dumpable check, not host Yama (which a peer can waive with
-    // PR_SET_PTRACER). It is set here, after the capability probes and the
-    // observer's attach to the (execve-reset, dumpable) backend and before
-    // release, so no probe fork and no observer attach is affected; children
-    // reset dumpable on execve. `doctor`/`gc` exec no untrusted target.
-    #[cfg(target_os = "linux")]
-    // SAFETY: prctl(PR_SET_DUMPABLE, 0, ...) takes scalars only and cannot fail.
-    unsafe {
-        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
-    }
-    // Security 2026-09-29 (audit 6 F1): this run is uncontained, so from the
-    // moment of release nothing on this host is distinguishable from
-    // something its child wrote. Its live markers go down before release —
-    // a run that cannot write them does not start — so concurrent runs
-    // refuse every trusted file while it lives; the guard settles them when
-    // it drops, after the run's tree is gone (it is declared before
-    // `running`, so it drops after it), and every later run refuses trusted
-    // files that do not postdate that (`refuse_stale_trusted_file`).
-    let _uncontained_run = if plan.profile() == ProfileName::None {
-        match state::UncontainedRun::arm(&[&plan.data_dir, &plan.config_dir], attempt_id.as_str()) {
-            Ok(run) => Some(run),
-            Err(error) => torn_down_and_refused!(prepared, error),
-        }
-    } else {
-        None
-    };
-    // Step 7: execute the exact target argv through the blocked launcher.
-    // A failed release reports its teardown, so the refused
-    // receipt carries the verified tree (§13.2 row 4) and vendor state can be
-    // removed rather than retained.
-    let mut running = match prepared.release() {
-        Ok(running) => running,
-        Err(failure) => {
-            let crate::platform::ReleaseFailure { error, teardown } = *failure;
-            if let Some(teardown) = teardown {
-                record_teardown(&mut record, &Ok(teardown));
-            }
-            refused!(error);
-        }
-    };
-
-    let wall_deadline = wall_deadline(&plan);
-    let mut outcome_error: Option<JailError> = None;
-    // J4 W2-S: R-1 — whether the platform reported an evidence loss while the
-    // loop ran; a class degraded at settlement without one is reported there.
-    let mut platform_loss_reported = false;
-    // J4-R: §13.3 — receipts written while the target runs are persisted by
-    // the worker while this loop keeps enforcing the wall, signals and
-    // evidence; each is acknowledged only once it is durable, in order.
-    let mut in_flight: std::collections::VecDeque<InFlight> = std::collections::VecDeque::new();
-    loop {
-        // J4-R: N4 — whatever the control reader has room for now.
-        if let Some(control) = control.as_mut() {
-            control.poll();
-        }
-        if let Some(error) = settle_in_flight(&mut in_flight, false, control.as_mut(), &mut journal)
-        {
-            persistence_failed(running.as_mut(), &mut record, &mut outcome_error, error);
-        }
-        // §13.3 + I07: a trace-sink failure — budget exhausted, external
-        // consumer stalled past its deadline — is evidence loss, and under
-        // strict it stops the attempt exactly like the tracer-queue path
-        // does. Checking here means the stop does not wait for the next
-        // event to notice it.
-        if let Some(error) = journal.take_new_loss() {
-            record.errors.push(error.to_object());
-            if plan.resolved.snapshot.observation.evidence == crate::records::EvidenceMode::Strict {
-                stop(running.as_mut(), &mut record, StopReason::EvidenceLoss);
-            }
-            outcome_error.get_or_insert(error);
-        }
-        if signals.as_ref().is_some_and(signals::SignalPipe::triggered) {
-            stop(running.as_mut(), &mut record, StopReason::OperatorSignal);
-        }
-        // A detected integrity loss reaches the receipt now, not only at the end
-        if record.lifetime.integrity != "lost" && running.integrity_lost() {
-            record.lifetime.integrity = "lost".to_owned();
-            record.lifetime.tree_empty = None;
-            record.lifetime.verified_at = None;
-            let phase = if record.exec_observed {
-                Phase::Enforced
-            } else {
-                Phase::Prepared
-            };
-            // J4-R: persisted by the worker; a failure, or no progress within
-            // the budget, stops the tree (§7) when the loop sees it.
-            match submit_receipt(
-                &persister,
-                state::Site::IntegrityReceipt,
-                &attempt_dir,
-                &mut record,
-                phase,
-                args,
-                &journal,
-            ) {
-                Ok(write) => in_flight.push_back(write),
-                Err(error) => {
-                    persistence_failed(running.as_mut(), &mut record, &mut outcome_error, error);
-                }
-            }
-        }
-        match running.wait(crate::platform::Deadline { at: wall_deadline }) {
-            RunEvent::Poll => continue,
-            RunEvent::StdioFailed {
-                reason,
-                after_target_end,
-            } => {
-                let error = JailError::new(
-                    ErrorCode::StdioFailed,
-                    ErrorStage::Running,
-                    Remediation::Configuration,
-                    reason,
-                );
-                record.errors.push(error.to_object());
-                if !after_target_end {
-                    stop(running.as_mut(), &mut record, StopReason::StdioFailure);
-                }
-                outcome_error.get_or_insert(error);
-            }
-            RunEvent::ExecConfirmed => {
-                // §11.2: exec is a confirmed transition, and there is exactly
-                // one per attempt. A repeat would advance the receipt revision
-                // and publish a second `exec_confirmed` for the same fact.
-                if record.exec_observed {
-                    continue;
-                }
-                record.exec_observed = true;
-                journal.lifecycle("exec_confirmed");
-                // J4-R: §13.3 — the enforced receipt is persisted by the
-                // worker while this loop keeps running; `exec_confirmed` is
-                // sent once it is durable, never before. §7: "Failed/ambiguous
-                // persistence ... after exec it stops the tree and leaves an
-                // incomplete receipt if necessary": a failure, or no progress
-                // within the budget, stops the tree unacknowledged.
-                match submit_receipt(
-                    &persister,
-                    state::Site::EnforcedReceipt,
-                    &attempt_dir,
-                    &mut record,
-                    Phase::Enforced,
-                    args,
-                    &journal,
-                ) {
-                    Ok(mut write) => {
-                        write.ack = Some(ControlKind::ExecConfirmed);
-                        in_flight.push_back(write);
-                    }
-                    Err(error) => {
-                        persistence_failed(
-                            running.as_mut(),
-                            &mut record,
-                            &mut outcome_error,
-                            error,
-                        );
-                    }
-                }
-            }
-            // §6.4: "Deadline or requested termination preserves the observed
-            // code/signal and records its cause." Only the fields this event
-            // establishes are written; `cause` and `error` were set by whatever
-            // asked for the termination and must survive it.
-            RunEvent::TargetExited { code } => {
-                record.outcome.kind = OutcomeKind::Exited;
-                record.outcome.code = Some(code);
-                record.outcome.signal = None;
-                break;
-            }
-            RunEvent::TargetSignaled { signal } => {
-                record.outcome.kind = OutcomeKind::Signaled;
-                record.outcome.code = None;
-                record.outcome.signal = Some(signal);
-                break;
-            }
-            RunEvent::ExecError { errno, detail } => {
-                // §8.1: an unsuccessful target exec is a pre-exec failure, and
-                // §13.2 gives it its own outcome kind. It is not `refused`:
-                // the attempt reached release and the kernel answered, which
-                // is a different fact from a refusal before anything ran.
-                record.outcome = Outcome::exec_error(&errno);
-                // §13.2 row 4 — "true / timestamp only after
-                // teardown verification": every contained attempt verifies the
-                // teardown of a failed exec, so the refused receipt says what
-                // it established and vendor state can be removed.
-                if plan.profile().is_contained() {
-                    let tree = running.wait_tree(TREE_BUDGET);
-                    record_tree(&mut record, &tree);
-                }
-                // X04: the errno stays in `cause`; a missing interpreter,
-                // which the kernel reports as ENOENT like a missing program,
-                // takes its own code so the two differ in a machine field.
-                let error = JailError::new(
-                    detail.map_or(
-                        ErrorCode::ExecFailed,
-                        crate::platform::ExecFailureDetail::error_code,
-                    ),
-                    ErrorStage::Released,
-                    Remediation::Configuration,
-                    match detail {
-                        Some(detail) => format!(
-                            "the target exec failed with {errno}: {}",
-                            detail.explanation()
-                        ),
-                        None => format!("the target exec failed with {errno}"),
-                    },
-                );
-                // J4-R: a receipt still with the worker lands (or is given up
-                // on) before the refused one.
-                if let Some(failure) =
-                    settle_in_flight(&mut in_flight, true, control.as_mut(), &mut journal)
-                {
-                    record.errors.push(failure.to_object());
-                }
-                refused!(error);
-            }
-            RunEvent::CommandForbidden { pattern } => {
-                let error = JailError::new(
-                    ErrorCode::CommandForbidden,
-                    ErrorStage::Running,
-                    Remediation::Configuration,
-                    format!("command matched forbidden pattern: {pattern}"),
-                );
-                record.errors.push(error.to_object());
-                outcome_error.get_or_insert(error);
-                stop(running.as_mut(), &mut record, StopReason::CommandForbidden);
-            }
-            RunEvent::WallExpired => {
-                // J4-D5: the first stop wins (see `stop`); an expiry during
-                // another stop's grace is recorded as the limit's hit, not
-                // as the cause.
-                // §13.2: "Limits report hits in `applied.limits[].hit` with
-                // `outcome.cause`". The expiry is the platform's report of
-                // the wall it enforces (on Linux its own boot-clock deadline,
-                // armed at release), so the `wall` row it applied is hit.
-                if let Some(wall) = record
-                    .applied
-                    .limits
-                    .iter_mut()
-                    .find(|limit| limit.key == "wall" && limit.applied)
-                {
-                    wall.hit = Some(true);
-                }
-                stop(running.as_mut(), &mut record, StopReason::WallExpiry);
-            }
-            RunEvent::EvidenceLost {
-                reason,
-                after_target_end,
-            } => {
-                let error = JailError::new(
-                    ErrorCode::EvidenceLost,
-                    ErrorStage::Running,
-                    Remediation::InspectState,
-                    reason,
-                );
-                record.errors.push(error.to_object());
-                platform_loss_reported = true;
-                // J4 W2-S: R-2 — a loss after the target's own end is
-                // recorded (the error, and exit 1 below) but it is not a stop
-                // the supervisor acted on: the target's end already was the
-                // termination trigger (§9.3), so it never becomes the cause.
-                if plan.resolved.snapshot.observation.evidence
-                    == crate::records::EvidenceMode::Strict
-                    && !after_target_end
-                {
-                    stop(running.as_mut(), &mut record, StopReason::EvidenceLoss);
-                }
-                // J4-D5 remainder: the first error is the reported one.
-                outcome_error.get_or_insert(error);
-            }
-            // §6.4 — the same honest unknown, and a coded error
-            RunEvent::ExecUnconfirmed { reason } => {
-                record.outcome.kind = OutcomeKind::Unknown;
-                record.outcome.code = None;
-                record.outcome.signal = None;
-                if let Some(cause) = running.limit_cause() {
-                    record.outcome.cause.get_or_insert(cause);
-                }
-                record.outcome.cause.get_or_insert(reason);
-                let error = JailError::new(
-                    ErrorCode::ExecUnconfirmed,
-                    ErrorStage::Running,
-                    Remediation::Configuration,
-                    "with observation off the target's exec could not be confirmed: it ended \
-                     before the supervisor saw its new image, so whether it ran is unknown; \
-                     run with --observe on to confirm it"
-                        .to_owned(),
-                );
-                record.errors.push(error.to_object());
-                outcome_error.get_or_insert(error);
-                break;
-            }
-            RunEvent::Unknown { reason } => {
-                record.outcome.kind = OutcomeKind::Unknown;
-                record.outcome.code = None;
-                record.outcome.signal = None;
-                // A resource event the supervisor itself acted on is the
-                // cause even when the target's own end is not observable:
-                // the ambiguity is the outcome's kind, not its cause.
-                if let Some(cause) = running.limit_cause() {
-                    record.outcome.cause.get_or_insert(cause);
-                }
-                record.outcome.cause.get_or_insert(reason);
-                break;
-            }
-        }
-    }
-
-    // Step 9: verify tree death, drain observations, persist settlement.
-    // J4 W3, P3: the rest of the tree is ended first. §8.1 step 8: "Target
-    // exit triggers termination of remaining attempt descendants", and
-    // §13.3: "Do not wait forever for a writer while descendants continue
-    // running"; the receipts still with the worker used to be waited for
-    // first, so under `none` a slow disk kept the target's descendants
-    // running for as long as the enforced receipt took.
-    let tree = running.wait_tree(TREE_BUDGET);
-    // J4-R: whatever the worker still holds is waited for within its budget
-    // and acknowledged in order before any terminal message. The loop is
-    // over, so a failure here stopped nothing: it is a tool error (S5), not a
-    // stop cause.
-    if let Some(error) = settle_in_flight(&mut in_flight, true, control.as_mut(), &mut journal) {
-        persistence_failed_after(&mut record, &mut outcome_error, error);
-    }
-    // Audit 2026-10-08 L2: a storage enforcement loss is recorded in
-    // `errors[]`; the applied rows it held no longer claim `applied: true`
-    // (see `Storage::limits`), and whether it is `outcome.cause` is decided
-    // by when it was found (`limit_cause`, §6.4).
-    if let Some(reason) = running.storage_loss() {
-        record.errors.push(storage_loss_error(reason).to_object());
-    }
-    for limit in running.final_limits() {
-        if let Some(recorded) = record
-            .applied
-            .limits
-            .iter_mut()
-            .find(|row| row.key == limit.key)
-        {
-            *recorded = limit;
-        }
-    }
-    if let Some(cause) = running.limit_cause() {
-        record.outcome.cause.get_or_insert(cause);
-    }
-    let summary = running.observer_summary();
-    // A sink loss that arrived after the last loop iteration, including one
-    // the observer's own drain caused while the tree was verified, still
-    // belongs in the settled receipt's errors (§13.3: the receipt is the
-    // bounded summary of what was lost). Taken after the observer stopped,
-    // so the check below knows about it.
-    if let Some(error) = journal.take_new_loss() {
-        record.errors.push(error.to_object());
-        outcome_error.get_or_insert(error);
-    }
-    if let Some(summary) = summary {
-        record.observer = summary.to_observer_record();
-        record.coverage = summary.to_coverage();
-        // J4 W2-S: R-1 — a loss the platform queued while the tree was being
-        // verified, or found only when its observer stopped, never reached
-        // the loop. Any evidence class degraded at settlement is an
-        // `evidence_lost` error and exit 1, whatever the loss's timing; it
-        // is never a cause, because nothing was stopped for it.
-        // J4 W3, P4: a trace-sink loss the journal reported is reported:
-        // the classes whose frames the lost sink refused are degraded by that
-        // same loss, which used to be reported a second time here.
-        if !platform_loss_reported
-            && journal.loss.is_none()
-            && let Some(error) = settlement_loss(&summary)
-        {
-            record.errors.push(error.to_object());
-            outcome_error.get_or_insert(error);
-        }
-    }
-    // What the helpers did, known now that they stopped
-    if let Some(native) = record.lifetime.native.as_mut() {
-        native.details.extend(running.final_native_details());
-    }
-    // The last nonsettled phase without a confirmed exec is prepared (§8.1)
-    let prepared_integrity = record.lifetime.integrity.clone();
-    record_tree(&mut record, &tree);
-
-    let settled = tree.tree_empty == Some(true) && record.lifetime.integrity == "verified";
-    // §13.2: "If tree death itself is unknown, retain the last nonsettled phase
-    // and update its outcome/coverage/error as unknown."
-    // `enforced` is the phase after a confirmed target exec (§8.1)
-    let phase = if settled {
-        Phase::Settled
-    } else if record.exec_observed {
-        Phase::Enforced
-    } else {
-        // Without a confirmed exec the last nonsettled phase is `prepared`.
-        // Its integrity stays the prepared one unless a loss was detected:
-        // an unknown tree end does not unmake the verified boundary.
-        if record.lifetime.integrity == "pending" {
-            record.lifetime.integrity = prepared_integrity;
-        }
-        Phase::Prepared
-    };
-    // §14.2: default managed scratch is removed only after verified tree
-    // death. Until then the child could still be writing to it, and after an
-    // unverified one something may still be holding it, so it is retained and
-    // the receipt says the cleanup did not complete.
-    // §8.1 step 9 and §12 — with vendor state, persist the
-    // settled receipt as `pending` first, then clean, then record the result;
-    // an unverified tree retains vendor state.
-    if matches!(state::vendor_registration(&attempt_dir), Ok(Some(_))) {
-        if settled {
-            record.state_cleanup = StateCleanup::Pending;
-            record.cleanup_error = None;
-            match persist(
-                state::Site::PendingReceipt,
-                &attempt_dir,
-                &mut record,
-                phase,
-                args,
-                &mut journal,
-            ) {
-                Ok(_) => {
-                    let vendor =
-                        cleanup::remove_vendor_state(&attempt_dir, cleanup::Limits::DEFAULT);
-                    // J4-R: S5 — the cleanup record is persistence after exec.
-                    if let Some(error) = vendor.record_error.clone() {
-                        persistence_failed_after(
-                            &mut record,
-                            &mut outcome_error,
-                            error.in_stage(ErrorStage::Settled),
-                        );
-                    }
-                    let scratch =
-                        remove_managed_scratch(&attempt_dir, &plan, cleanup::Limits::DEFAULT);
-                    match (vendor.status, scratch) {
-                        (StateCleanup::Complete, Ok(_)) => {
-                            record.state_cleanup = StateCleanup::Complete;
-                        }
-                        (StateCleanup::Complete, Err(reason)) => {
-                            record.state_cleanup = StateCleanup::Pending;
-                            record.cleanup_error = Some(reason);
-                        }
-                        (status, _) => {
-                            record.state_cleanup = status;
-                            record.cleanup_error = vendor.reason;
-                        }
-                    }
-                }
-                Err(error) => {
-                    // No durable settled receipt, so nothing would permit a
-                    // later `gc` to finish a removal started now.
-                    record.cleanup_error = Some("state_write_failed".to_owned());
-                    // J4-R: S5 — a persistence failure after exec is a tool
-                    // error (exit 1), recorded but not a stop cause.
-                    persistence_failed_after(
-                        &mut record,
-                        &mut outcome_error,
-                        error.in_stage(ErrorStage::Reconciling),
-                    );
-                }
-            }
-        } else if let Some(error) = retain_vendor_state(&attempt_dir, &mut record) {
-            persistence_failed_after(
-                &mut record,
-                &mut outcome_error,
-                error.in_stage(ErrorStage::Reconciling),
-            );
-        }
-    } else if settled {
-        match remove_managed_scratch(&attempt_dir, &plan, cleanup::Limits::DEFAULT) {
-            Ok(status) => record.state_cleanup = status,
-            Err(reason) => {
-                record.state_cleanup = StateCleanup::Pending;
-                record.cleanup_error = Some(reason);
-            }
-        }
-    }
-    // A detected integrity loss is not a budget overrun (§9.3)
-    let tree_message = if record.lifetime.integrity == "lost" {
-        "the lifetime boundary's integrity was lost (a membership escape, a replaced \
-         identity or a failed verification was detected), so tree death is unknown"
-    } else {
-        "tree death could not be verified within its budget"
-    };
-    let tree_error = (!settled).then(|| {
-        let error = JailError::new(
-            ErrorCode::TreeUnknown,
-            ErrorStage::Reconciling,
-            Remediation::InspectState,
-            tree_message.to_owned(),
-        );
-        record.errors.push(error.to_object());
-        error
-    });
-    if let Some(error) = remove_proxy_directory(&attempt_dir, &mut record) {
-        // J4-R: S5 — its state record is persistence after exec.
-        outcome_error.get_or_insert(error.in_stage(ErrorStage::Reconciling));
-    }
-    // §13.3 terminal drain, before the settled receipt is written: whatever
-    // the external trace consumer has not accepted within the no-progress
-    // deadline is recorded as evidence loss, and that loss belongs in the
-    // receipt that summarizes what was lost. (The receipt's own final note,
-    // written by persist below, is drained once more after it is sent.)
-    if let Ok(mut sink) = journal.trace.lock() {
-        sink.finish();
-    }
-    if let Some(error) = journal.take_new_loss() {
-        record.errors.push(error.to_object());
-        outcome_error.get_or_insert(error);
-    }
-    if journal.loss.is_some() {
-        degrade_trace_coverage(&mut record, &journal);
-    }
-    let receipt = match persist_terminal(
-        state::Site::TerminalReceipt,
-        &attempt_dir,
-        &mut record,
-        phase,
-        args,
-        &mut journal,
-    ) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            // J4-R: the terminal transition is not acknowledged; the receipt
-            // on disk stays the last one that persisted. S5: a tool error
-            // after exec, and the first cause is the reported error.
-            let error = error.in_stage(ErrorStage::Reconciling);
-            // J4 W3, P5: the failure, and every error the last durable
-            // receipt does not carry, reach stderr instead.
-            record.errors.push(error.to_object());
-            let reported = tree_error.or(outcome_error).unwrap_or(error);
-            let trace_error = journal.loss.clone();
-            let unrecorded =
-                unrecorded(&record, &journal, &[Some(&reported), trace_error.as_ref()]);
-            return Ok(RunReport {
-                exit_code: 1,
-                error: Some(reported),
-                receipt_path: Some(attempt_dir.receipt_path()),
-                trace_error,
-                control_dropped: finish_control(control.as_mut()),
-                unrecorded,
-                ..RunReport::default()
-            });
-        }
-    };
-    if let Some(error) = journal.loss.clone() {
-        outcome_error.get_or_insert(error);
-    }
-    send_control(
-        control.as_mut(),
-        if settled {
-            ControlKind::Settled
-        } else {
-            // §8.1: nothing after release is a refusal. An unverified tree is
-            // `unsettled`: the target did run, and saying otherwise would tell
-            // an owner that no command executed.
-            ControlKind::Unsettled
-        },
-        &receipt,
-    );
-
-    // Issue draft 03: in best-effort mode the process exit code is the
-    // child's own when the child ended naturally. The evidence gap stays in
-    // the receipt's errors, in the degraded coverage and on stderr, but a
-    // wrapper that trusts the exit code must see the child's status, not
-    // evidence_lost's 1. Strict mode keeps failing loudly, as does any
-    // non-evidence error.
-    let best_effort_natural_end = plan.resolved.snapshot.observation.evidence
-        == crate::records::EvidenceMode::BestEffort
-        && record.outcome.kind == OutcomeKind::Exited
-        && record.outcome.cause.as_deref() != Some("evidence_loss")
-        && outcome_error
-            .as_ref()
-            .is_none_or(|error| error.code == ErrorCode::EvidenceLost)
-        && record
-            .errors
-            .iter()
-            .all(|error| error.code == ErrorCode::EvidenceLost.as_str());
-    let exit_code = if let Some(error) = &tree_error {
-        error.exit_code()
-    } else if let Some(error) = &outcome_error
-        && !best_effort_natural_end
-    {
-        error.exit_code()
-    } else {
-        match record.outcome.kind {
-            OutcomeKind::Exited => i32::from(record.outcome.code.unwrap_or(0)),
-            OutcomeKind::Signaled => {
-                128 + i32::try_from(record.outcome.signal.unwrap_or(0)).unwrap_or(0)
-            }
-            _ => 1,
-        }
-    };
-    Ok(RunReport {
-        exit_code,
-        receipt: Some(receipt),
-        error: tree_error.or(outcome_error),
-        receipt_path: Some(attempt_dir.receipt_path()),
-        trace_error: journal.loss.clone(),
-        // J4-R: N4 — a bounded final drain, then an honest count.
-        control_dropped: finish_control(control.as_mut()),
+/// `--label-only` (§6.1): resolve and probe, print the label, execute nothing
+/// and copy no credential. No attempt state is allocated, so there is nothing
+/// to clean up.
+fn label_only(ctx: &Context, plan: &Plan, request: &PlanRequest) -> RunReport {
+    let capabilities = ctx.platform.probe(request);
+    let refusal = first_unsatisfied(&plan.resolved.requirements, &capabilities);
+    RunReport {
+        exit_code: refusal.as_ref().map_or(0, JailError::exit_code),
+        error: refusal,
+        label: Some(format!(
+            "label {}@{} observe={} digest={}",
+            plan.resolved.policy_name,
+            plan.resolved.snapshot.platform.as_str(),
+            match plan.resolved.snapshot.observation.mode {
+                crate::records::ObserveMode::On => "on",
+                crate::records::ObserveMode::Off => "off",
+            },
+            plan.resolved.digest
+        )),
+        capabilities,
         ..RunReport::default()
-    })
+    }
 }
 
 /// The evidence classes: the audit classes and `proxy.net`, whose loss §11.4
@@ -2717,83 +1879,6 @@ fn record_teardown(record: &mut AttemptRecord, teardown: &Result<Teardown, JailE
             record.lifetime.verified_at = None;
             if record.lifetime.boundary != "pending" {
                 record.lifetime.integrity = "lost".to_owned();
-            }
-        }
-    }
-}
-
-/// Writes the `refused` receipt of §13.2 and returns the report for it.
-fn refuse(
-    attempt_dir: &AttemptDir,
-    record: &mut AttemptRecord,
-    error: &JailError,
-    args: &RunArgs,
-    control: Option<&mut ControlSink>,
-    journal: &mut Journal,
-) -> RunReport {
-    let mut control = control;
-    // A proved exec failure keeps its own kind (§13.2); everything else that
-    // reaches here refused before the target ran.
-    record.outcome = if record.outcome.kind == OutcomeKind::ExecError {
-        Outcome {
-            error: Some(error.to_object()),
-            ..record.outcome.clone()
-        }
-    } else {
-        Outcome::refused(error)
-    };
-    record.errors.push(error.to_object());
-    record.exec_observed = false;
-    journal.lifecycle("refused");
-    // §12 vendor state on a pre-exec refusal
-    refuse_vendor_state(attempt_dir, record, args, journal);
-    // The proxy stopped with the boundary's teardown
-    let _ = remove_proxy_directory(attempt_dir, record);
-    let receipt = persist_terminal(
-        state::Site::RefusedReceipt,
-        attempt_dir,
-        record,
-        Phase::Refused,
-        args,
-        journal,
-    );
-    // J4-R: S5 — everything that reaches here refused before the target
-    // executed, so a persistence failure exits 125 like the refusal itself.
-    let exit_code = error.refusal_exit_code();
-    match receipt {
-        Ok(receipt) => {
-            send_control(control.as_deref_mut(), ControlKind::Refused, &receipt);
-            RunReport {
-                exit_code,
-                receipt: Some(receipt),
-                error: Some(error.clone()),
-                receipt_path: Some(attempt_dir.receipt_path()),
-                trace_error: journal.loss.clone(),
-                control_dropped: finish_control(control),
-                ..RunReport::default()
-            }
-        }
-        // J4-R: the refusal is still the cause (first cause wins); the report
-        // says the refused receipt did not persist, and no `refused` message
-        // acknowledges it.
-        Err(write_error) => {
-            let mut reported = error.clone();
-            reported.message = format!(
-                "{}; the refused receipt was not persisted: {}",
-                reported.message, write_error.message
-            );
-            let trace_error = journal.loss.clone();
-            // J4 W3, P5: the refusal and the failed write are in `error`;
-            // any other error no durable receipt carries reaches stderr too.
-            let unrecorded = unrecorded(record, journal, &[Some(error), trace_error.as_ref()]);
-            RunReport {
-                exit_code,
-                error: Some(reported),
-                receipt_path: Some(attempt_dir.receipt_path()),
-                trace_error,
-                control_dropped: finish_control(control),
-                unrecorded,
-                ..RunReport::default()
             }
         }
     }
@@ -4343,7 +3428,9 @@ pub fn env_bytes(name: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::Os;
+    use crate::observer::CoverageSummary;
+    use crate::platform::RunEvent;
+    use crate::records::{Os, Outcome};
 
     // Audit 2026-10-08 L22 (L04.4): the production deadline closure —
     // `ContinuousDeadline::remaining` over `elapsed_since_start_ns`, the
