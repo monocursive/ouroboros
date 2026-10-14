@@ -51,13 +51,14 @@ impl Session {
         }
     }
 
-    pub(super) fn handle_exit(&mut self, tid: pid_t, mut rval: i64) {
-        let tgid = self.tgid_of(tid);
+    /// A syscall exit of `tid`: the end of the call its entry stop put in
+    /// flight, which becomes one result or one gap — or, with a kernel
+    /// restart code, a wait for the kernel's decision.
+    pub(super) fn handle_exit(&mut self, tid: pid_t, rval: i64) {
         let Some((call, site)) = self.tasks.take_call(tid) else {
             // A syscall exit with no entry to pair it with: either the entry
             // was never seen or this thread is not one we track.
-            self.summary.loss.unmatched_exits += 1;
-            self.gap(GapReason::UnmatchedExit, OpSet::ALL, Some(1));
+            self.unmatched_exit();
             return;
         };
         if sys::is_restart(rval) {
@@ -76,84 +77,159 @@ impl Session {
             );
             return;
         }
-        let mut pending = match call {
-            Call::Closed(pending) => pending,
-            Call::Foreign => {
-                if rval == -i64::from(libc::ENOSYS) {
-                    // No such call in its table, or an ABI this kernel lacks
-                    // (x32 on the reference host): it had no effect, and a
-                    // tracee must not be able to manufacture loss by naming
-                    // a call nothing has.
-                    self.summary.foreign_rejected += 1;
-                } else {
-                    self.summary.loss.foreign_abi += 1;
-                    self.gap(GapReason::ForeignAbi, OpSet::ALL, Some(1));
-                }
-                return;
-            }
-            Call::Listener => {
-                if rval >= 0 {
-                    // The return is the listener's descriptor. From here on
-                    // any closed-set call may be continued with no stop, for
-                    // as long as anyone holds it: every class, no count.
-                    self.summary.loss.notification_listeners += 1;
-                    self.gap(GapReason::ChildNotificationListener, OpSet::ALL, None);
-                } else {
-                    // Refused (EBUSY under the `agent` mediation listener,
-                    // EINVAL, EACCES): no listener exists, nothing is hidden.
-                    self.summary.listener_refused += 1;
-                }
-                return;
-            }
-            Call::Untraced => {
-                if rval > 0 {
-                    // The return is the new task's id. Nothing traces it: not
-                    // its calls (they fail with ENOSYS, a trace stop with no
-                    // tracer), not its lifetime. §11.2 makes an untracked
-                    // descendant a gap; how much it hides is unknown and the
-                    // interval has no end.
-                    self.summary.loss.untraced_descendants += 1;
-                    self.gap(GapReason::UntracedDescendant, OpSet::ALL, None);
-                } else {
-                    self.summary.untraced_clone_refused += 1;
-                }
-                return;
-            }
-        };
-        if pending.args.command.is_some() {
-            if sys::deny_exec(tid, false).is_err() {
-                // The entry rewrite already skipped the call; only its
-                // `EPERM` could not be written, so the verdict's result is
-                // what is missing.
-                self.deny_by_kill(tid);
-                return;
-            }
-            rval = -i64::from(libc::EPERM);
+        match call {
+            Call::Closed(pending) => self.closed_returned(tid, pending, rval),
+            Call::Foreign => self.foreign_returned(rval),
+            Call::Listener => self.listener_returned(rval),
+            Call::Untraced => self.untraced_returned(rval),
         }
+    }
+
+    /// A syscall exit with no entry to pair it with.
+    fn unmatched_exit(&mut self) {
+        self.summary.loss.unmatched_exits += 1;
+        self.gap(GapReason::UnmatchedExit, OpSet::ALL, Some(1));
+    }
+
+    /// A call under another ABI returned (J4 D2): never decoded, so its
+    /// return is all the observer learns of it.
+    fn foreign_returned(&mut self, rval: i64) {
+        if rval == -i64::from(libc::ENOSYS) {
+            // No such call in its table, or an ABI this kernel lacks
+            // (x32 on the reference host): it had no effect, and a
+            // tracee must not be able to manufacture loss by naming
+            // a call nothing has.
+            self.summary.foreign_rejected += 1;
+        } else {
+            self.summary.loss.foreign_abi += 1;
+            self.gap(GapReason::ForeignAbi, OpSet::ALL, Some(1));
+        }
+    }
+
+    /// A request for a notification listener returned (J4 D1).
+    fn listener_returned(&mut self, rval: i64) {
+        if rval >= 0 {
+            // The return is the listener's descriptor. From here on
+            // any closed-set call may be continued with no stop, for
+            // as long as anyone holds it: every class, no count.
+            self.summary.loss.notification_listeners += 1;
+            self.gap(GapReason::ChildNotificationListener, OpSet::ALL, None);
+        } else {
+            // Refused (EBUSY under the `agent` mediation listener,
+            // EINVAL, EACCES): no listener exists, nothing is hidden.
+            self.summary.listener_refused += 1;
+        }
+    }
+
+    /// A `clone(CLONE_UNTRACED)` returned (J4 S4).
+    fn untraced_returned(&mut self, rval: i64) {
+        if rval > 0 {
+            // The return is the new task's id. Nothing traces it: not
+            // its calls (they fail with ENOSYS, a trace stop with no
+            // tracer), not its lifetime. §11.2 makes an untracked
+            // descendant a gap; how much it hides is unknown and the
+            // interval has no end.
+            self.summary.loss.untraced_descendants += 1;
+            self.gap(GapReason::UntracedDescendant, OpSet::ALL, None);
+        } else {
+            self.summary.untraced_clone_refused += 1;
+        }
+    }
+
+    /// A closed-set call returned `rval`. It is one result unless a step
+    /// below finds that the result cannot be delivered as observed, which
+    /// makes it a gap of the call's own classes instead.
+    fn closed_returned(&mut self, tid: pid_t, mut pending: Pending, rval: i64) {
+        let Some(rval) = self.denial_written(tid, &pending, rval) else {
+            return;
+        };
         if pending.exec_confirmed {
             // `Exec` was already emitted for this call at the confirmed
             // transition; the zero that follows is the same event.
             return;
         }
+        if self.forced_unmatched(&pending) || !self.unreadable_accounted(&pending, rval) {
+            return;
+        }
         let op = pending.entry.op;
-        // O03 seam: when this covered call's path matches the seam
-        // marker, treat its exit as unmatched — the entry might never have been
-        // seen — so it becomes an `unmatched_exit` gap, never a result. The
-        // in-flight slot is already released above, so this matches a genuinely
-        // unmatched exit. Gated to a non-exec op.
-        if op != ClosedOp::Exec
+        // Security 2026-09-25 (audit F1): the entry snapshot of pointed
+        // arguments is only an assertion while the same bytes still read at
+        // the exit. A thread of the tracee can rewrite `open_how.flags`, a
+        // pathname or an address family between the entry stop and the
+        // kernel's own copy after it, which would falsify this event's
+        // classification — a mutation recorded as a read, or a path that was
+        // never used. Re-read and compare; on any disagreement the event is
+        // dropped and the call becomes a gap of its own classes, so the
+        // receipt can never present a falsified snapshot as observed fact.
+        // Register arguments need no re-read: the kernel consumes the saved
+        // pt_regs, which this stop pair already saw.
+        if !self.arguments_stable(tid, &pending) {
+            self.summary.loss.argument_snapshot_unstable += 1;
+            self.gap(GapReason::ArgumentSnapshotUnstable, OpSet::of(op), Some(1));
+            return;
+        }
+        if self.readonly_open_unverified(&pending) {
+            return;
+        }
+        self.corroborate_open_path(tid, &mut pending, rval);
+        self.summary.ops.bump(op);
+        let tgid = self.tgid_of(tid);
+        let start_ticks = self.birth_of(tgid);
+        self.emit(TracerEvent::Syscall {
+            pid: tgid,
+            start_ticks,
+            tid,
+            op,
+            syscall: pending.entry.name,
+            args: pending.args,
+            ret: rval,
+        });
+    }
+
+    /// The result the call returns: its own, or the `EPERM` a command-rule
+    /// denial writes over it. `None` when that `EPERM` could not be written
+    /// and the process is killed instead.
+    fn denial_written(&mut self, tid: pid_t, pending: &Pending, rval: i64) -> Option<i64> {
+        if pending.args.command.is_none() {
+            return Some(rval);
+        }
+        if sys::deny_exec(tid, false).is_err() {
+            // The entry rewrite already skipped the call; only its
+            // `EPERM` could not be written, so the verdict's result is
+            // what is missing.
+            self.deny_by_kill(tid);
+            return None;
+        }
+        Some(-i64::from(libc::EPERM))
+    }
+
+    /// O03 seam: when this covered call's path matches the seam marker,
+    /// treat its exit as unmatched — the entry might never have been seen
+    /// — so it becomes an `unmatched_exit` gap, never a result. The
+    /// in-flight slot is already released, so this matches a genuinely
+    /// unmatched exit. Gated to a non-exec op.
+    fn forced_unmatched(&mut self, pending: &Pending) -> bool {
+        if pending.entry.op != ClosedOp::Exec
             && let Some(marker) = &self.force_unmatched_marker
             && path_has_marker(pending.args.path.as_ref(), marker)
         {
-            self.summary.loss.unmatched_exits += 1;
-            self.gap(GapReason::UnmatchedExit, OpSet::ALL, Some(1));
-            return;
+            self.unmatched_exit();
+            return true;
         }
-        // An argument the observer could not read is only a hole in coverage
-        // when the kernel could read it. When the kernel rejected the same
-        // pointer or structure, there was no covered operation to miss, and
-        // counting it as loss would let a tracee manufacture loss at will by
-        // passing addresses that can never work.
+        false
+    }
+
+    /// Account for the arguments the entry stop could not read, and say
+    /// whether the call can still be delivered: not when its flags are
+    /// unknown.
+    ///
+    /// An argument the observer could not read is only a hole in coverage
+    /// when the kernel could read it. When the kernel rejected the same
+    /// pointer or structure, there was no covered operation to miss, and
+    /// counting it as loss would let a tracee manufacture loss at will by
+    /// passing addresses that can never work.
+    fn unreadable_accounted(&mut self, pending: &Pending, rval: i64) -> bool {
+        let op = pending.entry.op;
         let rejected = rval == -i64::from(libc::EFAULT) || rval == -i64::from(libc::EINVAL);
         let mut unreadable = 0u64;
         if pending.path_unreadable {
@@ -188,61 +264,58 @@ impl Session {
                 self.summary.loss.flags_unavailable += 1;
                 self.gap(GapReason::FlagsUnavailable, OpSet::of(op), Some(1));
             }
-            return;
+            return false;
         }
-        // Security 2026-09-25 (audit F1): the entry snapshot of pointed
-        // arguments is only an assertion while the same bytes still read at
-        // the exit. A thread of the tracee can rewrite `open_how.flags`, a
-        // pathname or an address family between the entry stop and the
-        // kernel's own copy after it, which would falsify this event's
-        // classification — a mutation recorded as a read, or a path that was
-        // never used. Re-read and compare; on any disagreement the event is
-        // dropped and the call becomes a gap of its own classes, so the
-        // receipt can never present a falsified snapshot as observed fact.
-        // Register arguments need no re-read: the kernel consumes the saved
-        // pt_regs, which this stop pair already saw.
-        if !self.arguments_stable(tid, &pending) {
-            self.summary.loss.argument_snapshot_unstable += 1;
-            self.gap(GapReason::ArgumentSnapshotUnstable, OpSet::of(op), Some(1));
-            return;
-        }
+        true
+    }
+
+    /// Whether the call is a read-only open whose verdict rests on flags in
+    /// memory, counted and named by its gap.
+    ///
+    /// A memory-sourced read-only `openat2` followed for verification
+    /// (audit 2026-09-25-2, S1). Security 2026-09-27 (audit 3 A1): the exit
+    /// re-read agreeing with the entry snapshot does NOT prove the kernel
+    /// applied these flags — a thread of the tracee can flip
+    /// `open_how.flags` for the kernel's own copy and restore them before
+    /// this stop (an A-B-A rewrite), which this observer cannot tell apart.
+    /// The verdict is therefore not certifiable: the call is counted, but it
+    /// is also a gap of its own classes, never a silent filter.
+    /// Register-sourced flags are immune (the kernel consumes the saved
+    /// `pt_regs`) and keep their entry-time read-only skip.
+    fn readonly_open_unverified(&mut self, pending: &Pending) -> bool {
+        let op = pending.entry.op;
         if op == ClosedOp::Open
             && (!self.config.learning || matches!(pending.entry.flags, FlagSource::OpenHow { .. }))
             && let Some(flags) = pending.args.flags
             && !closed_set::open_is_covered(flags)
         {
-            // A memory-sourced read-only `openat2` followed for verification
-            // (audit 2026-09-25-2, S1). Security 2026-09-27 (audit 3 A1):
-            // the exit re-read agreeing with the entry snapshot does NOT
-            // prove the kernel applied these flags — a thread of the tracee
-            // can flip `open_how.flags` for the kernel's own copy and
-            // restore them before this stop (an A-B-A rewrite), which this
-            // observer cannot tell apart. The verdict is therefore not
-            // certifiable: the call is counted, but it is also a gap of its
-            // own classes, never a silent filter. Register-sourced flags
-            // are immune (the kernel consumes the saved `pt_regs`) and keep
-            // their entry-time read-only skip.
             self.summary.filtered_readonly_opens += 1;
             self.summary.loss.memory_flags_unverified += 1;
             self.gap(GapReason::MemoryFlagsUnverified, OpSet::of(op), Some(1));
-            return;
+            return true;
         }
-        // Security 2026-09-29 (audit 6 N1): byte stability is not
-        // certification for a pathname either — a sibling thread can
-        // rewrite the buffer for the kernel's own copy and restore it
-        // before the exit re-read, the same A-B-A rewrite the flags gap
-        // above names. A successful open hands the observer one kernel
-        // fact: the descriptor's own `/proc/<tid>/fd/<ret>` link, resolved
-        // by the kernel for the file it actually opened. When it
-        // corroborates the snapshot ([`path_corroborated`]) the claim
-        // stands; otherwise (an unreadable link, or a disagreement a
-        // symlink, a pipe or a rename could also explain) the claim is
-        // downgraded to an incomplete path, counted, and named by a
-        // bookkeeping gap, so a receipt never certifies a pathname the
-        // kernel may not have used. The call and its event are kept — no
-        // result is missing — so this never degrades a class or stops a
-        // strict run: failures of this check only weaken, never accuse.
-        if op == ClosedOp::Open
+        false
+    }
+
+    /// Weaken a successful open's pathname claim the kernel does not
+    /// corroborate.
+    ///
+    /// Security 2026-09-29 (audit 6 N1): byte stability is not
+    /// certification for a pathname either — a sibling thread can rewrite
+    /// the buffer for the kernel's own copy and restore it before the exit
+    /// re-read, the same A-B-A rewrite the flags gap names. A successful
+    /// open hands the observer one kernel fact: the descriptor's own
+    /// `/proc/<tid>/fd/<ret>` link, resolved by the kernel for the file it
+    /// actually opened. When it corroborates the snapshot
+    /// ([`path_corroborated`]) the claim stands; otherwise (an unreadable
+    /// link, or a disagreement a symlink, a pipe or a rename could also
+    /// explain) the claim is downgraded to an incomplete path, counted, and
+    /// named by a bookkeeping gap, so a receipt never certifies a pathname
+    /// the kernel may not have used. The call and its event are kept — no
+    /// result is missing — so this never degrades a class or stops a strict
+    /// run: failures of this check only weaken, never accuse.
+    fn corroborate_open_path(&mut self, tid: pid_t, pending: &mut Pending, rval: i64) {
+        if pending.entry.op == ClosedOp::Open
             && rval >= 0
             && let Some(snapshot) = pending.args.path.as_mut()
             && snapshot.complete
@@ -270,17 +343,6 @@ impl Session {
                 snapshot.complete = false;
             }
         }
-        self.summary.ops.bump(op);
-        let start_ticks = self.birth_of(tgid);
-        self.emit(TracerEvent::Syscall {
-            pid: tgid,
-            start_ticks,
-            tid,
-            op,
-            syscall: pending.entry.name,
-            args: pending.args,
-            ret: rval,
-        });
     }
 
     /// Whether the pointed arguments this event asserts still read at the

@@ -71,7 +71,7 @@ impl Session {
     /// not have, under the same birth, when the tracer attached — orphans of
     /// the traced tree a subreaper supervisor adopted, zombie or alive. They
     /// are the attempt's, so the tracer reaps them before it finishes (L01.7).
-    pub(super) fn adopted(&self) -> Vec<pid_t> {
+    fn adopted(&self) -> Vec<pid_t> {
         self.procfs
             .children(sys::getpid())
             .into_iter()
@@ -84,9 +84,32 @@ impl Session {
             .collect()
     }
 
+    /// The children this process answers for that are still unreaped: the
+    /// backend while its number names the process born at its birth, and
+    /// every child gained since the attach; with the backend unknown, every
+    /// child that is not a tracee.
+    pub(super) fn unreaped(&self) -> Vec<pid_t> {
+        match self.owed {
+            Owed::Every => self
+                .procfs
+                .children(sys::getpid())
+                .into_iter()
+                .filter(|pid| !self.tasks.contains(*pid))
+                .collect(),
+            Owed::Backend {
+                pid,
+                birth,
+                reaped: false,
+            } if self.still_there(pid, birth) => {
+                std::iter::once(pid).chain(self.adopted()).collect()
+            }
+            Owed::Backend { .. } | Owed::Nothing => self.adopted(),
+        }
+    }
+
     /// Whether `pid` still names the process born at `birth`, zombie
     /// included. Without a birth, whether anything has the number.
-    pub(super) fn still_there(&self, pid: pid_t, birth: Option<u64>) -> bool {
+    fn still_there(&self, pid: pid_t, birth: Option<u64>) -> bool {
         match (self.procfs.start_ticks(pid), birth) {
             (Some(now), Some(born)) => now == born,
             (now, None) => now.is_some(),

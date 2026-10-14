@@ -553,22 +553,7 @@ impl Session {
         // children while a tracer is attached. J5-T: only those it answers
         // for — the backend and any child gained after it attached; a child
         // it was attached beside is its owner's to wait for once this ends.
-        let unreaped: Vec<pid_t> = match self.owed {
-            Owed::Every => self
-                .procfs
-                .children(sys::getpid())
-                .into_iter()
-                .filter(|pid| !self.tasks.contains(*pid))
-                .collect(),
-            Owed::Backend {
-                pid,
-                birth,
-                reaped: false,
-            } if self.still_there(pid, birth) => {
-                std::iter::once(pid).chain(self.adopted()).collect()
-            }
-            Owed::Backend { .. } | Owed::Nothing => self.adopted(),
-        };
+        let unreaped = self.unreaped();
         if !unreaped.is_empty() {
             self.summary.loss.unreaped_children += unreaped.len() as u64;
             self.gap(

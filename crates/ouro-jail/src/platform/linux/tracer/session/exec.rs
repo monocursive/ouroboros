@@ -10,7 +10,21 @@ use super::restart::Site;
 use super::tasks::{Call, Task, TaskState};
 use super::{KILL_GRACE, Session};
 use crate::platform::linux::tracer::closed_set::ClosedOp;
-use crate::platform::linux::tracer::{GapReason, TracerEvent, sys};
+use crate::platform::linux::tracer::{GapReason, PathSnapshot, TracerEvent, sys};
+
+/// What the exec's own entry says about the transition, when the observer
+/// followed that entry.
+#[derive(Default)]
+struct ExecEntry {
+    /// `execve` or `execveat`.
+    syscall: Option<&'static str>,
+    /// The pathname snapshot taken at the entry.
+    path: Option<PathSnapshot>,
+    dirfd: Option<i32>,
+    /// The argv the entry-stop check judged, when the command rules
+    /// re-judge the exec here.
+    rejudge: Option<Vec<Vec<u8>>>,
+}
 
 impl Session {
     pub(super) fn handle_exec(&mut self, tid: pid_t) {
@@ -28,32 +42,82 @@ impl Session {
     fn exec_transition(&mut self, tid: pid_t, former: pid_t) {
         self.summary.exec_transitions += 1;
         let non_leader = former != tid && former > 0;
-        let mut carried: Option<(Call, Site)> = None;
-        if non_leader && let Some(task) = self.tasks.remove(former) {
-            let tgid = task.tgid;
-            match task.into_state() {
-                TaskState::InFlight { call, site, .. } => carried = Some((call, site)),
-                // Not reachable: the thread that execs is in its `execve`,
-                // not waiting for a restart decision. Kept exact anyway.
-                TaskState::Restarting(wait) => self.restart_ended(wait),
-                TaskState::Idle => {}
+        let carried = if non_leader {
+            self.renamed_thread(former)
+        } else {
+            None
+        };
+        self.end_leaders_flight(tid, non_leader);
+        let tgid = self.tgid_of(tid);
+        self.destroy_other_threads(tgid, tid);
+        let entry = self.confirm_entry(tid, carried);
+        // Security 2026-09-27 (audit 3 A1): the kernel has already installed
+        // the new image at this stop, so `/proc/<tid>/exe` names what actually
+        // runs, whatever the tracee did to the pathname between the entry
+        // snapshot and the kernel's own copy. A read that fails keeps the
+        // event (the snapshot's claim stands, as before) without the
+        // corroboration.
+        let images = self
+            .config
+            .target
+            .as_ref()
+            .filter(|(pid, _)| *pid == tgid)
+            .map_or(&[][..], |(_, images)| images.as_slice());
+        let evidence = ExecEvidence::read(&*self.procfs, tid, images, entry.rejudge.is_some());
+        let command = self.recheck_command(tid, &entry, &evidence);
+        let kernel_argv = evidence.event_argv();
+        let start_ticks = self.birth_of(tgid);
+        self.emit(TracerEvent::Exec {
+            pid: tgid,
+            start_ticks,
+            syscall: entry.syscall,
+            path: entry.path,
+            kernel_image: evidence.image,
+            dirfd: entry.dirfd,
+            command,
+            shebangs: evidence.scripts,
+            kernel_argv,
+        });
+    }
+
+    /// The thread that execed under the id `former`, which it no longer
+    /// has: its task is gone, and the call it had in flight — its `execve`
+    /// — moves with it to the leader's id.
+    fn renamed_thread(&mut self, former: pid_t) -> Option<(Call, Site)> {
+        let task = self.tasks.remove(former)?;
+        let tgid = task.tgid;
+        let carried = match task.into_state() {
+            TaskState::InFlight { call, site, .. } => Some((call, site)),
+            // Not reachable: the thread that execs is in its `execve`,
+            // not waiting for a restart decision. Kept exact anyway.
+            TaskState::Restarting(wait) => {
+                self.restart_ended(wait);
+                None
             }
-            // That task did not die: it is this one now, under the leader's
-            // id. Nothing will ever report it, so it is not retired — a
-            // recycled pid with this number must not be swallowed.
-            self.summary.tasks_destroyed_by_exec += 1;
-            if let Some(process) = self.procs.get_mut(&tgid) {
-                process.threads.remove(&former);
-            }
+            TaskState::Idle => None,
+        };
+        // That task did not die: it is this one now, under the leader's
+        // id. Nothing will ever report it, so it is not retired — a
+        // recycled pid with this number must not be swallowed.
+        self.summary.tasks_destroyed_by_exec += 1;
+        if let Some(process) = self.procs.get_mut(&tgid) {
+            process.threads.remove(&former);
         }
-        // The task registered under `tid` was the leader until now. After a
-        // non-leader exec that thread is gone: the kernel destroyed it, and
-        // the thread that execed took its id. Whatever it had in flight can
-        // no longer return, and the syscall exit that follows is the exec's
-        // own — whether or not the exec's entry was followed (J4 W3, loss
-        // review finding 1: when it was refused an in-flight slot, the
-        // leader's stale entry used to be paired with that exit, an invented
-        // result). The gap names the call, because the entry is in hand.
+        carried
+    }
+
+    /// End whatever the task registered under `tid` had in flight before
+    /// this exec.
+    ///
+    /// It was the leader until now. After a non-leader exec that thread is
+    /// gone: the kernel destroyed it, and the thread that execed took its
+    /// id. Whatever it had in flight can no longer return, and the syscall
+    /// exit that follows is the exec's own — whether or not the exec's
+    /// entry was followed (J4 W3, loss review finding 1: when it was refused
+    /// an in-flight slot, the leader's stale entry used to be paired with
+    /// that exit, an invented result). The gap names the call, because the
+    /// entry is in hand.
+    fn end_leaders_flight(&mut self, tid: pid_t, non_leader: bool) {
         if non_leader {
             match self.tasks.set_state(tid, TaskState::Idle) {
                 Some(TaskState::InFlight { call, .. }) => {
@@ -69,7 +133,11 @@ impl Session {
             self.summary.loss.restart_unresolved += 1;
             self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
         }
-        let tgid = self.tgid_of(tid);
+    }
+
+    /// The other threads of `tgid`, which the exec of `tid` destroyed, and
+    /// the exec the process is now seen to have made.
+    fn destroy_other_threads(&mut self, tgid: pid_t, tid: pid_t) {
         let mut destroyed = Vec::new();
         if let Some(process) = self.procs.get_mut(&tgid) {
             for other in process.threads.iter().copied() {
@@ -99,11 +167,12 @@ impl Session {
                 Some(TaskState::Idle) | None => {}
             }
         }
-        let mut path = None;
-        let mut dirfd = None;
-        let mut syscall = None;
-        // The argv the entry-stop check judged, when the rules re-judge it.
-        let mut rejudge: Option<Vec<Vec<u8>>> = None;
+    }
+
+    /// Put the `carried` call in flight under `tid`, and confirm the exec
+    /// entry `tid` now has in flight, if any: its syscall exit is this
+    /// transition's, not a second result.
+    fn confirm_entry(&mut self, tid: pid_t, carried: Option<(Call, Site)>) -> ExecEntry {
         if let Some((call, site)) = carried {
             self.tasks.set_state(
                 tid,
@@ -114,74 +183,58 @@ impl Session {
                 },
             );
         }
-        if let Some(Call::Closed(pending)) = self.tasks.call_mut(tid)
-            && pending.entry.op == ClosedOp::Exec
-        {
-            pending.exec_confirmed = true;
-            path = pending.args.path.clone();
-            dirfd = pending.args.dirfd;
-            syscall = Some(pending.entry.name);
+        let rules = !self.config.commands.is_empty();
+        let Some(Call::Closed(pending)) = self.tasks.call_mut(tid) else {
+            return ExecEntry::default();
+        };
+        if pending.entry.op != ClosedOp::Exec {
+            return ExecEntry::default();
+        }
+        pending.exec_confirmed = true;
+        ExecEntry {
+            syscall: Some(pending.entry.name),
+            path: pending.args.path.clone(),
+            dirfd: pending.args.dirfd,
             // Security 2026-09-29 (audit 6 N2): the argv the entry-stop
             // check judged is tracee memory, which a sibling thread can
             // rewrite for the kernel's own copy. The image is installed
             // here and has run nothing, so the kernel's own copy of the
             // argv and of the image are re-checked ([`exec_recheck`]).
             // An entry the rules already denied never reaches this stop.
-            if !self.config.commands.is_empty() && pending.args.command.is_none() {
-                rejudge = Some(pending.entry_argv.clone().unwrap_or_default());
-            }
+            rejudge: (rules && pending.args.command.is_none())
+                .then(|| pending.entry_argv.clone().unwrap_or_default()),
         }
-        // Security 2026-09-27 (audit 3 A1): the kernel has already installed
-        // the new image at this stop, so `/proc/<tid>/exe` names what actually
-        // runs, whatever the tracee did to the pathname between the entry
-        // snapshot and the kernel's own copy. A read that fails keeps the
-        // event (the snapshot's claim stands, as before) without the
-        // corroboration.
-        let images = self
-            .config
-            .target
-            .as_ref()
-            .filter(|(pid, _)| *pid == tgid)
-            .map_or(&[][..], |(_, images)| images.as_slice());
-        let evidence = ExecEvidence::read(&*self.procfs, tid, images, rejudge.is_some());
-        let command = rejudge
-            .and_then(|entry_argv| {
-                exec_recheck(
-                    &self.config.commands,
-                    &entry_argv,
-                    evidence.argv.as_deref(),
-                    path.as_ref().map(|p| p.bytes.as_slice()),
-                    evidence.image.as_ref().map(|image| image.path.as_slice()),
-                )
-            })
-            .map(Box::new);
-        if command.is_some() {
-            // The exec was observed whole and its event carries the verdict,
-            // so its entry leaves flight here: the death that follows has no
-            // call to abandon.
-            self.tasks.take_call(tid);
-            if !Self::kill_tracee(tid) {
-                // The hit is live: the process dies before its image runs an
-                // instruction — after its evidence was read above, so the
-                // event keeps it — and the event records the verdict and
-                // stops the run for a `forbid`. A kill that could not be
-                // sent leaves the image free to run, which the gap says.
-                self.exec_denial_failed();
-            }
+    }
+
+    /// The command rules' verdict on the exec the kernel installed, and its
+    /// enforcement: a hit kills the process before its image runs.
+    fn recheck_command(
+        &mut self,
+        tid: pid_t,
+        entry: &ExecEntry,
+        evidence: &ExecEvidence,
+    ) -> Option<Box<crate::commands::Hit>> {
+        let entry_argv = entry.rejudge.as_ref()?;
+        let command = Box::new(exec_recheck(
+            &self.config.commands,
+            entry_argv,
+            evidence.argv.as_deref(),
+            entry.path.as_ref().map(|p| p.bytes.as_slice()),
+            evidence.image.as_ref().map(|image| image.path.as_slice()),
+        )?);
+        // The exec was observed whole and its event carries the verdict,
+        // so its entry leaves flight here: the death that follows has no
+        // call to abandon.
+        self.tasks.take_call(tid);
+        if !Self::kill_tracee(tid) {
+            // The hit is live: the process dies before its image runs an
+            // instruction — after its evidence was read above, so the
+            // event keeps it — and the event records the verdict and
+            // stops the run for a `forbid`. A kill that could not be
+            // sent leaves the image free to run, which the gap says.
+            self.exec_denial_failed();
         }
-        let kernel_argv = evidence.event_argv();
-        let start_ticks = self.birth_of(tgid);
-        self.emit(TracerEvent::Exec {
-            pid: tgid,
-            start_ticks,
-            syscall,
-            path,
-            kernel_image: evidence.image,
-            dirfd,
-            command,
-            shebangs: evidence.scripts,
-            kernel_argv,
-        });
+        Some(command)
     }
 }
 
