@@ -84,19 +84,53 @@ pub fn resolve_request(options: &RunOptions) -> Result<Value> {
     }
     #[cfg(target_os = "linux")]
     {
-        if options.argv.is_empty() || options.capture_limit > CAPTURE_MAX {
-            return Err(error("invalid launch arguments or capture limit"));
-        }
-        let image = pinned_image(&options.jail)?;
-        let digest = image_digest(&image)?;
-        let resolved = plan(options, &image)?;
-        if image_digest(&image)? != digest {
-            return Err(error("jail image changed during policy resolution"));
-        }
-        let request = payload(options, &resolved, &digest)?;
-        crate::store::validate_payload(&request)?;
-        Ok(request)
+        Ok(resolve(options)?.payload)
     }
+}
+
+/// A launch request resolved against one pinned jail image.
+#[cfg(target_os = "linux")]
+struct Resolved {
+    image: File,
+    image_digest: String,
+    payload: Value,
+}
+
+/// Every check a launch request gets, shared by planning, preparation and
+/// launch so that none of them can accept what another refuses.
+#[cfg(target_os = "linux")]
+fn resolve(options: &RunOptions) -> Result<Resolved> {
+    if options.detached && options.separate_control {
+        return Err(error(
+            "detached owners cannot depend on a client control descriptor",
+        ));
+    }
+    if options.argv.is_empty() {
+        return Err(error("run needs a program after --"));
+    }
+    if options.capture_limit > CAPTURE_MAX {
+        return Err(error("capture limit exceeds 16 MiB per stream"));
+    }
+    if options
+        .captures
+        .iter()
+        .any(|s| !["stdout", "stderr", "argv"].contains(&s.as_str()))
+    {
+        return Err(error("capture accepts stdout, stderr and argv only"));
+    }
+    let image = pinned_image(&options.jail)?;
+    let digest = image_digest(&image)?;
+    let plan = plan(options, &image)?;
+    if image_digest(&image)? != digest {
+        return Err(error("jail image changed during policy resolution"));
+    }
+    let payload = payload(options, &plan, &digest)?;
+    crate::store::validate_payload(&payload)?;
+    Ok(Resolved {
+        image,
+        image_digest: digest,
+        payload,
+    })
 }
 
 fn error(message: impl Into<String>) -> LedgerError {
@@ -694,31 +728,11 @@ fn run_linux(
     options: &RunOptions,
     mut notify: Option<&mut dyn FnMut(&RunRecord)>,
 ) -> Result<RunResult> {
-    if options.detached && options.separate_control {
-        return Err(error(
-            "detached owners cannot depend on a client control descriptor",
-        ));
-    }
-    if options.argv.is_empty() {
-        return Err(error("run needs a program after --"));
-    }
-    if options.capture_limit > CAPTURE_MAX {
-        return Err(error("capture limit exceeds 16 MiB per stream"));
-    }
-    if options
-        .captures
-        .iter()
-        .any(|s| !["stdout", "stderr", "argv"].contains(&s.as_str()))
-    {
-        return Err(error("capture accepts stdout, stderr and argv only"));
-    }
-    let image = pinned_image(&options.jail)?;
-    let expected_image = image_digest(&image)?;
-    let plan = plan(options, &image)?;
-    if image_digest(&image)? != expected_image {
-        return Err(error("jail image changed during policy resolution"));
-    }
-    let payload = payload(options, &plan, &expected_image)?;
+    let Resolved {
+        image,
+        image_digest: expected_image,
+        payload,
+    } = resolve(options)?;
     let mut client = if options.detached {
         // Losing the independent writer must never create a replacement inside
         // this attempt's service cgroup. Strict evidence fails closed instead.
@@ -780,12 +794,23 @@ fn run_linux(
             &mut client,
             &claim.owner_token,
             "owner-returned-error",
-            &json!({"reason":"launch_owner_failed",
-                "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"launch_owner_failed"},
-                "coverage":{"status":"degraded","gaps":[{"reason":"launch_owner_failed"}]}}),
+            &unknown_body("launch_owner_failed", None),
         );
     }
     result
+}
+
+/// An owner's unresolved outcome: the reason, a matching degraded coverage
+/// gap and, once the child's streams are finalized, their capture state.
+#[cfg(target_os = "linux")]
+fn unknown_body(reason: &str, capture: Option<&serde_json::Map<String, Value>>) -> Value {
+    let mut body = json!({"reason":reason,
+        "outcome":{"kind":"unknown","unknown":true,"unknown_reason":reason},
+        "coverage":{"status":"degraded","gaps":[{"reason":reason}]}});
+    if let Some(capture) = capture {
+        body["capture"] = Value::Object(capture.clone());
+    }
+    body
 }
 
 #[cfg(target_os = "linux")]
@@ -1173,9 +1198,7 @@ fn run_owned(
             client,
             &claim.owner_token,
             "owner-failure",
-            &json!({"reason":"owner_or_evidence_failure","capture":capture,
-                "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"owner_or_evidence_failure"},
-                "coverage":{"status":"degraded","gaps":[{"reason":"owner_or_evidence_failure"}]}}),
+            &unknown_body("owner_or_evidence_failure", Some(&capture)),
         );
         return Err(problem);
     }
@@ -1197,9 +1220,7 @@ fn run_owned(
                 client,
                 &claim.owner_token,
                 "finalization-failed",
-                &json!({"reason":"finalization_failed","capture":capture,
-                    "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"finalization_failed"},
-                    "coverage":{"status":"degraded","gaps":[{"reason":"finalization_failed"}]}}),
+                &unknown_body("finalization_failed", Some(&capture)),
             );
             return Err(problem);
         }
@@ -1218,9 +1239,7 @@ fn run_owned(
             client,
             &claim.owner_token,
             "invalid-final",
-            &json!({"reason":"final_receipt_or_trace_mismatch",
-                "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"final_receipt_or_trace_mismatch"},
-                "coverage":{"status":"degraded","gaps":[{"reason":"final_receipt_or_trace_mismatch"}]}}),
+            &unknown_body("final_receipt_or_trace_mismatch", Some(&capture)),
         );
         return Err(error("terminal receipt/control/trace did not corroborate"));
     }
@@ -1297,6 +1316,65 @@ pub fn jail_binary(explicit: Option<PathBuf>) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn planning_applies_every_launch_check_before_touching_the_jail() {
+        type Edit = fn(&mut RunOptions);
+        let options = |edit: Edit| {
+            let mut options = RunOptions {
+                data: "/nonexistent/data".into(),
+                jail: "/nonexistent/ouro-jail".into(),
+                request_id: "plan".into(),
+                prepared: None,
+                policy_args: vec![],
+                argv: vec!["true".into()],
+                batch: true,
+                separate_control: false,
+                detached: false,
+                captures: vec![],
+                redact: vec![],
+                capture_limit: 1,
+                best_effort: false,
+                launch: None,
+                tags: vec![],
+            };
+            edit(&mut options);
+            options
+        };
+        let cases: [(Edit, &str); 4] = [
+            (
+                |o| (o.detached, o.separate_control) = (true, true),
+                "client control descriptor",
+            ),
+            (|o| o.argv.clear(), "program after --"),
+            (|o| o.capture_limit = CAPTURE_MAX + 1, "16 MiB per stream"),
+            (
+                |o| o.captures = vec!["environment".into()],
+                "stdout, stderr and argv only",
+            ),
+        ];
+        for (edit, refusal) in cases {
+            let refused = resolve_request(&options(edit)).unwrap_err();
+            assert!(refused.to_string().contains(refusal), "{refused}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unknown_bodies_name_one_reason_and_carry_finalized_captures() {
+        assert_eq!(
+            unknown_body("launch_owner_failed", None),
+            json!({"reason":"launch_owner_failed",
+                "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"launch_owner_failed"},
+                "coverage":{"status":"degraded","gaps":[{"reason":"launch_owner_failed"}]}})
+        );
+        let capture = json!({"stdout":{"state":"incomplete"}});
+        assert_eq!(
+            unknown_body("finalization_failed", capture.as_object())["capture"],
+            capture
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
