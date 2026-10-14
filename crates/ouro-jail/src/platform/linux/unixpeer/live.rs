@@ -985,9 +985,10 @@ fn path_beneath_child_root(
 
 fn same_location(left: RawFd, right: RawFd) -> io::Result<bool> {
     fn identity(fd: RawFd) -> io::Result<(u64, u64)> {
+        // SAFETY: statx is plain data; all-zero is a valid value.
+        let mut st: libc::statx = unsafe { std::mem::zeroed() };
         // SAFETY: `statx` writes only to the live result, and AT_EMPTY_PATH
         // describes the supplied O_PATH directory descriptor itself.
-        let mut st: libc::statx = unsafe { std::mem::zeroed() };
         let rc = unsafe {
             libc::statx(
                 fd,
@@ -1030,8 +1031,9 @@ fn openat2_in_root(base: BorrowedFd<'_>, rel: &[u8]) -> io::Result<OwnedFd> {
 }
 
 fn fstat(fd: RawFd) -> io::Result<libc::stat> {
-    // SAFETY: `st` is a live, zeroed stat the syscall fills in on success.
+    // SAFETY: stat is plain data; all-zero is a valid value.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `st` is a live stat the syscall fills in on success.
     let rc = unsafe { libc::fstat(fd, std::ptr::from_mut(&mut st)) };
     if rc < 0 {
         return Err(io::Error::last_os_error());

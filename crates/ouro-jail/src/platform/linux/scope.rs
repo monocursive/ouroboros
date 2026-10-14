@@ -878,6 +878,7 @@ mod linux {
         /// file does not; anything else is unknown, and counts as off.
         #[test]
         fn lingering_is_read_from_loginds_record() {
+            // SAFETY: getuid takes no arguments and cannot fail.
             let uid = unsafe { libc::getuid() };
             let name = user_name(uid).expect("the test's uid has a name");
             let dir = tempfile::tempdir().unwrap();
