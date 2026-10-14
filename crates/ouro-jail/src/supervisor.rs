@@ -2146,9 +2146,10 @@ fn persistence_failed_after(
 /// hold as they were raised and that the report does not already name
 /// (`printed`: its `error` and `trace_error`, each accounting for one), in
 /// the order they were raised. `errors[]` only grows and is never fitted
-/// itself; the latest durable receipt holds a prefix of it as raised
-/// ([`Journal::durable`]), and everything after that prefix (cut or omitted
-/// by [`render_receipt`], or raised later) is what it lacks.
+/// itself; the receipt on disk holds a prefix of it as raised
+/// ([`Journal::durable`], [`Journal::may_have_landed`]), and everything
+/// after that prefix (cut or omitted by [`render_receipt`], or raised later)
+/// is what it lacks.
 fn unrecorded(
     record: &AttemptRecord,
     journal: &Journal,
@@ -2246,6 +2247,17 @@ fn settle_in_flight(
         match outcome {
             Ok(()) => acknowledge(&done, control.as_deref_mut(), journal),
             Err(error) => {
+                // A write that failed or stalled can still have landed (its
+                // canonical rename comes before its directory sync and its
+                // extra copy, and a stalled one may finish later), and so can
+                // the next one if the worker already started it: the disk
+                // holds verbatim no more than the least of them does.
+                journal.may_have_landed(
+                    in_flight
+                        .iter()
+                        .map(|next| next.held)
+                        .fold(done.held, usize::min),
+                );
                 // Nothing after a failed transition is acknowledged either;
                 // dropping them makes the worker skip what has not started.
                 in_flight.clear();
@@ -2616,10 +2628,12 @@ struct Journal {
     /// True while `loss` has not yet been surfaced to the supervision loop.
     loss_pending: bool,
     /// J4 W3, P5: how many of the attempt's `errors[]`, from the first, the
-    /// latest durable receipt holds as they were raised. Every durable
-    /// receipt passes [`Journal::receipt`] (or [`Journal::durable`]); a
-    /// receipt replaces the one before it on disk, so the rest, whatever an
-    /// earlier receipt held, is on disk cut, omitted or not at all.
+    /// receipt on disk holds as they were raised. Every durable receipt
+    /// passes [`Journal::receipt`] (or [`Journal::durable`]), and every
+    /// failed write that may have left its receipt on disk passes
+    /// [`Journal::may_have_landed`]; a receipt replaces the one before it on
+    /// disk, so the rest, whatever an earlier receipt held, is on disk cut,
+    /// omitted or not at all.
     durable_errors: usize,
 }
 
@@ -2635,9 +2649,18 @@ impl Journal {
     }
 
     /// Notes that a receipt holding the first `held` errors as they were
-    /// raised is durable, without a trace note.
+    /// raised is durable, without a trace note. It replaced the one before
+    /// it, so `held` is the count now, whether it is more or less.
     fn durable(&mut self, held: usize) {
         self.durable_errors = held;
+    }
+
+    /// Notes that a write that failed may still have left its receipt,
+    /// holding the first `held` errors as they were raised, on disk in place
+    /// of the durable one: whichever of the two is there holds no more than
+    /// the lesser count.
+    fn may_have_landed(&mut self, held: usize) {
+        self.durable_errors = self.durable_errors.min(held);
     }
 
     /// The sink loss that has not been handled yet, if any (§13.3).
@@ -2837,6 +2860,36 @@ pub fn write_receipt_at(
     extra_copy: Option<&Path>,
     io: &dyn state::PersistIo,
 ) -> Result<Receipt, JailError> {
+    write_rendered(site, attempt_dir, record, phase, extra_copy, io)
+        .map_err(|failure| failure.error)
+}
+
+/// A receipt write that failed.
+struct Unwritten {
+    error: JailError,
+    /// The receipt the write rendered, when its bytes may be on disk all the
+    /// same: from the canonical rename on, a failure (its directory sync,
+    /// the extra copy) can leave it in place of the one before. `None` when
+    /// the write failed before it exposed anything.
+    visible: Option<Receipt>,
+}
+
+/// [`write_receipt_at`], with the receipt a failed write may have left on
+/// disk.
+fn write_rendered(
+    site: state::Site,
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    phase: Phase,
+    extra_copy: Option<&Path>,
+    io: &dyn state::PersistIo,
+) -> Result<Receipt, Box<Unwritten>> {
+    let unwritten = |error| {
+        Box::new(Unwritten {
+            error,
+            visible: None,
+        })
+    };
     record.updated_at = SystemTime::now();
     let receipt = render_receipt(record, phase);
     let bytes = cleanup::record_bytes(
@@ -2844,18 +2897,26 @@ pub fn write_receipt_at(
         &receipt,
         ErrorStage::Preparing,
         cleanup::RECEIPT_WRITE_MAX,
-    )?;
-    let canonical = state::TempWrite::create_at(site, &attempt_dir.receipt_path(), &bytes, io)?;
+    )
+    .map_err(unwritten)?;
+    let canonical = state::TempWrite::create_at(site, &attempt_dir.receipt_path(), &bytes, io)
+        .map_err(unwritten)?;
     // J4-D4: the rename below can land and a later step still fail (its
     // directory sync, or the extra copy), leaving this revision visible under
     // an error. Spending it here, before the rename, means the next receipt
     // never carries the same number with different content.
     record.revision += 1;
-    canonical.commit()?;
-    if let Some(path) = extra_copy {
-        state::TempWrite::create_at(site, path, &bytes, io)?.commit()?;
+    let written = canonical.commit().and_then(|()| match extra_copy {
+        Some(path) => state::TempWrite::create_at(site, path, &bytes, io)?.commit(),
+        None => Ok(()),
+    });
+    match written {
+        Ok(()) => Ok(receipt),
+        Err(error) => Err(Box::new(Unwritten {
+            error,
+            visible: Some(receipt),
+        })),
     }
-    Ok(receipt)
 }
 
 fn persist(
@@ -2886,20 +2947,30 @@ fn persist_noted(
         degrade_trace_coverage(record, journal);
     }
     let io = state::current_io();
-    let receipt = write_receipt_at(
+    let receipt = write_rendered(
         site,
         attempt_dir,
         record,
         phase,
         args.receipt.as_deref(),
         &*io,
-    )?;
+    )
+    .map_err(|failure| failed_write(*failure, record, journal))?;
     journal.receipt(
         &receipt,
         final_note,
         held_verbatim(&record.errors, &receipt.errors),
     );
     Ok(receipt)
+}
+
+/// The error of a failed receipt write, once the journal knows what the
+/// write may have left on disk.
+fn failed_write(failure: Unwritten, record: &AttemptRecord, journal: &mut Journal) -> JailError {
+    if let Some(visible) = &failure.visible {
+        journal.may_have_landed(held_verbatim(&record.errors, &visible.errors));
+    }
+    failure.error
 }
 
 /// The most errors a receipt lists: the receipt schema's `maxItems` for
@@ -3229,7 +3300,7 @@ fn persist_terminal(
         record.errors.push(error.to_object());
         degrade_trace_coverage(record, journal);
         let io = state::current_io();
-        return match write_receipt_at(
+        return match write_rendered(
             site,
             attempt_dir,
             record,
@@ -3241,8 +3312,8 @@ fn persist_terminal(
                 journal.durable(held_verbatim(&record.errors, &corrected.errors));
                 Ok(corrected)
             }
-            Err(error) => Err(Unpersisted {
-                error,
+            Err(failure) => Err(Unpersisted {
+                error: failed_write(*failure, record, journal),
                 persisted: Some(Box::new(receipt)),
             }),
         };
@@ -4596,6 +4667,55 @@ mod tests {
         assert_eq!(completed(&mut receipt).revision, 100);
     }
 
+    /// A refused write whose canonical rename lands and whose extra copy
+    /// then fails leaves its receipt on disk: what that receipt holds cut
+    /// reaches stderr, although the receipt before it held it whole.
+    #[test]
+    fn a_refused_write_that_lands_before_it_fails_leaves_its_cut_errors_to_stderr() {
+        let bound = usize::try_from(cleanup::RECEIPT_WRITE_MAX).unwrap();
+        let (root, attempt_dir, _plan) = scratch_fixture();
+        let big = error_object(ErrorCode::EvidenceLost, "x".repeat(bound - 64 * 1024));
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        record.errors = vec![big.clone()];
+        let mut journal = Journal::new("att_test", trace::shared(DrainFailure { loss: None }));
+        persist(
+            state::Site::PreparedReceipt,
+            &attempt_dir,
+            &mut record,
+            Phase::Prepared,
+            &run_args(&[]),
+            &mut journal,
+        )
+        .expect("the prepared receipt fits");
+        assert_eq!(journal.durable_errors, 1, "it holds `big` as raised");
+        let refusal = JailError::new(
+            ErrorCode::GateClosed,
+            ErrorStage::Prepared,
+            Remediation::InspectState,
+            "y".repeat(128 * 1024),
+        );
+        record.outcome = Outcome::refused(&refusal);
+        record.errors.push(refusal.to_object());
+        let copy = root.path().join("no-such-dir").join("copy.json");
+        let failure = persist_terminal(
+            state::Site::RefusedReceipt,
+            &attempt_dir,
+            &mut record,
+            Phase::Refused,
+            &run_args(&["--receipt", copy.to_str().unwrap()]),
+            &mut journal,
+        )
+        .expect_err("the extra copy cannot be written");
+        assert!(failure.persisted.is_none());
+        let on_disk: Receipt =
+            serde_json::from_slice(&std::fs::read(attempt_dir.receipt_path()).unwrap()).unwrap();
+        assert_eq!(on_disk.phase, Phase::Refused, "the refused receipt landed");
+        assert_ne!(on_disk.errors[0], big, "it holds `big` cut");
+        assert_eq!(journal.durable_errors, 0);
+        let stderr = unrecorded(&record, &journal, &[Some(&refusal), None]);
+        assert_eq!(stderr, [big]);
+    }
+
     /// Submits the receipt for `phase` to `persister` and waits for it;
     /// whether it failed.
     fn through_the_worker(
@@ -4656,6 +4776,43 @@ mod tests {
             &args,
             &mut journal
         ));
+        assert_eq!(journal.durable_errors, 0);
+        assert_eq!(unrecorded(&record, &journal, &[])[..2], record.errors[..2]);
+    }
+
+    /// A receipt the worker failed to write after its rename landed is on
+    /// disk all the same: the journal counts no more than it holds, so what
+    /// it omits reaches stderr although the receipt before it held it whole.
+    #[test]
+    fn a_worker_write_that_lands_before_it_fails_counts_what_it_holds() {
+        let (root, attempt_dir, _plan) = scratch_fixture();
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        record.errors = errors(2);
+        let persister = state::Persister::start().unwrap();
+        let mut journal = Journal::new("att_test", trace::shared(DrainFailure { loss: None }));
+        assert!(!through_the_worker(
+            &persister,
+            &attempt_dir,
+            &mut record,
+            &run_args(&[]),
+            &mut journal
+        ));
+        assert_eq!(journal.durable_errors, 2);
+        record.errors = errors(129);
+        let copy = root.path().join("no-such-dir").join("copy.json");
+        assert!(
+            through_the_worker(
+                &persister,
+                &attempt_dir,
+                &mut record,
+                &run_args(&["--receipt", copy.to_str().unwrap()]),
+                &mut journal
+            ),
+            "the extra copy cannot be written"
+        );
+        let on_disk: Receipt =
+            serde_json::from_slice(&std::fs::read(attempt_dir.receipt_path()).unwrap()).unwrap();
+        assert_eq!(on_disk.errors.len(), RECEIPT_ERRORS_MAX, "it landed");
         assert_eq!(journal.durable_errors, 0);
         assert_eq!(unrecorded(&record, &journal, &[])[..2], record.errors[..2]);
     }

@@ -2684,7 +2684,10 @@ not at all, counting an error raised twice as two. Any other receipt past
 the bound is not written: before release the attempt refuses with
 `state_write_failed`, after release a receipt handed to the persistence
 worker stops the tree for `state_write_failed`, and a terminal receipt
-leaves the last one written on disk (§7).
+leaves the last one written on disk (§7). A write that fails after its
+receipt became visible (its directory sync, the `--receipt` copy, a write
+reported stalled that lands later) may leave that receipt on disk, so what
+it holds cut or not at all is printed too.
 
 Native lifetime details live under an OS-tagged object. Linux may record cgroup
 and namespace identities; macOS will define its own. `pidfd`, `/proc` paths,
