@@ -4827,6 +4827,66 @@ mod tests {
         assert!(scratch.exists(), "the stopped tree is retained for gc");
     }
 
+    /// The pre-claim check counts the starting refused receipt, the room the
+    /// mount table may take and the room a run may add: a plan that fits
+    /// beside one but not both is refused, one that fits beside both is not.
+    #[test]
+    fn the_record_bound_keeps_room_for_the_mount_table_and_the_run() {
+        let (_root, _attempt_dir, mut plan) = scratch_fixture();
+        let ctx = Context {
+            platform: Box::new(LinuxIdentity),
+            env_settings: EnvSettings::default(),
+            cwd: plan.workspace.clone(),
+            home: None,
+            env_lookup: Box::new(|_| None),
+        };
+        let grant = |plan: &mut Plan, bytes: usize| {
+            plan.resolved.grants = vec![crate::records::Grant {
+                kind: "read_only".to_owned(),
+                value: crate::records::NativeString::Text("x".repeat(bytes)),
+                by: "operator".to_owned(),
+            }];
+        };
+        let start = |plan: &Plan| {
+            let record = first_record(
+                &ctx,
+                plan,
+                &AttemptId::generate(),
+                Some(crate::canonical::argv_digest(&[])),
+            );
+            u64::try_from(
+                serde_json::to_vec_pretty(&record.receipt(Phase::Refused))
+                    .unwrap()
+                    .len(),
+            )
+            .unwrap()
+        };
+        grant(&mut plan, 0);
+        let base = start(&plan);
+        let starting_at = |plan: &mut Plan, size: u64| {
+            grant(plan, usize::try_from(size - base).unwrap());
+            assert_eq!(start(plan), size);
+        };
+        let bound = cleanup::RECEIPT_MAX;
+        // Fits beside the mount table, not beside the run's room too.
+        starting_at(
+            &mut plan,
+            bound - MOUNT_TABLE_BYTES_MAX - RECEIPT_RESERVE / 2,
+        );
+        let error = check_record_bounds(&ctx, &plan).expect_err("no room for the run");
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.stage, ErrorStage::Resolving);
+        // Fits beside the run's room, not beside the mount table too.
+        starting_at(
+            &mut plan,
+            bound - RECEIPT_RESERVE - MOUNT_TABLE_BYTES_MAX / 2,
+        );
+        check_record_bounds(&ctx, &plan).expect_err("no room for the mount table");
+        // Fits beside both.
+        starting_at(&mut plan, bound - RECEIPT_RESERVE - MOUNT_TABLE_BYTES_MAX);
+        check_record_bounds(&ctx, &plan).expect("room for both");
+    }
+
     /// A platform that only names itself: resolution asks nothing else.
     struct LinuxIdentity;
 
