@@ -151,10 +151,17 @@ impl Attempt {
     /// so every process in it is this test's) and the supervisor (this
     /// test's own child), let `gc` reconcile the attempt's state, remove the
     /// leaf if it is still there, and report the jail's exit and stderr.
+    ///
+    /// The receipt is read raw for the leaf, and held to its contract only
+    /// after the cleanup: a receipt that breaks a rule is reported with the
+    /// failure, and does not stop the cleanup that would remove the leaf.
     fn fail(&mut self, why: &str) -> ! {
         let mut spawned = self.spawned.take().expect("the attempt is running");
-        let leaf = spawned.receipt_value().and_then(|receipt| {
-            details(&receipt)["execution_cgroup"]["path"]
+        let receipt = std::fs::read(spawned.root().join("receipt.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        let leaf = receipt.as_ref().and_then(|receipt| {
+            details(receipt)["execution_cgroup"]["path"]
                 .as_str()
                 .map(PathBuf::from)
         });
@@ -179,8 +186,14 @@ impl Attempt {
             }
             let _ = std::fs::remove_dir(leaf);
         }
+        let contract = match receipt.as_ref().map(common::check_receipt) {
+            None => "no receipt could be read".to_owned(),
+            Some(Ok(())) => "the receipt holds its contract".to_owned(),
+            Some(Err(error)) => format!("the receipt fails its contract: {error}"),
+        };
         panic!(
-            "{why}\ncontrol so far: {:?}\njail exit {code:?} signal {signal:?}; stderr:\n{stderr}",
+            "{why}\ncontrol so far: {:?}\n{contract}\n\
+             jail exit {code:?} signal {signal:?}; stderr:\n{stderr}",
             self.seen
         );
     }
