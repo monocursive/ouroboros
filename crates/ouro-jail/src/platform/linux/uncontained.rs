@@ -287,16 +287,20 @@ impl Inherited {
         Inherited(
             tracer::descendants(own)
                 .into_iter()
-                .filter_map(|pid| tracer::start_ticks(pid).map(|birth| (pid, birth)))
+                .filter_map(|pid| {
+                    identity::start_time_ticks(pid)
+                        .ok()
+                        .map(|birth| (pid, birth))
+                })
                 .collect(),
         )
     }
 
     /// Whether `pid` is still the process recorded under that number.
     fn contains(&self, pid: libc::pid_t) -> bool {
-        self.0
-            .iter()
-            .any(|(known, birth)| *known == pid && tracer::start_ticks(pid) == Some(*birth))
+        self.0.iter().any(|(known, birth)| {
+            *known == pid && identity::start_time_ticks(pid).ok() == Some(*birth)
+        })
     }
 }
 
@@ -1754,7 +1758,7 @@ mod tests {
         let own = unsafe { libc::getpid() };
         let child = spawn_sleeper();
         let pid = libc::pid_t::try_from(child.id()).unwrap();
-        let birth = tracer::start_ticks(pid).expect("the sleeper's start time");
+        let birth = identity::start_time_ticks(pid).expect("the sleeper's start time");
 
         assert!(Inherited(vec![(pid, birth)]).contains(pid));
         assert!(
