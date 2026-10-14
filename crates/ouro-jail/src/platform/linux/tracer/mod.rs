@@ -3,8 +3,9 @@
 //! This is the ptrace backend of jail-v1 §5.2 — the one that runs on any
 //! host with nothing installed, under the default Yama scope every major
 //! distribution ships. It implements the observer interface of the J1
-//! contract §3.5 and the event semantics of §11, and it depends on `std` and
-//! `libc` and nothing else.
+//! contract §3.5 and the event semantics of §11. Its narrowing filter speaks
+//! the seccomp ABI the baseline filters define (`seccomp`, `bpf`), and its
+//! exec stops judge the command rules (`crate::commands`).
 //!
 //! # How it is used
 //!
@@ -57,7 +58,6 @@
 
 pub mod clock;
 mod closed_set;
-mod digest;
 pub(super) mod filter;
 mod proc;
 mod session;

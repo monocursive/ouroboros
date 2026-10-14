@@ -36,7 +36,6 @@
 //! closed-set calls fail with `ENOSYS`, because nothing traces it.
 
 use crate::platform::linux::tracer::closed_set::CLOSED_SET;
-use crate::platform::linux::tracer::digest::sha256_hex;
 use crate::platform::linux::tracer::sys;
 use crate::platform::linux::{abi, bpf, seccomp};
 
@@ -278,7 +277,7 @@ pub fn narrowing_filter_bytes() -> Vec<u8> {
 /// `sha256:<hex>` over [`narrowing_filter_bytes`].
 #[must_use]
 pub fn narrowing_filter_digest() -> String {
-    format!("sha256:{}", sha256_hex(&narrowing_filter_bytes()))
+    sha256(&narrowing_filter_bytes())
 }
 
 /// Security 2026-09-27 (audit 4 B9): the bytes of the filter carrying
@@ -302,7 +301,7 @@ pub fn narrowing_filter_bytes_with(data: u16) -> Vec<u8> {
 /// program an attempt actually installed (audit 4 B9).
 #[must_use]
 pub fn narrowing_filter_digest_with(data: u16) -> String {
-    format!("sha256:{}", sha256_hex(&narrowing_filter_bytes_with(data)))
+    sha256(&narrowing_filter_bytes_with(data))
 }
 
 /// Digest of the exact mode-specific installed instructions.
@@ -314,7 +313,13 @@ pub fn narrowing_filter_digest_for(data: u16, learning: bool) -> String {
         bytes.extend_from_slice(&[insn.jt, insn.jf]);
         bytes.extend_from_slice(&insn.k.to_le_bytes());
     }
-    format!("sha256:{}", sha256_hex(&bytes))
+    sha256(&bytes)
+}
+
+/// `sha256:<hex>` of `bytes`, the form every filter digest in a receipt takes.
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
 /// Install the narrowing filter on the calling thread group.
@@ -758,13 +763,35 @@ mod tests {
         assert_eq!(digest.len(), "sha256:".len() + 64);
         assert_eq!(digest, narrowing_filter_digest(), "the digest is stable");
         assert_eq!(
-            digest[7..],
-            sha256_hex(&bytes),
+            digest,
+            sha256(&bytes),
             "and it is the digest of those bytes"
         );
         // A different program must produce a different digest.
         let mut altered = bytes.clone();
         altered[0] ^= 0xff;
-        assert_ne!(sha256_hex(&altered), sha256_hex(&bytes));
+        assert_ne!(sha256(&altered), sha256(&bytes));
+    }
+
+    /// The digest form receipts and the frozen evidence carry: lower-case
+    /// hex of SHA-256 (FIPS 180-4 / NIST CAVP vectors) behind `sha256:`.
+    #[test]
+    fn the_digest_is_sha256_in_lower_case_hex() {
+        assert_eq!(
+            sha256(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "sha256:248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        assert_eq!(
+            sha256(&[0u8; 56]),
+            "sha256:d4817aa5497628e7c77e6b606107042bbba3130888c5f47a375e6179be789fbb"
+        );
     }
 }
