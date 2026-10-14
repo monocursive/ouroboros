@@ -627,7 +627,10 @@ mod tests {
         let (event, upstream, response) =
             run_tls(true, true, true, authorized_get(true), b"", true);
         assert_eq!(event.reason, Reason::Relayed);
-        assert_eq!(event.origin_verification.as_deref(), Some("mitm_http_host"));
+        assert_eq!(
+            event.origin_verification,
+            Some(proxy::Verification::MitmHttpHost)
+        );
         assert!(
             upstream
                 .windows(b"Bearer fixture-secret".len())

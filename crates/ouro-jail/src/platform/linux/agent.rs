@@ -1355,7 +1355,7 @@ mod tests {
         ProxyResult {
             origin: None,
             origin_verification: None,
-            transport: "http".into(),
+            transport: proxy::Transport::Http,
             request_id: id,
             kind: proxy::RequestKind::Unknown,
             destination: None,

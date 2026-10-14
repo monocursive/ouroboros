@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use super::{Reason, http};
+use super::{Reason, Verification, http};
 use crate::network::{Destination, Host, normalize_host};
 
 pub const MAX_BYTES: usize = 8192;
@@ -13,7 +13,7 @@ pub const TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Flight {
     pub bytes: Vec<u8>,
     pub http: Option<http::Request>,
-    pub mechanism: &'static str,
+    pub mechanism: Verification,
 }
 
 pub fn inspect(stream: &UnixStream, early: &[u8], target: &Destination) -> Result<Flight, Reason> {
@@ -21,7 +21,7 @@ pub fn inspect(stream: &UnixStream, early: &[u8], target: &Destination) -> Resul
         return Ok(Flight {
             bytes: early.to_vec(),
             http: None,
-            mechanism: "explicit_ip",
+            mechanism: Verification::ExplicitIp,
         });
     }
     let deadline = Instant::now() + TIMEOUT;
@@ -38,7 +38,7 @@ pub fn inspect(stream: &UnixStream, early: &[u8], target: &Destination) -> Resul
                 return Ok(Flight {
                     bytes,
                     http: None,
-                    mechanism: "tls_sni",
+                    mechanism: Verification::TlsSni,
                 });
             }
         } else if !bytes.is_empty() {
@@ -51,7 +51,7 @@ pub fn inspect(stream: &UnixStream, early: &[u8], target: &Destination) -> Resul
                 return Ok(Flight {
                     bytes: bytes[end..].to_vec(),
                     http: Some(request),
-                    mechanism: "http_host",
+                    mechanism: Verification::HttpHost,
                 });
             }
         }

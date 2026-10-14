@@ -22,7 +22,7 @@ use ouro_jail::observer::CoverageClass;
 use ouro_jail::proxy::{
     self, Budgets, EndReason, FixtureAnswer, FixtureResolver, Lookup, ProxyConfig, ProxyDecision,
     ProxyHandle, ProxyResult, ProxySink, ProxySummary, Reason, RequestKind, ResolveError, Resolver,
-    SystemResolver,
+    SystemResolver, Transport,
 };
 use ouro_jail::records::{Completion, Decision};
 
@@ -2308,7 +2308,7 @@ fn n02_a_resource_failure_event_is_truthful() {
     let result = ProxyResult {
         origin: None,
         origin_verification: None,
-        transport: "http".into(),
+        transport: Transport::Http,
         request_id: 7,
         kind: RequestKind::Connect,
         destination: None,
@@ -2722,7 +2722,7 @@ fn socks_named_tls_uses_the_same_origin_gate_and_relay() {
     client.shutdown(Shutdown::Write).unwrap();
     read_to_eof(&mut client);
     let results = harness.sink.wait_for(1);
-    assert_eq!(results[0].transport, "socks5");
+    assert_eq!(results[0].transport, Transport::Socks5);
     assert_eq!(results[0].reason, Reason::Relayed);
     harness.stop(WAIT);
     server.join().unwrap();
