@@ -559,137 +559,7 @@ pub fn writable_by_others(mode: u32, uid: u32, gid: u32) -> bool {
     !accounts::group_is_private_to(uid, gid)
 }
 
-/// The account-database side of [`writable_by_others`].
-mod accounts {
-    use std::ffi::CStr;
-    use std::sync::Mutex;
-
-    /// The facts the rule needs, separated from the lookups so the rule can
-    /// be tested without depending on the host's accounts.
-    pub(super) struct Facts<'a> {
-        /// The owner's name and primary group, if the owner is known.
-        pub owner: Option<(&'a [u8], u32)>,
-        /// The group's listed members, if the group is known.
-        pub members: Option<Vec<Vec<u8>>>,
-        /// Whether another account has this group as its primary group.
-        pub another_primary: bool,
-    }
-
-    pub(super) fn private(gid: u32, facts: &Facts<'_>) -> bool {
-        let Some((name, primary)) = facts.owner else {
-            return false;
-        };
-        let Some(members) = &facts.members else {
-            return false;
-        };
-        primary == gid
-            && members.iter().all(|member| member.as_slice() == name)
-            && !facts.another_primary
-    }
-
-    /// `getpwent` walks one process-wide position.
-    static PASSWD_WALK: Mutex<()> = Mutex::new(());
-
-    pub(super) fn group_is_private_to(uid: u32, gid: u32) -> bool {
-        let Some((name, primary)) = owner(uid) else {
-            return false;
-        };
-        let facts = Facts {
-            owner: Some((&name, primary)),
-            members: members(gid),
-            another_primary: another_primary(uid, gid),
-        };
-        private(gid, &facts)
-    }
-
-    fn owner(uid: u32) -> Option<(Vec<u8>, u32)> {
-        let mut buffer = vec![0_u8; 16 * 1024];
-        // SAFETY: `passwd` is a plain C struct; all-zero is a valid value
-        // that getpwuid_r overwrites before we read it.
-        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
-        let mut result: *mut libc::passwd = std::ptr::null_mut();
-        // SAFETY: every pointer is to a live local, the buffer length is the
-        // buffer's own, and getpwuid_r writes only within them.
-        let rc = unsafe {
-            libc::getpwuid_r(
-                uid,
-                &raw mut entry,
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-                &raw mut result,
-            )
-        };
-        if rc != 0 || result.is_null() || entry.pw_name.is_null() {
-            return None;
-        }
-        // SAFETY: getpwuid_r succeeded, so pw_name points at a NUL-terminated
-        // string inside `buffer`, which is still alive.
-        let name = unsafe { CStr::from_ptr(entry.pw_name) }.to_bytes().to_vec();
-        Some((name, entry.pw_gid))
-    }
-
-    fn members(gid: u32) -> Option<Vec<Vec<u8>>> {
-        let mut buffer = vec![0_u8; 64 * 1024];
-        // SAFETY: as in `owner`, for `group`.
-        let mut entry: libc::group = unsafe { std::mem::zeroed() };
-        let mut result: *mut libc::group = std::ptr::null_mut();
-        // SAFETY: as in `owner`, for getgrgid_r.
-        let rc = unsafe {
-            libc::getgrgid_r(
-                gid,
-                &raw mut entry,
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-                &raw mut result,
-            )
-        };
-        if rc != 0 || result.is_null() {
-            return None;
-        }
-        let mut out = Vec::new();
-        let mut slot = entry.gr_mem;
-        while !slot.is_null() {
-            // SAFETY: gr_mem is a NULL-terminated array of pointers into
-            // `buffer`; `slot` has not passed its terminator.
-            let member = unsafe { *slot };
-            if member.is_null() {
-                break;
-            }
-            // SAFETY: each member points at a NUL-terminated string inside
-            // `buffer`.
-            out.push(unsafe { CStr::from_ptr(member) }.to_bytes().to_vec());
-            // SAFETY: the array continues until its NULL terminator, which
-            // has not been reached.
-            slot = unsafe { slot.add(1) };
-        }
-        Some(out)
-    }
-
-    fn another_primary(uid: u32, gid: u32) -> bool {
-        let _guard = PASSWD_WALK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut found = false;
-        // SAFETY: setpwent/getpwent/endpwent share one process-wide position, which
-        // the mutex serializes within this process; each entry is read
-        // before the next call.
-        unsafe {
-            libc::setpwent();
-            loop {
-                let entry = libc::getpwent();
-                if entry.is_null() {
-                    break;
-                }
-                if (*entry).pw_gid == gid && (*entry).pw_uid != uid {
-                    found = true;
-                    break;
-                }
-            }
-            libc::endpwent();
-        }
-        found
-    }
-}
+pub mod accounts;
 
 /// Checks that `path` is a private directory this operator owns (§6.2).
 ///
@@ -1370,6 +1240,7 @@ impl Drop for Lease {
 
 pub mod anchored;
 pub mod mount_alias;
+pub mod mountinfo;
 pub mod record;
 
 pub use record::{

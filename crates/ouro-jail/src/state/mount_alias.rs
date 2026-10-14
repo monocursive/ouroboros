@@ -46,46 +46,31 @@ struct Mount {
     ino: u64,
 }
 
+/// The largest `/proc/self/mountinfo` read; it also bounds the rows.
+#[cfg(target_os = "linux")]
+const MOUNTINFO_MAX: usize = 4 * 1024 * 1024;
+
 #[cfg(target_os = "linux")]
 fn read_mountinfo() -> io::Result<Vec<Mount>> {
-    use std::io::Read as _;
-    let mut bytes = Vec::new();
-    fs::File::open("/proc/self/mountinfo")?
-        .take(4 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    parse_mountinfo(&bytes)
+    let rows =
+        super::mountinfo::read(Path::new("/proc/self/mountinfo"), MOUNTINFO_MAX, usize::MAX)?;
+    visible_mounts(&rows)
 }
 
-/// Parses `/proc/self/mountinfo` bytes into visible mounts.
+/// The visible mounts of a mount table.
 ///
-/// Entries whose root field is not a path — nsfs bind mounts such as snapd's
+/// Rows whose root field is not a path — nsfs bind mounts such as snapd's
 /// `/run/snapd/ns/lxd.mnt` carry `mnt:[4026532535]` — name a namespace, not
 /// filesystem coordinates, so they can never be reached through a path grant
 /// and are skipped instead of failing the whole host. A mount point that is
 /// not absolute remains malformed: the kernel always reports absolute ones.
 #[cfg(target_os = "linux")]
-fn parse_mountinfo(bytes: &[u8]) -> io::Result<Vec<Mount>> {
-    use std::os::unix::ffi::OsStringExt as _;
-    if bytes.len() > 4 * 1024 * 1024 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "mountinfo too large",
-        ));
-    }
+fn visible_mounts(rows: &[super::mountinfo::Row]) -> io::Result<Vec<Mount>> {
+    use std::os::unix::ffi::OsStrExt as _;
     let mut mounts = Vec::new();
-    for line in bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
-        if fields.len() < 7 || !fields.iter().any(|field| *field == b"-") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "malformed mountinfo",
-            ));
-        }
-        let root = PathBuf::from(std::ffi::OsString::from_vec(unescape(fields[3])?));
-        let point = PathBuf::from(std::ffi::OsString::from_vec(unescape(fields[4])?));
+    for row in rows {
+        let root = Path::new(std::ffi::OsStr::from_bytes(&row.root));
+        let point = Path::new(std::ffi::OsStr::from_bytes(&row.mount_point));
         if !point.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -97,47 +82,16 @@ fn parse_mountinfo(bytes: &[u8]) -> io::Result<Vec<Mount>> {
         }
         // An overmounted entry may no longer be reachable. Only visible
         // mountpoints can carry a source path or a writable grant.
-        if let Ok(stat) = fs::metadata(&point) {
+        if let Ok(stat) = fs::metadata(point) {
             mounts.push(Mount {
-                point,
-                root,
+                point: point.to_path_buf(),
+                root: root.to_path_buf(),
                 dev: stat.dev(),
                 ino: stat.ino(),
             });
         }
     }
     Ok(mounts)
-}
-
-#[cfg(target_os = "linux")]
-fn unescape(input: &[u8]) -> io::Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(input.len());
-    let mut at = 0;
-    while at < input.len() {
-        if input[at] == b'\\' {
-            if at + 3 >= input.len()
-                || !input[at + 1..at + 4]
-                    .iter()
-                    .all(|b| (b'0'..=b'7').contains(b))
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "bad mountinfo escape",
-                ));
-            }
-            let value = u16::from(input[at + 1] - b'0') * 64
-                + u16::from(input[at + 2] - b'0') * 8
-                + u16::from(input[at + 3] - b'0');
-            let value = u8::try_from(value)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad mountinfo escape"))?;
-            out.push(value);
-            at += 4;
-        } else {
-            out.push(input[at]);
-            at += 1;
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(target_os = "linux")]
@@ -463,7 +417,8 @@ mod tests {
             "530 509 0:4 mnt:[4026532535] /run/snapd/ns/lxd.mnt rw - nsfs nsfs rw\n",
             "36 35 98:0 / / rw - ext4 /dev/sda1 rw\n",
         );
-        let mounts = parse_mountinfo(text.as_bytes()).unwrap();
+        let rows = super::super::mountinfo::rows(text.as_bytes(), 16).unwrap();
+        let mounts = visible_mounts(&rows).unwrap();
         assert!(
             mounts
                 .iter()
