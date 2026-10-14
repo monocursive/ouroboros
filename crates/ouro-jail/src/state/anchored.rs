@@ -538,12 +538,13 @@ impl Dir {
         })
     }
 
-    /// Up to `max` entry names, `.` and `..` excluded, read from the start.
+    /// Up to `max` entry names, `.` and `..` excluded, read from the start,
+    /// and whether they are all of them.
     ///
     /// # Errors
     /// The errno from `fcntl`, `fdopendir` or `readdir`, or `InvalidData`
     /// for a name the kernel returned that is not a valid component.
-    pub fn names(&self, max: usize) -> io::Result<Vec<Name>> {
+    pub fn names(&self, max: usize) -> io::Result<Listing> {
         // `fdopendir` takes ownership of what it is given, so it gets a
         // duplicate; a duplicate shares the file offset, so the stream is
         // rewound before reading.
@@ -565,7 +566,10 @@ impl Dir {
         unsafe { libc::rewinddir(stream) };
         let mut out = Vec::new();
         let mut failure = None;
-        while out.len() < max {
+        let mut complete = false;
+        // One name past `max` is read, and not kept, to tell a directory of
+        // exactly `max` names from a larger one.
+        while out.len() <= max {
             clear_errno();
             // SAFETY: `stream` is live; the returned entry stays valid until
             // the next call on this stream.
@@ -575,6 +579,7 @@ impl Dir {
                 if errno.raw_os_error().unwrap_or(0) != 0 {
                     failure = Some(errno);
                 }
+                complete = true;
                 break;
             }
             // SAFETY: `entry` is non-null and `d_name` is a NUL-terminated
@@ -596,10 +601,14 @@ impl Dir {
         }
         // SAFETY: `stream` was created above and is closed exactly once.
         unsafe { libc::closedir(stream) };
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(out),
+        if let Some(error) = failure {
+            return Err(error);
         }
+        out.truncate(max);
+        Ok(Listing {
+            names: out,
+            complete,
+        })
     }
 
     /// `fsync` of the directory, which makes its entries durable.
@@ -814,6 +823,16 @@ pub fn walk<E>(
         chain.push(stat.identity());
     }
     Ok(Walked { dir, chain })
+}
+
+/// What [`Dir::names`] read.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Listing {
+    /// The names read, at most the bound asked for.
+    pub names: Vec<Name>,
+    /// Whether they are every name in the directory; false when it holds
+    /// more than the bound.
+    pub complete: bool,
 }
 
 fn verify(actual: &Stat, expected: Option<&Stat>) -> io::Result<()> {
@@ -1189,11 +1208,31 @@ mod tests {
         for name in ["one", "two", "three"] {
             std::fs::write(root.path().join(name), b"").unwrap();
         }
-        let first = dir.names(usize::MAX).unwrap();
-        let second = dir.names(usize::MAX).unwrap();
-        assert_eq!(first.len(), 3, "{first:?}");
-        assert_eq!(second.len(), 3, "a second read starts from the beginning");
-        assert_eq!(dir.names(2).unwrap().len(), 2);
+        let first = dir.names(usize::MAX - 1).unwrap();
+        let second = dir.names(usize::MAX - 1).unwrap();
+        assert_eq!(first.names.len(), 3, "{first:?}");
+        assert!(first.complete);
+        assert_eq!(
+            second.names.len(),
+            3,
+            "a second read starts from the beginning"
+        );
+        let bounded = dir.names(2).unwrap();
+        assert_eq!(bounded.names.len(), 2);
+        assert!(
+            !bounded.complete,
+            "a bound below the count is not all of it"
+        );
+        let exact = dir.names(3).unwrap();
+        assert_eq!(exact.names.len(), 3);
+        assert!(exact.complete, "exactly the bound is all of it");
+        assert_eq!(
+            dir.names(0).unwrap(),
+            Listing {
+                names: Vec::new(),
+                complete: false
+            }
+        );
     }
 
     #[test]
@@ -1210,7 +1249,7 @@ mod tests {
             dir.chmod_at(&name, 0o700).unwrap();
         }
         let opened = dir.open_dir_at(&name, Some(&stat)).unwrap();
-        assert_eq!(opened.names(10).unwrap().len(), 1);
+        assert_eq!(opened.names(10).unwrap().names.len(), 1);
     }
 
     #[cfg(target_os = "linux")]

@@ -337,7 +337,7 @@ fn remove_tree_within(
         let depth = stack.len();
         let Some(top) = stack.last() else { break };
         let names = match top.dir.names(BATCH) {
-            Ok(names) => names,
+            Ok(listing) => listing.names,
             Err(error) => return Removal::stopped(io_reason("read directory", &error), removed),
         };
         if names.is_empty() {

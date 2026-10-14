@@ -244,9 +244,8 @@ fn remove_recorded(
     Ok(outcome)
 }
 
-/// Names a proxy directory is read for: the socket node, and one more,
-/// which is already a foreign object.
-const LISTED_NAMES: usize = 2;
+/// The names a proxy directory may hold: its socket node, and nothing else.
+const LISTED_NAMES: usize = 1;
 
 /// Removes the registered proxy directory, anchored and never followed, and
 /// only while it is the object registered: an identity never recorded was
@@ -315,9 +314,15 @@ fn remove_socket(
     let Ok(proxy) = attempt.open_dir_at(name, Some(stat)) else {
         return Err(ProxyDirRemoval::Failed("proxy_directory_unreadable"));
     };
-    let Ok(entries) = proxy.names(LISTED_NAMES) else {
+    let Ok(listing) = proxy.names(LISTED_NAMES) else {
         return Err(ProxyDirRemoval::Failed("proxy_directory_unreadable"));
     };
+    if !listing.complete {
+        return Err(ProxyDirRemoval::Retained(
+            "proxy_directory_holds_a_foreign_object",
+        ));
+    }
+    let entries = listing.names;
     let Ok(socket_name) = anchored::Name::new(PROXY_SOCKET_NAME.as_bytes()) else {
         return Err(ProxyDirRemoval::Failed("name_invalid"));
     };
