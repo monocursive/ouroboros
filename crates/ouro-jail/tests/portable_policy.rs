@@ -309,7 +309,7 @@ fn host_grants_follow_the_mode_their_own_layer_sets() {
 
     let resolved = resolve(ProfileName::Agent, config(), &proxy_with_host)
         .expect("one layer may set the mode and grant under it");
-    assert_eq!(resolved.snapshot.network.mode, "proxy");
+    assert_eq!(resolved.snapshot.network.mode, NetworkMode::Proxy);
     assert_eq!(resolved.snapshot.network.allow, ["api.example.com:443"]);
 
     let error = workspace
@@ -997,7 +997,7 @@ fn p02_every_narrowing_category_is_allowed() {
             },
         )
         .expect("proxy narrows to none");
-    assert_eq!(resolved.snapshot.network.mode, "none");
+    assert_eq!(resolved.snapshot.network.mode, NetworkMode::None);
     assert!(resolved.snapshot.network.allow.is_empty());
     assert_eq!(resolved.snapshot.network.ruleset, None);
 
@@ -1501,7 +1501,7 @@ fn a_config_file_cannot_give_tool_a_proxy() {
     let plan = files
         .plan(&files.args("agent"))
         .expect("`agent` has the proxy the file asks for");
-    assert_eq!(plan.resolved.snapshot.network.mode, "proxy");
+    assert_eq!(plan.resolved.snapshot.network.mode, NetworkMode::Proxy);
     assert_eq!(plan.resolved.snapshot.network.allow, ["example.com:443"]);
 
     // Without the mode key, the host grant itself refuses, as does the same

@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::network::NetworkMode;
 use crate::policy::{LimitKey, PolicySnapshot, ProfileName, ProtectedCoverage};
 use crate::records::ObserveMode;
 
@@ -152,10 +153,12 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
         out.push(REQ_FILESYSTEM_CONTAINMENT.to_owned());
         out.push(REQ_SYSCALL_FILTER.to_owned());
     }
-    match snapshot.network.mode.as_str() {
-        "none" if snapshot.profile.is_contained() => out.push(REQ_NETWORK_NONE.to_owned()),
-        "proxy" => out.push(REQ_NETWORK_PROXY.to_owned()),
-        _ => {}
+    match snapshot.network.mode {
+        NetworkMode::None if snapshot.profile.is_contained() => {
+            out.push(REQ_NETWORK_NONE.to_owned());
+        }
+        NetworkMode::Proxy => out.push(REQ_NETWORK_PROXY.to_owned()),
+        NetworkMode::None | NetworkMode::Host => {}
     }
     // Restrictions `none` cannot apply are requirements it refuses
     out.extend(none_restrictions(snapshot));
@@ -228,7 +231,7 @@ fn none_restrictions(snapshot: &PolicySnapshot) -> Vec<String> {
     if !snapshot.filesystem.deny_read.is_empty() || !snapshot.filesystem.read_only.is_empty() {
         out.push(REQ_FILESYSTEM_CONTAINMENT.to_owned());
     }
-    if snapshot.network.mode.as_str() == "none" {
+    if snapshot.network.mode == NetworkMode::None {
         out.push(REQ_NETWORK_NONE.to_owned());
     }
     out
@@ -320,7 +323,7 @@ mod tests {
         );
 
         let mut isolated = snapshot_for(ProfileName::None);
-        isolated.network.mode = "none".to_owned();
+        isolated.network.mode = NetworkMode::None;
         assert!(
             requirements(&isolated)
                 .iter()

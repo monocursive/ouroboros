@@ -1399,7 +1399,7 @@ fn stream_classes(plan: &Plan) -> Vec<CoverageClass> {
     if plan.resolved.snapshot.observation.mode == crate::records::ObserveMode::On {
         classes.extend(CoverageClass::AUDIT);
     }
-    if plan.resolved.snapshot.network.mode == NetworkMode::Proxy.as_str() {
+    if plan.resolved.snapshot.network.mode == NetworkMode::Proxy {
         classes.push(CoverageClass::ProxyNet);
     }
     classes
@@ -2519,7 +2519,7 @@ fn prepare_proxy_dir(
     attempt_dir: &AttemptDir,
     plan: &Plan,
 ) -> Result<Option<crate::platform::ProxyDirHandoff>, JailError> {
-    if plan.resolved.snapshot.network.mode != NetworkMode::Proxy.as_str() {
+    if plan.resolved.snapshot.network.mode != NetworkMode::Proxy {
         return Ok(None);
     }
     let dir = state::create_proxy_dir(attempt_dir)?;

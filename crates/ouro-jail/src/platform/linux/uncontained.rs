@@ -191,7 +191,7 @@ fn unapplied_restriction(snapshot: &PolicySnapshot) -> Option<&'static str> {
         Some("filesystem.read_only")
     } else if snapshot.filesystem.protected_coverage != ProtectedCoverage::None {
         Some("filesystem.protected_coverage")
-    } else if snapshot.network.mode != "host" {
+    } else if snapshot.network.mode != crate::network::NetworkMode::Host {
         Some("network.mode")
     } else {
         None
@@ -1480,7 +1480,7 @@ mod tests {
             Some("filesystem.protected_coverage")
         );
         let mut isolated = bare;
-        isolated.network.mode = "none".to_owned();
+        isolated.network.mode = crate::network::NetworkMode::None;
         assert_eq!(unapplied_restriction(&isolated), Some("network.mode"));
     }
 

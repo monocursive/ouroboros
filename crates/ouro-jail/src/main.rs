@@ -386,7 +386,7 @@ fn explain_text(report: &ExplainReport) -> String {
             records::EvidenceMode::BestEffort => "best-effort",
         }
     );
-    let _ = writeln!(out, "network {}", snapshot.network.mode);
+    let _ = writeln!(out, "network {}", snapshot.network.mode.as_str());
     for reference in &snapshot.filesystem.read_write {
         let _ = writeln!(
             out,

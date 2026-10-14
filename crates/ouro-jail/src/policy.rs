@@ -228,8 +228,8 @@ pub struct FilesystemSnapshot {
 /// `network` field group of the snapshot.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct NetworkSnapshot {
-    /// `none`, `host` or `proxy`.
-    pub mode: String,
+    /// The network mode.
+    pub mode: NetworkMode,
     /// Canonical allow rules.
     pub allow: Vec<String>,
     /// The `allow` rules every grant of which omitted its port: the TLS shape,
@@ -1786,7 +1786,7 @@ fn build_snapshot(
             protected_coverage: authority.protected_coverage,
         },
         network: NetworkSnapshot {
-            mode: authority.network_mode.as_str().to_owned(),
+            mode: authority.network_mode,
             allow: if proxy {
                 authority
                     .network_allow

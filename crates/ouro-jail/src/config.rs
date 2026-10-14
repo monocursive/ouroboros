@@ -385,17 +385,12 @@ pub fn delta_from_sections(
         })?);
     }
     if let Some(mode) = &network.mode {
-        delta.network_mode = Some(match mode.as_str() {
-            "none" => NetworkMode::None,
-            "proxy" => NetworkMode::Proxy,
-            "host" => NetworkMode::Host,
-            other => {
-                return Err(invalid(
-                    &format!("{prefix}network.mode"),
-                    format!("unknown network mode `{other}`"),
-                ));
-            }
-        });
+        delta.network_mode = Some(NetworkMode::parse(mode).ok_or_else(|| {
+            invalid(
+                &format!("{prefix}network.mode"),
+                format!("unknown network mode `{mode}`"),
+            )
+        })?);
     }
     delta.network_allow_present = network.allow.is_some();
     delta.network_allow = network.allow.clone().unwrap_or_default();

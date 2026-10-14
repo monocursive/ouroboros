@@ -50,8 +50,10 @@ pub fn nfc(input: &str) -> String {
     unicode::nfc(input)
 }
 
-/// Requested network mode (§6.3, §10).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+/// Requested network mode (§6.3, §10). Serialized as [`NetworkMode::as_str`]
+/// spells it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum NetworkMode {
     /// No network at all: `tool` and `build`.
     None,
@@ -62,6 +64,15 @@ pub enum NetworkMode {
 }
 
 impl NetworkMode {
+    /// Every mode, lowest authority first.
+    pub const ALL: [NetworkMode; 3] = [NetworkMode::None, NetworkMode::Proxy, NetworkMode::Host];
+
+    /// The mode `text` spells, if any.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<NetworkMode> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == text)
+    }
+
     /// The wire spelling used by the snapshot and the receipt.
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -605,6 +616,23 @@ impl Rules {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A network mode serializes as its `as_str`, and `parse` reads back
+    /// exactly those spellings, so the snapshot's bytes and digest are the
+    /// same whichever one wrote them.
+    #[test]
+    fn each_network_mode_has_one_spelling() {
+        for mode in NetworkMode::ALL {
+            assert_eq!(
+                serde_json::to_value(mode).unwrap(),
+                serde_json::Value::from(mode.as_str())
+            );
+            assert_eq!(NetworkMode::parse(mode.as_str()), Some(mode));
+        }
+        for text in ["", "None", "proxy ", "hosts"] {
+            assert_eq!(NetworkMode::parse(text), None, "{text:?}");
+        }
+    }
 
     fn rule(raw: &str) -> HostRule {
         HostRule::parse(raw).expect("parses")

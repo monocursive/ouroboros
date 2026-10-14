@@ -310,6 +310,7 @@ impl Platform for Sim {
             .snapshot
             .network
             .mode
+            .as_str()
             .clone_into(&mut self.network.lock().unwrap());
         let mut seen = self.seen.lock().unwrap();
         seen.prepared = true;

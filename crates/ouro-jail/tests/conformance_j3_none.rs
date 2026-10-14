@@ -1220,7 +1220,7 @@ fn the_boundary_itself_refuses_a_restriction_it_would_not_apply() {
             });
         }),
         ("network.mode", |snapshot| {
-            snapshot.network.mode = "none".to_owned();
+            snapshot.network.mode = ouro_jail::network::NetworkMode::None;
         }),
         ("filesystem.protected_coverage", |snapshot| {
             snapshot.filesystem.protected_coverage =
