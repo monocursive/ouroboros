@@ -528,7 +528,7 @@ fn a_binaries_bound_vault_credential_reaches_only_the_pinned_client() {
     let snapshot: Value =
         serde_json::from_slice(&std::fs::read(attempt.join("policy.json")).unwrap()).unwrap();
     assert_eq!(
-        snapshot["launch"]["credentials"][0]["vault"]["binaries"],
+        snapshot["snapshot"]["launch"]["credentials"][0]["vault"]["binaries"],
         serde_json::json!([curl.to_str().unwrap()]),
         "{snapshot:#}"
     );

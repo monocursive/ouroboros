@@ -1527,11 +1527,22 @@ fn remove_empty_leaf(path: &Path, inode: u64) {
 /// each an observed closed-set write that emits a ~630 B trace frame) then
 /// sleeps `sleep_ms`, with `--evidence best-effort` so trace loss degrades
 /// rather than stopping the attempt, leaving only the wall to end it.
-fn pressure_case(opens: usize, sleep_ms: u64) -> (Case, Vec<OsString>) {
+fn pressure_case(opens: usize, sleep_ms: u64, levels: usize) -> (Case, Vec<OsString>) {
     let c = case("tool");
-    let long = "n".repeat(160);
+    // A result names its path: under `levels` long directory names a frame
+    // grows by about 200 bytes a level, so 18 levels make it about 4 KB and
+    // the burst reaches the pipe and the 4 MiB queue behind it by count
+    // within a fraction of a second, not by racing a loaded host's clock.
+    let mut deep = PathBuf::new();
+    for level in 0..levels {
+        deep.push(format!("{level:02}{}", "d".repeat(198)));
+    }
+    std::fs::create_dir_all(c.workspace.join(&deep)).unwrap();
     let mut steps: Vec<Value> = (0..opens)
-        .map(|index| serde_json::json!(["open", format!("{long}{index}"), "--create", "--write"]))
+        .map(|index| {
+            let path = deep.join(format!("{}{index}", "n".repeat(160)));
+            serde_json::json!(["open", path.to_str().unwrap(), "--create", "--write"])
+        })
         .collect();
     steps.push(serde_json::json!(["sleep", sleep_ms.to_string()]));
     let argv = c.script("r03-pressure", &Value::Array(steps));
@@ -1540,7 +1551,7 @@ fn pressure_case(opens: usize, sleep_ms: u64) -> (Case, Vec<OsString>) {
 
 /// The wall fires on time while a trace WRITE IS PARTIAL. Attempted, live: a
 /// `tool` run with a 2 s wall and a `Never` trace consumer (reads nothing
-/// while the jail runs), and enough events (~630 B each) that the pipe fills
+/// while the jail runs), and enough events (about 4 KB each) that the pipe fills
 /// and, behind it, the whole external queue. The frame that crosses the full
 /// boundary is written only in part before the fd goes `WouldBlock`, then the
 /// queue overflows and evidence is lost. The target would run 30 s. Verdict:
@@ -1557,7 +1568,7 @@ fn pressure_case(opens: usize, sleep_ms: u64) -> (Case, Vec<OsString>) {
 /// `set_nonblocking`).
 ///
 /// Whether the captured prefix ends exactly on a frame boundary or mid-frame
-/// (a torn last line) depends on where 64 KiB of ~630 B frames lands, so this
+/// (a torn last line) depends on where 64 KiB of ~4 KB frames lands, so this
 /// asserts recognisability, not tornness. A guaranteed torn write needs a
 /// smaller pipe or a larger-than-pipe event, neither available to this slice
 /// (the pipe size lives in the harness, the frame writer in `trace.rs`).
@@ -1566,7 +1577,7 @@ fn r03_a_wall_fires_on_time_under_a_saturated_trace() {
     if !common::live() {
         return;
     }
-    let (c, argv) = pressure_case(8_000, 30_000);
+    let (c, argv) = pressure_case(2_000, 30_000, 18);
     let started = Instant::now();
     let run = c
         .jail
@@ -1633,7 +1644,7 @@ fn r03_a_wall_expires_before_the_saturation_loss_is_declared() {
     }
     // Far more than the 4 MiB external queue, so the pipe and queue are full
     // well before the 500 ms wall — saturation is by volume, not by timing.
-    let (c, argv) = pressure_case(10_000, 30_000);
+    let (c, argv) = pressure_case(10_000, 30_000, 0);
     let started = Instant::now();
     let run = c
         .jail

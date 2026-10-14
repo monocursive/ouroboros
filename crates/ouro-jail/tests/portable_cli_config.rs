@@ -50,6 +50,7 @@ impl Harness {
     }
 
     fn run_with_env(&self, arguments: &[&str], extra: &[(&str, &str)]) -> Output {
+        clear_group_and_other_write(&self.config);
         let mut command = Command::new(env!("CARGO_BIN_EXE_ouro-jail"));
         command
             .env_clear()
@@ -63,6 +64,31 @@ impl Harness {
             command.env(name, value);
         }
         command.output().expect("the binary runs")
+    }
+}
+
+/// Takes the group and other write bits off everything the test wrote under
+/// the configuration directory, as an operator's umask of 022 would have.
+/// The tests write with `std::fs::write`, whose mode follows this process's
+/// umask; on a host whose umask is 002 (Ubuntu's default for a user with a
+/// private group) the binary would rightly refuse those files as writable by
+/// group, and each test here is about something else.
+fn clear_group_and_other_write(root: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    for entry in std::fs::read_dir(root).expect("the config directory lists") {
+        let path = entry.expect("an entry").path();
+        let metadata = std::fs::symlink_metadata(&path).expect("an entry's metadata");
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let mode = metadata.permissions().mode() & 0o7777;
+        if mode & 0o022 != 0 {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & !0o022))
+                .expect("permissions");
+        }
+        if metadata.is_dir() {
+            clear_group_and_other_write(&path);
+        }
     }
 }
 
