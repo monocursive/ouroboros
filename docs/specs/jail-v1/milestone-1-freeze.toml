@@ -13,7 +13,7 @@ rust_version = "1.98.1"
 
 # Cargo.lock, byte for byte
 [cargo_lock]
-sha256 = "55f0ec255e95128a061a20815b0990662cbfcec68423d2559235786e789acb87"
+sha256 = "22809b8e221ca87d21ea7e0af050423af9ba19b11fb4411bb66f2fe899c7e298"
 packages = 194
 
 # The seccomp programs' digests, from docs/specs/jail-v1/evidence/seccomp-table-*.txt
@@ -930,14 +930,16 @@ sections = '''
       "version": "4"
     },
     "libc": "0.2",
+    "ouro-records": {
+      "path": "../ouro-records"
+    },
     "serde": {
       "features": [
         "derive"
       ],
       "version": "1"
     },
-    "serde_json": "1",
-    "sha2": "0.10.9"
+    "serde_json": "1"
   },
   "dev-dependencies": {
     "tempfile": "3"
@@ -1113,6 +1115,9 @@ sections = '''
         "derive"
       ],
       "version": "4"
+    },
+    "ouro-fixture": {
+      "path": "../ouro-fixture"
     },
     "ouro-jail": {
       "path": "../ouro-jail"

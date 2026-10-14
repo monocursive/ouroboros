@@ -2273,7 +2273,7 @@ tests = [
   "ouro-jail/tests/j5_audit_gaps_linux.rs::j5_a_poisoned_trace_writes_a_receipt_that_passes_the_frozen_contract",
   "ouro-jail/src/lib.rs::platform::linux::audit::tests::a_panicked_observer_is_a_gap_in_every_audit_class",
   "ouro-jail/src/lib.rs::platform::linux::audit::tests::a_result_a_poisoned_trace_cannot_take_is_a_gap_of_its_class",
-  "ouro-jail/src/lib.rs::platform::linux::audit::tests::a_gap_note_a_poisoned_trace_refuses_is_a_lost_frame",
+  "ouro-jail/src/lib.rs::platform::linux::audit::tests::a_gap_whose_note_a_poisoned_trace_refuses_stays_in_the_summary",
 ]
 note = "the panic and the poisoned lock are forced in-process (simulated); no live run reaches either"
 

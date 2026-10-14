@@ -108,6 +108,7 @@ fn attempt(cli: &Cli) -> AttemptRecord {
                 mode: "none".to_owned(),
                 mechanism: None,
                 allowed_hosts: Vec::new(),
+                tls_only: Vec::new(),
             },
             syscalls: None,
             limits: Vec::new(),
