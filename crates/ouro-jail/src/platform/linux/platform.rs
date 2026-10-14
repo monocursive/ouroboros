@@ -4773,11 +4773,21 @@ fn step_for(deadline: PortableDeadline) -> Duration {
     remaining.min(WAIT_STEP).max(Duration::from_micros(200))
 }
 
-/// What the contained boundary and `super::uncontained` share: the rules
-/// both run loops apply, each written once in this module, and delegations
-/// to helpers above. A fix to one of these rules (an evidence gap, a stop, a
-/// refusal) reaches both boundaries; what still differs between them is the
-/// state each keeps, not these rules.
+/// What the contained boundary and `super::uncontained` share, each written
+/// once: the privileged-supervisor refusal, the ceiling rows, the error-pipe
+/// drain, the counter sample and its loss, the sample cadence, the wall and
+/// grace checks, the hard-kill arming, the exec evidence without an
+/// observer, the order of an observed outcome, the observer's verdict, and
+/// delegations to helpers above. A fix to one of these reaches both
+/// boundaries.
+///
+/// The run loops themselves are still written twice, because each keeps its
+/// own state: `pump_tracer`, `handle_tracer_event` and `stop_observer` (the
+/// contained loop also takes the backend's untraced exit and command-rule
+/// hits; `none` tracks a late target exit), and the methods that apply the
+/// shared rules to that state — the limit sample, `hard_kill`,
+/// `terminal_event`, `request_stop`, `wait_tree` and `observer_summary`. A
+/// fix to any of those must be made in both.
 pub(super) mod shared {
     use std::collections::VecDeque;
     use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
