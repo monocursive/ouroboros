@@ -341,15 +341,15 @@ fn serve_many(
             interests.push((client != 0).then_some((relay.client.as_fd(), client)));
             interests.push((upstream != 0).then_some((relay.upstream.as_fd(), upstream)));
         }
-        let fds = match crate::proxy::sys::poll(&interests, None) {
+        let revents = match crate::proxy::sys::poll(&interests, None) {
             Ok(revents) => revents,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return,
         };
 
         for (index, relay) in relays.iter_mut().enumerate() {
-            let client = fds[listeners.len() + index * 2];
-            let upstream = fds[listeners.len() + 1 + index * 2];
+            let client = revents[listeners.len() + index * 2];
+            let upstream = revents[listeners.len() + 1 + index * 2];
             if step(relay, client, upstream).is_err() {
                 // Either side failed: close both. The client sees its
                 // connection end; nothing else is attempted for it.
@@ -360,7 +360,7 @@ fn serve_many(
         relays.retain(|relay| !relay.finished());
 
         for (index, listener) in listeners.iter().enumerate() {
-            if fds[index] != 0
+            if revents[index] != 0
                 && accept_all(listener, connect, rejected, &mut relays, credential_origin)
             {
                 // Security 2026-09-27 (audit 3 A7b): the accept failed on
