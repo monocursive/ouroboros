@@ -24,16 +24,25 @@ pub(super) struct Site {
 
 impl Site {
     /// The address of the syscall instruction itself, where the kernel
-    /// rewinds the PC to restart the call: `ip` is just past it, and the
-    /// instruction is four bytes on arm64 (`svc #0`) and two on x86_64
-    /// (`syscall`).
-    fn restart_ip(self) -> u64 {
-        let width = if self.arch == abi::AUDIT_ARCH_AARCH64 {
-            4
-        } else {
-            2
+    /// rewinds the PC to restart the call: `ip` is just past it. The
+    /// instruction is four bytes on arm64 (`svc #0`), and two on x86_64 and
+    /// under its compat ABIs, where the kernel always rewinds two (`syscall`,
+    /// `int 0x80`, `sysenter`).
+    ///
+    /// `None` for an AArch32 task, which an arm64 kernel runs under
+    /// `AUDIT_ARCH_ARM` and which can reach this as a foreign call under
+    /// `none`: its `svc` is four bytes in ARM state and two in Thumb state
+    /// (`compat_thumb_mode`), and the entry stop does not say which. Nothing
+    /// is lost by not guessing: the native register reader refuses such a
+    /// task's register set (it is not arm64's size), so no handler frame of
+    /// it is ever located and its restart is settled by what follows.
+    fn restart_ip(self) -> Option<u64> {
+        let width = match self.arch {
+            abi::AUDIT_ARCH_AARCH64 => 4,
+            abi::AUDIT_ARCH_X86_64 | abi::AUDIT_ARCH_I386 => 2,
+            _ => return None,
         };
-        self.ip.wrapping_sub(width)
+        Some(self.ip.wrapping_sub(width))
     }
 }
 
@@ -146,7 +155,7 @@ fn verdict_at_handler(code: i64, frame: Option<(u64, u64)>, site: Site) -> Verdi
                     } else {
                         site.nr
                     }
-                    && ip == site.restart_ip() =>
+                    && Some(ip) == site.restart_ip() =>
             {
                 Verdict::Restarted
             }
@@ -245,19 +254,14 @@ impl Session {
     /// reader verifies the delivered signal and locates the kernel frame.
     /// An ordinary signal-delivery stop is not this handler-entry stop.
     fn handler_entry(&mut self, tid: pid_t, delivered: libc::c_int, site: Site) -> Option<u64> {
+        let restart_ip = site.restart_ip()?;
         let (signo, code) = sys::siginfo(tid).ok()?;
         if signo != libc::SIGTRAP || code != sys::SI_CODE_HANDLER_ENTRY {
             return None;
         }
         // The PC of a handler's entry is neither the call's own instruction,
         // where the kernel rewinds it to restart, nor the one after it.
-        sys::handler_ucontext(
-            tid,
-            u64::try_from(delivered).ok()?,
-            site.restart_ip(),
-            site.ip,
-        )
-        .ok()?
+        sys::handler_ucontext(tid, u64::try_from(delivered).ok()?, restart_ip, site.ip).ok()?
     }
 
     /// The interrupted result register and PC the kernel saved in the frame
@@ -457,14 +461,32 @@ mod tests {
         };
         assert_eq!(
             at(abi::AUDIT_ARCH_AARCH64).restart_ip(),
-            0x40_1000,
+            Some(0x40_1000),
             "svc #0"
         );
         assert_eq!(
             at(abi::AUDIT_ARCH_X86_64).restart_ip(),
-            0x40_1002,
+            Some(0x40_1002),
             "syscall"
         );
+        assert_eq!(
+            at(abi::AUDIT_ARCH_I386).restart_ip(),
+            Some(0x40_1002),
+            "int 0x80"
+        );
+        assert_eq!(at(0).restart_ip(), None, "an ABI the tracer does not know");
+        // AArch32's `svc` is four bytes in ARM state and two in Thumb state,
+        // which the entry stop does not show: no address, so no frame can
+        // decide a restart either way.
+        let arm = at(abi::AUDIT_ARCH_ARM);
+        assert_eq!(arm.restart_ip(), None);
+        for ip in [arm.ip - 2, arm.ip - 4] {
+            assert_eq!(
+                verdict_at_handler(sys::ERESTARTSYS, Some((arm.nr, ip)), arm),
+                Verdict::Unknown,
+                "{ip:#x}"
+            );
+        }
     }
 
     /// J4 O-2 at the session: a restart code keeps the call in flight; each
