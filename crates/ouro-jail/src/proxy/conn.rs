@@ -597,16 +597,16 @@ fn relay_tls_lane(
     destination: &Destination,
     early: &[u8],
 ) {
-    let relayed = tls::relay(
+    let lane = tls::Connection {
         vault,
         client,
-        &upstream.stream,
-        destination,
+        upstream: &upstream.stream,
+        target: destination,
+        initiator: &slot.initiator,
         early,
-        shared.budgets.relay_chunk(),
-        &slot.initiator,
-    );
-    let mut event = match relayed {
+        chunk: shared.budgets.relay_chunk(),
+    };
+    let mut event = match tls::relay(&lane) {
         Ok(outcome) => {
             slot.origin_verification = Some(Verification::MitmHttpHost);
             slot.relayed(upstream.address, &outcome, outcome.end)
