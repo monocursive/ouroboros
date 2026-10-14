@@ -202,3 +202,64 @@ fn settling_orphans_skips_a_run_it_cannot_reconcile_now_and_settles_the_rest() {
         assert_eq!(store.show(&id).unwrap().state, "outcome_unknown");
     }
 }
+
+/// A wrapper note at `seq` saying `message`.
+fn note(run: &RunRecord, seq: u64, message: &str) -> Value {
+    serde_json::to_value(records::Event::lifecycle_note(
+        &run.attempt_id,
+        seq,
+        std::time::SystemTime::UNIX_EPOCH,
+        seq.into(),
+        message,
+    ))
+    .unwrap()
+}
+
+/// Queue `event` in the run's pending journal, as an owner in a writer
+/// outage would.
+fn journal_event(store: &Store, run: &RunRecord, event: Value) {
+    let journal = Journal::open(&store.run_dir(&run.run_id)).unwrap();
+    let mut state = journal.read(run).unwrap();
+    state.push(event).unwrap();
+    journal.save(&state).unwrap();
+}
+
+#[test]
+fn pending_evidence_history_refuses_is_the_journals_refusal() {
+    let (_temp, mut store, run) = admitted_with_journal("pending-conflict");
+    store
+        .append_source(&run.run_id, &note(&run, 1, "accepted"), &peer(), TOKEN)
+        .unwrap();
+    // The journal claims the same producer sequence for other evidence.
+    journal_event(&store, &run, note(&run, 1, "conflicting"));
+    match store.reconcile(&run.run_id, &peer(), &|_| false) {
+        Err(PendingFailure::Refused(PendingRefusal::EvidenceRefused, _)) => {}
+        Err(PendingFailure::Refused(class, error)) => panic!("refused as {class:?}: {error}"),
+        Err(PendingFailure::Other(error)) => panic!("not the journal's refusal: {error}"),
+        Ok(run) => panic!("reconciled conflicting evidence: {run:?}"),
+    }
+    assert!(!store.stream(&run.run_id).unwrap().is_poisoned());
+}
+
+#[test]
+fn pending_evidence_the_store_failed_to_persist_is_not_the_journals_refusal() {
+    let (temp, mut store, run) = admitted_with_journal("pending-persist");
+    journal_event(&store, &run, note(&run, 1, "pending"));
+    let marker = temp.path().join("marker");
+    faults::arm(Plan::error(
+        Scope::Source,
+        Point::EventBeforeWrite,
+        marker.clone(),
+    ));
+    let result = store.reconcile(&run.run_id, &peer(), &|_| false);
+    faults::disarm();
+    assert!(marker.exists());
+    match result {
+        Err(PendingFailure::Other(_)) => {}
+        Err(PendingFailure::Refused(class, error)) => {
+            panic!("a persistence failure was refused as {class:?}: {error}")
+        }
+        Ok(run) => panic!("reconciled past a failed append: {run:?}"),
+    }
+    assert!(store.stream(&run.run_id).unwrap().is_poisoned());
+}
