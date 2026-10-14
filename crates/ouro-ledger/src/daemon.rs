@@ -1057,6 +1057,21 @@ mod tests {
     }
 
     /// A private data directory with a listening writer socket.
+    /// Connects to a writer that refuses the connection at once. The refusal
+    /// frame is written and the writer's end closed before the read timeout
+    /// may even be set: macOS then refuses the socket option with `EINVAL`,
+    /// although the frame is already buffered for the read that follows.
+    fn connect_to_a_refusal(data: &Path) -> UnixStream {
+        let refused = UnixStream::connect(data.join("ledger/serve.sock")).unwrap();
+        if let Err(error) = refused.set_read_timeout(Some(TIMEOUT)) {
+            assert!(
+                cfg!(target_os = "macos") && error.raw_os_error() == Some(libc::EINVAL),
+                "{error}"
+            );
+        }
+        refused
+    }
+
     fn listening(temp: &Path) -> (std::path::PathBuf, UnixListener) {
         let data = temp.join("data");
         crate::fsx::create_dir_all(&data.join("ledger")).unwrap();
@@ -1095,8 +1110,7 @@ mod tests {
         thread::spawn(move || {
             accept_connections(listener, sender, first_start_fails, thread::sleep)
         });
-        let mut refused = UnixStream::connect(data.join("ledger/serve.sock")).unwrap();
-        refused.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let mut refused = connect_to_a_refusal(&data);
         match read_frame::<Response>(&mut refused).unwrap() {
             Response::Error { message } => assert!(
                 message.starts_with("writer_busy: the writer cannot start a connection handler"),
@@ -1189,8 +1203,7 @@ mod tests {
         thread::spawn(move || accept_connections(listener, sender, starts_fail, record));
         // Each refused connection is accepted successfully first.
         for _ in 0..=MAX_CONNECTIONS {
-            let mut refused = UnixStream::connect(data.join("ledger/serve.sock")).unwrap();
-            refused.set_read_timeout(Some(TIMEOUT)).unwrap();
+            let mut refused = connect_to_a_refusal(&data);
             match read_frame::<Response>(&mut refused).unwrap() {
                 Response::Error { message } => assert!(
                     message
