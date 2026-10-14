@@ -126,8 +126,10 @@ Read [PREVIEW.txt](PREVIEW.txt) for installation, command examples and limits.
 Apple Silicon / macOS 27+ is the package's minimum; measured execution is on
 macOS 27.0.1. Intel Macs and native macOS workloads are not included.
 
-Build from a trusted prepared image (including matching guest source and seed
-hash), with a Developer ID Application identity available in Keychain:
+Build from a trusted prepared image whose seed hash and every source hash
+recorded by `prepare.py` match the committed `vm/` tree. Uncommitted changes
+there stop the build, and only committed files are archived as the preview
+source. A Developer ID Application identity must be available in Keychain:
 
 ```sh
 uv venv --python 3.13 evidence/vm-build-env
