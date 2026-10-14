@@ -295,7 +295,7 @@ impl Platform for Sim {
             std::fs::create_dir(attempt.join("vendor-state")).unwrap();
             std::fs::write(attempt.join("vendor-state/precious"), b"not this attempt's").unwrap();
         }
-        sim::available(plan, "J3 launch simulation")
+        sim::available(plan, "launch simulation")
     }
     fn prepare(
         &self,

@@ -112,7 +112,7 @@ impl Platform for Sim {
         sim::identity()
     }
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
-        sim::available(plan, "J4 persistence simulation")
+        sim::available(plan, "persistence simulation")
     }
     fn prepare(&self, _: PreparedPlan, _: Sinks) -> Result<Box<dyn PreparedExecution>, JailError> {
         Ok(Box::new(SimPrepared(self.clone())))

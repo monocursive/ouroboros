@@ -195,8 +195,8 @@ fn path_key(p: &Path) -> String {
 /// test binary was built into (`<target>/[<triple>/]<profile>/deps/<test>`),
 /// next to the profile directories. It is a build artifact like any other:
 /// reused by the next run, removed by `cargo clean`, and never left in the
-/// shared temporary directory, where each tree's copy (about 100 MB) used to
-/// stay until the machine was cleaned by hand.
+/// shared temporary directory, where a copy per tree (about 100 MB) would
+/// stay until someone removed it by hand.
 fn on_demand_dir(exe: &Path) -> Option<PathBuf> {
     let deps = exe.parent()?;
     if deps.file_name() != Some(OsStr::new("deps")) {
