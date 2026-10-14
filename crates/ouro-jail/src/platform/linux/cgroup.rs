@@ -176,6 +176,13 @@ pub fn is_leaf_name(name: &std::ffi::OsStr) -> bool {
         .is_some_and(|token| crate::state::AttemptId::parse(token).is_ok())
 }
 
+/// Whether an execution leaf enforces the ceiling `key` (through one of its
+/// controllers).
+#[must_use]
+pub fn enforces(key: LimitKey) -> bool {
+    CgroupLimit::for_key(key).is_some()
+}
+
 /// The ceilings an execution leaf enforces, each through one controller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CgroupLimit {
@@ -208,12 +215,7 @@ impl CgroupLimit {
     }
 
     fn requested(self, limits: &LimitsSnapshot) -> Option<&LimitCeiling> {
-        match self {
-            CgroupLimit::Pids => limits.pids.as_ref(),
-            CgroupLimit::Mem => limits.mem.as_ref(),
-            CgroupLimit::Swap => limits.swap.as_ref(),
-            CgroupLimit::Cpu => limits.cpu.as_ref(),
-        }
+        limits.get(self.key())
     }
 
     /// The control file the ceiling is written to.

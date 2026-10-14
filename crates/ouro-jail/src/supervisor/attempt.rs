@@ -36,7 +36,7 @@ use crate::platform::{
     Deadline, PlanRequest, PreparedExecution, PreparedPlan, ProxyDirHandoff, ReleaseFailure,
     RunEvent, RunningExecution, Sinks, StopReason,
 };
-use crate::policy::ProfileName;
+use crate::policy::{LimitKey, ProfileName};
 use crate::records::{
     AttemptRecord, Containment, ControlKind, ErrorCode, ErrorStage, EvidenceMode, GateExpectation,
     JailError, JailRecord, Lifetime, Outcome, OutcomeKind, Phase, PolicyRecord, Receipt,
@@ -690,7 +690,7 @@ impl<'a> Attempt<'a> {
             .applied
             .limits
             .iter_mut()
-            .find(|limit| limit.key == "wall" && limit.applied)
+            .find(|limit| limit.key == LimitKey::Wall.as_str() && limit.applied)
         {
             wall.hit = Some(true);
         }

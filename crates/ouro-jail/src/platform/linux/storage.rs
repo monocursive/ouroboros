@@ -66,10 +66,7 @@ impl StorageLimit {
 
     /// The ceiling the policy requested, if any.
     fn requested(self, limits: &LimitsSnapshot) -> Option<&LimitCeiling> {
-        match self {
-            StorageLimit::Bytes => limits.storage.as_ref(),
-            StorageLimit::Inodes => limits.inodes.as_ref(),
-        }
+        limits.get(self.key())
     }
 }
 

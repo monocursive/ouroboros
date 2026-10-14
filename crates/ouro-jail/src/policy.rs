@@ -311,6 +311,36 @@ pub struct LimitsSnapshot {
     pub cpu: Option<LimitCeiling>,
 }
 
+impl LimitsSnapshot {
+    /// The ceiling for `key`, if one is set: the one projection from a key
+    /// to its field.
+    #[must_use]
+    pub fn get(&self, key: LimitKey) -> Option<&LimitCeiling> {
+        match key {
+            LimitKey::Wall => self.wall.as_ref(),
+            LimitKey::Pids => self.pids.as_ref(),
+            LimitKey::Mem => self.mem.as_ref(),
+            LimitKey::Swap => self.swap.as_ref(),
+            LimitKey::Storage => self.storage.as_ref(),
+            LimitKey::Inodes => self.inodes.as_ref(),
+            LimitKey::Cpu => self.cpu.as_ref(),
+        }
+    }
+
+    /// The field for `key`, to set or clear.
+    pub fn get_mut(&mut self, key: LimitKey) -> &mut Option<LimitCeiling> {
+        match key {
+            LimitKey::Wall => &mut self.wall,
+            LimitKey::Pids => &mut self.pids,
+            LimitKey::Mem => &mut self.mem,
+            LimitKey::Swap => &mut self.swap,
+            LimitKey::Storage => &mut self.storage,
+            LimitKey::Inodes => &mut self.inodes,
+            LimitKey::Cpu => &mut self.cpu,
+        }
+    }
+}
+
 /// `observation` field group of the snapshot.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -653,7 +683,9 @@ pub struct Ceilings {
 }
 
 impl Ceilings {
-    fn get(&self, key: LimitKey) -> &Option<Ceiling> {
+    /// The ceiling for `key`: the one projection from a key to its field.
+    #[must_use]
+    pub fn get(&self, key: LimitKey) -> &Option<Ceiling> {
         match key {
             LimitKey::Wall => &self.wall,
             LimitKey::Pids => &self.pids,
@@ -665,7 +697,8 @@ impl Ceilings {
         }
     }
 
-    fn set(&mut self, key: LimitKey, ceiling: Option<Ceiling>) {
+    /// Sets or clears the ceiling for `key`.
+    pub fn set(&mut self, key: LimitKey, ceiling: Option<Ceiling>) {
         match key {
             LimitKey::Wall => self.wall = ceiling,
             LimitKey::Pids => self.pids = ceiling,
@@ -1806,14 +1839,12 @@ fn build_snapshot(
                 Vec::new()
             },
         },
-        limits: LimitsSnapshot {
-            wall: ceiling(&authority.limits.wall),
-            pids: ceiling(&authority.limits.pids),
-            mem: ceiling(&authority.limits.mem),
-            swap: ceiling(&authority.limits.swap),
-            storage: ceiling(&authority.limits.storage),
-            inodes: ceiling(&authority.limits.inodes),
-            cpu: ceiling(&authority.limits.cpu),
+        limits: {
+            let mut limits = LimitsSnapshot::default();
+            for key in LimitKey::ALL {
+                *limits.get_mut(key) = ceiling(authority.limits.get(key));
+            }
+            limits
         },
         observation: authority.observation,
         environment: EnvironmentSnapshot {

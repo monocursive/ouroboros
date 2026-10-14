@@ -39,8 +39,8 @@ use crate::platform::{
     BoundaryIdentity, ContinuousDeadline, PlanRequest, Platform, StopReason, Teardown,
 };
 use crate::policy::{
-    self, CredentialMode, Layer, LayerOrigin, PolicyDelta, ProfileName, ResolveInputs, Resolved,
-    ScratchRoot,
+    self, CredentialMode, Layer, LayerOrigin, LimitKey, PolicyDelta, ProfileName, ResolveInputs,
+    Resolved, ScratchRoot,
 };
 use crate::profiles;
 use crate::records::StateCleanup;
@@ -2040,12 +2040,12 @@ fn merge_wall_limit(record: &mut AttemptRecord, plan: &Plan) {
         .applied
         .limits
         .iter()
-        .any(|limit| limit.key == "wall")
+        .any(|limit| limit.key == LimitKey::Wall.as_str())
     {
         return;
     }
     record.applied.limits.push(AppliedLimit {
-        key: "wall".to_owned(),
+        key: LimitKey::Wall.as_str().to_owned(),
         requested: wall.requested.clone(),
         required: wall.required,
         applied: true,

@@ -216,16 +216,7 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<Requirement> {
     // off; that is its only lifetime boundary.
     let mut needs_cgroup = snapshot.profile == ProfileName::None;
     for key in LimitKey::ALL {
-        let ceiling = match key {
-            LimitKey::Wall => &snapshot.limits.wall,
-            LimitKey::Pids => &snapshot.limits.pids,
-            LimitKey::Mem => &snapshot.limits.mem,
-            LimitKey::Swap => &snapshot.limits.swap,
-            LimitKey::Storage => &snapshot.limits.storage,
-            LimitKey::Inodes => &snapshot.limits.inodes,
-            LimitKey::Cpu => &snapshot.limits.cpu,
-        };
-        if let Some(ceiling) = ceiling
+        if let Some(ceiling) = snapshot.limits.get(key)
             && ceiling.required
         {
             out.push(Requirement::Limit(key));
@@ -412,13 +403,7 @@ mod tests {
                 value: "1".to_owned(),
                 required: true,
             };
-            match key {
-                LimitKey::Pids => snapshot.limits.pids = Some(ceiling),
-                LimitKey::Mem => snapshot.limits.mem = Some(ceiling),
-                LimitKey::Swap => snapshot.limits.swap = Some(ceiling),
-                LimitKey::Cpu => snapshot.limits.cpu = Some(ceiling),
-                other => unreachable!("{other:?}"),
-            }
+            *snapshot.limits.get_mut(key) = Some(ceiling);
             let requirements = requirements(&snapshot);
             assert!(
                 requirements.contains(&Requirement::Limit(key)),

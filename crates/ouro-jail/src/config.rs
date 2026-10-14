@@ -436,15 +436,7 @@ pub fn ceilings_from_section(
             requested: text,
             required,
         });
-        match key {
-            LimitKey::Wall => out.wall = ceiling,
-            LimitKey::Pids => out.pids = ceiling,
-            LimitKey::Mem => out.mem = ceiling,
-            LimitKey::Swap => out.swap = ceiling,
-            LimitKey::Storage => out.storage = ceiling,
-            LimitKey::Inodes => out.inodes = ceiling,
-            LimitKey::Cpu => out.cpu = ceiling,
-        }
+        out.set(key, ceiling);
     }
     Ok(out)
 }
@@ -484,15 +476,7 @@ pub fn ceilings_from_cli(arguments: &[String]) -> Result<Ceilings, JailError> {
             requested: value.to_owned(),
             required: true,
         });
-        match limit {
-            LimitKey::Wall => out.wall = ceiling,
-            LimitKey::Pids => out.pids = ceiling,
-            LimitKey::Mem => out.mem = ceiling,
-            LimitKey::Swap => out.swap = ceiling,
-            LimitKey::Storage => out.storage = ceiling,
-            LimitKey::Inodes => out.inodes = ceiling,
-            LimitKey::Cpu => out.cpu = ceiling,
-        }
+        out.set(limit, ceiling);
     }
     Ok(out)
 }

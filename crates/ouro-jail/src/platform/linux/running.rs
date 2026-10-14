@@ -24,7 +24,7 @@ use crate::platform::{
     BoundaryIdentity, Deadline as PortableDeadline, LimitCause, PreparedExecution, ReleaseFailure,
     RunEvent, RunningExecution, StopReason, Teardown, TreeObservation,
 };
-use crate::policy::{LimitsSnapshot, PolicySnapshot};
+use crate::policy::{LimitKey, LimitsSnapshot, PolicySnapshot};
 use crate::records::{Applied, AppliedLimit, ErrorCode, ErrorStage, JailError, Remediation};
 use crate::supervisor::TREE_BUDGET;
 
@@ -822,24 +822,27 @@ pub(super) fn ceiling_rows(
     leaf: Option<&ExecutionCgroup>,
 ) -> Vec<AppliedLimit> {
     let mut rows = Vec::new();
-    for (key, ceiling) in [
-        ("wall", limits.wall.as_ref()),
-        ("pids", limits.pids.as_ref()),
-        ("mem", limits.mem.as_ref()),
-        ("swap", limits.swap.as_ref()),
-        ("cpu", limits.cpu.as_ref()),
-    ] {
-        let Some(ceiling) = ceiling else { continue };
-        if key != "wall"
-            && let Some(limit) =
-                leaf.and_then(|leaf| leaf.limits().into_iter().find(|limit| limit.key == key))
+    // The wall and the cgroup ceilings; storage reports its own rows.
+    for key in LimitKey::ALL
+        .into_iter()
+        .filter(|key| *key == LimitKey::Wall || super::cgroup::enforces(*key))
+    {
+        let Some(ceiling) = limits.get(key) else {
+            continue;
+        };
+        if key != LimitKey::Wall
+            && let Some(limit) = leaf.and_then(|leaf| {
+                leaf.limits()
+                    .into_iter()
+                    .find(|limit| limit.key == key.as_str())
+            })
         {
             rows.push(limit);
             continue;
         }
-        let applied = key == "wall";
+        let applied = key == LimitKey::Wall;
         rows.push(AppliedLimit {
-            key: key.to_owned(),
+            key: key.as_str().to_owned(),
             requested: ceiling.value.clone(),
             required: ceiling.required,
             applied,

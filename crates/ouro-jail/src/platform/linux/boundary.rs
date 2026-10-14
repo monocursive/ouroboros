@@ -24,7 +24,7 @@ use crate::observer::CoverageSummary;
 use crate::platform::{
     BoundaryIdentity, LimitCause, PreparedPlan, RunEvent, Sinks, TreeObservation,
 };
-use crate::policy::{PolicySnapshot, ProfileName, ProtectedCoverage, ScratchRoot};
+use crate::policy::{LimitKey, PolicySnapshot, ProfileName, ProtectedCoverage, ScratchRoot};
 use crate::records::{
     Applied, AppliedFilesystem, AppliedLimit, AppliedMount, AppliedNetwork, AppliedSyscalls,
     ErrorCode, ErrorStage, JailError, NativeLifetime, NativeString, ObserveMode, Os,
@@ -36,7 +36,7 @@ use super::agent::AgentNet;
 use super::audit::AuditWriter;
 use super::bpf::Program;
 use super::bwrap::{self, BwrapPlan, Placeholder, PlaceholderOutcome, PlaceholderSet, Rendered};
-use super::cgroup::ExecutionCgroup;
+use super::cgroup::{self, ExecutionCgroup};
 use super::clock;
 use super::exec::{self, BootstrapChild, BootstrapSpawn, FdMap};
 use super::fs as jfs;
@@ -713,14 +713,12 @@ pub(super) fn create(
         return Err(started.refuse(err, None, &mut audit, observe_on));
     }
     if let Some(reason) = started.cgroup_unavailable.clone() {
-        for (key, ceiling) in [
-            ("pids", &snapshot.limits.pids),
-            ("mem", &snapshot.limits.mem),
-            ("swap", &snapshot.limits.swap),
-            ("cpu", &snapshot.limits.cpu),
-        ] {
-            if ceiling.is_some() {
-                audit.record_limit_unapplied(key, &reason);
+        for key in LimitKey::ALL
+            .into_iter()
+            .filter(|key| cgroup::enforces(*key))
+        {
+            if snapshot.limits.get(key).is_some() {
+                audit.record_limit_unapplied(key.as_str(), &reason);
             }
         }
     }
@@ -852,15 +850,11 @@ fn execution_cgroup(
     snapshot: &PolicySnapshot,
     attempt_dir: &Path,
 ) -> Result<(Option<ExecutionCgroup>, Option<String>), JailError> {
-    let required = [
-        &snapshot.limits.pids,
-        &snapshot.limits.mem,
-        &snapshot.limits.swap,
-        &snapshot.limits.cpu,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|limit| limit.required);
+    let required = LimitKey::ALL
+        .into_iter()
+        .filter(|key| cgroup::enforces(*key))
+        .filter_map(|key| snapshot.limits.get(key))
+        .any(|limit| limit.required);
     // N7: registered in jail state before `mkdir` and before anything is
     // placed in it; a failed registration refuses (S5).
     match ExecutionCgroup::create_for_attempt(&snapshot.limits, attempt_dir)? {
