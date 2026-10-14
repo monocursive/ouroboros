@@ -519,7 +519,7 @@ pub struct ExecFailure {
 impl ExecFailure {
     /// The errno name, which is what a receipt's `outcome.cause` holds.
     #[must_use]
-    pub fn errno_name(&self) -> &'static str {
+    pub fn errno_name(&self) -> std::borrow::Cow<'static, str> {
         super::sys::errno_name(self.errno)
     }
 
@@ -556,7 +556,7 @@ pub fn decode_exec_failure(bytes: &[u8]) -> Option<ExecFailure> {
 pub fn exec_failure_parts(bytes: &[u8]) -> (String, Option<crate::platform::ExecFailureDetail>) {
     decode_exec_failure(bytes).map_or_else(
         || ("unknown".to_owned(), None),
-        |failure| (failure.errno_name().to_owned(), failure.detail()),
+        |failure| (failure.errno_name().into_owned(), failure.detail()),
     )
 }
 

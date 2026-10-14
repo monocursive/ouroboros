@@ -2355,7 +2355,7 @@ fn nap() {
 /// is the backend's.
 fn launcher_failure(exit_code: Option<i32>, errno_bytes: &[u8], diagnostic: &str) -> JailError {
     let errno = super::launch::decode_error_report(errno_bytes)
-        .map_or("no errno reported", super::sys::errno_name);
+        .map_or("no errno reported".into(), super::sys::errno_name);
     match exit_code {
         Some(super::launch::EXIT_MEDIATION_FAILED) => preparing(
             ErrorCode::MissingCapability,

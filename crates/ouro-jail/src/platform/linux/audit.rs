@@ -460,7 +460,7 @@ impl AuditWriter {
         let outcome = EventOutcome {
             ok: Some(ret >= 0),
             return_value: Some(ret),
-            errno: errno.map(|code| super::sys::errno_name(code).to_owned()),
+            errno: errno.map(|code| super::sys::errno_name(code).into_owned()),
             completion: Completion::SyscallReturn,
             bytes_in: None,
             bytes_out: None,
@@ -569,7 +569,7 @@ impl AuditWriter {
         let outcome = EventOutcome {
             ok: Some(record.ret >= 0),
             return_value: Some(record.ret),
-            errno: errno.map(|code| super::sys::errno_name(code).to_owned()),
+            errno: errno.map(|code| super::sys::errno_name(code).into_owned()),
             completion: Completion::SyscallReturn,
             bytes_in: None,
             bytes_out: None,

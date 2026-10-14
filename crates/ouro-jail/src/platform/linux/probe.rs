@@ -1571,7 +1571,7 @@ fn outcome(rc: i64) -> String {
     if rc >= 0 {
         "ok".to_owned()
     } else {
-        errno_name(last()).to_owned()
+        errno_name(last()).into_owned()
     }
 }
 
@@ -1593,7 +1593,7 @@ fn check_write(path: &str) -> String {
         unsafe { libc::close(fd) };
         return "ok".to_owned();
     }
-    errno_name(last()).to_owned()
+    errno_name(last()).into_owned()
 }
 
 fn check_mkdir(path: &str) -> String {
@@ -1623,7 +1623,7 @@ fn check_listdir(path: &str) -> String {
             names.sort();
             names.join(",")
         }
-        Err(e) => errno_name(e.raw_os_error().unwrap_or(libc::EIO)).to_owned(),
+        Err(e) => errno_name(e.raw_os_error().unwrap_or(libc::EIO)).into_owned(),
     }
 }
 
@@ -1643,7 +1643,7 @@ fn check_socket_afunix() -> String {
         unsafe { libc::close(fd) };
         return "ok".to_owned();
     }
-    errno_name(last()).to_owned()
+    errno_name(last()).into_owned()
 }
 
 #[cfg(test)]

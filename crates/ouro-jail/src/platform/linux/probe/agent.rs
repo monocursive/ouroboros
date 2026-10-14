@@ -467,7 +467,7 @@ pub fn check_unix_self(path: &str) -> String {
 fn io_errno(error: &io::Error) -> String {
     error.raw_os_error().map_or_else(
         || format!("{:?}", error.kind()),
-        |code| errno_name(code).to_owned(),
+        |code| errno_name(code).into_owned(),
     )
 }
 
@@ -576,7 +576,7 @@ fn result(rc: i64) -> String {
         }
         "ok".to_owned()
     } else {
-        errno_name(crate::platform::linux::sys::last_errno()).to_owned()
+        errno_name(crate::platform::linux::sys::last_errno()).into_owned()
     }
 }
 

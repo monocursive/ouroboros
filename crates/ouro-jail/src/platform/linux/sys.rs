@@ -115,102 +115,170 @@ pub const fn trace_data_from_bytes(bytes: [u8; 2]) -> u16 {
     u16::from_le_bytes(bytes)
 }
 
-/// The symbolic name of a Linux errno, or `E<number>` when it is not one this
-/// project names. Receipts and probe evidence carry the name, never a bare
-/// number, because a number in a report is not a fact anyone can check.
+/// Every errno Linux defines, by its symbolic name, in number order (the
+/// asm-generic numbering x86_64 and aarch64 share). Aliases (`EWOULDBLOCK`,
+/// `EDEADLOCK`, `ENOTSUP`) name a number already here and are left out.
+const ERRNOS: &[(i32, &str)] = &[
+    (libc::EPERM, "EPERM"),
+    (libc::ENOENT, "ENOENT"),
+    (libc::ESRCH, "ESRCH"),
+    (libc::EINTR, "EINTR"),
+    (libc::EIO, "EIO"),
+    (libc::ENXIO, "ENXIO"),
+    (libc::E2BIG, "E2BIG"),
+    (libc::ENOEXEC, "ENOEXEC"),
+    (libc::EBADF, "EBADF"),
+    (libc::ECHILD, "ECHILD"),
+    (libc::EAGAIN, "EAGAIN"),
+    (libc::ENOMEM, "ENOMEM"),
+    (libc::EACCES, "EACCES"),
+    (libc::EFAULT, "EFAULT"),
+    (libc::ENOTBLK, "ENOTBLK"),
+    (libc::EBUSY, "EBUSY"),
+    (libc::EEXIST, "EEXIST"),
+    (libc::EXDEV, "EXDEV"),
+    (libc::ENODEV, "ENODEV"),
+    (libc::ENOTDIR, "ENOTDIR"),
+    (libc::EISDIR, "EISDIR"),
+    (libc::EINVAL, "EINVAL"),
+    (libc::ENFILE, "ENFILE"),
+    (libc::EMFILE, "EMFILE"),
+    (libc::ENOTTY, "ENOTTY"),
+    (libc::ETXTBSY, "ETXTBSY"),
+    (libc::EFBIG, "EFBIG"),
+    (libc::ENOSPC, "ENOSPC"),
+    (libc::ESPIPE, "ESPIPE"),
+    (libc::EROFS, "EROFS"),
+    (libc::EMLINK, "EMLINK"),
+    (libc::EPIPE, "EPIPE"),
+    (libc::EDOM, "EDOM"),
+    (libc::ERANGE, "ERANGE"),
+    (libc::EDEADLK, "EDEADLK"),
+    (libc::ENAMETOOLONG, "ENAMETOOLONG"),
+    (libc::ENOLCK, "ENOLCK"),
+    (libc::ENOSYS, "ENOSYS"),
+    (libc::ENOTEMPTY, "ENOTEMPTY"),
+    (libc::ELOOP, "ELOOP"),
+    (libc::ENOMSG, "ENOMSG"),
+    (libc::EIDRM, "EIDRM"),
+    (libc::ECHRNG, "ECHRNG"),
+    (libc::EL2NSYNC, "EL2NSYNC"),
+    (libc::EL3HLT, "EL3HLT"),
+    (libc::EL3RST, "EL3RST"),
+    (libc::ELNRNG, "ELNRNG"),
+    (libc::EUNATCH, "EUNATCH"),
+    (libc::ENOCSI, "ENOCSI"),
+    (libc::EL2HLT, "EL2HLT"),
+    (libc::EBADE, "EBADE"),
+    (libc::EBADR, "EBADR"),
+    (libc::EXFULL, "EXFULL"),
+    (libc::ENOANO, "ENOANO"),
+    (libc::EBADRQC, "EBADRQC"),
+    (libc::EBADSLT, "EBADSLT"),
+    (libc::EBFONT, "EBFONT"),
+    (libc::ENOSTR, "ENOSTR"),
+    (libc::ENODATA, "ENODATA"),
+    (libc::ETIME, "ETIME"),
+    (libc::ENOSR, "ENOSR"),
+    (libc::ENONET, "ENONET"),
+    (libc::ENOPKG, "ENOPKG"),
+    (libc::EREMOTE, "EREMOTE"),
+    (libc::ENOLINK, "ENOLINK"),
+    (libc::EADV, "EADV"),
+    (libc::ESRMNT, "ESRMNT"),
+    (libc::ECOMM, "ECOMM"),
+    (libc::EPROTO, "EPROTO"),
+    (libc::EMULTIHOP, "EMULTIHOP"),
+    (libc::EDOTDOT, "EDOTDOT"),
+    (libc::EBADMSG, "EBADMSG"),
+    (libc::EOVERFLOW, "EOVERFLOW"),
+    (libc::ENOTUNIQ, "ENOTUNIQ"),
+    (libc::EBADFD, "EBADFD"),
+    (libc::EREMCHG, "EREMCHG"),
+    (libc::ELIBACC, "ELIBACC"),
+    (libc::ELIBBAD, "ELIBBAD"),
+    (libc::ELIBSCN, "ELIBSCN"),
+    (libc::ELIBMAX, "ELIBMAX"),
+    (libc::ELIBEXEC, "ELIBEXEC"),
+    (libc::EILSEQ, "EILSEQ"),
+    (libc::ERESTART, "ERESTART"),
+    (libc::ESTRPIPE, "ESTRPIPE"),
+    (libc::EUSERS, "EUSERS"),
+    (libc::ENOTSOCK, "ENOTSOCK"),
+    (libc::EDESTADDRREQ, "EDESTADDRREQ"),
+    (libc::EMSGSIZE, "EMSGSIZE"),
+    (libc::EPROTOTYPE, "EPROTOTYPE"),
+    (libc::ENOPROTOOPT, "ENOPROTOOPT"),
+    (libc::EPROTONOSUPPORT, "EPROTONOSUPPORT"),
+    (libc::ESOCKTNOSUPPORT, "ESOCKTNOSUPPORT"),
+    (libc::EOPNOTSUPP, "EOPNOTSUPP"),
+    (libc::EPFNOSUPPORT, "EPFNOSUPPORT"),
+    (libc::EAFNOSUPPORT, "EAFNOSUPPORT"),
+    (libc::EADDRINUSE, "EADDRINUSE"),
+    (libc::EADDRNOTAVAIL, "EADDRNOTAVAIL"),
+    (libc::ENETDOWN, "ENETDOWN"),
+    (libc::ENETUNREACH, "ENETUNREACH"),
+    (libc::ENETRESET, "ENETRESET"),
+    (libc::ECONNABORTED, "ECONNABORTED"),
+    (libc::ECONNRESET, "ECONNRESET"),
+    (libc::ENOBUFS, "ENOBUFS"),
+    (libc::EISCONN, "EISCONN"),
+    (libc::ENOTCONN, "ENOTCONN"),
+    (libc::ESHUTDOWN, "ESHUTDOWN"),
+    (libc::ETOOMANYREFS, "ETOOMANYREFS"),
+    (libc::ETIMEDOUT, "ETIMEDOUT"),
+    (libc::ECONNREFUSED, "ECONNREFUSED"),
+    (libc::EHOSTDOWN, "EHOSTDOWN"),
+    (libc::EHOSTUNREACH, "EHOSTUNREACH"),
+    (libc::EALREADY, "EALREADY"),
+    (libc::EINPROGRESS, "EINPROGRESS"),
+    (libc::ESTALE, "ESTALE"),
+    (libc::EUCLEAN, "EUCLEAN"),
+    (libc::ENOTNAM, "ENOTNAM"),
+    (libc::ENAVAIL, "ENAVAIL"),
+    (libc::EISNAM, "EISNAM"),
+    (libc::EREMOTEIO, "EREMOTEIO"),
+    (libc::EDQUOT, "EDQUOT"),
+    (libc::ENOMEDIUM, "ENOMEDIUM"),
+    (libc::EMEDIUMTYPE, "EMEDIUMTYPE"),
+    (libc::ECANCELED, "ECANCELED"),
+    (libc::ENOKEY, "ENOKEY"),
+    (libc::EKEYEXPIRED, "EKEYEXPIRED"),
+    (libc::EKEYREVOKED, "EKEYREVOKED"),
+    (libc::EKEYREJECTED, "EKEYREJECTED"),
+    (libc::EOWNERDEAD, "EOWNERDEAD"),
+    (libc::ENOTRECOVERABLE, "ENOTRECOVERABLE"),
+    (libc::ERFKILL, "ERFKILL"),
+    (libc::EHWPOISON, "EHWPOISON"),
+];
+
+/// The symbolic name of a Linux errno, `NONE` for zero, and `E<number>` for
+/// a number Linux does not define. Receipts and probe evidence carry the
+/// name, never a bare number, because a number in a report is not a fact
+/// anyone can check; an undefined one keeps its number, so nothing is lost.
 #[must_use]
-pub fn errno_name(errno: i32) -> &'static str {
-    match errno {
-        0 => "NONE",
-        libc::EPERM => "EPERM",
-        libc::ENOENT => "ENOENT",
-        libc::ESRCH => "ESRCH",
-        libc::EINTR => "EINTR",
-        libc::EIO => "EIO",
-        libc::ENXIO => "ENXIO",
-        libc::E2BIG => "E2BIG",
-        libc::ENOEXEC => "ENOEXEC",
-        libc::EBADF => "EBADF",
-        libc::ECHILD => "ECHILD",
-        libc::EAGAIN => "EAGAIN",
-        libc::ENOMEM => "ENOMEM",
-        libc::EACCES => "EACCES",
-        libc::EFAULT => "EFAULT",
-        libc::EBUSY => "EBUSY",
-        libc::EEXIST => "EEXIST",
-        libc::EXDEV => "EXDEV",
-        libc::ENODEV => "ENODEV",
-        libc::ENOTDIR => "ENOTDIR",
-        libc::EISDIR => "EISDIR",
-        libc::EINVAL => "EINVAL",
-        libc::ENFILE => "ENFILE",
-        libc::EMFILE => "EMFILE",
-        libc::ENOTTY => "ENOTTY",
-        libc::EFBIG => "EFBIG",
-        libc::ENOSPC => "ENOSPC",
-        libc::ESPIPE => "ESPIPE",
-        libc::EROFS => "EROFS",
-        libc::EMLINK => "EMLINK",
-        libc::EPIPE => "EPIPE",
-        libc::ERANGE => "ERANGE",
-        libc::ENAMETOOLONG => "ENAMETOOLONG",
-        libc::ENOSYS => "ENOSYS",
-        libc::ENOTEMPTY => "ENOTEMPTY",
-        libc::ELOOP => "ELOOP",
-        libc::ENODATA => "ENODATA",
-        libc::EPROTO => "EPROTO",
-        libc::EOVERFLOW => "EOVERFLOW",
-        libc::EAFNOSUPPORT => "EAFNOSUPPORT",
-        libc::ENETUNREACH => "ENETUNREACH",
-        libc::ENETDOWN => "ENETDOWN",
-        libc::ECONNREFUSED => "ECONNREFUSED",
-        libc::ETIMEDOUT => "ETIMEDOUT",
-        libc::EHOSTUNREACH => "EHOSTUNREACH",
-        libc::EADDRNOTAVAIL => "EADDRNOTAVAIL",
-        libc::EPROTONOSUPPORT => "EPROTONOSUPPORT",
-        // §11.2 names it for net.connect: the canonical non-blocking
-        // in-progress return, not an anonymous number.
-        libc::EINPROGRESS => "EINPROGRESS",
-        libc::ESTALE => "ESTALE",
-        libc::EDQUOT => "EDQUOT",
-        _ => "E?",
+pub fn errno_name(errno: i32) -> std::borrow::Cow<'static, str> {
+    if errno == 0 {
+        return "NONE".into();
     }
+    ERRNOS
+        .iter()
+        .find(|(number, _)| *number == errno)
+        .map_or_else(|| format!("E{errno}").into(), |(_, name)| (*name).into())
 }
 
-/// Parse a symbolic errno name back to its number. Used by tests and by the
-/// probe helper that reports results across a pipe.
+/// The errno a symbolic name stands for: the inverse of [`errno_name`]
+/// over the names it gives.
+#[cfg(test)]
 #[must_use]
 pub fn errno_from_name(name: &str) -> Option<i32> {
-    const KNOWN: &[i32] = &[
-        libc::EPERM,
-        libc::ENOENT,
-        libc::ESRCH,
-        libc::EINTR,
-        libc::EIO,
-        libc::EBADF,
-        libc::EAGAIN,
-        libc::ENOMEM,
-        libc::EACCES,
-        libc::EFAULT,
-        libc::EBUSY,
-        libc::EEXIST,
-        libc::ENODEV,
-        libc::ENOTDIR,
-        libc::EISDIR,
-        libc::EINVAL,
-        libc::EROFS,
-        libc::ENOSYS,
-        libc::ENOTEMPTY,
-        libc::ELOOP,
-        libc::EAFNOSUPPORT,
-        libc::ENETUNREACH,
-        libc::ECONNREFUSED,
-        libc::EPROTONOSUPPORT,
-    ];
     if name == "NONE" {
         return Some(0);
     }
-    KNOWN.iter().copied().find(|e| errno_name(*e) == name)
+    ERRNOS
+        .iter()
+        .find(|(_, known)| *known == name)
+        .map(|(number, _)| *number)
 }
 
 #[cfg(test)]
@@ -254,8 +322,26 @@ mod tests {
 
     #[test]
     fn errno_names_round_trip() {
-        for e in [libc::EPERM, libc::EROFS, libc::ENOSYS, libc::ENETUNREACH] {
-            assert_eq!(errno_from_name(errno_name(e)), Some(e));
+        for (number, name) in ERRNOS {
+            assert_eq!(errno_name(*number), *name);
+            assert_eq!(errno_from_name(name), Some(*number), "{name}");
         }
+        assert_eq!(errno_from_name(&errno_name(0)), Some(0));
+        let mut numbers: Vec<i32> = ERRNOS.iter().map(|(number, _)| *number).collect();
+        numbers.dedup();
+        assert_eq!(
+            numbers.len(),
+            ERRNOS.len(),
+            "the table is in number order, no alias"
+        );
+        assert!(numbers.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn an_errno_linux_does_not_define_keeps_its_number() {
+        assert_eq!(errno_name(libc::EKEYREVOKED), "EKEYREVOKED");
+        assert_eq!(errno_name(4242), "E4242");
+        assert_eq!(errno_name(-3), "E-3");
+        assert_eq!(errno_from_name("E4242"), None);
     }
 }
