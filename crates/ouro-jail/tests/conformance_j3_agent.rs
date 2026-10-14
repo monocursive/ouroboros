@@ -2748,7 +2748,9 @@ def find_bridge():
 /// bridge's pid; the only AF_INET mediated connect is the target's one to
 /// the bridge; and the bridge's connects were seen and counted as the
 /// helper's in at least one round, so the race was exercised. Every
-/// mediated result carries the target's own pid.
+/// mediated result carries the target's own pid. The 3 ms window depends on
+/// the host's speed, so the rounds go on (up to [`RACE_ROUNDS`]) until the
+/// race has been exercised at least once.
 #[test]
 fn review_a_bridge_killed_after_its_connect_is_never_the_targets_connect() {
     if !common::live() {
@@ -2768,7 +2770,10 @@ print(json.dumps({{"bridge": b}}))
 "#
     );
     let mut helper_connects = 0;
-    for round in 0..6 {
+    for round in 0..RACE_ROUNDS {
+        if round >= MIN_RACE_ROUNDS && helper_connects >= 1 {
+            break;
+        }
         let origin = HttpServer::start(b"ok".to_vec()).unwrap();
         let o = origin.addr().port();
         let c = case("agent");
@@ -2807,9 +2812,15 @@ print(json.dumps({{"bridge": b}}))
     }
     assert!(
         helper_connects >= 1,
-        "the bridge's connect was never recorded: nothing was exercised"
+        "the bridge's connect was never recorded in {RACE_ROUNDS} rounds: \
+         nothing was exercised"
     );
 }
+
+/// Rounds the bridge-kill race always runs, each checking the attribution.
+const MIN_RACE_ROUNDS: usize = 6;
+/// Rounds it may run before giving up on exercising the race.
+const RACE_ROUNDS: usize = 24;
 
 /// `SigIgn` and `SigBlk` as `grep` reads them from its own status.
 fn signal_state(stdout: &str) -> (u64, u64) {

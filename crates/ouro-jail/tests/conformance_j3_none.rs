@@ -60,18 +60,10 @@ fn none_case(observe: &str) -> (Jail, PathBuf) {
     (jail, workspace)
 }
 
-fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 /// The latest `--receipt` copy once it reaches `phase`.
 fn receipt_in_phase(spawned: &Spawned, phase: &str) -> Value {
     let mut latest = Value::Null;
-    wait_for(&format!("a {phase} receipt"), || {
+    common::eventually(&format!("a {phase} receipt"), common::SETTLE_BOUND, || {
         latest = spawned.receipt_value().unwrap_or(Value::Null);
         latest["phase"] == phase
     });
@@ -81,10 +73,14 @@ fn receipt_in_phase(spawned: &Spawned, phase: &str) -> Value {
 /// The latest `--receipt` copy once its lifetime integrity reads `integrity`.
 fn receipt_in_integrity(spawned: &Spawned, integrity: &str) -> Value {
     let mut latest = Value::Null;
-    wait_for(&format!("a receipt with integrity {integrity}"), || {
-        latest = spawned.receipt_value().unwrap_or(Value::Null);
-        latest["lifetime"]["integrity"] == integrity
-    });
+    common::eventually(
+        &format!("a receipt with integrity {integrity}"),
+        common::SETTLE_BOUND,
+        || {
+            latest = spawned.receipt_value().unwrap_or(Value::Null);
+            latest["lifetime"]["integrity"] == integrity
+        },
+    );
     latest
 }
 
@@ -121,7 +117,9 @@ fn remove_cgroup(dir: &Path) {
     }
     if populated(dir) {
         std::fs::write(dir.join("cgroup.kill"), "1").expect("cgroup.kill");
-        wait_for("the cgroup to empty", || !populated(dir));
+        common::eventually("the cgroup to empty", common::SETTLE_BOUND, || {
+            !populated(dir)
+        });
     }
     std::fs::remove_dir(dir).expect("an empty cgroup is removed");
 }
@@ -688,7 +686,7 @@ fn l02_none_supervisor_death_leaves_the_specified_unknown() {
             .target([PYTHON, "-c", &code])
             .spawn()
             .expect("the jail starts");
-        wait_for("the target", || running.exists());
+        common::eventually("the target", common::SETTLE_BOUND, || running.exists());
         let enforced = receipt_in_phase(&spawned, "enforced");
         let (leaf, inode) = leaf_of(&enforced);
         let pid: i32 = std::fs::read_to_string(&descendant)
@@ -725,9 +723,11 @@ fn l02_none_supervisor_death_leaves_the_specified_unknown() {
             // the kernel kills the traced tree when its tracer dies. That is
             // the observer's attachment, not a lifetime claim: the record
             // above stays unknown all the same.
-            wait_for("the traced descendant to die with its tracer", || {
-                watch::readable(descendant_fd.as_raw_fd())
-            });
+            common::eventually(
+                "the traced descendant to die with its tracer",
+                common::SETTLE_BOUND,
+                || watch::readable(descendant_fd.as_raw_fd()),
+            );
         } else {
             // Nothing ended the descendant: no watchdog exists (§8.2), the
             // unknown is real, and the retained leaf still holds it.
@@ -1490,7 +1490,9 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or(Value::Null)
     };
-    wait_for("a prepared receipt", || current()["phase"] == "prepared");
+    common::eventually("a prepared receipt", common::SETTLE_BOUND, || {
+        current()["phase"] == "prepared"
+    });
     let prepared = current();
     let (leaf, _) = leaf_of(&prepared);
     let pid = prepared["lifetime"]["native"]["details"]["launcher_pid"]
@@ -1500,7 +1502,7 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
         .iter()
         .map(|part| part.as_encoded_bytes().to_vec())
         .collect();
-    wait_for("the target image", || {
+    common::eventually("the target image", common::SETTLE_BOUND, || {
         std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|raw| {
             raw.split(|byte| *byte == 0)
                 .filter(|part| !part.is_empty())
@@ -1512,7 +1514,7 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
     let target_fd = identity::pidfd_open(pid).expect("the live target");
     std::fs::write(destination.path.join("cgroup.procs"), pid.to_string())
         .expect("the target is moved out");
-    wait_for("the loss in the receipt", || {
+    common::eventually("the loss in the receipt", common::SETTLE_BOUND, || {
         current()["lifetime"]["integrity"] == "lost"
     });
     let mid_run = common::checked_receipt(current());
@@ -1679,11 +1681,11 @@ impl Drop for ChildMade {
 /// host (seen once on the reference host, 2026-09-23).
 fn written_pid(what: &str, path: &std::path::Path) -> i32 {
     let mut pid = None;
-    wait_for(what, || {
+    common::eventually(what, common::SETTLE_BOUND, || {
         pid = std::fs::read_to_string(path)
             .ok()
             .and_then(|text| text.trim().parse::<i32>().ok());
         pid.is_some()
     });
-    pid.expect("wait_for returns only once the pid parsed")
+    pid.expect("the wait returns only once the pid parsed")
 }

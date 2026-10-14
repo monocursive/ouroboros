@@ -29,6 +29,10 @@ mod common;
 
 /// Upper bound for any wait. Never reached when the behaviour is correct.
 const WAIT: Duration = Duration::from_secs(20);
+/// How long a second lookup must stay queued, from its start, while the
+/// first holds the only slot: far longer than a refusal or a lookup takes to
+/// show, short enough to keep the test quick.
+const QUEUED_WINDOW: Duration = Duration::from_millis(200);
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -1655,20 +1659,40 @@ fn n04_system_resolver_looks_up_the_absolute_name_and_keeps_its_deadline() {
     assert_eq!(resolver.in_flight(), 1);
     // ... and a second lookup now WAITS for the slot (issue draft 04:
     // queueing bounded by the deadline) instead of being refused ...
+    let (started, waiting) = mpsc::channel();
     let waiter = {
         let resolver = Arc::clone(&resolver);
         thread::spawn(move || {
+            let _ = started.send(());
             resolver.resolve("other.test", Instant::now() + Duration::from_secs(30))
         })
     };
-    thread::sleep(Duration::from_millis(200));
+    waiting
+        .recv_timeout(WAIT)
+        .expect("the second lookup starts");
+    // Once it has started, a refusal comes back at once and a slot taken past
+    // the cap runs the lookup, which records the name: over a window measured
+    // from its start, neither may happen while the first lookup holds the
+    // slot. (The window bounds how long a wrong answer could hide; it orders
+    // nothing.)
+    thread::sleep(QUEUED_WINDOW);
     assert!(
         !waiter.is_finished(),
         "the second lookup is queued behind the held slot"
     );
+    assert_eq!(
+        *held.names.lock().unwrap_or_else(PoisonError::into_inner),
+        vec!["example.test.".to_owned()],
+        "the queued lookup ran while the slot was held"
+    );
     // ... and proceeds once the held lookup releases its slot.
     held.release();
     assert!(waiter.join().unwrap().is_ok(), "the queued lookup resolves");
+    assert_eq!(
+        *held.names.lock().unwrap_or_else(PoisonError::into_inner),
+        vec!["example.test.".to_owned(), "other.test.".to_owned()],
+        "the queued lookup ran once the slot was free"
+    );
     wait_until("the second lookup ends", || resolver.in_flight() == 0);
 }
 

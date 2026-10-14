@@ -34,6 +34,45 @@ pub fn private_tempdir() -> TempDir {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded waits
+// ---------------------------------------------------------------------------
+
+/// How often a bounded wait looks again.
+pub const POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// How long a live run may take to reach a state a test waits for (a
+/// receipt phase, a cgroup emptying, a helper's ready file). Generous on
+/// purpose: it only turns a hang into a failure under load, it never orders
+/// two events.
+pub const SETTLE_BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Wait until `ready` holds, looking every [`POLL`]; fail the test naming
+/// `what` when `bound` passes first.
+pub fn eventually(what: &str, bound: std::time::Duration, ready: impl FnMut() -> bool) {
+    assert!(
+        within(bound, ready),
+        "timed out after {bound:?} waiting for {what}"
+    );
+}
+
+/// Whether `ready` came to hold within `bound`, looking every [`POLL`]: for a
+/// caller that reports the timeout itself (a cleanup in `Drop`, a crash
+/// matrix that collects problems) rather than failing on the spot.
+#[must_use]
+pub fn within(bound: std::time::Duration, mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + bound;
+    loop {
+        if ready() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-exec helpers
 // ---------------------------------------------------------------------------
 

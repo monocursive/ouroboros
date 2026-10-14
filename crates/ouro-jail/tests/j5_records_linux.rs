@@ -759,6 +759,14 @@ fn consume(listener: &std::os::fd::OwnedFd, pace: Pace) -> Received {
     received
 }
 
+/// How long the consumer may look for the jail blocked mid-frame. The fixture
+/// writes for longer than the run's 2 s wall, so a block that never comes
+/// within this is a finding, not load.
+const HOLD_SEARCH_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the queued byte count must stay unchanged to count as a stall.
+const STABLE_SAMPLE: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Stops reading until the jail is blocked with a frame partly written, then
 /// holds the stall for `duration`.
 ///
@@ -770,7 +778,10 @@ fn consume(listener: &std::os::fd::OwnedFd, pace: Pace) -> Received {
 /// block fell between frames, or the target was between batches), one
 /// message is consumed, which frees room for about one more piece, and the
 /// check repeats. Once held, the stall lasts `duration`, and the queued
-/// count must not have moved: the jail wrote nothing more of that frame.
+/// count must not have moved: the jail wrote nothing more of that frame. A
+/// count that moved means the jail was only slow, not blocked (a full socket
+/// takes nothing more), so the search goes on rather than failing on a busy
+/// host.
 fn hold_mid_frame(
     fd: i32,
     buffer: &mut [u8],
@@ -780,13 +791,14 @@ fn hold_mid_frame(
     let started = std::time::Instant::now();
     loop {
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
-            "the jail was never seen blocked with a frame partly written"
+            started.elapsed() < HOLD_SEARCH_BOUND,
+            "the jail was never seen blocked with a frame partly written \
+             within {HOLD_SEARCH_BOUND:?}"
         );
-        // Stable: unchanged over 100 ms.
+        // Stable: unchanged over one sampling interval.
         let mut queued = queued_bytes(fd);
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(STABLE_SAMPLE);
             let now = queued_bytes(fd);
             if now == queued {
                 break;
@@ -808,16 +820,15 @@ fn hold_mid_frame(
         let written = unfinished(&stream);
         if written > 0 && queued > 0 {
             std::thread::sleep(duration);
-            assert_eq!(
-                queued_bytes(fd),
-                queued,
-                "the jail wrote more while it was supposed to be blocked"
-            );
-            return Held {
-                offset: stream.len(),
-                written,
-                held_for: duration,
-            };
+            if queued_bytes(fd) == queued {
+                return Held {
+                    offset: stream.len(),
+                    written,
+                    held_for: duration,
+                };
+            }
+            // The jail was descheduled mid-frame, not blocked: look again.
+            continue;
         }
         match receive(fd, buffer, false, false) {
             Some(message) => received.messages.push(message),
