@@ -186,40 +186,22 @@ pub enum Fact {
     Finished,
 }
 
-/// Whether an exec event establishes that one of `images` — the resolved
-/// absolute paths the platform prepared as the target's — actually ran.
+/// Whether an exec's pathname snapshot names one of `images` — the resolved
+/// absolute paths the platform prepared as the target's — completely.
 ///
 /// A transition with no pathname is one whose entry the observer did not
 /// witness, which is what seizing a process already inside its own `execve`
 /// produces; the launcher is seized while blocked in `read(2)`, so its target
 /// exec is witnessed and carries a path. A pathname that is not one the
-/// launcher would have tried is some other image. Neither confirms the
-/// target ran on its own.
+/// launcher would have tried is some other image.
 ///
-/// Security 2026-09-27 (audit 3 A1): `kernel_image`, read from
-/// `/proc/<tid>/exe` at the exec-event stop, is what the kernel itself
-/// loaded and outranks the pathname snapshot, which a thread of the tracee
-/// can rewrite for the kernel's copy. When it is present it decides, and it
-/// can confirm an image even against a snapshot that was raced into naming
-/// something else; when it is absent the snapshot stands as before, the
-/// weaker claim §11.3 documents.
-///
-/// Security 2026-09-27 (audit 4 B3): the kernel bytes are the link's raw
-/// form and travel with the image's own inode. A link that matches a
-/// candidate only after stripping the kernel's ` (deleted)` annotation is
-/// ambiguous — the image may be a legitimately unlinked target (audit 3
-/// confirmed those), or a decoy genuinely *named* `tool (deleted)`. The
-/// inode separates them: a candidate that still exists and is **not** the
-/// image contradicts the match, and identity agreement confirms outright.
-#[must_use]
-pub fn is_target_image(
-    images: &[Vec<u8>],
-    path: Option<&PathSnapshot>,
-    kernel_image: Option<&KernelImage>,
-) -> bool {
-    if let Some(kernel) = kernel_image {
-        return kernel_confirms(images, kernel);
-    }
+/// Security 2026-09-27 (audit 3 A1): the snapshot is tracee memory, which a
+/// thread of the tracee can rewrite for the kernel's copy, so it decides
+/// only when the kernel's own image (`/proc/<tid>/exe` at the exec stop) was
+/// not read — the weaker claim §11.3 documents. When it was read,
+/// [`kernel_confirms`] decides, and a snapshot naming the target beside a
+/// kernel image that does not is an `exec_image_mismatch` gap.
+fn snapshot_names_target(images: &[Vec<u8>], path: Option<&PathSnapshot>) -> bool {
     path.is_some_and(|path| {
         path.complete
             && images
@@ -387,8 +369,8 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
                 {
                     return Fact::TargetExec;
                 }
-                if is_target_image(target.images, path.as_ref(), None) {
-                    let now = super::clock::boottime_ns();
+                if snapshot_names_target(target.images, path.as_ref()) {
+                    let now = since_start_ns();
                     audit.record_gap(
                         super::tracer::GapReason::ExecImageMismatch,
                         super::tracer::OpSet::of(super::tracer::ClosedOp::Exec),
@@ -400,7 +382,7 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
                 }
                 return Fact::Nothing;
             }
-            if is_target_image(target.images, path.as_ref(), None) {
+            if snapshot_names_target(target.images, path.as_ref()) {
                 Fact::TargetExec
             } else {
                 Fact::Nothing
@@ -523,15 +505,31 @@ pub fn stop(
     let summary = tracer.finish_within_draining(budget, |event| {
         on_fact(record(audit, target, &event));
     });
+    record_unreported_losses(audit, &summary);
+    summary
+}
+
+/// Now, in nanoseconds since the supervisor started: the base of every gap
+/// endpoint, the tracer's included (its epoch is the supervisor's start,
+/// §13.1), so a gap recorded here lines up with the ones it reported.
+fn since_start_ns() -> u64 {
+    super::tracer::elapsed_since(super::clock::mark_supervisor_start())
+}
+
+/// The losses the tracer's account shows that no event of its own named,
+/// recorded once each. Where they started is not known, so each covers the
+/// whole run so far: from the supervisor's start to now.
+fn record_unreported_losses(audit: &mut AuditWriter, summary: &TracerSummary) {
     let recorded = |audit: &AuditWriter, reason: GapReason| {
         audit.gaps().iter().any(|gap| gap.reason == reason.as_str())
     };
+    let now = since_start_ns();
     if summary.loss.abandoned_tracees > 0 && !recorded(audit, GapReason::TraceesAbandoned) {
         audit.record_gap(
             GapReason::TraceesAbandoned,
             OpSet::ALL,
             0,
-            0,
+            now,
             Some(summary.loss.abandoned_tracees),
         );
     }
@@ -540,7 +538,7 @@ pub fn stop(
             GapReason::UnreapedChildren,
             OpSet::EMPTY,
             0,
-            0,
+            now,
             u64::try_from(summary.unreaped_children.len()).ok(),
         );
     }
@@ -550,15 +548,8 @@ pub fn stop(
     // exposure. This catch-all stays for losses recorded without a gap of
     // their own.
     if summary.loss.total() > 0 && !audit.has_loss_gaps() {
-        audit.record_gap(
-            GapReason::QueueFull,
-            OpSet::ALL,
-            0,
-            u64::try_from(crate::platform::elapsed_since_start_ns()).unwrap_or(u64::MAX),
-            None,
-        );
+        audit.record_gap(GapReason::QueueFull, OpSet::ALL, 0, now, None);
     }
-    summary
 }
 
 #[cfg(test)]
@@ -670,6 +661,83 @@ mod tests {
         }
         // Every exec was recorded, confirming or not.
         assert_eq!(audit.count(CoverageClass::Exec), 5);
+    }
+
+    /// The `exec_image_mismatch` gap is on the base every other gap uses —
+    /// nanoseconds since the supervisor started — not an instant on the boot
+    /// clock, which coalescing would stretch far past the run.
+    #[test]
+    fn an_exec_image_mismatch_is_stamped_since_the_supervisor_start() {
+        let images = images();
+        let target = Target {
+            launcher: LAUNCHER,
+            images: &images,
+        };
+        let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
+        let fact = record(
+            &mut audit,
+            &target,
+            &exec_with_kernel(
+                LAUNCHER,
+                snapshot(b"/usr/bin/target", true),
+                kernel(b"/usr/bin/other"),
+            ),
+        );
+        assert_eq!(fact, Fact::CoverageLost(GapReason::ExecImageMismatch));
+        let elapsed = since_start_ns();
+        let gap = audit
+            .gaps()
+            .iter()
+            .find(|gap| gap.reason == GapReason::ExecImageMismatch.as_str())
+            .expect("the mismatch gap");
+        let start: u64 = gap.start_ns.parse().expect("decimal");
+        assert!(
+            start <= elapsed,
+            "the gap starts at {start}, after the {elapsed} ns the supervisor has run"
+        );
+        assert_eq!(gap.end_ns.as_deref(), Some(gap.start_ns.as_str()));
+    }
+
+    /// Losses only the tracer's account shows have no known start: each
+    /// covers the run so far, from the supervisor's start to now, never the
+    /// empty interval `0..0`.
+    #[test]
+    fn losses_only_the_account_shows_cover_the_run_so_far() {
+        let _ = super::super::clock::mark_supervisor_start();
+        std::thread::sleep(Duration::from_millis(2));
+        let mut audit = AuditWriter::new("att_x", None, b"/work", b"");
+        let summary = TracerSummary {
+            unreaped_children: vec![41],
+            loss: crate::platform::linux::tracer::LossCounters {
+                abandoned_tracees: 2,
+                ..Default::default()
+            },
+            ..TracerSummary::default()
+        };
+        record_unreported_losses(&mut audit, &summary);
+        let after = since_start_ns();
+        for reason in [GapReason::TraceesAbandoned, GapReason::UnreapedChildren] {
+            let gap = audit
+                .gaps()
+                .iter()
+                .find(|gap| gap.reason == reason.as_str())
+                .unwrap_or_else(|| panic!("{reason:?} is recorded"));
+            assert_eq!(gap.start_ns, "0", "{reason:?}");
+            let end: u64 = gap
+                .end_ns
+                .as_deref()
+                .expect("a bounded gap")
+                .parse()
+                .expect("decimal");
+            assert!(end >= 2_000_000 && end <= after, "{reason:?} ends at {end}");
+        }
+        assert!(
+            !audit
+                .gaps()
+                .iter()
+                .any(|gap| gap.reason == GapReason::QueueFull.as_str()),
+            "a loss with a gap of its own needs no catch-all"
+        );
     }
 
     /// Security 2026-09-27 (audit 3 A1): the kernel's own image decides the
