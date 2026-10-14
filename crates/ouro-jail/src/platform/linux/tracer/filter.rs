@@ -38,6 +38,7 @@
 use crate::platform::linux::tracer::closed_set::CLOSED_SET;
 use crate::platform::linux::tracer::digest::sha256_hex;
 use crate::platform::linux::tracer::sys;
+use crate::platform::linux::{abi, bpf, seccomp};
 
 /// The `SECCOMP_RET_DATA` this filter's trace carries, which the tracer reads
 /// back at a stop (`PTRACE_GETEVENTMSG`). A stop for a number this filter
@@ -49,17 +50,17 @@ use crate::platform::linux::tracer::sys;
 /// `unexpected_trace_stop` gap.
 pub const NARROWING_TRACE_DATA: u16 = 0x4f4a;
 
-/// Native `seccomp(2)`: a stop when its flags ask for a listener.
-pub const LISTENER_SYSCALL: (&str, u32) = ("seccomp", crate::platform::linux::seccomp::NR_SECCOMP);
-/// `SECCOMP_FILTER_FLAG_NEW_LISTENER`.
-pub const SECCOMP_FILTER_FLAG_NEW_LISTENER: u32 = 1 << 3;
-/// Native `clone(2)`: a stop when its flags carry `CLONE_UNTRACED`.
-pub const CLONE_SYSCALL: (&str, u32) = ("clone", crate::platform::linux::seccomp::NR_CLONE);
-/// `CLONE_UNTRACED`: the kernel does not attach the new task to a tracer.
-pub const CLONE_UNTRACED: u32 = 0x0080_0000;
+pub use crate::platform::linux::seccomp::{CLONE_UNTRACED, SECCOMP_FILTER_FLAG_NEW_LISTENER};
+
+/// Native `seccomp(2)`: a stop when its flags ask for a listener
+/// ([`SECCOMP_FILTER_FLAG_NEW_LISTENER`]).
+pub const LISTENER_SYSCALL: (&str, u32) = ("seccomp", seccomp::NR_SECCOMP);
+/// Native `clone(2)`: a stop when its flags carry [`CLONE_UNTRACED`], which
+/// keeps the kernel from attaching the new task to a tracer.
+pub const CLONE_SYSCALL: (&str, u32) = ("clone", seccomp::NR_CLONE);
 /// `clone3(2)` on both native ABIs: refused with `ENOSYS`, since its flags are in
 /// memory the filter cannot read.
-pub const CLONE3_SYSCALL: (&str, u32) = ("clone3", 435);
+pub const CLONE3_SYSCALL: (&str, u32) = ("clone3", seccomp::NR_CLONE3);
 
 /// Security 2026-09-27 (audit 4 B2): the i386 (`int 0x80`) numbers of the
 /// two calls whose *native* forms get their own classification. A compat-ABI
@@ -72,6 +73,16 @@ pub const CLONE3_SYSCALL: (&str, u32) = ("clone3", 435);
 pub const I386_LISTENER_SYSCALL: u32 = 354;
 /// i386 `clone`: same `CLONE_UNTRACED` flag semantics as the native number.
 pub const I386_CLONE_SYSCALL: u32 = 120;
+/// AArch32 (EABI) `seccomp`, which an arm64 kernel accepts from a 32-bit
+/// task under `AUDIT_ARCH_ARM`; the flags are in `args[1]` there too.
+pub const ARM_LISTENER_SYSCALL: u32 = 383;
+/// AArch32 (EABI) `clone`, flags in `args[0]`.
+pub const ARM_CLONE_SYSCALL: u32 = 120;
+/// x32 `seccomp` and `clone`: x32 shares the x86_64 table's numbers for both
+/// (they are `common` in `syscall_64.tbl`) and sets the x32 bit at entry.
+/// These are the x86_64 numbers whatever this build's native table is.
+pub const X32_LISTENER_SYSCALL: u32 = 317;
+pub const X32_CLONE_SYSCALL: u32 = 56;
 
 /// Instruction count: architecture check (2), x32 check (2), one comparison
 /// per closed-set number, the listener check (3), the untraced-clone check
@@ -118,18 +129,23 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16, learning: bo
     debug_assert!(n <= 235);
     // clone3's flags live behind a pointer on native, i386 and x32 alike.
     // Refuse it before the architecture branch, including the x32 spelling.
-    out[0] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_NR);
-    out[1] = jump(sys::BPF_JEQ_K, 435, (enosys - 2) as u8, 0);
+    out[0] = stmt(bpf::CODE_LD_W_ABS, seccomp::SD_NR);
+    out[1] = jump(bpf::CODE_JEQ_K, CLONE3_SYSCALL.1, (enosys - 2) as u8, 0);
     out[2] = jump(
-        sys::BPF_JEQ_K,
-        435 | sys::X32_SYSCALL_BIT,
+        bpf::CODE_JEQ_K,
+        CLONE3_SYSCALL.1 | seccomp::X32_SYSCALL_BIT,
         (enosys - 3) as u8,
         0,
     );
-    out[3] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_ARCH);
-    out[4] = jump(sys::BPF_JEQ_K, sys::AUDIT_ARCH, 0, (trace - 5) as u8);
-    out[5] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_NR);
-    out[6] = jump(sys::BPF_JSET_K, sys::X32_SYSCALL_BIT, (trace - 7) as u8, 0);
+    out[3] = stmt(bpf::CODE_LD_W_ABS, seccomp::SD_ARCH);
+    out[4] = jump(bpf::CODE_JEQ_K, abi::AUDIT_ARCH, 0, (trace - 5) as u8);
+    out[5] = stmt(bpf::CODE_LD_W_ABS, seccomp::SD_NR);
+    out[6] = jump(
+        bpf::CODE_JSET_K,
+        seccomp::X32_SYSCALL_BIT,
+        (trace - 7) as u8,
+        0,
+    );
     for (i, entry) in CLOSED_SET.iter().enumerate() {
         let destination = match (learning, entry.nr) {
             (false, _) if entry.name == "open" => open,
@@ -137,7 +153,7 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16, learning: bo
             _ => trace,
         };
         out[7 + i] = jump(
-            sys::BPF_JEQ_K,
+            bpf::CODE_JEQ_K,
             entry.nr as u32,
             (destination - 8 - i) as u8,
             0,
@@ -148,14 +164,14 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16, learning: bo
     // Any other number goes on to the clone check with the number still in
     // the accumulator.
     out[listener] = jump(
-        sys::BPF_JEQ_K,
+        bpf::CODE_JEQ_K,
         LISTENER_SYSCALL.1,
         0,
         (clone - listener - 1) as u8,
     );
-    out[listener + 1] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_ARG1_LOW);
+    out[listener + 1] = stmt(bpf::CODE_LD_W_ABS, seccomp::sd_arg_low(1));
     out[listener + 2] = jump(
-        sys::BPF_JSET_K,
+        bpf::CODE_JSET_K,
         SECCOMP_FILTER_FLAG_NEW_LISTENER,
         (trace - listener - 3) as u8,
         (allow - listener - 3) as u8,
@@ -163,21 +179,21 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16, learning: bo
     // clone(2) with CLONE_UNTRACED. Every clone flag lives in the low word
     // of the first argument on x86_64.
     out[clone] = jump(
-        sys::BPF_JEQ_K,
+        bpf::CODE_JEQ_K,
         CLONE_SYSCALL.1,
         0,
         (clone3 - clone - 1) as u8,
     );
-    out[clone + 1] = stmt(sys::BPF_LD_W_ABS, sys::SECCOMP_DATA_ARG0_LOW);
+    out[clone + 1] = stmt(bpf::CODE_LD_W_ABS, seccomp::sd_arg_low(0));
     out[clone + 2] = jump(
-        sys::BPF_JSET_K,
+        bpf::CODE_JSET_K,
         CLONE_UNTRACED,
         (trace - clone - 3) as u8,
         (allow - clone - 3) as u8,
     );
     // clone3(2): its flags are behind a pointer. ENOSYS, and glibc falls back.
     out[clone3] = jump(
-        sys::BPF_JEQ_K,
+        bpf::CODE_JEQ_K,
         CLONE3_SYSCALL.1,
         (enosys - clone3 - 1) as u8,
         (allow - clone3 - 1) as u8,
@@ -192,21 +208,27 @@ fn build_into(out: &mut [libc::sock_filter; FILTER_LEN], data: u16, learning: bo
             | libc::O_TRUNC
             | (libc::O_TMPFILE & !libc::O_DIRECTORY)) as u32;
         for (offset, arg) in [
-            (open, sys::SECCOMP_DATA_ARG1_LOW),
-            (openat, sys::SECCOMP_DATA_ARG2_LOW),
+            (open, seccomp::sd_arg_low(1)),
+            (openat, seccomp::sd_arg_low(2)),
         ] {
-            out[offset] = stmt(sys::BPF_LD_W_ABS, arg);
+            out[offset] = stmt(bpf::CODE_LD_W_ABS, arg);
             out[offset + 1] = jump(
-                sys::BPF_JSET_K,
+                bpf::CODE_JSET_K,
                 writes,
                 (trace - offset - 2) as u8,
                 (allow - offset - 2) as u8,
             );
         }
     }
-    out[allow] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_ALLOW);
-    out[trace] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_TRACE | u32::from(data));
-    out[enosys] = stmt(sys::BPF_RET_K, sys::SECCOMP_RET_ERRNO | sys::LINUX_ENOSYS);
+    out[allow] = stmt(bpf::CODE_RET_K, seccomp::SECCOMP_RET_ALLOW);
+    out[trace] = stmt(
+        bpf::CODE_RET_K,
+        seccomp::SECCOMP_RET_TRACE | u32::from(data),
+    );
+    out[enosys] = stmt(
+        bpf::CODE_RET_K,
+        seccomp::SECCOMP_RET_ERRNO | seccomp::LINUX_ENOSYS,
+    );
     enosys + 1
 }
 
@@ -405,23 +427,22 @@ mod tests {
     }
 
     fn interpret_mode(arch: u32, nr: u32, args: [u32; 3], learning: bool) -> u32 {
-        const ARG0_LOW: u32 = 16;
         let prog = narrowing_filter_for(NARROWING_TRACE_DATA, learning);
         let mut pc = 0usize;
         let mut acc: u32 = 0;
         for _ in 0..4096 {
             let insn = prog[pc];
             match insn.code {
-                c if c == sys::BPF_LD_W_ABS => {
-                    acc = if insn.k == sys::SECCOMP_DATA_NR {
+                c if c == bpf::CODE_LD_W_ABS => {
+                    acc = if insn.k == seccomp::SD_NR {
                         nr
-                    } else if insn.k == sys::SECCOMP_DATA_ARCH {
+                    } else if insn.k == seccomp::SD_ARCH {
                         arch
-                    } else if insn.k == ARG0_LOW {
+                    } else if insn.k == seccomp::sd_arg_low(0) {
                         args[0]
-                    } else if insn.k == sys::SECCOMP_DATA_ARG1_LOW {
+                    } else if insn.k == seccomp::sd_arg_low(1) {
                         args[1]
-                    } else if insn.k == 32 {
+                    } else if insn.k == seccomp::sd_arg_low(2) {
                         args[2]
                     } else {
                         panic!(
@@ -431,13 +452,13 @@ mod tests {
                     };
                     pc += 1;
                 }
-                c if c == sys::BPF_JEQ_K => {
+                c if c == bpf::CODE_JEQ_K => {
                     pc += 1 + usize::from(if acc == insn.k { insn.jt } else { insn.jf });
                 }
-                c if c == sys::BPF_JSET_K => {
+                c if c == bpf::CODE_JSET_K => {
                     pc += 1 + usize::from(if acc & insn.k != 0 { insn.jt } else { insn.jf });
                 }
-                c if c == sys::BPF_RET_K => return insn.k,
+                c if c == bpf::CODE_RET_K => return insn.k,
                 other => panic!("unknown opcode {other:#x}"),
             }
             assert!(pc < prog.len(), "jumped past the end of the program");
@@ -450,14 +471,14 @@ mod tests {
     }
 
     fn interpret_flags(nr: u32, arg1: u32) -> u32 {
-        interpret_full(sys::AUDIT_ARCH, nr, 0, arg1)
+        interpret_full(abi::AUDIT_ARCH, nr, 0, arg1)
     }
 
-    const TRACE: u32 = sys::SECCOMP_RET_TRACE | NARROWING_TRACE_DATA as u32;
+    const TRACE: u32 = seccomp::SECCOMP_RET_TRACE | NARROWING_TRACE_DATA as u32;
 
     #[test]
     fn fast_path_only_skips_register_sourced_read_only_opens() {
-        let arch = sys::AUDIT_ARCH;
+        let arch = abi::AUDIT_ARCH;
         let opens = if cfg!(target_arch = "aarch64") {
             vec![56]
         } else {
@@ -478,7 +499,7 @@ mod tests {
                 };
                 assert_eq!(
                     interpret_mode(arch, nr, args, false),
-                    sys::SECCOMP_RET_ALLOW
+                    seccomp::SECCOMP_RET_ALLOW
                 );
                 assert_eq!(interpret_mode(arch, nr, args, true), TRACE);
             }
@@ -500,9 +521,9 @@ mod tests {
             }
         }
         // Every other number and every ABI/gap path keeps its old verdict.
-        for arch in [arch, 0x4000_0003] {
-            for nr in (0..1024).chain((0..1024).map(|nr| nr | sys::X32_SYSCALL_BIT)) {
-                if arch == sys::AUDIT_ARCH && opens.contains(&nr) {
+        for arch in [arch, abi::AUDIT_ARCH_I386] {
+            for nr in (0..1024).chain((0..1024).map(|nr| nr | seccomp::X32_SYSCALL_BIT)) {
+                if arch == abi::AUDIT_ARCH && opens.contains(&nr) {
                     continue;
                 }
                 for args in [[0; 3], [u32::MAX; 3]] {
@@ -531,13 +552,12 @@ mod tests {
     /// profiles the baseline's `EPERM` outranks the trace, so no stop happens.
     #[test]
     fn j4_d2_every_foreign_abi_syscall_is_traced() {
-        const AUDIT_ARCH_I386: u32 = 0x4000_0003;
-        const OTHER_ARCH: u32 = if cfg!(target_arch = "aarch64") {
-            0xc000_003e
+        const OTHER_ARCH: u32 = if abi::AARCH64 {
+            abi::AUDIT_ARCH_X86_64
         } else {
-            0xc000_00b7
+            abi::AUDIT_ARCH_AARCH64
         };
-        for arch in [AUDIT_ARCH_I386, OTHER_ARCH, 0, 0xffff_ffff] {
+        for arch in [abi::AUDIT_ARCH_I386, OTHER_ARCH, 0, 0xffff_ffff] {
             for nr in [0u32, 2, 5, 11, 39, 42, 157, 257, 317, 322, 0x7ffe] {
                 assert_eq!(
                     interpret(arch, nr),
@@ -548,7 +568,7 @@ mod tests {
         }
         for nr in [0u32, 1, 39, 42, 59, 257, 0x3fff_ffff] {
             assert_eq!(
-                interpret(sys::AUDIT_ARCH, sys::X32_SYSCALL_BIT | nr),
+                interpret(abi::AUDIT_ARCH, seccomp::X32_SYSCALL_BIT | nr),
                 TRACE,
                 "x32 {nr:#x} must stop"
             );
@@ -556,8 +576,8 @@ mod tests {
         // A number past the x32 range without its bit is a native number no
         // table has: the kernel answers ENOSYS, and this filter lets it by.
         assert_eq!(
-            interpret(sys::AUDIT_ARCH, 0x8000_0000),
-            sys::SECCOMP_RET_ALLOW
+            interpret(abi::AUDIT_ARCH, 0x8000_0000),
+            seccomp::SECCOMP_RET_ALLOW
         );
     }
 
@@ -588,15 +608,15 @@ mod tests {
         for flags in [0, TSYNC, 1 << 2, TSYNC_ESRCH] {
             assert_eq!(
                 interpret_flags(SECCOMP, flags),
-                sys::SECCOMP_RET_ALLOW,
+                seccomp::SECCOMP_RET_ALLOW,
                 "seccomp flags {flags:#x} asks for no listener"
             );
         }
         // PR_SET_SECCOMP, PR_SET_NAME, PR_SET_NO_NEW_PRIVS.
         for option in [22u32, 15, 38] {
             assert_eq!(
-                interpret_full(sys::AUDIT_ARCH, PRCTL, option, NEW_LISTENER),
-                sys::SECCOMP_RET_ALLOW,
+                interpret_full(abi::AUDIT_ARCH, PRCTL, option, NEW_LISTENER),
+                seccomp::SECCOMP_RET_ALLOW,
                 "prctl option {option}"
             );
         }
@@ -606,7 +626,7 @@ mod tests {
     fn every_closed_set_number_traces_and_nothing_else_does() {
         for entry in CLOSED_SET {
             assert_eq!(
-                interpret(sys::AUDIT_ARCH, entry.nr as u32),
+                interpret(abi::AUDIT_ARCH, entry.nr as u32),
                 TRACE,
                 "{} ({}) must stop",
                 entry.name,
@@ -619,17 +639,17 @@ mod tests {
             } else if nr == CLONE3_SYSCALL.1 {
                 ENOSYS
             } else {
-                sys::SECCOMP_RET_ALLOW
+                seccomp::SECCOMP_RET_ALLOW
             };
             assert_eq!(
-                interpret(sys::AUDIT_ARCH, nr),
+                interpret(abi::AUDIT_ARCH, nr),
                 expected,
                 "syscall {nr} with no listener or untraced flag"
             );
         }
     }
 
-    const ENOSYS: u32 = sys::SECCOMP_RET_ERRNO | sys::LINUX_ENOSYS;
+    const ENOSYS: u32 = seccomp::SECCOMP_RET_ERRNO | seccomp::LINUX_ENOSYS;
 
     /// J4 S4: `clone` stops when its flags carry `CLONE_UNTRACED`, whatever
     /// else they carry, and runs untouched otherwise — the flags glibc uses
@@ -649,36 +669,36 @@ mod tests {
             0xffff_ffff,
         ] {
             assert_eq!(
-                interpret_full(sys::AUDIT_ARCH, CLONE, flags, 0),
+                interpret_full(abi::AUDIT_ARCH, CLONE, flags, 0),
                 TRACE,
                 "clone flags {flags:#x} must stop"
             );
         }
         for flags in [0, SIGCHLD, THREAD, VFORK, !CLONE_UNTRACED] {
             assert_eq!(
-                interpret_full(sys::AUDIT_ARCH, CLONE, flags, 0),
-                sys::SECCOMP_RET_ALLOW,
+                interpret_full(abi::AUDIT_ARCH, CLONE, flags, 0),
+                seccomp::SECCOMP_RET_ALLOW,
                 "clone flags {flags:#x} carry no CLONE_UNTRACED"
             );
         }
         // The flag in another call's first argument means nothing.
         for nr in [57u32, 58, 1, 0] {
             assert_eq!(
-                interpret_full(sys::AUDIT_ARCH, nr, CLONE_UNTRACED, 0),
-                sys::SECCOMP_RET_ALLOW,
+                interpret_full(abi::AUDIT_ARCH, nr, CLONE_UNTRACED, 0),
+                seccomp::SECCOMP_RET_ALLOW,
                 "nr {nr}"
             );
         }
         for (arg0, arg1) in [(0, 0), (0x1000, 88), (u32::MAX, u32::MAX)] {
             assert_eq!(
-                interpret_full(sys::AUDIT_ARCH, CLONE3_SYSCALL.1, arg0, arg1),
+                interpret_full(abi::AUDIT_ARCH, CLONE3_SYSCALL.1, arg0, arg1),
                 ENOSYS
             );
         }
         // Compat clone3 is refused before architecture dispatch.
-        assert_eq!(interpret(0x4000_0003, CLONE3_SYSCALL.1), ENOSYS);
+        assert_eq!(interpret(abi::AUDIT_ARCH_I386, CLONE3_SYSCALL.1), ENOSYS);
         assert_eq!(
-            interpret(sys::AUDIT_ARCH, CLONE3_SYSCALL.1 | sys::X32_SYSCALL_BIT),
+            interpret(abi::AUDIT_ARCH, CLONE3_SYSCALL.1 | seccomp::X32_SYSCALL_BIT),
             ENOSYS
         );
         assert_eq!(
@@ -696,8 +716,8 @@ mod tests {
             libc::SYS_close,
         ] {
             assert_eq!(
-                interpret(sys::AUDIT_ARCH, nr as u32),
-                sys::SECCOMP_RET_ALLOW,
+                interpret(abi::AUDIT_ARCH, nr as u32),
+                seccomp::SECCOMP_RET_ALLOW,
                 "syscall {nr} is outside the closed set"
             );
         }
@@ -708,9 +728,9 @@ mod tests {
         let prog = narrowing_filter();
         assert_eq!(prog.len(), CLOSED_SET.len() + 17);
         for insn in &prog {
-            if insn.code == sys::BPF_RET_K {
+            if insn.code == bpf::CODE_RET_K {
                 assert!(
-                    insn.k == sys::SECCOMP_RET_ALLOW || insn.k == TRACE || insn.k == ENOSYS,
+                    insn.k == seccomp::SECCOMP_RET_ALLOW || insn.k == TRACE || insn.k == ENOSYS,
                     "the narrowing filter never denies anything but clone3: {:#x}",
                     insn.k
                 );
@@ -718,13 +738,13 @@ mod tests {
         }
         // And the one refusal is reached by clone3 alone.
         for nr in 0u32..1024 {
-            let verdict = interpret(sys::AUDIT_ARCH, nr);
+            let verdict = interpret(abi::AUDIT_ARCH, nr);
             assert_eq!(verdict == ENOSYS, nr == CLONE3_SYSCALL.1, "nr {nr}");
         }
-        assert_eq!(prog[0].code, sys::BPF_LD_W_ABS);
+        assert_eq!(prog[0].code, bpf::CODE_LD_W_ABS);
         assert_eq!(
             prog[0].k,
-            sys::SECCOMP_DATA_NR,
+            seccomp::SD_NR,
             "compat clone3 is refused before architecture dispatch"
         );
     }

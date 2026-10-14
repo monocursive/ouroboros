@@ -82,6 +82,7 @@ use super::{
     Args, GapReason, OpSet, PathSnapshot, SockaddrSnapshot, TracerConfig, TracerError, TracerEvent,
     TracerSummary, clock, event_bytes,
 };
+use crate::platform::linux::{abi, seccomp};
 
 /// How long a tracee may be held at a stop by a consumer that is not reading.
 /// After this the result is dropped and counted; the tree keeps moving.
@@ -356,7 +357,7 @@ fn verdict_at_handler(code: i64, frame: Option<(u64, u64)>, site: Site) -> Verdi
             }
             Some((ax, ip))
                 if ax
-                    == if site.arch == 0xc000_00b7 {
+                    == if site.arch == abi::AUDIT_ARCH_AARCH64 {
                         site.arg0
                     } else {
                         site.nr
@@ -364,7 +365,11 @@ fn verdict_at_handler(code: i64, frame: Option<(u64, u64)>, site: Site) -> Verdi
                     && ip
                         == site
                             .ip
-                            .wrapping_sub(if site.arch == 0xc000_00b7 { 4 } else { 2 }) =>
+                            .wrapping_sub(if site.arch == abi::AUDIT_ARCH_AARCH64 {
+                                4
+                            } else {
+                                2
+                            }) =>
             {
                 Verdict::Restarted
             }
@@ -507,7 +512,7 @@ fn ensure_wake_handler() -> bool {
 fn seize_and_confirm(launcher: pid_t) -> Result<(), TracerError> {
     // J5-D: the one statement of which architecture the tables cover, so
     // the tracer refuses exactly where `doctor` reports it unsupported.
-    if !super::super::seccomp::tables_cover(std::env::consts::ARCH) {
+    if !seccomp::tables_cover(std::env::consts::ARCH) {
         return Err(TracerError::UnsupportedArch);
     }
     ensure_wake_handler();
@@ -1640,39 +1645,41 @@ impl Session {
     /// Security 2026-09-27 (audit 4 B2): whether a *foreign-ABI* entry is one of
     /// the two special calls anyway — a `seccomp` asking for its own
     /// notification listener, or a `clone` the kernel will not attach to this
-    /// tracer.
+    /// tracer — or a `clone3`, whose flags no filter can read.
     ///
-    /// The i386 (`int 0x80`) numbers are 354 (`seccomp`, flags in `args[1]`) and
-    /// 120 (`clone`, flags in `args[0]`); the x32 spellings are the native
-    /// numbers with the x32 bit set. Register positions are identical across
-    /// these ABIs, so the same flag tests decide. The reference host does accept
-    /// `int 0x80`, and under `none` a listener created through it can pass any
-    /// syscall with `SECCOMP_USER_NOTIF_FLAG_CONTINUE` and no trace stop at all
-    /// — which is the open-ended [`GapReason::ChildNotificationListener`] gap,
-    /// not the bounded `foreign_abi` interval a plain foreign call costs.
+    /// Three compat ABIs carry them: i386 (`int 0x80` on x86_64: `seccomp`
+    /// 354, `clone` 120), x32 (the x86_64 numbers 317 and 56 with the x32 bit
+    /// set) and AArch32 on arm64 (`seccomp` 383, `clone` 120). `seccomp`'s
+    /// flags are in `args[1]` and `clone`'s in `args[0]` in all of them, so the
+    /// same flag tests decide. The reference host does accept `int 0x80`, and
+    /// under `none` a listener created through it can pass any syscall with
+    /// `SECCOMP_USER_NOTIF_FLAG_CONTINUE` and no trace stop at all — which is
+    /// the open-ended [`GapReason::ChildNotificationListener`] gap, not the
+    /// bounded `foreign_abi` interval a plain foreign call costs.
     fn compat_special(info: &sys::SyscallInfo) -> Option<InFlight> {
-        let listener_flags =
-            u64::from(crate::platform::linux::tracer::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER);
-        let untraced_flag = u64::from(crate::platform::linux::tracer::filter::CLONE_UNTRACED);
-        let x32 = info.arch == 0xc000_003e && info.nr & u64::from(sys::X32_SYSCALL_BIT) != 0;
-        let i386 = info.arch == sys::AUDIT_ARCH_I386;
-        let arm32 = info.arch == 0x4000_0028;
-        if !i386 && !x32 && !arm32 {
-            return None;
-        }
-        let nr = info.nr & !u64::from(sys::X32_SYSCALL_BIT);
-        let is_seccomp = (arm32 && nr == 383)
-            || (i386
-                && nr == u64::from(crate::platform::linux::tracer::filter::I386_LISTENER_SYSCALL))
-            || (x32 && !i386 && nr == 317);
-        let is_clone = (arm32 && nr == 120)
-            || (i386
-                && nr == u64::from(crate::platform::linux::tracer::filter::I386_CLONE_SYSCALL))
-            || (x32 && !i386 && nr == 56);
-        if is_seccomp && info.args[1] & listener_flags != 0 {
+        use super::filter::{
+            ARM_CLONE_SYSCALL, ARM_LISTENER_SYSCALL, CLONE_UNTRACED, CLONE3_SYSCALL,
+            I386_CLONE_SYSCALL, I386_LISTENER_SYSCALL, SECCOMP_FILTER_FLAG_NEW_LISTENER,
+            X32_CLONE_SYSCALL, X32_LISTENER_SYSCALL,
+        };
+        let x32_bit = u64::from(seccomp::X32_SYSCALL_BIT);
+        let nr = info.nr & !x32_bit;
+        let (listener, clone) = match info.arch {
+            abi::AUDIT_ARCH_I386 => (I386_LISTENER_SYSCALL, I386_CLONE_SYSCALL),
+            abi::AUDIT_ARCH_ARM => (ARM_LISTENER_SYSCALL, ARM_CLONE_SYSCALL),
+            abi::AUDIT_ARCH_X86_64 if info.nr & x32_bit != 0 => {
+                (X32_LISTENER_SYSCALL, X32_CLONE_SYSCALL)
+            }
+            _ => return None,
+        };
+        if nr == u64::from(listener)
+            && info.args[1] & u64::from(SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
+        {
             return Some(InFlight::Listener);
         }
-        if nr == 435 || (is_clone && info.args[0] & untraced_flag != 0) {
+        if nr == u64::from(CLONE3_SYSCALL.1)
+            || (nr == u64::from(clone) && info.args[0] & u64::from(CLONE_UNTRACED) != 0)
+        {
             return Some(InFlight::Untraced);
         }
         None
@@ -1738,7 +1745,7 @@ impl Session {
         // A compat or x32 entry carries a number from a different table, and
         // naming it from this one would mislabel the call (J4 D2): it is
         // foreign, followed to its return and never decoded.
-        if info.arch != sys::AUDIT_ARCH || info.nr & u64::from(sys::X32_SYSCALL_BIT) != 0 {
+        if info.arch != abi::AUDIT_ARCH || info.nr & u64::from(seccomp::X32_SYSCALL_BIT) != 0 {
             // Security 2026-09-27 (audit 4 B2): the two calls whose *native*
             // forms carry their own classification — a listener hides every
             // later syscall for as long as it is held, and an untraced
@@ -1757,12 +1764,8 @@ impl Session {
         // J4 D1: a child asking for its own notification listener. The flags
         // are the register the kernel will read, not memory the child could
         // change behind this stop.
-        if info.nr == u64::from(crate::platform::linux::tracer::filter::LISTENER_SYSCALL.1)
-            && info.args[1]
-                & u64::from(
-                    crate::platform::linux::tracer::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER,
-                )
-                != 0
+        if info.nr == u64::from(super::filter::LISTENER_SYSCALL.1)
+            && info.args[1] & u64::from(super::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER) != 0
         {
             self.follow(tid, InFlight::Listener, site);
             return;
@@ -1770,8 +1773,8 @@ impl Session {
         // J4 S4: a clone the kernel will not attach to this tracer. The flags
         // are the register the kernel reads. Contained baselines refuse the
         // flag (EPERM outranks the trace), so only `none` stops here.
-        if info.nr == u64::from(crate::platform::linux::tracer::filter::CLONE_SYSCALL.1)
-            && info.args[0] & u64::from(crate::platform::linux::tracer::filter::CLONE_UNTRACED) != 0
+        if info.nr == u64::from(super::filter::CLONE_SYSCALL.1)
+            && info.args[0] & u64::from(super::filter::CLONE_UNTRACED) != 0
         {
             self.follow(tid, InFlight::Untraced, site);
             return;
@@ -3152,7 +3155,7 @@ mod tests {
                 start_ticks: None,
                 pending: Some(InFlight::Closed(pending.clone())),
                 site: Site {
-                    arch: sys::AUDIT_ARCH,
+                    arch: abi::AUDIT_ARCH,
                     nr: 437,
                     ip: 0,
                     arg0: 0,
@@ -3237,7 +3240,7 @@ mod tests {
                 start_ticks: None,
                 pending: None,
                 site: Site {
-                    arch: sys::AUDIT_ARCH,
+                    arch: abi::AUDIT_ARCH,
                     nr: 257,
                     ip: 0,
                     arg0: 0,
@@ -3608,7 +3611,7 @@ mod tests {
     #[test]
     fn j4_o2_the_verdict_at_a_handler_follows_the_kernel_for_every_code() {
         let site = Site {
-            arch: sys::AUDIT_ARCH,
+            arch: abi::AUDIT_ARCH,
             nr: 257,
             ip: 0x40_1002,
             arg0: 257,
@@ -4269,7 +4272,7 @@ mod tests {
         // i386 int 0x80 seccomp(354) with NEW_LISTENER.
         assert_eq!(
             kind(Session::compat_special(&info(
-                sys::AUDIT_ARCH_I386,
+                abi::AUDIT_ARCH_I386,
                 354,
                 0,
                 flag
@@ -4279,7 +4282,7 @@ mod tests {
         // The same call without the flag is ordinary foreign.
         assert_eq!(
             kind(Session::compat_special(&info(
-                sys::AUDIT_ARCH_I386,
+                abi::AUDIT_ARCH_I386,
                 354,
                 0,
                 0
@@ -4289,7 +4292,7 @@ mod tests {
         // i386 clone(120) with CLONE_UNTRACED.
         assert_eq!(
             kind(Session::compat_special(&info(
-                sys::AUDIT_ARCH_I386,
+                abi::AUDIT_ARCH_I386,
                 120,
                 untraced,
                 0
@@ -4299,8 +4302,8 @@ mod tests {
         // x32 seccomp (317 | bit) and clone (56 | bit).
         assert_eq!(
             kind(Session::compat_special(&info(
-                0xc000_003e,
-                317u64 | u64::from(sys::X32_SYSCALL_BIT),
+                abi::AUDIT_ARCH_X86_64,
+                317u64 | u64::from(seccomp::X32_SYSCALL_BIT),
                 0,
                 flag
             ))),
@@ -4308,8 +4311,8 @@ mod tests {
         );
         assert_eq!(
             kind(Session::compat_special(&info(
-                0xc000_003e,
-                56u64 | u64::from(sys::X32_SYSCALL_BIT),
+                abi::AUDIT_ARCH_X86_64,
+                56u64 | u64::from(seccomp::X32_SYSCALL_BIT),
                 untraced,
                 0
             ))),
@@ -4319,7 +4322,7 @@ mod tests {
         // not i386 seccomp.
         assert_eq!(
             kind(Session::compat_special(&info(
-                sys::AUDIT_ARCH_I386,
+                abi::AUDIT_ARCH_I386,
                 317,
                 0,
                 flag
@@ -4329,12 +4332,17 @@ mod tests {
         // AArch32 EABI has its own seccomp number. It can create the same
         // open-ended listener/untraced-child gaps as x86 compatibility ABIs.
         assert_eq!(
-            kind(Session::compat_special(&info(0x4000_0028, 383, 0, flag))),
+            kind(Session::compat_special(&info(
+                abi::AUDIT_ARCH_ARM,
+                383,
+                0,
+                flag
+            ))),
             "listener"
         );
         assert_eq!(
             kind(Session::compat_special(&info(
-                0x4000_0028,
+                abi::AUDIT_ARCH_ARM,
                 120,
                 untraced,
                 0
@@ -4342,16 +4350,31 @@ mod tests {
             "untraced"
         );
         assert_eq!(
-            kind(Session::compat_special(&info(0x4000_0028, 354, 0, flag))),
+            kind(Session::compat_special(&info(
+                abi::AUDIT_ARCH_ARM,
+                354,
+                0,
+                flag
+            ))),
             "none"
         );
         assert_eq!(
-            kind(Session::compat_special(&info(0x4000_0028, 383, 0, 0))),
+            kind(Session::compat_special(&info(
+                abi::AUDIT_ARCH_ARM,
+                383,
+                0,
+                0
+            ))),
             "none"
         );
         // Another foreign architecture entirely.
         assert_eq!(
-            kind(Session::compat_special(&info(0xc000_00b7, 354, 0, flag))),
+            kind(Session::compat_special(&info(
+                abi::AUDIT_ARCH_AARCH64,
+                354,
+                0,
+                flag
+            ))),
             "none"
         );
     }

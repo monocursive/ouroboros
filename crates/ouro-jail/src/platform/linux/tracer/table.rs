@@ -5,7 +5,7 @@
 //! [`CLOSED_SET`](super::closed_set::CLOSED_SET), every verdict from running
 //! the installed program ([`super::narrowing_filter`]) the way the kernel
 //! would, and the digest from the bytes the launcher installs. The copy kept
-//! as evidence (`docs/specs/jail-v1/evidence/closed-set-x86_64.txt`) is
+//! as evidence (`docs/specs/jail-v1/evidence/closed-set-<arch>.txt`) is
 //! compared with this output by a test, and a live test reads the digest
 //! back from a receipt, so the published table is the one this build traces.
 
@@ -16,8 +16,8 @@ use super::filter::{
     CLONE_SYSCALL, CLONE_UNTRACED, CLONE3_SYSCALL, LISTENER_SYSCALL, NARROWING_TRACE_DATA,
     SECCOMP_FILTER_FLAG_NEW_LISTENER, narrowing_filter, narrowing_filter_digest,
 };
-use super::sys;
-use crate::platform::linux::seccomp::{DENY_EPERM, NAMESPACE_SETUP};
+use crate::platform::linux::seccomp::{self, DENY_EPERM, NAMESPACE_SETUP};
+use crate::platform::linux::{abi, bpf};
 
 /// The three io_uring entry points (jail-v1 §9.2), by name.
 const IO_URING: [&str; 3] = ["io_uring_setup", "io_uring_enter", "io_uring_register"];
@@ -32,23 +32,23 @@ fn verdict(arch: u32, nr: u32, arg0: u32, arg1: u32) -> u32 {
             return u32::MAX;
         };
         match insn.code {
-            c if c == sys::BPF_LD_W_ABS => {
+            c if c == bpf::CODE_LD_W_ABS => {
                 acc = match insn.k {
-                    k if k == sys::SECCOMP_DATA_NR => nr,
-                    k if k == sys::SECCOMP_DATA_ARCH => arch,
-                    k if k == sys::SECCOMP_DATA_ARG0_LOW => arg0,
-                    k if k == sys::SECCOMP_DATA_ARG1_LOW => arg1,
+                    k if k == seccomp::SD_NR => nr,
+                    k if k == seccomp::SD_ARCH => arch,
+                    k if k == seccomp::sd_arg_low(0) => arg0,
+                    k if k == seccomp::sd_arg_low(1) => arg1,
                     _ => return u32::MAX,
                 };
                 pc += 1;
             }
-            c if c == sys::BPF_JEQ_K => {
+            c if c == bpf::CODE_JEQ_K => {
                 pc += 1 + usize::from(if acc == insn.k { insn.jt } else { insn.jf });
             }
-            c if c == sys::BPF_JSET_K => {
+            c if c == bpf::CODE_JSET_K => {
                 pc += 1 + usize::from(if acc & insn.k != 0 { insn.jt } else { insn.jf });
             }
-            c if c == sys::BPF_RET_K => return insn.k,
+            c if c == bpf::CODE_RET_K => return insn.k,
             _ => return u32::MAX,
         }
     }
@@ -56,11 +56,11 @@ fn verdict(arch: u32, nr: u32, arg0: u32, arg1: u32) -> u32 {
 }
 
 fn name(verdict: u32) -> String {
-    if verdict == sys::SECCOMP_RET_TRACE | u32::from(NARROWING_TRACE_DATA) {
+    if verdict == seccomp::SECCOMP_RET_TRACE | u32::from(NARROWING_TRACE_DATA) {
         "TRACE".to_owned()
-    } else if verdict == sys::SECCOMP_RET_ALLOW {
+    } else if verdict == seccomp::SECCOMP_RET_ALLOW {
         "ALLOW".to_owned()
-    } else if verdict == sys::SECCOMP_RET_ERRNO | sys::LINUX_ENOSYS {
+    } else if verdict == seccomp::SECCOMP_RET_ERRNO | seccomp::LINUX_ENOSYS {
         "ENOSYS".to_owned()
     } else {
         format!("{verdict:#010x}")
@@ -112,7 +112,7 @@ fn operation(entry: &Entry) -> String {
 /// The table, as the evidence file holds it.
 #[must_use]
 pub fn closed_set_table() -> String {
-    let x86 = sys::AUDIT_ARCH;
+    let native = abi::AUDIT_ARCH;
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -128,11 +128,11 @@ pub fn closed_set_table() -> String {
         out,
         "precondition                 verdict  meaning\n\
          clone3 (nr 435 or x32|435)   ENOSYS  every ABI, before the architecture branch\n\
-         arch != 0x{x86:08x}          {}    other calls: stopped, labelled foreign, never decoded\n\
+         arch != 0x{native:08x}          {}    other calls: stopped, labelled foreign, never decoded\n\
          nr & 0x{:08x}             {}    x32: stopped, labelled foreign, never decoded",
-        name(verdict(0x4000_0003, 59, 0, 0)),
-        sys::X32_SYSCALL_BIT,
-        name(verdict(x86, sys::X32_SYSCALL_BIT | 59, 0, 0)),
+        name(verdict(abi::AUDIT_ARCH_I386, 59, 0, 0)),
+        seccomp::X32_SYSCALL_BIT,
+        name(verdict(native, seccomp::X32_SYSCALL_BIT | 59, 0, 0)),
     );
     out.push_str(
         "\nclosed-set rows (a stop, then one result per return; EACCES or EPERM is\n\
@@ -149,7 +149,7 @@ pub fn closed_set_table() -> String {
             "{:<12} {:<4} {:<7} {:<54} {}",
             entry.name,
             entry.nr,
-            name(verdict(x86, entry.nr as u32, 0, 0)),
+            name(verdict(native, entry.nr as u32, 0, 0)),
             operation(entry),
             arguments(entry)
         );
@@ -163,8 +163,8 @@ pub fn closed_set_table() -> String {
          a granted listener is a child_notification_listener gap, a refused one nothing; \
          one the in-flight bound cannot follow is that gap too\n\
          {seccomp:<12} {nr:<4} {:<7} otherwise",
-        name(verdict(x86, nr, 1, SECCOMP_FILTER_FLAG_NEW_LISTENER)),
-        name(verdict(x86, nr, 1, 0)),
+        name(verdict(native, nr, 1, SECCOMP_FILTER_FLAG_NEW_LISTENER)),
+        name(verdict(native, nr, 1, 0)),
     );
     let (clone, nr) = CLONE_SYSCALL;
     let _ = writeln!(
@@ -173,16 +173,16 @@ pub fn closed_set_table() -> String {
          a created task is an untraced_descendant gap, a failed call nothing; \
          one the in-flight bound cannot follow is that gap too\n\
          {clone:<12} {nr:<4} {:<7} otherwise (fork, vfork, threads: followed by ptrace events)",
-        name(verdict(x86, nr, CLONE_UNTRACED | 17, 0)),
-        name(verdict(x86, nr, 0x003d_0f00, 0)),
+        name(verdict(native, nr, CLONE_UNTRACED | 17, 0)),
+        name(verdict(native, nr, 0x003d_0f00, 0)),
     );
     let (clone3, nr) = CLONE3_SYSCALL;
     let _ = writeln!(
         out,
         "{clone3:<12} {nr:<4} {:<7} its flags are in memory seccomp cannot read; glibc falls back to clone",
-        name(verdict(x86, nr, 0, 0)),
+        name(verdict(native, nr, 0, 0)),
     );
-    let _ = writeln!(out, "everything else   {}", name(verdict(x86, 0, 0, 0)));
+    let _ = writeln!(out, "everything else   {}", name(verdict(native, 0, 0, 0)));
     out.push_str(
         "\nexcluded by name (§11.2): read, write, mmap, ftruncate and every other\n\
          descriptor-based mutation, io_uring, payloads and file contents; a read-only\n\
@@ -204,7 +204,7 @@ pub fn closed_set_table() -> String {
             out,
             "{call:<18} {:<4} {:<7} tool, build, agent: {}",
             nr.map_or_else(|| "?".to_owned(), |nr| nr.to_string()),
-            nr.map_or_else(|| "?".to_owned(), |nr| name(verdict(x86, nr, 0, 0))),
+            nr.map_or_else(|| "?".to_owned(), |nr| name(verdict(native, nr, 0, 0))),
             if refused {
                 "EPERM (baseline)"
             } else {

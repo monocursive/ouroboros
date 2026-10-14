@@ -414,11 +414,12 @@ fn target(index: usize, offset: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::linux::abi::AUDIT_ARCH_X86_64;
 
     fn tiny() -> Program {
         let mut asm = Asm::new();
         asm.ld_w_abs(4)
-            .jeq(0xc000_003e, None, Some("deny"))
+            .jeq(AUDIT_ARCH_X86_64, None, Some("deny"))
             .ld_w_abs(0)
             .jeq(101, Some("deny"), None)
             .ret(0x7fff_0000)
@@ -545,7 +546,7 @@ mod tests {
             code: CODE_JEQ_K,
             jt: 3,
             jf: 4,
-            k: 0xc000_003e,
+            k: AUDIT_ARCH_X86_64,
         };
         assert_eq!(insn.to_bytes(), [0x15, 0x00, 3, 4, 0x3e, 0x00, 0x00, 0xc0]);
         assert_eq!(tiny().to_bytes().len(), 6 * 8);
@@ -578,7 +579,7 @@ mod tests {
     fn digest_changes_when_one_immediate_changes() {
         let mut asm = Asm::new();
         asm.ld_w_abs(4)
-            .jeq(0xc000_003e, None, Some("deny"))
+            .jeq(AUDIT_ARCH_X86_64, None, Some("deny"))
             .ld_w_abs(0)
             .jeq(102, Some("deny"), None) // 101 in `tiny`
             .ret(0x7fff_0000)

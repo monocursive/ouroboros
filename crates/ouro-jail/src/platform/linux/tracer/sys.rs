@@ -132,35 +132,12 @@ pub fn is_restart(rval: i64) -> bool {
 }
 
 // ------------------------------------------------------------ seccomp ABI
+//
+// The filter's opcodes, verdicts and `seccomp_data` offsets are the ones the
+// baseline assembler (`bpf`) and table (`seccomp`) define; only what they do
+// not is spelled out here.
 
 pub const SECCOMP_SET_MODE_FILTER: libc::c_long = 1;
-pub const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
-pub const SECCOMP_RET_TRACE: u32 = 0x7ff0_0000;
-pub const AUDIT_ARCH: u32 = crate::platform::linux::abi::AUDIT_ARCH;
-/// x86_64 marks an x32 syscall by this bit in `nr`.
-pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
-/// The 32-bit x86 audit architecture: `int 0x80` entries carry this arch and
-/// numbers from the i386 table (audit 4 B2).
-pub const AUDIT_ARCH_I386: u32 = 0x4000_0003;
-
-pub const BPF_LD_W_ABS: u16 = 0x20;
-pub const BPF_JEQ_K: u16 = 0x15;
-pub const BPF_JSET_K: u16 = 0x45;
-pub const BPF_RET_K: u16 = 0x06;
-
-/// Byte offsets into `struct seccomp_data`.
-pub const SECCOMP_DATA_NR: u32 = 0;
-pub const SECCOMP_DATA_ARCH: u32 = 4;
-/// The low word of `args[0]` on a little-endian host.
-pub const SECCOMP_DATA_ARG0_LOW: u32 = 16;
-/// The low word of `args[1]` on a little-endian host.
-pub const SECCOMP_DATA_ARG1_LOW: u32 = 24;
-/// The low word of `args[2]` on a little-endian host.
-pub const SECCOMP_DATA_ARG2_LOW: u32 = 32;
-/// `SECCOMP_RET_ERRNO`, with the errno in the data bits.
-pub const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
-/// Linux `ENOSYS`, spelled out because the filter targets the Linux ABI.
-pub const LINUX_ENOSYS: u32 = 38;
 /// `SECCOMP_RET_DATA`: the low sixteen bits of a verdict, which
 /// `PTRACE_GETEVENTMSG` reports at a `PTRACE_EVENT_SECCOMP` stop.
 pub const SECCOMP_RET_DATA: u32 = 0x0000_ffff;
@@ -728,14 +705,18 @@ mod tests {
         );
     }
 
+    /// The seccomp ABI the narrowing filter speaks, from the modules that
+    /// define it for every filter, against `libc`.
     #[test]
     fn seccomp_and_errno_constants_match_libc() {
+        use crate::platform::linux::{bpf, seccomp};
         assert_eq!(
             SECCOMP_SET_MODE_FILTER,
             i64::from(libc::SECCOMP_SET_MODE_FILTER)
         );
-        assert_eq!(SECCOMP_RET_ALLOW, libc::SECCOMP_RET_ALLOW);
-        assert_eq!(SECCOMP_RET_TRACE, libc::SECCOMP_RET_TRACE);
+        assert_eq!(seccomp::SECCOMP_RET_ALLOW, libc::SECCOMP_RET_ALLOW);
+        assert_eq!(seccomp::SECCOMP_RET_TRACE, libc::SECCOMP_RET_TRACE);
+        assert_eq!(seccomp::SECCOMP_RET_ERRNO, libc::SECCOMP_RET_ERRNO);
         assert_eq!(SECCOMP_RET_DATA, libc::SECCOMP_RET_DATA);
         assert_eq!(
             super::super::filter::SECCOMP_FILTER_FLAG_NEW_LISTENER,
@@ -746,14 +727,24 @@ mod tests {
             libc::SYS_seccomp
         );
         assert_eq!(
-            u32::from(BPF_JSET_K),
+            u32::from(bpf::CODE_JSET_K),
             libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K
         );
+        assert_eq!(
+            u32::from(bpf::CODE_JEQ_K),
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K
+        );
+        assert_eq!(
+            u32::from(bpf::CODE_LD_W_ABS),
+            libc::BPF_LD | libc::BPF_W | libc::BPF_ABS
+        );
+        assert_eq!(u32::from(bpf::CODE_RET_K), libc::BPF_RET | libc::BPF_K);
         // `args[1]` starts 16 + 8 bytes into `struct seccomp_data`.
         assert_eq!(
-            SECCOMP_DATA_ARG1_LOW as usize,
+            seccomp::sd_arg_low(1) as usize,
             std::mem::offset_of!(libc::seccomp_data, args) + 8
         );
+        assert_eq!(seccomp::LINUX_ENOSYS, libc::ENOSYS as u32);
     }
 
     /// The signal-frame offsets are glibc's view of the same kernel layout:
