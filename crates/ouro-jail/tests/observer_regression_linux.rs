@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
-//! Regression tests for the Linux ptrace observer, adopted from the
-//! independent review of J1.
+//! Regression tests for the Linux ptrace observer, adopted from an
+//! independent review of its first version.
 //!
 //! Each one was written by a reviewer against the first version of the
 //! module, and each either found a defect or survived a mutation the
@@ -12,11 +12,13 @@
 //!
 //! Where a fix changed what the right answer is, the assertion is inverted
 //! rather than deleted, and the doc comment says which defect it now pins.
+//!
+//! The fixture is `fixtures/observer_regression.c`, built and launched by
+//! `common/observer.rs`.
 
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::os::fd::AsRawFd as _;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 // Measure live requested allocation bytes independently of the observer's own
@@ -31,6 +33,8 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 // counter neither dereferences nor changes the returned allocation.
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract for
+        // `layout`, which is the contract `System.alloc` asks for.
         let ptr = unsafe { std::alloc::System.alloc(layout) };
         if !ptr.is_null() {
             LIVE_BYTES.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
@@ -38,6 +42,8 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
         ptr
     }
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: as in `alloc`, the caller's contract for `layout` is the
+        // one `System.alloc_zeroed` asks for.
         let ptr = unsafe { std::alloc::System.alloc_zeroed(layout) };
         if !ptr.is_null() {
             LIVE_BYTES.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
@@ -45,10 +51,14 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
         ptr
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: the caller passes a block this allocator returned, which
+        // `System` allocated, with the layout it was allocated with.
         unsafe { std::alloc::System.dealloc(ptr, layout) };
         LIVE_BYTES.fetch_sub(layout.size(), std::sync::atomic::Ordering::Relaxed);
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        // SAFETY: the caller passes a block `System` allocated with `layout`
+        // and a valid new size, which is `System.realloc`'s contract.
         let next = unsafe { std::alloc::System.realloc(ptr, layout, size) };
         if !next.is_null() {
             LIVE_BYTES.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
@@ -58,991 +68,36 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     }
 }
 
-use ouro_fixture::harness;
 use ouro_jail::platform::linux::clock;
-#[cfg(target_arch = "x86_64")]
-use ouro_jail::platform::linux::seccomp;
+use ouro_jail::platform::linux::identity;
 use ouro_jail::platform::linux::tracer::{
-    ClosedOp, GapReason, OpSet, Tracer, TracerConfig, TracerEvent, TracerSummary,
-    narrowing_filter_bytes,
+    ClosedOp, GapReason, OpSet, TracerConfig, TracerEvent, narrowing_filter_bytes, start_ticks,
 };
 
-const HELPER_C: &str = r##"
-#define _GNU_SOURCE
-#include <errno.h>
-#include <fcntl.h>
-#include <linux/filter.h>
-#include <linux/seccomp.h>
-#include <netinet/in.h>
-#include <pthread.h>
-#include <signal.h>
-#include <spawn.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/mman.h>
-#include <sys/prctl.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
-#include <sys/types.h>
-#include <sys/un.h>
-#include <sys/wait.h>
-#include <unistd.h>
+mod common;
 
-extern char **environ;
+#[cfg(target_arch = "x86_64")]
+use common::observer::launch_tool;
+use common::observer::{
+    Fixture, Observed, Report, Work, attach, collect, launch, mkfifo, primary, serial,
+    spawn_launcher,
+};
 
-struct ouro_open_how { unsigned long long flags, mode, resolve; };
+static FIXTURE: Fixture = Fixture {
+    name: "observer_regression",
+    source: include_str!("fixtures/observer_regression.c"),
+    pthread: true,
+    filter: narrowing_filter_bytes,
+};
 
-static void report(const char *label, long r, const char *p1, const char *p2) {
-    printf("%s\t%ld\t%d\t%s\t%s\n", label, r, r < 0 ? errno : 0, p1 ? p1 : "", p2 ? p2 : "");
-    fflush(stdout);
-}
-
-static int install_filter(const char *path) {
-    static struct sock_filter prog[1024];
-    struct sock_fprog fprog;
-    int fd = open(path, O_RDONLY);
-    ssize_t n;
-    if (fd < 0) return -1;
-    n = read(fd, prog, sizeof prog);
-    close(fd);
-    if (n <= 0 || (size_t) n % sizeof(struct sock_filter)) return -2;
-    fprog.len = (unsigned short) ((size_t) n / sizeof(struct sock_filter));
-    fprog.filter = prog;
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) return -3;
-    if (syscall(SYS_seccomp, 1, 0, &fprog)) return -4;
-    return 0;
-}
-
-static int await_release(void) {
-    char b;
-    for (;;) {
-        ssize_t n = read(0, &b, 1);
-        if (n == 1) return 0;
-        if (n == 0) return -1;
-        if (errno != EINTR) return -1;
-    }
-}
-
-static int mode_launch(int argc, char **argv) {
-    if (argc < 4) return 2;
-    if (install_filter(argv[2])) { fprintf(stderr, "install_filter failed\n"); return 3; }
-    /* The exec that brought us here is complete and the filter is on. The
-       supervisor seizes only after reading this, so the seize can never land
-       in the middle of an exec it did not ask about. */
-    report("ready", (long) getpid(), "", "");
-    if (await_release()) return 4;
-    execv(argv[3], &argv[3]);
-    fprintf(stderr, "execv %s: %s\n", argv[3], strerror(errno));
-    return 127;
-}
-
-/* launch2 BASELINE NARROWING PROG ... : the product's shape, enforcement
-   baseline first and the observer's narrowing filter second. */
-static int mode_launch2(int argc, char **argv) {
-    if (argc < 5) return 2;
-    if (install_filter(argv[2])) { fprintf(stderr, "baseline failed\n"); return 3; }
-    if (install_filter(argv[3])) { fprintf(stderr, "narrowing failed\n"); return 3; }
-    report("ready", (long) getpid(), "", "");
-    if (await_release()) return 4;
-    execv(argv[4], &argv[4]);
-    fprintf(stderr, "execv %s: %s\n", argv[4], strerror(errno));
-    return 127;
-}
-
-static char *page_pair(size_t *ps_out) {
-    size_t ps = (size_t) sysconf(_SC_PAGESIZE);
-    char *m = mmap(NULL, 2 * ps, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (m == MAP_FAILED) return NULL;
-    if (mprotect(m + ps, ps, PROT_NONE)) return NULL;
-    *ps_out = ps;
-    return m;
-}
-
-static volatile sig_atomic_t g_hits = 0;
-static void on_usr1(int s) { (void) s; g_hits++; }
-
-static int mode_restart_fifo(int argc, char **argv) {
-    struct sigaction sa;
-    pid_t kid;
-    long r;
-    if (argc < 3) return 2;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = on_usr1;
-    sa.sa_flags = SA_RESTART;
-    sigaction(SIGUSR1, &sa, NULL);
-    kid = fork();
-    if (kid == 0) {
-        int i, fd;
-        pid_t parent = getppid();
-        for (i = 0; i < 6; i++) { usleep(60000); kill(parent, SIGUSR1); }
-        usleep(60000);
-        fd = (int) syscall(SYS_openat, AT_FDCWD, argv[2], O_RDONLY, 0);
-        usleep(200000);
-        if (fd >= 0) close(fd);
-        _exit(0);
-    }
-    r = syscall(SYS_openat, AT_FDCWD, argv[2], O_WRONLY, 0);
-    report("fifo_open", r, argv[2], "");
-    if (r >= 0) close((int) r);
-    waitpid(kid, NULL, 0);
-    report("signals", (long) g_hits, "", "");
-    return 0;
-}
-
-static int mode_stopcont(int argc, char **argv) {
-    pid_t kid;
-    long r;
-    if (argc < 3) return 2;
-    kid = fork();
-    if (kid == 0) {
-        int fd;
-        pid_t parent = getppid();
-        usleep(200000); kill(parent, SIGSTOP);
-        usleep(400000); kill(parent, SIGCONT);
-        usleep(200000);
-        fd = (int) syscall(SYS_openat, AT_FDCWD, argv[2], O_RDONLY, 0);
-        usleep(200000);
-        if (fd >= 0) close(fd);
-        _exit(0);
-    }
-    r = syscall(SYS_openat, AT_FDCWD, argv[2], O_WRONLY, 0);
-    report("fifo_open", r, argv[2], "");
-    if (r >= 0) close((int) r);
-    waitpid(kid, NULL, 0);
-    return 0;
-}
-
-static char *g_fifo;
-static void *blocker(void *arg) {
-    (void) arg;
-    syscall(SYS_openat, AT_FDCWD, g_fifo, O_WRONLY, 0);
-    return NULL;
-}
-
-static int mode_die_inflight(int argc, char **argv) {
-    pthread_t t;
-    if (argc < 4) return 2;
-    g_fifo = argv[2];
-    pthread_create(&t, NULL, blocker, NULL);
-    usleep(300000);
-    report("exiting", (long) atol(argv[3]), "", "");
-    syscall(SYS_exit_group, atol(argv[3]));
-    return 0;
-}
-
-static int mode_forkburst(int argc, char **argv) {
-    long n, i, ok = 0;
-    if (argc < 4) return 2;
-    n = atol(argv[2]);
-    for (i = 0; i < n; i++) {
-        pid_t p = fork();
-        if (p == 0) {
-            char *av[2];
-            av[0] = argv[3];
-            av[1] = NULL;
-            execv(argv[3], av);
-            _exit(126);
-        }
-        if (p > 0) ok++; else break;
-    }
-    for (i = 0; i < ok; i++) { int st = 0; wait(&st); }
-    report("forkburst", ok, "", "");
-    return 0;
-}
-
-static int mode_badpath(int argc, char **argv) {
-    size_t ps;
-    char *m;
-    long r;
-    const char *kind;
-    char name[256];
-    if (argc < 4) return 2;
-    kind = argv[2];
-    m = page_pair(&ps);
-    if (!m) return 3;
-    snprintf(name, sizeof name, "%s/edge", argv[3]);
-    if (!strcmp(kind, "edge")) {
-        size_t len = strlen(name);
-        char *p = m + ps - (len + 1);
-        memcpy(p, name, len + 1);
-        r = syscall(SYS_openat, AT_FDCWD, p, O_WRONLY | O_CREAT, 0600);
-        report("edge", r, name, "");
-        if (r >= 0) close((int) r);
-    } else if (!strcmp(kind, "nonul")) {
-        memset(m, 'a', ps);
-        r = syscall(SYS_openat, AT_FDCWD, m, O_WRONLY | O_CREAT, 0600);
-        report("nonul", r, "", "");
-    } else if (!strcmp(kind, "unmapped")) {
-        r = syscall(SYS_openat, AT_FDCWD, m + ps, O_WRONLY | O_CREAT, 0600);
-        report("unmapped", r, "", "");
-    } else if (!strcmp(kind, "minus1")) {
-        r = syscall(SYS_openat, AT_FDCWD, (void *) -1L, O_WRONLY | O_CREAT, 0600);
-        report("minus1", r, "", "");
-    } else if (!strcmp(kind, "null")) {
-        r = syscall(SYS_openat, AT_FDCWD, (void *) 0L, O_WRONLY | O_CREAT, 0600);
-        report("null", r, "", "");
-    } else if (!strcmp(kind, "long")) {
-        char *big = malloc(9000);
-        memset(big, 'b', 8999);
-        big[8999] = 0;
-        r = syscall(SYS_openat, AT_FDCWD, big, O_WRONLY | O_CREAT, 0600);
-        report("long", r, "", "");
-    } else return 2;
-    return 0;
-}
-
-static int mode_badsock(int argc, char **argv) {
-    size_t ps;
-    char *m;
-    long r;
-    int fd;
-    const char *kind;
-    struct sockaddr_in sin;
-    if (argc < 3) return 2;
-    kind = argv[2];
-    m = page_pair(&ps);
-    if (!m) return 3;
-    memset(&sin, 0, sizeof sin);
-    sin.sin_family = AF_INET;
-    sin.sin_port = htons(9);
-    sin.sin_addr.s_addr = htonl(0x7f000001);
-    fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return 3;
-    if (!strcmp(kind, "lie-long")) {
-        memcpy(m, &sin, sizeof sin);
-        memset(m + sizeof sin, 0x5a, 128 - sizeof sin);
-        r = syscall(SYS_connect, fd, m, 128L);
-        report("lie_long", r, "", "");
-    } else if (!strcmp(kind, "edge")) {
-        char *p = m + ps - sizeof sin;
-        memcpy(p, &sin, sizeof sin);
-        r = syscall(SYS_connect, fd, p, (long) sizeof sin);
-        report("edge", r, "", "");
-    } else if (!strcmp(kind, "over-edge")) {
-        char *p = m + ps - 8;
-        memcpy(p, &sin, 8);
-        r = syscall(SYS_connect, fd, p, 64L);
-        report("over_edge", r, "", "");
-    } else if (!strcmp(kind, "unmapped")) {
-        r = syscall(SYS_connect, fd, m + ps, (long) sizeof sin);
-        report("unmapped", r, "", "");
-    } else if (!strcmp(kind, "zero-len")) {
-        memcpy(m, &sin, sizeof sin);
-        r = syscall(SYS_connect, fd, m, 0L);
-        report("zero_len", r, "", "");
-    } else if (!strcmp(kind, "huge-len")) {
-        memcpy(m, &sin, sizeof sin);
-        r = syscall(SYS_connect, fd, m, 0x7fffffffL);
-        report("huge_len", r, "", "");
-    } else if (!strcmp(kind, "null-ptr")) {
-        r = syscall(SYS_connect, fd, (void *) 0L, (long) sizeof sin);
-        report("null_ptr", r, "", "");
-    } else return 2;
-    close(fd);
-    return 0;
-}
-
-static int mode_outside(int argc, char **argv) {
-    char mk[512], tr[512], i386[512], x32[512];
-    long r;
-    int fd;
-    char *low;
-    if (argc < 3) return 2;
-    snprintf(mk, sizeof mk, "%s/by-mknod", argv[2]);
-    snprintf(tr, sizeof tr, "%s/by-truncate", argv[2]);
-    snprintf(i386, sizeof i386, "%s/by-int80", argv[2]);
-    snprintf(x32, sizeof x32, "%s/by-x32", argv[2]);
-
-    r = syscall(SYS_mknodat, AT_FDCWD, mk, S_IFREG | 0600, 0);
-    report("mknodat", r, mk, "");
-
-    fd = (int) syscall(SYS_openat, AT_FDCWD, tr, O_WRONLY | O_CREAT, 0600);
-    if (fd >= 0) { if (write(fd, "hello", 5) < 0) {} close(fd); }
-    r = syscall(SYS_truncate, tr, 0L);
-    report("truncate", r, tr, "");
-
-#ifdef __x86_64__
-    low = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-               MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
-    if (low == MAP_FAILED) {
-        report("int80_open", -1, i386, "");
-    } else {
-        unsigned int p32;
-        long res;
-        strncpy(low, i386, 4000);
-        p32 = (unsigned int) (uintptr_t) low;
-        __asm__ volatile("int $0x80" : "=a"(res) : "a"(5L), "b"((long) p32), "c"(0x41L), "d"(0600L) : "memory");
-        errno = res < 0 ? (int) -res : 0;
-        report("int80_open", res < 0 ? -1 : res, i386, "");
-    }
-
-    r = syscall(0x40000000L | 257L, AT_FDCWD, x32, O_WRONLY | O_CREAT, 0600);
-    report("x32_openat", r, x32, "");
-#endif
-    return 0;
-}
-
-static int mode_openhow(int argc, char **argv) {
-    struct ouro_open_how how;
-    size_t ps;
-    char *m;
-    char p[512];
-    long r;
-    int i;
-    static const long sizes[] = {0, 8, 16, 24, 32, 4096, -1};
-    if (argc < 3) return 2;
-    how.flags = O_WRONLY | O_CREAT;
-    how.mode = 0600;
-    how.resolve = 0;
-    for (i = 0; i < 7; i++) {
-        char lbl[64];
-        snprintf(p, sizeof p, "%s/how%d", argv[2], i);
-        snprintf(lbl, sizeof lbl, "size_%ld", sizes[i]);
-        r = syscall(437, AT_FDCWD, p, &how, sizes[i]);
-        report(lbl, r, p, "");
-        if (r >= 0) close((int) r);
-    }
-    m = page_pair(&ps);
-    if (m) {
-        snprintf(p, sizeof p, "%s/how-unmapped", argv[2]);
-        r = syscall(437, AT_FDCWD, p, m + ps, 24L);
-        report("how_unmapped", r, p, "");
-    }
-    return 0;
-}
-
-static int mode_bigpaths(int argc, char **argv) {
-    long n, i;
-    char *a, *b, *mapping;
-    size_t len = 4000;
-    if (argc < 4) return 2;
-    n = atol(argv[2]);
-    /* Force snapshots across a page boundary after a large second read.
-       A growing Vec can retain nearly twice the pathname length here. */
-    mapping = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (mapping == MAP_FAILED) return 3;
-    a = mapping + 512;
-    b = mapping + 2 * 4096 + 512;
-    memset(a, 'a', len); a[len] = 0;
-    memset(b, 'b', len); b[len] = 0;
-    memcpy(a, argv[3], strlen(argv[3]));
-    memcpy(b, argv[3], strlen(argv[3]));
-    for (i = 0; i < n; i++) native_rename(a, b);
-    report("bigpaths", n, "", "");
-    return 0;
-}
-
-static int mode_sleep_forever(void) {
-    report("sleeping", (long) getpid(), "", "");
-    for (;;) pause();
-}
-
-static int mode_quick(int argc, char **argv) {
-    long r;
-    char p[512];
-    if (argc < 3) return 2;
-    snprintf(p, sizeof p, "%s/quick", argv[2]);
-    r = syscall(SYS_openat, AT_FDCWD, p, O_WRONLY | O_CREAT, 0600);
-    report("quick", r, p, "");
-    if (r >= 0) close((int) r);
-    return 0;
-}
-
-static int mode_vfork(int argc, char **argv) {
-    pid_t p;
-    int st = 0;
-    if (argc < 3) return 2;
-    p = vfork();
-    if (p == 0) {
-        char *av[2];
-        av[0] = argv[2];
-        av[1] = NULL;
-        execv(argv[2], av);
-        _exit(126);
-    }
-    if (p < 0) return 3;
-    waitpid(p, &st, 0);
-    report("vfork_child", (long) p, "", "");
-    {
-        pid_t sp = 0;
-        char *av[2];
-        av[0] = argv[2];
-        av[1] = NULL;
-        if (posix_spawn(&sp, argv[2], NULL, NULL, av, environ) == 0) {
-            waitpid(sp, &st, 0);
-            report("spawn_child", (long) sp, "", "");
-        } else {
-            report("spawn_child", -1, "", "");
-        }
-    }
-    return 0;
-}
-
-static int mode_execveat(int argc, char **argv) {
-    char *av[2];
-    long r;
-    int fd;
-    if (argc < 4) return 2;
-    av[1] = NULL;
-    av[0] = argv[3];
-    r = syscall(SYS_execveat, AT_FDCWD, argv[3], av, environ, 0);
-    report("execveat_fail", r, argv[3], "");
-    fd = open(argv[2], O_RDONLY);
-    if (fd < 0) { report("open_good", -1, argv[2], ""); return 3; }
-    av[0] = argv[2];
-    r = syscall(SYS_execveat, fd, "", av, environ, AT_EMPTY_PATH);
-    report("execveat_ok", r, argv[2], "");
-    return 4;
-}
-
-static int mode_closes(int argc, char **argv) {
-    long n, i;
-    if (argc < 3) return 2;
-    n = atol(argv[2]);
-    for (i = 0; i < n; i++) syscall(SYS_close, -1);
-    report("closes", n, "", "");
-    return 0;
-}
-
-static int mode_inprogress(void) {
-    struct sockaddr_in sin;
-    long r;
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-    if (fd < 0) return 3;
-    memset(&sin, 0, sizeof sin);
-    sin.sin_family = AF_INET;
-    sin.sin_port = htons(80);
-    sin.sin_addr.s_addr = htonl(0xC0000202);
-    r = syscall(SYS_connect, fd, &sin, (long) sizeof sin);
-    report("inprogress", r, "", "");
-    close(fd);
-    return 0;
-}
-
-static int mode_twopath(int argc, char **argv) {
-    size_t ps = (size_t) sysconf(_SC_PAGESIZE);
-    char *m;
-    char good[512];
-    long r;
-    int fd;
-    if (argc < 3) return 2;
-    snprintf(good, sizeof good, "%s/good", argv[2]);
-    fd = (int) syscall(SYS_openat, AT_FDCWD, good, O_WRONLY | O_CREAT, 0600);
-    if (fd >= 0) close(fd);
-    m = mmap(NULL, 2 * ps, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (m == MAP_FAILED) return 3;
-    mprotect(m + ps, ps, PROT_NONE);
-    r = native_rename(good, m + ps);
-    report("rename_second_faults", r, good, "");
-    r = native_rename(m + ps, good);
-    report("rename_first_faults", r, "", good);
-    return 0;
-}
-
-static void *sleeper(void *arg) { (void) arg; usleep(400000); return NULL; }
-static char *g_exec_argv[2];
-static void *execer(void *arg) {
-    (void) arg;
-    usleep(150000);
-    execv(g_exec_argv[0], g_exec_argv);
-    _exit(3);
-}
-static int mode_threads_exec(int argc, char **argv) {
-    pthread_t t[4];
-    int i;
-    if (argc < 3) return 2;
-    g_exec_argv[0] = argv[2];
-    g_exec_argv[1] = NULL;
-    for (i = 0; i < 3; i++) pthread_create(&t[i], NULL, sleeper, NULL);
-    pthread_create(&t[3], NULL, execer, NULL);
-    report("leader", (long) getpid(), "", "");
-    for (;;) pause();
-}
-
-/* helper exec-over-inflight FIFO PROGRAM: a worker blocks in openat on the
-   FIFO while another thread execs. The kernel destroys the blocked thread
-   without ever reporting it, and its entry can no longer return. */
-static int mode_exec_over_inflight(int argc, char **argv) {
-    pthread_t t[2];
-    if (argc < 4) return 2;
-    g_fifo = argv[2];
-    g_exec_argv[0] = argv[3];
-    g_exec_argv[1] = NULL;
-    pthread_create(&t[0], NULL, blocker, NULL);
-    usleep(300000);
-    pthread_create(&t[1], NULL, execer, NULL);
-    report("leader", (long) getpid(), "", "");
-    for (;;) pause();
-}
-
-#ifdef __x86_64__
-static int mode_abi(int argc, char **argv) {
-    char i386[512], native[512], mk[512];
-    char *low;
-    long r;
-    if (argc < 3) return 2;
-    snprintf(i386, sizeof i386, "%s/abi-int80", argv[2]);
-    snprintf(native, sizeof native, "%s/abi-native", argv[2]);
-    snprintf(mk, sizeof mk, "%s/abi-mknod", argv[2]);
-    low = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-               MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
-    if (low == MAP_FAILED) { report("int80", -1, i386, ""); }
-    else {
-        unsigned int p32;
-        long res;
-        strncpy(low, i386, 4000);
-        p32 = (unsigned int) (uintptr_t) low;
-        __asm__ volatile("int $0x80" : "=a"(res) : "a"(5L), "b"((long) p32), "c"(0x41L), "d"(0600L) : "memory");
-        errno = res < 0 ? (int) -res : 0;
-        report("int80", res < 0 ? -1 : res, i386, "");
-    }
-    r = syscall(SYS_openat, AT_FDCWD, native, O_WRONLY | O_CREAT, 0600);
-    report("native", r, native, "");
-    if (r >= 0) close((int) r);
-    r = syscall(SYS_mknodat, AT_FDCWD, mk, S_IFIFO | 0600, 0);
-    report("mknodat", r, mk, "");
-    return 0;
-}
-#endif
-
-static int mode_rdonly(int argc, char **argv) {
-    long n, i, ok = 0;
-    if (argc < 4) return 2;
-    n = atol(argv[2]);
-    for (i = 0; i < n; i++) {
-        long fd = syscall(SYS_openat, AT_FDCWD, argv[3], O_RDONLY, 0);
-        if (fd >= 0) { ok++; close((int) fd); }
-    }
-    report("rdonly", ok, argv[3], "");
-    return 0;
-}
-
-static char *g_prog;
-static pid_t g_worker_tid, g_child;
-static void *forker(void *arg) {
-    (void) arg;
-    g_worker_tid = (pid_t) syscall(SYS_gettid);
-    g_child = fork();
-    if (g_child == 0) {
-        char *av[2];
-        av[0] = g_prog;
-        av[1] = NULL;
-        execv(g_prog, av);
-        _exit(126);
-    }
-    return NULL;
-}
-static int mode_worker_fork(int argc, char **argv) {
-    pthread_t t;
-    int st = 0;
-    if (argc < 3) return 2;
-    g_prog = argv[2];
-    pthread_create(&t, NULL, forker, NULL);
-    pthread_join(t, NULL);
-    waitpid(g_child, &st, 0);
-    report("leader_pid", (long) getpid(), "", "");
-    report("worker_tid", (long) g_worker_tid, "", "");
-    report("child_pid", (long) g_child, "", "");
-    return 0;
-}
-
-static int mode_symlink(int argc, char **argv) {
-    char link[512];
-    long r;
-    if (argc < 3) return 2;
-    snprintf(link, sizeof link, "%s/the-link", argv[2]);
-    r = native_symlink("THE-TARGET", link);
-    report("symlink", r, "THE-TARGET", link);
-    return 0;
-}
-
-static int mode_unreadable(int argc, char **argv) {
-    size_t ps = (size_t) sysconf(_SC_PAGESIZE);
-    char *m;
-    long n, i;
-    if (argc < 3) return 2;
-    n = atol(argv[2]);
-    m = mmap(NULL, ps, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (m == MAP_FAILED) return 3;
-    for (i = 0; i < n; i++) syscall(SYS_openat, AT_FDCWD, m, O_WRONLY | O_CREAT, 0600);
-    report("unreadable", n, "", "");
-    return 0;
-}
-
-#ifdef __x86_64__
-static int mode_i386_pipe(void) {
-    int fds[2] = {-1, -1};
-    long res;
-    __asm__ volatile("int $0x80" : "=a"(res) : "a"(42L), "b"((long) (uintptr_t) fds) : "memory");
-    report("i386_pipe", res, "", "");
-    if (fds[0] >= 0) close(fds[0]);
-    if (fds[1] >= 0) close(fds[1]);
-    return 0;
-}
-#endif
-
-static long g_n;
-static char *g_worker_path;
-static void *hammer(void *arg) {
-    long i;
-    (void) arg;
-    for (i = 0; i < g_n; i++) {
-        long fd = syscall(SYS_openat, AT_FDCWD, g_worker_path, O_WRONLY | O_CREAT, 0600);
-        if (fd >= 0) close((int) fd);
-    }
-    return NULL;
-}
-static int mode_two_threads(int argc, char **argv) {
-    pthread_t t;
-    long i;
-    if (argc < 5) return 2;
-    g_n = atol(argv[2]);
-    g_worker_path = argv[4];
-    pthread_create(&t, NULL, hammer, NULL);
-    for (i = 0; i < g_n; i++) {
-        long fd = syscall(SYS_openat, AT_FDCWD, argv[3], O_WRONLY | O_CREAT, 0600);
-        if (fd >= 0) close((int) fd);
-    }
-    pthread_join(t, NULL);
-    report("leader_path", g_n, argv[3], "");
-    report("worker_path", g_n, argv[4], "");
-    return 0;
-}
-
-int main(int argc, char **argv) {
-    if (argc < 2) return 2;
-    if (!strcmp(argv[1], "launch")) return mode_launch(argc, argv);
-    if (!strcmp(argv[1], "launch2")) return mode_launch2(argc, argv);
-    if (!strcmp(argv[1], "restart-fifo")) return mode_restart_fifo(argc, argv);
-    if (!strcmp(argv[1], "stopcont")) return mode_stopcont(argc, argv);
-    if (!strcmp(argv[1], "die-inflight")) return mode_die_inflight(argc, argv);
-    if (!strcmp(argv[1], "forkburst")) return mode_forkburst(argc, argv);
-    if (!strcmp(argv[1], "badpath")) return mode_badpath(argc, argv);
-    if (!strcmp(argv[1], "badsock")) return mode_badsock(argc, argv);
-    if (!strcmp(argv[1], "outside")) return mode_outside(argc, argv);
-    if (!strcmp(argv[1], "openhow")) return mode_openhow(argc, argv);
-    if (!strcmp(argv[1], "bigpaths")) return mode_bigpaths(argc, argv);
-    if (!strcmp(argv[1], "sleep-forever")) return mode_sleep_forever();
-    if (!strcmp(argv[1], "quick")) return mode_quick(argc, argv);
-    if (!strcmp(argv[1], "vfork")) return mode_vfork(argc, argv);
-    if (!strcmp(argv[1], "execveat")) return mode_execveat(argc, argv);
-    if (!strcmp(argv[1], "closes")) return mode_closes(argc, argv);
-    if (!strcmp(argv[1], "inprogress")) return mode_inprogress();
-    if (!strcmp(argv[1], "twopath")) return mode_twopath(argc, argv);
-    if (!strcmp(argv[1], "threads-exec")) return mode_threads_exec(argc, argv);
-    if (!strcmp(argv[1], "exec-over-inflight")) return mode_exec_over_inflight(argc, argv);
-#ifdef __x86_64__
-    if (!strcmp(argv[1], "abi")) return mode_abi(argc, argv);
-#endif
-    if (!strcmp(argv[1], "rdonly")) return mode_rdonly(argc, argv);
-    if (!strcmp(argv[1], "worker-fork")) return mode_worker_fork(argc, argv);
-    if (!strcmp(argv[1], "symlink")) return mode_symlink(argc, argv);
-    if (!strcmp(argv[1], "unreadable")) return mode_unreadable(argc, argv);
-#ifdef __x86_64__
-    if (!strcmp(argv[1], "i386-pipe")) return mode_i386_pipe();
-#endif
-    if (!strcmp(argv[1], "two-threads")) return mode_two_threads(argc, argv);
-    return 2;
-}
-"##;
-
-// ---------------------------------------------------------------------------
-// One tracer at a time
-// ---------------------------------------------------------------------------
-
-/// Serialise the checks in this binary.
-///
-/// Every check here drives real processes. A tracer's thread owns
-/// `waitpid(-1, __WALL)` for the whole process, so while one is attached it
-/// reaps *every* child this process has, including the `gcc` a second check is
-/// waiting on and the launcher a second tracer just seized. Two of them at
-/// once do not race on any data structure; they steal each other's children,
-/// and the loser waits for a status that has already been collected.
-///
-/// That is a property of the binary, not of how it is invoked, so it is
-/// enforced here rather than by passing `--test-threads=1`: the checks are
-/// correct under any parallelism the runner chooses.
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // A check that panicked while holding this poisoned it. There is no shared
-    // state behind the lock — only the process's children, which that check no
-    // longer has — so the next one takes the guard and carries on.
-    SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-// ------------------------------------------------------------- scaffolding
-
-/// Report a missing precondition, in the words the rest of the suite uses.
-fn skip(reason: &str) {
-    harness::skip_or_fail(reason);
-}
-
-fn build() -> Result<&'static (PathBuf, PathBuf), String> {
-    static BUILD: OnceLock<Result<(PathBuf, PathBuf), String>> = OnceLock::new();
-    BUILD
-        .get_or_init(|| {
-            if !std::path::Path::new("/usr/bin/gcc").exists() {
-                return Err("/usr/bin/gcc is not installed".to_string());
-            }
-            let dir = std::env::temp_dir().join(format!("ouro-j1-regress-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-            let source = dir.join("regress.c");
-            std::fs::write(
-                &source,
-                format!("{}\n{HELPER_C}", include_str!("fixtures/native_fs.h")),
-            )
-            .map_err(|e| format!("write regress.c: {e}"))?;
-            let helper = dir.join("regress");
-            // `-B` beside the compiler, so building the fixture does not
-            // depend on `PATH`: `gcc` looks up `as` and `ld` there, and every
-            // other program these checks run is named absolutely for the same
-            // reason. A host that has the compiler but not its assembler
-            // still skips, with that as the reason.
-            let out = Command::new("/usr/bin/gcc")
-                .args(["-O1", "-Wall", "-pthread", "-B/usr/bin", "-o"])
-                .arg(&helper)
-                .arg(&source)
-                .output()
-                .map_err(|e| format!("run gcc: {e}"))?;
-            if !out.status.success() {
-                return Err(format!(
-                    "gcc failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                ));
-            }
-            let filter = dir.join("filter.bin");
-            std::fs::write(&filter, narrowing_filter_bytes())
-                .map_err(|e| format!("write filter.bin: {e}"))?;
-            Ok((helper, filter))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
-struct Work {
-    dir: PathBuf,
-    helper: PathBuf,
-    filter: PathBuf,
-}
-
-impl Work {
-    fn path(&self, name: &str) -> String {
-        self.dir.join(name).to_string_lossy().into_owned()
-    }
-    fn base(&self) -> String {
-        self.dir.to_string_lossy().into_owned()
-    }
-    fn helper_s(&self) -> String {
-        self.helper.to_string_lossy().into_owned()
-    }
-}
-
-impl Drop for Work {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
+/// Prepare a check. `None` means it skipped and must return.
 fn setup(name: &str) -> Option<Work> {
-    let (helper, filter) = match build() {
-        Ok(pair) => pair,
-        Err(err) => {
-            skip(&format!("{name}: {err}"));
-            return None;
-        }
-    };
-    let dir = std::env::temp_dir().join(format!("ouro-j1-r-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create the work directory");
-    Some(Work {
-        dir,
-        helper: helper.clone(),
-        filter: filter.clone(),
-    })
-}
-
-struct Launched {
-    pid: libc::pid_t,
-    release: std::process::ChildStdin,
-    output: BufReader<std::process::ChildStdout>,
-}
-
-impl Launched {
-    /// Wait until the launcher has finished its own exec and installed the
-    /// filter, so the seize cannot land inside an exec this test never asked
-    /// about.
-    fn await_ready(&mut self) {
-        let mut line = String::new();
-        self.output
-            .read_line(&mut line)
-            .expect("the launcher announces itself");
-        let report = Report::parse(line.trim_end_matches('\n'))
-            .unwrap_or_else(|| panic!("unparseable readiness line {line:?}"));
-        assert_eq!(report.label, "ready", "unexpected first line {line:?}");
-    }
-
-    fn release(&mut self) {
-        self.release.write_all(b"g").expect("release byte");
-        self.release.flush().expect("flush");
-    }
-    fn lines(&mut self) -> Vec<Report> {
-        let mut out = Vec::new();
-        let mut line = String::new();
-        while self.output.read_line(&mut line).unwrap_or(0) > 0 {
-            if let Some(report) = Report::parse(line.trim_end_matches('\n')) {
-                out.push(report);
-            }
-            line.clear();
-        }
-        out
-    }
-}
-
-impl Drop for Launched {
-    fn drop(&mut self) {
-        // SAFETY: `kill` with a pid this test created and a valid signal.
-        unsafe { libc::kill(self.pid, libc::SIGKILL) };
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Report {
-    label: String,
-    raw: i64,
-    errno: i32,
-    path: String,
-    path2: String,
-}
-
-impl Report {
-    fn parse(line: &str) -> Option<Report> {
-        let mut fields = line.split('\t');
-        let label = fields.next()?.to_string();
-        let raw = fields.next()?.parse().ok()?;
-        let errno = fields.next()?.parse().ok()?;
-        Some(Report {
-            label,
-            raw,
-            errno,
-            path: fields.next().unwrap_or_default().to_string(),
-            path2: fields.next().unwrap_or_default().to_string(),
-        })
-    }
-    fn ret(&self) -> i64 {
-        if self.errno == 0 {
-            self.raw
-        } else {
-            -i64::from(self.errno)
-        }
-    }
-    fn find<'a>(reports: &'a [Report], label: &str) -> &'a Report {
-        reports
-            .iter()
-            .find(|r| r.label == label)
-            .unwrap_or_else(|| panic!("no fixture line {label:?} in {reports:?}"))
-    }
-}
-
-fn spawn(mut command: Command) -> Launched {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn");
-    let pid = child.id() as libc::pid_t;
-    let release = child.stdin.take().expect("stdin");
-    let output = BufReader::new(child.stdout.take().expect("stdout"));
-    drop(child);
-    let mut launched = Launched {
-        pid,
-        release,
-        output,
-    };
-    launched.await_ready();
-    launched
-}
-
-fn launch(work: &Work, argv: &[&str]) -> Launched {
-    let mut command = Command::new(&work.helper);
-    command.arg("launch").arg(&work.filter).args(argv);
-    spawn(command)
-}
-
-struct Observed {
-    events: Vec<TracerEvent>,
-    summary: TracerSummary,
+    FIXTURE.setup(name, &[])
 }
 
 impl Observed {
-    fn syscalls(&self) -> Vec<&TracerEvent> {
-        self.events
-            .iter()
-            .filter(|e| matches!(e, TracerEvent::Syscall { .. }))
-            .collect()
-    }
-    fn of_op(&self, op: ClosedOp) -> Vec<&TracerEvent> {
-        self.events
-            .iter()
-            .filter(|e| matches!(e, TracerEvent::Syscall { op: o, .. } if *o == op))
-            .collect()
-    }
-    fn exits(&self) -> Vec<(libc::pid_t, i32)> {
-        self.events
-            .iter()
-            .filter_map(|e| match e {
-                TracerEvent::Exit { pid, status, .. } => Some((*pid, *status)),
-                _ => None,
-            })
-            .collect()
-    }
-    fn execs(&self) -> Vec<libc::pid_t> {
-        self.events
-            .iter()
-            .filter_map(|e| match e {
-                TracerEvent::Exec { pid, .. } => Some(*pid),
-                _ => None,
-            })
-            .collect()
-    }
-    fn forks(&self) -> Vec<(libc::pid_t, libc::pid_t)> {
-        self.events
-            .iter()
-            .filter_map(|e| match e {
-                TracerEvent::Fork { parent, child, .. } => Some((*parent, *child)),
-                _ => None,
-            })
-            .collect()
-    }
-    fn gaps(&self) -> Vec<(GapReason, OpSet, Option<u64>)> {
-        self.events
-            .iter()
-            .filter_map(|e| match e {
-                TracerEvent::Gap {
-                    reason, ops, count, ..
-                } => Some((*reason, *ops, *count)),
-                _ => None,
-            })
-            .collect()
-    }
-    fn has_gap(&self, reason: GapReason) -> bool {
-        self.gaps().iter().any(|(r, _, _)| *r == reason)
-    }
-    fn untraced(&self) -> Vec<(libc::pid_t, i32)> {
-        self.events
-            .iter()
-            .filter_map(|e| match e {
-                TracerEvent::UntracedChildExit { pid, status } => Some((*pid, *status)),
-                _ => None,
-            })
-            .collect()
-    }
+    /// What the observer said, a line per event, with each path cut to 48
+    /// bytes.
     fn describe(&self) -> String {
         self.events
             .iter()
@@ -1070,49 +125,6 @@ impl Observed {
             .collect::<Vec<_>>()
             .join("\n  ")
     }
-}
-
-fn collect(tracer: Tracer, budget: Duration) -> Observed {
-    let deadline = Instant::now() + budget;
-    let mut events = Vec::new();
-    loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        match tracer.events().recv_timeout(left) {
-            Ok(TracerEvent::Finished) => {
-                events.push(TracerEvent::Finished);
-                break;
-            }
-            Ok(e) => events.push(e),
-            Err(_) => break,
-        }
-    }
-    let summary = tracer.finish();
-    Observed { events, summary }
-}
-
-fn attach(pid: libc::pid_t, config: TracerConfig) -> Tracer {
-    Tracer::attach(pid, config).unwrap_or_else(|e| panic!("attach {pid}: {e}"))
-}
-
-fn primary(event: &TracerEvent) -> String {
-    match event {
-        TracerEvent::Syscall { args, .. } => args
-            .path
-            .as_ref()
-            .map(|p| String::from_utf8_lossy(&p.bytes).into_owned())
-            .unwrap_or_default(),
-        _ => String::new(),
-    }
-}
-
-fn mkfifo(path: &str) {
-    let c = std::ffi::CString::new(path).expect("a path without NULs");
-    // SAFETY: `mkfifo` takes a NUL-terminated path and a mode.
-    let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
-    assert_eq!(rc, 0, "mkfifo {path}: {}", std::io::Error::last_os_error());
 }
 
 fn rss_kib() -> i64 {
@@ -1242,12 +254,10 @@ fn r3_attaching_to_an_already_stopped_tracee_works() {
     let base = work.base();
     let mut run = launch(&work, &[&helper, "quick", &base]);
     std::thread::sleep(Duration::from_millis(300));
-    // SAFETY: a pid this test created, and a valid signal.
-    assert_eq!(unsafe { libc::kill(run.pid, libc::SIGSTOP) }, 0);
+    run.signal(libc::SIGSTOP).expect("stop the launcher");
     std::thread::sleep(Duration::from_millis(200));
     let tracer = attach(run.pid, TracerConfig::default());
-    // SAFETY: as above.
-    assert_eq!(unsafe { libc::kill(run.pid, libc::SIGCONT) }, 0);
+    run.signal(libc::SIGCONT).expect("continue the launcher");
     run.release();
     let reports = run.lines();
     let observed = collect(tracer, Duration::from_secs(60));
@@ -1624,14 +634,13 @@ fn r10_the_queue_bound_is_the_four_mib_of_the_spec() {
 /// R11: an untraced child that outlives the traced tree — bubblewrap, in the
 /// real tree — still has its exit reported. It has exactly one route.
 ///
-/// J5-T: bubblewrap is the launcher's ancestor, and the test now builds it
-/// that way: an untraced `sh` is this process's child, the launcher is its
-/// child, and the `sh` outlives the traced tree by two seconds before
-/// exiting 5. Written first with the untraced child as the launcher's
-/// *sibling*, it asserted that the tracer waits for every child the process
-/// had when it attached — which is how a process substitution the
-/// supervisor inherited from the shell that exec'd it held the observer open
-/// and was then counted as lost. A sibling is not the tracer's to wait for
+/// Bubblewrap is the launcher's ancestor, and the test builds it that way:
+/// an untraced `sh` is this process's child, the launcher is its child, and
+/// the `sh` outlives the traced tree by two seconds before exiting 5. The
+/// untraced child is not the launcher's *sibling*: a tracer that waited for
+/// every child the process had when it attached let a process substitution
+/// the supervisor inherited from the shell that exec'd it hold the observer
+/// open, and counted it as lost. A sibling is not the tracer's to wait for
 /// (`j5_tracer_foreign_child_linux`); the child it reached the launcher
 /// through is, and this pins that exit's route.
 #[test]
@@ -1655,9 +664,7 @@ fn r11_a_late_untraced_child_exit_is_still_reported() {
         "quick",
         &base,
     ]);
-    // Never dropped: `Launched` kills its pid by number on drop, and this
-    // one is reaped by the tracer, after which the number is anyone's.
-    let mut run = std::mem::ManuallyDrop::new(spawn(command));
+    let mut run = spawn_launcher(command);
     let backend = run.pid;
     let launcher = ouro_jail::platform::linux::tracer::children(backend)
         .into_iter()
@@ -1672,11 +679,11 @@ fn r11_a_late_untraced_child_exit_is_still_reported() {
     let observed = collect(tracer, Duration::from_secs(60));
     println!(
         "r11: untraced exits {:?}, backend state after finish {:?}",
-        observed.untraced(),
+        observed.untraced_exits(),
         proc_state(backend)
     );
     let exit = observed
-        .untraced()
+        .untraced_exits()
         .into_iter()
         .find(|(p, _)| *p == backend)
         .unwrap_or_else(|| {
@@ -1684,7 +691,7 @@ fn r11_a_late_untraced_child_exit_is_still_reported() {
                 "the exit of the untraced child {backend}, which the launcher descends \
                  through, must reach the supervisor, which was told not to wait for its own \
                  children while a tracer is attached: {:?}",
-                observed.untraced()
+                observed.untraced_exits()
             )
         });
     assert!(
@@ -1725,8 +732,14 @@ fn r12_finish_returns_even_when_a_tracee_will_not_die() {
     });
     let returned = rx.recv_timeout(Duration::from_secs(20)).is_ok();
     if !returned {
-        // SAFETY: a pid this test created.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        // The rescue for a `finish` that never returned, so the joiner can.
+        // ESRCH means the tracee is gone already.
+        match run.signal(libc::SIGKILL) {
+            Err(error) if error.raw_os_error() != Some(libc::ESRCH) => {
+                panic!("kill the tracee: {error}")
+            }
+            _ => {}
+        }
     }
     let summary = joiner.join().expect("the joining thread");
     println!(
@@ -1804,7 +817,7 @@ fn r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount() {
 /// the filter is not its own instead of guessing, and does not wedge the
 /// tracee.
 ///
-/// Since J4 D1 the tracer tells whose a stop is by its trace data: a stop
+/// The tracer tells whose a stop is by its trace data: a stop
 /// carrying the narrowing filter's own data on a number it never traces
 /// means the installed program is not the observer's, while one with other
 /// data was asked for by another filter (a child's own `SECCOMP_RET_TRACE`)
@@ -1865,7 +878,7 @@ fn r17_a_foreign_filter_is_named_not_guessed() {
         .arg("launch")
         .arg(&foreign)
         .args([&helper, "closes", "50"]);
-    let mut run = spawn(command);
+    let mut run = spawn_launcher(command);
     let tracer = attach(run.pid, TracerConfig::default());
     run.release();
     let reports = run.lines();
@@ -1985,18 +998,9 @@ fn r20_a_non_leader_exec_accounts_for_every_thread() {
 fn r21_the_tool_baseline_denies_the_abi_the_observer_cannot_name() {
     let _serial = serial();
     let Some(work) = setup("r21") else { return };
-    let baseline = seccomp::tool_baseline().expect("the tool baseline");
-    let path = work.path("baseline.bin");
-    std::fs::write(&path, baseline.to_bytes()).expect("write the baseline");
     let helper = work.helper_s();
     let base = work.base();
-    let mut command = Command::new(&work.helper);
-    command
-        .arg("launch2")
-        .arg(&path)
-        .arg(&work.filter)
-        .args([&helper, "abi", &base]);
-    let mut run = spawn(command);
+    let mut run = launch_tool(&work, &[&helper, "abi", &base]);
     let tracer = attach(run.pid, TracerConfig::default());
     run.release();
     let reports = run.lines();
@@ -2272,8 +1276,8 @@ fn r26_a_tracee_cannot_manufacture_the_observers_loss() {
 /// R27: a seccomp stop whose `nr` belongs to another architecture's table is
 /// never labelled from this one. i386 42 is `pipe`; x86_64 42 is `connect`.
 ///
-/// Since J4 D2 such a stop is labelled foreign (`foreign_abi`), not
-/// `unexpected_trace_stop`: the narrowing filter itself now stops on every
+/// Such a stop is labelled foreign (`foreign_abi`), not
+/// `unexpected_trace_stop`: the narrowing filter itself stops on every
 /// foreign call, so the stop is expected and the gap says what it is.
 #[test]
 #[cfg(target_arch = "x86_64")]
@@ -2314,7 +1318,7 @@ fn r27_a_foreign_architecture_stop_is_never_labelled_from_the_x86_64_table() {
         .arg("launch")
         .arg(&blind)
         .args([&helper, "i386-pipe"]);
-    let mut run = spawn(command);
+    let mut run = spawn_launcher(command);
     let tracer = attach(run.pid, TracerConfig::default());
     run.release();
     let reports = run.lines();
@@ -2405,22 +1409,14 @@ fn r28_concurrent_threads_pair_their_own_entries_and_exits() {
 #[test]
 fn r29_a_dead_supervisor_kills_its_traced_tree() {
     let _serial = serial();
-    if build().is_err() {
-        skip("r29: the fixture could not be built");
+    if FIXTURE.built().is_none() {
         return;
     }
-    let dir = std::env::temp_dir().join(format!("ouro-j1-r29-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create the work directory");
-    let pid_file = dir.join("pid");
-    let exe = std::env::current_exe().expect("the test binary");
-    let status = Command::new(&exe)
-        .args([
-            "--exact",
-            "--ignored",
-            "--nocapture",
-            "exitkill_child_supervisor",
-        ])
+    let dir = common::private_tempdir();
+    let pid_file = dir.path().join("pid");
+    // The helper ends with `_exit`, so it never reports; the pid file it
+    // writes is what proves it ran.
+    let status = common::helper_command("exitkill_child_supervisor")
         .env("OURO_REGRESS_EXITKILL", &pid_file)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -2428,21 +1424,31 @@ fn r29_a_dead_supervisor_kills_its_traced_tree() {
         .expect("run the child supervisor");
     assert!(status.success(), "the child supervisor: {status:?}");
     let raw = std::fs::read_to_string(&pid_file).expect("the child wrote the tracee pid");
-    let tracee: libc::pid_t = raw.trim().parse().expect("a pid");
+    let (tracee, birth) = raw.trim().split_once(' ').expect("a pid and its birth");
+    let tracee: libc::pid_t = tracee.parse().expect("a pid");
+    let birth: u64 = birth.parse().expect("a birth");
+    // The tracee is not this process's child, so its number is free for
+    // anyone once it is reaped: the pid with the birth the child recorded is
+    // the tracee, and a pid alone is not.
+    let still_there = || start_ticks(tracee) == Some(birth);
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut alive = true;
     while Instant::now() < deadline {
-        if !std::path::Path::new(&format!("/proc/{tracee}")).exists() {
+        if !still_there() {
             alive = false;
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     if alive {
-        // SAFETY: a pid this test's child created.
-        unsafe { libc::kill(tracee, libc::SIGKILL) };
+        // The rescue, through a pidfd checked against that birth after it
+        // was opened, so it reaches the tracee or nothing.
+        if let Ok(pidfd) = identity::pidfd_open(tracee)
+            && still_there()
+        {
+            let _ = identity::pidfd_send_signal(pidfd.as_raw_fd(), libc::SIGKILL);
+        }
     }
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         !alive,
         "the supervisor died and its tracee {tracee} is still running: \
@@ -2452,25 +1458,29 @@ fn r29_a_dead_supervisor_kills_its_traced_tree() {
 
 /// The child half of `r29`: a supervisor that dies without cleaning up.
 #[test]
-#[ignore]
+#[ignore = "a helper process of r29_a_dead_supervisor_kills_its_traced_tree"]
 fn exitkill_child_supervisor() {
+    if !common::running_helper("exitkill_child_supervisor") {
+        return;
+    }
     let _serial = serial();
-    let Some(pid_file) = std::env::var_os("OURO_REGRESS_EXITKILL") else {
+    let pid_file =
+        std::env::var_os("OURO_REGRESS_EXITKILL").expect("the parent names the pid file");
+    // No working directory: nothing this half leaves could be removed.
+    let Some(built) = FIXTURE.built() else {
         return;
     };
-    let Some(work) = setup("r29-child") else {
-        return;
-    };
-    let helper = work.helper_s();
-    let mut run = launch(&work, &[&helper, "sleep-forever"]);
+    let mut command = built.launcher();
+    command.arg(&built.helper).arg("sleep-forever");
+    let mut run = spawn_launcher(command);
     let tracer = attach(run.pid, TracerConfig::default());
     run.release();
     let mut line = String::new();
     run.output.read_line(&mut line).expect("the sleeping line");
-    std::fs::write(&pid_file, format!("{}", run.pid)).expect("write the pid");
+    let birth = start_ticks(run.pid).expect("the tracee's birth");
+    std::fs::write(&pid_file, format!("{} {birth}", run.pid)).expect("write the pid");
     std::mem::forget(tracer);
     std::mem::forget(run);
-    std::mem::forget(work);
     // SAFETY: `_exit` ends the process without running any destructor, which
     // is the point: this half is a supervisor that dies.
     unsafe { libc::_exit(0) };
@@ -2481,13 +1491,10 @@ fn exitkill_child_supervisor() {
 #[test]
 fn r30_repeated_attach_and_finish_leaks_nothing() {
     let _serial = serial();
-    let Ok((helper, filter)) = build() else {
-        skip("r30: the fixture could not be built");
+    let Some(built) = FIXTURE.built() else {
         return;
     };
-    let dir = std::env::temp_dir().join(format!("ouro-j1-r30-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create the work directory");
+    let dir = common::private_tempdir();
 
     let count = |path: &str| std::fs::read_dir(path).map(Iterator::count).unwrap_or(0);
     let mut baseline = (0usize, 0usize);
@@ -2500,11 +1507,10 @@ fn r30_repeated_attach_and_finish_leaks_nothing() {
                 baseline.0, baseline.1
             );
         }
-        let target = dir.join(format!("t{round}"));
-        let mut child = Command::new(helper)
-            .arg("launch")
-            .arg(filter)
-            .arg(helper)
+        let target = dir.path().join(format!("t{round}"));
+        let mut child = built
+            .launcher()
+            .arg(&built.helper)
             .arg("quick")
             .arg(&target)
             .stdin(Stdio::piped())
@@ -2553,7 +1559,6 @@ fn r30_repeated_attach_and_finish_leaks_nothing() {
     let fds = count("/proc/self/fd");
     let zombies = zombies();
     println!("r30: after 20 more cycles threads={threads} fds={fds} zombies={zombies:?}");
-    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         threads <= baseline.0,
         "the tracer thread of each cycle must be joined: {threads} threads, baseline {}",
@@ -2678,10 +1683,9 @@ fn r31_an_entry_destroyed_by_an_exec_names_its_operation() {
     }
 }
 
-// ====================================================== J4 N8: dead modes
+// ======================================= execveat and vfork, through the tracer
 
-/// J4 N8, `execveat`: the fixture mode that exercises both results of the
-/// row was defined and never run. A failed `execveat` is a result with its
+/// `execveat`, both results of the row. A failed `execveat` is a result with its
 /// errno and its pathname; a successful one through `AT_EMPTY_PATH` is the
 /// confirmed transition, carrying the descriptor it resolved against and the
 /// empty pathname it was given — never a path the observer did not see.
@@ -2754,8 +1758,8 @@ fn j4_n8_execveat_failure_and_success_are_distinct_events() {
     );
 }
 
-/// J4 N8, `vfork` and `posix_spawn`: the mode was defined and never run.
-/// Both children are born through the vfork path (glibc's `posix_spawn`
+/// `vfork` and `posix_spawn`. Both children are born through the vfork path
+/// (glibc's `posix_spawn`
 /// uses `clone(CLONE_VM|CLONE_VFORK)`, after `clone3` where the kernel and
 /// the filters allow it), exec, and exit. Each is attributed to its own
 /// pid, as the fixture reported it, with its own confirmed exec and exit;

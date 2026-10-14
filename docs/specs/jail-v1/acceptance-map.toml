@@ -3797,7 +3797,7 @@ reason = "a helper process of j4_w3_p1c_a_zombie_leader_with_a_live_thread_is_al
 
 [[ignored]]
 test = "ouro-jail/tests/observer_regression_linux.rs::exitkill_child_supervisor"
-reason = "a helper process of r29_a_dead_supervisor_kills_its_traced_tree (bare #[ignore])"
+reason = "a helper process of r29_a_dead_supervisor_kills_its_traced_tree"
 
 [[ignored]]
 test = "ouro-jail/tests/portable_network_rules.rs::n03_nfc_normalization_test_17"

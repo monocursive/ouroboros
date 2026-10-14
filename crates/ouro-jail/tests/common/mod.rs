@@ -15,6 +15,12 @@ use tempfile::TempDir;
 /// Simulated platforms for the in-process supervisor tests.
 pub mod sim;
 
+/// The bare-tracer scaffolding the observer suites share: the C fixtures
+/// under `tests/fixtures/`, built once per binary, and the launcher the
+/// tracer seizes.
+#[cfg(target_os = "linux")]
+pub mod observer;
+
 /// A temporary directory created mode 0700, whatever the umask is.
 ///
 /// `tempfile::tempdir()` creates with 0777 masked by the process umask, so the
