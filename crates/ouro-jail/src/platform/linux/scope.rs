@@ -37,10 +37,8 @@ use std::path::{Path, PathBuf};
 /// value is ignored (recorded as `null`).
 pub const SEAM: &str = "OURO_JAIL_TEST_SUPERVISOR_SCOPE";
 
-/// The whole step's budget: the call and the observed move share it. Whole
-/// seconds, because `busctl --timeout` is given it in seconds.
+/// The whole step's budget: the call and the observed move share it.
 pub const BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
-const _: () = assert!(BUDGET.subsec_nanos() == 0 && BUDGET.as_secs() > 0);
 
 /// Where `busctl` is looked for, in order. Never a `PATH` lookup: the
 /// supervisor's `PATH` is the operator's, and this child runs before policy.
@@ -422,11 +420,13 @@ pub fn unit_name(pid: u32) -> String {
 /// The `busctl` arguments that start `unit` as a transient scope holding
 /// `pid`: `StartTransientUnit` with mode `fail`, the pid, collection when
 /// inactive or failed (so a failed scope does not linger), and a description.
+/// The call's own timeout is the step's `budget`, in milliseconds, so
+/// `busctl` gives up no later than the step does.
 #[must_use]
-pub fn busctl_args(unit: &str, pid: u32) -> Vec<String> {
+pub fn busctl_args(unit: &str, pid: u32, budget: std::time::Duration) -> Vec<String> {
     let mut args: Vec<String> = [
         "--user",
-        &format!("--timeout={}", BUDGET.as_secs()),
+        &format!("--timeout={}ms", budget.as_millis().max(1)),
         "call",
         "org.freedesktop.systemd1",
         "/org/freedesktop/systemd1",
@@ -777,7 +777,7 @@ mod linux {
         fn request(&mut self, busctl: &Path, unit: &str, bus: Bus) -> Result<(), CallFailure> {
             let mut command = Command::new(busctl);
             command
-                .args(busctl_args(unit, self.pid))
+                .args(busctl_args(unit, self.pid, self.budget))
                 .env_clear()
                 .envs(call_environment(
                     bus,
@@ -991,7 +991,7 @@ mod linux {
                 .filter_map(|line| line.strip_prefix("arg "))
                 .map(str::to_owned)
                 .collect();
-            assert_eq!(args, busctl_args(&unit, host.pid()));
+            assert_eq!(args, busctl_args(&unit, host.pid(), BUDGET));
             for line in lines.iter().filter_map(|line| line.strip_prefix("env ")) {
                 let name = line.split('=').next().unwrap_or_default();
                 assert!(
@@ -1005,6 +1005,28 @@ mod linux {
             );
             assert!(seen.contains("stdin /dev/null"), "{seen}");
             assert!(seen.contains("stdout /dev/null"), "{seen}");
+        }
+
+        /// `busctl` is told the host's own budget, so a step given less
+        /// than the default never waits on a call that may outlive it.
+        #[test]
+        fn the_call_is_given_the_hosts_own_budget() {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("seen");
+            let busctl = script(
+                dir.path(),
+                "busctl",
+                &format!(
+                    "for a in \"$@\"; do echo \"$a\" >> {}; done\n",
+                    out.display()
+                ),
+            );
+            let budget = std::time::Duration::from_millis(1500);
+            let mut host = LinuxHost::with_candidates(vec![busctl.clone()], budget);
+            let unit = unit_name(host.pid());
+            assert_eq!(host.request(&busctl, &unit, Bus::Session), Ok(()));
+            let seen = std::fs::read_to_string(&out).unwrap();
+            assert!(seen.lines().any(|arg| arg == "--timeout=1500ms"), "{seen}");
         }
 
         #[test]
@@ -1504,12 +1526,12 @@ mod tests {
 
     #[test]
     fn the_call_starts_a_transient_scope_holding_the_pid() {
-        let args = busctl_args(UNIT, 42);
+        let args = busctl_args(UNIT, 42, BUDGET);
         assert_eq!(
             args,
             [
                 "--user",
-                "--timeout=2",
+                "--timeout=2000ms",
                 "call",
                 "org.freedesktop.systemd1",
                 "/org/freedesktop/systemd1",
