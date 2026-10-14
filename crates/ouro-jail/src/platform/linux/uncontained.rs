@@ -563,16 +563,20 @@ impl Uncontained {
         let mut command = Command::new(&exe);
         command
             .arg(launch::SUBCOMMAND)
-            .arg("--release-fd")
-            .arg(RELEASE_FD.to_string())
-            .arg("--error-fd")
-            .arg(ERROR_FD.to_string());
-        if observe_on {
-            command.arg("--narrow");
-        }
-        command
-            .arg("--")
-            .args(&argv)
+            .args(
+                launch::LaunchArgs {
+                    release_fd: RELEASE_FD,
+                    error_fd: ERROR_FD,
+                    narrow: observe_on,
+                    read_open_fast_path: false,
+                    trace_data_fd: None,
+                    mediate: None,
+                    bridge: None,
+                    sigmask: None,
+                    argv: argv.clone(),
+                }
+                .to_argv(),
+            )
             .env_clear()
             .envs(env.iter().map(|(name, value)| (name, value)))
             .current_dir(&plan.workspace);

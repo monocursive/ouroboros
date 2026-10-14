@@ -6,6 +6,21 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
+use super::super::fs::ScanLimits;
+
+/// `XFS_IOC_FSGEOMETRY` (`linux/xfs_fs.h`): `_IOR('X', 126, struct
+/// xfs_fsop_geom)`, a 256-byte read.
+pub(super) const XFS_IOC_FSGEOMETRY: libc::c_ulong = 0x8100_587e;
+/// The 64-bit word of `struct xfs_fsop_geom` that holds `rtblocks` (byte 40).
+const GEOMETRY_RTBLOCKS: usize = 5;
+/// `Q_XGETQSTATV` (`linux/dqblk_xfs.h`): `XQM_CMD(8)`, that is `('X' << 8) + 8`.
+const Q_XGETQSTATV: libc::c_int = (b'X' as libc::c_int) << 8 | 8;
+/// `FS_QUOTA_UDQ_ACCT | FS_QUOTA_UDQ_ENFD` (`linux/dqblk_xfs.h`): user quota
+/// accounting and user quota limit enforcement.
+const USER_QUOTA_ACCOUNTED_AND_ENFORCED: u16 = 1 << 0 | 1 << 1;
+/// The `dqb_valid` bits a readback must carry: both limits and both usages.
+const QUOTA_READBACK_COMPLETE: u32 = libc::QIF_LIMITS | libc::QIF_USAGE;
+
 // linux/dqblk_xfs.h: Q_XGETQSTATV's version-1 ABI, also implemented by ext4.
 #[repr(C)]
 #[derive(Default)]
@@ -48,13 +63,12 @@ pub(super) fn read(file: &File, uid: u32) -> io::Result<Quota> {
         // xfs_fsop_geom: 256 bytes, rtblocks at byte 40. Aligned storage
         // avoids binding unused fields to a particular kernel revision.
         let mut geometry = [0u64; 32];
-        const XFS_IOC_FSGEOMETRY: libc::c_ulong = 0x8100_587e;
         // SAFETY: a live descriptor and the full initialized ioctl output ABI.
         if unsafe { libc::ioctl(file.as_raw_fd(), XFS_IOC_FSGEOMETRY, geometry.as_mut_ptr()) } != 0
         {
             return Err(io::Error::last_os_error());
         }
-        if geometry[5] != 0 {
+        if geometry[GEOMETRY_RTBLOCKS] != 0 {
             return Err(io::Error::other(
                 "XFS realtime storage quotas are not supported",
             ));
@@ -65,7 +79,7 @@ pub(super) fn read(file: &File, uid: u32) -> io::Result<Quota> {
         libc::syscall(
             libc::SYS_quotactl_fd,
             file.as_raw_fd(),
-            libc::QCMD((i32::from(b'X') << 8) | 8, libc::USRQUOTA),
+            libc::QCMD(Q_XGETQSTATV, libc::USRQUOTA),
             0,
             &raw mut state,
         )
@@ -74,7 +88,9 @@ pub(super) fn read(file: &File, uid: u32) -> io::Result<Quota> {
         return Err(io::Error::last_os_error());
     }
     // Accounting alone (e.g. XFS uqnoenforce) is not a hard limit.
-    if state.version != 1 || state.flags & 3 != 3 {
+    if state.version != 1
+        || state.flags & USER_QUOTA_ACCOUNTED_AND_ENFORCED != USER_QUOTA_ACCOUNTED_AND_ENFORCED
+    {
         return Err(io::Error::other(
             "user quota accounting and enforcement must both be active",
         ));
@@ -94,8 +110,7 @@ pub(super) fn read(file: &File, uid: u32) -> io::Result<Quota> {
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
-    // QIF_BLIMITS, QIF_SPACE, QIF_ILIMITS and QIF_INODES must all be present.
-    if quota.dqb_valid & 15 != 15 {
+    if quota.dqb_valid & QUOTA_READBACK_COMPLETE != QUOTA_READBACK_COMPLETE {
         return Err(io::Error::other("incomplete user quota readback"));
     }
     Ok(Quota {
@@ -161,16 +176,24 @@ fn walk(
     if !meta.is_dir() || !seen.insert((meta.dev(), meta.ino())) {
         return Ok(());
     }
-    if depth >= 128 {
-        return Err(io::Error::other("quota ownership walk exceeds depth 128"));
+    // The protected walk's bounds (§9.1): a writable tree too large for one
+    // is too large for the other.
+    let ScanLimits {
+        max_entries,
+        max_depth,
+    } = ScanLimits::DEFAULT;
+    if depth >= max_depth {
+        return Err(io::Error::other(format!(
+            "quota ownership walk exceeds depth {max_depth}"
+        )));
     }
     let path = format!("/proc/self/fd/{}", file.as_raw_fd());
     for entry in fs::read_dir(&path)? {
         *scanned += 1;
-        if *scanned > 100_000 {
-            return Err(io::Error::other(
-                "quota ownership walk exceeds 100000 entries",
-            ));
+        if *scanned > max_entries {
+            return Err(io::Error::other(format!(
+                "quota ownership walk exceeds {max_entries} entries"
+            )));
         }
         let child = OpenOptions::new()
             .read(true)
@@ -190,6 +213,13 @@ mod tests {
         assert_eq!(std::mem::size_of::<QuotaState>(), 160);
         assert_eq!(std::mem::offset_of!(QuotaState, flags), 2);
         assert_eq!(std::mem::offset_of!(QuotaState, files), 8);
+        // The named commands and masks are the values the headers define.
+        assert_eq!(Q_XGETQSTATV, 0x5808);
+        assert_eq!(USER_QUOTA_ACCOUNTED_AND_ENFORCED, 3);
+        assert_eq!(QUOTA_READBACK_COMPLETE, 15);
+        // _IOR('X', 126, 256 bytes): direction read, size, type, number.
+        assert_eq!(XFS_IOC_FSGEOMETRY, 2 << 30 | 256 << 16 | 0x58 << 8 | 126);
+        assert_eq!(GEOMETRY_RTBLOCKS * 8, 40);
     }
 
     #[test]
@@ -202,10 +232,11 @@ mod tests {
         let root = File::open(root.path()).unwrap();
         let uid = root.metadata().unwrap().uid();
         assert!(check_owners(&root, uid, &mut 0, Deadline::after(Duration::from_secs(5))).is_ok());
+        let mut at_the_bound = ScanLimits::DEFAULT.max_entries;
         let exhausted = check_owners(
             &root,
             uid,
-            &mut 100_000,
+            &mut at_the_bound,
             Deadline::after(Duration::from_secs(5)),
         );
         assert!(

@@ -20,8 +20,8 @@
 //!    exactly the pinned proxy socket.
 //! 4. [`AgentNet::discover_bridge`]: finds the bridge the launcher started,
 //!    pins it with a pidfd, and reads back that it listens on
-//!    `127.0.0.1:3128` in the attempt's network namespace, under the agent
-//!    filters, with no capability.
+//!    `127.0.0.1:3128` (HTTP) and `127.0.0.1:3129` (SOCKS5) in the attempt's
+//!    network namespace, under the agent filters, with no capability.
 //!
 //! While the target runs, [`AgentNet::pump`] turns mediation records into
 //! audit-source `net.connect` results (a mediated connect is not a ptrace
@@ -417,11 +417,8 @@ impl AgentNet {
         self.dir.try_clone()
     }
 
-    /// Step 2: start the proxy on the pinned listener.
-    ///
-    /// # Errors
-    /// A refusal naming the proxy when it cannot start (its descriptor
-    /// budget does not fit, a thread cannot be created).
+    /// Gives the attempt's credential vault to the proxy (started after
+    /// this) and its origin rendezvous table to the mediation record queue.
     pub fn configure_vault(&mut self, vault: Arc<crate::vault::Vault>) {
         *self
             .queue
@@ -431,6 +428,11 @@ impl AgentNet {
         self.vault = Some(vault);
     }
 
+    /// Step 2: start the proxy on the pinned listener.
+    ///
+    /// # Errors
+    /// A refusal naming the proxy when it cannot start (its descriptor
+    /// budget does not fit, a thread cannot be created).
     pub fn start_proxy(&mut self) -> Result<(), JailError> {
         if let Some(vault) = &self.vault {
             let trace = self.trace.clone();
@@ -478,8 +480,8 @@ impl AgentNet {
     }
 
     /// Step 3: take the mediation listener and `sock_diag` socket from the
-    /// blocked launcher and start the mediator; take the bridge's report
-    /// pipe too.
+    /// blocked launcher and start the mediator; take the supervisor's end of
+    /// the bridge's report socket too.
     ///
     /// # Errors
     /// A refusal naming the unix-peer mediation or the bridge.
@@ -525,6 +527,7 @@ impl AgentNet {
         deadline: &super::clock::Deadline,
     ) -> Result<libc::pid_t, JailError> {
         let argv = bridge_argv();
+        let mut backoff = Backoff::new();
         // The launcher waited for the intermediate child, so the bridge is
         // already a child of the namespace init; it may still be between its
         // fork and its exec, when its command line is still the launcher's.
@@ -538,7 +541,7 @@ impl AgentNet {
             if deadline.expired() {
                 return Err(refusal("bridge", "it never appeared in the namespace"));
             }
-            nap();
+            backoff.nap();
         };
         let fd = identity::pidfd_open(pid).map_err(|error| refusal("bridge", error))?;
         let seen = identity::ns_ids(pid);
@@ -560,6 +563,7 @@ impl AgentNet {
         .map_err(|error| refusal("bridge", error.message))?;
         // Listening is read back from the attempt's own network namespace,
         // through the bridge's /proc view, and tied to a descriptor it holds.
+        let mut backoff = Backoff::new();
         loop {
             match listening_socket(pid) {
                 Ok(true) => break,
@@ -569,10 +573,14 @@ impl AgentNet {
             if deadline.expired() || super::watch::readable(fd.as_raw_fd()) {
                 return Err(refusal(
                     "bridge",
-                    format!("it is not listening on {}", bridge::LISTEN),
+                    format!(
+                        "it is not listening on {} and {}",
+                        bridge::LISTEN,
+                        bridge::SOCKS_LISTEN
+                    ),
                 ));
             }
-            nap();
+            backoff.nap();
         }
         // Read with the pidfd held and the process shown alive after it, so
         // the start time is this bridge's and not a successor's.
@@ -599,26 +607,14 @@ impl AgentNet {
         // host, `ptrace_scope=0` included. A bridge that cannot be sealed
         // never serves: the run refuses here rather than release beside an
         // unprotected helper.
-        let sealed = self.bridge_report.as_ref().map(|report| {
-            // SAFETY: `report` is a live socket descriptor this process
-            // owns; the byte buffer outlives the call.
-            unsafe {
-                libc::send(
-                    report.as_raw_fd(),
-                    if self.vault.is_some() {
-                        b"v".as_ptr().cast()
-                    } else {
-                        b"s".as_ptr().cast()
-                    },
-                    1,
-                    libc::MSG_NOSIGNAL,
-                )
-            }
-        });
-        match sealed {
-            Some(1) => {}
-            _ => return Err(refusal("bridge", "it could not be sealed")),
-        }
+        let Some(report) = &self.bridge_report else {
+            return Err(refusal(
+                "bridge",
+                "it could not be sealed: no report socket",
+            ));
+        };
+        bridge::send_seal(report.as_fd(), self.vault.is_some())
+            .map_err(|error| refusal("bridge", format!("it could not be sealed: {error}")))?;
         Ok(pid)
     }
 
@@ -699,16 +695,32 @@ impl AgentNet {
         loss
     }
 
-    /// Counts what the bridge reported since the last drain (nonblocking).
+    /// Counts the rejections the bridge reported since the last drain: one
+    /// [`bridge::report::REJECTED`] datagram each, read without blocking
+    /// whatever flags the descriptor carries.
     fn drain_bridge_report(&mut self) {
         let Some(report) = &self.bridge_report else {
             return;
         };
-        let mut buffer = [0u8; 256];
+        let mut datagram = [0u8; 16];
         for _ in 0..256 {
-            match read_some(report.as_raw_fd(), &mut buffer) {
-                Some(n) if n > 0 => self.bridge_rejected += n as u64,
-                _ => return,
+            // SAFETY: `report` is a live socket descriptor this process owns;
+            // `datagram` is writable for its whole length.
+            let received = unsafe {
+                libc::recv(
+                    report.as_raw_fd(),
+                    datagram.as_mut_ptr().cast(),
+                    datagram.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            // An error (`EAGAIN` included) or the bridge's end closing ends
+            // the drain.
+            if received <= 0 {
+                return;
+            }
+            if datagram[0] == bridge::report::REJECTED {
+                self.bridge_rejected += 1;
             }
         }
     }
@@ -893,7 +905,12 @@ impl AgentNet {
             "first_flight_bytes_max".into(),
             Value::from(crate::proxy::origin::MAX_BYTES),
         );
-        agent.insert("first_flight_timeout_ms".into(), Value::from(5000));
+        agent.insert(
+            "first_flight_timeout_ms".into(),
+            Value::from(
+                u64::try_from(crate::proxy::origin::TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+            ),
+        );
         agent.insert(
             "filter_variant".to_owned(),
             Value::from(self.variant.as_str()),
@@ -1107,17 +1124,17 @@ fn bind_pinned(
     Ok((listener, pin, stat))
 }
 
-/// Whether `pid` holds a TCP socket listening on `127.0.0.1:3128`, read from
-/// its own network namespace's `/proc/<pid>/net/tcp` and `/proc/<pid>/net/tcp6`
-/// tables (audit 3 A7c: the bridge binds the v4 loopback
-/// only, but the read-back must not depend on which table the kernel listed
-/// the listener in) and matched to one of its descriptors. True when either
-/// table shows the `LISTEN` row and one of `pid`'s fds is that socket.
+/// Whether `pid` holds both bridge listeners, on [`bridge::LISTEN`] (HTTP)
+/// and [`bridge::SOCKS_LISTEN`] (SOCKS5), read from its own network
+/// namespace's `/proc/<pid>/net/tcp` and matched to its descriptors. The
+/// bridge binds the IPv4 loopback only, so the IPv4 table is the one that
+/// lists it. True when the table shows a `LISTEN` row for each address and
+/// each of those sockets is one of `pid`'s descriptors.
 fn listening_socket(pid: libc::pid_t) -> io::Result<bool> {
     let table = std::fs::read_to_string(format!("/proc/{pid}/net/tcp"))?;
     let mut wanted = Vec::new();
-    for local in ["0100007F:0C38", "0100007F:0C39"] {
-        let Some(inode) = listening_inode_on(&table, &[local]) else {
+    for address in [bridge::LISTEN, bridge::SOCKS_LISTEN] {
+        let Some(inode) = listening_inode_on(&table, &proc_net_local(address)) else {
             return Ok(false);
         };
         wanted.push(format!("socket:[{inode}]"));
@@ -1131,58 +1148,46 @@ fn listening_socket(pid: libc::pid_t) -> io::Result<bool> {
     Ok(wanted.is_empty())
 }
 
-/// The inode of the `LISTEN` row for `127.0.0.1:3128` in a `/proc/net/tcp`
-/// table, if there is one.
-#[must_use]
-pub fn listening_inode(table: &str) -> Option<u64> {
-    // Little-endian hex of 127.0.0.1, then the port in hex; state 0A is LISTEN.
-    listening_inode_on(table, &["0100007F:0C38"])
-}
-
-/// The same match in a `/proc/net/tcp6` table (audit 3 A7c): a v6 local
-/// address is thirty-two hex digits, and the forms that name
-/// the bridge's local end are `::1` (the v6 loopback) and `::` (a dual-stack
-/// listener, which also serves the v4 loopback), each on the bridge's port.
-#[must_use]
-#[cfg(test)]
-fn listening_inode6(table: &str) -> Option<u64> {
-    listening_inode_on(
-        table,
-        &[
-            "00000000000000000000000001000000:0C38",
-            "00000000000000000000000000000000:0C38",
-        ],
+/// How `/proc/net/tcp` spells an IPv4 local address: the address as the
+/// kernel's `%08X` of its network-order word, then the port in hex
+/// (`127.0.0.1:3128` is `0100007F:0C38` on a little-endian host).
+fn proc_net_local(address: std::net::SocketAddrV4) -> String {
+    format!(
+        "{:08X}:{:04X}",
+        u32::from_ne_bytes(address.ip().octets()),
+        address.port()
     )
 }
 
-/// The inode of the `LISTEN` row (`0A`) whose local address is one of
-/// `local`, each already carrying the bridge's port in hex (`:0C38`), if
-/// there is one.
-fn listening_inode_on(table: &str, local: &[&str]) -> Option<u64> {
+/// The inode of the `LISTEN` row (`0A`) whose local address is `local`
+/// ([`proc_net_local`]), if there is one.
+fn listening_inode_on(table: &str, local: &str) -> Option<u64> {
     const LISTEN: &str = "0A";
     table.lines().skip(1).find_map(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        (fields.get(1).is_some_and(|found| local.contains(found)) && fields.get(3) == Some(&LISTEN))
+        (fields.get(1) == Some(&local) && fields.get(3) == Some(&LISTEN))
             .then(|| fields.get(9)?.parse().ok())
             .flatten()
     })
 }
 
-/// One nonblocking `read`; `None` on an error (including `EAGAIN`), `Some(0)`
-/// at end of file.
-fn read_some(fd: RawFd, buffer: &mut [u8]) -> Option<usize> {
-    // SAFETY: `buffer` is live and writable for its whole length.
-    let n = unsafe { libc::read(fd, buffer.as_mut_ptr().cast::<libc::c_void>(), buffer.len()) };
-    usize::try_from(n).ok()
-}
+/// The pause between two `/proc` polls of bridge discovery: 200 µs at
+/// first, doubling to 10 ms, so a bridge that is already up is found at
+/// once and a slow one costs no busy loop.
+struct Backoff(Duration);
 
-fn nap() {
-    let ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 200_000,
-    };
-    // SAFETY: `ts` is a live timespec and the second argument may be null.
-    unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
+impl Backoff {
+    const FIRST: Duration = Duration::from_micros(200);
+    const MAX: Duration = Duration::from_millis(10);
+
+    fn new() -> Backoff {
+        Backoff(Self::FIRST)
+    }
+
+    fn nap(&mut self) {
+        std::thread::sleep(self.0);
+        self.0 = (self.0 * 2).min(Self::MAX);
+    }
 }
 
 /// The number of seccomp filters a contained launcher must be running
@@ -1221,51 +1226,99 @@ mod tests {
 
     #[test]
     fn the_listening_row_is_found_only_for_the_bridge_address_in_listen_state() {
+        let http = proc_net_local(bridge::LISTEN);
+        let socks = proc_net_local(bridge::SOCKS_LISTEN);
+        if cfg!(target_endian = "little") {
+            assert_eq!(
+                (http.as_str(), socks.as_str()),
+                ("0100007F:0C38", "0100007F:0C39")
+            );
+        }
         let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
         let listen = "   0: 0100007F:0C38 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 4242 1 0000000000000000 100 0 0 10 0\n";
         let established = "   1: 0100007F:0C38 0100007F:D431 01 00000000:00000000 00:00000000 00000000  1001        0 4343 1 0000000000000000 20 4 30 10 -1\n";
-        let other_port = "   2: 0100007F:0C39 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 4444 1 0000000000000000 100 0 0 10 0\n";
+        let other_port = "   2: 0100007F:0C3A 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 4444 1 0000000000000000 100 0 0 10 0\n";
         let any_address = "   3: 00000000:0C38 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 4545 1 0000000000000000 100 0 0 10 0\n";
-        assert_eq!(listening_inode(&format!("{header}{listen}")), Some(4242));
-        assert_eq!(
-            listening_inode(&format!("{header}{established}{other_port}{any_address}")),
-            None,
-            "an established flow, another port and 0.0.0.0 are not the bridge"
-        );
-        assert_eq!(listening_inode(header), None);
+        let socks_listen = "   4: 0100007F:0C39 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 4646 1 0000000000000000 100 0 0 10 0\n";
+        if cfg!(target_endian = "little") {
+            let table = format!("{header}{listen}{socks_listen}");
+            assert_eq!(listening_inode_on(&table, &http), Some(4242));
+            assert_eq!(listening_inode_on(&table, &socks), Some(4646));
+            assert_eq!(
+                listening_inode_on(
+                    &format!("{header}{established}{other_port}{any_address}"),
+                    &http
+                ),
+                None,
+                "an established flow, another port and 0.0.0.0 are not the bridge"
+            );
+        }
+        assert_eq!(listening_inode_on(header, &http), None);
     }
 
     #[test]
-    fn the_listening_row_is_found_in_the_v6_table_too() {
-        // Security 2026-09-27 (audit 3 A7c): the read-back parses tcp6 as well
-        // as tcp. A v6 address is thirty-two hex digits, and `::1` and `::`
-        // name the bridge's local end there; another address, another port,
-        // an established flow and a v4-mapped form do not.
-        let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
-        let row = |local: &str, st: &str, inode: u64| {
-            format!(
-                "   0: {local} 00000000000000000000000000000000:0000 {st} \
-                 00000000:00000000 00:00000000 00000000  1001        0 \
-                 {inode} 1 0000000000000000 100 0 0 10 0\n"
+    fn the_report_protocol_is_one_byte_per_datagram() {
+        let mut fds = [-1; 2];
+        // SAFETY: `fds` is writable storage for the two descriptors
+        // socketpair returns.
+        let rc = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+                0,
+                fds.as_mut_ptr(),
             )
         };
-        let loopback = row("00000000000000000000000001000000:0C38", "0A", 5252);
-        let dual_stack = row("00000000000000000000000000000000:0C38", "0A", 5353);
-        let v4_mapped = row("00000000000000000000FFFF0100007F:0C38", "0A", 5454);
-        let established = row("00000000000000000000000001000000:0C38", "01", 5555);
-        let other_port = row("00000000000000000000000001000000:0C39", "0A", 5656);
-        assert_eq!(listening_inode6(&format!("{header}{loopback}")), Some(5252));
-        assert_eq!(
-            listening_inode6(&format!("{header}{dual_stack}")),
-            Some(5353),
-            "a dual-stack listener also serves the v4 loopback"
-        );
-        assert_eq!(
-            listening_inode6(&format!("{header}{established}{other_port}{v4_mapped}")),
-            None,
-            "an established flow, another port and a v4-mapped form are not the bridge"
-        );
-        assert_eq!(listening_inode6(header), None);
+        assert_eq!(rc, 0);
+        // SAFETY: both descriptors were just created and are owned here.
+        let (ours, theirs) = unsafe {
+            (
+                <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fds[0]),
+                <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fds[1]),
+            )
+        };
+        for vault in [false, true] {
+            bridge::send_seal(ours.as_fd(), vault).unwrap();
+            let mut byte = [0u8; 4];
+            // SAFETY: `theirs` is live and `byte` writable for its length.
+            let n = unsafe { libc::recv(theirs.as_raw_fd(), byte.as_mut_ptr().cast(), 4, 0) };
+            assert_eq!(n, 1, "one seal is one one-byte datagram");
+            assert_eq!(
+                byte[0],
+                if vault {
+                    bridge::report::SEAL_VAULT
+                } else {
+                    bridge::report::SEAL
+                }
+            );
+        }
+    }
+
+    /// The bridge binds the IPv4 loopback, and the read-back reads the IPv4
+    /// table only: a row in IPv6 form (`::1`, `::`, v4-mapped) is never
+    /// taken for the bridge.
+    #[test]
+    fn a_row_in_ipv6_form_is_not_the_bridge() {
+        let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+        let row = |local: &str| {
+            format!(
+                "   0: {local} 00000000000000000000000000000000:0000 0A \
+                 00000000:00000000 00:00000000 00000000  1001        0 \
+                 5252 1 0000000000000000 100 0 0 10 0\n"
+            )
+        };
+        for local in [
+            "00000000000000000000000001000000:0C38",
+            "00000000000000000000000000000000:0C38",
+            "00000000000000000000FFFF0100007F:0C38",
+        ] {
+            let table = format!("{header}{}", row(local));
+            assert_eq!(
+                listening_inode_on(&table, &proc_net_local(bridge::LISTEN)),
+                None,
+                "{local}"
+            );
+        }
     }
 
     #[test]

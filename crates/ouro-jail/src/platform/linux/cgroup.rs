@@ -3,10 +3,9 @@
 //! jail-v1 §9.3. Everything here is a measurement. Whether a leaf can be made
 //! and whether a process can be moved into it are two separate questions with
 //! two separate answers, and the kernel's common-ancestor rule means the
-//! second can fail while the first succeeds. The result type keeps them
-//! apart, and nothing here reports success it did not observe.
+//! second can fail while the first succeeds; nothing here reports success it
+//! did not observe.
 
-use std::fmt;
 use std::fs;
 use std::io;
 use std::io::{Read, Write};
@@ -15,7 +14,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use super::sys::errno_name;
+use super::fs::path_within;
+use crate::policy::{LimitCeiling, LimitKey, LimitsSnapshot};
 
 /// The unified cgroup v2 mount point.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
@@ -83,19 +83,14 @@ pub fn process_cgroup(pid: libc::pid_t) -> io::Result<String> {
     })
 }
 
-/// Whether the cgroup path `member` is `boundary` or lies beneath it.
-///
-/// Component-wise, like [`common_ancestor_ok`]: `/a/leaf.x` is not inside
-/// `/a/leaf`. A process in a cgroup the child created inside the boundary is
-/// still inside it: population, `cgroup.kill` and the limits are recursive.
+/// Whether the cgroup path `member` is `boundary` or lies beneath it
+/// ([`path_within`]): `/a/leaf.x` is not inside `/a/leaf`, and an empty
+/// boundary or the root contains nothing. A process in a cgroup the child
+/// created inside the boundary is still inside it: population, `cgroup.kill`
+/// and the limits are recursive.
 #[must_use]
 pub fn within(member: &str, boundary: &str) -> bool {
-    let boundary = boundary.trim_end_matches('/');
-    !boundary.is_empty()
-        && (member == boundary
-            || member
-                .strip_prefix(boundary)
-                .is_some_and(|rest| rest.starts_with('/')))
+    path_within(member.as_bytes(), boundary.as_bytes())
 }
 
 /// Whether a process in `own` may move a process into `leaf`.
@@ -103,226 +98,11 @@ pub fn within(member: &str, boundary: &str) -> bool {
 /// cgroup v2 requires write access to `cgroup.procs` of the common ancestor of
 /// the source and destination cgroups. The only common ancestor a delegated
 /// user can write is one inside the delegated subtree, so the rule reduces to:
-/// the writer's own cgroup must lie inside the delegated root.
+/// the writer's own cgroup must lie inside the delegated root — by the same
+/// predicate as [`within`], so an empty or root delegation admits nothing.
 #[must_use]
 pub fn common_ancestor_ok(own_cgroup: &str, delegated_relative: &str) -> bool {
-    let own = own_cgroup.trim_end_matches('/');
-    let delegated = delegated_relative.trim_end_matches('/');
-    own == delegated || own.starts_with(&format!("{delegated}/"))
-}
-
-/// The controllers a cgroup directory makes available to its children.
-///
-/// # Errors
-///
-/// Any failure reading `cgroup.subtree_control`.
-pub fn subtree_control(dir: &Path) -> io::Result<Vec<String>> {
-    Ok(fs::read_to_string(dir.join("cgroup.subtree_control"))?
-        .split_ascii_whitespace()
-        .map(str::to_owned)
-        .collect())
-}
-
-/// What happened when a leaf was attempted.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LeafStatus {
-    /// There is no delegated subtree for this uid.
-    NotDelegated {
-        /// Why.
-        reason: String,
-    },
-    /// Creating the leaf directory failed.
-    CreateFailed {
-        /// The errno.
-        errno: i32,
-    },
-    /// The leaf exists but enabling a controller in the parent failed.
-    SubtreeControlFailed {
-        /// The controller that could not be enabled.
-        controller: String,
-        /// The errno.
-        errno: i32,
-    },
-    /// The leaf exists but the process could not be moved into it.
-    MoveFailed {
-        /// The errno the kernel gave for the write to `cgroup.procs`.
-        errno: i32,
-    },
-    /// The leaf exists and the process is in it.
-    Moved,
-}
-
-impl fmt::Display for LeafStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotDelegated { reason } => write!(f, "not delegated: {reason}"),
-            Self::CreateFailed { errno } => {
-                write!(f, "leaf creation failed: {}", errno_name(*errno))
-            }
-            Self::SubtreeControlFailed { controller, errno } => write!(
-                f,
-                "enabling {controller} in the parent failed: {}",
-                errno_name(*errno)
-            ),
-            Self::MoveFailed { errno } => {
-                write!(f, "moving the process in failed: {}", errno_name(*errno))
-            }
-            Self::Moved => write!(f, "leaf created and process moved in"),
-        }
-    }
-}
-
-/// The full record of a leaf attempt, including the facts that explain it.
-#[derive(Clone, Debug)]
-pub struct LeafAttempt {
-    /// What happened.
-    pub status: LeafStatus,
-    /// The leaf directory, when one was created.
-    pub path: Option<PathBuf>,
-    /// The delegated subtree, when one was found.
-    pub delegated_root: Option<PathBuf>,
-    /// This process's own cgroup at the time of the attempt.
-    pub own_cgroup: Option<String>,
-    /// Whether the kernel's common-ancestor rule permits the move at all.
-    pub common_ancestor_ok: bool,
-    /// The parent's `cgroup.subtree_control` before the attempt.
-    pub subtree_control_before: Option<Vec<String>>,
-    /// Whether this attempt changed `cgroup.subtree_control`.
-    pub subtree_control_changed: bool,
-}
-
-impl LeafAttempt {
-    /// Whether the leaf is usable: created and populated with the pid.
-    #[must_use]
-    pub fn moved(&self) -> bool {
-        self.status == LeafStatus::Moved
-    }
-}
-
-/// Create a leaf beneath the delegated subtree, make sure `controller` is
-/// available in it, and move `pid` into it.
-///
-/// The common-ancestor check is recorded but the move is still attempted, so
-/// that the result carries the kernel's own errno rather than this code's
-/// prediction of it.
-#[must_use]
-pub fn try_leaf(name: &str, pid: libc::pid_t, controller: &str) -> LeafAttempt {
-    // SAFETY: getuid takes no arguments and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    let own = own_cgroup().ok();
-    let Some(root) = delegated_root(uid) else {
-        return LeafAttempt {
-            status: LeafStatus::NotDelegated {
-                reason: format!(
-                    "no directory {CGROUP_ROOT}/user.slice/user-{uid}.slice/user@{uid}.service owned by uid {uid}"
-                ),
-            },
-            path: None,
-            delegated_root: None,
-            own_cgroup: own,
-            common_ancestor_ok: false,
-            subtree_control_before: None,
-            subtree_control_changed: false,
-        };
-    };
-
-    let relative = root
-        .strip_prefix(CGROUP_ROOT)
-        .map(|p| format!("/{}", p.display()))
-        .unwrap_or_default();
-    let ancestor_ok = own
-        .as_deref()
-        .is_some_and(|own| common_ancestor_ok(own, &relative));
-
-    let before = subtree_control(&root).ok();
-    let mut changed = false;
-    let leaf = root.join(name);
-
-    if let Some(before) = before.as_ref()
-        && !before.iter().any(|c| c == controller)
-    {
-        match fs::write(
-            root.join("cgroup.subtree_control"),
-            format!("+{controller}"),
-        ) {
-            Ok(()) => changed = true,
-            Err(e) => {
-                return LeafAttempt {
-                    status: LeafStatus::SubtreeControlFailed {
-                        controller: controller.to_owned(),
-                        errno: e.raw_os_error().unwrap_or(libc::EIO),
-                    },
-                    path: None,
-                    delegated_root: Some(root),
-                    own_cgroup: own,
-                    common_ancestor_ok: ancestor_ok,
-                    subtree_control_before: before.clone().into(),
-                    subtree_control_changed: false,
-                };
-            }
-        }
-    }
-
-    if let Err(e) = fs::create_dir(&leaf) {
-        return LeafAttempt {
-            status: LeafStatus::CreateFailed {
-                errno: e.raw_os_error().unwrap_or(libc::EIO),
-            },
-            path: None,
-            delegated_root: Some(root),
-            own_cgroup: own,
-            common_ancestor_ok: ancestor_ok,
-            subtree_control_before: before,
-            subtree_control_changed: changed,
-        };
-    }
-
-    let status = match fs::write(leaf.join("cgroup.procs"), pid.to_string()) {
-        Ok(()) => LeafStatus::Moved,
-        Err(e) => LeafStatus::MoveFailed {
-            errno: e.raw_os_error().unwrap_or(libc::EIO),
-        },
-    };
-
-    LeafAttempt {
-        status,
-        path: Some(leaf),
-        delegated_root: Some(root),
-        own_cgroup: own,
-        common_ancestor_ok: ancestor_ok,
-        subtree_control_before: before,
-        subtree_control_changed: changed,
-    }
-}
-
-/// Remove a leaf this process created and put the parent's
-/// `cgroup.subtree_control` back the way it was found.
-///
-/// # Errors
-///
-/// A failure to remove the leaf. A failure to restore `subtree_control` is
-/// reported the same way; the host must be left as it was found.
-pub fn remove_leaf(attempt: &LeafAttempt) -> io::Result<()> {
-    if let Some(path) = attempt.path.as_ref()
-        && path.exists()
-    {
-        fs::remove_dir(path)?;
-    }
-    if attempt.subtree_control_changed
-        && let Some(root) = attempt.delegated_root.as_ref()
-        && let Some(before) = attempt.subtree_control_before.as_ref()
-    {
-        let now = subtree_control(root).unwrap_or_default();
-        for controller in now {
-            if !before.contains(&controller) {
-                fs::write(
-                    root.join("cgroup.subtree_control"),
-                    format!("-{controller}"),
-                )?;
-            }
-        }
-    }
-    Ok(())
+    path_within(own_cgroup.as_bytes(), delegated_relative.as_bytes())
 }
 
 /// Whether a cgroup has any process in it, recursively.
@@ -366,7 +146,7 @@ pub const LEAF_PREFIX: &str = crate::gc::LEAF_PREFIX;
 pub const LEAF_SUFFIX: &str = crate::gc::LEAF_SUFFIX;
 
 /// The name an attempt's execution leaf has: `ouro-<attempt id>.leaf`
-/// (J4 wave 3, G2: the leaf carries its attempt association, §9.3, and `gc`
+/// (the leaf carries its attempt association, §9.3, and `gc`
 /// never acts on a registration naming another attempt's leaf).
 #[must_use]
 pub fn leaf_name(attempt: &crate::state::AttemptId) -> String {
@@ -396,6 +176,79 @@ pub fn is_leaf_name(name: &std::ffi::OsStr) -> bool {
         .is_some_and(|token| crate::state::AttemptId::parse(token).is_ok())
 }
 
+/// The ceilings an execution leaf enforces, each through one controller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CgroupLimit {
+    Pids,
+    Mem,
+    Swap,
+    Cpu,
+}
+
+impl CgroupLimit {
+    /// The cgroup ceiling for a policy key, if a cgroup enforces it. Every
+    /// key is named, so a new one does not compile until it is placed.
+    fn for_key(key: LimitKey) -> Option<CgroupLimit> {
+        match key {
+            LimitKey::Pids => Some(CgroupLimit::Pids),
+            LimitKey::Mem => Some(CgroupLimit::Mem),
+            LimitKey::Swap => Some(CgroupLimit::Swap),
+            LimitKey::Cpu => Some(CgroupLimit::Cpu),
+            LimitKey::Wall | LimitKey::Storage | LimitKey::Inodes => None,
+        }
+    }
+
+    fn key(self) -> LimitKey {
+        match self {
+            CgroupLimit::Pids => LimitKey::Pids,
+            CgroupLimit::Mem => LimitKey::Mem,
+            CgroupLimit::Swap => LimitKey::Swap,
+            CgroupLimit::Cpu => LimitKey::Cpu,
+        }
+    }
+
+    fn requested(self, limits: &LimitsSnapshot) -> Option<&LimitCeiling> {
+        match self {
+            CgroupLimit::Pids => limits.pids.as_ref(),
+            CgroupLimit::Mem => limits.mem.as_ref(),
+            CgroupLimit::Swap => limits.swap.as_ref(),
+            CgroupLimit::Cpu => limits.cpu.as_ref(),
+        }
+    }
+
+    /// The control file the ceiling is written to.
+    fn control(self) -> &'static str {
+        match self {
+            CgroupLimit::Pids => "pids.max",
+            CgroupLimit::Mem => "memory.max",
+            CgroupLimit::Swap => "memory.swap.max",
+            CgroupLimit::Cpu => "cpu.max",
+        }
+    }
+
+    /// The value the control file is given for `requested`.
+    fn control_value(self, requested: &str) -> io::Result<String> {
+        match self {
+            CgroupLimit::Pids => Ok(requested.to_owned()),
+            CgroupLimit::Mem => memory_max(requested),
+            CgroupLimit::Swap => swap_max(requested),
+            CgroupLimit::Cpu => cpu_max(requested),
+        }
+    }
+
+    /// The hit a ceiling starts with once applied. A swap ceiling's `max`
+    /// event counter rises only on a refault reclaim may never raise, so
+    /// `false` would be a negative claim nothing establishes: swap starts
+    /// unknown (§13.2: `null` when unknown). The readable event counters
+    /// back every other ceiling's `false`.
+    fn initial_hit(self) -> Option<bool> {
+        match self {
+            CgroupLimit::Swap => None,
+            CgroupLimit::Pids | CgroupLimit::Mem | CgroupLimit::Cpu => Some(false),
+        }
+    }
+}
+
 /// A unique, pinned execution leaf. No controller is enabled or disabled by a
 /// run: delegation is operator configuration, never a side effect of doctor.
 pub struct ExecutionCgroup {
@@ -406,7 +259,7 @@ pub struct ExecutionCgroup {
     name: std::ffi::OsString,
     device: u64,
     inode: u64,
-    limits: Vec<crate::records::AppliedLimit>,
+    limits: Vec<(CgroupLimit, crate::records::AppliedLimit)>,
     baseline: Counters,
     oom_killed: bool,
     removed: bool,
@@ -423,7 +276,6 @@ struct Counters {
     cpu: u64,
 }
 
-// N7
 /// What a leaf registration hook is told, in order (N7).
 #[derive(Clone, Copy, Debug)]
 pub enum LeafStep<'a> {
@@ -449,18 +301,17 @@ impl ExecutionCgroup {
     /// probe's): its name is [`probe_leaf_name`]. Missing preferred
     /// controllers are recorded unapplied; a required controller always makes
     /// preparation fail.
-    pub fn create(limits: &crate::policy::LimitsSnapshot) -> io::Result<Self> {
+    pub fn create(limits: &LimitsSnapshot) -> io::Result<Self> {
         Self::create_named(limits, &probe_leaf_name(), &mut |_| Ok(()))
     }
 
-    // N7
     /// [`ExecutionCgroup::create`] for an attempt: the leaf is registered in
     /// the attempt's jail state by name before `mkdir` (P15) and by device
     /// and inode right after (P16), before anything is placed in it, so a
     /// supervisor that dies at any point leaves either no leaf or one that
     /// jail state names for `gc` (§7, §14.2).
     ///
-    /// J4 wave 3 (G2): the leaf is `ouro-<attempt id>.leaf`, the attempt id
+    /// The leaf is `ouro-<attempt id>.leaf`, the attempt id
     /// being the attempt root's name (`<data>/attempts/<attempt id>`), so the
     /// leaf carries its attempt; `mkdir` is exclusive, so a directory of that
     /// name made by anyone else fails the creation rather than being adopted.
@@ -473,7 +324,7 @@ impl ExecutionCgroup {
     /// # Errors
     /// The failed registration, as `state_write_failed`.
     pub fn create_for_attempt(
-        limits: &crate::policy::LimitsSnapshot,
+        limits: &LimitsSnapshot,
         attempt_root: &Path,
     ) -> Result<io::Result<Self>, crate::records::JailError> {
         let Some(attempt_id) = attempt_root
@@ -518,11 +369,13 @@ impl ExecutionCgroup {
     /// [`ExecutionCgroup::create`] with the leaf named `name`, telling
     /// `register` each step first.
     pub fn create_named(
-        limits: &crate::policy::LimitsSnapshot,
+        limits: &LimitsSnapshot,
         name: &str,
         register: Register<'_>,
     ) -> io::Result<Self> {
-        let root = delegated_root(unsafe { libc::getuid() }).ok_or_else(|| {
+        // SAFETY: getuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let root = delegated_root(uid).ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "no delegated cgroup")
         })?;
         let relative = root.strip_prefix(CGROUP_ROOT).map_err(io::Error::other)?;
@@ -537,7 +390,7 @@ impl ExecutionCgroup {
 
     /// Low-level delegated-root entry point, also used to exercise controller
     /// absence under an owned, isolated subtree without changing host settings.
-    pub fn create_beneath(root: &Path, limits: &crate::policy::LimitsSnapshot) -> io::Result<Self> {
+    pub fn create_beneath(root: &Path, limits: &LimitsSnapshot) -> io::Result<Self> {
         Self::create_beneath_registered(root, limits, &probe_leaf_name(), &mut |_| Ok(()))
     }
 
@@ -547,12 +400,14 @@ impl ExecutionCgroup {
     /// identity removes the empty leaf again.
     pub fn create_beneath_registered(
         root: &Path,
-        limits: &crate::policy::LimitsSnapshot,
+        limits: &LimitsSnapshot,
         name: &str,
         register: Register<'_>,
     ) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(root)?;
-        if !metadata.is_dir() || metadata.uid() != unsafe { libc::getuid() } {
+        // SAFETY: getuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        if !metadata.is_dir() || metadata.uid() != uid {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "cgroup root is not owned",
@@ -563,21 +418,24 @@ impl ExecutionCgroup {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
             .open(root)?;
         let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        // SAFETY: `root_fd` is a live descriptor and `filesystem` is writable
+        // storage of the type fstatfs fills.
         if unsafe { libc::fstatfs(root_fd.as_raw_fd(), filesystem.as_mut_ptr()) } < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: fstatfs succeeded, so it initialized `filesystem`.
         if unsafe { filesystem.assume_init() }.f_type != libc::CGROUP2_SUPER_MAGIC {
             return Err(io::Error::other("execution root is not cgroup v2"));
         }
-        // J4 wave 3 (G2): the name is given (an attempt's own, or a probe's);
-        // one path component, never a path.
+        // The name is given (an attempt's own, or a probe's); one path
+        // component, never a path.
         if name.is_empty() || name.contains('/') || name == "." || name == ".." {
             return Err(io::Error::other(
                 "an execution leaf's name is one component",
             ));
         }
         let path = root.join(name);
-        // J4 W2-S: N7 — named durably before it exists.
+        // N7: named durably before it exists.
         register(LeafStep::Named(&path))?;
         // Exclusive: an existing directory of this name is never adopted.
         fs::create_dir(&path)?;
@@ -588,7 +446,7 @@ impl ExecutionCgroup {
                 return Err(error);
             }
         };
-        // J4 W2-S: N7 — identified durably before anything is placed in it.
+        // N7: identified durably before anything is placed in it.
         // On failure the leaf is dropped, which removes it (it is empty).
         let (device, inode) = leaf.identity();
         register(LeafStep::Created {
@@ -599,7 +457,7 @@ impl ExecutionCgroup {
         Ok(leaf)
     }
 
-    fn open_created(path: &Path, limits: &crate::policy::LimitsSnapshot) -> io::Result<Self> {
+    fn open_created(path: &Path, limits: &LimitsSnapshot) -> io::Result<Self> {
         let directory = |target: &Path| {
             fs::OpenOptions::new()
                 .read(true)
@@ -635,19 +493,12 @@ impl ExecutionCgroup {
         if leaf.populated()? {
             return Err(io::Error::other("new cgroup is populated"));
         }
-        for (key, ceiling, control) in [
-            ("pids", limits.pids.as_ref(), "pids.max"),
-            ("mem", limits.mem.as_ref(), "memory.max"),
-            ("swap", limits.swap.as_ref(), "memory.swap.max"),
-            ("cpu", limits.cpu.as_ref(), "cpu.max"),
-        ] {
-            let Some(ceiling) = ceiling else { continue };
-            let value = match key {
-                "cpu" => cpu_max(&ceiling.value)?,
-                "mem" => memory_max(&ceiling.value)?,
-                "swap" => swap_max(&ceiling.value)?,
-                _ => ceiling.value.clone(),
+        for limit in LimitKey::ALL.into_iter().filter_map(CgroupLimit::for_key) {
+            let Some(ceiling) = limit.requested(limits) else {
+                continue;
             };
+            let control = limit.control();
+            let value = limit.control_value(&ceiling.value)?;
             let applied = match leaf.write(control, &value) {
                 Ok(()) => {
                     if leaf.read(control)?.trim() != value {
@@ -658,22 +509,18 @@ impl ExecutionCgroup {
                 Err(error) if ceiling.required => return Err(error),
                 Err(_) => false,
             };
-            leaf.limits.push(crate::records::AppliedLimit {
-                key: key.to_owned(),
-                requested: ceiling.value.clone(),
-                required: ceiling.required,
-                applied,
-                mechanism: applied.then(|| control.to_owned()),
-                scope: applied.then(|| "tree".to_owned()),
-                // Audit 2026-10-08 M3: a swap ceiling's `max` event counter
-                // rises only on a refault reclaim may never raise, so `false`
-                // would be a negative claim nothing establishes. Swap starts
-                // unknown (§13.2: `null` when unknown); the readable event
-                // counters back every other ceiling's `false`.
-                hit: applied
-                    .then(|| if key == "swap" { None } else { Some(false) })
-                    .flatten(),
-            });
+            leaf.limits.push((
+                limit,
+                crate::records::AppliedLimit {
+                    key: limit.key().as_str().to_owned(),
+                    requested: ceiling.value.clone(),
+                    required: ceiling.required,
+                    applied,
+                    mechanism: applied.then(|| control.to_owned()),
+                    scope: applied.then(|| "tree".to_owned()),
+                    hit: applied.then(|| limit.initial_hit()).flatten(),
+                },
+            ));
         }
         leaf.baseline = leaf.counters()?;
         Ok(leaf)
@@ -707,6 +554,7 @@ impl ExecutionCgroup {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: `fd` was just returned by `openat` and nothing else owns it.
         Ok(unsafe { fs::File::from_raw_fd(fd) })
     }
 
@@ -770,21 +618,30 @@ impl ExecutionCgroup {
         }
     }
 
+    /// The applied ceilings, with the kind each is.
+    fn applied(&self) -> impl Iterator<Item = CgroupLimit> + '_ {
+        self.limits
+            .iter()
+            .filter(|(_, limit)| limit.applied)
+            .map(|(kind, _)| *kind)
+    }
+
     fn counters(&self) -> io::Result<Counters> {
         let mut out = Counters::default();
-        for limit in self.limits.iter().filter(|limit| limit.applied) {
-            match limit.key.as_str() {
-                "pids" => out.pids = counter(&self.read("pids.events")?, "max")?,
-                "mem" => {
+        for limit in self.applied() {
+            match limit {
+                CgroupLimit::Pids => out.pids = counter(&self.read("pids.events")?, "max")?,
+                CgroupLimit::Mem => {
                     let events = self.read("memory.events")?;
                     out.memory = counter(&events, "max")?;
                     out.oom = counter(&events, "oom_kill")?;
                 }
-                "cpu" => out.cpu = counter(&self.read("cpu.stat")?, "nr_throttled")?,
+                CgroupLimit::Cpu => out.cpu = counter(&self.read("cpu.stat")?, "nr_throttled")?,
                 // `fail` also counts global swap exhaustion. Only `max`
                 // attributes a refusal to this cgroup's configured ceiling.
-                "swap" => out.swap = counter(&self.read("memory.swap.events")?, "max")?,
-                _ => {}
+                CgroupLimit::Swap => {
+                    out.swap = counter(&self.read("memory.swap.events")?, "max")?;
+                }
             }
         }
         Ok(out)
@@ -795,26 +652,21 @@ impl ExecutionCgroup {
     pub fn sample(&mut self) -> io::Result<usize> {
         let now = self.counters()?;
         self.oom_killed |= now.oom > self.baseline.oom;
-        // Audit 2026-10-08 M3: a sampled `swap.current` at or above the
-        // written ceiling is direct hit evidence, beside the `max` event
-        // counter a refault may never raise.
-        let swap_saturated = if self
-            .limits
-            .iter()
-            .any(|limit| limit.applied && limit.key == "swap")
-        {
+        // A sampled `swap.current` at or above the written ceiling is direct
+        // hit evidence, beside the `max` event counter a refault may never
+        // raise.
+        let swap_saturated = if self.applied().any(|limit| limit == CgroupLimit::Swap) {
             self.swap_saturated()?
         } else {
             false
         };
         let mut hits = 0;
-        for limit in self.limits.iter_mut().filter(|limit| limit.applied) {
-            let hit = match limit.key.as_str() {
-                "pids" => now.pids > self.baseline.pids,
-                "mem" => now.memory > self.baseline.memory || self.oom_killed,
-                "swap" => now.swap > self.baseline.swap || swap_saturated,
-                "cpu" => now.cpu > self.baseline.cpu,
-                _ => false,
+        for (kind, limit) in self.limits.iter_mut().filter(|(_, limit)| limit.applied) {
+            let hit = match kind {
+                CgroupLimit::Pids => now.pids > self.baseline.pids,
+                CgroupLimit::Mem => now.memory > self.baseline.memory || self.oom_killed,
+                CgroupLimit::Swap => now.swap > self.baseline.swap || swap_saturated,
+                CgroupLimit::Cpu => now.cpu > self.baseline.cpu,
             };
             if hit && limit.hit != Some(true) {
                 hits += 1;
@@ -846,7 +698,7 @@ impl ExecutionCgroup {
     }
 
     pub fn limits(&self) -> Vec<crate::records::AppliedLimit> {
-        self.limits.clone()
+        self.limits.iter().map(|(_, limit)| limit.clone()).collect()
     }
     /// The leaf's path, as created.
     #[must_use]
@@ -869,26 +721,12 @@ impl ExecutionCgroup {
     /// that drive one integrity check in process.
     #[cfg(test)]
     pub(crate) fn open_for_test(path: &Path) -> io::Result<Self> {
-        Self::open_created(
-            path,
-            &crate::policy::LimitsSnapshot {
-                wall: None,
-                pids: None,
-                mem: None,
-                swap: None,
-                storage: None,
-                inodes: None,
-                cpu: None,
-            },
-        )
+        Self::open_created(path, &LimitsSnapshot::default())
     }
     /// [`Self::open_for_test`] with `limits` written into the fake leaf's
     /// control files, so a test can make a counter read fail.
     #[cfg(test)]
-    pub(crate) fn open_for_test_with(
-        path: &Path,
-        limits: &crate::policy::LimitsSnapshot,
-    ) -> io::Result<Self> {
+    pub(crate) fn open_for_test_with(path: &Path, limits: &LimitsSnapshot) -> io::Result<Self> {
         Self::open_created(path, limits)
     }
     /// Keep the leaf when this value is dropped. jail-v1 §9.3: a boundary
@@ -901,7 +739,7 @@ impl ExecutionCgroup {
         self.oom_killed
     }
     pub fn invalidate_hits(&mut self) {
-        for limit in &mut self.limits {
+        for (_, limit) in &mut self.limits {
             if limit.applied && limit.hit != Some(true) {
                 limit.hit = None;
             }
@@ -996,38 +834,46 @@ fn cpu_max(value: &str) -> io::Result<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn swap_ceiling_and_attributed_hits_are_read_back() {
-        let dir = tempfile::tempdir().unwrap();
+    /// The control files of an empty leaf, written into `dir`, with `extra`
+    /// beside them, so a test can drive a leaf on an ordinary directory.
+    fn fake_leaf(dir: &Path, extra: &[(&str, &str)]) {
         for (name, value) in [
             ("cgroup.kill", ""),
             ("cgroup.procs", ""),
             ("cgroup.events", "populated 0\n"),
-            ("memory.swap.events", "high 0\nmax 4\nfail 8\n"),
-            ("memory.swap.max", ""),
-            ("memory.swap.current", "0"),
-        ] {
-            fs::write(dir.path().join(name), value).unwrap();
+        ]
+        .iter()
+        .chain(extra)
+        {
+            fs::write(dir.join(name), value).unwrap();
         }
-        let limits = crate::policy::LimitsSnapshot {
-            wall: None,
-            pids: None,
-            mem: None,
-            cpu: None,
-            storage: None,
-            inodes: None,
-            swap: Some(crate::policy::LimitCeiling {
+    }
+
+    #[test]
+    fn swap_ceiling_and_attributed_hits_are_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_leaf(
+            dir.path(),
+            &[
+                ("memory.swap.events", "high 0\nmax 4\nfail 8\n"),
+                ("memory.swap.max", ""),
+                ("memory.swap.current", "0"),
+            ],
+        );
+        let limits = LimitsSnapshot {
+            swap: Some(LimitCeiling {
                 value: "0".into(),
                 required: true,
             }),
+            ..LimitsSnapshot::default()
         };
         let mut leaf = ExecutionCgroup::open_created(dir.path(), &limits).unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join("memory.swap.max")).unwrap(),
             "0"
         );
-        // Audit 2026-10-08 M3: a swap ceiling's hit starts unknown, a
-        // negative claim nothing establishes.
+        // A swap ceiling's hit starts unknown: `false` would be a negative
+        // claim nothing establishes.
         assert_eq!(leaf.limits()[0].hit, None);
         fs::write(
             dir.path().join("memory.swap.events"),
@@ -1070,24 +916,13 @@ mod tests {
     #[test]
     fn required_and_preferred_missing_controllers_are_distinct() {
         let dir = tempfile::tempdir().unwrap();
-        for (name, value) in [
-            ("cgroup.kill", ""),
-            ("cgroup.procs", ""),
-            ("cgroup.events", "populated 0\n"),
-        ] {
-            fs::write(dir.path().join(name), value).unwrap();
-        }
-        let mut limits = crate::policy::LimitsSnapshot {
-            wall: None,
-            mem: None,
-            swap: None,
-            storage: None,
-            inodes: None,
-            cpu: None,
-            pids: Some(crate::policy::LimitCeiling {
+        fake_leaf(dir.path(), &[]);
+        let mut limits = LimitsSnapshot {
+            pids: Some(LimitCeiling {
                 value: "256".into(),
                 required: false,
             }),
+            ..LimitsSnapshot::default()
         };
         let preferred = ExecutionCgroup::open_created(dir.path(), &limits).unwrap();
         assert!(!preferred.limits()[0].applied);
@@ -1101,23 +936,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("leaf");
         fs::create_dir(&path).unwrap();
-        for (name, value) in [
-            ("cgroup.kill", ""),
-            ("cgroup.procs", ""),
-            ("cgroup.events", "populated 0\n"),
-        ] {
-            fs::write(path.join(name), value).unwrap();
-        }
-        let limits = crate::policy::LimitsSnapshot {
-            wall: None,
-            pids: None,
-            mem: None,
-            swap: None,
-            storage: None,
-            inodes: None,
-            cpu: None,
-        };
-        let mut leaf = ExecutionCgroup::open_created(&path, &limits).unwrap();
+        fake_leaf(&path, &[]);
+        let mut leaf = ExecutionCgroup::open_created(&path, &LimitsSnapshot::default()).unwrap();
         fs::rename(&path, root.path().join("original")).unwrap();
         fs::create_dir(&path).unwrap();
         fs::write(path.join("cgroup.kill"), "untouched").unwrap();
@@ -1127,6 +947,23 @@ mod tests {
             fs::read_to_string(path.join("cgroup.kill")).unwrap(),
             "untouched"
         );
+    }
+
+    /// The cgroup ceilings are the policy's pids, mem, swap and cpu, in its
+    /// key order, which is the order the receipt lists them in.
+    #[test]
+    fn every_policy_key_is_placed_and_the_cgroup_keys_keep_their_order() {
+        let keys: Vec<&str> = LimitKey::ALL
+            .into_iter()
+            .filter_map(CgroupLimit::for_key)
+            .map(|limit| limit.key().as_str())
+            .collect();
+        assert_eq!(keys, ["pids", "mem", "swap", "cpu"]);
+        for key in LimitKey::ALL {
+            if let Some(limit) = CgroupLimit::for_key(key) {
+                assert_eq!(limit.key(), key);
+            }
+        }
     }
 
     #[test]
@@ -1217,23 +1054,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("leaf");
         fs::create_dir(&path).unwrap();
-        for (name, value) in [
-            ("cgroup.kill", ""),
-            ("cgroup.procs", ""),
-            ("cgroup.events", "populated 0\n"),
-        ] {
-            fs::write(path.join(name), value).unwrap();
-        }
-        let limits = crate::policy::LimitsSnapshot {
-            wall: None,
-            pids: None,
-            mem: None,
-            swap: None,
-            storage: None,
-            inodes: None,
-            cpu: None,
-        };
-        let leaf = ExecutionCgroup::open_created(&path, &limits).unwrap();
+        fake_leaf(&path, &[]);
+        let leaf = ExecutionCgroup::open_created(&path, &LimitsSnapshot::default()).unwrap();
         assert_eq!(leaf.relative_path(), None);
         assert_eq!(leaf.path(), path.as_path());
     }
@@ -1265,6 +1087,12 @@ mod tests {
             delegated
         ));
         assert!(!common_ancestor_ok("/", delegated));
+        // The two predicates agree on a boundary that names nothing: an
+        // empty or root delegation contains no cgroup.
+        for empty in ["", "/"] {
+            assert!(!common_ancestor_ok(delegated, empty), "{empty:?}");
+            assert!(!within(delegated, empty), "{empty:?}");
+        }
         // A prefix that is not a path component must not count.
         assert!(!common_ancestor_ok(
             "/user.slice/user-1001.slice/user@1001.service.evil",

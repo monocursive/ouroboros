@@ -229,7 +229,7 @@ pub fn resolved_bwrap() -> Result<&'static Path, &'static str> {
 static BWRAP_MEETS_MINIMUM: std::sync::LazyLock<Result<(), String>> =
     std::sync::LazyLock::new(|| {
         let bwrap = resolved_bwrap().map_err(str::to_owned)?;
-        match bwrap::bwrap_version(bwrap) {
+        match bwrap::bwrap_version(bwrap, clock::Deadline::after(probe::PROBE_DEADLINE)) {
             Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => Ok(()),
             Ok(version) => Err(format!(
                 "the resolved bubblewrap ({}) reports {}; every contained run renders \
@@ -725,7 +725,9 @@ struct Boundary {
     placeholders: Vec<Placeholder>,
     placeholder_outcomes: Vec<PlaceholderOutcome>,
     applied: Applied,
-    backend_version: String,
+    /// What the backend reported, read again for this attempt; `None` when
+    /// it could not be asked.
+    backend_version: Option<String>,
     resolv_sanitization: &'static str,
     observe_on: bool,
     /// The §11.4 bounds the observer runs with, decided once; `None` with
@@ -887,25 +889,19 @@ impl Boundary {
         names.sort_unstable();
         names.dedup();
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut bplan = BwrapPlan::tool(&plan.workspace, &scratch, &exe);
-        bplan.bounded_storage = super::storage::requested(&snapshot.limits);
-        bplan.workspace_access = None;
-        if snapshot.filesystem.read_write.iter().any(|reference| {
-            host_path_of(reference, &plan.workspace, &scratch)
-                .is_ok_and(|path| path == plan.workspace)
-        }) {
-            bplan.workspace_access = Some(true);
-        }
-        if snapshot.filesystem.read_only.iter().any(|reference| {
-            host_path_of(reference, &plan.workspace, &scratch)
-                .is_ok_and(|path| path == plan.workspace)
-        }) {
-            bplan.workspace_access = Some(false);
-        }
-        bplan.bwrap = bwrap_path.to_path_buf();
-        bplan.env = environment_for(&snapshot, &plan.workspace)?;
-        // §10 — the proxy socket in its registered directory,
-        // bound read-only by descriptor, and the proxy variables.
+        let mut bplan = plan_for(
+            &snapshot,
+            &PlanPaths {
+                bwrap: bwrap_path,
+                workspace: &plan.workspace,
+                scratch: &scratch,
+                jail_exe: &exe,
+                proxy_dir: plan
+                    .proxy
+                    .as_ref()
+                    .map(|handoff| handoff.host_path.as_path()),
+            },
+        )?;
         let mut agent = if snapshot.profile == ProfileName::Agent {
             let Some(handoff) = plan.proxy.as_ref() else {
                 return Err(preparing(
@@ -921,13 +917,6 @@ impl Boundary {
                 &exe,
                 bwrap_path,
             )?;
-            bplan.proxy_dir = Some(agent.dir_path().to_path_buf());
-            bplan.proxy_dir_fd = Some(super::agent::PROXY_DIR_FD);
-            for (name, value) in super::bridge::proxy_environment() {
-                bplan
-                    .env
-                    .push((OsString::from(name), OsString::from(value)));
-            }
             Some(agent)
         } else {
             None
@@ -986,8 +975,10 @@ impl Boundary {
                 .launch
                 .as_ref()
                 .and_then(|handoff| handoff.vendor_state.as_ref())
-                .map(|vendor| vendor.host_path.clone());
-            bplan.vendor_state_fd = Some(VENDOR_STATE_FD);
+                .map(|vendor| bwrap::Staged {
+                    host: vendor.host_path.clone(),
+                    fd: VENDOR_STATE_FD,
+                });
         }
         bplan.credential_binds = staged
             .credentials
@@ -1017,7 +1008,8 @@ impl Boundary {
                         .push((host, PathBuf::from(destination)));
                     continue;
                 }
-                if (bplan.workspace_access == Some(true) && host.starts_with(&plan.workspace))
+                if (bplan.workspace_access == bwrap::WorkspaceAccess::Writable
+                    && host.starts_with(&plan.workspace))
                     || host.starts_with(&scratch)
                 {
                     // Inside a base writable bind already; layering an extra
@@ -1191,26 +1183,22 @@ impl Boundary {
         } else {
             None
         };
-        bplan.inner = bwrap::inner_launch_command_with(
-            RELEASE_FD,
-            ERROR_FD,
-            observe_on,
-            agent.is_some().then_some((
-                super::agent::LISTENER_FD,
-                super::agent::SOCKDIAG_FD,
-                super::agent::BRIDGE_REPORT_FD,
-            )),
+        bplan.inner = super::launch::LaunchArgs {
+            release_fd: RELEASE_FD,
+            error_fd: ERROR_FD,
+            narrow: observe_on,
+            read_open_fast_path: observe_on && !snapshot.observation.learning,
+            trace_data_fd: trace_data.map(|_| TRACE_DATA_FD),
+            mediate: agent
+                .is_some()
+                .then_some((super::agent::LISTENER_FD, super::agent::SOCKDIAG_FD)),
+            bridge: agent.is_some().then_some(super::agent::BRIDGE_REPORT_FD),
             // bubblewrap unblocks SIGCHLD in its child: the launcher puts
             // back the mask this supervisor inherited.
-            Some(super::launch::blocked_mask()),
-            trace_data.map(|_| TRACE_DATA_FD),
-            &target,
-        );
-        if observe_on && !snapshot.observation.learning {
-            bplan
-                .inner
-                .insert(2, OsString::from("--read-open-fast-path"));
+            sigmask: Some(super::launch::blocked_mask()),
+            argv: target.clone(),
         }
+        .command_line(OsStr::new(bwrap::JAIL_INSIDE_PATH));
         bplan.seccomp_fd = Some(SECCOMP_FD);
         bplan.json_status_fd = Some(STATUS_FD);
         bplan.args_fd = Some(ARGS_FD);
@@ -1239,7 +1227,8 @@ impl Boundary {
 
         refuse_unrecordable_mounts(
             &bplan,
-            scan.segments.len(),
+            0,
+            scan.segments.len() + bplan.placeholders.len(),
             skipped_protected_names(&scan).len(),
         )?;
         let rendered = bplan.render().map_err(|err| {
@@ -1498,7 +1487,7 @@ impl Boundary {
                 environment_names: Vec::new(),
                 removed_environment_names: Vec::new(),
             },
-            backend_version: String::new(),
+            backend_version: None,
             resolv_sanitization,
             observe_on,
             observer_plan: observe_on.then(super::observed::ObserverPlan::from_env),
@@ -1847,9 +1836,9 @@ impl Boundary {
 
         // Keep this fresh readback: a process can create a new platform after
         // a backend upgrade, while its minimum-version decision is cached.
-        self.backend_version = bwrap::bwrap_version(bwrap_path)
-            .map(|version| version.raw)
-            .unwrap_or_default();
+        self.backend_version = bwrap::bwrap_version(bwrap_path, deadline)
+            .ok()
+            .map(|version| version.raw);
 
         if super::storage::requested(&self.snapshot.limits) {
             self.storage = Some(
@@ -2460,8 +2449,7 @@ impl Boundary {
                 },
             }),
             backend: Some("bubblewrap".to_owned()),
-            backend_version: (!self.backend_version.is_empty())
-                .then(|| self.backend_version.clone()),
+            backend_version: self.backend_version.clone(),
         }
     }
 }
@@ -3095,20 +3083,23 @@ fn skipped_protected_names(scan: &jfs::ProtectedScan) -> Vec<String> {
 /// as the child's whole view (§13.2).
 const MOUNT_TABLE_ROWS_MAX: usize = 1024;
 
-/// Refuses, before anything is spawned, a plan whose mount table no receipt
-/// can record. Every protected segment the walk found (`segments`) is one
-/// read-only bind of the plan, so a workspace holding about a thousand
-/// `.git` directories passes the bound on its own: a configuration to
-/// narrow, not a host to repair. The count is the plan's lower bound
-/// ([`BwrapPlan::mount_rows_at_least`]) plus the `hidden` row of each
-/// protected name the walk would not follow; [`recordable_mounts`] still
-/// refuses what the host's own mounts add after the spawn.
+/// Refuses, before anything is spawned (and before the protected segments are
+/// pinned), a plan whose mount table no receipt can record. Every protected
+/// segment the walk found, and every placeholder, is one read-only bind, so a
+/// workspace holding about a thousand `.git` directories passes the bound on
+/// its own: a configuration to narrow, not a host to repair. The count is the
+/// plan's lower bound ([`BwrapPlan::mount_rows_at_least`]) plus the `pending`
+/// binds not yet in the plan, plus the `hidden` row of each protected name
+/// the walk would not follow; `protected` is how many segments and
+/// placeholders there are in all. [`recordable_mounts`] still refuses what
+/// the host's own mounts add after the spawn.
 fn refuse_unrecordable_mounts(
     plan: &BwrapPlan,
-    segments: usize,
+    pending: usize,
+    protected: usize,
     hidden: usize,
 ) -> Result<(), JailError> {
-    let rows = plan.mount_rows_at_least() + hidden;
+    let rows = plan.mount_rows_at_least() + pending + hidden;
     if rows <= MOUNT_TABLE_ROWS_MAX {
         return Ok(());
     }
@@ -3121,9 +3112,69 @@ fn refuse_unrecordable_mounts(
              segments, each bound read-only, so the boundary would hold at least {rows} mounts, \
              more than the {MOUNT_TABLE_ROWS_MAX} a receipt's mount table records; run over a \
              narrower workspace",
-            segments + plan.placeholders.len() + hidden
+            protected + hidden
         ),
     ))
+}
+
+/// Descriptors the boundary opens beside its mount sources before the spawn
+/// (pipes, the backend's pidfd, the status and argument channels).
+const MOUNT_DESCRIPTOR_HEADROOM: u64 = 64;
+
+/// Makes room for `needed` more descriptors before they are opened, raising
+/// the soft `RLIMIT_NOFILE` to the hard limit when the soft one is short
+/// (only this process and its children, within what the operator allows).
+/// A workspace whose mounts need more than even the hard limit allows is
+/// refused as a configuration naming the count and the limits, never left
+/// to fail half-way with `EMFILE`.
+///
+/// # Errors
+/// That refusal, or a limit that cannot be read.
+fn reserve_mount_descriptors(needed: usize, protected: usize) -> Result<(), JailError> {
+    let unreadable = |err: std::io::Error| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("the descriptor limit cannot be read: {err}"),
+        )
+    };
+    let needed = u64::try_from(needed)
+        .unwrap_or(u64::MAX)
+        .saturating_add(MOUNT_DESCRIPTOR_HEADROOM);
+    let open = || {
+        crate::proxy::open_descriptor_count()
+            .map(|open| u64::try_from(open).unwrap_or(u64::MAX))
+            .map_err(unreadable)
+    };
+    let (soft, hard) = crate::proxy::nofile_limits().map_err(unreadable)?;
+    if descriptor_shortfall(needed, open()?, soft, hard, protected).is_none() {
+        return Ok(());
+    }
+    let (soft, hard) = crate::proxy::raise_nofile_soft_to_hard().map_err(unreadable)?;
+    descriptor_shortfall(needed, open()?, soft, hard, protected).map_or(Ok(()), Err)
+}
+
+/// The refusal for `needed` more descriptors with `open` already open under
+/// the `soft` and `hard` limits, or `None` when they fit.
+fn descriptor_shortfall(
+    needed: u64,
+    open: u64,
+    soft: u64,
+    hard: u64,
+    protected: usize,
+) -> Option<JailError> {
+    (open.saturating_add(needed) > soft).then(|| {
+        error(
+            ErrorCode::InvalidConfig,
+            ErrorStage::Preparing,
+            Remediation::Configuration,
+            format!(
+                "binding the {protected} protected segments and the other mounts read-only takes \
+                 {needed} more descriptors with {open} already open, more than RLIMIT_NOFILE \
+                 allows (soft {soft}, hard {hard}); raise the limit or run over a narrower \
+                 workspace"
+            ),
+        )
+    })
 }
 
 /// The rows a receipt records, whole or not at all (§13.2). The plan's own
@@ -3243,6 +3294,74 @@ fn read_environment_names(pid: libc::pid_t) -> std::io::Result<Vec<String>> {
     names.sort();
     names.dedup();
     Ok(names)
+}
+
+/// Where a contained plan's paths are: what it binds that the snapshot does
+/// not name.
+pub(crate) struct PlanPaths<'a> {
+    /// The backend binary.
+    pub(crate) bwrap: &'a Path,
+    /// The workspace, on the host and inside alike.
+    pub(crate) workspace: &'a Path,
+    /// The scratch directory the child sees at `/tmp`.
+    pub(crate) scratch: &'a Path,
+    /// The jail binary bound at [`bwrap::JAIL_INSIDE_PATH`].
+    pub(crate) jail_exe: &'a Path,
+    /// The attempt's proxy directory, which `agent` binds.
+    pub(crate) proxy_dir: Option<&'a Path>,
+}
+
+/// The plan a contained snapshot starts from: [`BwrapPlan::tool`] with what
+/// the snapshot alone decides — the storage seal, the workspace's access,
+/// the environment and, for `agent`, the proxy directory by descriptor and
+/// the proxy variables. Preparation adds what needs the host and the
+/// attempt (grants, masks, staged state, pins); the freeze renders the
+/// built-in baselines through this same function.
+///
+/// # Errors
+/// An environment binding that does not resolve, or `agent` without a
+/// proxy directory.
+pub(crate) fn plan_for(
+    snapshot: &PolicySnapshot,
+    paths: &PlanPaths,
+) -> Result<BwrapPlan, JailError> {
+    let mut bplan = BwrapPlan::tool(paths.workspace, paths.scratch, paths.jail_exe);
+    bplan.bounded_storage = super::storage::requested(&snapshot.limits);
+    let names_workspace = |references: &[PathRef]| {
+        references.iter().any(|reference| {
+            host_path_of(reference, paths.workspace, paths.scratch)
+                .is_ok_and(|path| path == paths.workspace)
+        })
+    };
+    bplan.workspace_access = if names_workspace(&snapshot.filesystem.read_only) {
+        bwrap::WorkspaceAccess::ReadOnly
+    } else if names_workspace(&snapshot.filesystem.read_write) {
+        bwrap::WorkspaceAccess::Writable
+    } else {
+        bwrap::WorkspaceAccess::Hidden
+    };
+    bplan.bwrap = paths.bwrap.to_path_buf();
+    bplan.env = environment_for(snapshot, paths.workspace)?;
+    // §10 — the proxy socket in its registered directory, bound read-only
+    // by descriptor, and the proxy variables.
+    if snapshot.profile == ProfileName::Agent {
+        let Some(proxy_dir) = paths.proxy_dir else {
+            return Err(preparing(
+                ErrorCode::MissingCapability,
+                "the `agent` proxy could not be established: no proxy directory was prepared",
+            ));
+        };
+        bplan.proxy_dir = Some(bwrap::Staged {
+            host: proxy_dir.to_path_buf(),
+            fd: super::agent::PROXY_DIR_FD,
+        });
+        for (name, value) in super::bridge::proxy_environment() {
+            bplan
+                .env
+                .push((OsString::from(name), OsString::from(value)));
+        }
+    }
+    Ok(bplan)
 }
 
 /// The environment bindings of the snapshot, resolved to the paths the child
@@ -3682,7 +3801,7 @@ fn prepare_mounts(
         .chain(plan.extra_dev_binds.iter())
         .cloned()
         .collect();
-    if plan.workspace_access == Some(true) {
+    if plan.workspace_access == bwrap::WorkspaceAccess::Writable {
         roots.push((plan.workspace.clone(), plan.workspace.clone()));
     }
     roots.push((
@@ -3700,8 +3819,10 @@ fn prepare_mounts(
         entries_seen: 0,
         max_depth_seen: 0,
     };
-    // Every refusal below drops the set, which removes what it created.
-    let mut placeholders = PlaceholderSet::default();
+    // Every writable root is scanned before anything in it is pinned, so the
+    // mounts the scans add are counted against the receipt's bound, and the
+    // descriptors their pins take are reserved, before one is opened.
+    let mut scans = Vec::new();
     for (root_index, (source, destination)) in roots.iter().enumerate() {
         let pin = jfs::PinnedPath::open(source).map_err(failure)?;
         if !pin.is_dir().map_err(failure)? {
@@ -3712,13 +3833,14 @@ fn prepare_mounts(
             pins.insert(source.clone(), pin);
             continue;
         }
-        let mut scan = jfs::scan_pinned(
+        let seen_before = aggregate.entries_seen;
+        let scan = jfs::scan_pinned(
             &pin,
             names,
             jfs::ScanLimits {
                 max_entries: jfs::ScanLimits::DEFAULT
                     .max_entries
-                    .saturating_sub(aggregate.entries_seen),
+                    .saturating_sub(seen_before),
                 ..jfs::ScanLimits::DEFAULT
             },
         )
@@ -3730,6 +3852,30 @@ fn prepare_mounts(
                 "existing_and_root coverage cannot cover protected symlinks",
             ));
         }
+        aggregate.entries_seen += scan.entries_seen;
+        scans.push((root_index, source, destination, seen_before, scan));
+    }
+    let segments: usize = scans.iter().map(|(.., scan)| scan.segments.len()).sum();
+    let holders: usize = scans
+        .iter()
+        .map(|(.., scan)| scan.absent_root_literals().len())
+        .sum();
+    let hidden: usize = scans
+        .iter()
+        .map(|(.., scan)| scan.skipped_symlinks.len())
+        .sum();
+    refuse_unrecordable_mounts(
+        plan,
+        segments + holders,
+        segments + holders + plan.placeholders.len(),
+        hidden,
+    )?;
+    // A pin per segment; a placeholder holds its own handle and its holder.
+    reserve_mount_descriptors(segments + 2 * holders, segments + holders)?;
+
+    // Every refusal below drops the set, which removes what it created.
+    let mut placeholders = PlaceholderSet::default();
+    for (root_index, source, destination, seen_before, mut scan) in scans {
         for segment in &scan.segments {
             let pinned = jfs::PinnedPath::open(&segment.path).map_err(failure)?;
             if pinned.identity() != (segment.dev, segment.ino) {
@@ -3779,7 +3925,7 @@ fn prepare_mounts(
                     // first scan at the cap would trip.
                     max_entries: jfs::ScanLimits::DEFAULT
                         .max_entries
-                        .saturating_sub(aggregate.entries_seen)
+                        .saturating_sub(seen_before)
                         .saturating_add(scan.absent_root_literals().len()),
                     ..jfs::ScanLimits::DEFAULT
                 },
@@ -3816,7 +3962,6 @@ fn prepare_mounts(
             scan.directories = checked.directories;
         }
         aggregate.directories.extend(scan.directories);
-        aggregate.entries_seen += scan.entries_seen;
         aggregate.max_depth_seen = aggregate.max_depth_seen.max(scan.max_depth_seen);
         aggregate.segments.extend(scan.segments);
         aggregate.skipped_symlinks.extend(scan.skipped_symlinks);
@@ -3824,22 +3969,46 @@ fn prepare_mounts(
     // Bind ancestors before descendants, and never expose a second writable
     // alias of a protected source after applying its protection.
     let mut fds = Vec::new();
-    for row in plan.mount_table() {
-        if row.kind == "file-mask" {
-            // EOF supplies an empty file to bubblewrap; no host content
-            // or writable source descriptor is exposed to the child.
-            let (reader, writer) = exec::pipe().map_err(failure)?;
-            drop(writer);
-            let target = PINNED_FD_BASE + fds.len() as RawFd;
-            fds.push((reader, target));
-            plan.mount_fds.push(Some(target));
-            continue;
-        }
-        if !matches!(row.kind, "bind" | "ro-bind" | "ro-bind-fd" | "placeholder") {
-            plan.mount_fds.push(None);
-            continue;
-        }
-        let source = PathBuf::from(row.source.expect("bind source"));
+    let mut rows = plan.mount_table();
+    // One duplicate per row bubblewrap binds from a descriptor, and a pin
+    // per source not pinned yet.
+    let prepared = rows
+        .iter()
+        .filter(|row| row.kind.preparation() != bwrap::MountPreparation::Nothing)
+        .count();
+    let unpinned: std::collections::BTreeSet<&OsString> = rows
+        .iter()
+        .filter(|row| row.kind.preparation() == bwrap::MountPreparation::PinSource)
+        .filter_map(|row| row.source.as_ref())
+        .filter(|source| !pins.contains_key(Path::new(source)))
+        .collect();
+    reserve_mount_descriptors(
+        prepared + unpinned.len(),
+        aggregate.segments.len() + plan.placeholders.len(),
+    )?;
+    for row in &mut rows {
+        let source = match row.kind.preparation() {
+            bwrap::MountPreparation::Nothing => continue,
+            bwrap::MountPreparation::EmptyData => {
+                // EOF supplies an empty file to bubblewrap; no host content
+                // or writable source descriptor is exposed to the child.
+                let (reader, writer) = exec::pipe().map_err(failure)?;
+                drop(writer);
+                let target = PINNED_FD_BASE + fds.len() as RawFd;
+                fds.push((reader, target));
+                row.fd = Some(target);
+                continue;
+            }
+            bwrap::MountPreparation::PinSource => match &row.source {
+                Some(source) => PathBuf::from(source),
+                None => {
+                    return Err(preparing(
+                        ErrorCode::InternalError,
+                        format!("a {} mount has no source to pin", row.kind),
+                    ));
+                }
+            },
+        };
         if !pins.contains_key(&source) {
             // Distribution-owned runtime aliases may be resolved here;
             // workspace/operator sources must never follow symlinks.
@@ -3861,8 +4030,10 @@ fn prepare_mounts(
         }
         let target = PINNED_FD_BASE + fds.len() as RawFd;
         fds.push((pins[&source].try_clone_fd().map_err(failure)?, target));
-        plan.mount_fds.push(Some(target));
+        row.fd = Some(target);
     }
+    plan.set_mount_descriptors(rows)
+        .map_err(|err| preparing(ErrorCode::InternalError, err.to_string()))?;
     Ok((aggregate, pins.into_values().collect(), fds, placeholders))
 }
 
@@ -5710,16 +5881,16 @@ mod tests {
         ] {
             assert!(
                 rows.iter()
-                    .any(|row| row.destination == dest && row.kind == "ro-bind")
+                    .any(|row| row.destination == dest && row.kind == bwrap::MountKind::RoBind)
             );
         }
         assert_eq!(
             fds.len(),
             rows.iter().filter(|row| row.source.is_some()).count()
         );
-        for (row, fd) in rows.iter().zip(&plan.mount_fds) {
-            if matches!(row.kind, "bind" | "ro-bind" | "placeholder") {
-                assert!(fd.is_some());
+        for row in plan.mount_rows().unwrap() {
+            if row.kind.preparation() == bwrap::MountPreparation::PinSource {
+                assert!(row.fd.is_some(), "{row:?}");
             }
         }
         drop(placeholders);
@@ -5749,7 +5920,8 @@ mod tests {
         let row = rows
             .iter()
             .find(|row| {
-                row.kind == "placeholder" && row.destination == root.join("workspace/.ouroboros")
+                row.kind == bwrap::MountKind::Placeholder
+                    && row.destination == root.join("workspace/.ouroboros")
             })
             .expect("a placeholder mount for the absent workspace literal");
         assert!(
@@ -5911,12 +6083,12 @@ mod tests {
         let at_bound = MOUNT_TABLE_ROWS_MAX - fixed;
         protect(&mut plan, at_bound);
         assert_eq!(plan.mount_rows_at_least(), MOUNT_TABLE_ROWS_MAX);
-        super::refuse_unrecordable_mounts(&plan, at_bound, 0).unwrap();
-        let error = super::refuse_unrecordable_mounts(&plan, at_bound, 1).unwrap_err();
+        super::refuse_unrecordable_mounts(&plan, 0, at_bound, 0).unwrap();
+        let error = super::refuse_unrecordable_mounts(&plan, 0, at_bound, 1).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfig);
 
         protect(&mut plan, 1100);
-        let error = super::refuse_unrecordable_mounts(&plan, 1100, 0).unwrap_err();
+        let error = super::refuse_unrecordable_mounts(&plan, 0, 1100, 0).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfig);
         assert_eq!(error.stage, ErrorStage::Preparing);
         assert_eq!(error.remediation, Remediation::Configuration);
@@ -5929,6 +6101,27 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    /// Pinning a workspace's protected segments either fits the descriptor
+    /// limit or is refused as a configuration naming the count and the
+    /// limits, never left to fail with `EMFILE` as a host problem.
+    #[test]
+    fn a_descriptor_budget_that_does_not_fit_is_a_configuration() {
+        assert!(super::descriptor_shortfall(900, 100, 1024, 1024, 890).is_none());
+        let error = super::descriptor_shortfall(1900, 100, 1024, 1024, 990).unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.stage, ErrorStage::Preparing);
+        assert_eq!(error.remediation, Remediation::Configuration);
+        assert!(
+            error.message.contains("990 protected segments")
+                && error.message.contains("1900 more descriptors")
+                && error.message.contains("soft 1024, hard 1024"),
+            "{}",
+            error.message
+        );
+        // Within this process's own limit a modest budget is reserved.
+        super::reserve_mount_descriptors(16, 1).unwrap();
     }
 
     #[test]

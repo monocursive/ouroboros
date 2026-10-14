@@ -687,7 +687,8 @@ fn backend_plan_section(root: &Path) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         let _ = root;
-        let plans = ouro_jail::platform::linux::freeze::backend_plans()?;
+        let plans = ouro_jail::platform::linux::freeze::backend_plans()
+            .map_err(|error| error.to_string())?;
         for (profile, argv) in plans {
             let _ = writeln!(out, "\n[[backend_plan]]");
             let _ = writeln!(out, "profile = {}", quote(profile));

@@ -1,7 +1,7 @@
 //! The inside launcher: `ouro-jail __launch`.
 //!
-//! jail-v1 §8.3 and CONTRACT §3.6. This is the process bubblewrap starts
-//! inside the namespaces. It is the jail's own binary, bound read-only at
+//! jail-v1 §8.3. This is the process bubblewrap starts inside the
+//! namespaces. It is the jail's own binary, bound read-only at
 //! `/run/ouro/jail`, re-executed with a hidden subcommand — a re-exec rather
 //! than work in `pre_exec`, so that nothing but the target's own code runs
 //! after the boundary is closed.
@@ -35,6 +35,29 @@ use super::sys::{PathError, cstring_from_os};
 /// The hidden subcommand token.
 pub const SUBCOMMAND: &str = "__launch";
 
+/// The launcher's options, by the one spelling [`parse`] reads and
+/// [`LaunchArgs::to_argv`] writes.
+pub mod flag {
+    /// `--release-fd N`.
+    pub const RELEASE_FD: &str = "--release-fd";
+    /// `--error-fd N`.
+    pub const ERROR_FD: &str = "--error-fd";
+    /// `--narrow`.
+    pub const NARROW: &str = "--narrow";
+    /// `--read-open-fast-path`.
+    pub const READ_OPEN_FAST_PATH: &str = "--read-open-fast-path";
+    /// `--trace-data-fd N`.
+    pub const TRACE_DATA_FD: &str = "--trace-data-fd";
+    /// `--mediate LISTENER,SOCKDIAG`.
+    pub const MEDIATE: &str = "--mediate";
+    /// `--bridge REPORT`.
+    pub const BRIDGE: &str = "--bridge";
+    /// `--sigmask HEX`.
+    pub const SIGMASK: &str = "--sigmask";
+    /// The separator before the target's argv.
+    pub const SEPARATOR: &str = "--";
+}
+
 /// Release pipe closed without a byte: the supervisor never released, so the
 /// target was never executed.
 pub const EXIT_NO_RELEASE: i32 = 124;
@@ -65,20 +88,20 @@ pub struct LaunchArgs {
     pub narrow: bool,
     /// Skip register-sourced read-only opens when policy learning is off.
     pub read_open_fast_path: bool,
-    /// Audit 2026-09-25-2, S14: descriptor holding this attempt's narrowing
-    /// `SECCOMP_RET_DATA` (two bytes, written by the supervisor before the
-    /// spawn). The value travels by pipe because the launcher's whole argv —
-    /// and everything the filter will carry — is readable in `/proc/1/cmdline`
-    /// from inside the sandbox.
+    /// Descriptor holding this attempt's narrowing `SECCOMP_RET_DATA` (two
+    /// bytes, written by the supervisor before the spawn). The value travels
+    /// by pipe because the launcher's whole argv — and everything the filter
+    /// will carry — is readable in `/proc/1/cmdline` from inside the sandbox;
+    /// only the descriptor's number is an argument.
     pub trace_data_fd: Option<RawFd>,
     // Mediation and bridge (jail-v1 §10)
     /// Install the unix-peer mediation filter with its own listener and open
     /// a `NETLINK_SOCK_DIAG` socket, placing them at these two descriptor
     /// numbers for the supervisor to take before release.
     pub mediate: Option<(RawFd, RawFd)>,
-    /// Start the loopback bridge before blocking, and place the read end of
-    /// its report socket (one byte per client it turned away at capacity) at
-    /// this descriptor number for the supervisor to take before release.
+    /// Start the loopback bridge before blocking, and place the supervisor's
+    /// end of its report socket (`SOCK_SEQPACKET`, one datagram per report)
+    /// at this descriptor number for the supervisor to take before release.
     pub bridge: Option<RawFd>,
     /// The signal mask the supervisor inherited (bit `n - 1` for signal
     /// `n`), which the target gets instead of what bubblewrap left: it
@@ -88,6 +111,53 @@ pub struct LaunchArgs {
     pub sigmask: Option<u64>,
     /// The target's argv; element 0 is also the program to execute.
     pub argv: Vec<OsString>,
+}
+
+impl LaunchArgs {
+    /// The launcher's arguments, the exact inverse of [`parse`]: options in
+    /// the order `parse` documents, then `--` and the target's argv.
+    #[must_use]
+    pub fn to_argv(&self) -> Vec<OsString> {
+        let mut out = vec![
+            OsString::from(flag::RELEASE_FD),
+            OsString::from(self.release_fd.to_string()),
+            OsString::from(flag::ERROR_FD),
+            OsString::from(self.error_fd.to_string()),
+        ];
+        if self.narrow {
+            out.push(OsString::from(flag::NARROW));
+        }
+        if self.read_open_fast_path {
+            out.push(OsString::from(flag::READ_OPEN_FAST_PATH));
+        }
+        if let Some(fd) = self.trace_data_fd {
+            out.extend([OsString::from(flag::TRACE_DATA_FD), fd.to_string().into()]);
+        }
+        if let Some((listener, sockdiag)) = self.mediate {
+            out.extend([
+                OsString::from(flag::MEDIATE),
+                format!("{listener},{sockdiag}").into(),
+            ]);
+        }
+        if let Some(report) = self.bridge {
+            out.extend([OsString::from(flag::BRIDGE), report.to_string().into()]);
+        }
+        if let Some(mask) = self.sigmask {
+            out.extend([OsString::from(flag::SIGMASK), format!("{mask:x}").into()]);
+        }
+        out.push(OsString::from(flag::SEPARATOR));
+        out.extend(self.argv.iter().cloned());
+        out
+    }
+
+    /// The whole command line that runs the launcher from `launcher`: the
+    /// binary, [`SUBCOMMAND`], then [`LaunchArgs::to_argv`].
+    #[must_use]
+    pub fn command_line(&self, launcher: &OsStr) -> Vec<OsString> {
+        let mut out = vec![launcher.to_owned(), OsString::from(SUBCOMMAND)];
+        out.extend(self.to_argv());
+        out
+    }
 }
 
 /// Why `__launch` cannot proceed.
@@ -131,8 +201,10 @@ impl fmt::Display for LaunchUsage {
 
 impl std::error::Error for LaunchUsage {}
 
-/// Parse `--release-fd N --error-fd M [--narrow] [--trace-data-fd T]
-/// [--mediate L,S] [--bridge R] [--sigmask HEX] -- PROGRAM ARG...`.
+/// Parse `--release-fd N --error-fd M [--narrow] [--read-open-fast-path]
+/// [--trace-data-fd T] [--mediate L,S] [--bridge R] [--sigmask HEX] --
+/// PROGRAM ARG...`, options in any order; [`LaunchArgs::to_argv`] writes
+/// them in this one.
 ///
 /// # Errors
 ///
@@ -151,55 +223,56 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
 
     while index < args.len() {
         let arg = &args[index];
-        if arg == "--" {
+        if arg == flag::SEPARATOR {
             argv = Some(args[index + 1..].to_vec());
             break;
         }
         let name = arg.to_string_lossy().into_owned();
         match name.as_str() {
-            "--release-fd" => {
-                release_fd = Some(fd_value(args.get(index + 1), "--release-fd")?);
+            flag::RELEASE_FD => {
+                release_fd = Some(fd_value(args.get(index + 1), flag::RELEASE_FD)?);
                 index += 2;
             }
-            "--error-fd" => {
-                error_fd = Some(fd_value(args.get(index + 1), "--error-fd")?);
+            flag::ERROR_FD => {
+                error_fd = Some(fd_value(args.get(index + 1), flag::ERROR_FD)?);
                 index += 2;
             }
-            "--narrow" => {
+            flag::NARROW => {
                 narrow = true;
                 index += 1;
             }
-            "--read-open-fast-path" => {
+            flag::READ_OPEN_FAST_PATH => {
                 read_open_fast_path = true;
                 index += 1;
             }
-            "--trace-data-fd" => {
-                let fd = fd_value(args.get(index + 1), "--trace-data-fd")?;
+            flag::TRACE_DATA_FD => {
+                let fd = fd_value(args.get(index + 1), flag::TRACE_DATA_FD)?;
                 if fd < 3 {
-                    return Err(LaunchUsage::BadFd("--trace-data-fd"));
+                    return Err(LaunchUsage::BadFd(flag::TRACE_DATA_FD));
                 }
                 trace_data_fd = Some(fd);
                 index += 2;
             }
-            "--mediate" => {
-                mediate = Some(fd_pair(args.get(index + 1), "--mediate")?);
+            flag::MEDIATE => {
+                mediate = Some(fd_pair(args.get(index + 1), flag::MEDIATE)?);
                 index += 2;
             }
-            "--bridge" => {
-                let fd = fd_value(args.get(index + 1), "--bridge")?;
+            flag::BRIDGE => {
+                let fd = fd_value(args.get(index + 1), flag::BRIDGE)?;
                 if fd < 3 {
-                    return Err(LaunchUsage::BadFd("--bridge"));
+                    return Err(LaunchUsage::BadFd(flag::BRIDGE));
                 }
                 bridge = Some(fd);
                 index += 2;
             }
-            "--sigmask" => {
+            flag::SIGMASK => {
                 let raw = args
                     .get(index + 1)
-                    .ok_or(LaunchUsage::MissingValue("--sigmask"))?;
-                let text = raw.to_str().ok_or(LaunchUsage::BadMask("--sigmask"))?;
+                    .ok_or(LaunchUsage::MissingValue(flag::SIGMASK))?;
+                let text = raw.to_str().ok_or(LaunchUsage::BadMask(flag::SIGMASK))?;
                 sigmask = Some(
-                    u64::from_str_radix(text, 16).map_err(|_| LaunchUsage::BadMask("--sigmask"))?,
+                    u64::from_str_radix(text, 16)
+                        .map_err(|_| LaunchUsage::BadMask(flag::SIGMASK))?,
                 );
                 index += 2;
             }
@@ -211,7 +284,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
     if let (Some(report), Some((listener, sockdiag))) = (bridge, mediate)
         && (report == listener || report == sockdiag)
     {
-        return Err(LaunchUsage::BadFd("--bridge"));
+        return Err(LaunchUsage::BadFd(flag::BRIDGE));
     }
     let argv = argv.ok_or(LaunchUsage::MissingSeparator)?;
     if argv.is_empty() {
@@ -223,8 +296,8 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
         cstring_from_os(part).map_err(LaunchUsage::Path)?;
     }
     Ok(LaunchArgs {
-        release_fd: release_fd.ok_or(LaunchUsage::Missing("--release-fd"))?,
-        error_fd: error_fd.ok_or(LaunchUsage::Missing("--error-fd"))?,
+        release_fd: release_fd.ok_or(LaunchUsage::Missing(flag::RELEASE_FD))?,
+        error_fd: error_fd.ok_or(LaunchUsage::Missing(flag::ERROR_FD))?,
         narrow,
         read_open_fast_path,
         trace_data_fd,
@@ -284,8 +357,8 @@ pub fn launch_main(args: &[OsString]) -> ! {
     };
 
     for (fd, option) in [
-        (parsed.release_fd, "--release-fd"),
-        (parsed.error_fd, "--error-fd"),
+        (parsed.release_fd, flag::RELEASE_FD),
+        (parsed.error_fd, flag::ERROR_FD),
     ] {
         // SAFETY: F_GETFD takes a descriptor number and dereferences nothing.
         if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
@@ -901,6 +974,48 @@ mod tests {
 
     fn osv(parts: &[&str]) -> Vec<OsString> {
         parts.iter().map(OsString::from).collect()
+    }
+
+    /// `to_argv` is `parse`'s exact inverse, for every option it can write.
+    #[test]
+    fn the_written_arguments_parse_back_to_themselves() {
+        let base = LaunchArgs {
+            release_fd: 12,
+            error_fd: 13,
+            narrow: false,
+            read_open_fast_path: false,
+            trace_data_fd: None,
+            mediate: None,
+            bridge: None,
+            sigmask: None,
+            argv: osv(&["/bin/sh", "-c", "echo --narrow"]),
+        };
+        let full = LaunchArgs {
+            narrow: true,
+            read_open_fast_path: true,
+            trace_data_fd: Some(21),
+            mediate: Some((18, 19)),
+            bridge: Some(20),
+            sigmask: Some(0x0201),
+            ..base.clone()
+        };
+        for args in [
+            base.clone(),
+            full.clone(),
+            LaunchArgs {
+                narrow: true,
+                ..base.clone()
+            },
+            LaunchArgs {
+                sigmask: Some(0),
+                ..base.clone()
+            },
+        ] {
+            assert_eq!(parse(&args.to_argv()).as_ref(), Ok(&args), "{args:?}");
+        }
+        let line = full.command_line(OsStr::new("/run/ouro/jail"));
+        assert_eq!(line[..2], osv(&["/run/ouro/jail", SUBCOMMAND]));
+        assert_eq!(parse(&line[2..]), Ok(full));
     }
 
     #[test]

@@ -80,6 +80,48 @@ pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Exit status when the bridge cannot bind its address.
 pub const EXIT_BIND_FAILED: i32 = 126;
+/// The report pair's protocol: one byte per `SOCK_SEQPACKET` datagram, so
+/// one datagram is one message whatever is queued behind it.
+pub mod report {
+    /// Supervisor to bridge: sealed; relay without an origin preamble.
+    pub const SEAL: u8 = b's';
+    /// Supervisor to bridge: sealed for a vault; prefix each relayed
+    /// stream with the client's origin preamble.
+    pub const SEAL_VAULT: u8 = b'v';
+    /// Bridge to supervisor: one client turned away at capacity.
+    pub const REJECTED: u8 = b'o';
+}
+
+/// Seals the bridge over the supervisor's end of the report pair: one
+/// datagram, [`report::SEAL_VAULT`] when the attempt has a vault, else
+/// [`report::SEAL`].
+///
+/// # Errors
+/// The `send` error, or a datagram the socket did not take whole.
+pub fn send_seal(report: std::os::fd::BorrowedFd<'_>, vault: bool) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let byte = [if vault {
+        report::SEAL_VAULT
+    } else {
+        report::SEAL
+    }];
+    // SAFETY: `report` is a live socket descriptor; `byte` outlives the call
+    // and its length is the count passed.
+    let sent = unsafe {
+        libc::send(
+            report.as_raw_fd(),
+            byte.as_ptr().cast(),
+            byte.len(),
+            libc::MSG_NOSIGNAL,
+        )
+    };
+    match sent {
+        1 => Ok(()),
+        -1 => Err(io::Error::last_os_error()),
+        _ => Err(io::Error::other("the seal was not sent whole")),
+    }
+}
+
 /// Exit status when the supervisor's seal never arrived: the bridge makes
 /// itself un-dumpable only on the supervisor's word (see [`await_seal`]),
 /// and an unsealed bridge never serves.
@@ -183,7 +225,8 @@ fn await_seal() -> Option<bool> {
     // SAFETY: the descriptor is a socket this process owns; `byte` is
     // writable and its length matches the count.
     let received = unsafe { libc::recv(libc::STDERR_FILENO, byte.as_mut_ptr().cast(), 1, 0) };
-    (received == 1 && matches!(byte[0], b's' | b'v')).then_some(byte[0] == b'v')
+    (received == 1 && matches!(byte[0], report::SEAL | report::SEAL_VAULT))
+        .then_some(byte[0] == report::SEAL_VAULT)
 }
 
 /// One byte on stderr, the report `SOCK_SEQPACKET` socket the supervisor
@@ -191,7 +234,7 @@ fn await_seal() -> Option<bool> {
 /// from it. A full socket drops the byte rather than stall a relay.
 fn report_rejection() {
     use std::io::Write as _;
-    let _ = std::io::stderr().write(b"o");
+    let _ = std::io::stderr().write(&[report::REJECTED]);
 }
 
 /// One direction of a relay.
