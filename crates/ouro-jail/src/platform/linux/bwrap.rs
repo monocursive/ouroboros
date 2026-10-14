@@ -1680,30 +1680,21 @@ mod tests {
         let mut plan = sample_plan();
         plan.extra_dev_binds
             .push((PathBuf::from("/dev/nvidia0"), PathBuf::from("/dev/nvidia0")));
-        let rendered = plan.render().unwrap();
-        let text: Vec<&str> = rendered
-            .argv
-            .iter()
-            .map(|arg| arg.to_str().expect("UTF-8"))
-            .collect();
+        let text = argv_strings(&plan);
         let at = text
             .iter()
-            .position(|arg| *arg == "--dev-bind")
+            .position(|arg| arg == "--dev-bind")
             .expect("a --dev-bind row");
         assert_eq!(
-            (&text[at + 1], &text[at + 2]),
-            (&"/dev/nvidia0", &"/dev/nvidia0")
+            (text[at + 1].as_str(), text[at + 2].as_str()),
+            ("/dev/nvidia0", "/dev/nvidia0")
         );
     }
 
     #[test]
     fn the_argv_has_the_profile_the_north_star_describes() {
-        let rendered = sample_plan().render().unwrap();
-        let text: Vec<String> = rendered
-            .argv
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let plan = sample_plan();
+        let text = argv_strings(&plan);
         for flag in [
             "--unshare-user",
             "--unshare-pid",
@@ -1734,24 +1725,16 @@ mod tests {
         assert!(joined.ends_with(
             "-- /run/ouro/jail __launch --release-fd 12 --error-fd 13 --narrow -- /bin/true"
         ));
-        assert!(rendered.args_payload.is_none());
+        assert!(plan.render().unwrap().args_payload.is_none());
     }
 
     #[test]
     fn the_scratch_becomes_tmpdir() {
-        let plan = sample_plan();
-        let rendered = plan.render().unwrap();
-        let text = rendered
-            .argv
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(text.contains("--setenv TMPDIR /tmp"));
+        assert!(argv_text(&sample_plan()).contains("--setenv TMPDIR /tmp "));
     }
 
-    /// Audit 2026-09-25-2, S3: a mask renders last over every other row, so
-    /// one over the boundary's own plumbing must refuse the plan outright.
+    /// A mask renders last over every other row, so one over the boundary's
+    /// own plumbing must refuse the plan outright.
     #[test]
     fn a_mask_over_the_boundary_plumbing_refuses_the_plan() {
         for path in [
@@ -1887,15 +1870,20 @@ mod tests {
         }
     }
 
-    fn argv_text(plan: &BwrapPlan) -> String {
-        let mut text = plan
-            .render()
+    /// The rendered argv, each argument as text.
+    fn argv_strings(plan: &BwrapPlan) -> Vec<String> {
+        plan.render()
             .unwrap()
             .argv
             .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" ");
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The rendered argv joined by spaces, with a trailing space so a
+    /// needle can end at an argument's end.
+    fn argv_text(plan: &BwrapPlan) -> String {
+        let mut text = argv_strings(plan).join(" ");
         text.push(' ');
         text
     }
@@ -2083,13 +2071,7 @@ mod tests {
             fd: Some(30),
             destination: PathBuf::from("/run/ouro/state/conf/c.toml"),
         }];
-        let argv: Vec<String> = plan
-            .render()
-            .unwrap()
-            .argv
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
+        let argv = argv_strings(&plan);
         let at = |needle: &[&str]| {
             argv.windows(needle.len())
                 .position(|window| window == needle)
