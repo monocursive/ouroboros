@@ -540,21 +540,32 @@ pub(super) fn staged_mounts(
 }
 
 /// A read-only bind of a file this process wrote and pinned itself, such as
-/// the vault's public CA. The bind and its pin are one value, and the only
-/// way to make one is [`PinnedBind::write`], so the bind can only ever take
-/// the file written: [`prepare_mounts`] adds the bind from it and never
-/// pins its source again by path.
+/// the vault's public CA or the sanitized resolver. The bind and its pin are
+/// one value, and the only way to make one is [`PinnedBind::write`], so the
+/// bind can only ever take the file written: [`prepare_mounts`] adds the
+/// bind from it and never pins its source again by path.
 pub(super) struct PinnedBind {
     /// The file, pinned through the directory it was written in.
     pin: jfs::PinnedPath,
-    /// Where it appears inside the sandbox.
-    destination: PathBuf,
+    /// How it enters the mount table.
+    placement: Placement,
+}
+
+/// Where a [`PinnedBind`] enters the mount table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Placement {
+    /// A read-only bind of its own at this path inside the sandbox.
+    Bind(PathBuf),
+    /// The source of the plan's `/etc/resolv.conf` row, in place of the
+    /// host's file; the row itself is the runtime one, so the mount table
+    /// is the same shape with or without a sanitized copy.
+    Resolver,
 }
 
 impl PinnedBind {
     /// Writes `bytes` as the new file `name` in `dir`, whose host path is
-    /// `dir_path`, and pins the file written, to be bound read-only at
-    /// `destination`.
+    /// `dir_path`, and pins the file written, to be bound read-only as
+    /// `placement` says.
     ///
     /// The caller's directory is supervisor state no sandbox exists to
     /// reach while this runs, so only a same-UID host process could replace
@@ -572,9 +583,9 @@ impl PinnedBind {
         dir_path: &Path,
         name: &str,
         bytes: &[u8],
-        destination: PathBuf,
+        placement: Placement,
     ) -> std::io::Result<PinnedBind> {
-        Self::write_then(dir, dir_path, name, bytes, destination, || {})
+        Self::write_then(dir, dir_path, name, bytes, placement, || {})
     }
 
     /// [`PinnedBind::write`], running `between` after the write and before
@@ -585,7 +596,7 @@ impl PinnedBind {
         dir_path: &Path,
         name: &str,
         bytes: &[u8],
-        destination: PathBuf,
+        placement: Placement,
         between: impl FnOnce(),
     ) -> std::io::Result<PinnedBind> {
         use std::os::fd::AsFd as _;
@@ -602,7 +613,7 @@ impl PinnedBind {
         }
         Ok(PinnedBind {
             pin: jfs::PinnedPath::adopt(handle, &dir_path.join(name))?,
-            destination,
+            placement,
         })
     }
 
@@ -613,7 +624,10 @@ impl PinnedBind {
 
     /// Where the file appears inside the sandbox.
     pub(super) fn destination(&self) -> &Path {
-        &self.destination
+        match &self.placement {
+            Placement::Bind(destination) => destination,
+            Placement::Resolver => Path::new(RESOLV_CONF),
+        }
     }
 }
 
@@ -783,15 +797,21 @@ pub(super) fn pseudo_fs_points(rows: &[mountinfo::Row]) -> Vec<PathBuf> {
     out
 }
 
-/// Security 2026-09-25 (audit F5): write the sanitized `/etc/resolv.conf`
-/// the child will be bound, and return its path.
+/// The host resolver file, and where the sandbox sees its sanitized copy.
+const RESOLV_CONF: &str = "/etc/resolv.conf";
+
+/// Writes the sanitized `/etc/resolv.conf` the child will be bound in the
+/// attempt directory, and returns its bind, pinned as written, with what
+/// the sanitizer did.
 ///
 /// The host file's `search`/`domain` lines name the operator's networks;
 /// they are host facts no grant covers, and nothing in the child's network
 /// namespace can use the resolver anyway, so the copy keeps the nameservers
 /// only, with numeric addresses, and drops all other directives. The file
 /// lives in the attempt's private state, is created fresh with mode 0600,
-/// and is removed with the attempt by the existing state cleanup.
+/// and is removed with the attempt by the existing state cleanup. It is
+/// pinned through the attempt directory as it is written, so the bind takes
+/// that file even if its name is replaced before the mounts are prepared.
 ///
 /// # Errors
 ///
@@ -800,34 +820,31 @@ pub(super) fn pseudo_fs_points(rows: &[mountinfo::Row]) -> Vec<PathBuf> {
 /// produces an empty resolver file, never the unsanitized host file.
 pub(super) fn stage_sanitized_resolv_conf(
     attempt_dir: &Path,
-) -> Result<(PathBuf, &'static str), JailError> {
-    const SOURCE: &str = "/etc/resolv.conf";
+) -> Result<(PinnedBind, &'static str), JailError> {
     use std::io::Read as _;
     let mut bytes = Vec::new();
-    let host = std::fs::File::open(SOURCE).and_then(|f| f.take(65537).read_to_end(&mut bytes));
-    let (sanitized, status) = sanitize_resolv_conf(host.is_ok().then_some(bytes.as_slice()));
-    let dest = attempt_dir.join("resolv.conf");
-    let write = || -> std::io::Result<()> {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&dest)?;
-        file.write_all(sanitized.as_bytes())?;
-        if !sanitized.ends_with('\n') {
-            file.write_all(b"\n")?;
-        }
-        Ok(())
-    };
-    write().map_err(|error| {
-        preparing(
-            ErrorCode::StateWriteFailed,
-            format!("the sanitized resolver view could not be staged: {error}"),
-        )
-    })?;
-    Ok((dest, status))
+    let host = std::fs::File::open(RESOLV_CONF).and_then(|f| f.take(65537).read_to_end(&mut bytes));
+    let (mut sanitized, status) = sanitize_resolv_conf(host.is_ok().then_some(bytes.as_slice()));
+    if !sanitized.ends_with('\n') {
+        sanitized.push('\n');
+    }
+    let bind = crate::state::anchored::Dir::open_trusted(attempt_dir)
+        .and_then(|dir| {
+            PinnedBind::write(
+                &dir,
+                attempt_dir,
+                "resolv.conf",
+                sanitized.as_bytes(),
+                Placement::Resolver,
+            )
+        })
+        .map_err(|error| {
+            preparing(
+                ErrorCode::StateWriteFailed,
+                format!("the sanitized resolver view could not be staged: {error}"),
+            )
+        })?;
+    Ok((bind, status))
 }
 
 pub(super) fn sanitize_resolv_conf(bytes: Option<&[u8]>) -> (String, &'static str) {
@@ -856,7 +873,8 @@ pub(super) fn sanitize_resolv_conf(bytes: Option<&[u8]>) -> (String, &'static st
 /// Pin every source once, scan the pinned writable roots, then give each bind
 /// its own descriptor. Bubblewrap validates the mounted inode against that fd.
 /// `pinned` are binds of objects this process made and pinned already: they
-/// are added here, bound as pinned, never pinned again by path.
+/// are added here (the resolver as the source of the `/etc/resolv.conf`
+/// row), bound as pinned, never pinned again by path.
 pub(super) fn prepare_mounts(
     plan: &mut BwrapPlan,
     pinned: Vec<PinnedBind>,
@@ -874,7 +892,10 @@ pub(super) fn prepare_mounts(
     let mut pins: BTreeMap<PathBuf, jfs::PinnedPath> = BTreeMap::new();
     for bind in pinned {
         let source = bind.source().to_owned();
-        plan.extra_ro_binds.push((source.clone(), bind.destination));
+        match bind.placement {
+            Placement::Bind(destination) => plan.extra_ro_binds.push((source.clone(), destination)),
+            Placement::Resolver => plan.resolv_source = Some(source.clone()),
+        }
         pins.insert(source, bind.pin);
     }
     let mut roots: Vec<(PathBuf, PathBuf)> = plan
@@ -1444,7 +1465,7 @@ mod tests {
             temp.path(),
             "ca.pem",
             b"pem",
-            PathBuf::from("/run/ouro/vault-ca.pem"),
+            Placement::Bind(PathBuf::from("/run/ouro/vault-ca.pem")),
         )
         .unwrap();
         let source = temp.path().join("ca.pem");
@@ -1474,7 +1495,7 @@ mod tests {
             temp.path(),
             "ca.pem",
             b"pem",
-            PathBuf::from("/run/ouro/vault-ca.pem"),
+            Placement::Bind(PathBuf::from("/run/ouro/vault-ca.pem")),
             || std::fs::rename(&swap, &source).unwrap(),
         );
         let error = result.err().expect("a replaced file was pinned");
@@ -1502,7 +1523,7 @@ mod tests {
             &mut plan,
             vec![PinnedBind {
                 pin,
-                destination: destination.clone(),
+                placement: Placement::Bind(destination.clone()),
             }],
             &root.join("attempt"),
             &jfs::PROTECTED_LITERALS,
@@ -1519,6 +1540,48 @@ mod tests {
             plan.extra_ro_binds.contains(&(source, destination)),
             "the pinned object is bound at its destination"
         );
+        drop(placeholders);
+    }
+
+    /// The sanitized resolver is bound as the file written: a name replaced
+    /// between staging and the mount preparation is not pinned in its
+    /// place, the handoff check of the pin refuses it, and the runtime
+    /// `/etc/resolv.conf` row takes its source from the pin.
+    #[test]
+    fn the_staged_resolver_is_bound_as_written_and_not_pinned_by_path() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut plan = mount_plan(root);
+        plan.etc_paths = vec![PathBuf::from(RESOLV_CONF)];
+        let attempt = root.join("attempt");
+        let (resolver, _status) = stage_sanitized_resolv_conf(&attempt).unwrap();
+        let source = attempt.join("resolv.conf");
+        let written = std::fs::metadata(&source).unwrap();
+        assert_eq!(written.mode() & 0o7777, 0o600);
+        assert!(std::fs::read(&source).unwrap().ends_with(b"\n"));
+        let swap = attempt.join("swap");
+        std::fs::write(&swap, b"search planted.example\n").unwrap();
+        std::fs::rename(&swap, &source).unwrap();
+        let (_, pins, _fds, placeholders) = prepare_mounts(
+            &mut plan,
+            vec![resolver],
+            &attempt,
+            &jfs::PROTECTED_LITERALS,
+            ProtectedCoverage::None,
+        )
+        .unwrap();
+        assert_eq!(plan.resolv_source.as_deref(), Some(source.as_path()));
+        assert!(
+            plan.extra_ro_binds.iter().all(|(from, _)| from != &source),
+            "the resolver is the runtime row's source, not a bind of its own"
+        );
+        let bound = pins
+            .iter()
+            .find(|pin| pin.path() == source)
+            .expect("the resolver is pinned");
+        assert_eq!(bound.identity(), (written.dev(), written.ino()));
+        assert!(bound.verify().is_err(), "the replaced name is refused");
         drop(placeholders);
     }
 

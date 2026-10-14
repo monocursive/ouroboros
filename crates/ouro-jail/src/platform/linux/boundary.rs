@@ -42,7 +42,7 @@ use super::exec::{self, BootstrapChild, BootstrapSpawn, FdMap};
 use super::fs as jfs;
 use super::identity::{self, read_environment_names};
 use super::mounts::{
-    PinnedBind, PlanPaths, StagedMounts, absent_runtime_candidate, host_path_of,
+    PinnedBind, Placement, PlanPaths, StagedMounts, absent_runtime_candidate, host_path_of,
     is_allowed_device_node, mount_swap_rendezvous, plan_for, prepare_mounts, read_mount_table,
     recordable_mounts, refuse_pseudo_fs_grants, refuse_unrecordable_mounts, resolve_path_ref,
     scan_coverage, skipped_protected_names, stage_sanitized_resolv_conf, staged_mounts,
@@ -987,20 +987,19 @@ impl Planned {
             .collect();
         bind_grants(&mut bplan, snapshot, &plan.workspace, scratch)?;
 
-        // Security 2026-09-25 (audit F5): bind a sanitized resolver view.
-        // The host's `/etc/resolv.conf` can carry the operator's search
-        // domains — host facts the child has no grant for. The child's
-        // resolver is unreachable inside its network namespace either way;
-        // the copy keeps the nameservers and drops `search`/`domain` lines.
-        let (resolv_source, resolv_sanitization) = stage_sanitized_resolv_conf(&plan.attempt_dir)?;
-        bplan.resolv_source = Some(resolv_source);
+        // A sanitized resolver view (audit F5): the host's
+        // `/etc/resolv.conf` can carry the operator's search domains, host
+        // facts the child has no grant for. The child's resolver is
+        // unreachable inside its network namespace either way; the copy
+        // keeps the nameservers and drops `search`/`domain` lines.
+        let (resolver, resolv_sanitization) = stage_sanitized_resolv_conf(&plan.attempt_dir)?;
         refuse_pseudo_fs_sources(snapshot, &plan.workspace, &bplan)?;
 
         // Until the boundary owns them, every refusal drops `placeholders`,
         // which removes the directories it made in the operator's workspace.
         let (scan, pins, pinned_fds, placeholders) = prepare_mounts(
             &mut bplan,
-            vault_ca.into_iter().collect(),
+            vault_ca.into_iter().chain([resolver]).collect(),
             &plan.attempt_dir,
             &name_refs,
             snapshot.filesystem.protected_coverage,
@@ -1197,7 +1196,7 @@ fn stage_vault(
         attempt_dir,
         VAULT_CA_NAME,
         vault.ca_pem().as_bytes(),
-        PathBuf::from("/run/ouro/vault-ca.pem"),
+        Placement::Bind(PathBuf::from("/run/ouro/vault-ca.pem")),
     )
     .map_err(vault_io)?;
     for (name, value) in vault.environment() {
