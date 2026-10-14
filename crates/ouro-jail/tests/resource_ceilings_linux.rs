@@ -134,8 +134,8 @@ fn none_profile_reports_its_explicit_swap_ceiling() {
 /// The storage claim §6.4 rests on (mutation-B03 guard): with a storage
 /// ceiling the tool baseline refuses the hard-link syscalls, and the same
 /// link without a ceiling succeeds — so the denial is the ceiling's
-/// baseline, not the filesystem's. Both spellings are exercised, and the
-/// receipt's storage evidence states the denial.
+/// baseline, not the filesystem's. Every spelling this architecture has is
+/// exercised, and the receipt's storage evidence states the denial.
 #[test]
 fn hard_links_are_denied_under_a_storage_ceiling_and_allowed_without_it() {
     if !common::live() {
@@ -165,7 +165,14 @@ fn hard_links_are_denied_under_a_storage_ceiling_and_allowed_without_it() {
     std::fs::copy(harness::fixture_path(), &fixture).unwrap();
     std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(ws.join("from"), b"hard link source").unwrap();
-    for via in ["link", "linkat"] {
+    // `link` exists only where the architecture kept the legacy calls
+    // (x86_64); elsewhere `linkat` is the one spelling a program can make.
+    let spellings: &[&str] = if ouro_fixture::raw::has_legacy_syscalls() {
+        &["link", "linkat"]
+    } else {
+        &["linkat"]
+    };
+    for &via in spellings {
         // No ceiling: the link is an ordinary call.
         let unlimited = Jail::new()
             .unwrap()
@@ -327,16 +334,10 @@ fn an_agent_storage_ceiling_installs_and_names_the_hard_link_denials() {
 /// instead of active with a count nothing read.
 #[test]
 fn unreadable_counters_degrade_the_limits_class_of_a_contained_run() {
-    if !common::live() {
-        return;
-    }
-    let probe = ouro_jail::platform::linux::probe::run_one(
+    if !common::probe_available(
         "cgroup_pids",
-        &harness::jail_path(),
-        std::path::Path::new("bwrap"),
-    );
-    if probe.status != ouro_jail::platform::linux::probe::ProbeStatus::Available {
-        harness::skip_or_fail("unreadable counters need a delegated cgroup with pids");
+        "unreadable counters need a delegated cgroup with pids",
+    ) {
         return;
     }
     let jail = Jail::new().unwrap();
