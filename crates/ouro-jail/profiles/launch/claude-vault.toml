@@ -19,4 +19,4 @@ hosts = ["https://api.anthropic.com"]
 header = { name = "x-api-key" }
 
 [network]
-allow = ["api.anthropic.com:443"]
+allow = ["api.anthropic.com"]

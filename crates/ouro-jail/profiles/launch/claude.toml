@@ -24,4 +24,4 @@ state_var = "CLAUDE_CONFIG_DIR"
 # mode = "bind_ro"
 
 [network]
-allow = ["api.anthropic.com:443"]
+allow = ["api.anthropic.com"]

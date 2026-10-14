@@ -24,4 +24,4 @@ hosts = ["https://api.anthropic.com"]
 header = { name = "x-api-key" }
 
 [network]
-allow = ["api.anthropic.com:443", "models.opencode.ai:443", "opencode.ai:443"]
+allow = ["api.anthropic.com", "models.opencode.ai", "opencode.ai"]

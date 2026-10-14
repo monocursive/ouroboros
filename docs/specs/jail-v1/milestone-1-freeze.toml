@@ -104,7 +104,7 @@ jail = "agent"
 state_var = "CLAUDE_CONFIG_DIR"
 home_is_state = false
 state_subdirs = []
-network_allow = ["api.anthropic.com:443"]
+network_allow = ["api.anthropic.com"]
 environment = "{\"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC\":\"1\"}"
 [[launch_profile.credential]]
 id = "anthropic"
@@ -120,7 +120,7 @@ jail = "agent"
 state_var = "CLAUDE_CONFIG_DIR"
 home_is_state = false
 state_subdirs = []
-network_allow = ["api.anthropic.com:443"]
+network_allow = ["api.anthropic.com"]
 environment = "{}"
 
 [[launch_profile]]
@@ -139,7 +139,7 @@ jail = "agent"
 state_var = "CODEX_HOME"
 home_is_state = true
 state_subdirs = []
-network_allow = ["api.openai.com:443", "*.openai.com:443"]
+network_allow = ["*.openai.com"]
 environment = "{}"
 
 [[launch_profile]]
@@ -202,7 +202,7 @@ name = "opencode-vault"
 jail = "agent"
 home_is_state = true
 state_subdirs = ["config/opencode", "data/opencode", "cache/opencode", "state/opencode"]
-network_allow = ["api.anthropic.com:443", "models.opencode.ai:443", "opencode.ai:443"]
+network_allow = ["api.anthropic.com", "models.opencode.ai", "opencode.ai"]
 environment = "{\"OPENCODE_DISABLE_AUTOUPDATE\":\"true\",\"XDG_CACHE_HOME\":{\"state\":\"cache\"},\"XDG_CONFIG_HOME\":{\"state\":\"config\"},\"XDG_DATA_HOME\":{\"state\":\"data\"},\"XDG_STATE_HOME\":{\"state\":\"state\"}}"
 [[launch_profile.credential]]
 id = "anthropic"

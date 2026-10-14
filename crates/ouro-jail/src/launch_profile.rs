@@ -1504,6 +1504,26 @@ allow = ["api.example.com:443"]
         assert!(check_jail_permits(ProfileName::None, &plain).is_err());
     }
 
+    /// L21: the bundled profiles grant TLS only. A host written with `:443`
+    /// also admits plaintext HTTP to that port, which none of them needs.
+    #[test]
+    fn bundled_profiles_grant_tls_only() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("profiles/launch");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&directory).expect("the bundled profiles") {
+            let path = entry.expect("an entry").path();
+            let stem = path.file_stem().and_then(OsStr::to_str).expect("a name");
+            let text = std::fs::read_to_string(&path).expect("readable");
+            let profile = parse(&text, stem, BASE, Some(b"/home/op")).expect("parses");
+            for rule in &profile.network_allow {
+                let parsed = crate::network::HostRule::parse(rule).expect("a host rule");
+                assert!(!parsed.explicit_port, "{stem}: `{rule}` names a port");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no bundled profile allows a host");
+    }
+
     #[test]
     fn names_follow_their_grammars() {
         assert!(valid_name("demo-1_x"));

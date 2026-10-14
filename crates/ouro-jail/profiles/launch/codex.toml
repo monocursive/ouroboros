@@ -24,5 +24,8 @@ home_is_state = true
 # dest = "config.toml"
 # mode = "bind_ro"
 
+# Hosts without a port are TLS-only (port 443; plaintext HTTP needs an
+# explicit port). `*.openai.com` covers `api.openai.com` and every other name
+# beneath `openai.com`, never `openai.com` itself.
 [network]
-allow = ["api.openai.com:443", "*.openai.com:443"]
+allow = ["*.openai.com"]
