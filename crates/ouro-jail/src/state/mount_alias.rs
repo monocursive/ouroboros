@@ -391,10 +391,15 @@ mod tests {
             conflict_in_mounts(&roots, Path::new("/home/u/state"), 1, &mounts),
             Some(PathBuf::from("/ws/alias"))
         );
-        // A bind of an ancestor reaches it too.
+        // A bind of an ancestor reaches it too, without the direct one.
+        let ancestor_only: Vec<Mount> = mounts
+            .iter()
+            .filter(|mount| mount.point != Path::new("/ws/alias"))
+            .cloned()
+            .collect();
         assert_eq!(
-            conflict_in_mounts(&roots, Path::new("/home/u/state"), 1, &mounts),
-            Some(PathBuf::from("/ws/alias"))
+            conflict_in_mounts(&roots, Path::new("/home/u/state"), 1, &ancestor_only),
+            Some(PathBuf::from("/ws/ancestor"))
         );
         // Nothing under a child root: no conflict (the lexical guards own
         // that case, and mounts elsewhere are not child-visible).
