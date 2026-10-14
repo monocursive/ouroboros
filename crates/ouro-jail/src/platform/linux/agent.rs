@@ -570,7 +570,7 @@ impl AgentNet {
                 Ok(false) => {}
                 Err(error) => return Err(refusal("bridge", error)),
             }
-            if deadline.expired() || super::watch::readable(fd.as_raw_fd()) {
+            if deadline.expired() || super::watch::is_readable(fd.as_fd()) {
                 return Err(refusal(
                     "bridge",
                     format!(
@@ -586,7 +586,7 @@ impl AgentNet {
         // the start time is this bridge's and not a successor's.
         let start_ticks =
             identity::start_time_ticks(pid).map_err(|error| refusal("bridge", error))?;
-        if super::watch::readable(fd.as_raw_fd()) {
+        if super::watch::is_readable(fd.as_fd()) {
             return Err(refusal("bridge", "it exited during discovery"));
         }
         self.bridge = Some(Bridge {
@@ -672,7 +672,7 @@ impl AgentNet {
         }
         if !self.bridge_reported
             && let Some(bridge) = &self.bridge
-            && super::watch::readable(bridge.fd.as_raw_fd())
+            && super::watch::is_readable(bridge.fd.as_fd())
         {
             self.bridge_reported = true;
             // Asked after the death was seen, so "up" means up after it.

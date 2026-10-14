@@ -23,22 +23,7 @@ pub(crate) use bootstrap::{BootstrapChild, BootstrapSpawn, KillOnDrop, spawn_boo
 /// source, including when there are more than 256 pinned mounts.
 const RESERVE_BASE: RawFd = 256;
 
-/// A pipe with both ends close-on-exec.
-///
-/// # Errors
-///
-/// The errno from `pipe2`.
-pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [-1i32; 2];
-    // SAFETY: `fds` is a two-element array of the right type; pipe2 writes
-    // exactly two descriptors into it or returns -1.
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: both descriptors were just created and are owned here.
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
-}
+pub use super::sys::pipe;
 
 /// Descriptors to install at fixed numbers in a child.
 ///
@@ -265,19 +250,7 @@ const CLOSE_RANGE_CLOEXEC: libc::c_uint = 4;
 /// `exec` so that only the descriptors the caller re-installs with `dup2`
 /// reach the child.
 fn close_range_cloexec() -> io::Result<()> {
-    // SAFETY: close_range takes three scalars and dereferences nothing.
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            3,
-            libc::c_uint::MAX,
-            CLOSE_RANGE_CLOEXEC,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    super::sys::close_range_from(3, CLOSE_RANGE_CLOEXEC).map_err(io::Error::from_raw_os_error)
 }
 
 /// Reap `child` if it ends before `deadline`, without ever blocking on it.
@@ -502,14 +475,10 @@ fn capture_step(
             revents: 0,
         });
     }
-    let count = libc::nfds_t::try_from(fds.len()).unwrap_or(0);
-    // SAFETY: `fds` holds `count` initialized pollfds and outlives the call.
-    if unsafe { libc::poll(fds.as_mut_ptr(), count, timeout_ms) } < 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::Interrupted {
-            return Ok(Step::Interrupted);
-        }
-        return Err(error);
+    match super::sys::poll(&mut fds, timeout_ms) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(Step::Interrupted),
+        Err(error) => return Err(error),
     }
     let mut any_ready = false;
     let mut polled = fds.iter();
@@ -561,7 +530,7 @@ mod tests {
         let error = capture(child, pipes, Deadline::after(Duration::from_secs(10))).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EISDIR), "{error}");
         assert!(
-            super::super::watch::readable(watch.as_raw_fd()),
+            super::super::watch::is_readable(std::os::fd::AsFd::as_fd(&watch)),
             "the child still runs"
         );
         let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();

@@ -2,8 +2,12 @@
 
 use std::ffi::{CString, OsStr};
 use std::fmt;
+use std::io;
+use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+
+use super::clock::Deadline;
 
 /// A path or argument that cannot be passed to a syscall.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,20 +60,22 @@ pub fn cstring_from_path(path: &Path) -> Result<CString, PathError> {
     cstring_from_os(path.as_os_str())
 }
 
-/// An all-zero `libc::stat`, to be filled in by a `stat`, `lstat` or `fstat`
-/// call. Callers must check that call's return value before reading a field.
-#[must_use]
-pub fn empty_stat() -> libc::stat {
-    // SAFETY: `libc::stat` is a plain C struct of integers and has no
-    // invariant that all-zero violates; it is a scratch buffer here, and the
-    // kernel overwrites it on a successful call.
-    unsafe { std::mem::zeroed() }
-}
-
-/// The errno of the most recent failing syscall on this thread.
+/// The errno of the most recent failing syscall on this thread. One read of
+/// the thread's own errno: async-signal-safe, for the launcher after its fork
+/// as for everything else.
 #[must_use]
 pub fn last_errno() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    // SAFETY: __errno_location returns this thread's errno, valid for the
+    // thread's lifetime.
+    unsafe { *libc::__errno_location() }
+}
+
+/// Clears this thread's errno, so a call that reports its end and its
+/// errors through errno alone (`readdir`) can be told apart.
+pub fn clear_errno() {
+    // SAFETY: __errno_location returns this thread's errno, valid for the
+    // thread's lifetime.
+    unsafe { *libc::__errno_location() = 0 };
 }
 
 // An inherited ignored disposition is the operator's
@@ -123,84 +129,144 @@ pub fn nap() {
     std::thread::sleep(std::time::Duration::from_micros(200));
 }
 
-pub fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
-    // SAFETY: F_GETFL and F_SETFL take scalars and dereference nothing.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+/// A pipe with both ends close-on-exec.
+///
+/// # Errors
+/// The errno from `pipe2`.
+pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [-1i32; 2];
+    // SAFETY: `fds` is a two-element array of the right type; pipe2 writes
+    // exactly two descriptors into it or returns -1.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: both descriptors were just created and are owned here.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Sets `O_NONBLOCK` on `fd`, keeping its other status flags.
+///
+/// # Errors
+/// The errno from `fcntl`.
+pub fn set_nonblocking(fd: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: F_GETFL and F_SETFL take scalars and dereference nothing; the
+    // descriptor is live for the borrow.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
     if flags < 0 {
-        return Err(std::io::Error::last_os_error());
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: as above.
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(std::io::Error::last_os_error());
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
 
-pub fn write_all(fd: std::os::fd::RawFd, bytes: &[u8]) -> std::io::Result<()> {
-    let mut written = 0usize;
-    while written < bytes.len() {
-        // SAFETY: the pointer and length address the remaining bytes of a live
-        // slice.
-        let n = unsafe {
-            libc::write(
-                fd,
-                bytes.as_ptr().add(written).cast::<libc::c_void>(),
-                bytes.len() - written,
-            )
-        };
-        if n < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
+/// Writes all of `bytes` to `fd`, retrying an interrupted or short write.
+///
+/// Async-signal-safe and allocation-free (`write` only), so the launcher
+/// uses it after its fork and under its filters, where its descriptors are
+/// numbers it was told.
+///
+/// # Errors
+/// The errno of a failed `write`, or `WriteZero` for a write that took no
+/// byte (never left to spin).
+pub fn write_all(fd: RawFd, bytes: &[u8]) -> io::Result<()> {
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        // SAFETY: the pointer and length address the live remaining slice.
+        let n = unsafe { libc::write(fd, remaining.as_ptr().cast(), remaining.len()) };
+        match usize::try_from(n) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => remaining = &remaining[written.min(remaining.len())..],
+            Err(_) if last_errno() == libc::EINTR => {}
+            Err(_) => return Err(io::Error::last_os_error()),
         }
-        written += usize::try_from(n).unwrap_or(0);
     }
     Ok(())
 }
 
-/// Setup channels obey the preparation deadline even if a helper stops
-/// reading while retaining its descriptor.
-pub fn write_until(
-    fd: std::os::fd::RawFd,
-    bytes: &[u8],
-    deadline: super::clock::Deadline,
-) -> std::io::Result<()> {
+/// Writes all of `bytes` to `fd`, which this makes non-blocking, by
+/// `deadline`: a setup channel obeys the preparation deadline even if the
+/// helper reading it stops while it keeps its descriptor.
+///
+/// # Errors
+/// `TimedOut` at the deadline, `WriteZero`, or the errno of a failed
+/// `fcntl`, `write` or `poll`.
+pub fn write_until(fd: BorrowedFd<'_>, bytes: &[u8], deadline: Deadline) -> io::Result<()> {
     set_nonblocking(fd)?;
     let mut remaining = bytes;
     while !remaining.is_empty() {
         if deadline.expired() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
                 "backend argument delivery timed out",
             ));
         }
-        // SAFETY: the descriptor is owned by the caller, and this slice is live.
-        let n = unsafe { libc::write(fd, remaining.as_ptr().cast(), remaining.len()) };
-        if n > 0 {
-            remaining = &remaining[n as usize..];
-            continue;
-        }
-        if n == 0 {
-            return Err(std::io::ErrorKind::WriteZero.into());
-        }
-        let error = std::io::Error::last_os_error();
-        match error.kind() {
-            std::io::ErrorKind::Interrupted => continue,
-            std::io::ErrorKind::WouldBlock => {
-                let mut pfd = libc::pollfd {
-                    fd,
-                    events: libc::POLLOUT,
-                    revents: 0,
-                };
-                // SAFETY: one initialized pollfd, bounded by the deadline.
-                unsafe {
-                    libc::poll(&raw mut pfd, 1, deadline.remaining_millis_capped(10));
+        // SAFETY: the descriptor is live for the borrow, and this slice is
+        // live.
+        let n = unsafe { libc::write(fd.as_raw_fd(), remaining.as_ptr().cast(), remaining.len()) };
+        match usize::try_from(n) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => remaining = &remaining[written.min(remaining.len())..],
+            Err(_) => {
+                let error = io::Error::last_os_error();
+                match error.kind() {
+                    io::ErrorKind::Interrupted => {}
+                    io::ErrorKind::WouldBlock => {
+                        poll_one(fd, libc::POLLOUT, deadline.remaining_millis_capped(10))?;
+                    }
+                    _ => return Err(error),
                 }
             }
-            _ => return Err(error),
         }
+    }
+    Ok(())
+}
+
+/// `poll(2)` over `fds` for at most `timeout_ms` (negative: no bound): how
+/// many have events.
+///
+/// # Errors
+/// The errno of a failed `poll`; `Interrupted` for a signal, which a caller
+/// may treat as nothing ready only if it asks again.
+pub fn poll(fds: &mut [libc::pollfd], timeout_ms: i32) -> io::Result<usize> {
+    let count = libc::nfds_t::try_from(fds.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many descriptors"))?;
+    // SAFETY: `fds` holds `count` initialized pollfds and outlives the call;
+    // poll writes only their `revents`.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), count, timeout_ms) };
+    usize::try_from(ready).map_err(|_| io::Error::last_os_error())
+}
+
+/// [`poll`] of one descriptor for `events`: the events it reports, empty on
+/// a timeout or an interruption. For callers that ask again in a loop.
+///
+/// # Errors
+/// The errno of a failed `poll`, other than `EINTR`.
+pub fn poll_one(fd: BorrowedFd<'_>, events: libc::c_short, timeout_ms: i32) -> io::Result<libc::c_short> {
+    let mut entry = [libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events,
+        revents: 0,
+    }];
+    match poll(&mut entry, timeout_ms) {
+        Ok(_) => Ok(entry[0].revents),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+/// `close_range(first, ~0, flags)`: closes, or with `CLOSE_RANGE_CLOEXEC`
+/// marks close-on-exec, every descriptor from `first` up. One syscall, no
+/// allocation: safe between `fork` and `exec`.
+///
+/// # Errors
+/// The errno from `close_range`.
+pub fn close_range_from(first: libc::c_uint, flags: libc::c_uint) -> Result<(), i32> {
+    // SAFETY: close_range takes three scalars and dereferences nothing.
+    if unsafe { libc::syscall(libc::SYS_close_range, first, libc::c_uint::MAX, flags) } != 0 {
+        return Err(last_errno());
     }
     Ok(())
 }
@@ -377,11 +443,10 @@ mod tests {
 
     #[test]
     fn stalled_backend_argument_delivery_has_a_deadline() {
-        use std::os::fd::AsRawFd;
-        let (_reader, writer) = super::super::exec::pipe().unwrap();
-        let deadline = super::super::clock::Deadline::after(std::time::Duration::from_millis(20));
-        let error =
-            super::write_until(writer.as_raw_fd(), &vec![0; 1024 * 1024], deadline).unwrap_err();
+        use std::os::fd::AsFd as _;
+        let (_reader, writer) = pipe().unwrap();
+        let deadline = Deadline::after(std::time::Duration::from_millis(20));
+        let error = write_until(writer.as_fd(), &vec![0; 1024 * 1024], deadline).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 

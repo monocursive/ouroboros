@@ -803,7 +803,7 @@ fn render_mediation_filter(out: &mut String) {
 #[cfg(target_os = "linux")]
 mod linux_only {
     use std::io;
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::fd::OwnedFd;
 
     use super::Program;
 
@@ -822,17 +822,7 @@ mod linux_only {
     /// the pipe's buffer.
     pub fn program_pipe(program: &Program) -> io::Result<OwnedFd> {
         let bytes = program.to_bytes();
-        let mut fds = [-1i32; 2];
-        // SAFETY: `fds` is a two-element array of the right type; pipe2 writes
-        // exactly two descriptors into it or returns -1.
-        let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: both descriptors were just created by pipe2 and are owned
-        // here; wrapping them transfers that ownership.
-        let (read_end, write_end) =
-            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        let (read_end, write_end) = super::super::sys::pipe()?;
         // SAFETY: F_GETPIPE_SZ takes no argument and only reads the pipe's
         // capacity; the descriptor is live.
         let capacity = unsafe {
@@ -849,26 +839,7 @@ mod linux_only {
             )));
         }
 
-        let mut written = 0usize;
-        while written < bytes.len() {
-            // SAFETY: the pointer and length address `bytes[written..]`, which
-            // is live for the duration of the call.
-            let n = unsafe {
-                libc::write(
-                    std::os::fd::AsRawFd::as_raw_fd(&write_end),
-                    bytes.as_ptr().add(written).cast::<libc::c_void>(),
-                    bytes.len() - written,
-                )
-            };
-            if n < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(err);
-            }
-            written += usize::try_from(n).expect("write returns a non-negative count here");
-        }
+        super::super::sys::write_all(std::os::fd::AsRawFd::as_raw_fd(&write_end), &bytes)?;
         drop(write_end);
         Ok(read_end)
     }

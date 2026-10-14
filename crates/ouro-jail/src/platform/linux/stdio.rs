@@ -1,6 +1,6 @@
 //! Stdio validation and the relays for regular-file and socket streams (§8.3).
 
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::time::Duration;
@@ -58,17 +58,18 @@ pub(super) fn validate_stdio(
                 message,
             ))
         };
-        let mut st = super::sys::empty_stat();
-        // SAFETY: `st` is a writable stat buffer; fstat dereferences nothing
-        // else.
-        if unsafe { libc::fstat(fd, &raw mut st) } != 0 {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `st` is writable storage for a stat buffer; fstat
+        // dereferences nothing else.
+        if unsafe { libc::fstat(fd, st.as_mut_ptr()) } != 0 {
             let errno = super::sys::last_errno();
             return refuse(format!(
                 "{name} cannot be inspected ({}), so what the child would inherit is unknown",
                 super::sys::errno_name(errno)
             ));
         }
-        let kind = st.st_mode & libc::S_IFMT;
+        // SAFETY: fstat returned 0, so it filled the buffer.
+        let kind = unsafe { st.assume_init() }.st_mode & libc::S_IFMT;
         if kind == libc::S_IFDIR {
             return refuse(format!(
                 "{name} is a directory, which a contained run refuses"
@@ -204,7 +205,7 @@ impl StdioRelay {
                 format!("a stdio relay descriptor could not be mapped: {err}"),
             )
         })?;
-        set_nonblocking(ours.as_raw_fd()).map_err(|err| {
+        set_nonblocking(ours.as_fd()).map_err(|err| {
             error(
                 ErrorCode::InvalidFd,
                 ErrorStage::Preparing,
@@ -231,7 +232,7 @@ impl StdioRelay {
         let mut progress = false;
         if self.to_child {
             while !self.origin_eof && self.buffer.len() < RELAY_BUFFER {
-                if !origin_ready(self.origin.as_raw_fd(), true) {
+                if !origin_ready(self.origin.as_fd(), true) {
                     // A socket origin never blocks the pump loop (issue
                     // draft 11); a regular file is always ready.
                     break;
@@ -299,7 +300,7 @@ impl StdioRelay {
                     break;
                 }
             }
-            if !self.buffer.is_empty() && origin_ready(self.origin.as_raw_fd(), false) {
+            if !self.buffer.is_empty() && origin_ready(self.origin.as_fd(), false) {
                 match relay_write(self.origin.as_raw_fd(), &self.buffer, self.origin_socket) {
                     Ok(written) => {
                         self.buffer.drain(..written);
@@ -323,21 +324,15 @@ impl StdioRelay {
 /// asked with a zero-timeout poll so a socket origin never blocks the pump
 /// loop (issue draft 11). A regular file is always ready; a socket that
 /// would block is simply visited again on a later pump.
-pub(super) fn origin_ready(fd: RawFd, for_read: bool) -> bool {
-    let mut pollfd = libc::pollfd {
-        fd,
-        events: if for_read {
-            libc::POLLIN
-        } else {
-            libc::POLLOUT
-        },
-        revents: 0,
+pub(super) fn origin_ready(fd: BorrowedFd<'_>, for_read: bool) -> bool {
+    let events = if for_read {
+        libc::POLLIN
+    } else {
+        libc::POLLOUT
     };
-    // SAFETY: `pollfd` is a live, correctly sized struct; the timeout is
-    // zero, so the call cannot block.
-    let ready = unsafe { libc::poll(&raw mut pollfd, 1, 0) };
-    ready > 0
-        && pollfd.revents & (libc::POLLIN | libc::POLLOUT | libc::POLLHUP | libc::POLLERR) != 0
+    super::sys::poll_one(fd, events, 0).is_ok_and(|revents| {
+        revents & (libc::POLLIN | libc::POLLOUT | libc::POLLHUP | libc::POLLERR) != 0
+    })
 }
 
 pub(super) fn relay_read(fd: RawFd, buffer: &mut [u8], socket: bool) -> std::io::Result<usize> {
@@ -436,8 +431,8 @@ pub(super) fn pump_stdio_relays(relays: &mut [StdioRelay]) -> std::io::Result<bo
 mod tests {
     fn output_relay(origin: std::fs::File) -> (super::StdioRelay, std::os::fd::OwnedFd) {
         let (ours, child) = super::exec::pipe().unwrap();
-        use std::os::fd::AsRawFd as _;
-        super::set_nonblocking(ours.as_raw_fd()).unwrap();
+        use std::os::fd::AsFd as _;
+        super::set_nonblocking(ours.as_fd()).unwrap();
         (
             super::StdioRelay {
                 origin: origin.into(),
@@ -543,7 +538,7 @@ mod tests {
     #[test]
     fn the_output_drain_waits_for_output_only() {
         use std::io::{Read as _, Seek as _};
-        use std::os::fd::AsRawFd as _;
+        use std::os::fd::{AsFd as _, AsRawFd as _};
         let mut stdout = tempfile::tempfile().unwrap();
         let (out, writer) = output_relay(stdout.try_clone().unwrap());
         super::relay_write(writer.as_raw_fd(), b"last words", false).unwrap();
@@ -551,7 +546,7 @@ mod tests {
         // A stdin origin that never reaches end-of-file while its peer lives.
         let (origin, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (child_end, ours) = super::exec::pipe().unwrap();
-        super::set_nonblocking(ours.as_raw_fd()).unwrap();
+        super::set_nonblocking(ours.as_fd()).unwrap();
         let stdin = super::StdioRelay {
             origin: origin.into(),
             origin_socket: true,
@@ -603,11 +598,11 @@ mod tests {
 
     #[test]
     fn relay_input_errors_are_not_eof() {
-        use std::os::fd::AsRawFd as _;
+        use std::os::fd::AsFd as _;
         let dir = tempfile::tempdir().unwrap();
         let origin = std::fs::File::create(dir.path().join("write-only")).unwrap();
         let (read, write) = super::exec::pipe().unwrap();
-        super::set_nonblocking(write.as_raw_fd()).unwrap();
+        super::set_nonblocking(write.as_fd()).unwrap();
         let mut relay = super::StdioRelay {
             origin: origin.into(),
             origin_socket: false,

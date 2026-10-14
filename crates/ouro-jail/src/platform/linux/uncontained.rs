@@ -61,7 +61,7 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::Path;
@@ -441,7 +441,7 @@ fn spawn_launcher(
     };
     let (release_r, release_w) = exec::pipe().map_err(io)?;
     let (error_r, error_w) = exec::pipe().map_err(io)?;
-    set_nonblocking(error_r.as_raw_fd()).map_err(io)?;
+    set_nonblocking(error_r.as_fd()).map_err(io)?;
     let mut fds = FdMap::new();
     fds.add(release_r, RELEASE_FD).map_err(io)?;
     fds.add(error_w, ERROR_FD).map_err(io)?;
@@ -682,9 +682,9 @@ impl Uncontained {
         // Blocked in read(2) on the release descriptor, which is what the
         // observer's attach contract requires and what makes the release the
         // only way forward.
-        let launcher_fd = self.launcher_fd.as_raw_fd();
+        let launcher_fd = self.launcher_fd.as_fd();
         match identity::wait_blocked_in_read(pid, RELEASE_FD, deadline, || {
-            watch::readable(launcher_fd)
+            watch::is_readable(launcher_fd)
         }) {
             Ok(()) => {}
             Err(identity::NotBlocked::Ended) => {
@@ -842,7 +842,7 @@ impl Uncontained {
     }
 
     fn target_exited(&self) -> bool {
-        watch::readable(self.launcher_fd.as_raw_fd())
+        watch::is_readable(self.launcher_fd.as_fd())
     }
 
     /// Whether the target's final status has been collected.
@@ -864,9 +864,9 @@ impl Uncontained {
     /// The live target's membership, read from its own cgroup file and
     /// confirmed alive afterwards, so the read was of the target.
     fn scan_target(&mut self) {
-        let fd = self.launcher_fd.as_raw_fd();
+        let fd = self.launcher_fd.as_fd();
         let (cgroup_of, pid) = (self.cgroup_of, self.pid);
-        let Some(read) = read_while_alive(|| !watch::readable(fd), || cgroup_of(pid)) else {
+        let Some(read) = read_while_alive(|| !watch::is_readable(fd), || cgroup_of(pid)) else {
             return;
         };
         match read {
@@ -936,10 +936,10 @@ impl Uncontained {
             let Ok(fd) = identity::pidfd_open(pid) else {
                 continue;
             };
-            let raw = fd.as_raw_fd();
+            let borrowed = fd.as_fd();
             let cgroup_of = self.cgroup_of;
             let Some((parent, cgroup)) = read_while_alive(
-                || !watch::readable(raw),
+                || !watch::is_readable(borrowed),
                 || (tracer::ppid(pid), cgroup_of(pid).ok()),
             ) else {
                 continue;
@@ -1337,7 +1337,7 @@ impl Tree for Uncontained {
         let escaped_alive = self
             .escaped
             .iter()
-            .any(|(_, fd)| !watch::readable(fd.as_raw_fd()));
+            .any(|(_, fd)| !watch::is_readable(fd.as_fd()));
         // An unreadable leaf after a recorded loss has nothing more to say; a
         // readable one must be seen empty.
         let leaf_done =

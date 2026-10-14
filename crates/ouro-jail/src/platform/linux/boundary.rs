@@ -262,7 +262,7 @@ impl Init {
     /// Whether the init is still running: its pidfd turns readable at its
     /// exit, a zombie's included, and cannot come to name another process.
     fn alive(&self) -> bool {
-        !watch::readable(self.fd.as_raw_fd())
+        !watch::is_readable(self.fd.as_fd())
     }
 }
 
@@ -303,7 +303,7 @@ impl Started {
     /// Whether the backend's pidfd reports its exit, independent of whether
     /// its status has been collected yet.
     fn backend_exited(&self) -> bool {
-        watch::readable(self.bwrap_fd.as_raw_fd())
+        watch::is_readable(self.bwrap_fd.as_fd())
     }
 
     /// The watcher stays until released or until this supervisor is gone
@@ -1445,8 +1445,8 @@ impl Channels {
             fds.add(args_r, ARGS_FD).map_err(io)?;
             args = Some(args_w);
         }
-        set_nonblocking(error_r.as_raw_fd()).map_err(io)?;
-        set_nonblocking(status_r.as_raw_fd()).map_err(io)?;
+        set_nonblocking(error_r.as_fd()).map_err(io)?;
+        set_nonblocking(status_r.as_fd()).map_err(io)?;
         Ok(Channels {
             fds,
             release: release_w,
@@ -1569,7 +1569,7 @@ fn spawn(
     // payload larger than the pipe's capacity flows through instead of
     // deadlocking. A failure here means bwrap died reading.
     if let (Some(args), Some(payload)) = (args.as_ref(), planned.rendered.args_payload.as_ref()) {
-        write_until(args.as_raw_fd(), payload, deadline).map_err(io)?;
+        write_until(args.as_fd(), payload, deadline).map_err(io)?;
     }
     drop(args);
     let started = Started {
@@ -2852,7 +2852,7 @@ mod tests {
         assert!(init.alive());
         child.kill().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !super::super::watch::readable(init.fd.as_raw_fd()) {
+        while !super::super::watch::is_readable(init.fd.as_fd()) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "SIGKILL not delivered"

@@ -14,7 +14,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd as _, OwnedFd,
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::sys::{PathError, cstring_from_path, empty_stat, errno_name, last_errno};
+use super::sys::{PathError, cstring_from_path, errno_name, last_errno};
 use crate::state::anchored::{Dir, Kind, Name, Stat, fstat};
 
 /// The two path segments the `tool` profile protects (north-star §4.4).
@@ -672,9 +672,10 @@ fn stable_regular_file_hints(dir: &Dir, stamp: &DirectoryStamp) -> bool {
 }
 
 /// One `readdir` entry: its name and the type `readdir` reported for it.
-struct DirectoryEntry {
-    name: CString,
-    kind: u8,
+pub(super) struct DirectoryEntry {
+    pub(super) name: CString,
+    /// The `d_type` `readdir` reported.
+    pub(super) kind: u8,
 }
 
 /// The kind and identity a no-follow stat of one entry found.
@@ -690,21 +691,23 @@ struct EntryMeta {
 /// flag to every call: the walk stats up to [`ScanLimits::DEFAULT`] entries
 /// and needs only kind and identity.
 fn stat_entry(dir: &Dir, name: &CStr) -> Result<EntryMeta, i32> {
-    let mut st = empty_stat();
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: the directory descriptor is live, `name` is NUL-terminated and
-    // valid for the call, `st` is a writable stat buffer, and
+    // valid for the call, `st` is writable storage for a stat buffer, and
     // AT_SYMLINK_NOFOLLOW stats the entry itself.
     let rc = unsafe {
         libc::fstatat(
             dir.as_fd().as_raw_fd(),
             name.as_ptr(),
-            &raw mut st,
+            st.as_mut_ptr(),
             libc::AT_SYMLINK_NOFOLLOW,
         )
     };
     if rc != 0 {
         return Err(last_errno());
     }
+    // SAFETY: fstatat returned 0, so it filled the buffer.
+    let st = unsafe { st.assume_init() };
     let mode = st.st_mode & libc::S_IFMT;
     Ok(EntryMeta {
         kind: if mode == libc::S_IFDIR {
@@ -726,7 +729,7 @@ fn stat_entry(dir: &Dir, name: &CStr) -> Result<EntryMeta, i32> {
 ///
 /// [`Dir::names`] reads names alone; the walk needs the type as well, which
 /// is what lets it skip an ordinary file without a stat.
-fn read_entries(dir: &Dir, remaining: usize) -> Result<Vec<DirectoryEntry>, i32> {
+pub(super) fn read_entries(dir: &Dir, remaining: usize) -> Result<Vec<DirectoryEntry>, i32> {
     // `fdopendir` takes ownership of the descriptor it is given, so it gets a
     // duplicate; a duplicate shares the file offset, so the stream is
     // rewound before reading.
@@ -748,8 +751,7 @@ fn read_entries(dir: &Dir, remaining: usize) -> Result<Vec<DirectoryEntry>, i32>
     let mut out = Vec::new();
     let mut result = Ok(());
     loop {
-        // SAFETY: errno is this thread's own.
-        unsafe { *libc::__errno_location() = 0 };
+        super::sys::clear_errno();
         // SAFETY: `dirp` is live; the entry it returns stays valid until the
         // next call on this stream.
         let entry = unsafe { libc::readdir(dirp) };

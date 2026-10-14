@@ -30,7 +30,7 @@ use std::fmt;
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt as _;
 
-use super::sys::{PathError, cstring_from_os};
+use super::sys::{PathError, cstring_from_os, last_errno as errno};
 
 /// The hidden subcommand token.
 pub const SUBCOMMAND: &str = "__launch";
@@ -841,7 +841,7 @@ fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
             // Nothing above stdio: not the release or error pipe, not the
             // mediation listener, not the sock_diag socket, not the report
             // pipe's read end.
-            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) < 0 {
+            if super::sys::close_range_from(3, 0).is_err() {
                 libc::_exit(EXIT_BRIDGE_FAILED);
             }
             libc::execve(path.as_ptr(), argv.as_ptr(), envp.as_ptr());
@@ -973,34 +973,10 @@ fn report_and_exit(fd: RawFd, errno: i32, code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
-/// Write `bytes` to `fd`, retrying a short or interrupted write, and give up
-/// silently on any other failure. Async-signal-safe: `write` only.
+/// Write `bytes` to `fd` ([`super::sys::write_all`]), giving up silently on a
+/// failure: there is no one left to tell. Async-signal-safe: `write` only.
 fn write_fully(fd: RawFd, bytes: &[u8]) {
-    let mut written = 0usize;
-    while written < bytes.len() {
-        // SAFETY: the pointer and length address the remaining bytes of a live
-        // stack array.
-        let n = unsafe {
-            libc::write(
-                fd,
-                bytes.as_ptr().add(written).cast::<libc::c_void>(),
-                bytes.len() - written,
-            )
-        };
-        if n <= 0 {
-            if n < 0 && errno() == libc::EINTR {
-                continue;
-            }
-            break;
-        }
-        written += n as usize;
-    }
-}
-
-fn errno() -> i32 {
-    // SAFETY: __errno_location returns a pointer to this thread's errno, valid
-    // for the thread's lifetime.
-    unsafe { *libc::__errno_location() }
+    let _ = super::sys::write_all(fd, bytes);
 }
 
 /// Decode the four bytes the launcher writes on a failed exec.
