@@ -314,10 +314,12 @@ pub fn provenance_problems(doctor: &Value, revision: &Revision) -> Vec<String> {
 ///
 /// Use the already built driver: invoking cargo here changes dependency feature
 /// and provenance fingerprints between precompilation and execution of the suite.
+/// The run directory is a copy without `.git`, so the root is named: the
+/// scan finds no worktree there by itself.
 #[must_use]
 pub fn i02_command(run_dir: &str) -> String {
     format!(
-        "cd {} && ./target/release/xtask i02-scan",
+        "cd {} && ./target/release/xtask i02-scan --root .",
         run_path(run_dir)
     )
 }
@@ -3280,7 +3282,10 @@ smoke doctor 0
     #[test]
     fn the_remote_scan_uses_the_precompiled_driver_without_rebuilding() {
         let c = i02_command("d");
-        assert!(c.contains("./target/release/xtask i02-scan"), "{c}");
+        assert!(
+            c.contains("./target/release/xtask i02-scan --root ."),
+            "{c}"
+        );
         assert!(c.starts_with("cd $HOME/ouro-ci/runs/d &&"), "{c}");
         assert!(!c.contains("cargo"), "{c}");
     }
