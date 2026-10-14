@@ -22,8 +22,8 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::protocol::{
-    AppendReceipt, Chain, LedgerError, MAX_FRAME_BYTES, Peer, ReadPage, ReadRequest, Result,
-    RunRecord, VerifyReport,
+    AppendReceipt, Chain, LedgerError, MAX_FRAME_BYTES, MAX_VERIFY_LIMIT, Peer, ReadPage,
+    ReadRequest, Result, RunRecord, StoreStatus, VerifyPage, VerifyReport,
 };
 
 use crate::manifest::{self, STREAM};
@@ -44,6 +44,8 @@ mod tail;
 mod transcript;
 
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+/// Canonical history one verify page re-reads before it yields the writer.
+const VERIFY_PAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -152,6 +154,7 @@ pub struct Store {
     #[cfg(target_os = "linux")]
     pending_failures: BTreeMap<String, Option<pending_recovery::JournalSeen>>,
     segment_limit: u64,
+    verify_page_bytes: u64,
     #[cfg(test)]
     fault: Option<Fault>,
 }
@@ -419,6 +422,7 @@ impl Store {
             #[cfg(target_os = "linux")]
             pending_failures: BTreeMap::new(),
             segment_limit: SEGMENT_BYTES,
+            verify_page_bytes: VERIFY_PAGE_BYTES,
             #[cfg(test)]
             fault: None,
         };
@@ -1074,75 +1078,146 @@ impl Store {
         Ok(reconciled)
     }
 
-    pub fn verify(&self, run_id: Option<&str>) -> Result<Vec<VerifyReport>> {
-        let ids: Vec<_> = match run_id {
-            Some(id) => {
-                self.stream(id)?;
-                vec![id.to_owned()]
-            }
-            None => self.streams.keys().cloned().collect(),
+    /// The accepted in-memory state only: nothing is re-read from disk, so a
+    /// readiness probe never competes with live owners for the writer thread.
+    pub fn status(&self) -> StoreStatus {
+        let mut status = StoreStatus {
+            scope: "writer_accepted_state".into(),
+            runs: self.streams.len() as u32,
+            ambiguous_runs: 0,
+            incomplete_deletions: 0,
+            preparation_blocked: self.recovery_ambiguous,
         };
-        ids.iter()
-            .map(|id| {
-                if self.stream(id)?.pruned.is_some() {
-                    return self.verify_pruned(id);
+        for stream in self.streams.values() {
+            status.ambiguous_runs += u32::from(!stream.poisoned.is_empty());
+            status.incomplete_deletions += u32::from(
+                [&stream.run.history, &stream.run.capture_history]
+                    .into_iter()
+                    .flatten()
+                    .any(|history| history.state == "pruning"),
+            );
+        }
+        status
+    }
+
+    /// Freshly re-read and re-hash one run, or a bounded page of runs after
+    /// `after`. A page stops at `limit` runs or before it would re-read more
+    /// than VERIFY_PAGE_BYTES of canonical history (it always verifies at
+    /// least one run), so no request holds the single writer thread for a
+    /// whole store.
+    pub fn verify_page(
+        &self,
+        run_id: Option<&str>,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<VerifyPage> {
+        if let Some(id) = run_id {
+            return Ok(VerifyPage {
+                reports: vec![self.verify_run(id)?],
+                next_after: None,
+                done: true,
+            });
+        }
+        if !(1..=MAX_VERIFY_LIMIT).contains(&limit) {
+            return Err(LedgerError(format!(
+                "verify limit must be between 1 and {MAX_VERIFY_LIMIT}"
+            )));
+        }
+        if let Some(id) = after {
+            check_run_id(id)?;
+        }
+        let lower = after.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        let mut reports: Vec<VerifyReport> = Vec::new();
+        let mut bytes = 0u64;
+        let mut next_after = None;
+        for (id, stream) in self
+            .streams
+            .range::<str, _>((lower, std::ops::Bound::Unbounded))
+        {
+            let read = bytes.saturating_add(stream.accepted_bytes);
+            if let Some(last) = reports.last()
+                && (reports.len() >= limit as usize || read > self.verify_page_bytes)
+            {
+                next_after = Some(last.run_id.clone());
+                break;
+            }
+            bytes = read;
+            reports.push(self.verify_run(id)?);
+        }
+        Ok(VerifyPage {
+            reports,
+            done: next_after.is_none(),
+            next_after,
+        })
+    }
+
+    /// Every run, page by page, as the CLI assembles it.
+    #[cfg(test)]
+    pub(crate) fn verify(&self, run_id: Option<&str>) -> Result<Vec<VerifyReport>> {
+        let mut reports = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.verify_page(run_id, after.as_deref(), MAX_VERIFY_LIMIT)?;
+            reports.extend(page.reports);
+            if page.done {
+                return Ok(reports);
+            }
+            after = page.next_after;
+        }
+    }
+
+    fn verify_run(&self, id: &str) -> Result<VerifyReport> {
+        if self.stream(id)?.pruned.is_some() {
+            return self.verify_pruned(id);
+        }
+        let (stream, events) = self.load_stream_with_sync(id, &|_| Ok(()))?;
+        let mut problems = poison_details(&stream.poisoned);
+        if stream
+            .run
+            .capture_history
+            .as_ref()
+            .is_some_and(|h| h.state == "pruning")
+        {
+            problems.push("capture deletion is incomplete; retry GC or restart the writer".into());
+        }
+        if stream.poisoned.is_empty() {
+            let projection = (|| -> Result<Value> {
+                use std::io::Read as _;
+                let file = private_file(&self.root.join(id).join("run.json"), false, false)?;
+                let mut bytes = Vec::new();
+                file.take((4 * MAX_FRAME_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() > 4 * MAX_FRAME_BYTES {
+                    return Err(LedgerError(
+                        "run projection exceeds its bounded read limit".into(),
+                    ));
                 }
-                let (stream, events) = self.load_stream_with_sync(id, &|_| Ok(()))?;
-                let mut problems = poison_details(&stream.poisoned);
-                if stream
-                    .run
-                    .capture_history
-                    .as_ref()
-                    .is_some_and(|h| h.state == "pruning")
-                {
-                    problems.push(
-                        "capture deletion is incomplete; retry GC or restart the writer".into(),
-                    );
-                }
-                if stream.poisoned.is_empty() {
-                    let projection = (|| -> Result<Value> {
-                        use std::io::Read as _;
-                        let file =
-                            private_file(&self.root.join(id).join("run.json"), false, false)?;
-                        let mut bytes = Vec::new();
-                        file.take((4 * MAX_FRAME_BYTES + 1) as u64)
-                            .read_to_end(&mut bytes)?;
-                        if bytes.len() > 4 * MAX_FRAME_BYTES {
-                            return Err(LedgerError(
-                                "run projection exceeds its bounded read limit".into(),
-                            ));
-                        }
-                        let value: Value = serde_json::from_slice(&bytes)?;
-                        validate_frozen("run", &value)?;
-                        Ok(value)
-                    })();
-                    if projection.is_err()
-                        || projection.as_ref().is_ok_and(|value| {
-                            serde_json::to_value(&stream.run)
-                                .is_ok_and(|expected| expected != *value)
-                        })
-                    {
-                        problems.push(
-                            "run projection does not match verified canonical records".into(),
-                        );
-                    }
-                }
-                if let Some(active) = self.streams.get(id) {
-                    problems.extend(poison_details(&active.poisoned));
-                }
-                problems.sort();
-                problems.dedup();
-                Ok(VerifyReport {
-                    run_id: id.clone(),
-                    local_consistency: problems.is_empty(),
-                    child_protection: stream.run.child_protection,
-                    coverage: stream.run.coverage,
-                    events,
-                    problems,
-                    history: None,
+                let value: Value = serde_json::from_slice(&bytes)?;
+                validate_frozen("run", &value)?;
+                Ok(value)
+            })();
+            if projection.is_err()
+                || projection.as_ref().is_ok_and(|value| {
+                    serde_json::to_value(&stream.run).is_ok_and(|expected| expected != *value)
                 })
-            })
-            .collect()
+            {
+                problems.push("run projection does not match verified canonical records".into());
+            }
+        }
+        if let Some(active) = self.streams.get(id) {
+            problems.extend(poison_details(&active.poisoned));
+        }
+        problems.sort();
+        problems.dedup();
+        Ok(VerifyReport {
+            run_id: id.into(),
+            local_consistency: problems.is_empty(),
+            child_protection: stream.run.child_protection,
+            coverage: crate::reader::coverage_summary(&stream.run.coverage),
+            events,
+            problems,
+            history: None,
+        })
     }
 
     fn load_stream_with_sync(
@@ -3925,6 +4000,55 @@ mod tests {
         drop(store);
         let store = Store::open(&temp.path().join("data")).unwrap();
         assert!(store.verify(None).unwrap()[0].local_consistency);
+    }
+
+    #[test]
+    fn verification_pages_are_bounded_by_runs_and_bytes_and_status_reads_no_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let mut ids: Vec<_> = (0..3)
+            .map(|n| {
+                store
+                    .prepare(&format!("verify-{n}"), &payload(), &peer())
+                    .unwrap()
+                    .run_id
+            })
+            .collect();
+        ids.sort();
+        for limit in [0, MAX_VERIFY_LIMIT + 1] {
+            assert!(store.verify_page(None, None, limit).is_err());
+        }
+        let first = store.verify_page(None, None, 2).unwrap();
+        assert_eq!(first.reports.len(), 2);
+        assert!(!first.done);
+        assert_eq!(first.next_after.as_deref(), Some(ids[1].as_str()));
+        let last = store
+            .verify_page(None, first.next_after.as_deref(), 2)
+            .unwrap();
+        assert_eq!(last.reports[0].run_id, ids[2]);
+        assert!(last.done && last.next_after.is_none());
+        // A page re-reads at most its byte budget, but never fewer than one run.
+        store.verify_page_bytes = 1;
+        let one = store.verify_page(None, None, MAX_VERIFY_LIMIT).unwrap();
+        assert_eq!(one.reports.len(), 1);
+        assert_eq!(one.next_after.as_deref(), Some(ids[0].as_str()));
+        assert_eq!(store.verify(None).unwrap().len(), 3);
+        // Reports carry the bounded coverage summary, not raw gap payloads.
+        assert_eq!(
+            one.reports[0].coverage,
+            crate::reader::coverage_summary(&json!({"status":"unobserved"}))
+        );
+        assert!(store.status().ready());
+        assert_eq!(store.status().runs, 3);
+        // Status reflects accepted state; damage on disk waits for verify.
+        fs::write(store.root.join(&ids[0]).join(STREAM), b"damaged\n").unwrap();
+        assert!(store.status().ready());
+        assert!(!store.verify_page(Some(&ids[0]), None, 1).unwrap().reports[0].local_consistency);
+        store.fault = Some(Fault::BeforeWrite);
+        assert!(store.hold(&ids[1], "lost", &peer()).is_err());
+        let status = store.status();
+        assert_eq!(status.ambiguous_runs, 1);
+        assert!(!status.ready());
     }
 
     #[test]

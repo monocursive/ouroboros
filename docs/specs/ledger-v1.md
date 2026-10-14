@@ -461,6 +461,13 @@ A recovery sync failure refuses startup; no recovered retry can be acknowledged 
 A valid chain is local consistency only: deleting both history and its same-user
 manifest anchor has no external witness in this slice.
 Source gaps remain explicit even when the hash chain is consistent.
+Whole-store `verify` re-reads history one page per writer request: at most 25
+runs, stopping before 8 MiB of canonical bytes unless a single run is larger, so
+live owners' requests interleave with it. Its `coverage` is the bounded summary
+(status, per-class status, sources and gap counts); `show` has the full record.
+`doctor` reports only the writer's accepted state (run count, ambiguous streams,
+unfinished deletions, blocked preparation and the index) without re-reading
+history; it is ready only when none of those is set. Use `verify` for a fresh check.
 
 ## 6. Captures and privacy
 

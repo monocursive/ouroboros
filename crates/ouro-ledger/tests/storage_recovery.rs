@@ -17,6 +17,11 @@ use serde_json::{Value, json};
 
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+/// Fresh verification of the store's first run.
+fn first_run_consistent(store: &Store) -> bool {
+    store.verify_page(None, None, 1).unwrap().reports[0].local_consistency
+}
+
 fn peer() -> Peer {
     Peer {
         uid: unsafe { libc::geteuid() },
@@ -191,7 +196,7 @@ fn disposable_projections_rebuild_without_rebinding_owner_requests_or_effects() 
         );
         assert_eq!(fs::read(fixture.stream()).unwrap(), canonical);
         assert_eq!(fs::read(fixture.manifest()).unwrap(), manifest);
-        assert!(recovered.verify(None).unwrap()[0].local_consistency);
+        assert!(first_run_consistent(&recovered));
     }
 }
 
@@ -213,7 +218,7 @@ fn complete_unacknowledged_tail_promotes_manifest_and_replays_original_receipt()
     );
     assert_eq!(fs::read(fixture.stream()).unwrap(), complete_bytes);
     assert_eq!(fs::read(fixture.manifest()).unwrap(), promoted_manifest);
-    assert!(recovered.verify(None).unwrap()[0].local_consistency);
+    assert!(first_run_consistent(&recovered));
 }
 
 #[test]
@@ -230,7 +235,7 @@ fn valid_prefix_truncation_below_manifest_refuses_replay_and_new_preparations() 
         recovered.show(&fixture.run.run_id).unwrap().state,
         "outcome_unknown"
     );
-    assert!(!recovered.verify(None).unwrap()[0].local_consistency);
+    assert!(!first_run_consistent(&recovered));
     assert!(
         recovered
             .prepare("fresh-attempt", &payload(), &peer())
@@ -269,7 +274,7 @@ fn incomplete_tail_is_retained_and_does_not_rewrite_committed_manifest() {
     let interrupted = fs::read(fixture.stream()).unwrap();
 
     let mut recovered = Store::open(&fixture.data).unwrap();
-    assert!(!recovered.verify(None).unwrap()[0].local_consistency);
+    assert!(!first_run_consistent(&recovered));
     assert_eq!(
         recovered.show(&fixture.run.run_id).unwrap().state,
         "outcome_unknown"
@@ -306,7 +311,7 @@ fn recomputing_a_valid_local_chain_cannot_override_durable_manifest_history() {
     synced_replace(&fixture.stream(), &altered);
 
     let mut recovered = Store::open(&fixture.data).unwrap();
-    assert!(!recovered.verify(None).unwrap()[0].local_consistency);
+    assert!(!first_run_consistent(&recovered));
     assert_eq!(
         recovered.show(&fixture.run.run_id).unwrap().state,
         "outcome_unknown"
@@ -342,7 +347,7 @@ fn legacy_stream_without_manifest_migrates_without_duplicating_history() {
             & 0o777,
         0o600
     );
-    assert!(recovered.verify(None).unwrap()[0].local_consistency);
+    assert!(first_run_consistent(&recovered));
 }
 
 #[test]
@@ -413,7 +418,7 @@ fn durable_cursor_refuses_changed_checkpoint_and_replaced_canonical_inode() {
 
         let mut recovered = Store::open(&fixture.data).unwrap();
         assert!(recovered.read(&request).is_err());
-        assert!(recovered.verify(None).unwrap()[0].local_consistency);
+        assert!(first_run_consistent(&recovered));
     }
 }
 
@@ -440,7 +445,7 @@ fn poisoned_durable_snapshot_cannot_resume_with_clean_consistency_labels() {
     synced_replace(&fixture.manifest(), &altered);
 
     let mut recovered = Store::open(&fixture.data).unwrap();
-    assert!(!recovered.verify(None).unwrap()[0].local_consistency);
+    assert!(!first_run_consistent(&recovered));
     assert_eq!(
         recovered.show(&fixture.run.run_id).unwrap().state,
         "outcome_unknown"

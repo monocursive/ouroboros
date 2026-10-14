@@ -585,7 +585,10 @@ fn assert_consistent_unlaunched_report(report: &Value, run_id: &str) {
     assert_eq!(reports[0]["events"], 1);
     assert_eq!(reports[0]["problems"], json!([]));
     assert_eq!(reports[0]["child_protection"], "unprotected");
-    assert_eq!(reports[0]["coverage"], json!({"status":"unobserved"}));
+    assert_eq!(
+        reports[0]["coverage"],
+        json!({"scope":"snapshot_run","status":"unobserved","classes":{},"gap_count":0})
+    );
 }
 
 #[test]
@@ -643,7 +646,12 @@ fn preparation_replay_and_inspection_survive_writer_restart() {
     assert_eq!(doctor["component"], "ouro-ledger");
     assert_eq!(doctor["ready"], true);
     assert_eq!(doctor["writer"], "reachable");
-    assert_eq!(doctor["store"], verification);
+    assert_eq!(
+        doctor["store"],
+        json!({"scope":"writer_accepted_state","runs":1,"ambiguous_runs":0,
+            "incomplete_deletions":0,"preparation_blocked":false})
+    );
+    assert_eq!(doctor["index"]["state"], "ready");
     assert_eq!(doctor["managed_authorization"], "not_implemented");
 
     let stream = cli

@@ -796,7 +796,7 @@ impl Store {
             run_id: id.into(),
             local_consistency: checked.is_ok(),
             child_protection: stream.run.child_protection.clone(),
-            coverage: stream.run.coverage.clone(),
+            coverage: crate::reader::coverage_summary(&stream.run.coverage),
             events: 0,
             problems: checked
                 .err()

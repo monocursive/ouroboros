@@ -27,22 +27,25 @@ use uuid::Uuid;
 
 use crate::{
     protocol::{
-        AppendReceipt, CatalogPage, CatalogRequest, ClaimedOwner, DiscoveryPage, DiscoveryRequest,
-        GcPlan, GcResult, LedgerError, MAX_CONNECTIONS, MAX_FRAME_BYTES, OperatorIntent, Peer,
-        ReadPage, ReadRequest, Request, Response, Result, RunRecord, TailPage, TailRequest,
-        VerifyReport,
+        AppendReceipt, CatalogPage, CatalogRequest, ClaimedOwner, DEFAULT_VERIFY_LIMIT,
+        DiscoveryPage, DiscoveryRequest, GcPlan, GcResult, LedgerError, MAX_CONNECTIONS,
+        MAX_FRAME_BYTES, OperatorIntent, Peer, ReadPage, ReadRequest, Request, Response, Result,
+        RunRecord, StoreStatus, TailPage, TailRequest, VerifyPage, VerifyReport,
     },
     store::Store,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 const GC_TIMEOUT: Duration = Duration::from_secs(300);
+/// One verify page re-reads a bounded amount of history, but a single large
+/// run still takes longer than an ordinary request.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn response_timeout(request: &Request) -> Duration {
-    if matches!(request, Request::Gc { dry_run: false, .. }) {
-        GC_TIMEOUT
-    } else {
-        TIMEOUT
+    match request {
+        Request::Gc { dry_run: false, .. } => GC_TIMEOUT,
+        Request::Verify { .. } => VERIFY_TIMEOUT,
+        _ => TIMEOUT,
     }
 }
 
@@ -178,10 +181,25 @@ impl Client {
             request: request.clone(),
         })
     }
+    /// Fresh verification of one run, or of every run page by page.
     pub fn verify(&mut self, run_id: Option<&str>) -> Result<Vec<VerifyReport>> {
-        self.request(Request::Verify {
-            run_id: run_id.map(str::to_owned),
-        })
+        let mut reports = Vec::new();
+        let mut after = None;
+        loop {
+            let page: VerifyPage = self.request(Request::Verify {
+                run_id: run_id.map(str::to_owned),
+                after: after.take(),
+                limit: DEFAULT_VERIFY_LIMIT,
+            })?;
+            reports.extend(page.reports);
+            match page.next_after {
+                Some(next) if !page.done => after = Some(next),
+                _ => return Ok(reports),
+            }
+        }
+    }
+    pub fn status(&mut self) -> Result<StoreStatus> {
+        self.request(Request::Status)
     }
     pub fn read(&mut self, request: &ReadRequest) -> Result<ReadPage> {
         self.request(Request::Read {
@@ -488,7 +506,16 @@ fn dispatch(
         Request::Runs => Ok(serde_json::to_value(store.legacy_runs()?)?),
         Request::Catalog { request } => Ok(serde_json::to_value(store.catalog(&request)?)?),
         Request::Discover { request } => Ok(serde_json::to_value(store.discover(&request)?)?),
-        Request::Verify { run_id } => Ok(serde_json::to_value(store.verify(run_id.as_deref())?)?),
+        Request::Verify {
+            run_id,
+            after,
+            limit,
+        } => Ok(serde_json::to_value(store.verify_page(
+            run_id.as_deref(),
+            after.as_deref(),
+            limit,
+        )?)?),
+        Request::Status => Ok(serde_json::to_value(store.status())?),
         Request::Read { request } => Ok(serde_json::to_value(store.read(&request)?)?),
         Request::Ping => Ok(
             json!({"schema":"ouro.ledger.doctor/1","writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status(),"retention":{"retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.retain_days,"capture_retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.capture_retain_days}}),

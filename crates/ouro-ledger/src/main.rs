@@ -142,7 +142,8 @@ enum Action {
     Append(AppendArgs),
     /// Read bounded canonical fragments, optionally following later appends.
     Tail(TailArgs),
-    /// Verify canonical bytes, hash chains, and durable projections.
+    /// Freshly re-read canonical bytes, hash chains and durable projections,
+    /// one bounded page of runs per writer request.
     Verify {
         run_id: Option<String>,
         #[arg(long)]
@@ -175,7 +176,8 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
-    /// Check the local writer and store; does not measure jail capabilities.
+    /// Check the writer and its accepted store state without re-reading history
+    /// (use verify for that); does not measure jail capabilities.
     Doctor {
         #[arg(long)]
         json: bool,
@@ -893,11 +895,13 @@ fn execute(cli: Cli) -> Result<i32> {
                     return Ok(1);
                 }
             };
+            // The writer's accepted state only: re-hashing every stream here
+            // would stall live owners' heartbeats. `verify` is the fresh check.
             let writer = client.ping()?;
-            let reports = client.verify(None)?;
-            let ready = reports.iter().all(|r| r.local_consistency);
+            let store = client.status()?;
+            let ready = store.ready();
             output(
-                &json!({"component":"ouro-ledger","ready":ready,"writer":"reachable","store":reports,"retention":writer["retention"],"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
+                &json!({"component":"ouro-ledger","ready":ready,"writer":"reachable","store":store,"index":writer["index"],"retention":writer["retention"],"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
                 json,
             )?;
             Ok(if ready { 0 } else { 1 })

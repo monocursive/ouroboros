@@ -178,6 +178,39 @@ pub struct VerifyReport {
     pub history: Option<PrunedHistory>,
 }
 
+/// One fresh verification page. `next_after` resumes after its last run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyPage {
+    pub reports: Vec<VerifyReport>,
+    pub next_after: Option<String>,
+    pub done: bool,
+}
+
+pub const MAX_VERIFY_LIMIT: u32 = 100;
+pub const DEFAULT_VERIFY_LIMIT: u32 = 25;
+
+/// The writer's accepted in-memory state, as `doctor` reports it. It is not a
+/// fresh check of the bytes on disk; that is `verify`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StoreStatus {
+    pub scope: String,
+    pub runs: u32,
+    /// Streams whose persistence or recovery is ambiguous.
+    pub ambiguous_runs: u32,
+    /// Runs whose history or capture deletion has not finished.
+    pub incomplete_deletions: u32,
+    /// An ambiguous recovery or preparation refuses every new preparation.
+    pub preparation_blocked: bool,
+}
+
+impl StoreStatus {
+    pub fn ready(&self) -> bool {
+        self.ambiguous_runs == 0 && self.incomplete_deletions == 0 && !self.preparation_blocked
+    }
+}
+
 pub const MAX_READ_LIMIT: u32 = 1000;
 pub const READ_SCAN_BYTES: usize = 131_072;
 pub const READ_SCAN_FRAMES: usize = 32;
@@ -358,6 +391,10 @@ pub struct TailPage {
     pub scanned_through_seq: u64,
 }
 
+fn default_verify_limit() -> u32 {
+    DEFAULT_VERIFY_LIMIT
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
@@ -402,7 +439,12 @@ pub enum Request {
     },
     Verify {
         run_id: Option<String>,
+        #[serde(default)]
+        after: Option<String>,
+        #[serde(default = "default_verify_limit")]
+        limit: u32,
     },
+    Status,
     Read {
         request: ReadRequest,
     },
