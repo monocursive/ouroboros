@@ -341,28 +341,17 @@ fn read_launch_profile(
 /// none.
 ///
 /// # Errors
-/// The read's and the parser's refusals, and [`ErrorCode::InvalidConfig`] at
-/// `jail.extends`, which belongs in a profile file.
+/// The read's and the parser's refusals.
 fn read_operator_config(
     config_dir: &Path,
     epoch: &state::UncontainedEpoch,
 ) -> Result<config::OperatorConfig, JailError> {
     let config_path = config_dir.join("config.toml");
     refuse_stale_trusted_file(&config_path, epoch, "config")?;
-    let operator = match read_operator_file(&config_path, "config")? {
-        Some(text) => config::parse_operator_config(&text)?,
-        None => config::OperatorConfig::default(),
-    };
-    if let Some(jail) = &operator.jail {
-        config::check_schema("jail.schema", jail.schema.as_deref())?;
-        if jail.extends.is_some() {
-            return Err(usage(
-                "jail.extends",
-                "`extends` belongs in a profile file, not in config.toml",
-            ));
-        }
+    match read_operator_file(&config_path, "config")? {
+        Some(text) => config::parse_operator_config(&text),
+        None => Ok(config::OperatorConfig::default()),
     }
-    Ok(operator)
 }
 
 /// The profile selection, by precedence: `--profile`, then the operator's
