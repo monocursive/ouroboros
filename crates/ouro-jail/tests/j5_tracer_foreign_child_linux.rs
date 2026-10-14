@@ -58,12 +58,13 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The tracer is x86_64's (J5-D refuses elsewhere); these checks need it.
+/// The ptrace observer knows the x86_64 and aarch64 closed sets and refuses
+/// elsewhere; these checks need it.
 fn tracer_live() -> bool {
     if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
         return true;
     }
-    harness::skip_or_fail("the ptrace observer implements the x86_64 closed set only");
+    harness::skip_or_fail("the ptrace observer implements the x86_64 and aarch64 closed sets only");
     false
 }
 
