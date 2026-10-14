@@ -11,6 +11,11 @@ use crate::state::{
     anchored::{Dir, Name},
 };
 
+/// An I/O error, naming the file it concerns.
+fn at(path: &Path) -> impl Fn(io::Error) -> String + '_ {
+    move |error| format!("{}: {error}", path.display())
+}
+
 pub fn attempt_path(data: &Path, selected: Option<&str>) -> Result<PathBuf, String> {
     let base = data.join("attempts");
     let id = if let Some(id) = selected {
@@ -20,19 +25,18 @@ pub fn attempt_path(data: &Path, selected: Option<&str>) -> Result<PathBuf, Stri
             .to_owned()
     } else {
         let mut entries = Vec::new();
-        for entry in std::fs::read_dir(&base).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
+        for entry in std::fs::read_dir(&base).map_err(at(&base))? {
+            let entry = entry.map_err(at(&base))?;
+            let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            if AttemptId::parse(&name).is_err()
-                || !entry.file_type().map_err(|e| e.to_string())?.is_dir()
-            {
+            if AttemptId::parse(&name).is_err() || !entry.file_type().map_err(at(&path))?.is_dir() {
                 continue;
             }
             entries.push((
                 entry
                     .metadata()
                     .and_then(|m| m.modified())
-                    .map_err(|e| e.to_string())?,
+                    .map_err(at(&path))?,
                 name,
             ));
         }
@@ -74,16 +78,18 @@ pub fn tail(
     {
         return Err("--since must be a UTC timestamp YYYY-MM-DDTHH:MM:SSZ".into());
     }
-    let file = open(attempt, "trace.ndjson").map_err(|e| e.to_string())?;
-    let lock = open(attempt, "jail.lock").map_err(|e| e.to_string())?;
+    let trace = attempt.join("trace.ndjson");
+    let lock_path = attempt.join("jail.lock");
+    let file = open(attempt, "trace.ndjson").map_err(at(&trace))?;
+    let lock = open(attempt, "jail.lock").map_err(at(&lock_path))?;
     let mut reader = BufReader::new(file);
     let mut pending = Vec::new();
     let mut drained_after_close = false;
+    let written = |error: io::Error| format!("the output: {error}");
     loop {
-        let bytes = reader.fill_buf().map_err(|e| e.to_string())?;
+        let bytes = reader.fill_buf().map_err(at(&trace))?;
         if bytes.is_empty() {
-            let ended = !follow
-                || unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0;
+            let ended = !follow || released(&lock).map_err(at(&lock_path))?;
             if ended && drained_after_close {
                 if !pending.is_empty() {
                     return Err("incomplete final journal frame".into());
@@ -109,14 +115,14 @@ pub fn tail(
         if !pending.ends_with(b"\n") {
             continue;
         }
-        let event: serde_json::Value =
-            serde_json::from_slice(&pending).map_err(|e| e.to_string())?;
+        let event: serde_json::Value = serde_json::from_slice(&pending)
+            .map_err(|error| format!("{}: {error}", trace.display()))?;
         let at = event["observed_at"].as_str().unwrap_or("");
         // Compare against the whole-second prefix: a recorded fractional
         // timestamp within that second sorts before its trailing Z.
         if since.is_none_or(|start| at >= &start[..19]) {
             if json {
-                output.write_all(&pending).map_err(|e| e.to_string())?;
+                output.write_all(&pending).map_err(written)?;
             } else {
                 let line = format!(
                     "{} {} {} {}",
@@ -125,12 +131,28 @@ pub fn tail(
                     event["operation"].as_str().unwrap_or("?"),
                     event["fields"]
                 );
-                writeln!(output, "{}", crate::records::escape_control(&line))
-                    .map_err(|e| e.to_string())?;
+                writeln!(output, "{}", crate::records::escape_control(&line)).map_err(written)?;
             }
-            output.flush().map_err(|e| e.to_string())?;
+            output.flush().map_err(written)?;
         }
         pending.clear();
+    }
+}
+
+/// Whether the supervisor has let go of its attempt lease: a shared lock on
+/// `jail.lock` is granted only once no supervisor holds it exclusively. Any
+/// error but "held" is reported: read as "still live", it would keep
+/// `--follow` polling forever.
+fn released(lock: &File) -> io::Result<bool> {
+    // SAFETY: `flock` takes a descriptor `lock` keeps open for the call and
+    // an operation flag; it reads and writes no memory of this process.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EWOULDBLOCK | libc::EINTR) => Ok(false),
+        _ => Err(error),
     }
 }
 
@@ -170,19 +192,21 @@ fn valid_timestamp(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn since_includes_fractional_events_in_the_start_second() {
+    /// An attempt directory with a free `jail.lock` and this trace.
+    fn attempt_with(trace: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let attempt = dir.path().join("attempt");
         std::fs::create_dir(&attempt).unwrap();
         std::fs::write(attempt.join("jail.lock"), b"").unwrap();
+        std::fs::write(attempt.join("trace.ndjson"), trace).unwrap();
+        (dir, attempt)
+    }
+
+    #[test]
+    fn since_includes_fractional_events_in_the_start_second() {
         let before = b"{\"observed_at\":\"2026-09-28T12:00:00.999Z\"}\n";
         let included = b"{\"observed_at\":\"2026-09-28T12:00:01.001Z\"}\n";
-        std::fs::write(
-            attempt.join("trace.ndjson"),
-            [before.as_slice(), included.as_slice()].concat(),
-        )
-        .unwrap();
+        let (_dir, attempt) = attempt_with(&[before.as_slice(), included.as_slice()].concat());
         let mut output = Vec::new();
         super::tail(
             &attempt,
@@ -216,16 +240,9 @@ mod tests {
     /// printed as evidence; the tail refuses.
     #[test]
     fn a_torn_final_frame_is_refused_not_printed() {
-        let dir = tempfile::tempdir().unwrap();
-        let attempt = dir.path().join("attempt");
-        std::fs::create_dir(&attempt).unwrap();
-        std::fs::write(attempt.join("jail.lock"), b"").unwrap();
         let whole = b"{\"observed_at\":\"2026-09-28T12:00:00Z\"}\n";
-        std::fs::write(
-            attempt.join("trace.ndjson"),
-            [whole.as_slice(), &b"{\"observed_at\":\"2026-"[..]].concat(),
-        )
-        .unwrap();
+        let (_dir, attempt) =
+            attempt_with(&[whole.as_slice(), &b"{\"observed_at\":\"2026-"[..]].concat());
         let mut output = Vec::new();
         let error = super::tail(&attempt, false, true, None, &mut output)
             .expect_err("a torn final frame must refuse");
@@ -238,19 +255,51 @@ mod tests {
     /// and valid JSON — a bounded reader never prints an unbounded frame.
     #[test]
     fn an_oversized_frame_is_refused_even_when_complete() {
-        let dir = tempfile::tempdir().unwrap();
-        let attempt = dir.path().join("attempt");
-        std::fs::create_dir(&attempt).unwrap();
-        std::fs::write(attempt.join("jail.lock"), b"").unwrap();
         let mut frame = b"{\"observed_at\":\"2026-09-28T12:00:00Z\",\"pad\":\"".to_vec();
         frame.resize(1024 * 1024 + 512, b'x');
         frame.extend(b"\"}\n");
-        std::fs::write(attempt.join("trace.ndjson"), &frame).unwrap();
+        let (_dir, attempt) = attempt_with(&frame);
         let mut output = Vec::new();
         let error = super::tail(&attempt, false, true, None, &mut output)
             .expect_err("a frame over 1 MiB must refuse");
         assert!(error.contains("1 MiB"), "{error}");
         assert!(output.is_empty());
+    }
+
+    /// A frame that is not JSON is refused with the file it came from.
+    #[test]
+    fn a_frame_that_is_not_json_names_the_trace() {
+        let (_dir, attempt) = attempt_with(b"not json\n");
+        let error =
+            super::tail(&attempt, false, true, None, &mut Vec::new()).expect_err("not JSON");
+        assert!(error.contains("trace.ndjson"), "{error}");
+        let error = super::tail(&attempt.join("absent"), false, true, None, &mut Vec::new())
+            .expect_err("no attempt");
+        assert!(
+            error.contains("absent"),
+            "the error names the file: {error}"
+        );
+    }
+
+    /// `--follow` ends once the supervisor's exclusive lease is gone, and
+    /// not before.
+    #[test]
+    fn the_lease_is_released_only_when_no_supervisor_holds_it() {
+        let (_dir, attempt) = attempt_with(b"");
+        let path = attempt.join("jail.lock");
+        // The lease is private state (§6.2): 0600, as the supervisor makes it.
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let lease = crate::state::Lease::acquire(&path)
+            .unwrap()
+            .expect("the lease is free");
+        let lock = std::fs::File::open(&path).unwrap();
+        assert!(!super::released(&lock).unwrap(), "a held lease is live");
+        drop(lease);
+        assert!(
+            super::released(&lock).unwrap(),
+            "a dropped lease is released"
+        );
     }
 
     /// J4: a `--attempt` value is an attempt id, never a path: `../x` must
