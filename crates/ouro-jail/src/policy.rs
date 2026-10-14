@@ -1366,7 +1366,7 @@ pub fn resolve(inputs: &ResolveInputs) -> Result<Resolved, JailError> {
         scratch: scratch_host,
     };
 
-    let mut authority = Authority {
+    let authority = Authority {
         read_write: inputs.baseline.read_write.clone(),
         read_only: inputs.baseline.read_only.clone(),
         deny_read: inputs.baseline.deny_read.clone(),
@@ -1377,23 +1377,23 @@ pub fn resolve(inputs: &ResolveInputs) -> Result<Resolved, JailError> {
         limits: inputs.baseline.limits.clone(),
         observation: inputs.baseline.observation,
     };
-    let mut provenance = vec![ProvenanceEntry {
-        origin: format!("builtin-profile:{}", inputs.base_profile.as_str()),
-        key: "profile".to_owned(),
-        detail: None,
-    }];
-    let mut grants: Vec<crate::records::Grant> = Vec::new();
-
+    let mut resolution = Resolution {
+        authority,
+        provenance: vec![ProvenanceEntry {
+            origin: format!("builtin-profile:{}", inputs.base_profile.as_str()),
+            key: "profile".to_owned(),
+            detail: None,
+        }],
+        grants: Vec::new(),
+    };
     for layer in &inputs.layers {
-        apply_layer(
-            inputs,
-            &tokenizer,
-            &mut authority,
-            &mut provenance,
-            &mut grants,
-            layer,
-        )?;
+        LayerStep::new(inputs, &tokenizer, layer, &resolution.authority).apply(&mut resolution)?;
     }
+    let Resolution {
+        authority,
+        provenance,
+        grants,
+    } = resolution;
 
     let snapshot = build_snapshot(inputs, &authority, workspace, scratch)?;
     let digest = snapshot.digest()?;
@@ -1409,325 +1409,431 @@ pub fn resolve(inputs: &ResolveInputs) -> Result<Resolved, JailError> {
     })
 }
 
-fn apply_layer(
-    inputs: &ResolveInputs,
-    tokenizer: &Tokenizer,
-    authority: &mut Authority,
-    provenance: &mut Vec<ProvenanceEntry>,
-    grants: &mut Vec<crate::records::Grant>,
-    layer: &Layer,
-) -> Result<(), JailError> {
-    let prefix = layer.origin.key_prefix();
-    let narrowing = layer.origin.narrows();
+/// What resolution has accumulated so far: the authority, the provenance of
+/// every input that set part of it, and the explicit operator grants.
+struct Resolution {
+    authority: Authority,
+    provenance: Vec<ProvenanceEntry>,
+    grants: Vec<crate::records::Grant>,
+}
 
-    // Narrowing decisions compare against the authority as it was before this
-    // layer, so one layer cannot bootstrap itself into wider authority.
-    let base = authority.clone();
-    let expand = |raw: &[u8], key: &str| {
-        if layer.origin.expands_home() {
-            path::expand_home(raw, inputs.operator_home.as_deref())
+impl Resolution {
+    /// Records that `layer` set `key`.
+    fn set_by(&mut self, layer: &Layer, key: String, detail: Option<String>) {
+        self.provenance.push(ProvenanceEntry {
+            origin: layer.origin.label(),
+            key,
+            detail,
+        });
+    }
+
+    /// Records an explicit operator grant (§13.2: the receipt's grants).
+    fn grant(&mut self, kind: &str, value: NativeString) {
+        self.grants.push(crate::records::Grant {
+            kind: kind.to_owned(),
+            value,
+            by: "operator".to_owned(),
+        });
+    }
+}
+
+/// A filesystem list a layer adds entries to (§6.3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FilesystemList {
+    ReadWrite,
+    ReadOnly,
+    DenyRead,
+}
+
+impl FilesystemList {
+    /// In the order a layer's lists are applied.
+    const ALL: [FilesystemList; 3] = [
+        FilesystemList::ReadWrite,
+        FilesystemList::ReadOnly,
+        FilesystemList::DenyRead,
+    ];
+
+    /// The key under `filesystem.`, and a receipt grant's `kind`.
+    fn as_str(self) -> &'static str {
+        match self {
+            FilesystemList::ReadWrite => "read_write",
+            FilesystemList::ReadOnly => "read_only",
+            FilesystemList::DenyRead => "deny_read",
+        }
+    }
+
+    /// Whether an entry adds authority. A denial only removes it.
+    fn grants(self) -> bool {
+        self != FilesystemList::DenyRead
+    }
+
+    /// Whether the access the base has at a path already covers an entry of
+    /// this list, so a narrowing layer may add it.
+    fn within(self, base: AccessMode) -> bool {
+        match self {
+            FilesystemList::ReadWrite => base == AccessMode::ReadWrite,
+            FilesystemList::ReadOnly => {
+                matches!(base, AccessMode::ReadWrite | AccessMode::ReadOnly)
+            }
+            FilesystemList::DenyRead => true,
+        }
+    }
+
+    /// This list's raw entries in `delta`.
+    fn entries(self, delta: &PolicyDelta) -> &[Vec<u8>] {
+        match self {
+            FilesystemList::ReadWrite => &delta.read_write,
+            FilesystemList::ReadOnly => &delta.read_only,
+            FilesystemList::DenyRead => &delta.deny_read,
+        }
+    }
+
+    /// This list in `authority`.
+    fn of(self, authority: &mut Authority) -> &mut Vec<PathRef> {
+        match self {
+            FilesystemList::ReadWrite => &mut authority.read_write,
+            FilesystemList::ReadOnly => &mut authority.read_only,
+            FilesystemList::DenyRead => &mut authority.deny_read,
+        }
+    }
+}
+
+/// One layer being applied (§6.2, §6.3), one named step per field group.
+struct LayerStep<'a> {
+    inputs: &'a ResolveInputs,
+    tokenizer: &'a Tokenizer,
+    layer: &'a Layer,
+    /// The key-path prefix of this layer's file.
+    prefix: &'static str,
+    /// Whether this layer may only narrow.
+    narrowing: bool,
+    /// The authority before this layer. Narrowing decisions compare against
+    /// it, so one layer cannot bootstrap itself into wider authority.
+    base: Authority,
+}
+
+impl<'a> LayerStep<'a> {
+    fn new(
+        inputs: &'a ResolveInputs,
+        tokenizer: &'a Tokenizer,
+        layer: &'a Layer,
+        base: &Authority,
+    ) -> Self {
+        LayerStep {
+            inputs,
+            tokenizer,
+            layer,
+            prefix: layer.origin.key_prefix(),
+            narrowing: layer.origin.narrows(),
+            base: base.clone(),
+        }
+    }
+
+    fn apply(&self, resolution: &mut Resolution) -> Result<(), JailError> {
+        for list in FilesystemList::ALL {
+            for raw in list.entries(&self.layer.delta) {
+                self.filesystem_entry(list, raw, resolution)?;
+            }
+        }
+        self.protected_coverage(resolution)?;
+        self.network_mode(resolution)?;
+        self.network_allow(resolution)?;
+        self.limits(resolution)?;
+        self.observation(resolution)
+    }
+
+    /// `raw` with a leading `~/` expanded, for a layer whose paths may use it.
+    fn expand(&self, raw: &[u8], key: &str) -> Result<Vec<u8>, JailError> {
+        if self.layer.origin.expands_home() {
+            path::expand_home(raw, self.inputs.operator_home.as_deref())
                 .map_err(|refusal| path_refusal(refusal, key))
         } else {
             Ok(raw.to_vec())
         }
-    };
+    }
 
-    for (kind, entries) in [
-        ("read_write", &layer.delta.read_write),
-        ("read_only", &layer.delta.read_only),
-        ("deny_read", &layer.delta.deny_read),
-    ] {
-        let key = format!("{prefix}filesystem.{kind}");
-        let grant = kind != "deny_read";
-        for raw in entries {
-            let absolute = normalize_path(layer.base_dir.as_deref(), &expand(raw, &key)?, &key)?;
-            if kind == "deny_read" && masks_boundary_plumbing(&absolute) {
-                // Audit 2026-09-25-2, S3: a denial is always admitted as
-                // narrowing — except one whose mask would cover the
-                // boundary's own plumbing. `/run`, `/run/ouro` and beneath
-                // hold the jail binary, the proxy socket directory and the
-                // staged state of the *next* run in this workspace, and the
-                // mask renders after every staged mount, so it would remove
-                // them rather than narrow the child. Refused for every
-                // layer, trusted or not.
+    /// One entry of a filesystem list.
+    fn filesystem_entry(
+        &self,
+        list: FilesystemList,
+        raw: &[u8],
+        resolution: &mut Resolution,
+    ) -> Result<(), JailError> {
+        let layer = self.layer;
+        let kind = list.as_str();
+        let key = format!("{}filesystem.{kind}", self.prefix);
+        let absolute = normalize_path(layer.base_dir.as_deref(), &self.expand(raw, &key)?, &key)?;
+        if list == FilesystemList::DenyRead && masks_boundary_plumbing(&absolute) {
+            // Audit 2026-09-25-2, S3: a denial is always admitted as
+            // narrowing — except one whose mask would cover the boundary's
+            // own plumbing. `/run`, `/run/ouro` and beneath hold the jail
+            // binary, the proxy socket directory and the staged state of the
+            // *next* run in this workspace, and the mask renders after every
+            // staged mount, so it would remove them rather than narrow the
+            // child. Refused for every layer, trusted or not.
+            return Err(refuse(
+                ErrorCode::InvalidConfig,
+                &key,
+                format!(
+                    "denies `{}` at {}, which would mask the boundary's own \
+                     plumbing under /run/ouro rather than narrow the child",
+                    String::from_utf8_lossy(&absolute),
+                    layer.origin.label()
+                ),
+            ));
+        }
+        let reference = self.tokenizer.tokenize(&absolute, &key)?;
+        // A grant written by the contained party is compared by filesystem
+        // identity. A denial is not, and the asymmetry is the point: a denial
+        // can only remove authority, so naming a symlink or a path that does
+        // not exist costs nothing. A grant naming an absent path is
+        // different, because there is nothing to pin: between this resolution
+        // and the backend's bind the child can create that path as a symlink,
+        // and §9.1 forbids following an untrusted symlink between policy
+        // validation and grant construction. So an absent grant target
+        // refuses as an unknown subset.
+        if layer.origin.is_untrusted() && list.grants() {
+            let chain = untrusted_identities(&absolute, &key, &layer.origin.label())?;
+            if let Some(denied) = denied_identity(self.tokenizer, &self.base, &chain) {
                 return Err(refuse(
-                    ErrorCode::InvalidConfig,
+                    ErrorCode::PolicyWidening,
                     &key,
                     format!(
-                        "denies `{}` at {}, which would mask the boundary's own \
-                         plumbing under /run/ouro rather than narrow the child",
-                        String::from_utf8_lossy(&absolute),
-                        layer.origin.label()
+                        "{} adds `{kind}` authority for an object that is {} the denied \
+                         {}, whatever its spelling",
+                        layer.origin.label(),
+                        if chain.last() == Some(&denied.1) {
+                            "exactly"
+                        } else {
+                            "beneath"
+                        },
+                        denied.0.to_display()
                     ),
                 ));
             }
-            let reference = tokenizer.tokenize(&absolute, &key)?;
-            // A grant written by the contained party is compared by filesystem
-            // identity. A denial is not, and the asymmetry is the point: a
-            // denial can only remove authority, so naming a symlink or a path
-            // that does not exist costs nothing. A grant naming an absent path
-            // is different, because there is nothing to pin: between this
-            // resolution and the backend's bind the child can create that path
-            // as a symlink, and §9.1 forbids following an untrusted symlink
-            // between policy validation and grant construction. So an absent
-            // grant target refuses as an unknown subset.
-            if layer.origin.is_untrusted() && grant {
-                let chain = untrusted_identities(&absolute, &key, &layer.origin.label())?;
-                if let Some(denied) = denied_identity(tokenizer, &base, &chain) {
-                    return Err(refuse(
-                        ErrorCode::PolicyWidening,
-                        &key,
-                        format!(
-                            "{} adds `{kind}` authority for an object that is {} the denied \
-                             {}, whatever its spelling",
-                            layer.origin.label(),
-                            if chain.last() == Some(&denied.1) {
-                                "exactly"
-                            } else {
-                                "beneath"
-                            },
-                            denied.0.to_display()
-                        ),
-                    ));
-                }
-            }
-            if narrowing {
-                let mode = base.mode_at(&reference);
-                let allowed = match kind {
-                    "read_write" => mode == AccessMode::ReadWrite,
-                    "read_only" => {
-                        matches!(mode, AccessMode::ReadWrite | AccessMode::ReadOnly)
-                    }
-                    _ => true,
-                };
-                if !allowed {
-                    return Err(refuse(
-                        ErrorCode::PolicyWidening,
-                        &key,
-                        format!(
-                            "{} adds `{kind}` authority for {} that the base does not grant",
-                            layer.origin.label(),
-                            reference.to_display()
-                        ),
-                    ));
-                }
-            }
-            if layer.origin.is_operator_grant() {
-                grants.push(crate::records::Grant {
-                    kind: kind.to_owned(),
-                    value: native(absolute.clone(), &key)?,
-                    by: "operator".to_owned(),
-                });
-            }
-            match kind {
-                "read_write" => authority.read_write.push(reference),
-                "read_only" => authority.read_only.push(reference),
-                _ => authority.deny_read.push(reference),
-            }
-            provenance.push(ProvenanceEntry {
-                origin: layer.origin.label(),
-                key: key.clone(),
-                detail: None,
-            });
         }
+        if self.narrowing && !list.within(self.base.mode_at(&reference)) {
+            return Err(refuse(
+                ErrorCode::PolicyWidening,
+                &key,
+                format!(
+                    "{} adds `{kind}` authority for {} that the base does not grant",
+                    layer.origin.label(),
+                    reference.to_display()
+                ),
+            ));
+        }
+        if layer.origin.is_operator_grant() {
+            resolution.grant(kind, native(absolute, &key)?);
+        }
+        list.of(&mut resolution.authority).push(reference);
+        resolution.set_by(layer, key, None);
+        Ok(())
     }
 
-    if let Some(coverage) = layer.delta.protected_coverage {
-        let key = format!("{prefix}filesystem.protected_coverage");
-        if narrowing && coverage < base.protected_coverage {
+    /// `filesystem.protected_coverage`: a narrowing layer may not weaken it.
+    fn protected_coverage(&self, resolution: &mut Resolution) -> Result<(), JailError> {
+        let Some(coverage) = self.layer.delta.protected_coverage else {
+            return Ok(());
+        };
+        let key = format!("{}filesystem.protected_coverage", self.prefix);
+        if self.narrowing && coverage < self.base.protected_coverage {
             return Err(refuse(
                 ErrorCode::PolicyWidening,
                 &key,
                 format!(
                     "{} weakens protected coverage from `{}` to `{}`",
-                    layer.origin.label(),
-                    base.protected_coverage.as_str(),
+                    self.layer.origin.label(),
+                    self.base.protected_coverage.as_str(),
                     coverage.as_str()
                 ),
             ));
         }
-        authority.protected_coverage = coverage;
-        provenance.push(ProvenanceEntry {
-            origin: layer.origin.label(),
-            key,
-            detail: Some(coverage.as_str().to_owned()),
-        });
+        resolution.authority.protected_coverage = coverage;
+        resolution.set_by(self.layer, key, Some(coverage.as_str().to_owned()));
+        Ok(())
     }
 
-    if let Some(mode) = layer.delta.network_mode {
-        let key = format!("{prefix}network.mode");
-        if narrowing && mode.authority_rank() > base.network_mode.authority_rank() {
+    /// `network.mode`: a narrowing layer may only lower it, and no layer
+    /// may ask for a mode the profile never applies.
+    fn network_mode(&self, resolution: &mut Resolution) -> Result<(), JailError> {
+        let Some(mode) = self.layer.delta.network_mode else {
+            return Ok(());
+        };
+        let key = format!("{}network.mode", self.prefix);
+        if self.narrowing && mode.authority_rank() > self.base.network_mode.authority_rank() {
             return Err(refuse(
                 ErrorCode::PolicyWidening,
                 &key,
                 format!(
                     "{} widens the network from `{}` to `{}`",
-                    layer.origin.label(),
-                    base.network_mode.as_str(),
+                    self.layer.origin.label(),
+                    self.base.network_mode.as_str(),
                     mode.as_str()
                 ),
             ));
         }
-        if let Some(reason) = unapplied_network_mode(inputs.base_profile, mode) {
+        if let Some(reason) = unapplied_network_mode(self.inputs.base_profile, mode) {
             return Err(refuse(ErrorCode::InvalidConfig, &key, reason));
         }
-        authority.network_mode = mode;
-        provenance.push(ProvenanceEntry {
-            origin: layer.origin.label(),
-            key,
-            detail: Some(mode.as_str().to_owned()),
-        });
+        resolution.authority.network_mode = mode;
+        resolution.set_by(self.layer, key, Some(mode.as_str().to_owned()));
+        Ok(())
     }
 
-    if narrowing && (layer.delta.network_allow_present || !layer.delta.network_allow.is_empty()) {
-        authority.network_allow.clear();
+    /// `network.allow`: a narrowing layer replaces the set with a subset of
+    /// the base's; only `agent` in proxy mode takes host grants at all.
+    fn network_allow(&self, resolution: &mut Resolution) -> Result<(), JailError> {
+        let delta = &self.layer.delta;
+        if self.narrowing && (delta.network_allow_present || !delta.network_allow.is_empty()) {
+            resolution.authority.network_allow.clear();
+        }
+        for raw in &delta.network_allow {
+            let key = format!("{}network.allow", self.prefix);
+            // §6.1: `tool` and `build` reject proxy grants, whatever mode a
+            // layer writes: only `agent` starts a proxy, so a host rule
+            // anywhere else would be recorded as a grant that never applied.
+            if self.inputs.base_profile != ProfileName::Agent {
+                return Err(refuse(
+                    ErrorCode::InvalidConfig,
+                    &key,
+                    format!(
+                        "the `{}` profile rejects proxy grants (jail-v1 §6.1); only `agent` \
+                         has a proxy",
+                        self.inputs.base_profile.as_str()
+                    ),
+                ));
+            }
+            // Within `agent`, the mode this layer leaves, its own
+            // `network.mode` included: a file that switches to `none` and
+            // lists hosts asks for grants nothing would apply.
+            if resolution.authority.network_mode != NetworkMode::Proxy {
+                return Err(refuse(
+                    ErrorCode::InvalidConfig,
+                    &key,
+                    format!(
+                        "network mode is `{}`, which accepts no host grants",
+                        resolution.authority.network_mode.as_str()
+                    ),
+                ));
+            }
+            let rule = HostRule::parse(raw).map_err(|error| {
+                if self.narrowing {
+                    // The subset relationship is unknown, which §6.3 refuses.
+                    refuse(
+                        ErrorCode::PolicyWidening,
+                        &key,
+                        format!("unknown subset: {error}"),
+                    )
+                } else {
+                    refuse(ErrorCode::InvalidConfig, &key, error.to_string())
+                }
+            })?;
+            if self.layer.origin.is_operator_grant() {
+                resolution.grant("allow_host", NativeString::Text(rule.canonical()));
+            }
+            if self.narrowing
+                && !self
+                    .base
+                    .network_allow
+                    .iter()
+                    .any(|base| base.covers(&rule))
+            {
+                return Err(refuse(
+                    ErrorCode::PolicyWidening,
+                    &key,
+                    format!(
+                        "{} adds the host grant `{}`{}, which no base rule covers",
+                        self.layer.origin.label(),
+                        rule.canonical(),
+                        if rule.explicit_port {
+                            " with an explicit port (which admits plaintext HTTP)"
+                        } else {
+                            ""
+                        }
+                    ),
+                ));
+            }
+            resolution.authority.network_allow.push(rule);
+            resolution.set_by(self.layer, key, None);
+        }
+        Ok(())
     }
-    for raw in &layer.delta.network_allow {
-        let key = format!("{prefix}network.allow");
-        // §6.1: `tool` and `build` reject proxy grants, whatever mode a layer
-        // writes: only `agent` starts a proxy, so a host rule anywhere else
-        // would be recorded as a grant that never applied.
-        if inputs.base_profile != ProfileName::Agent {
-            return Err(refuse(
-                ErrorCode::InvalidConfig,
-                &key,
-                format!(
-                    "the `{}` profile rejects proxy grants (jail-v1 §6.1); only `agent` has a \
-                     proxy",
-                    inputs.base_profile.as_str()
-                ),
-            ));
-        }
-        // Within `agent`, the mode this layer leaves, its own `network.mode`
-        // included: a file that switches to `none` and lists hosts asks for
-        // grants nothing would apply.
-        if authority.network_mode != NetworkMode::Proxy {
-            return Err(refuse(
-                ErrorCode::InvalidConfig,
-                &key,
-                format!(
-                    "network mode is `{}`, which accepts no host grants",
-                    authority.network_mode.as_str()
-                ),
-            ));
-        }
-        let rule = HostRule::parse(raw).map_err(|error| {
-            let code = if narrowing {
-                // The subset relationship is unknown, which §6.3 refuses.
-                ErrorCode::PolicyWidening
-            } else {
-                ErrorCode::InvalidConfig
+
+    /// `limits.*`: only a layer that may raise ceilings raises one.
+    fn limits(&self, resolution: &mut Resolution) -> Result<(), JailError> {
+        for key in LimitKey::ALL {
+            let Some(ceiling) = self.layer.delta.limits.get(key).clone() else {
+                continue;
             };
-            let prefix = if narrowing { "unknown subset: " } else { "" };
-            refuse(code, &key, format!("{prefix}{error}"))
-        })?;
-        if layer.origin.is_operator_grant() {
-            grants.push(crate::records::Grant {
-                kind: "allow_host".to_owned(),
-                value: NativeString::Text(rule.canonical()),
-                by: "operator".to_owned(),
-            });
+            let key_path = format!("{}limits.{}", self.prefix, key.as_str());
+            // Issue draft 07: a resource ceiling limits the contained party,
+            // so an operator-owned layer may raise it exactly like the same
+            // operator's `--limit` flag. Only the untrusted project file (and
+            // layers that may not grant at all) keep the §6.3 refusal.
+            if !self.layer.origin.may_raise_ceilings()
+                && let Some(existing) = self.base.limits.get(key)
+                && ceiling.value > existing.value
+            {
+                return Err(refuse(
+                    ErrorCode::PolicyWidening,
+                    &key_path,
+                    format!(
+                        "{} raises the `{}` ceiling from {} to {} (pass --limit {}= on the \
+                         command line, which an operator may always do)",
+                        self.layer.origin.label(),
+                        key.as_str(),
+                        existing.value,
+                        ceiling.value,
+                        key.as_str()
+                    ),
+                ));
+            }
+            resolution.authority.limits.set(key, Some(ceiling.clone()));
+            resolution.set_by(self.layer, key_path, Some(ceiling.requested));
         }
-        if narrowing && !base.network_allow.iter().any(|base| base.covers(&rule)) {
-            return Err(refuse(
-                ErrorCode::PolicyWidening,
-                &key,
-                format!(
-                    "{} adds the host grant `{}`{}, which no base rule covers",
-                    layer.origin.label(),
-                    rule.canonical(),
-                    if rule.explicit_port {
-                        " with an explicit port (which admits plaintext HTTP)"
-                    } else {
-                        ""
-                    }
-                ),
-            ));
-        }
-        authority.network_allow.push(rule);
-        provenance.push(ProvenanceEntry {
-            origin: layer.origin.label(),
-            key,
-            detail: None,
-        });
+        Ok(())
     }
 
-    for key in LimitKey::ALL {
-        let Some(ceiling) = layer.delta.limits.get(key).clone() else {
-            continue;
-        };
-        let key_path = format!("{prefix}limits.{}", key.as_str());
-        // Issue draft 07: a resource ceiling limits the contained party, so
-        // an operator-owned layer may raise it exactly like the same
-        // operator's `--limit` flag. Only the untrusted project file (and
-        // layers that may not grant at all) keep the §6.3 refusal.
-        if !layer.origin.may_raise_ceilings()
-            && let Some(existing) = base.limits.get(key)
-            && ceiling.value > existing.value
-        {
-            return Err(refuse(
-                ErrorCode::PolicyWidening,
-                &key_path,
-                format!(
-                    "{} raises the `{}` ceiling from {} to {} (pass --limit {}= on the \
-                     command line, which an operator may always do)",
-                    layer.origin.label(),
-                    key.as_str(),
-                    existing.value,
-                    ceiling.value,
-                    key.as_str()
-                ),
-            ));
+    /// `observation.mode` and `observation.evidence`: a narrowing layer may
+    /// neither turn observation off nor weaken evidence.
+    fn observation(&self, resolution: &mut Resolution) -> Result<(), JailError> {
+        let label = || self.layer.origin.label();
+        if let Some(mode) = self.layer.delta.observe {
+            let key = format!("{}observation.mode", self.prefix);
+            if self.narrowing
+                && mode == ObserveMode::Off
+                && self.base.observation.mode == ObserveMode::On
+            {
+                return Err(refuse(
+                    ErrorCode::PolicyWidening,
+                    &key,
+                    format!("{} disables observation", label()),
+                ));
+            }
+            resolution.authority.observation.mode = mode;
+            resolution.set_by(self.layer, key, None);
         }
-        authority.limits.set(key, Some(ceiling.clone()));
-        provenance.push(ProvenanceEntry {
-            origin: layer.origin.label(),
-            key: key_path,
-            detail: Some(ceiling.requested),
-        });
-    }
-
-    if let Some(mode) = layer.delta.observe {
-        let key = format!("{prefix}observation.mode");
-        if narrowing && mode == ObserveMode::Off && base.observation.mode == ObserveMode::On {
-            return Err(refuse(
-                ErrorCode::PolicyWidening,
-                &key,
-                format!("{} disables observation", layer.origin.label()),
-            ));
+        if let Some(evidence) = self.layer.delta.evidence {
+            let key = format!("{}observation.evidence", self.prefix);
+            if self.narrowing
+                && evidence == EvidenceMode::BestEffort
+                && self.base.observation.evidence == EvidenceMode::Strict
+            {
+                return Err(refuse(
+                    ErrorCode::PolicyWidening,
+                    &key,
+                    format!(
+                        "{} weakens evidence from `strict` to `best-effort`",
+                        label()
+                    ),
+                ));
+            }
+            resolution.authority.observation.evidence = evidence;
+            resolution.set_by(self.layer, key, None);
         }
-        authority.observation.mode = mode;
-        provenance.push(ProvenanceEntry {
-            origin: layer.origin.label(),
-            key,
-            detail: None,
-        });
+        Ok(())
     }
-
-    if let Some(evidence) = layer.delta.evidence {
-        let key = format!("{prefix}observation.evidence");
-        if narrowing
-            && evidence == EvidenceMode::BestEffort
-            && base.observation.evidence == EvidenceMode::Strict
-        {
-            return Err(refuse(
-                ErrorCode::PolicyWidening,
-                &key,
-                format!(
-                    "{} weakens evidence from `strict` to `best-effort`",
-                    layer.origin.label()
-                ),
-            ));
-        }
-        authority.observation.evidence = evidence;
-        provenance.push(ProvenanceEntry {
-            origin: layer.origin.label(),
-            key,
-            detail: None,
-        });
-    }
-
-    Ok(())
 }
 
 /// Why `profile` cannot apply the network `mode` a layer asks for, if it
