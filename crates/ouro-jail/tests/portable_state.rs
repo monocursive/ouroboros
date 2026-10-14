@@ -41,7 +41,8 @@ fn a_durable_replacement_leaves_the_old_file_when_it_is_abandoned() {
     assert_eq!(std::fs::read(&target).expect("readable"), b"first");
 
     // Simulate a failure between the sync and the rename.
-    let pending = TempWrite::create(&target, b"second").expect("a pending write");
+    let pending = TempWrite::create_at(state::Site::Unnamed, &target, b"second", &state::RealIo)
+        .expect("a pending write");
     let pending_path = pending.temp_path().to_path_buf();
     assert!(
         pending_path.exists(),

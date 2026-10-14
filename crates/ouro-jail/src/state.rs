@@ -782,9 +782,9 @@ pub fn read_capped_checked(
 pub mod persist;
 
 pub use persist::{
-    ABORT_AT_SEAM, CrashPoint, Durable, Fsync, Installed, PERSIST_BUDGET, Pending, PersistIo,
-    Persister, Progress, RealIo, SharedIo, Site, Stalled, TEST_SEAM_PREFIX, crash_point,
-    current_io, install, plain_decimal, test_seams, test_seams_in, with_persist_io,
+    ABORT_AT_SEAM, CrashPoint, Installed, PERSIST_BUDGET, Pending, PersistIo, Persister, Progress,
+    RealIo, SharedIo, Site, Stalled, TEST_SEAM_PREFIX, crash_point, current_io, install,
+    plain_decimal, test_seams, test_seams_in, with_persist_io,
 };
 
 /// Writes every byte through the seam, one `write` at a time: a short write
@@ -837,17 +837,6 @@ impl std::fmt::Debug for TempWrite<'_> {
     }
 }
 
-impl TempWrite<'static> {
-    /// Creates the temporary file beside `target`, writes `bytes` and syncs it.
-    ///
-    /// # Errors
-    /// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be created,
-    /// written or synced.
-    pub fn create(target: &Path, bytes: &[u8]) -> Result<Self, JailError> {
-        Self::create_with(target, bytes, &RealIo)
-    }
-}
-
 /// What an exclusive publication found (§7's claim).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Published {
@@ -858,20 +847,8 @@ pub enum Published {
 }
 
 impl<'a> TempWrite<'a> {
-    /// [`TempWrite::create`] against an explicit seam, outside any named site.
-    ///
-    /// # Errors
-    /// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be created,
-    /// written or synced.
-    pub fn create_with(
-        target: &Path,
-        bytes: &[u8],
-        io: &'a dyn PersistIo,
-    ) -> Result<Self, JailError> {
-        Self::create_at(Site::Unnamed, target, bytes, io)
-    }
-
-    /// Creates the temporary file for a replacement at `site`.
+    /// Creates the temporary file for a replacement of `target` at `site`
+    /// beside it, through `io`, writes `bytes` and syncs it.
     ///
     /// The temporary file is removed on any failure here, so a failed write
     /// never leaves a partial file behind except when the process dies.
@@ -895,8 +872,8 @@ impl<'a> TempWrite<'a> {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "state".to_owned());
-        // The id is unique per attempt and per process, so two live supervisors
-        // never race on the same temporary name.
+        // A random UUIDv4: no two writers, in this process or another, race
+        // on the same temporary name, and nobody can plant it in advance.
         let temp = directory.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
         let mut file = io
             .create_new(site, &temp)
@@ -1006,18 +983,6 @@ pub fn replace_atomically(target: &Path, bytes: &[u8]) -> Result<(), JailError> 
 pub fn replace_atomically_at(site: Site, target: &Path, bytes: &[u8]) -> Result<(), JailError> {
     let io = current_io();
     TempWrite::create_at(site, target, bytes, &*io)?.commit()
-}
-
-/// [`replace_atomically`] against an explicit seam.
-///
-/// # Errors
-/// Returns [`ErrorCode::StateWriteFailed`] when any step fails.
-pub fn replace_atomically_with(
-    target: &Path,
-    bytes: &[u8],
-    io: &dyn PersistIo,
-) -> Result<(), JailError> {
-    TempWrite::create_with(target, bytes, io)?.commit()
 }
 
 /// Creates `target` with `bytes` only if it does not exist, never exposing a

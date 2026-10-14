@@ -250,50 +250,6 @@ pub trait PersistIo {
     }
 }
 
-/// The two durability primitives §7 names, as the narrow seam the J1 tests
-/// were written against: every [`Durable`] is a [`PersistIo`] whose other
-/// steps are real.
-///
-/// "A successful rename alone is not a durable acknowledgment", so both calls
-/// have to happen and a test has to be able to see that they did.
-pub trait Durable {
-    /// Flushes the file's own data and metadata.
-    ///
-    /// # Errors
-    /// Returns the underlying `fsync` failure.
-    fn sync_file(&self, file: &File) -> io::Result<()>;
-
-    /// Flushes the directory entry created by the rename.
-    ///
-    /// # Errors
-    /// Returns the underlying open or `fsync` failure.
-    fn sync_dir(&self, path: &Path) -> io::Result<()>;
-}
-
-impl<T: Durable + ?Sized> PersistIo for T {
-    fn sync_file(&self, _site: Site, file: &File) -> io::Result<()> {
-        Durable::sync_file(self, file)
-    }
-
-    fn sync_dir(&self, _site: Site, dir: &Path) -> io::Result<()> {
-        Durable::sync_dir(self, dir)
-    }
-}
-
-/// The real durability implementation of the narrow seam.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Fsync;
-
-impl Durable for Fsync {
-    fn sync_file(&self, file: &File) -> io::Result<()> {
-        file.sync_all()
-    }
-
-    fn sync_dir(&self, path: &Path) -> io::Result<()> {
-        File::open(path).and_then(|handle| handle.sync_all())
-    }
-}
-
 /// The real I/O: every step of [`PersistIo`] as the kernel performs it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RealIo;
@@ -502,11 +458,23 @@ struct Job {
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Locks `mutex` whether or not a thread panicked while holding it: every
+/// value guarded here is a plain fact (a time, a flag, a sender) that a
+/// panic cannot leave half-written.
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// What the worker and its waiters share: when it last made progress, and
 /// how many jobs are outstanding.
 struct Shared {
     budget: std::time::Duration,
     last_progress: std::sync::Mutex<std::time::Instant>,
+    /// Signalled, under `last_progress`, each time a job ends, so a
+    /// persister being dropped waits for the worker without polling.
+    job_ended: std::sync::Condvar,
     outstanding: std::sync::atomic::AtomicUsize,
     abandoned: std::sync::atomic::AtomicBool,
     /// J4 W3, P1 (a): the cancellation flag of the job the worker is running,
@@ -516,20 +484,25 @@ struct Shared {
 
 impl Shared {
     fn progress(&self) {
-        if let Ok(mut last) = self.last_progress.lock() {
-            *last = std::time::Instant::now();
-        }
+        *lock(&self.last_progress) = std::time::Instant::now();
+    }
+
+    /// One outstanding job ended: it is progress, and it is signalled.
+    fn job_ended(&self) {
+        let mut last = lock(&self.last_progress);
+        self.outstanding
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        *last = std::time::Instant::now();
+        self.job_ended.notify_all();
     }
 
     /// Whether the job the worker is running was given up on: by its waiter
     /// (the budget ran out, or it was dropped) or by the persister.
     fn given_up(&self) -> bool {
         self.abandoned.load(std::sync::atomic::Ordering::SeqCst)
-            || self.running.lock().map_or(true, |running| {
-                running
-                    .as_ref()
-                    .is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::SeqCst))
-            })
+            || lock(&self.running)
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(std::sync::atomic::Ordering::SeqCst))
     }
 
     fn idle(&self) -> bool {
@@ -538,11 +511,28 @@ impl Shared {
 
     /// When the worker, if it makes no further progress, is stalled.
     fn stall_at(&self) -> std::time::Instant {
-        let last = self
-            .last_progress
-            .lock()
-            .map_or_else(|_| std::time::Instant::now(), |last| *last);
-        last + self.budget
+        *lock(&self.last_progress) + self.budget
+    }
+
+    /// Waits until no job is outstanding or the worker is stalled; returns
+    /// whether it is idle.
+    fn wait_idle_or_stalled(&self) -> bool {
+        let mut last = lock(&self.last_progress);
+        loop {
+            if self.idle() {
+                return true;
+            }
+            let stall_at = *last + self.budget;
+            let now = std::time::Instant::now();
+            if now >= stall_at {
+                return false;
+            }
+            last = self
+                .job_ended
+                .wait_timeout(last, stall_at - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
     }
 
     fn stalled(&self) -> bool {
@@ -687,6 +677,7 @@ impl Persister {
         let shared = Arc::new(Shared {
             budget: budget.min(PERSIST_BUDGET),
             last_progress: std::sync::Mutex::new(std::time::Instant::now()),
+            job_ended: std::sync::Condvar::new(),
             outstanding: std::sync::atomic::AtomicUsize::new(0),
             abandoned: std::sync::atomic::AtomicBool::new(false),
             running: std::sync::Mutex::new(None),
@@ -707,19 +698,12 @@ impl Persister {
                             .abandoned
                             .load(std::sync::atomic::Ordering::SeqCst);
                     if !skip {
-                        if let Ok(mut running) = worker_shared.running.lock() {
-                            *running = Some(Arc::clone(&job.cancelled));
-                        }
+                        *lock(&worker_shared.running) = Some(Arc::clone(&job.cancelled));
                         worker_shared.progress();
                         (job.work)();
-                        if let Ok(mut running) = worker_shared.running.lock() {
-                            *running = None;
-                        }
+                        *lock(&worker_shared.running) = None;
                     }
-                    worker_shared.progress();
-                    worker_shared
-                        .outstanding
-                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    worker_shared.job_ended();
                 }
             })?;
         Ok(Persister {
@@ -790,9 +774,7 @@ impl Drop for Persister {
         shared
             .abandoned
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Ok(mut jobs) = self.inner.jobs.lock() {
-            jobs.take();
-        }
+        lock(&self.inner.jobs).take();
         let Some(lease) = self.lease.take() else {
             return;
         };
@@ -800,10 +782,7 @@ impl Drop for Persister {
         // queued one is skipped: while the worker makes progress this takes
         // at most one step, and a step that makes none for the whole budget
         // is stalled.
-        while !shared.idle() && !shared.stalled() {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        if shared.idle() {
+        if shared.wait_idle_or_stalled() {
             drop(lease);
         } else {
             // A step is stalled in the kernel and may still complete. The
@@ -835,18 +814,14 @@ impl Inner {
         {
             self.shared.progress();
         }
-        let sent = self
-            .jobs
-            .lock()
-            .ok()
-            .and_then(|jobs| jobs.as_ref().map(|jobs| jobs.send(job).is_ok()))
-            .unwrap_or(false);
+        let sent = lock(&self.jobs)
+            .as_ref()
+            .is_some_and(|jobs| jobs.send(job).is_ok());
         if !sent {
             // No worker: the job's sender is dropped with it, so the waiter
-            // sees a disconnected result, which is reported as stalled.
-            self.shared
-                .outstanding
-                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            // sees a disconnected result, which is reported as stalled; for
+            // the persister it is a job that ended.
+            self.shared.job_ended();
         }
         Pending {
             result,

@@ -19,7 +19,7 @@ use ouro_jail::records::{
     NativeString, ObserveMode, Os, Outcome, Phase, PlatformRecord, PolicyRecord, SCHEMA_CONTROL,
     StateCleanup, parse_release,
 };
-use ouro_jail::state::{self, AttemptDir, AttemptId, Durable};
+use ouro_jail::state::{self, AttemptDir, AttemptId, PersistIo};
 
 const ATTEMPT: &str = "att_00000000-0000-4000-8000-000000000001";
 
@@ -321,23 +321,33 @@ fn the_ownership_predicate_refuses_a_foreign_owner() {
     assert!(error.message.contains("mode"), "{}", error.message);
 }
 
-/// A [`Durable`] that records the calls instead of making them.
+/// A persistence seam that records the two syncs instead of making them;
+/// every other step is real.
 #[derive(Default)]
 struct Recorder {
     files: std::cell::Cell<usize>,
     dirs: std::cell::Cell<usize>,
 }
 
-impl Durable for Recorder {
-    fn sync_file(&self, _file: &std::fs::File) -> std::io::Result<()> {
+impl PersistIo for Recorder {
+    fn sync_file(&self, _site: state::Site, _file: &std::fs::File) -> std::io::Result<()> {
         self.files.set(self.files.get() + 1);
         Ok(())
     }
 
-    fn sync_dir(&self, _path: &Path) -> std::io::Result<()> {
+    fn sync_dir(&self, _site: state::Site, _path: &Path) -> std::io::Result<()> {
         self.dirs.set(self.dirs.get() + 1);
         Ok(())
     }
+}
+
+/// A durable replacement of `target` through `io`.
+fn replace(
+    target: &Path,
+    bytes: &[u8],
+    io: &dyn PersistIo,
+) -> Result<(), ouro_jail::records::JailError> {
+    state::TempWrite::create_at(state::Site::Unnamed, target, bytes, io)?.commit()
 }
 
 #[test]
@@ -346,7 +356,7 @@ fn a_durable_replacement_syncs_the_file_and_then_the_parent_directory() {
     let target = temp.path().join("jail.json");
     let recorder = Recorder::default();
 
-    state::replace_atomically_with(&target, b"first", &recorder).expect("writes");
+    replace(&target, b"first", &recorder).expect("writes");
     assert_eq!(
         recorder.files.get(),
         1,
@@ -358,14 +368,15 @@ fn a_durable_replacement_syncs_the_file_and_then_the_parent_directory() {
         "§7: a successful rename alone is not a durable acknowledgment"
     );
 
-    state::replace_atomically_with(&target, b"second", &recorder).expect("writes");
+    replace(&target, b"second", &recorder).expect("writes");
     assert_eq!(recorder.files.get(), 2);
     assert_eq!(recorder.dirs.get(), 2);
     assert_eq!(std::fs::read(&target).expect("readable"), b"second");
 
     // An abandoned write syncs the file but never the directory, because it
     // never renames.
-    let pending = state::TempWrite::create_with(&target, b"third", &recorder).expect("pending");
+    let pending = state::TempWrite::create_at(state::Site::Unnamed, &target, b"third", &recorder)
+        .expect("pending");
     assert_eq!(recorder.files.get(), 3);
     assert_eq!(recorder.dirs.get(), 2, "no rename, no directory sync");
     drop(pending);

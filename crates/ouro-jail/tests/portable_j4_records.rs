@@ -545,7 +545,7 @@ mod d4 {
         Applied, AppliedNetwork, AttemptRecord, Containment, EvidenceMode, JailRecord, Lifetime,
         ObserveMode, Outcome, Phase, PlatformRecord, PolicyRecord, StateCleanup,
     };
-    use ouro_jail::state::{self, Durable};
+    use ouro_jail::state::{self, PersistIo};
 
     const RECORDED: &str = "att_4d4a0000-0000-4000-8000-000000000004";
 
@@ -743,7 +743,7 @@ mod d4 {
         assert!(failures.is_empty(), "{failures:#?}");
     }
 
-    /// A [`Durable`] that fails its `fail_at`-th call (file and directory syncs
+    /// A seam that fails its `fail_at`-th sync (file and directory syncs
     /// counted together, in call order) and performs every other one for real.
     struct FailAt {
         fail_at: Option<usize>,
@@ -768,15 +768,15 @@ mod d4 {
         }
     }
 
-    impl Durable for FailAt {
-        fn sync_file(&self, file: &std::fs::File) -> std::io::Result<()> {
+    impl PersistIo for FailAt {
+        fn sync_file(&self, site: state::Site, file: &std::fs::File) -> std::io::Result<()> {
             self.step()?;
-            state::Fsync.sync_file(file)
+            state::RealIo.sync_file(site, file)
         }
 
-        fn sync_dir(&self, path: &Path) -> std::io::Result<()> {
+        fn sync_dir(&self, site: state::Site, path: &Path) -> std::io::Result<()> {
             self.step()?;
-            state::Fsync.sync_dir(path)
+            state::RealIo.sync_dir(site, path)
         }
     }
 
