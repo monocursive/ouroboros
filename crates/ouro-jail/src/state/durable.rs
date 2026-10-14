@@ -119,12 +119,6 @@ impl<'a> TempWrite<'a> {
         Ok(pending)
     }
 
-    /// The temporary file's path, for tests that inspect the failure window.
-    #[must_use]
-    pub fn temp_path(&self) -> &Path {
-        &self.temp
-    }
-
     fn directory(&self) -> &Path {
         self.target
             .parent()

@@ -339,7 +339,7 @@ mod gc_leaf {
 /// Managed scratch, as the contained profile creates it, with `files` files,
 /// and the `policy.json` that says it is managed.
 fn managed_scratch(dir: &AttemptDir, files: usize) -> PathBuf {
-    let scratch = dir.scratch_path();
+    let scratch = dir.root().join(state::SCRATCH_NAME);
     private_dir(&scratch);
     for index in 0..files {
         private_file(&scratch.join(format!("f{index}")), b"scratch");
@@ -1529,7 +1529,7 @@ mod scripted {
 
         let report = run(&fixture, &host, false);
         let entry = only(&report, &id);
-        assert!(!dir.scratch_path().exists(), "{entry:?}");
+        assert!(!dir.root().join(state::SCRATCH_NAME).exists(), "{entry:?}");
         assert_eq!(entry.scratch.as_deref(), Some("removed"), "{entry:?}");
         assert_eq!(entry.action, "completed_cleanup", "{entry:?}");
         assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
@@ -1575,7 +1575,7 @@ mod scripted {
         let fixture = Fixture::new();
         let (id, dir, _) = settled_with_scratch_left(&fixture, 30);
         let mut passes = 0;
-        while dir.scratch_path().exists() {
+        while dir.root().join(state::SCRATCH_NAME).exists() {
             passes += 1;
             assert!(passes <= 10, "the scratch was never finished");
             let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
@@ -1589,7 +1589,7 @@ mod scripted {
                 },
             )
             .unwrap();
-            if dir.scratch_path().exists() {
+            if dir.root().join(state::SCRATCH_NAME).exists() {
                 assert!(
                     report.incomplete.iter().any(|item| item.contains(&id)),
                     "pass {passes} left scratch and reported a complete pass: {:?}",

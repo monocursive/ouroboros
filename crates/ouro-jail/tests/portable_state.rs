@@ -38,13 +38,21 @@ fn a_durable_replacement_leaves_the_old_file_when_it_is_abandoned() {
     assert_eq!(std::fs::read(&target).expect("readable"), b"first");
 
     // Simulate a failure between the sync and the rename.
+    let entries = || -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(&data)
+            .expect("listable")
+            .map(|entry| entry.expect("an entry").path())
+            .collect()
+    };
     let pending = TempWrite::create_at(state::Site::Unnamed, &target, b"second", &state::RealIo)
         .expect("a pending write");
-    let pending_path = pending.temp_path().to_path_buf();
-    assert!(
-        pending_path.exists(),
-        "the temporary file is a separate file"
-    );
+    let during = entries();
+    let pending_path = during
+        .iter()
+        .find(|path| **path != target)
+        .expect("the temporary file is a separate file")
+        .clone();
+    assert_eq!(during.len(), 2, "{during:?}");
     assert_eq!(
         std::fs::read(&target).expect("readable"),
         b"first",
@@ -60,6 +68,7 @@ fn a_durable_replacement_leaves_the_old_file_when_it_is_abandoned() {
         !pending_path.exists(),
         "the abandoned temporary file does not accumulate"
     );
+    assert_eq!(entries(), std::slice::from_ref(&target));
 
     state::replace_atomically(&target, b"second").expect("the second write");
     assert_eq!(std::fs::read(&target).expect("readable"), b"second");
@@ -168,7 +177,7 @@ fn the_attempt_directory_has_the_layout_of_section_seven() {
         (dir.receipt_path(), "jail.json"),
         (dir.trace_path(), "trace.ndjson"),
         (dir.vendor_state_path(), "vendor-state"),
-        (dir.scratch_path(), "scratch"),
+        (dir.root().join(state::SCRATCH_NAME), "scratch"),
     ] {
         assert_eq!(
             path.file_name().and_then(|value| value.to_str()),

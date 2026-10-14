@@ -187,15 +187,19 @@ impl AttemptDir {
         self.root.join(VENDOR_STATE_NAME)
     }
 
-    /// `scratch/`: the default child-writable scratch directory.
+    /// `scratch/`: the default child-writable scratch directory. The jail
+    /// itself reaches it only through the anchored attempt directory.
+    #[cfg(test)]
     #[must_use]
-    pub fn scratch_path(&self) -> PathBuf {
+    pub(crate) fn scratch_path(&self) -> PathBuf {
         self.root.join(SCRATCH_NAME)
     }
 
-    /// `placeholders/`: the holders of workspace paths a run masks.
+    /// `placeholders/`: the holders of workspace paths a run masks, reached
+    /// like the scratch.
+    #[cfg(test)]
     #[must_use]
-    pub fn placeholders_path(&self) -> PathBuf {
+    pub(crate) fn placeholders_path(&self) -> PathBuf {
         self.root.join(PLACEHOLDERS_NAME)
     }
 
