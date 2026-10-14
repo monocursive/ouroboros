@@ -520,6 +520,23 @@ fn spawn_launcher(
     }
 }
 
+/// The refusal for a launcher that exited, with `exit_code` when its status
+/// was collected, before it blocked on its release pipe: the target never
+/// ran either way.
+fn launcher_ended_before_blocking(exit_code: Option<i32>) -> JailError {
+    if exit_code == Some(launch::EXIT_NOFILE_FAILED) {
+        return host_setup(
+            ErrorCode::InternalError,
+            "the launcher could not put the operator's soft RLIMIT_NOFILE back for the target, \
+             so it refused before the release; the target never ran",
+        );
+    }
+    host_setup(
+        ErrorCode::BackendUnavailable,
+        "the launcher exited before it blocked on its release pipe",
+    )
+}
+
 impl Uncontained {
     /// Creates the boundary and its blocked launcher, read back and, with
     /// observation on, observed: the run the supervisor releases.
@@ -693,10 +710,12 @@ impl Uncontained {
         }) {
             Ok(()) => {}
             Err(identity::NotBlocked::Ended) => {
-                return Err(host_setup(
-                    ErrorCode::BackendUnavailable,
-                    "the launcher exited before it blocked on its release pipe",
-                ));
+                let code = self
+                    .child
+                    .as_mut()
+                    .and_then(|child| child.try_wait().ok().flatten())
+                    .and_then(|status| status.code());
+                return Err(launcher_ended_before_blocking(code));
             }
             Err(timeout) => {
                 return Err(JailError::new(
@@ -1955,6 +1974,28 @@ mod tests {
                 .losses
                 .contains(&(Subject::Boundary, Loss::IdentityReplaced))
         );
+    }
+
+    /// A launcher that could not restore the descriptor limit says so; any
+    /// other early end stays the generic refusal.
+    #[test]
+    fn an_early_launcher_end_names_a_descriptor_limit_it_could_not_restore() {
+        let nofile = launcher_ended_before_blocking(Some(launch::EXIT_NOFILE_FAILED));
+        assert_eq!(nofile.code, ErrorCode::InternalError);
+        assert!(
+            nofile.message.contains("RLIMIT_NOFILE") && nofile.message.contains("never ran"),
+            "{}",
+            nofile.message
+        );
+        for code in [None, Some(launch::EXIT_INTERNAL)] {
+            let other = launcher_ended_before_blocking(code);
+            assert_eq!(other.code, ErrorCode::BackendUnavailable);
+            assert!(
+                other.message.contains("before it blocked"),
+                "{}",
+                other.message
+            );
+        }
     }
 
     #[test]

@@ -22,9 +22,11 @@ pub(super) struct Storage {
     capacity_bytes: Option<u64>,
     capacity_inodes: Option<u64>,
     failure: Option<String>,
-    /// The loss was found while the target still ran, the only timing that
-    /// may make it `outcome.cause` (§6.4, audit 2026-10-08 L2): a loss first
-    /// seen after the target's own end never does.
+    /// The loss was found before the target's end was known, the only
+    /// timing that may make it `outcome.cause` (§6.4, audit 2026-10-08 L2):
+    /// while the target ran, or before the release, where the check that
+    /// finds it refuses the run anyway. A loss first seen after the
+    /// target's own end never does.
     lost_while_running: bool,
 }
 
@@ -607,8 +609,9 @@ impl Storage {
 
     /// Positive saturation evidence only. A missed transient stays unknown.
     /// A loss is sticky: every later sample replays it. `target_ended` is
-    /// whether the target's own end is known at this sample, which decides
-    /// whether a loss found now was found while it ran.
+    /// whether the target's own end is known at this sample (never before
+    /// the release), which decides whether a loss found now may become the
+    /// cause.
     pub(super) fn sample(&mut self, target_ended: bool) -> io::Result<Vec<String>> {
         let result = match &self.failure {
             Some(failure) => Err(io::Error::other(failure.clone())),
@@ -621,7 +624,8 @@ impl Storage {
         result
     }
 
-    /// Whether enforcement was lost while the target still ran (§6.4).
+    /// Whether enforcement was lost before the target's end was known
+    /// (§6.4).
     pub(super) fn lost_while_running(&self) -> bool {
         self.failure.is_some() && self.lost_while_running
     }

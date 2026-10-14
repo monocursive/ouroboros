@@ -35,7 +35,11 @@ pub(crate) fn operator_nofile_soft() -> Option<u64> {
 
 /// Raises this process's soft `RLIMIT_NOFILE` to its hard limit, after
 /// recording the operator's ([`operator_nofile_soft`]); the (soft, hard)
-/// pair in force afterwards. Every raise in this process goes through here.
+/// pair in force afterwards. Every raise the platform makes goes through
+/// here. The `agent` proxy raises the limit for itself without it
+/// (`proxy::raise_nofile_soft_to_hard`), which records nothing, so the
+/// operator's limit is read before that too: `LinuxPlatform::new` reads it
+/// first, and the proxy starts only once the launcher was spawned.
 ///
 /// # Errors
 /// The `getrlimit` error.
