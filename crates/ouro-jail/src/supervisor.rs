@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::capability::Capability;
 use crate::cleanup;
-use crate::cli::{DoctorArgs, ExplainArgs, GcArgs, PolicyArgs, RunArgs};
+use crate::cli::{DoctorArgs, ExplainArgs, PolicyArgs, RunArgs};
 use crate::config::{self, EnvSettings};
 use crate::launch_profile;
 use crate::network::NetworkMode;
@@ -151,40 +151,6 @@ pub struct LaunchReadiness {
 pub const LAUNCH_SUPPORT: &str = "experimental";
 /// Why [`LAUNCH_SUPPORT`] is what it is.
 pub const LAUNCH_SUPPORT_REASON: &str = "no_recorded_run";
-
-/// What `gc` found.
-pub struct GcReport {
-    /// One entry per attempt directory considered.
-    pub entries: Vec<GcEntry>,
-    /// Whether this was a dry run.
-    pub dry_run: bool,
-    // Cleanups that did not complete (§6.4: exit 1)
-    /// Attempts whose vendor-state cleanup ran and stopped again, with the
-    /// reason; non-empty means `gc` exits 1 after printing its report.
-    pub incomplete: Vec<String>,
-}
-
-/// One attempt `gc` looked at.
-pub struct GcEntry {
-    /// The attempt id, when the directory name is a valid one.
-    pub attempt_id: String,
-    /// What `gc` did, or `skipped`.
-    pub action: String,
-    /// Why.
-    pub reason: String,
-    // The attempt's proxy directory (§10, §14.2)
-    /// What became of a crashed or settled attempt's proxy directory:
-    /// `removed`, `would_remove`, `retained: <reason>`, `failed: <reason>`,
-    /// or `None` when there was none to act on.
-    pub proxy_dir: Option<String>,
-    // Leftovers (§7)
-    /// The temporary files a crashed durable replacement left in the
-    /// attempt root, as gc found them under its lease, sorted.
-    pub leftover_temp_files: Vec<String>,
-    /// What gc did with them (`removed <n>`, `would_remove`,
-    /// `retained: <why>`, `failed: <why>`), or `None` when there were none.
-    pub temp_files: Option<String>,
-}
 
 // ---------------------------------------------------------------------------
 // Resolution shared by run, explain, doctor and label-only
@@ -953,21 +919,6 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
         ready,
         launch,
     })
-}
-
-// Exception G1 — the body of `gc` is `gc::gc` (§14.2, C03)
-/// Enumerates the registered state root and reconciles what a dead
-/// supervisor left, without touching anything it cannot identify (§14.2).
-///
-/// The walk, the decisions and the report live in [`crate::gc`]; this keeps
-/// the J3 entry point and its report shape for existing callers.
-///
-/// # Errors
-/// Returns [`ErrorCode::UnsafeStatePath`] when the state root or its
-/// `attempts/` directory fails its checks, and
-/// [`ErrorCode::StateWriteFailed`] when `attempts/` cannot be read.
-pub fn gc(ctx: &Context, args: &GcArgs) -> Result<GcReport, JailError> {
-    crate::gc::gc(ctx, args).map(GcReport::from)
 }
 
 fn plan_request(plan: &Plan) -> PlanRequest {

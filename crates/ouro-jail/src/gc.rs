@@ -46,7 +46,7 @@ use crate::records::{
     ErrorCode, ErrorStage, JailError, Os, Remediation, SCHEMA_RECEIPT, rfc3339_utc,
 };
 use crate::state::{self, AttemptDir, AttemptId};
-use crate::supervisor::{Context, GcEntry, GcReport};
+use crate::supervisor::Context;
 
 /// The test seam that shrinks the per-invocation entry bound (S9).
 pub const SEAM_MAX_ENTRIES: &str = "OURO_JAIL_TEST_GC_MAX_ENTRIES";
@@ -375,27 +375,6 @@ pub struct Entry {
     /// `retained: <why>`, `pending: <why>` or `failed: <why>`; `None` when
     /// there were none.
     pub temp_files: Option<String>,
-}
-
-impl From<Report> for GcReport {
-    fn from(report: Report) -> GcReport {
-        GcReport {
-            entries: report
-                .entries
-                .into_iter()
-                .map(|entry| GcEntry {
-                    attempt_id: entry.attempt_id,
-                    action: entry.action,
-                    reason: entry.reason,
-                    proxy_dir: entry.proxy_dir,
-                    leftover_temp_files: entry.leftover_temp_files,
-                    temp_files: entry.temp_files,
-                })
-                .collect(),
-            dry_run: report.dry_run,
-            incomplete: report.incomplete,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

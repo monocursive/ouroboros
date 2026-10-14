@@ -222,8 +222,8 @@ impl Fixture {
         supervisor::run(&self.context(script), &args)
     }
 
-    fn gc(&self, dry_run: bool) -> supervisor::GcReport {
-        let report = supervisor::gc(
+    fn gc(&self, dry_run: bool) -> ouro_jail::gc::Report {
+        let report = ouro_jail::gc::gc(
             &self.context(Script::default()),
             &cli::GcArgs {
                 dry_run,

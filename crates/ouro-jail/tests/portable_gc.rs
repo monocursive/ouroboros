@@ -6,7 +6,7 @@
 //! Linux. Attempts are built on disk by hand, in the shapes the supervisor
 //! writes them (a free or held `jail.lock`, a claimed `jail-state.json`, a
 //! receipt taken from the checked-in examples), and `gc` runs through the
-//! real library entry point (`supervisor::gc`, `gc::gc_with`) or the real
+//! real library entry points (`gc::gc`, `gc::gc_with`) or the real
 //! binary. Where a decision depends on the host (the recorded owner's
 //! liveness, the execution cgroup), a scripted host answers and records every
 //! call, so "never probes" and "never kills" are assertions, not hopes.
@@ -147,8 +147,8 @@ impl Fixture {
     }
 
     /// `gc` through the entry point the J3 tests use.
-    fn gc(&self, dry_run: bool) -> Result<supervisor::GcReport, JailError> {
-        supervisor::gc(&self.context(), &gc_args(dry_run))
+    fn gc(&self, dry_run: bool) -> Result<ouro_jail::gc::Report, JailError> {
+        ouro_jail::gc::gc(&self.context(), &gc_args(dry_run))
     }
 
     /// The real binary on this host, over this fixture's state root.
@@ -390,7 +390,7 @@ fn picture(root: &Path) -> BTreeMap<PathBuf, Node> {
     out
 }
 
-fn entry<'a>(report: &'a supervisor::GcReport, id: &str) -> &'a supervisor::GcEntry {
+fn entry<'a>(report: &'a ouro_jail::gc::Report, id: &str) -> &'a ouro_jail::gc::Entry {
     report
         .entries
         .iter()
@@ -423,7 +423,12 @@ fn j4_c03_a_live_lease_is_retained() {
         let entry = entry(&report, &id);
         assert_eq!(entry.action, "retained", "{}", entry.reason);
         assert!(entry.reason.contains("live supervisor"), "{}", entry.reason);
+        // Nothing was asked of the host and nothing was recorded for it.
+        assert_eq!(entry.owner, None, "{entry:?}");
+        assert!(entry.recorded.is_empty(), "{:?}", entry.recorded);
         assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
+        assert_eq!(report.dry_run, dry_run);
+        assert!(report.budget.listing_complete, "{:?}", report.budget);
         assert_eq!(picture(&fixture.data), before, "dry_run={dry_run}");
         assert!(vendor.join("precious").is_file());
     }
@@ -454,6 +459,12 @@ fn j4_c03_a_name_that_is_not_an_attempt_id_is_skipped() {
             "{}",
             entry.reason
         );
+        assert_eq!(
+            (&entry.owner, &entry.cgroup, &entry.scratch),
+            (&None, &None, &None),
+            "a skipped name is never reconciled"
+        );
+        assert!(entry.recorded.is_empty(), "{:?}", entry.recorded);
         assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
         assert_eq!(picture(&fixture.data), before, "dry_run={dry_run}");
     }
@@ -536,7 +547,7 @@ fn j4_c03_a_supervisor_taking_its_lease_is_never_refused_by_a_concurrent_gc() {
         scope.spawn(|| {
             let ctx = fixture.context();
             while !stop.load(Ordering::Relaxed) {
-                let _ = supervisor::gc(&ctx, &gc_args(false));
+                let _ = ouro_jail::gc::gc(&ctx, &gc_args(false));
             }
         });
         let mut claims = 0u64;

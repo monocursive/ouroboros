@@ -884,10 +884,10 @@ impl Fixture {
         self.run_with(sim, flags, io, Control::Drained)
     }
 
-    fn gc(&self, io: Arc<dyn PersistIo + Send + Sync>) -> supervisor::GcReport {
+    fn gc(&self, io: Arc<dyn PersistIo + Send + Sync>) -> ouro_jail::gc::Report {
         let ctx = self.context(Sim::new(Scenario::Plain));
         let report = state::with_persist_io(io, || {
-            supervisor::gc(
+            ouro_jail::gc::gc(
                 &ctx,
                 &cli::GcArgs {
                     dry_run: false,

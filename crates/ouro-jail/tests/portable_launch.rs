@@ -143,9 +143,9 @@ impl Fixture {
         supervisor::run(&ctx, &args)
     }
 
-    fn gc(&self, dry_run: bool) -> Result<supervisor::GcReport, JailError> {
+    fn gc(&self, dry_run: bool) -> Result<ouro_jail::gc::Report, JailError> {
         let ctx = self.context(Box::new(Sim::default()), None);
-        supervisor::gc(
+        ouro_jail::gc::gc(
             &ctx,
             &cli::GcArgs {
                 dry_run,
