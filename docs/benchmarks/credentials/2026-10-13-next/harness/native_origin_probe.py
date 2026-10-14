@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Retain an isolated native process-origin regression attempt and source hashes."""
+"""Retain an isolated native process-origin regression attempt and source hashes.
+
+The archive is the source tree at --revision; --override REL=PATH (and the
+--origin/--proxy shorthands) replace repository files in the extracted copy,
+and --record REL names further repository files whose digests are kept.
+Every recorded file is copied into the results under source/REL, beside a
+copy of this harness, so the run directory alone shows what was built.
+"""
 import argparse
 import hashlib
 import json
@@ -11,23 +18,46 @@ import subprocess
 import tarfile
 import time
 
+ORIGIN = 'crates/ouro-jail/src/vault/origin.rs'
+PROXY = 'crates/ouro-jail/src/proxy/mod.rs'
+
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def overrides(a):
+    files = {}
+    if a.origin:
+        files[ORIGIN] = a.origin
+    if a.proxy:
+        files[PROXY] = a.proxy
+    for item in a.override:
+        rel, sep, actual = item.partition('=')
+        assert sep and rel and actual, f'--override needs REL=PATH, got {item!r}'
+        files[rel] = Path(actual)
+    for rel in files:
+        assert not Path(rel).is_absolute() and '..' not in Path(rel).parts, rel
+    return files
+
+
 def main():
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--root', type=Path, required=True)
     p.add_argument('--archive', type=Path, required=True)
-    p.add_argument('--origin', type=Path, required=True)
-    p.add_argument('--proxy', type=Path)
+    p.add_argument('--origin', type=Path, help=f'override {ORIGIN}')
+    p.add_argument('--proxy', type=Path, help=f'override {PROXY}')
+    p.add_argument('--override', action='append', default=[], metavar='REL=PATH')
+    p.add_argument('--record', action='append', default=[], metavar='REL')
     p.add_argument('--target', type=Path, required=True)
     p.add_argument('--revision', required=True)
     p.add_argument('--test', default='vault::origin::tests')
     p.add_argument('--operation', choices=['test', 'clippy', 'build'], default='test')
     p.add_argument('--expected-exit', type=int, required=True)
     a = p.parse_args()
+    harness = Path(__file__).resolve()
+    replaced = overrides(a)
     os.umask(0o077)
     a.root.mkdir(mode=0o700)
     output, source = a.root / 'results', a.root / 'source'
@@ -35,12 +65,18 @@ def main():
     source.mkdir()
     with tarfile.open(a.archive, 'r:gz') as archive:
         archive.extractall(source, filter='data')
-    files = {'crates/ouro-jail/src/vault/origin.rs': a.origin}
-    if a.proxy:
-        files['crates/ouro-jail/src/proxy/mod.rs'] = a.proxy
-    for rel, actual in files.items():
+    # The tree is dirty exactly when an override differs from the archive.
+    archived = {rel: digest(source / rel) if (source / rel).is_file() else None
+                for rel in replaced}
+    for rel, actual in replaced.items():
         shutil.copyfile(actual, source / rel)
-        shutil.copyfile(actual, output / ('source-' + actual.name))
+    dirty = any(archived[rel] != digest(source / rel) for rel in replaced)
+    recorded = sorted(set(replaced) | set(a.record) | {ORIGIN})
+    for rel in recorded:
+        copy = output / 'source' / rel
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / rel, copy)
+    shutil.copyfile(harness, output / harness.name)
     assert a.target.is_dir() and a.target.stat().st_uid == os.getuid()
     for proc in Path('/proc').iterdir():
         if not proc.name.isdigit():
@@ -54,7 +90,7 @@ def main():
             pass
     env = {'HOME': str(Path.home()), 'PATH': str(Path.home() / '.cargo/bin') + ':/usr/bin:/bin',
            'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8', 'CARGO_TARGET_DIR': str(a.target),
-           'OURO_BUILD_REVISION': a.revision, 'OURO_BUILD_DIRTY': 'true'}
+           'OURO_BUILD_REVISION': a.revision, 'OURO_BUILD_DIRTY': 'true' if dirty else 'false'}
     argv = ['cargo', '+1.98.1', 'test', '--release', '--jobs', '1', '-p', 'ouro-jail',
             '--lib', a.test, '--', '--nocapture', '--test-threads=1']
     if a.operation == 'clippy':
@@ -62,13 +98,16 @@ def main():
                 '--all-targets', '--', '-D', 'warnings']
     elif a.operation == 'build':
         argv = ['cargo', '+1.98.1', 'build', '--release', '--jobs', '1', '-p', 'ouro-jail']
-    record = {'schema': 'native-origin-probe/1', 'base_revision': a.revision, 'dirty': True,
+    record = {'schema': 'native-origin-probe/2', 'base_revision': a.revision, 'dirty': dirty,
+              'harness': harness.name, 'harness_sha256': digest(harness),
               'archive_sha256': digest(a.archive), 'argv': argv,
-              'source_files': {rel: digest(source / rel) for rel in files},
+              'overridden_files': sorted(replaced),
+              'source_files': {rel: digest(source / rel) for rel in recorded},
               'target': str(a.target), 'expected_exit': a.expected_exit,
               'operation': a.operation,
               'rustc': subprocess.check_output(['rustc', '+1.98.1', '-V'], env=env, text=True).strip(),
-              'scored_performance': False, 'synthetic_protocol_unit_test': True,
+              # In-crate unit tests drive the rendezvous over socket pairs, not a jail.
+              'scored_performance': False, 'synthetic_protocol_unit_test': a.operation == 'test',
               'started_unix': time.time()}
     (output / 'driver.json').write_text(json.dumps(record, indent=2) + '\n')
     with (output / 'test.log').open('wb') as log:
