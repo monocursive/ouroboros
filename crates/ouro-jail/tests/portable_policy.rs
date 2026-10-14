@@ -216,6 +216,64 @@ fn project_host_narrowing_cannot_name_a_port_the_base_omitted() {
     }
 }
 
+/// A layer's host grants are checked against the network mode that layer
+/// leaves, its own `network.mode` included: the operator's `config.toml`
+/// switching `tool` to `proxy` and listing a host in the same table is one
+/// consistent request (it was refused, while the same two keys in two layers
+/// passed), and a project file switching to `none` while listing hosts asks
+/// for grants nothing would apply.
+#[test]
+fn host_grants_follow_the_mode_their_own_layer_sets() {
+    let workspace = Workspace::new();
+    let proxy_with_host = PolicyDelta {
+        network_mode: Some(NetworkMode::Proxy),
+        network_allow: vec!["api.example.com".to_owned()],
+        network_allow_present: true,
+        ..PolicyDelta::default()
+    };
+    let resolve = |profile: ProfileName, layer: Layer| {
+        let inputs = ResolveInputs {
+            platform: Os::Linux,
+            base_profile: profile,
+            policy_name: profile.as_str().to_owned(),
+            baseline: profiles::baseline(profile, Os::Linux, &|_| None),
+            workspace: workspace.bytes(),
+            scratch: ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: None,
+            translation_prefixes: Vec::new(),
+            layers: vec![layer],
+        };
+        ouro_jail::policy::resolve(&inputs)
+    };
+    let resolved = resolve(
+        ProfileName::Tool,
+        Layer {
+            origin: LayerOrigin::OperatorConfig("config.toml".to_owned()),
+            base_dir: Some(workspace.bytes()),
+            delta: proxy_with_host,
+        },
+    )
+    .expect("one layer may set the mode and grant under it");
+    assert_eq!(resolved.snapshot.network.mode, "proxy");
+    assert_eq!(resolved.snapshot.network.allow, ["api.example.com:443"]);
+
+    let error = workspace
+        .resolve_project(
+            ProfileName::Agent,
+            |base| base.network_allow = vec![HostRule::parse("api.example.com").unwrap()],
+            PolicyDelta {
+                network_mode: Some(NetworkMode::None),
+                network_allow: vec!["api.example.com".to_owned()],
+                network_allow_present: true,
+                ..PolicyDelta::default()
+            },
+        )
+        .expect_err("no proxy, no host grant");
+    assert_eq!(error.code, ErrorCode::InvalidConfig);
+    assert_eq!(error.key_path.as_deref(), Some("jail.network.allow"));
+}
+
 fn read_only(paths: &[&str]) -> PolicyDelta {
     PolicyDelta {
         read_only: paths.iter().map(|path| path.as_bytes().to_vec()).collect(),

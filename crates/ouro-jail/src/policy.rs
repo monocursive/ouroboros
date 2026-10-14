@@ -1482,7 +1482,11 @@ fn apply_layer(
     }
     for raw in &layer.delta.network_allow {
         let key = format!("{prefix}network.allow");
-        if base.network_mode != NetworkMode::Proxy {
+        // The mode this layer leaves, its own `network.mode` included: a
+        // file that switches to `proxy` and lists hosts is one consistent
+        // request, and one that switches to `none` and lists hosts asks for
+        // grants nothing would apply.
+        if authority.network_mode != NetworkMode::Proxy {
             // §6.1: `tool` and `build` reject proxy grants, and a policy with
             // no proxy has nothing for a host rule to authorize. Accepting it
             // silently would leave an operator believing a grant applied.
@@ -1491,7 +1495,7 @@ fn apply_layer(
                 &key,
                 format!(
                     "network mode is `{}`, which accepts no host grants",
-                    base.network_mode.as_str()
+                    authority.network_mode.as_str()
                 ),
             ));
         }
