@@ -2,9 +2,8 @@
 //! sealed bridge. HTTP headers and child argv never supply process identity.
 #[cfg(target_os = "linux")]
 use std::io::Read;
-use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(target_os = "linux")]
@@ -123,14 +122,10 @@ impl Process {
             && alive(&self.0.pidfd)
     }
 }
+/// A pidfd polls readable once its process has exited.
 fn alive(file: &File) -> bool {
-    let mut fd = libc::pollfd {
-        fd: file.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one initialized pollfd; timeout zero never blocks.
-    unsafe { libc::poll(&mut fd, 1, 0) == 0 }
+    use std::os::fd::AsFd as _;
+    crate::proxy::sys::ready(file.as_fd(), libc::POLLIN).is_ok_and(|exited| !exited)
 }
 const MAGIC: &[u8; 8] = b"OUROPID1";
 #[derive(Default)]

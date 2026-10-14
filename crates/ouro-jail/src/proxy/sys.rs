@@ -1,6 +1,8 @@
 //! The system calls the proxy needs and std does not wrap: `poll(2)` and the
-//! `RLIMIT_NOFILE` pair. Every `unsafe` block is here, each with its safety
-//! argument; the tests at the bottom exercise each boundary.
+//! `RLIMIT_NOFILE` pair, each with its safety argument; the tests at the
+//! bottom exercise each boundary. The proxy's few other `unsafe` blocks (a
+//! peeking `recv` in [`super::socks`], the credential-origin socket queries in
+//! `vault::origin`) carry their own.
 //!
 //! Descriptors cross this boundary only as [`BorrowedFd`], so every call
 //! sees descriptors that are open for its whole duration.
@@ -10,24 +12,36 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// `poll(2)` on each descriptor for `events`; returns each one's `revents`.
+/// One `poll(2)` entry: a descriptor and the events wanted from it, or
+/// `None`, a placeholder poll skips (its `revents` stay 0), which keeps the
+/// entries' indexes stable when a side has nothing asked of it.
+pub(crate) type Interest<'a> = Option<(BorrowedFd<'a>, libc::c_short)>;
+
+/// `poll(2)` on each interest; returns each one's `revents`.
 ///
 /// `None` waits without a timeout; a timeout is clamped to `i32::MAX`
 /// milliseconds. An interrupted call returns [`io::ErrorKind::Interrupted`].
 ///
 /// # Errors
 /// The `poll` error.
-pub(super) fn poll(
-    fds: &[BorrowedFd<'_>],
-    events: libc::c_short,
+pub(crate) fn poll(
+    interests: &[Interest<'_>],
     timeout: Option<Duration>,
 ) -> io::Result<Vec<libc::c_short>> {
-    let mut entries: Vec<libc::pollfd> = fds
+    let mut entries: Vec<libc::pollfd> = interests
         .iter()
-        .map(|fd| libc::pollfd {
-            fd: fd.as_raw_fd(),
-            events,
-            revents: 0,
+        .map(|interest| match interest {
+            Some((fd, events)) => libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: *events,
+                revents: 0,
+            },
+            // poll(2) ignores a negative descriptor and reports nothing for it.
+            None => libc::pollfd {
+                fd: -1,
+                events: 0,
+                revents: 0,
+            },
         })
         .collect();
     let timeout: libc::c_int = match timeout {
@@ -42,13 +56,20 @@ pub(super) fn poll(
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: `entries` is a live, initialized array of exactly `count`
     // `pollfd` values that outlives the call, and poll(2) only writes the
-    // `revents` fields inside it. Every `fd` comes from a `BorrowedFd`, so it
-    // stays open until the call returns.
+    // `revents` fields inside it. Every non-negative `fd` comes from a
+    // `BorrowedFd`, so it stays open until the call returns.
     let rc = unsafe { libc::poll(entries.as_mut_ptr(), count, timeout) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(entries.iter().map(|entry| entry.revents).collect())
+}
+
+/// Whether `fd` has `events` pending right now, without waiting.
+pub(crate) fn ready(fd: BorrowedFd<'_>, events: libc::c_short) -> io::Result<bool> {
+    Ok(poll(&[Some((fd, events))], Some(Duration::ZERO))?
+        .first()
+        .is_some_and(|&revents| revents != 0))
 }
 
 /// Whether `revents` says the descriptor hung up, failed or is invalid.
@@ -72,7 +93,7 @@ pub(super) fn wait_peer_closed(fd: BorrowedFd<'_>, finished: &AtomicBool) {
             return;
         }
         if cfg!(target_os = "linux") {
-            match poll(&[fd], 0, None) {
+            match poll(&[Some((fd, 0))], None) {
                 Ok(revents) if revents.first().copied().is_some_and(hung_up) => return,
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -80,8 +101,8 @@ pub(super) fn wait_peer_closed(fd: BorrowedFd<'_>, finished: &AtomicBool) {
             }
         } else {
             // A timed wait; nothing is requested, so it returns on timeout.
-            let _ = poll(&[fd], 0, Some(Duration::from_millis(100)));
-            match poll(&[fd], libc::POLLOUT, Some(Duration::ZERO)) {
+            let _ = poll(&[Some((fd, 0))], Some(Duration::from_millis(100)));
+            match poll(&[Some((fd, libc::POLLOUT))], Some(Duration::ZERO)) {
                 Ok(revents) if revents.first().copied().is_some_and(hung_up) => return,
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -191,22 +212,43 @@ mod tests {
     fn poll_reports_readiness_per_descriptor_and_handles_edges() {
         let (mut a, b) = UnixStream::pair().expect("a pair");
         let (c, _d) = UnixStream::pair().expect("a pair");
+        fn both<'a>(b: &'a UnixStream, c: &'a UnixStream) -> [Interest<'a>; 2] {
+            [
+                Some((b.as_fd(), libc::POLLIN)),
+                Some((c.as_fd(), libc::POLLIN)),
+            ]
+        }
         // Nothing to read: a zero timeout returns at once.
-        let revents =
-            poll(&[b.as_fd(), c.as_fd()], libc::POLLIN, Some(Duration::ZERO)).expect("polls");
+        let revents = poll(&both(&b, &c), Some(Duration::ZERO)).expect("polls");
         assert_eq!(revents, vec![0, 0]);
+        assert!(!ready(b.as_fd(), libc::POLLIN).expect("polls"));
         a.write_all(b"x").expect("writes");
-        let revents = poll(&[b.as_fd(), c.as_fd()], libc::POLLIN, None).expect("polls");
+        let revents = poll(&both(&b, &c), None).expect("polls");
         assert!(revents[0] & libc::POLLIN != 0);
         assert_eq!(revents[1], 0);
+        assert!(ready(b.as_fd(), libc::POLLIN).expect("polls"));
+        // Each entry asks for its own events: c is writable, b readable.
+        let revents = poll(
+            &[
+                Some((b.as_fd(), libc::POLLIN)),
+                Some((c.as_fd(), libc::POLLOUT)),
+            ],
+            None,
+        )
+        .expect("polls");
+        assert!(revents[0] & libc::POLLIN != 0 && revents[1] & libc::POLLOUT != 0);
+        // A placeholder keeps its index and reports nothing.
+        let revents = poll(&[None, Some((b.as_fd(), libc::POLLIN))], None).expect("polls");
+        assert_eq!(revents[0], 0);
+        assert!(revents[1] & libc::POLLIN != 0);
         // An empty set with a timeout is a sleep, not an error.
         assert_eq!(
-            poll(&[], libc::POLLIN, Some(Duration::from_millis(1))).ok(),
+            poll(&[], Some(Duration::from_millis(1))).ok(),
             Some(Vec::new())
         );
         // A timeout beyond i32 milliseconds is clamped, not wrapped negative
         // (which would mean "forever"): the ready descriptor returns at once.
-        let revents = poll(&[b.as_fd()], libc::POLLIN, Some(Duration::MAX)).expect("polls");
+        let revents = poll(&[Some((b.as_fd(), libc::POLLIN))], Some(Duration::MAX)).expect("polls");
         assert!(revents[0] & libc::POLLIN != 0);
     }
 

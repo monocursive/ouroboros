@@ -51,7 +51,7 @@ pub(crate) mod origin;
 mod relay;
 mod resolve;
 mod socks;
-mod sys;
+pub(crate) mod sys;
 mod tls;
 
 pub use event::proxy_event;
@@ -81,21 +81,23 @@ pub struct Budgets {
 }
 
 impl Default for Budgets {
-    /// §10: 128 active connections, 32 KiB request headers, 10-second
-    /// DNS/connect/header deadline, 1 MiB total relay buffers.
     fn default() -> Self {
-        Budgets {
-            max_connections: 128,
-            max_header_bytes: 32 * 1024,
-            header_deadline: Duration::from_secs(10),
-            resolve_deadline: Duration::from_secs(10),
-            connect_deadline: Duration::from_secs(10),
-            relay_buffer_bytes: 1024 * 1024,
-        }
+        Budgets::DEFAULT
     }
 }
 
 impl Budgets {
+    /// §10: 128 active connections, 32 KiB request headers, 10-second
+    /// DNS/connect/header deadline, 1 MiB total relay buffers.
+    pub const DEFAULT: Budgets = Budgets {
+        max_connections: 128,
+        max_header_bytes: 32 * 1024,
+        header_deadline: Duration::from_secs(10),
+        resolve_deadline: Duration::from_secs(10),
+        connect_deadline: Duration::from_secs(10),
+        relay_buffer_bytes: 1024 * 1024,
+    };
+
     /// The buffer one relay direction owns.
     #[must_use]
     pub fn relay_chunk(&self) -> usize {
@@ -786,7 +788,11 @@ impl Drop for ProxyHandle {
 
 fn accept_loop(shared: &Arc<Shared>, listener: &UnixListener, wake: &UnixStream) {
     loop {
-        match sys::poll(&[listener.as_fd(), wake.as_fd()], libc::POLLIN, None) {
+        let interests = [
+            Some((listener.as_fd(), libc::POLLIN)),
+            Some((wake.as_fd(), libc::POLLIN)),
+        ];
+        match sys::poll(&interests, None) {
             Ok(revents) if revents.get(1).is_some_and(|&events| events != 0) => return,
             // A listening socket reports POLLHUP only once it
             // was shut down (measured on the reference host: accept then
@@ -848,7 +854,10 @@ fn accept_loop(shared: &Arc<Shared>, listener: &UnixListener, wake: &UnixStream)
 /// Waits 10 ms on the wake channel; `true` when stop woke it.
 fn backoff(wake: &UnixStream) -> bool {
     matches!(
-        sys::poll(&[wake.as_fd()], libc::POLLIN, Some(Duration::from_millis(10))),
+        sys::poll(
+            &[Some((wake.as_fd(), libc::POLLIN))],
+            Some(Duration::from_millis(10))
+        ),
         Ok(revents) if revents.first().is_some_and(|&events| events != 0)
     )
 }

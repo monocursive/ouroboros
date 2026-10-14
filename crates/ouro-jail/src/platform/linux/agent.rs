@@ -877,7 +877,10 @@ impl AgentNet {
     #[must_use]
     pub fn details(&self) -> (Value, Value) {
         let mut agent = Map::new();
-        agent.insert("socks5_listen".into(), Value::from("127.0.0.1:3129"));
+        agent.insert(
+            "socks5_listen".into(),
+            Value::from(bridge::SOCKS_LISTEN.to_string()),
+        );
         agent.insert("udp_egress".into(), Value::from(false));
         agent.insert(
             "origin_verification".into(),

@@ -31,28 +31,31 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::net::{Shutdown, TcpListener, TcpStream};
-use std::os::fd::AsRawFd as _;
+use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
+use std::os::fd::AsFd as _;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 /// The hidden subcommand token.
 pub const SUBCOMMAND: &str = "__bridge";
-/// The only address the bridge listens on.
-pub const LISTEN: &str = "127.0.0.1:3128";
+/// The only address the bridge listens on, on two ports.
+pub const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
+/// The HTTP proxy port (jail-v1 §10).
+pub const HTTP_PORT: u16 = 3128;
 /// SOCKS5 uses the same isolated bridge and outside policy evaluator.
-pub const SOCKS_LISTEN: &str = "127.0.0.1:3129";
-pub const SOCKS_URL: &str = "socks5h://127.0.0.1:3129";
-/// The proxy variables' value (jail-v1 §10).
-pub const PROXY_URL: &str = "http://127.0.0.1:3128";
+pub const SOCKS_PORT: u16 = 3129;
+/// The HTTP proxy listener.
+pub const LISTEN: SocketAddrV4 = SocketAddrV4::new(LOOPBACK, HTTP_PORT);
+/// The SOCKS5 listener.
+pub const SOCKS_LISTEN: SocketAddrV4 = SocketAddrV4::new(LOOPBACK, SOCKS_PORT);
 /// The proxy socket as the sandbox sees it.
 pub const PROXY_PATH: &str = "/run/ouro/proxy/proxy.sock";
-/// The most relays at once. It matches the proxy's own connection budget
-/// (§10); a client beyond it is answered [`OVERLOAD_RESPONSE`] and closed at
-/// once rather than left in the kernel's backlog until it gives up, and
-/// counted: one byte on the report socket, which the supervisor records as the
+/// The most relays at once: the proxy's own connection budget (§10). A
+/// client beyond it is answered [`OVERLOAD_RESPONSE`] and closed at once
+/// rather than left in the kernel's backlog until it gives up, and counted:
+/// one byte on the report socket, which the supervisor records as the
 /// bridge's `rejected_at_capacity`.
-pub const MAX_CONNECTIONS: usize = 128;
+pub const MAX_CONNECTIONS: usize = crate::proxy::Budgets::DEFAULT.max_connections;
 
 /// What a client beyond [`MAX_CONNECTIONS`] gets: a complete, fixed
 /// `503` in the proxy's own refusal format, written without reading or
@@ -80,19 +83,32 @@ pub const EXIT_UNSEALED: i32 = 124;
 /// Exit status for arguments the bridge does not take.
 pub const EXIT_USAGE: i32 = 125;
 
+/// The HTTP proxy variables' value (jail-v1 §10).
+#[must_use]
+pub fn proxy_url() -> String {
+    format!("http://{LISTEN}")
+}
+
+/// `ALL_PROXY`'s value: SOCKS5 with names resolved by the proxy.
+#[must_use]
+pub fn socks_url() -> String {
+    format!("socks5h://{SOCKS_LISTEN}")
+}
+
 /// The environment variables `agent` sets, with their value (jail-v1 §10):
 /// the three proxy variables in both spellings, and an empty `NO_PROXY`.
 #[must_use]
-pub fn proxy_environment() -> Vec<(&'static str, &'static str)> {
+pub fn proxy_environment() -> Vec<(&'static str, String)> {
+    let (http, socks) = (proxy_url(), socks_url());
     vec![
-        ("HTTP_PROXY", PROXY_URL),
-        ("HTTPS_PROXY", PROXY_URL),
-        ("ALL_PROXY", SOCKS_URL),
-        ("http_proxy", PROXY_URL),
-        ("https_proxy", PROXY_URL),
-        ("all_proxy", SOCKS_URL),
-        ("NO_PROXY", ""),
-        ("no_proxy", ""),
+        ("HTTP_PROXY", http.clone()),
+        ("HTTPS_PROXY", http.clone()),
+        ("ALL_PROXY", socks.clone()),
+        ("http_proxy", http.clone()),
+        ("https_proxy", http),
+        ("all_proxy", socks),
+        ("NO_PROXY", String::new()),
+        ("no_proxy", String::new()),
     ]
 }
 
@@ -150,15 +166,13 @@ pub fn bridge_main(args: &[OsString]) -> ! {
 /// peer's death as `POLLHUP`, which fails the wait rather than parking the
 /// bridge forever.
 fn await_seal() -> Option<bool> {
-    let mut fds = [libc::pollfd {
-        fd: libc::STDERR_FILENO,
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    // SAFETY: `fds` is a writable poll array of one entry; the infinite
-    // timeout is fine because the peer's death wakes the poll.
-    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 1, -1) };
-    if ready != 1 || fds[0].revents & libc::POLLIN == 0 {
+    let stderr = std::io::stderr();
+    // The infinite wait is fine because the peer's death wakes the poll.
+    let revents = crate::proxy::sys::poll(&[Some((stderr.as_fd(), libc::POLLIN))], None).ok()?;
+    if revents
+        .first()
+        .is_none_or(|&events| events & libc::POLLIN == 0)
+    {
         return None;
     }
     let mut byte = [0u8; 1];
@@ -297,13 +311,10 @@ fn serve_many(
 ) {
     let mut relays: Vec<Relay> = Vec::new();
     loop {
-        let mut fds = Vec::with_capacity(listeners.len() + relays.len() * 2);
+        let mut interests: Vec<crate::proxy::sys::Interest<'_>> =
+            Vec::with_capacity(listeners.len() + relays.len() * 2);
         for listener in listeners {
-            fds.push(libc::pollfd {
-                fd: listener.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            });
+            interests.push(Some((listener.as_fd(), libc::POLLIN)));
         }
         for relay in &relays {
             let mut client = 0;
@@ -320,42 +331,21 @@ fn serve_many(
             if relay.up.has_data() {
                 upstream |= libc::POLLOUT;
             }
-            // A side with nothing asked of it is left out (a negative fd is
-            // ignored by poll): a half-closed peer reports POLLHUP whether
-            // or not anything was requested, which would otherwise spin.
-            fds.push(libc::pollfd {
-                fd: if client == 0 {
-                    -1
-                } else {
-                    relay.client.as_raw_fd()
-                },
-                events: client,
-                revents: 0,
-            });
-            fds.push(libc::pollfd {
-                fd: if upstream == 0 {
-                    -1
-                } else {
-                    relay.upstream.as_raw_fd()
-                },
-                events: upstream,
-                revents: 0,
-            });
+            // A side with nothing asked of it is left out: a half-closed
+            // peer reports POLLHUP whether or not anything was requested,
+            // which would otherwise spin.
+            interests.push((client != 0).then_some((relay.client.as_fd(), client)));
+            interests.push((upstream != 0).then_some((relay.upstream.as_fd(), upstream)));
         }
-        let count = libc::nfds_t::try_from(fds.len()).unwrap_or(libc::nfds_t::MAX);
-        // SAFETY: `fds` is a live, initialized array of `count` pollfds; poll
-        // writes only their `revents`.
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), count, -1) };
-        if rc < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return;
-        }
+        let fds = match crate::proxy::sys::poll(&interests, None) {
+            Ok(revents) => revents,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
 
         for (index, relay) in relays.iter_mut().enumerate() {
-            let client = fds[listeners.len() + index * 2].revents;
-            let upstream = fds[listeners.len() + 1 + index * 2].revents;
+            let client = fds[listeners.len() + index * 2];
+            let upstream = fds[listeners.len() + 1 + index * 2];
             if step(relay, client, upstream).is_err() {
                 // Either side failed: close both. The client sees its
                 // connection end; nothing else is attempted for it.
@@ -366,7 +356,7 @@ fn serve_many(
         relays.retain(|relay| !relay.finished());
 
         for (index, listener) in listeners.iter().enumerate() {
-            if fds[index].revents != 0
+            if fds[index] != 0
                 && accept_all(listener, connect, rejected, &mut relays, credential_origin)
             {
                 // Security 2026-09-27 (audit 3 A7b): the accept failed on
@@ -661,21 +651,26 @@ mod tests {
     #[test]
     fn the_proxy_environment_is_both_spellings_and_an_empty_no_proxy() {
         let env = proxy_environment();
-        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        for (name, expected) in [
+            ("HTTP_PROXY", "http://127.0.0.1:3128"),
+            ("HTTPS_PROXY", "http://127.0.0.1:3128"),
+            ("ALL_PROXY", "socks5h://127.0.0.1:3129"),
+        ] {
             for spelling in [name.to_owned(), name.to_ascii_lowercase()] {
                 assert!(
-                    env.iter().any(|(key, value)| *key == spelling
-                        && *value
-                            == if name == "ALL_PROXY" {
-                                SOCKS_URL
-                            } else {
-                                PROXY_URL
-                            }),
+                    env.iter()
+                        .any(|(key, value)| *key == spelling && value == expected),
                     "{spelling}"
                 );
             }
         }
-        assert!(env.contains(&("NO_PROXY", "")) && env.contains(&("no_proxy", "")));
-        assert_eq!(PROXY_URL, format!("http://{LISTEN}"));
+        for name in ["NO_PROXY", "no_proxy"] {
+            assert!(
+                env.iter()
+                    .any(|(key, value)| *key == name && value.is_empty())
+            );
+        }
+        assert_eq!(LISTEN.to_string(), "127.0.0.1:3128");
+        assert_eq!(SOCKS_LISTEN.to_string(), "127.0.0.1:3129");
     }
 }

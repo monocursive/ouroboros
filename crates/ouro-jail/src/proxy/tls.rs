@@ -1,8 +1,9 @@
 //! One HTTP/1.1 request per TLS connection. No opaque forwarding in vault mode.
-use super::{EndReason, Reason, http::Framing, origin, relay::RelayOutcome};
+use super::{EndReason, Reason, http::Framing, origin, relay::RelayOutcome, sys};
 use crate::{network::Destination, vault::Vault};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::os::fd::{AsFd as _, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
@@ -300,6 +301,25 @@ fn verify_websocket(head: &[u8], key: &[u8]) -> Result<(), Reason> {
     Ok(())
 }
 
+/// What one side of the pump waits for: room to write its pending records,
+/// and records to read while it can take them. A side with nothing asked of
+/// it is left out: a half-closed peer reports POLLHUP whether or not
+/// anything was requested, which would otherwise spin.
+fn interest<'a>(
+    fd: BorrowedFd<'a>,
+    conn: &rustls::Connection,
+    can_take: bool,
+) -> sys::Interest<'a> {
+    let mut events = 0;
+    if conn.wants_write() {
+        events |= libc::POLLOUT;
+    }
+    if can_take && conn.wants_read() {
+        events |= libc::POLLIN;
+    }
+    (events != 0).then_some((fd, events))
+}
+
 // Two nonblocking TLS state machines, bounded plaintext buffers, one absolute
 // lifetime. Only a verified RFC6455 switch enables client-to-upstream traffic.
 fn pump(
@@ -311,7 +331,6 @@ fn pump(
     mode: (bool, usize),
     outcome: &mut RelayOutcome,
 ) -> Result<rustls::ServerConnection, Reason> {
-    use std::os::fd::AsRawFd as _;
     let (websocket, chunk) = mode;
     let limit = chunk.clamp(1, 16384);
     let mut incoming = rustls::Connection::Server(server);
@@ -413,59 +432,31 @@ fn pump(
         if websocket && client_eof && up.is_empty() {
             outgoing.send_close_notify();
         }
-        let mut fds = [
-            libc::pollfd {
-                fd: if (client_eof || !incoming.wants_read() || up.len() >= limit)
-                    && !incoming.wants_write()
-                {
-                    -1
-                } else {
-                    socket.as_raw_fd()
-                },
-                events: if incoming.wants_write() {
-                    libc::POLLOUT
-                } else {
-                    0
-                } | if !client_eof && incoming.wants_read() && up.len() < limit {
-                    libc::POLLIN
-                } else {
-                    0
-                },
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: if (upstream_eof || !outgoing.wants_read() || down.len() >= limit)
-                    && !outgoing.wants_write()
-                {
-                    -1
-                } else {
-                    remote.as_raw_fd()
-                },
-                events: if outgoing.wants_write() {
-                    libc::POLLOUT
-                } else {
-                    0
-                } | if !upstream_eof && outgoing.wants_read() && down.len() < limit {
-                    libc::POLLIN
-                } else {
-                    0
-                },
-                revents: 0,
-            },
-        ];
-        // SAFETY: two initialized pollfds, bounded lease-check interval.
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, if progress { 0 } else { 100 }) };
-        if rc < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(Reason::InternalError);
-        }
+        // The timeout bounds how long a revoked lease can go unnoticed.
+        let revents = match sys::poll(
+            &[
+                interest(socket.as_fd(), &incoming, !client_eof && up.len() < limit),
+                interest(
+                    remote.as_fd(),
+                    &outgoing,
+                    !upstream_eof && down.len() < limit,
+                ),
+            ],
+            Some(if progress {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(100)
+            }),
+        ) {
+            Ok(revents) => revents,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(Reason::InternalError),
+        };
         for (index, conn, eof) in [
             (0, &mut incoming, &mut client_eof),
             (1, &mut outgoing, &mut upstream_eof),
         ] {
-            let flags = fds[index].revents;
+            let flags = revents[index];
             if flags & libc::POLLOUT != 0 {
                 let result = if index == 0 {
                     conn.write_tls(&mut &*socket)

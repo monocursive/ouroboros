@@ -18,6 +18,9 @@ pub fn detect(stream: &UnixStream, deadline: Instant) -> Result<Option<bool>, Re
     let mut byte = 0u8;
     // MSG_PEEK selects the protocol without consuming HTTP's request byte.
     let n = loop {
+        // SAFETY: `byte` is a writable one-byte buffer that outlives the
+        // call, the length passed is 1, and the descriptor belongs to
+        // `stream`, which is borrowed (open) for the call.
         let n = unsafe {
             libc::recv(
                 stream.as_raw_fd(),
