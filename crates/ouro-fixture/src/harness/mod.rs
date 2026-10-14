@@ -1675,6 +1675,19 @@ mod tests {
 
     /// Review FX10: a line that is not a report is not silently dropped.
     #[test]
+    fn a_run_with_a_line_that_is_not_a_report_says_so() {
+        let run = Jail::with_program("/bin/sh")
+            .expect("a private harness root")
+            .args(["-c", r#"echo '{"op":"a"}'; echo 'not a report'"#])
+            .run()
+            .expect("the shell runs");
+        let strict =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.fixture_lines().len()));
+        assert!(strict.is_err(), "a stray line must not be dropped");
+        assert_eq!(run.fixture_lines_lossy().len(), 1);
+    }
+
+    #[test]
     fn report_lines_refuse_a_line_that_is_not_json() {
         assert_eq!(
             report_lines(b"{\"op\":\"a\"}\n\n{\"op\":\"b\"}\n")
