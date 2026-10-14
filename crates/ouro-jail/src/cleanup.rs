@@ -624,7 +624,9 @@ pub enum Resume {
     StillPending(String),
 }
 
-const RECEIPT_MAX: u64 = 4 * 1024 * 1024;
+/// Largest receipt (or `policy.json`) this tool reads back: whoever reads
+/// one, the supervisor, cleanup or `gc`, holds it to this one bound.
+pub const RECEIPT_MAX: u64 = 4 * 1024 * 1024;
 
 fn read_receipt(attempt_dir: &AttemptDir) -> Result<Option<Receipt>, JailError> {
     let path = attempt_dir.receipt_path();

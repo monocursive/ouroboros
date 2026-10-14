@@ -68,7 +68,7 @@ pub fn leaf_name_of(attempt_id: &str) -> String {
 /// Largest `jail-state.json` gc reads.
 const STATE_MAX: u64 = 1024 * 1024;
 /// Largest `jail.json` or `policy.json` gc reads.
-const RECORD_MAX: u64 = 4 * 1024 * 1024;
+const RECORD_MAX: u64 = cleanup::RECEIPT_MAX;
 
 /// What one invocation may do (§14.2, S7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

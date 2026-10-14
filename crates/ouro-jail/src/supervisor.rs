@@ -2692,18 +2692,12 @@ fn validate_receipt_path(args: &RunArgs, plan: &Plan, roots: &ChildRoots) -> Res
     Ok(())
 }
 
-/// Whether an existing regular file is a prior receipt copy: small enough to
-/// be one and carrying the `ouro.jail.receipt/1` schema identifier. Anything
-/// else — truncated, huge or foreign — stays untouched.
+/// Whether an existing regular file is a prior receipt copy: within the
+/// receipt bound every reader uses ([`cleanup::RECEIPT_MAX`]), read without
+/// following a link, and carrying the `ouro.jail.receipt/1` schema
+/// identifier. Anything else — truncated, huge or foreign — stays untouched.
 fn prior_receipt_copy(path: &Path) -> bool {
-    const RECEIPT_COPY_MAX: u64 = 8 * 1024 * 1024;
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !meta.is_file() || meta.len() > RECEIPT_COPY_MAX {
-        return false;
-    }
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(Some(bytes)) = state::read_capped(path, cleanup::RECEIPT_MAX) else {
         return false;
     };
     serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -4686,6 +4680,36 @@ mod tests {
             errors: Vec::new(),
             credentials: Vec::new(),
         }
+    }
+
+    /// A prior receipt copy is replaceable only within the receipt bound
+    /// every other reader holds receipts to, and only as a regular file.
+    #[test]
+    fn a_prior_receipt_copy_is_held_to_the_receipt_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let receipt = |pad: usize| {
+            serde_json::to_vec(&serde_json::json!({
+                "schema": crate::records::SCHEMA_RECEIPT,
+                "pad": "x".repeat(pad),
+            }))
+            .unwrap()
+        };
+        let small = dir.path().join("small.json");
+        std::fs::write(&small, receipt(16)).unwrap();
+        assert!(prior_receipt_copy(&small));
+        let large = dir.path().join("large.json");
+        std::fs::write(
+            &large,
+            receipt(usize::try_from(cleanup::RECEIPT_MAX).unwrap()),
+        )
+        .unwrap();
+        assert!(!prior_receipt_copy(&large), "past the receipt bound");
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&small, &link).unwrap();
+        assert!(!prior_receipt_copy(&link), "a link is not a copy");
+        let foreign = dir.path().join("foreign.json");
+        std::fs::write(&foreign, b"{\"schema\":\"something.else/1\"}").unwrap();
+        assert!(!prior_receipt_copy(&foreign));
     }
 
     /// An unsatisfied requirement refuses with the code, remediation and
