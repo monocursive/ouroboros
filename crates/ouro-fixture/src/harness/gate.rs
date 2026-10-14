@@ -421,7 +421,7 @@ pub struct GateOwner<'a> {
     gate: &'a mut Option<GateWriter>,
     /// Every control message read so far, in order. Owned by the run, so the
     /// conversation survives the owner and appears in [`super::Run`].
-    pub seen: &'a mut Vec<Value>,
+    seen: &'a mut Vec<Value>,
 }
 
 impl<'a> GateOwner<'a> {
@@ -435,6 +435,17 @@ impl<'a> GateOwner<'a> {
             gate,
             seen,
         }
+    }
+
+    /// Keep one more control message, after the transcript so far, with it,
+    /// has passed the installed [`super::RecordContract`]: a message the
+    /// owner hands a test was checked like the run's whole transcript is.
+    /// The ordering rules hold for every prefix of a valid transcript, so a
+    /// transcript read only part way is held to them too.
+    fn keep(&mut self, value: Value) -> Value {
+        self.seen.push(value.clone());
+        super::contract::control(self.seen);
+        value
     }
 
     /// Read control messages until the first `prepared`. Returns an error when
@@ -468,7 +479,7 @@ impl<'a> GateOwner<'a> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            self.seen.push(value.clone());
+            let value = self.keep(value);
             match kind.as_str() {
                 "prepared" => return Ok(value),
                 "refused" => {
@@ -546,7 +557,7 @@ impl<'a> GateOwner<'a> {
                     format!("control message is not JSON: {e}"),
                 )
             })?;
-            self.seen.push(value.clone());
+            let value = self.keep(value);
             if value.get("kind").and_then(Value::as_str) == Some(kind) {
                 return Ok(Some(value));
             }
@@ -566,10 +577,7 @@ impl<'a> GateOwner<'a> {
                 continue;
             }
             match serde_json::from_slice::<Value>(&line) {
-                Ok(v) => {
-                    self.seen.push(v.clone());
-                    out.push(v);
-                }
+                Ok(v) => out.push(self.keep(v)),
                 Err(e) => {
                     drained.error = Some(io::Error::new(
                         io::ErrorKind::InvalidData,

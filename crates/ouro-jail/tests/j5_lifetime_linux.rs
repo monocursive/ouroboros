@@ -185,7 +185,10 @@ impl Attempt {
         );
     }
 
-    /// The next control message; `None` at end of file.
+    /// The next control message; `None` at end of file. The transcript so
+    /// far, with it, is held to its contract first (the ordering rules hold
+    /// for every prefix of a valid transcript), so no test reads a message
+    /// that breaks one.
     fn next(&mut self) -> Option<Value> {
         let line = match self.reader.next_line() {
             Ok(line) => line?,
@@ -194,6 +197,11 @@ impl Attempt {
         match serde_json::from_slice::<Value>(&line) {
             Ok(value) => {
                 self.seen.push(value.clone());
+                if let Err(error) = common::check_control(&self.seen) {
+                    self.fail(&format!(
+                        "the control transcript fails its contract: {error}"
+                    ));
+                }
                 Some(value)
             }
             Err(error) => self.fail(&format!(

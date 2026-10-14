@@ -5,15 +5,19 @@
 //! per test binary with [`hold_records_to`] (`ouro-jail`'s `tests/common`
 //! does it in `live()`). From then on every receipt, control transcript and
 //! complete trace a [`Run`](super::Run) or [`Spawned`](super::Spawned) hands
-//! out has passed them, and one that does not panics with the finding instead
-//! of being returned.
+//! out, and every control message its [`GateOwner`](super::GateOwner) reads
+//! (with the messages before it), has passed them, and one that does not
+//! panics with the finding instead of being returned.
 //!
 //! A binary that installed nothing cannot read a record at all: the accessor
 //! panics rather than hand out something no rule was applied to. A suite
 //! whose program is a stand-in that only imitates the product's records says
-//! so with [`RecordContract::STAND_IN`]. The raw fields (`trace_readback`,
-//! `trace_bytes`) stay unchecked: they exist for tests about a transcript
-//! that is torn, cut short or otherwise not the product's whole record.
+//! so with [`RecordContract::STAND_IN`]. The transcripts themselves are
+//! private to `Run`; the raw trace (`trace_readback`, `trace_bytes`) and the
+//! local traces `local_traces` hands back incomplete stay unchecked: they
+//! exist for tests about a transcript that is torn, cut short or otherwise
+//! not the product's whole record, which hold what they read to what a
+//! prefix keeps themselves.
 
 use std::sync::OnceLock;
 

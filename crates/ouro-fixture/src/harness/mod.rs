@@ -1063,11 +1063,16 @@ pub struct Run {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    pub control_messages: Vec<Value>,
+    /// Read through [`Run::control_messages`], which holds the transcript to
+    /// the installed [`RecordContract`] and refuses a partial one. Not
+    /// public, so no test can read the product's messages unchecked.
+    control_messages: Vec<Value>,
     /// The complete trace frames, in order, up to the first line that is not
-    /// one (see `trace_readback`). Prefer [`Run::trace_events`], which
-    /// refuses a transcript that is not complete in the §13.3 sense.
-    pub trace_events: Vec<Value>,
+    /// one (see `trace_readback`). Read through [`Run::trace_events`], which
+    /// refuses a transcript that is not complete in the §13.3 sense and holds
+    /// a complete one to the contract. A test about a trace that is not
+    /// complete reads `trace_readback` and says so.
+    trace_events: Vec<Value>,
     /// How the recogniser classified the trace bytes, when a trace was asked
     /// for: complete, visibly incomplete (a torn last line) or corrupt.
     pub trace_readback: Option<Readback>,

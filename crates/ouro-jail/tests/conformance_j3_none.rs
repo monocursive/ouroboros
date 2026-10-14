@@ -1493,7 +1493,7 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
     common::eventually("a prepared receipt", common::SETTLE_BOUND, || {
         current()["phase"] == "prepared"
     });
-    let prepared = current();
+    let prepared = common::checked_receipt(current());
     let (leaf, _) = leaf_of(&prepared);
     let pid = prepared["lifetime"]["native"]["details"]["launcher_pid"]
         .as_i64()

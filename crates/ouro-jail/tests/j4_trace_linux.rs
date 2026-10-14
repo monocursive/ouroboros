@@ -373,6 +373,9 @@ fn assert_prefix_then_notes(path: &Path, readback: &ouro_fixture::harness::Readb
         );
     }
     let receipt = std::fs::read(path.with_file_name("jail.json")).expect("the attempt's receipt");
+    let _ = common::checked_receipt(
+        serde_json::from_slice(&receipt).expect("the receipt is one JSON document"),
+    );
     let (phase, digest) = receipt_note_of(&receipt).expect("a receipt with a phase");
     assert_eq!(phase, "settled", "{what}");
     assert_eq!(

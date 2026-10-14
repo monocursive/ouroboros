@@ -1510,12 +1510,12 @@ fn r5_control_ordering_and_sequence() {
     );
 
     let kinds: Vec<&str> = run
-        .control_messages
+        .control_messages()
         .iter()
         .filter_map(|m| m.get("kind").and_then(Value::as_str))
         .collect();
     let seqs: Vec<u64> = run
-        .control_messages
+        .control_messages()
         .iter()
         .filter_map(|m| m.get("seq").and_then(Value::as_u64))
         .collect();
@@ -1614,7 +1614,7 @@ fn r5_malformed_gate_frames_refuse_without_running_the_target() {
         let ran = marker.exists();
         let code = run.code();
         let kinds: Vec<&str> = run
-            .control_messages
+            .control_messages()
             .iter()
             .filter_map(|m| m.get("kind").and_then(Value::as_str))
             .collect();

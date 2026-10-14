@@ -194,10 +194,8 @@ fn a_claimed_attempt_always_has_a_receipt() {
         "a claimed attempt has no receipt; the run reported {:?}",
         report.error
     );
-    let receipt: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    let receipt = common::read_receipt(&receipt_path);
     assert_eq!(receipt["phase"], "refused", "{receipt:#}");
-    common::assert_semantic_receipt(&receipt);
 }
 
 /// §14.1: plain `doctor` reports the host; only `--launch` has credential

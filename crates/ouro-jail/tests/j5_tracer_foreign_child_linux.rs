@@ -852,6 +852,8 @@ impl Beside {
             .collect()
     }
 
+    /// The `--receipt` copy, held to its contract (schema and semantic
+    /// rules) before any assertion reads it.
     fn receipt(&self) -> Value {
         let raw = fs::read(self.dir.join("receipt.json")).unwrap_or_else(|e| {
             panic!(
@@ -860,7 +862,7 @@ impl Beside {
                 self.captured.stderr
             )
         });
-        serde_json::from_slice(&raw).expect("receipt JSON")
+        common::checked_receipt(serde_json::from_slice(&raw).expect("receipt JSON"))
     }
 }
 
@@ -1134,7 +1136,6 @@ fn j5t_a_strict_tool_run_traced_to_an_inherited_reader_settles_verified() {
         beside.captured.stderr
     );
     let receipt = beside.receipt();
-    common::assert_semantic_receipt(&receipt);
     assert_eq!(receipt["phase"], "settled", "{receipt:#}");
     assert_eq!(
         receipt["outcome"]["kind"], "exited",
@@ -1209,7 +1210,6 @@ fn none_case(observe: &str, foreign: Foreign) {
         beside.captured.stderr
     );
     let receipt = beside.receipt();
-    common::assert_semantic_receipt(&receipt);
     assert_eq!(receipt["phase"], "settled", "{label}: {receipt:#}");
     assert_eq!(receipt["outcome"]["kind"], "exited", "{label}");
     assert_eq!(

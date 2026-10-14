@@ -412,7 +412,7 @@ fn a_run_without_channels_still_works_and_keeps_its_state_private() {
         .unwrap();
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
     assert!(marker.exists());
-    assert!(run.control_messages.is_empty());
+    assert!(run.control_messages().is_empty());
     assert!(run.trace_events().is_empty());
 }
 
