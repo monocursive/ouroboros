@@ -132,6 +132,47 @@ fn an_observed_run_works_below_the_supervisors_descriptor_range() {
     }
 }
 
+/// The `observer_closed_set` entry of a `doctor --json` run, with `hard`
+/// (when given) as the doctor's own hard and soft descriptor limit.
+fn doctor_observer_probe(hard: Option<libc::rlim_t>) -> Value {
+    use std::os::unix::process::CommandExt as _;
+    let jail = Jail::new().unwrap();
+    let _soft = SoftNofile::set(OPERATOR_SOFT);
+    let mut command = Command::new(harness::jail_path());
+    command
+        .arg("doctor")
+        .arg("--json")
+        .env("OURO_DATA_DIR", jail.data_dir())
+        .env("OURO_CONFIG_DIR", jail.config_dir());
+    if let Some(hard) = hard {
+        let limit = libc::rlimit {
+            rlim_cur: hard,
+            rlim_max: hard,
+        };
+        // SAFETY: runs between fork and exec and calls only setrlimit, which
+        // is async-signal-safe, on a value copied into the closure; lowering
+        // both limits needs no privilege and touches only the child.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let out = command.output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let report: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    report["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|capability| capability["name"] == "observer_closed_set")
+        .unwrap_or_else(|| panic!("no observer probe: {report:#}"))
+        .clone()
+}
+
 /// Attempted, live: `doctor` from a session whose soft descriptor limit is
 /// 200. Verdict: the observer probe, which hands the launcher its channels
 /// like a run does, measures the host instead of failing.
@@ -140,22 +181,23 @@ fn doctor_measures_the_observer_below_the_supervisors_descriptor_range() {
     if !common::live() || !room_to_raise() {
         return;
     }
-    let jail = Jail::new().unwrap();
-    let _soft = SoftNofile::set(OPERATOR_SOFT);
-    let out = Command::new(harness::jail_path())
-        .arg("doctor")
-        .arg("--json")
-        .env("OURO_DATA_DIR", jail.data_dir())
-        .env("OURO_CONFIG_DIR", jail.config_dir())
-        .output()
-        .unwrap();
-    let text = String::from_utf8_lossy(&out.stdout);
-    let report: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
-    let probe = report["capabilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|capability| capability["name"] == "observer_closed_set")
-        .unwrap_or_else(|| panic!("no observer probe: {report:#}"));
+    let probe = doctor_observer_probe(None);
     assert_eq!(probe["status"], "available", "{probe:#}");
+}
+
+/// Attempted, live: `doctor` whose hard descriptor limit is 200 too, so no
+/// raise reaches the supervisor's range. Verdict: the observer probe fails
+/// naming the limits and the number it needs, not "Invalid argument".
+#[test]
+fn doctor_names_a_hard_descriptor_limit_below_the_supervisors_range() {
+    if !common::live() {
+        return;
+    }
+    let probe = doctor_observer_probe(Some(OPERATOR_SOFT));
+    assert_ne!(probe["status"], "available", "{probe:#}");
+    let evidence = probe["evidence_ref"].as_str().unwrap_or_default();
+    assert!(
+        evidence.contains("RLIMIT_NOFILE") && evidence.contains("hard limit 200"),
+        "{probe:#}"
+    );
 }
