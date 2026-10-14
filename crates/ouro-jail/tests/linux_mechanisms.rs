@@ -1947,8 +1947,10 @@ fn a_delegated_leaf_records_the_kernels_own_answer() {
         .delegated_root
         .clone()
         .expect("the reference host delegates a subtree to this account");
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    let uid = unsafe { libc::geteuid() };
     assert!(
-        root.ends_with(format!("user@{}.service", unsafe { libc::geteuid() })),
+        root.ends_with(format!("user@{uid}.service")),
         "{}",
         root.display()
     );

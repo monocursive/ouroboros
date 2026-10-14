@@ -305,7 +305,9 @@ impl ExecutionCgroup {
         name: &str,
         register: Register<'_>,
     ) -> io::Result<Self> {
-        let root = delegated_root(unsafe { libc::getuid() }).ok_or_else(|| {
+        // SAFETY: getuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let root = delegated_root(uid).ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "no delegated cgroup")
         })?;
         let relative = root.strip_prefix(CGROUP_ROOT).map_err(io::Error::other)?;
@@ -335,7 +337,9 @@ impl ExecutionCgroup {
         register: Register<'_>,
     ) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(root)?;
-        if !metadata.is_dir() || metadata.uid() != unsafe { libc::getuid() } {
+        // SAFETY: getuid takes no arguments and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        if !metadata.is_dir() || metadata.uid() != uid {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "cgroup root is not owned",
@@ -346,9 +350,12 @@ impl ExecutionCgroup {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
             .open(root)?;
         let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        // SAFETY: `root_fd` is a live descriptor and `filesystem` is writable
+        // storage of the type fstatfs fills.
         if unsafe { libc::fstatfs(root_fd.as_raw_fd(), filesystem.as_mut_ptr()) } < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: fstatfs succeeded, so it initialized `filesystem`.
         if unsafe { filesystem.assume_init() }.f_type != libc::CGROUP2_SUPER_MAGIC {
             return Err(io::Error::other("execution root is not cgroup v2"));
         }
@@ -490,6 +497,7 @@ impl ExecutionCgroup {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: `fd` was just returned by `openat` and nothing else owns it.
         Ok(unsafe { fs::File::from_raw_fd(fd) })
     }
 

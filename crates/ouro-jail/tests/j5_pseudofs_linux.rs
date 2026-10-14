@@ -118,7 +118,9 @@ fn s02_a_grant_of_dev_or_run_refuses_before_exec() {
     // The audit's live shape, writable: the operator's own logind runtime
     // submount. Skipped where that mount does not exist, like the grants
     // above.
-    let runtime = Path::new("/run/user").join(format!("{}", unsafe { libc::geteuid() }));
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    let runtime = Path::new("/run/user").join(format!("{uid}"));
     if runtime.is_dir() {
         let (code, stderr, ran) = rw_grant_run("tool", &runtime);
         assert_eq!(code, Some(125), "--rw {}: {stderr}", runtime.display());
