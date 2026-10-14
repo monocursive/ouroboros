@@ -217,6 +217,19 @@ vocabulary! {
 }
 
 vocabulary! {
+    /// What a run's coverage says about one evidence class, or about every
+    /// class a reader selected.
+    SelectionStatus {
+        /// Observed, without a recorded gap.
+        Active = "active",
+        /// A recorded gap or degradation applies.
+        Degraded = "degraded",
+        /// Not observed.
+        Unobserved = "unobserved",
+    }
+}
+
+vocabulary! {
     /// Whether a GC deletion of history or captures finished.
     HistoryState {
         Pruning = "pruning",

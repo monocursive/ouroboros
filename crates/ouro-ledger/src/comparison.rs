@@ -12,7 +12,7 @@ use crate::{
     daemon::Client,
     protocol::{
         Chain, LedgerError, MAX_FRAME_BYTES, READ_OUTPUT_BYTES, ReadFilter, ReadPage, ReadRequest,
-        ReadSelector, Result,
+        ReadSelector, Result, SelectionStatus,
     },
 };
 
@@ -233,26 +233,18 @@ fn class_reason(summary: &Value, class: &str) -> Option<&'static str> {
         return Some("run_not_terminal");
     }
     let coverage = &summary["coverage"];
-    let entry = &coverage["classes"][class];
-    let gaps = |v: &Value| v["gap_count"].as_u64().is_some_and(|n| n > 0);
-    if coverage["status"] == "degraded"
-        || gaps(coverage)
-        || gaps(&coverage["classes"]["ledger"])
-        || coverage["classes"]["ledger"]["status"] == "degraded"
-        || gaps(entry)
-        || entry["status"] == "degraded"
-    {
-        return Some("coverage_degraded");
+    match crate::reader::class_coverage(coverage, class) {
+        SelectionStatus::Degraded => Some("coverage_degraded"),
+        SelectionStatus::Unobserved => Some("unobserved"),
+        SelectionStatus::Active
+            if coverage["classes"][class]["sources"]
+                .as_array()
+                .is_none_or(Vec::is_empty) =>
+        {
+            Some("source_unspecified")
+        }
+        SelectionStatus::Active => None,
     }
-    if !matches!(coverage["status"].as_str(), Some("by_class" | "active"))
-        || entry["status"] != "active"
-    {
-        return Some("unobserved");
-    }
-    if entry["sources"].as_array().is_none_or(Vec::is_empty) {
-        return Some("source_unspecified");
-    }
-    None
 }
 
 #[derive(Serialize, Deserialize)]

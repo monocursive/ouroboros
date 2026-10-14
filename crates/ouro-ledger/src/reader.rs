@@ -24,7 +24,7 @@ use crate::{
         AppendReceipt, ChildProtection, LedgerError, MAX_FRAME_BYTES, MAX_READ_LIMIT,
         OversizedRecord, READ_CHUNK_BYTES, READ_OUTPUT_BYTES, READ_SCAN_BYTES, READ_SCAN_FRAMES,
         ReadFilter, ReadPage, ReadRequest, ReadSelector, ReadStage, Result, RunRecord, RunState,
-        StreamStatus,
+        SelectionStatus, StreamStatus,
     },
     schemas,
 };
@@ -485,7 +485,33 @@ pub(crate) fn snapshot_labels_digest(
     durable_digest(&json!({"child_protection":child_protection,"coverage":coverage}))
 }
 
-pub(crate) fn selection_status(filter: &ReadFilter, coverage: &Value) -> &'static str {
+/// What a run's coverage summary says about `class`. Readers' selection
+/// status and comparisons both decide by this one rule: any run-level or
+/// ledger gap or degradation degrades every class, and a class is active
+/// only when its own entry is active under a summary that is per class.
+pub(crate) fn class_coverage(summary: &Value, class: &str) -> SelectionStatus {
+    let classes = &summary["classes"];
+    let entry = &classes[class];
+    let gaps = |entry: &Value| entry["gap_count"].as_u64().is_some_and(|count| count > 0);
+    if summary["status"] == "degraded"
+        || gaps(summary)
+        || gaps(&classes["ledger"])
+        || classes["ledger"]["status"] == "degraded"
+        || gaps(entry)
+        || entry["status"] == "degraded"
+    {
+        SelectionStatus::Degraded
+    } else if !matches!(summary["status"].as_str(), Some("by_class" | "active"))
+        || entry["status"] != "active"
+    {
+        SelectionStatus::Unobserved
+    } else {
+        SelectionStatus::Active
+    }
+}
+
+/// The weakest class coverage among the classes `filter` selects.
+pub(crate) fn selection_status(filter: &ReadFilter, coverage: &Value) -> SelectionStatus {
     let classes: &[&str] = match filter.selector {
         ReadSelector::All => &["exec", "fs.write", "fs.deny", "net", "limits", "proxy.net"],
         ReadSelector::Execs => &["exec"],
@@ -493,24 +519,16 @@ pub(crate) fn selection_status(filter: &ReadFilter, coverage: &Value) -> &'stati
         ReadSelector::Hosts => &["net", "proxy.net"],
         ReadSelector::Denials => &["exec", "fs.write", "fs.deny", "net", "proxy.net"],
     };
-    let classes_coverage = &coverage["classes"];
-    let gaps = |entry: &Value| entry["gap_count"].as_u64().is_some_and(|count| count > 0);
-    if coverage["status"] == "degraded"
-        || gaps(coverage)
-        || gaps(&classes_coverage["ledger"])
-        || classes
-            .iter()
-            .any(|c| classes_coverage[*c]["status"] == "degraded" || gaps(&classes_coverage[*c]))
-    {
-        return "degraded";
-    }
-    if classes
+    let statuses: Vec<_> = classes
         .iter()
-        .any(|c| classes_coverage[*c]["status"] != "active")
-    {
-        "unobserved"
+        .map(|class| class_coverage(coverage, class))
+        .collect();
+    if statuses.contains(&SelectionStatus::Degraded) {
+        SelectionStatus::Degraded
+    } else if statuses.contains(&SelectionStatus::Unobserved) {
+        SelectionStatus::Unobserved
     } else {
-        "active"
+        SelectionStatus::Active
     }
 }
 
@@ -1262,6 +1280,20 @@ mod tests {
         assert_eq!(selection_status(&filter, &summary), "degraded");
         filter.selector = ReadSelector::Hosts;
         assert_eq!(selection_status(&filter, &summary), "unobserved");
+        // An active class counts only under a summary that is per class:
+        // comparisons and selections read coverage by the same rule.
+        filter.selector = ReadSelector::Execs;
+        let active = json!({"exec":{"status":"active","sources":["audit"],"gaps":[]}});
+        assert_eq!(
+            selection_status(&filter, &coverage_summary(&active)),
+            "active"
+        );
+        let mut unknown = active.clone();
+        unknown["status"] = json!("complete");
+        assert_eq!(
+            selection_status(&filter, &coverage_summary(&unknown)),
+            "unobserved"
+        );
     }
 
     #[test]
