@@ -1449,6 +1449,7 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
     use std::process::Stdio;
     const NAME: &str = Probe::ObserverClosedSet.name();
     const MECHANISM: &str = Probe::ObserverClosedSet.mechanism();
+    use super::platform::{ERROR_FD, RELEASE_FD};
     let deadline = Deadline::after(PROBE_DEADLINE);
     let measured = (|| -> io::Result<()> {
         let temp = OwnedTempDir::new("observer-probe")?;
@@ -1456,19 +1457,14 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
         let (release_r, release_w) = exec::pipe()?;
         let (_error_r, error_w) = exec::pipe()?;
         let mut fds = FdMap::new();
-        fds.add(release_r, 12)?;
-        fds.add(error_w, 13)?;
+        fds.add(release_r, RELEASE_FD)?;
+        fds.add(error_w, ERROR_FD)?;
         let mut command = Command::new(jail_exe);
         command
-            .args([
-                super::launch::SUBCOMMAND,
-                "--release-fd",
-                "12",
-                "--error-fd",
-                "13",
-                "--narrow",
-                "--",
-            ])
+            .arg(super::launch::SUBCOMMAND)
+            .args(["--release-fd", &RELEASE_FD.to_string()])
+            .args(["--error-fd", &ERROR_FD.to_string()])
+            .args(["--narrow", "--"])
             .arg(jail_exe)
             .arg(INSIDE_SUBCOMMAND)
             .arg(format!("create=write:{}", target.display()))
@@ -1490,7 +1486,7 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
         let measured = (|| -> io::Result<()> {
             loop {
                 // Blocked on the `--release-fd` above, not on an earlier read.
-                if identity::blocked_in_read(pid, 12)? {
+                if identity::blocked_in_read(pid, RELEASE_FD)? {
                     break;
                 }
                 if deadline.expired() {
