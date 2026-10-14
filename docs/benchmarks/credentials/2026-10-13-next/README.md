@@ -677,3 +677,55 @@ can be adopted. Kernel-pinned executable identity, descriptor budgets,
 single-use authority, missing-authority refusal, isolation and audit coverage
 must remain intact. The identical fixture must then be rerun with both records
 retained, followed by fresh final-source release proof if runtime changes.
+
+## Origin rendezvous runs: which source each validates
+
+Each `validation/origin-race-*` directory is one run of
+`harness/native_origin_probe.py` (or its predecessor) on the aarch64 Linux VM
+`ouro-dev`: rustc 1.98.1, `cargo test --release --jobs 1 -p ouro-jail --lib`
+over the in-crate `vault::origin` unit tests, which drive the rendezvous over
+real loopback sockets and socket pairs, not through a jail. None is a
+performance score. A run validates exactly the source files it records (under
+`source/`, or `source-*.rs` in the earliest runs) at the revision its
+`driver.json` names, `dirty: true` when a file was overridden. If a branch is
+re-applied on integration rather than merged, its revision is no longer an
+ancestor of the integrated tree, and the recorded hashes, not the revision,
+say which integrated files a run covers.
+
+| Run | Built from | What it shows |
+|---|---|---|
+| `origin-race-before-01-quota` | `35869fe8` | Nothing: it never compiled (its `verdict-note.json`) |
+| `origin-race-before-02` | `35869fe8`, `origin.rs` overridden with the guard test | Before the waiting rendezvous, a preamble ahead of the publication is refused |
+| `origin-race-fixed-01` | `35869fe8`, `origin.rs` `a65c3aec` and `proxy/mod.rs` `73ba0df4` overridden | The first waiting rendezvous; that source was replaced since |
+| `origin-race-fixed-02` | archive of `596eb2dd`, clean | The waiting rendezvous: 13 passed |
+| `origin-race-check-order-mutant-02` | `596eb2dd`, `claim` checking the deadline before the table | The check-order test fails, the other 12 pass |
+| `origin-race-fixed-03-failed` | archive of `2bc65529` lacking a build input | Nothing: it never compiled (its `verdict-note.json`) |
+| `origin-race-fixed-04` | archive of `2bc65529`'s build inputs, clean | The socket-bound authority: 19 passed, 18 of them rendezvous tests |
+| `origin-race-liveness-mutant-04` | `2bc65529`, claim and prune ignoring the held socket | 3 fail, among them a later connection on a reused 4-tuple receiving another process's authority; 16 pass |
+
+`596eb2dd` is the last commit of the package that made the waiting
+rendezvous. It is not an ancestor of the integrated tree: integration
+re-applied that package's commits (`596eb2dd` there is `1d1da26c`, the same
+patch) on top of other packages' changes, and those include changes to
+`agent.rs` in the `AgentNet` code (from about line 247 on), not in
+`RecordQueue` or `PreparedOrigin`. So `origin-race-fixed-02` records an
+`agent.rs` (`f7a547ee…`) that differs from the one at `2af84e59`
+(`24738130…`), while its `origin.rs`, `proxy/mod.rs`, `bridge.rs`,
+`unixpeer.rs` and `unixpeer/live.rs` are byte-identical to `2af84e59`'s.
+The rendezvous runs through those five, so `fixed-02` validates the
+rendezvous as integrated at `2af84e59`; it does not validate that `agent.rs`.
+
+`2bc65529` descends from `2af84e59`. Its `origin.rs` binds each published
+authority to the connection's own socket, so a later connection on the same
+4-tuple never receives an earlier connection's authority, and it closes the
+held sockets off the rendezvous threads. Its `agent.rs`, `bridge.rs`,
+`unixpeer.rs` and `unixpeer/live.rs` are those of `2af84e59`; `proxy/mod.rs`
+differs by a comment. The `-04` runs record all six. Their archive holds the
+build's inputs only (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
+`.cargo`, `crates/` and `docs/specs/jail-v1/network-addresses.json`, which
+`origin-race-fixed-03-failed` lacked). From these runs on the probe runs both
+test modules by default and records `linux_tests_ran`; the mutant run's
+recorded 15 undercounts the 18 that ran, as its `verdict-note.json` explains,
+and the probe has counted failing tests since. None of these runs exercises a
+jail end to end: the release preview's vault case configures no `binaries`,
+so it never pins a process.
