@@ -126,25 +126,24 @@ impl Deadline {
     }
 }
 
-/// Security 2026-09-27 (audit 4 B6): the wall deadline from the snapshot's
-/// single wall ceiling, parsed in exactly one place.
+/// The snapshot's single wall ceiling as a duration, parsed in exactly one
+/// place for both release paths, which start the [`Deadline`] from it once
+/// the target is released.
 ///
-/// Both release paths used to parse the ceiling independently with
-/// `.parse().ok()`, so an unparseable value would have silently dropped
-/// enforcement while the receipt's limit row still claimed
-/// `mechanism: boottime-deadline`. Resolution validates the grammar, so an
-/// unparseable ceiling here is an internal inconsistency, and the honest
-/// answer is a refusal, not a missing deadline.
+/// Resolution validates the grammar, so an unparseable ceiling here is an
+/// internal inconsistency, and the honest answer is a refusal: a missing
+/// deadline would drop enforcement while the receipt's limit row still
+/// claims `mechanism: boottime-deadline`.
 ///
 /// # Errors
 /// Returns the ceiling that did not parse, for the caller's error.
-pub fn wall_deadline(limits: &crate::policy::LimitsSnapshot) -> Result<Option<Deadline>, String> {
+pub fn wall_ceiling(limits: &crate::policy::LimitsSnapshot) -> Result<Option<Duration>, String> {
     match &limits.wall {
         None => Ok(None),
         Some(ceiling) => ceiling
             .value
             .parse::<u64>()
-            .map(|ms| Some(Deadline::after(Duration::from_millis(ms))))
+            .map(|ms| Some(Duration::from_millis(ms)))
             .map_err(|error| format!("wall ceiling {:?} does not parse: {error}", ceiling.value)),
     }
 }
@@ -157,10 +156,10 @@ fn nanos_of(duration: Duration) -> u64 {
 mod tests {
     use super::*;
 
-    /// Security 2026-09-27 (audit 4 B6): the single parse of the wall
-    /// ceiling — present, absent and unparseable.
+    /// The single parse of the wall ceiling: present, absent and
+    /// unparseable.
     #[test]
-    fn audit4_wall_deadline_parses_once_and_refuses_the_unparseable() {
+    fn the_wall_ceiling_parses_once_and_refuses_the_unparseable() {
         let none = crate::policy::LimitsSnapshot {
             wall: None,
             pids: None,
@@ -170,7 +169,7 @@ mod tests {
             inodes: None,
             cpu: None,
         };
-        assert!(wall_deadline(&none).unwrap().is_none());
+        assert!(wall_ceiling(&none).unwrap().is_none());
         let wall = crate::policy::LimitsSnapshot {
             wall: Some(crate::policy::LimitCeiling {
                 value: "30000".to_owned(),
@@ -178,8 +177,10 @@ mod tests {
             }),
             ..none.clone()
         };
-        let deadline = wall_deadline(&wall).unwrap().unwrap();
-        assert!(deadline.remaining() <= Duration::from_millis(30_000));
+        assert_eq!(
+            wall_ceiling(&wall).unwrap(),
+            Some(Duration::from_millis(30_000))
+        );
         let bogus = crate::policy::LimitsSnapshot {
             wall: Some(crate::policy::LimitCeiling {
                 value: "30m".to_owned(),
@@ -189,7 +190,7 @@ mod tests {
         };
 
         assert!(
-            wall_deadline(&bogus).is_err(),
+            wall_ceiling(&bogus).is_err(),
             "refuses, never silently drops"
         );
     }

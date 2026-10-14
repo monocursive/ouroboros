@@ -3701,6 +3701,22 @@ impl PreparedExecution for LinuxPrepared {
                 teardown: Some(Teardown { tree: Some(tree) }),
             }));
         }
+        // Parsed once, before the release: an unparseable ceiling refuses
+        // with the launcher still blocked, rather than after the target was
+        // released without the deadline the receipt's limit row claims.
+        let wall = match clock::wall_ceiling(&boundary.snapshot.limits) {
+            Ok(wall) => wall,
+            Err(what) => {
+                let tree = boundary.verified_teardown();
+                return Err(Box::new(crate::platform::ReleaseFailure {
+                    error: preparing(
+                        ErrorCode::InternalError,
+                        format!("the wall limit cannot be enforced: {what}"),
+                    ),
+                    teardown: Some(Teardown { tree: Some(tree) }),
+                }));
+            }
+        };
         let Some(release) = boundary.release.take() else {
             let tree = boundary.verified_teardown();
             return Err(Box::new(crate::platform::ReleaseFailure {
@@ -3723,23 +3739,10 @@ impl PreparedExecution for LinuxPrepared {
         }
         // Closing it makes a second release impossible (X03).
         drop(release);
-        // Security 2026-09-27 (audit 4 B6): parsed once, and an unparseable
-        // ceiling refuses the release instead of silently dropping the
-        // deadline the receipt's limit row claims.
-        let wall = clock::wall_deadline(&boundary.snapshot.limits).map_err(|what| {
-            Box::new(crate::platform::ReleaseFailure {
-                error: preparing(
-                    ErrorCode::InternalError,
-                    format!("the wall limit cannot be enforced: {what}"),
-                ),
-                teardown: Some(Teardown {
-                    tree: Some(boundary.verified_teardown()),
-                }),
-            })
-        })?;
         Ok(Box::new(LinuxRunning {
             boundary,
-            wall,
+            // The wall runs from the release.
+            wall: wall.map(clock::Deadline::after),
             wall_reported: false,
             exec_confirmed: false,
             target_outcome: None,

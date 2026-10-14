@@ -1418,6 +1418,18 @@ impl PreparedExecution for Prepared {
                 "the registered boundary or the blocked launcher was lost before release",
             )));
         }
+        // Parsed once, before the release: an unparseable ceiling refuses
+        // with the launcher still blocked, rather than after the target was
+        // released without the deadline the receipt's limit row claims.
+        let wall = match clock::wall_ceiling(&boundary.snapshot.limits) {
+            Ok(wall) => wall,
+            Err(what) => {
+                return Err(boundary.fail_release(host_setup(
+                    ErrorCode::InternalError,
+                    format!("the wall limit cannot be enforced: {what}"),
+                )));
+            }
+        };
         let Some(release) = boundary.release.take() else {
             return Err(boundary.fail_release(host_setup(
                 ErrorCode::BackendUnavailable,
@@ -1435,20 +1447,8 @@ impl PreparedExecution for Prepared {
         // Closing it here only makes the single release visible at a glance
         // (an equivalent mutant; nothing can test it).
         drop(release);
-        // Security 2026-09-27 (audit 4 B6): parsed once, and an unparseable
-        // ceiling refuses the release instead of silently dropping the
-        // deadline the receipt's limit row claims.
-        let wall = match clock::wall_deadline(&boundary.snapshot.limits) {
-            Ok(wall) => wall,
-            Err(what) => {
-                let failure = boundary.fail_release(host_setup(
-                    ErrorCode::InternalError,
-                    format!("the wall limit cannot be enforced: {what}"),
-                ));
-                return Err(failure);
-            }
-        };
-        boundary.wall = wall;
+        // The wall runs from the release.
+        boundary.wall = wall.map(clock::Deadline::after);
         Ok(Box::new(boundary))
     }
 
