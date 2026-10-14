@@ -99,7 +99,7 @@ use super::running::{
     Counters, ErrorPipe, Launched, Run, RunState, Tree, ceiling_rows, counters_lost,
     outcome_from_status, refuse_privileged_supervisor, sample_counters,
 };
-use super::sys::{nap, set_nonblocking};
+use super::sys::set_nonblocking;
 use super::tracer::{self, Tracer};
 use super::verdict::{REGISTERED_SCOPE, observer_verdict};
 use super::watch;
@@ -682,25 +682,28 @@ impl Uncontained {
         // Blocked in read(2) on the release descriptor, which is what the
         // observer's attach contract requires and what makes the release the
         // only way forward.
-        loop {
-            if matches!(identity::blocked_in_read(pid, RELEASE_FD), Ok(true)) {
-                break;
-            }
-            if watch::readable(self.launcher_fd.as_raw_fd()) {
+        let launcher_fd = self.launcher_fd.as_raw_fd();
+        match identity::wait_blocked_in_read(pid, RELEASE_FD, deadline, || {
+            watch::readable(launcher_fd)
+        }) {
+            Ok(()) => {}
+            Err(identity::NotBlocked::Ended) => {
                 return Err(host_setup(
                     ErrorCode::BackendUnavailable,
                     "the launcher exited before it blocked on its release pipe",
                 ));
             }
-            if deadline.expired() {
+            Err(timeout) => {
                 return Err(JailError::new(
                     ErrorCode::PrepareTimeout,
                     ErrorStage::Preparing,
                     Remediation::Retry,
-                    "the launcher did not block on its release pipe".to_owned(),
+                    format!(
+                        "the launcher did not block on its release pipe{}",
+                        timeout.detail()
+                    ),
                 ));
             }
-            nap();
         }
 
         // With observation on, the narrowing filter must be in force before

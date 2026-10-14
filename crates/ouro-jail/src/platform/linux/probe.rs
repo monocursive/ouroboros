@@ -1495,15 +1495,22 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
             }
         };
         let measured = (|| -> io::Result<()> {
-            loop {
-                // Blocked on the `--release-fd` above, not on an earlier read.
-                if identity::blocked_in_read(pid, RELEASE_FD)? {
-                    break;
+            // Blocked on the `--release-fd` above, not on an earlier read.
+            match identity::wait_blocked_in_read(pid, RELEASE_FD, deadline, || {
+                super::watch::readable(pidfd.as_raw_fd())
+            }) {
+                Ok(()) => {}
+                Err(identity::NotBlocked::Ended) => {
+                    return Err(io::Error::other(
+                        "observer launcher exited before it blocked",
+                    ));
                 }
-                if deadline.expired() {
-                    return Err(io::Error::other("observer launcher did not block"));
+                Err(timeout) => {
+                    return Err(io::Error::other(format!(
+                        "observer launcher did not block{}",
+                        timeout.detail()
+                    )));
                 }
-                nap();
             }
             let tracer = Tracer::attach(pid, TracerConfig::default()).map_err(io::Error::other)?;
             std::fs::File::from(release_w).write_all(&[1])?;

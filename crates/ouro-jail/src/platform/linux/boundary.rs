@@ -1880,28 +1880,16 @@ fn find_blocked_launcher(
         nap();
     };
 
-    // Wait until it is blocked in read(2) on its release descriptor, which
-    // is what the observer's attach contract requires. `/proc/<pid>/syscall`
-    // names the call and its first argument, so this is a read-back and not
-    // an assumption. The descriptor is part of the check: the launcher reads
-    // its trace-data descriptor before it installs the narrowing filter, and
-    // that read is not the gate.
-    loop {
-        if matches!(identity::blocked_in_read(launcher, RELEASE_FD), Ok(true)) {
-            break;
-        }
-        if deadline.expired() {
-            return Err(prepare_timeout(
-                "the inside launcher did not block on its release pipe",
-            ));
-        }
-        if started.exited() {
-            return Err(launcher_setup_failure(started, launcher_error));
-        }
-        nap();
+    // Blocked in read(2) on its release descriptor, which is what the
+    // observer's attach contract requires.
+    match identity::wait_blocked_in_read(launcher, RELEASE_FD, deadline, || started.exited()) {
+        Ok(()) => Ok(launcher),
+        Err(identity::NotBlocked::Ended) => Err(launcher_setup_failure(started, launcher_error)),
+        Err(timeout) => Err(prepare_timeout(&format!(
+            "the inside launcher did not block on its release pipe{}",
+            timeout.detail()
+        ))),
     }
-
-    Ok(launcher)
 }
 
 /// The launcher's namespaces, each one the plan asked for and none this
