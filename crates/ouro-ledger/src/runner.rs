@@ -11,7 +11,7 @@ use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::ExitStatusExt;
@@ -464,6 +464,43 @@ struct Tee {
 const FORWARDING_GRACE: Duration = Duration::from_secs(2);
 #[cfg(target_os = "linux")]
 const HEARTBEAT: Duration = Duration::from_millis(250);
+/// The longest the owner loop sleeps when it cannot be woken by the jail's
+/// exit (no pidfd).
+#[cfg(target_os = "linux")]
+const EXIT_POLL: Duration = Duration::from_millis(5);
+
+/// A descriptor that becomes readable when `pid` exits. The caller holds the
+/// unreaped child, so the pid cannot name another process.
+#[cfg(target_os = "linux")]
+fn exit_descriptor(pid: u32) -> Option<OwnedFd> {
+    // SAFETY: pidfd_open takes a pid and flags by value and reads no memory.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    // SAFETY: a successful pidfd_open returned a new descriptor owned only here.
+    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+/// Sleep until one of `fds` is readable or `timeout` passes. Readiness is
+/// only a wake-up: the caller re-checks every stream, deadline and the child.
+#[cfg(target_os = "linux")]
+fn wait_readable(fds: &[RawFd], timeout: Duration) {
+    let mut polls: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|&fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    // Round up so a wait never ends just short of the deadline it aims at.
+    let millis = timeout.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+    // SAFETY: `polls` is an initialized array of descriptors that stay open
+    // for the call; poll writes only their revents.
+    let ready = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, millis) };
+    if ready < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+        // Never spin on a failing poll; a signal (cancellation) ends it early.
+        std::thread::sleep(timeout.min(EXIT_POLL));
+    }
+}
 
 #[cfg(target_os = "linux")]
 impl Tee {
@@ -987,6 +1024,7 @@ fn run_owned(
     drop(trace_child);
     drop(control_child);
     drop(gate_child);
+    let exited = exit_descriptor(child.0.id());
     let mut trace = Frames::new(trace_parent)?;
     let mut control = Frames::new(control_parent)?;
     let mut gate = Some(&mut gate_parent);
@@ -1142,7 +1180,39 @@ fn run_owned(
                     "jail did not exit within five seconds of terminal control",
                 ));
             }
-            std::thread::sleep(Duration::from_millis(5));
+            // Sleep until a stream has bytes, the jail exits, or the next
+            // heartbeat or deadline is due.
+            let now = Instant::now();
+            let due = [
+                Some(last_heartbeat + HEARTBEAT),
+                (!admitted).then_some(preparation_deadline),
+                exit_seen.map(|t| t + Duration::from_secs(5)),
+                terminal_seen.map(|t| t + Duration::from_secs(5)),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .map_or(Duration::ZERO, |due| due.saturating_duration_since(now));
+            let mut fds: Vec<RawFd> = [(&control, control.eof), (&trace, trace.eof)]
+                .into_iter()
+                .filter(|(_, eof)| !eof)
+                .map(|(frames, _)| frames.stream.as_raw_fd())
+                .collect();
+            fds.extend(
+                captures
+                    .iter()
+                    .filter(|c| !c.eof)
+                    .map(|c| c.stream.as_raw_fd()),
+            );
+            let due = match (&exited, exit) {
+                (Some(exited), None) => {
+                    fds.push(exited.as_raw_fd());
+                    due
+                }
+                (None, None) => due.min(EXIT_POLL),
+                (_, Some(_)) => due,
+            };
+            wait_readable(&fds, due);
         }
         Ok(())
     })();
@@ -1316,6 +1386,28 @@ pub fn jail_binary(explicit: Option<PathBuf>) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_owner_wait_sleeps_when_idle_and_wakes_on_bytes_or_exit() {
+        let (reader, mut writer) = output_pipe().unwrap();
+        let started = Instant::now();
+        wait_readable(&[reader.as_raw_fd()], Duration::from_millis(60));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        writer.write_all(b"x").unwrap();
+        let started = Instant::now();
+        wait_readable(&[reader.as_raw_fd()], Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 0.2"])
+            .spawn()
+            .unwrap();
+        let exited = exit_descriptor(child.id()).expect("pidfd_open on the reference kernel");
+        let started = Instant::now();
+        wait_readable(&[exited.as_raw_fd()], Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        child.wait().unwrap();
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
