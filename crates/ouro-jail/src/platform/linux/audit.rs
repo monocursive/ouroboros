@@ -1037,8 +1037,17 @@ impl AuditWriter {
             // Issue draft 12: a relative pathname the kernel resolves
             // against the thread's own cwd is resolved against that cwd,
             // observed at the syscall stop. Only the true dirfd cases (and a
-            // cwd that could not be read) keep their distinct reasons.
-            if dirfd.is_none_or(|fd| fd == libc::AT_FDCWD)
+            // cwd that could not be read or named) keep their distinct
+            // reasons.
+            let at_cwd = dirfd.is_none_or(|fd| fd == libc::AT_FDCWD);
+            if at_cwd && cwd.is_some_and(|cwd| cwd.ends_with(DELETED_MARK)) {
+                // The kernel names a removed directory by its old path plus
+                // this mark: no path names it now, and a directory whose own
+                // name ends that way cannot be told from one. Either way the
+                // joined path would be a claim about a name, not the cwd.
+                return PathClass::Unavailable("relative_to_unresolved_cwd");
+            }
+            if at_cwd
                 && let Some(cwd) = cwd
                 && cwd.first() == Some(&b'/')
             {
@@ -1093,6 +1102,10 @@ enum Frame {
     /// written, the sink's own loss note included.
     Poisoned,
 }
+
+/// What the kernel appends to `/proc/<tid>/cwd` when the directory was
+/// removed (`d_path`).
+const DELETED_MARK: &[u8] = b" (deleted)";
 
 /// The gap reason of a result a poisoned trace lock could not take.
 const TRACE_WRITER_POISONED: &str = "trace_writer_poisoned";
@@ -1799,6 +1812,31 @@ mod tests {
         assert_eq!(
             writer.classify(Some(&snap("relative/file")), Some(7), None),
             PathClass::Unavailable("relative_to_dirfd")
+        );
+    }
+
+    /// A relative path opened from a removed directory: `/proc/<tid>/cwd`
+    /// reads `<old path> (deleted)`, which is not a path, so nothing may be
+    /// joined to it (it would claim `build (deleted)/x` in the workspace).
+    #[test]
+    fn a_relative_path_is_never_joined_to_a_deleted_cwd() {
+        let writer = writer();
+        assert_eq!(
+            writer.classify(
+                Some(&snap("x")),
+                Some(libc::AT_FDCWD),
+                Some(b"/work/space/build (deleted)")
+            ),
+            PathClass::Unavailable("relative_to_unresolved_cwd")
+        );
+        assert_eq!(
+            writer.classify(Some(&snap("x")), None, Some(b"/work/space/build")),
+            PathClass::WorkspaceRelative(b"build/x".to_vec())
+        );
+        // An absolute path does not consult the cwd at all.
+        assert_eq!(
+            writer.classify(Some(&snap("/work/space/x")), None, Some(b"/gone (deleted)")),
+            PathClass::WorkspaceRelative(b"x".to_vec())
         );
     }
 
