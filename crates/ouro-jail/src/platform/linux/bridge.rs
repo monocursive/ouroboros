@@ -1,12 +1,16 @@
 //! The in-namespace loopback bridge of the `agent` profile: `ouro-jail
 //! __bridge`.
 //!
-//! jail-v1 §10: "The bridge listens only on `127.0.0.1:3128` and connects to
-//! `/run/ouro/proxy/proxy.sock`." It is a byte relay and nothing else: it
-//! parses no request, decides nothing and holds no authority beyond its two
-//! sockets. The proxy outside decides every request; a child that connects to
-//! `/run/ouro/proxy/proxy.sock` directly reaches the same proxy under the same
-//! policy.
+//! jail-v1 §10 has the bridge listen on `127.0.0.1:3128` and connect to
+//! `/run/ouro/proxy/proxy.sock`; jail-v2 §6.1 adds a SOCKS5 listener on
+//! `127.0.0.1:3129`, relayed the same way. It is a byte relay: it parses no
+//! request, decides nothing and holds no authority beyond its sockets. The
+//! one thing it adds is, when the supervisor sealed it for a vault, a
+//! preamble ahead of each relayed stream naming the client's address
+//! (`vault::origin::preamble`), under which the proxy finds the process the
+//! mediator pinned for that connect. The proxy outside decides every
+//! request; the mediator refuses a child's direct connect to
+//! `/run/ouro/proxy/proxy.sock`, which only the bridge may reach.
 //!
 //! The launcher starts it before the target is released, with a double fork,
 //! `/dev/null` as stdin and stdout, the report end of a `SOCK_SEQPACKET`
