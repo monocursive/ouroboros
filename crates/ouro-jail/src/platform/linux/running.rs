@@ -694,13 +694,10 @@ impl<T: Tree> RunningExecution for Run<T> {
         self.state.stop_observer(TREE_BUDGET);
         self.tree.before_summary(&mut self.state);
         let state = &mut self.state;
-        let mut summary = if state.observe_on {
+        let mut known = if state.observe_on {
             // The observer attached during preparation exactly when
             // observation is on; stopping it is what leaves its account here.
-            state.audit.summary(
-                state.tracer_summary.as_ref(),
-                CoverageSummary::applied(state.tracer_attached),
-            )
+            CoverageSummary::applied(state.tracer_attached)
         } else {
             // §11.4: observation off makes every audit class unsupported
             // with a null count. The wrapper's own `limits` class still
@@ -711,8 +708,14 @@ impl<T: Tree> RunningExecution for Run<T> {
                 .insert(CoverageClass::Limits, state.audit.limits_class());
             summary
         };
-        self.tree.supply_coverage(&mut summary);
-        Some(summary)
+        // The boundary's own evidence sources state their classes before the
+        // audit's account joins them; nothing is patched in afterwards.
+        self.tree.supply_coverage(&mut known);
+        Some(if state.observe_on {
+            state.audit.summary(state.tracer_summary.as_ref(), known)
+        } else {
+            known
+        })
     }
 }
 

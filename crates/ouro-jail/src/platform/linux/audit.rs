@@ -808,7 +808,8 @@ impl AuditWriter {
     /// observer attached, the wrapper's health, and the proxy source with
     /// its `proxy.net` class (see [`CoverageSummary::applied`]). This writer
     /// fills in the observer backend and set, the audit source and its four
-    /// classes, the `limits` class it accumulates, and its gaps.
+    /// classes, the `limits` class it accumulates, and its gaps, which come
+    /// before those `known` brings.
     ///
     /// `tracer` is the observer's own account. Without one, or with a tracer
     /// thread that panicked, nothing says what the observer lost: the loss
@@ -885,13 +886,15 @@ impl AuditWriter {
             );
         }
         classes.insert(CoverageClass::Limits, self.limits_class());
-        summary_gaps.extend(gaps);
+        // The audit's gaps first, then those of the sources the platform
+        // stated in `known`.
+        gaps.append(&mut summary_gaps);
         CoverageSummary {
             backend: Some(OBSERVER_BACKEND.to_owned()),
             set: Some(CLOSED_SET_LINUX_V1.to_owned()),
             attached,
             sources,
-            gaps: summary_gaps,
+            gaps,
             classes,
         }
     }
@@ -1627,6 +1630,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// What the caller states in `known` stays as stated: the proxy source,
+    /// its `proxy.net` class and its gap, after the audit's own gaps.
+    #[test]
+    fn the_proxy_class_a_caller_states_is_kept_after_the_audit_gaps() {
+        let writer = writer();
+        let mut known = applied();
+        let proxy_gap = Gap {
+            classes: vec![CoverageClass::ProxyNet.as_str().to_owned()],
+            source: "proxy".to_owned(),
+            start_ns: "0".to_owned(),
+            end_ns: Some("1".to_owned()),
+            reason: "proxy_result_lost".to_owned(),
+            lost_count: Some(1),
+        };
+        known.sources.proxy = SourceStatus::Degraded;
+        known.gaps.push(proxy_gap.clone());
+        known.classes.insert(
+            CoverageClass::ProxyNet,
+            ClassSummary {
+                status: SourceStatus::Degraded,
+                observed_count: None,
+                gaps: vec![proxy_gap.clone()],
+                resolver_refused: 2,
+            },
+        );
+        let summary = writer.summary(None, known);
+        assert_eq!(summary.sources.proxy, SourceStatus::Degraded);
+        let proxy = &summary.classes[&CoverageClass::ProxyNet];
+        assert_eq!(proxy.resolver_refused, 2);
+        assert_eq!(proxy.gaps, vec![proxy_gap.clone()]);
+        assert_eq!(summary.gaps.last(), Some(&proxy_gap), "{:?}", summary.gaps);
+        assert!(
+            summary.gaps[0].source == "audit",
+            "the audit's own gap comes first: {:?}",
+            summary.gaps
+        );
     }
 
     #[test]
