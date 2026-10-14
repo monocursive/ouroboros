@@ -20,9 +20,11 @@
 //! - O-1: with the in-flight table full, a read-only open — outside the
 //!   closed set — was refused as `inflight_exhausted` before the read-only
 //!   filter ran, so reads became loss.
-//! - O-3 is reproduced at the session seam (`session.rs`), where the kill can
-//!   be placed inside the tracer's own window; the stress check here shows
-//!   the same window through the real tracer loop.
+//! - O-3 is reproduced in the tracer session's unit tests
+//!   (`platform/linux/tracer/session/mod.rs`, over the `/proc` seam in
+//!   `session/seams.rs`), where the kill can be placed inside the tracer's
+//!   own window; the stress check here shows the same window through the
+//!   real tracer loop.
 //!
 //! The fixture is a C program built at test time
 //! (`fixtures/tracer_precision.c`, through `common/observer.rs`). Every

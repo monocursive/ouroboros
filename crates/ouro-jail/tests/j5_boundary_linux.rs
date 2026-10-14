@@ -1721,12 +1721,13 @@ fn assert_recognisable_prefix(run: &Run) {
 
 // ===========================================================================
 // O03: truncation and unmatched exit produce gaps, never fabricated results
-// (§15 O03; tracer/session.rs). Neither the truncation branch (a required
-// structure the kernel accepted but the tracer could not read) nor an
-// unmatched exit is producible on the stock host without a race, so each is
-// driven through a documented tracer seam (session.rs) and asserted through
-// `ouro-jail run`. Tagged live-cli: the real tracer runs against a real
-// tracee; the seam only manufactures the loss the tracer already records.
+// (§15 O03; the tracer session's exit step). Neither the truncation branch
+// (a required structure the kernel accepted but the tracer could not read)
+// nor an unmatched exit is producible on the stock host without a race, so
+// each is driven through a documented tracer seam
+// (`tracer/session/seams.rs`) and asserted through `ouro-jail run`. Tagged
+// live-cli: the real tracer runs against a real tracee; the seam only
+// manufactures the loss the tracer already records.
 // ===========================================================================
 
 /// A `none` run (observation on, best-effort) whose target is the fixture
@@ -1802,8 +1803,9 @@ fn degraded_gap(receipt: &Value, reason: &str) -> Value {
 /// `path_unreadable` gap in a degraded coverage class with a null (never
 /// fabricated, never zero) count, and one `evidence_lost` error records it.
 /// The enforcement point is `self.gap(GapReason::PathUnreadable, ..)` in
-/// `session.rs`: deleting it makes the truncated call vanish (no gap, and the
-/// class stays active) rather than becoming a gap — verified RED on the host.
+/// `tracer/session/exit.rs`: deleting it makes the truncated call vanish (no
+/// gap, and the class stays active) rather than becoming a gap — verified RED
+/// on the host.
 #[test]
 fn o03_a_truncated_path_is_a_gap_not_a_result() {
     let Some(receipt) = o03_run("OURO_JAIL_TEST_TRACER_TRUNCATE_PATH") else {
@@ -1825,8 +1827,8 @@ fn o03_a_truncated_path_is_a_gap_not_a_result() {
 /// call whose entry the tracer drops, so its exit is unmatched. Verdict: an
 /// `unmatched_exit` gap appears in a degraded coverage class with a null
 /// count, and one `evidence_lost` error records it. The enforcement point is
-/// `self.gap(GapReason::UnmatchedExit, ..)` in `session.rs` (session.rs
-/// ~1463): deleting it makes the unmatched exit silently vanish rather than
+/// `self.gap(GapReason::UnmatchedExit, ..)` in `tracer/session/exit.rs`:
+/// deleting it makes the unmatched exit silently vanish rather than
 /// becoming a gap — verified RED on the host.
 #[test]
 fn o03_an_unmatched_exit_is_a_gap_not_a_result() {
