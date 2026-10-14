@@ -55,6 +55,8 @@ jobs:
           python3 -m unittest discover -s crates/ouro-jail/dist -p test_versions.py
           python3 -m unittest discover -s crates/ouro-jail/dist -p test_bootstrap.py
           python3 -m unittest discover -s crates/ouro-jail/dist -p test_publish.py
+      - name: Reference-host manifest fallback script
+        run: shellcheck docs/specs/jail-v1/host-manifest.sh
   website:
     # Builds the site the way it is deployed (deployment stays a manual step)
     # and checks that it serves the reviewed installer and key byte for byte.

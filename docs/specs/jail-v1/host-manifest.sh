@@ -15,6 +15,10 @@
 # are required here too, and the script exits 1 if any of them could not be
 # determined.
 # Usage: ssh <account>@<host> 'bash -s' < docs/specs/jail-v1/host-manifest.sh
+#
+# The awk programs and the `sh -c` body below are single-quoted so that the
+# probe, not this shell, expands them.
+# shellcheck disable=SC2016
 set -u
 missing=0
 say() { printf '%s: %s\n' "$1" "$2"; }
@@ -39,6 +43,20 @@ opt() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# The names in /etc/apparmor.d that mention user namespaces, bubblewrap or
+# ouro, space-separated. A glob, not `ls | grep`, so any file name is read
+# as it is.
+apparmor_entries() {
+  local entry name
+  for entry in /etc/apparmor.d/*; do
+    [ -e "$entry" ] || continue
+    name=${entry##*/}
+    case "${name,,}" in
+      *userns* | *bwrap* | *ouro*) printf '%s ' "$name" ;;
+    esac
+  done
+}
 
 # The contents of a file, or a named reason.
 val() {
@@ -67,6 +85,7 @@ opt virtualization "$(via systemd-detect-virt systemd-detect-virt)" "systemd-det
 req kernel "$(via uname uname -r)" "uname is not installed"
 req kernel_build "$(via uname uname -v)" "uname is not installed"
 req arch "$(via uname uname -m)" "uname is not installed"
+# shellcheck source=/dev/null
 req distribution "$( (via lsb_release lsb_release -ds) || ( [ -r /etc/os-release ] && . /etc/os-release && echo "$PRETTY_NAME" ) )" "neither lsb_release nor /etc/os-release"
 opt systemd "$(via systemctl systemctl --version | head -1)" "systemctl is not installed"
 opt cpus "$(via nproc nproc)" "nproc is not installed"
@@ -91,7 +110,7 @@ say cgroup_user_subtree_control "$(val "$ucg/cgroup.subtree_control")"
 opt bwrap "$(via bwrap bwrap --version)" "bubblewrap is not installed"
 opt userns_unshare_test "$(have unshare && { unshare -U true 2>&1 && echo ok; })" "unshare is not installed"
 opt apparmor_enabled "$(via aa-enabled aa-enabled)" "aa-enabled is not installed"
-opt apparmor_profile_files "$(ls /etc/apparmor.d 2>/dev/null | grep -iE 'userns|bwrap|ouro' | tr '\n' ' ')" "no /etc/apparmor.d entry matches"
+opt apparmor_profile_files "$(apparmor_entries)" "no /etc/apparmor.d entry matches"
 opt apparmor_loaded_bwrap_ouro "$(have sudo && sudo -n aa-status 2>/dev/null | grep -iE 'bwrap|ouro' | sed 's/^ *//' | tr '\n' ' ')" "aa-status needs privilege this account may not have"
 opt kconfig_bpf "$(grep -E '^CONFIG_(BPF_SYSCALL|BPF_JIT|DEBUG_INFO_BTF)=' "/boot/config-$(uname -r 2>/dev/null)" 2>/dev/null | tr '\n' ' ')" "no readable /boot/config-<release>"
 say btf_vmlinux "$([ -r /sys/kernel/btf/vmlinux ] && echo present || echo absent)"
