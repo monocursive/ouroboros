@@ -357,7 +357,7 @@ pub fn launch_main(args: &[OsString]) -> ! {
         }
         // SAFETY: closing a descriptor number this process was given.
         unsafe { libc::close(fd) };
-        trace_data = u16::from_ne_bytes(bytes);
+        trace_data = super::sys::trace_data_from_bytes(bytes);
         if trace_data == 0 {
             // Zero would collide with a child filter that sets no data.
             trace_data = super::tracer::filter::NARROWING_TRACE_DATA;
@@ -560,14 +560,15 @@ pub fn exec_failure_parts(bytes: &[u8]) -> (String, Option<crate::platform::Exec
     )
 }
 
-/// Write `errno`, and `detail` when it is not zero, as little-endian words in
-/// one `write`, and exit with `code`. Async-signal-safe: `write` and `_exit`.
+/// Write `errno`, and `detail` when it is not zero, as little-endian words
+/// ([`super::sys::errno_bytes`]) in one `write`, and exit with `code`.
+/// Async-signal-safe: `write` and `_exit`.
 fn report_exec_failure_and_exit(fd: RawFd, errno: i32, detail: u32, code: i32) -> ! {
     if detail == 0 {
         report_and_exit(fd, errno, code);
     }
     let mut bytes = [0u8; 8];
-    bytes[..4].copy_from_slice(&errno.to_le_bytes());
+    bytes[..4].copy_from_slice(&super::sys::errno_bytes(errno));
     bytes[4..].copy_from_slice(&detail.to_le_bytes());
     write_fully(fd, &bytes);
     // SAFETY: _exit takes a scalar and never returns.
@@ -840,11 +841,11 @@ pub fn exec_candidates(program: &CString, path: Option<&OsStr>) -> Vec<CString> 
     out
 }
 
-/// Write `errno` as four little-endian bytes to `fd` and exit with `code`.
+/// Write `errno` ([`super::sys::errno_bytes`]) to `fd` and exit with `code`.
 ///
 /// Async-signal-safe: `write` and `_exit` only.
 fn report_and_exit(fd: RawFd, errno: i32, code: i32) -> ! {
-    write_fully(fd, &errno.to_le_bytes());
+    write_fully(fd, &super::sys::errno_bytes(errno));
     // SAFETY: _exit takes a scalar and never returns.
     unsafe { libc::_exit(code) }
 }
@@ -886,8 +887,9 @@ fn errno_raw() -> i32 {
 /// Decode the four bytes the launcher writes on a failed exec.
 #[must_use]
 pub fn decode_error_report(bytes: &[u8]) -> Option<i32> {
-    let four: [u8; 4] = bytes.get(..4)?.try_into().ok()?;
-    Some(i32::from_le_bytes(four))
+    Some(super::sys::errno_from_bytes(
+        bytes.get(..4)?.try_into().ok()?,
+    ))
 }
 
 #[cfg(test)]

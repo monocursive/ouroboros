@@ -86,6 +86,35 @@ pub fn signal_ignored(signal: libc::c_int) -> bool {
     }
 }
 
+/// The jail's own pipes carry their integers little-endian: a launcher's
+/// errno report (and its detail code), the bootstrap's exec handshake and
+/// the narrowing trace data. One definition, so writer and reader agree by
+/// construction rather than by running on the same host. `const` and
+/// allocation-free, for code that runs after a fork or under the narrowing
+/// filter.
+#[must_use]
+pub const fn errno_bytes(errno: i32) -> [u8; 4] {
+    errno.to_le_bytes()
+}
+
+/// The errno [`errno_bytes`] wrote.
+#[must_use]
+pub const fn errno_from_bytes(bytes: [u8; 4]) -> i32 {
+    i32::from_le_bytes(bytes)
+}
+
+/// The narrowing filter's 16-bit trace data in the [`errno_bytes`] order.
+#[must_use]
+pub const fn trace_data_bytes(data: u16) -> [u8; 2] {
+    data.to_le_bytes()
+}
+
+/// The trace data [`trace_data_bytes`] wrote.
+#[must_use]
+pub const fn trace_data_from_bytes(bytes: [u8; 2]) -> u16 {
+    u16::from_le_bytes(bytes)
+}
+
 /// The symbolic name of a Linux errno, or `E<number>` when it is not one this
 /// project names. Receipts and probe evidence carry the name, never a bare
 /// number, because a number in a report is not a fact anyone can check.
@@ -213,6 +242,14 @@ mod tests {
         let raw = OsStr::from_bytes(b"/tmp/\xff\xfe");
         let c = cstring_from_os(raw).unwrap();
         assert_eq!(c.as_bytes(), b"/tmp/\xff\xfe");
+    }
+
+    #[test]
+    fn pipe_integers_are_little_endian_whatever_the_host() {
+        assert_eq!(errno_bytes(libc::ENOENT), [2, 0, 0, 0]);
+        assert_eq!(errno_from_bytes(errno_bytes(-7)), -7);
+        assert_eq!(trace_data_bytes(0x1234), [0x34, 0x12]);
+        assert_eq!(trace_data_from_bytes(trace_data_bytes(0xbeef)), 0xbeef);
     }
 
     #[test]

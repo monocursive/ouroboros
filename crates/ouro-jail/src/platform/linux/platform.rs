@@ -1246,24 +1246,9 @@ impl Boundary {
         // the descriptor closes in the launcher and never reaches the target.
         if let Some(data) = trace_data {
             let (trace_r, trace_w) = exec::pipe().map_err(io)?;
-            let bytes = data.to_ne_bytes();
-            // SAFETY: the buffer is two live bytes owned by this frame and
-            // the descriptor is owned; two bytes always fit the pipe's
-            // capacity, so the write succeeds before any reader exists.
-            let mut written = 0usize;
-            while written < bytes.len() {
-                let n = unsafe {
-                    libc::write(
-                        trace_w.as_raw_fd(),
-                        bytes.as_ptr().add(written).cast::<libc::c_void>(),
-                        bytes.len() - written,
-                    )
-                };
-                if n <= 0 && unsafe { *libc::__errno_location() } != libc::EINTR {
-                    return Err(io(std::io::Error::last_os_error()));
-                }
-                written += usize::try_from(n.max(0)).unwrap_or(0);
-            }
+            // Two bytes always fit the pipe's capacity, so the write
+            // completes before any reader exists.
+            write_all(trace_w.as_raw_fd(), &super::sys::trace_data_bytes(data)).map_err(io)?;
             fds.add(trace_r, TRACE_DATA_FD).map_err(io)?;
         }
         fds.add(status_w, STATUS_FD).map_err(io)?;

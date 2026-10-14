@@ -348,7 +348,7 @@ pub(crate) fn spawn_bootstrap(
 }
 
 unsafe fn report_failure_and_exit(descriptor: RawFd, errno: i32) -> ! {
-    let bytes = errno.to_ne_bytes();
+    let bytes = crate::platform::linux::sys::errno_bytes(errno);
     let mut written = 0;
     while written < bytes.len() {
         // SAFETY: descriptor and remaining fixed-size errno bytes are live.
@@ -386,7 +386,9 @@ fn exec_handshake(descriptor: RawFd, deadline: Deadline) -> io::Result<()> {
         if result > 0 {
             received += result as usize;
             if received == bytes.len() {
-                return Err(io::Error::from_raw_os_error(i32::from_ne_bytes(bytes)));
+                return Err(io::Error::from_raw_os_error(
+                    crate::platform::linux::sys::errno_from_bytes(bytes),
+                ));
             }
             continue;
         }
