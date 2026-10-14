@@ -814,11 +814,13 @@ pub struct BwrapPlan {
     pub(crate) bounded_storage: bool,
     /// Environment to set after `--clearenv`.
     pub(crate) env: Vec<(OsString, OsString)>,
-    /// Existing protected segments, each bound read-only over itself. A pin
+    /// Protected segments bound read-only over themselves, for a caller that
+    /// builds a plan without the mount preparation (the mechanisms suite).
+    /// A run's segments are not here: the preparation pins each one and
+    /// binds it into [`BwrapPlan::extra_ro_binds`], at its destination
+    /// inside the sandbox, which for the scratch is not its host path. A pin
     /// whose `O_PATH` handle was handed to the spawn map is bound by
-    /// descriptor (`--ro-bind-fd`), which cannot be redirected by a path
-    /// swap between validation and mount (§9.1); the rest are bound by path
-    /// and re-verified at handoff.
+    /// descriptor (`--ro-bind-fd`); the rest are bound by path.
     pub(crate) protected: Vec<ProtectedBind>,
     /// Extra read-only binds with a destination of their own, used by the
     /// doctor probes and by operator `--ro` grants (§6.1).
