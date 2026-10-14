@@ -1941,17 +1941,15 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                             error.in_stage(ErrorStage::Settled),
                         );
                     }
-                    let scratch = remove_managed_scratch(&attempt_dir, &plan);
+                    let scratch =
+                        remove_managed_scratch(&attempt_dir, &plan, cleanup::Limits::DEFAULT);
                     match (vendor.status, scratch) {
-                        (
-                            StateCleanup::Complete,
-                            StateCleanup::Complete | StateCleanup::NotNeeded,
-                        ) => {
+                        (StateCleanup::Complete, Ok(_)) => {
                             record.state_cleanup = StateCleanup::Complete;
                         }
-                        (StateCleanup::Complete, _) => {
+                        (StateCleanup::Complete, Err(reason)) => {
                             record.state_cleanup = StateCleanup::Pending;
-                            record.cleanup_error = Some("scratch_removal_failed".to_owned());
+                            record.cleanup_error = Some(reason);
                         }
                         (status, _) => {
                             record.state_cleanup = status;
@@ -1980,7 +1978,13 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             );
         }
     } else if settled {
-        record.state_cleanup = remove_managed_scratch(&attempt_dir, &plan);
+        match remove_managed_scratch(&attempt_dir, &plan, cleanup::Limits::DEFAULT) {
+            Ok(status) => record.state_cleanup = status,
+            Err(reason) => {
+                record.state_cleanup = StateCleanup::Pending;
+                record.cleanup_error = Some(reason);
+            }
+        }
     }
     // A detected integrity loss is not a budget overrun (§9.3)
     let tree_message = if record.lifetime.integrity == "lost" {
@@ -2256,37 +2260,46 @@ fn degrade_trace_coverage(record: &mut AttemptRecord, journal: &Journal) {
 ///
 /// Only the directories this tool created under the attempt directory: an
 /// operator-supplied `--scratch` and the workspace are never touched. The
-/// receipt records `complete` only when both are gone.
-fn remove_managed_scratch(attempt_dir: &AttemptDir, plan: &Plan) -> crate::records::StateCleanup {
-    use crate::records::StateCleanup;
+/// removal is `gc`'s own anchored, bounded traversal (I07: every wait has a
+/// bound), which also takes the read-only directories a child can leave.
+///
+/// `Ok(complete)` once both are gone, `Ok(not_needed)` when neither existed
+/// (the `none` profile makes no managed scratch), and `Err` with the safe
+/// reason when a removal stopped: the scratch is retained and a later `gc`
+/// resumes it.
+fn remove_managed_scratch(
+    attempt_dir: &AttemptDir,
+    plan: &Plan,
+    limits: cleanup::Limits,
+) -> Result<StateCleanup, String> {
     if plan.resolved.snapshot.roots.scratch != ScratchRoot::Managed {
-        return cleanup::not_needed();
+        return Ok(cleanup::not_needed());
     }
-    let mut complete = true;
-    // `not_needed` when nothing was created (the `none`
-    // profile makes no managed scratch); `complete` only for a removal.
     let mut created = false;
-    for path in [
-        attempt_dir.root().join("scratch"),
-        attempt_dir.root().join("placeholders"),
-    ] {
-        if std::fs::symlink_metadata(&path).is_ok() {
-            created = true;
+    let mut left = limits.max_entries;
+    for name in ["scratch", "placeholders"] {
+        let removal = cleanup::remove_managed_dir(
+            attempt_dir,
+            name,
+            cleanup::Limits {
+                max_entries: left,
+                ..limits
+            },
+        );
+        left = left.saturating_sub(removal.visited);
+        if !removal.complete {
+            return Err(format!(
+                "scratch_removal_failed: {}",
+                removal.reason.as_deref().unwrap_or("the removal stopped")
+            ));
         }
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => complete = false,
-        }
+        created |= removal.removed > 0;
     }
-    if !created {
-        return cleanup::not_needed();
-    }
-    if complete {
+    Ok(if created {
         StateCleanup::Complete
     } else {
-        StateCleanup::Pending
-    }
+        cleanup::not_needed()
+    })
 }
 
 fn apply_boundary(record: &mut AttemptRecord, boundary: &BoundaryIdentity, profile: ProfileName) {
@@ -5028,6 +5041,78 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// A claimed-shape attempt directory under a private state root, and a
+    /// `tool` plan with managed scratch.
+    fn scratch_fixture() -> (tempfile::TempDir, AttemptDir, Plan) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let data = root.path().canonicalize().unwrap().join("data");
+        let attempt_dir = AttemptDir::new(&data, &AttemptId::generate());
+        attempt_dir.create(&data).unwrap();
+        let plan = Plan {
+            resolved: minimal_resolved(ProfileName::Tool),
+            profile: ProfileName::Tool,
+            workspace: root.path().join("workspace"),
+            config_dir: root.path().join("config"),
+            data_dir: data,
+        };
+        (root, attempt_dir, plan)
+    }
+
+    /// I07 and §14.2: managed scratch is removed by the bounded, anchored
+    /// traversal, which takes the read-only directories a child leaves
+    /// (an unbounded `remove_dir_all` stops at them and leaves `pending`).
+    #[test]
+    fn settlement_removes_a_child_made_read_only_scratch_tree() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_root, attempt_dir, plan) = scratch_fixture();
+        let locked = attempt_dir.root().join("scratch/a/b");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("kept"), b"child bytes").unwrap();
+        std::fs::create_dir(attempt_dir.root().join("placeholders")).unwrap();
+        for dir in [&locked, &attempt_dir.root().join("scratch/a")] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        assert_eq!(
+            remove_managed_scratch(&attempt_dir, &plan, cleanup::Limits::DEFAULT),
+            Ok(StateCleanup::Complete)
+        );
+        assert!(!attempt_dir.root().join("scratch").exists());
+        assert!(!attempt_dir.root().join("placeholders").exists());
+        // Nothing left: nothing to do, and nothing claimed as done.
+        assert_eq!(
+            remove_managed_scratch(&attempt_dir, &plan, cleanup::Limits::DEFAULT),
+            Ok(StateCleanup::NotNeeded)
+        );
+    }
+
+    /// A tree past the pass bound stops with its reason and is retained for
+    /// `gc`, rather than holding the supervisor for as long as it takes.
+    #[test]
+    fn settlement_stops_at_the_removal_bound_and_says_why() {
+        let (_root, attempt_dir, plan) = scratch_fixture();
+        let scratch = attempt_dir.root().join("scratch");
+        std::fs::create_dir(&scratch).unwrap();
+        for index in 0..32 {
+            std::fs::write(scratch.join(format!("f{index}")), b"x").unwrap();
+        }
+        let limits = cleanup::Limits {
+            max_entries: 8,
+            max_depth: cleanup::DEFAULT_MAX_DEPTH,
+        };
+        let reason = remove_managed_scratch(&attempt_dir, &plan, limits)
+            .expect_err("a tree past the bound is not removed in one pass");
+        assert!(
+            reason.starts_with("scratch_removal_failed: ")
+                && reason.contains(cleanup::REASON_BUDGET),
+            "{reason}"
+        );
+        assert!(scratch.exists(), "the stopped tree is retained for gc");
     }
 
     fn minimal_resolved(profile: ProfileName) -> Resolved {
