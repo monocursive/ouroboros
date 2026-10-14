@@ -340,6 +340,9 @@ pub enum EndReason {
     ClientFraming,
     /// The proxy was stopped.
     Stopped,
+    /// The proxy's own lifetime for the connection ran out (the TLS lane's
+    /// client deadline).
+    Deadline,
 }
 
 impl EndReason {
@@ -354,6 +357,7 @@ impl EndReason {
             EndReason::ClientError => "client_error",
             EndReason::ClientFraming => "client_framing",
             EndReason::Stopped => "stopped",
+            EndReason::Deadline => "deadline",
         }
     }
 }

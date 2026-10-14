@@ -1,5 +1,11 @@
 //! One HTTP/1.1 request per TLS connection. No opaque forwarding in vault mode.
-use super::{EndReason, Reason, http::Framing, origin, relay::RelayOutcome, sys};
+//!
+//! jail-v2 §6.3: the lane "requires a content length for request bodies, and
+//! refuses chunked uploads and Expect. It has a 32 KiB decrypted-header
+//! bound, a 10 s header deadline, 30 s upstream I/O deadlines and a 300 s
+//! client deadline. TLS record state is bounded separately from relay
+//! buffers".
+use super::{Budgets, EndReason, Reason, http::Framing, origin, relay::RelayOutcome, sys};
 use crate::{network::Destination, vault::Vault};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -7,6 +13,23 @@ use std::os::fd::{AsFd as _, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
+
+/// The bound on a decrypted request head, and on the upstream's response
+/// head read before anything reaches the client.
+const MAX_HEAD: usize = 32 * 1024;
+/// From the start of the lane to a complete decrypted request head.
+const HEADER_DEADLINE: Duration = Duration::from_secs(10);
+/// Each upstream read and write.
+const UPSTREAM_IO: Duration = Duration::from_secs(30);
+/// The client's whole connection, from the start of the lane.
+const CLIENT_DEADLINE: Duration = Duration::from_secs(300);
+/// Plaintext one TLS connection buffers, outside the relay budget.
+const TLS_BUFFER: usize = 16 * 1024;
+/// How long client bytes after the response are still counted and dropped.
+const DRAIN: Duration = Duration::from_secs(1);
+// The lane's head bound and header deadline are §10's own.
+const _: () = assert!(MAX_HEAD == Budgets::DEFAULT.max_header_bytes);
+const _: () = assert!(HEADER_DEADLINE.as_nanos() == Budgets::DEFAULT.header_deadline.as_nanos());
 
 struct ClientIo<'a> {
     prefix: &'a [u8],
@@ -100,17 +123,21 @@ fn relay_inner(
     outcome: &mut RelayOutcome,
 ) -> Result<(), Reason> {
     let (target, initiator) = authority;
+    let started = Instant::now();
+    // One lifetime for the whole connection: every client phase, the pump
+    // included, ends by it.
+    let lifetime = started + CLIENT_DEADLINE;
     let mut server = vault.server(target)?;
-    server.set_buffer_limit(Some(16 * 1024));
+    server.set_buffer_limit(Some(TLS_BUFFER));
     let io = ClientIo {
         prefix: early,
         socket: client,
-        deadline: Instant::now() + Duration::from_secs(10),
+        deadline: started + HEADER_DEADLINE,
     };
     let mut incoming = rustls::StreamOwned::new(server, io);
     let mut head = Vec::new();
     while !head.ends_with(b"\r\n\r\n") {
-        if head.len() >= 32 * 1024 {
+        if head.len() >= MAX_HEAD {
             return Err(Reason::HeaderTooLarge);
         }
         let mut byte = [0];
@@ -140,10 +167,10 @@ fn relay_inner(
         }
     }
     upstream
-        .set_read_timeout(Some(Duration::from_secs(30)))
+        .set_read_timeout(Some(UPSTREAM_IO))
         .map_err(|_| Reason::InternalError)?;
     upstream
-        .set_write_timeout(Some(Duration::from_secs(30)))
+        .set_write_timeout(Some(UPSTREAM_IO))
         .map_err(|_| Reason::InternalError)?;
     let mut outgoing = rustls::StreamOwned::new(vault.client(target)?, &**upstream);
     // Complete and verify the upstream handshake before releasing any secret.
@@ -158,7 +185,7 @@ fn relay_inner(
     let lease = std::sync::Arc::new(lease);
     let watch =
         crate::vault::lifecycle::Watch::start(lease.clone(), client.clone(), upstream.clone())?;
-    incoming.sock.deadline = Instant::now() + Duration::from_secs(300);
+    incoming.sock.deadline = lifetime;
     lease.check()?;
     let sent = outgoing.write_all(&request.forward_head);
     let head_bytes = request.forward_head.len() as u64;
@@ -186,7 +213,7 @@ fn relay_inner(
     // Read a bounded response head before exposing any protocol switch.
     let mut response = zeroize::Zeroizing::new(Vec::new());
     while !response.ends_with(b"\r\n\r\n") {
-        if response.len() >= 32 * 1024 {
+        if response.len() >= MAX_HEAD {
             return Err(Reason::HeaderTooLarge);
         }
         if watch.revoked() {
@@ -218,7 +245,11 @@ fn relay_inner(
         client_io.socket,
         socket,
         &watch,
-        (switched, chunk),
+        Lane {
+            websocket: switched,
+            chunk,
+            lifetime,
+        },
         outcome,
     );
     client
@@ -234,7 +265,7 @@ fn relay_inner(
         ClientIo {
             prefix: &[],
             socket: client,
-            deadline: Instant::now() + Duration::from_secs(1),
+            deadline: (Instant::now() + DRAIN).min(lifetime),
         },
     );
     // The response is complete: say so first, so a client reading a
@@ -242,13 +273,13 @@ fn relay_inner(
     // sees it end, rather than either waiting out the drain below.
     incoming.conn.send_close_notify();
     let _ = incoming.flush();
-    // Security 2026-09-29 (audit 6 N3): parity with the plain lanes'
-    // `discard_rest` — one request per connection, so anything the client
-    // still sends is counted and dropped, not vanished. Bounded to one
-    // second past the response: counting must never hold the connection's
-    // teardown hostage to a client that never stops sending. A client's own
-    // `close_notify` in answer to ours ends it at once.
-    incoming.sock.deadline = Instant::now() + Duration::from_secs(1);
+    // Parity with the plain lanes' `discard_rest`: one request per
+    // connection, so anything the client still sends is counted and dropped,
+    // not vanished. Bounded to [`DRAIN`] past the response and by the
+    // lifetime: counting must never hold the connection's teardown hostage to
+    // a client that never stops sending. A client's own `close_notify` in
+    // answer to ours ends it at once.
+    incoming.sock.deadline = (Instant::now() + DRAIN).min(lifetime);
     loop {
         match incoming.read(&mut buffer) {
             Ok(0) => break,
@@ -334,30 +365,44 @@ fn interest<'a>(
     (events != 0).then_some((fd, events))
 }
 
-// Two nonblocking TLS state machines, bounded plaintext buffers, one absolute
-// lifetime. Only a verified RFC6455 switch enables client-to-upstream traffic.
+/// What the pump relays, and until when.
+struct Lane {
+    /// Whether the upstream switched to a verified WebSocket: only then may
+    /// the client's bytes reach it.
+    websocket: bool,
+    chunk: usize,
+    /// The connection's lifetime, started with the lane.
+    lifetime: Instant,
+}
+
+// Two nonblocking TLS state machines, bounded plaintext buffers, the
+// connection's one absolute lifetime. Only a verified RFC6455 switch enables
+// client-to-upstream traffic.
 fn pump(
     server: rustls::ServerConnection,
     upstream: rustls::ClientConnection,
     socket: &UnixStream,
     remote: &TcpStream,
     watch: &crate::vault::lifecycle::Watch,
-    mode: (bool, usize),
+    lane: Lane,
     outcome: &mut RelayOutcome,
 ) -> Result<rustls::ServerConnection, Reason> {
-    let (websocket, chunk) = mode;
-    let limit = chunk.clamp(1, 16384);
+    let Lane {
+        websocket,
+        chunk,
+        lifetime,
+    } = lane;
+    let limit = chunk.clamp(1, TLS_BUFFER);
     let mut incoming = rustls::Connection::Server(server);
     let mut outgoing = rustls::Connection::Client(upstream);
-    incoming.set_buffer_limit(Some(16384));
-    outgoing.set_buffer_limit(Some(16384));
+    incoming.set_buffer_limit(Some(TLS_BUFFER));
+    outgoing.set_buffer_limit(Some(TLS_BUFFER));
     socket
         .set_nonblocking(true)
         .map_err(|_| Reason::InternalError)?;
     remote
         .set_nonblocking(true)
         .map_err(|_| Reason::InternalError)?;
-    let deadline = Instant::now() + Duration::from_secs(300);
     let mut up = zeroize::Zeroizing::new(Vec::with_capacity(limit));
     let mut down = zeroize::Zeroizing::new(Vec::with_capacity(limit));
     let mut client_eof = false;
@@ -371,8 +416,9 @@ fn pump(
             outcome.end = EndReason::CredentialRevoked;
             break;
         }
-        if Instant::now() >= deadline {
-            outcome.end = EndReason::UpstreamError;
+        // The proxy's own cap, not anything the upstream did.
+        if Instant::now() >= lifetime {
+            outcome.end = EndReason::Deadline;
             break;
         }
         let mut progress = false;
@@ -553,6 +599,47 @@ mod websocket_tests {
             bad.extend_from_slice(b"\r\n");
             assert_eq!(verify_websocket(&bad, key), Err(Reason::UpstreamProtocol));
         }
+    }
+
+    #[test]
+    fn the_pump_ends_at_the_connection_lifetime_and_says_so() {
+        use std::sync::Arc;
+        let vault = crate::vault::Vault::new("test-attempt", Vec::new()).unwrap();
+        let target = crate::network::parse_authority("fixture.test:443", None).unwrap();
+        let (socket, _client) = UnixStream::pair().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        // The upstream is gone too, so a pump that ignored the lifetime
+        // would end on that instead, blaming the upstream.
+        drop(listener.accept().unwrap());
+        let (socket, remote) = (Arc::new(socket), Arc::new(remote));
+        let watch = crate::vault::lifecycle::Watch::start(
+            Arc::new(crate::vault::lifecycle::Lease::default()),
+            Arc::clone(&socket),
+            Arc::clone(&remote),
+        )
+        .unwrap();
+        let mut outcome = RelayOutcome {
+            bytes_in: 0,
+            bytes_out: 0,
+            discarded: 0,
+            end: EndReason::UpstreamClosed,
+        };
+        let pumped = pump(
+            vault.server(&target).unwrap(),
+            vault.client(&target).unwrap(),
+            &socket,
+            &remote,
+            &watch,
+            Lane {
+                websocket: false,
+                chunk: 1024,
+                lifetime: Instant::now(),
+            },
+            &mut outcome,
+        );
+        assert!(pumped.is_ok());
+        assert_eq!(outcome.end, EndReason::Deadline);
     }
 
     #[test]
