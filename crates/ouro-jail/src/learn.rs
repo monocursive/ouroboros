@@ -150,16 +150,22 @@ pub fn derive(attempt: &Path, workspace: &Path, min_hits: u32) -> Result<Proposa
             }
         } else if event.source == EventSource::Proxy
             && event.decision == Some(Decision::Deny)
-            && field("reason") == Some("host_not_allowed")
+            && matches!(
+                field("reason"),
+                Some("host_not_allowed" | "plaintext_not_granted")
+            )
         {
-            if let Some(host) = field("destination")
-                && crate::network::parse_authority(host, None).is_ok()
+            if let Some(destination) = field("destination")
+                && let Ok(destination) = crate::network::parse_authority(destination, None)
             {
-                *hosts.entry(host.into()).or_default() += 1;
+                let plaintext = field("kind") == Some("http")
+                    || field("reason") == Some("plaintext_not_granted");
+                let grant = proposed_grant(&destination, plaintext);
+                *hosts.entry(grant.clone()).or_default() += 1;
                 proposal
                     .provenance
                     .evidence
-                    .entry(host.into())
+                    .entry(grant)
                     .or_default()
                     .push(evidence);
             }
@@ -199,6 +205,22 @@ pub fn derive(attempt: &Path, workspace: &Path, min_hits: u32) -> Result<Proposa
     proposal.unresolved_reads.sort();
     proposal.unresolved_reads.dedup();
     Ok(proposal)
+}
+
+/// The host grant a refused proxy request asks for, and no more.
+///
+/// An explicit port admits plaintext HTTP to it (network-rules.md, L21), so
+/// a destination is proposed with its port written out only when the run
+/// was seen sending plaintext there: an absolute-form `http://` request, or
+/// a tunnel the proxy refused for an HTTP first flight. A tunnel to port 443
+/// is proposed as the bare host, the TLS-only shape; a tunnel to any other
+/// port can only be granted with that port.
+fn proposed_grant(destination: &crate::network::Destination, plaintext: bool) -> String {
+    if plaintext || destination.port != 443 {
+        destination.to_string()
+    } else {
+        destination.host.to_string()
+    }
 }
 
 // A bounded metadata-only walk: no symlink traversal, device opens or content

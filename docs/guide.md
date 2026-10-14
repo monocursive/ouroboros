@@ -377,7 +377,10 @@ ouro-jail learn --launch opencode --workspace "$PWD" \
 ```
 
 The proposal can include exact read-only paths and denied network
-destinations. Denied writes are reported without becoming write grants.
+destinations. A refused tunnel to port 443 is proposed as the bare host,
+which grants TLS only; a destination is proposed with its port only when
+the run sent plaintext HTTP there. Denied writes are reported without
+becoming write grants.
 Read the proposal, check that the access fits the task, and then apply only
 what you intend. `--adopt` shows the change and requires confirmation in an
 interactive terminal.
