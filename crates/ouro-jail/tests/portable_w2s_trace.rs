@@ -24,21 +24,20 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use clap::Parser as _;
-use ouro_jail::capability::{Capability, CapabilityScope, CapabilityStatus};
+use ouro_jail::capability::Capability;
 use ouro_jail::config::EnvSettings;
 use ouro_jail::platform::{
     BoundaryIdentity, Deadline, OwnerIdentity, PlanRequest, Platform, PlatformIdentity,
     PreparedExecution, PreparedPlan, RunEvent, RunningExecution, Sinks, StopReason, Teardown,
     TreeObservation,
 };
-use ouro_jail::records::{
-    Event, JailError, NativeLifetime, Os, ProcessIdentity, ProcessRecord, rfc3339_utc,
-};
+use ouro_jail::records::{Event, JailError};
 use ouro_jail::trace::{Priority, SharedTrace, TRACE_CAP_SEAM, TRANSPORT_LOSS_REASON};
 use ouro_jail::{cli, supervisor};
 use serde_json::Value;
 
 mod common;
+use common::sim;
 
 /// The shrunk local trace cap every run here uses.
 const CAP: &str = "65536";
@@ -105,32 +104,13 @@ struct Running {
 
 impl Platform for Simulated {
     fn owner_identity(&self) -> Option<OwnerIdentity> {
-        Some(OwnerIdentity {
-            pid: std::process::id(),
-            boot_id: "00000000-0000-4000-8000-000000000001".into(),
-            start_time_ticks: 1,
-        })
+        Some(sim::owner())
     }
     fn identity(&self) -> PlatformIdentity {
-        PlatformIdentity {
-            os: Os::Linux,
-            arch: "simulation".into(),
-            kernel: "simulated".into(),
-        }
+        sim::identity()
     }
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
-        plan.requirements
-            .iter()
-            .map(|name| Capability {
-                name: name.clone(),
-                status: CapabilityStatus::Available,
-                scope: CapabilityScope::Tree,
-                mechanism: Some("simulation".into()),
-                reason_code: Some("ok".into()),
-                measured_at: Some(rfc3339_utc(SystemTime::now())),
-                evidence_ref: Some("trace-loss simulation".into()),
-            })
-            .collect()
+        sim::available(plan, "trace-loss simulation")
     }
     fn prepare(
         &self,
@@ -143,23 +123,7 @@ impl Platform for Simulated {
 
 impl PreparedExecution for Prepared {
     fn boundary(&self) -> BoundaryIdentity {
-        BoundaryIdentity {
-            boundary: "supervisor_cgroup".into(),
-            verification_scope: "registered_boundary".into(),
-            native: Some(NativeLifetime {
-                os: Os::Linux,
-                details: Default::default(),
-            }),
-            process: Some(ProcessRecord {
-                pid: 4242,
-                identity: ProcessIdentity {
-                    kind: "linux_boot_start".into(),
-                    value: Default::default(),
-                },
-            }),
-            backend: Some("none".into()),
-            backend_version: None,
-        }
+        sim::cgroup_boundary()
     }
     fn release(
         self: Box<Self>,

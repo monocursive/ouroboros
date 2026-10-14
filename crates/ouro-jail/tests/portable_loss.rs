@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use clap::Parser as _;
-use ouro_jail::capability::{Capability, CapabilityScope, CapabilityStatus};
+use ouro_jail::capability::Capability;
 use ouro_jail::config::EnvSettings;
 use ouro_jail::observer::{ClassSummary, CoverageClass, CoverageSummary};
 use ouro_jail::platform::{
@@ -43,12 +43,12 @@ use ouro_jail::platform::{
 use ouro_jail::records::{
     Applied, AppliedFilesystem, AppliedNetwork, AppliedSyscalls, CLOSED_SET_LINUX_V1, ErrorCode,
     Gap, NativeLifetime, Os, ProcessIdentity, ProcessRecord, SourceHealth, SourceStatus,
-    rfc3339_utc,
 };
 use ouro_jail::{cli, supervisor};
 use serde_json::Value;
 
 mod common;
+use common::sim;
 
 // ---------------------------------------------------------------------------
 // A scripted platform whose target runs until something stops it
@@ -92,32 +92,13 @@ struct Running {
 
 impl Platform for Simulated {
     fn owner_identity(&self) -> Option<OwnerIdentity> {
-        Some(OwnerIdentity {
-            pid: std::process::id(),
-            boot_id: "00000000-0000-4000-8000-000000000001".into(),
-            start_time_ticks: 1,
-        })
+        Some(sim::owner())
     }
     fn identity(&self) -> PlatformIdentity {
-        PlatformIdentity {
-            os: Os::Linux,
-            arch: "simulation".into(),
-            kernel: "simulated".into(),
-        }
+        sim::identity()
     }
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
-        plan.requirements
-            .iter()
-            .map(|name| Capability {
-                name: name.clone(),
-                status: CapabilityStatus::Available,
-                scope: CapabilityScope::Tree,
-                mechanism: Some("simulation".into()),
-                reason_code: Some("ok".into()),
-                measured_at: Some(rfc3339_utc(SystemTime::now())),
-                evidence_ref: Some("loss simulation".into()),
-            })
-            .collect()
+        sim::available(plan, "loss simulation")
     }
     fn prepare(
         &self,

@@ -1,4 +1,4 @@
-//! J4 wave 0, records: the supervisor's receipts, `gc` and canonical bytes.
+//! Records: the supervisor's receipts, `gc` and canonical bytes.
 //!
 //! - D3 (§7, §14.2): `gc`, dry run or not, never creates `jail.lock` for an
 //!   attempt root that has none, so a pre-created managed root stays
@@ -13,27 +13,22 @@
 //!
 //! Portable: the platform is simulated, the filesystem is real.
 
-use std::collections::VecDeque;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use clap::Parser as _;
-use ouro_jail::capability::{Capability, CapabilityScope, CapabilityStatus};
 use ouro_jail::config::EnvSettings;
 use ouro_jail::observer::CoverageSummary;
-use ouro_jail::platform::{
-    BoundaryIdentity, Deadline, OwnerIdentity, PlanRequest, Platform, PlatformIdentity,
-    PreparedExecution, PreparedPlan, RunEvent, RunningExecution, Sinks, StopReason, Teardown,
-    TreeObservation,
-};
-use ouro_jail::records::{NativeLifetime, Os, ProcessIdentity, ProcessRecord, rfc3339_utc};
+use ouro_jail::platform::{RunEvent, StopReason};
+use ouro_jail::records::Os;
 use ouro_jail::state::{AttemptDir, AttemptId};
 use ouro_jail::{cli, supervisor};
 use serde_json::Value;
 
 mod common;
+use common::sim;
 
 // ---------------------------------------------------------------------------
 // A scripted platform
@@ -47,103 +42,14 @@ struct Script {
     stops: Arc<Mutex<Vec<StopReason>>>,
 }
 
-struct Simulated(Script);
-struct Prepared(Script);
-struct Running {
-    events: VecDeque<RunEvent>,
-    stops: Arc<Mutex<Vec<StopReason>>>,
-}
-
-impl Platform for Simulated {
-    fn owner_identity(&self) -> Option<OwnerIdentity> {
-        Some(OwnerIdentity {
-            pid: std::process::id(),
-            boot_id: "00000000-0000-4000-8000-000000000001".into(),
-            start_time_ticks: 1,
-        })
-    }
-    fn identity(&self) -> PlatformIdentity {
-        PlatformIdentity {
-            os: Os::Linux,
-            arch: "simulation".into(),
-            kernel: "simulated".into(),
-        }
-    }
-    fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
-        plan.requirements
-            .iter()
-            .map(|name| Capability {
-                name: name.clone(),
-                status: CapabilityStatus::Available,
-                scope: CapabilityScope::Tree,
-                mechanism: Some("simulation".into()),
-                reason_code: Some("ok".into()),
-                measured_at: Some(rfc3339_utc(SystemTime::now())),
-                evidence_ref: Some("records simulation".into()),
-            })
-            .collect()
-    }
-    fn prepare(
-        &self,
-        _: PreparedPlan,
-        _: Sinks,
-    ) -> Result<Box<dyn PreparedExecution>, ouro_jail::records::JailError> {
-        Ok(Box::new(Prepared(self.0.clone())))
-    }
-}
-
-impl PreparedExecution for Prepared {
-    fn boundary(&self) -> BoundaryIdentity {
-        BoundaryIdentity {
-            boundary: "supervisor_cgroup".into(),
-            verification_scope: "registered_boundary".into(),
-            native: Some(NativeLifetime {
-                os: Os::Linux,
-                details: Default::default(),
-            }),
-            process: Some(ProcessRecord {
-                pid: 4242,
-                identity: ProcessIdentity {
-                    kind: "linux_boot_start".into(),
-                    value: Default::default(),
-                },
-            }),
-            backend: Some("none".into()),
-            backend_version: None,
-        }
-    }
-    fn release(
-        self: Box<Self>,
-    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
-        Ok(Box::new(Running {
-            events: self.0.events.into(),
-            stops: self.0.stops,
-        }))
-    }
-    fn abort(self: Box<Self>) -> Result<Teardown, ouro_jail::records::JailError> {
-        Ok(Teardown { tree: None })
-    }
-}
-
-impl RunningExecution for Running {
-    fn wait(&mut self, _: Deadline) -> RunEvent {
-        self.events
-            .pop_front()
-            .unwrap_or(RunEvent::TargetExited { code: 0 })
-    }
-    fn request_stop(&mut self, reason: StopReason) {
-        self.stops.lock().unwrap().push(reason);
-    }
-    fn wait_tree(&mut self, _: Duration) -> TreeObservation {
-        TreeObservation {
-            tree_empty: Some(true),
-            verified_at: Some(SystemTime::now()),
-            verification_scope: "registered_boundary".into(),
-            integrity: "verified".into(),
-        }
-    }
-    fn observer_summary(&mut self) -> Option<CoverageSummary> {
-        None
+impl Script {
+    /// `none`'s boundary, reporting the script's events and then a clean
+    /// exit, with the tree verified empty.
+    fn platform(self) -> sim::ScriptedPlatform {
+        let mut platform = sim::ScriptedPlatform::new("records simulation", sim::cgroup_boundary())
+            .events(self.events);
+        platform.calls.stops = self.stops;
+        platform
     }
 }
 
@@ -191,7 +97,7 @@ impl Fixture {
 
     fn context(&self, script: Script) -> supervisor::Context {
         supervisor::Context {
-            platform: Box::new(Simulated(script)),
+            platform: Box::new(script.platform()),
             env_settings: EnvSettings {
                 config_dir: Some(self.config.clone()),
                 data_dir: Some(self.data.clone()),

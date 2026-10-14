@@ -20,10 +20,10 @@ use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use clap::Parser as _;
-use ouro_jail::capability::{Capability, CapabilityScope, CapabilityStatus};
+use ouro_jail::capability::Capability;
 use ouro_jail::cli::{self, PolicyArgs};
 use ouro_jail::config::EnvSettings;
 use ouro_jail::credentials::LaunchHandoff;
@@ -34,12 +34,13 @@ use ouro_jail::platform::{
 };
 use ouro_jail::policy::{EnvValue, ProfileName, RootToken};
 use ouro_jail::records::{
-    ErrorCode, JailError, NativeLifetime, Os, Receipt, Remediation, StateCleanup, rfc3339_utc,
+    ErrorCode, JailError, NativeLifetime, Os, Receipt, Remediation, StateCleanup,
 };
 use ouro_jail::{cleanup, launch_profile, supervisor};
 use sha2::{Digest as _, Sha256};
 
 mod common;
+use common::sim;
 
 // ---------------------------------------------------------------------------
 // Fixture layout
@@ -273,28 +274,15 @@ struct Sim {
 }
 
 fn verified_tree() -> TreeObservation {
-    TreeObservation {
-        tree_empty: Some(true),
-        verified_at: Some(SystemTime::now()),
-        verification_scope: "attempt_tree".into(),
-        integrity: "verified".into(),
-    }
+    sim::verified_tree("attempt_tree")
 }
 
 impl Platform for Sim {
     fn owner_identity(&self) -> Option<OwnerIdentity> {
-        Some(OwnerIdentity {
-            pid: std::process::id(),
-            boot_id: "00000000-0000-4000-8000-000000000001".into(),
-            start_time_ticks: 1,
-        })
+        Some(sim::owner())
     }
     fn identity(&self) -> PlatformIdentity {
-        PlatformIdentity {
-            os: Os::Linux,
-            arch: "simulation".into(),
-            kernel: "simulated".into(),
-        }
+        sim::identity()
     }
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
         if let Some(data) = &self.plant_vendor_state {
@@ -307,18 +295,7 @@ impl Platform for Sim {
             std::fs::create_dir(attempt.join("vendor-state")).unwrap();
             std::fs::write(attempt.join("vendor-state/precious"), b"not this attempt's").unwrap();
         }
-        plan.requirements
-            .iter()
-            .map(|name| Capability {
-                name: name.clone(),
-                status: CapabilityStatus::Available,
-                scope: CapabilityScope::Tree,
-                mechanism: Some("simulation".into()),
-                reason_code: Some("ok".into()),
-                measured_at: Some(rfc3339_utc(SystemTime::now())),
-                evidence_ref: Some("J3 launch simulation".into()),
-            })
-            .collect()
+        sim::available(plan, "J3 launch simulation")
     }
     fn prepare(
         &self,
@@ -376,7 +353,7 @@ impl PreparedExecution for SimPrepared {
                 identity: ouro_jail::records::ProcessIdentity {
                     kind: "linux_boot_start".into(),
                     value: serde_json::from_value(serde_json::json!({
-                        "boot_id": "00000000-0000-4000-8000-000000000001",
+                        "boot_id": sim::BOOT_ID,
                         "start_time_ticks": 1
                     }))
                     .unwrap(),
