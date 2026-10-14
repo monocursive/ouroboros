@@ -32,8 +32,35 @@ const MAX_CHECKPOINT_BYTES: u64 = 32_768;
 #[derive(Default)]
 pub(crate) struct Readers {
     sessions: BTreeMap<String, Session>,
+    /// Checkpoints already validated, by file identity, so a page does not
+    /// re-read and re-hash every other session's checkpoint.
+    parsed: BTreeMap<String, (Seen, Checkpoint)>,
+    /// The checkpoint directory's entry is durable in its parent.
+    directory_synced: bool,
     #[cfg(test)]
     pub(crate) fail_directory_sync: bool,
+}
+
+/// A checkpoint file's identity and change times; any rewrite changes it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Seen {
+    device: u64,
+    inode: u64,
+    bytes: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl Seen {
+    fn of(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            bytes: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
 }
 
 struct Ready {
@@ -76,7 +103,7 @@ struct Position {
     verified: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Replay {
     token: String,
@@ -86,7 +113,7 @@ struct Replay {
     done: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Checkpoint {
     schema: String,
@@ -143,25 +170,6 @@ fn private_directory(path: &Path) -> Result<File> {
     Ok(directory)
 }
 
-fn checkpoint_directory(path: &Path) -> Result<PathBuf> {
-    let root = path
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| LedgerError("reader canonical path has no ledger root".into()))?;
-    let parent = private_directory(root)?;
-    let directory = root.join("readers");
-    match fs::DirBuilder::new().mode(0o700).create(&directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.into()),
-    }
-    private_directory(&directory)?;
-    // A previous mkdir may have survived a failed parent sync. Re-establish
-    // its namespace durability before any checkpoint can be acknowledged.
-    parent.sync_all()?;
-    Ok(directory)
-}
-
 fn checkpoint_file(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -182,10 +190,13 @@ fn checkpoint_file(path: &Path) -> Result<File> {
 }
 
 fn load_checkpoint(directory: &Path, id: &str) -> Result<(Checkpoint, File)> {
-    let mut bytes = Vec::new();
     let mut file = checkpoint_file(&directory.join(format!("{id}.json")))?;
-    (&mut file)
-        .take(MAX_CHECKPOINT_BYTES + 1)
+    Ok((parse_checkpoint(&mut file, id)?, file))
+}
+
+fn parse_checkpoint(file: &mut File, id: &str) -> Result<Checkpoint> {
+    let mut bytes = Vec::new();
+    file.take(MAX_CHECKPOINT_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
         return Err(LedgerError("reader checkpoint exceeds bounded size".into()));
@@ -233,7 +244,7 @@ fn load_checkpoint(directory: &Path, id: &str) -> Result<(Checkpoint, File)> {
             "reader checkpoint labels are inconsistent".into(),
         ));
     }
-    Ok((checkpoint, file))
+    Ok(checkpoint)
 }
 
 #[derive(Default)]
@@ -248,11 +259,38 @@ impl Checkpoints {
     }
 }
 
-/// Scan a bounded private directory, expiring both disk and in-memory sessions.
-/// Interrupted atomic writes have no issued cursor and can be safely removed.
-fn checkpoints(directory: &Path, now: u64) -> Result<Checkpoints> {
+/// What a checkpoint scan may change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// The reader: remove interrupted writes, which have no issued cursor,
+    /// and expired checkpoints.
+    Expire,
+    /// A retention preview: change nothing.
+    Inspect,
+}
+
+fn modified_seconds(metadata: &fs::Metadata) -> Result<u64> {
+    metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .map(|time| time.as_secs())
+        .map_err(|_| LedgerError("reader checkpoint timestamp is invalid".into()))
+}
+
+/// Scan a bounded private checkpoint directory. Unexpired valid checkpoints
+/// are `valid`; unexpired files that cannot identify their run (corrupt, from
+/// the future, or an interrupted write seen by an inspection) are `invalid`.
+/// Safe corrupt files stay bounded capacity occupants until their filesystem
+/// timestamp expires; their cursors refuse independently.
+fn scan_checkpoints(
+    directory: &Path,
+    now: u64,
+    scan: Scan,
+    mut parsed: Option<&mut BTreeMap<String, (Seen, Checkpoint)>>,
+) -> Result<Checkpoints> {
     private_directory(directory)?;
     let mut result = Checkpoints::default();
+    let mut present = BTreeSet::new();
     for (count, entry) in fs::read_dir(directory)?.enumerate() {
         if count >= MAX_SESSIONS * 2 {
             return Err(LedgerError(
@@ -261,50 +299,49 @@ fn checkpoints(directory: &Path, now: u64) -> Result<Checkpoints> {
         }
         let entry = entry?;
         let name = entry.file_name();
-        let name = name
-            .to_str()
-            .ok_or_else(|| LedgerError("reader checkpoint filename is unsafe".into()))?;
         let (id, suffix) = name
-            .rsplit_once('.')
+            .to_str()
+            .and_then(|name| name.rsplit_once('.'))
+            .filter(|(id, suffix)| token_valid(id) && ["json", "tmp"].contains(suffix))
             .ok_or_else(|| LedgerError("reader checkpoint filename is unsafe".into()))?;
-        if !token_valid(id) || !["json", "tmp"].contains(&suffix) {
-            return Err(LedgerError("reader checkpoint filename is unsafe".into()));
-        }
-        let file = checkpoint_file(&entry.path())?;
-        if suffix == "tmp" {
-            fs::remove_file(entry.path())?;
-            private_directory(directory)?.sync_all()?;
+        let mut file = checkpoint_file(&entry.path())?;
+        let metadata = file.metadata()?;
+        let checkpoint = if suffix == "json" {
+            let seen = Seen::of(&metadata);
+            match parsed.as_deref().and_then(|parsed| parsed.get(id)) {
+                Some((cached, checkpoint)) if *cached == seen => Some(checkpoint.clone()),
+                _ => parse_checkpoint(&mut file, id).ok().inspect(|checkpoint| {
+                    if let Some(parsed) = parsed.as_deref_mut() {
+                        parsed.insert(id.to_owned(), (seen, checkpoint.clone()));
+                    }
+                }),
+            }
+            .filter(|checkpoint| checkpoint.created <= now)
+        } else {
+            None
+        };
+        let created = match &checkpoint {
+            Some(checkpoint) => checkpoint.created,
+            None => modified_seconds(&metadata)?,
+        };
+        if (scan == Scan::Expire && suffix == "tmp") || now.saturating_sub(created) >= TTL.as_secs()
+        {
+            if scan == Scan::Expire {
+                fs::remove_file(entry.path())?;
+                private_directory(directory)?.sync_all()?;
+            }
             continue;
         }
-        let checkpoint = load_checkpoint(directory, id)
-            .ok()
-            .map(|(checkpoint, _)| checkpoint)
-            .filter(|checkpoint| checkpoint.created <= now);
-        // Safe corrupt files remain bounded capacity occupants until their
-        // filesystem timestamp expires; their cursors refuse independently.
-        let created = checkpoint.as_ref().map_or_else(
-            || {
-                file.metadata()?
-                    .modified()?
-                    .duration_since(UNIX_EPOCH)
-                    .map(|time| time.as_secs())
-                    .map_err(|_| LedgerError("reader checkpoint timestamp is invalid".into()))
-            },
-            |checkpoint| Ok(checkpoint.created),
-        )?;
-        if now.saturating_sub(created) >= TTL.as_secs() {
-            fs::remove_file(entry.path())?;
-            private_directory(directory)?.sync_all()?;
-        } else if let Some(checkpoint) = checkpoint {
-            result.valid.push(checkpoint);
-        } else {
-            result.invalid.insert(id.to_owned());
+        present.insert(id.to_owned());
+        match checkpoint {
+            Some(checkpoint) => result.valid.push(checkpoint),
+            None => {
+                result.invalid.insert(id.to_owned());
+            }
         }
     }
-    if result.len() > MAX_SESSIONS {
-        return Err(LedgerError(
-            "reader checkpoint session limit exceeded".into(),
-        ));
+    if let Some(parsed) = parsed {
+        parsed.retain(|id, _| present.contains(id));
     }
     Ok(result)
 }
@@ -506,42 +543,41 @@ impl Readers {
             Err(error) => return Err(error.into()),
             Ok(_) => {}
         }
-        private_directory(&directory)?;
-        for (count, entry) in fs::read_dir(&directory)?.enumerate() {
-            if count >= MAX_SESSIONS * 2 {
-                return Err(LedgerError(
-                    "reader checkpoint directory exceeds bounded size".into(),
-                ));
-            }
-            let entry = entry?;
-            let name = entry.file_name();
-            let (id, suffix) = name
-                .to_str()
-                .and_then(|name| name.rsplit_once('.'))
-                .filter(|(id, suffix)| token_valid(id) && ["json", "tmp"].contains(suffix))
-                .ok_or_else(|| LedgerError("reader checkpoint filename is unsafe".into()))?;
-            let file = checkpoint_file(&entry.path())?;
-            if suffix == "json"
-                && let Ok((checkpoint, _)) = load_checkpoint(&directory, id)
-                && checkpoint.created <= now
-            {
-                if now - checkpoint.created < TTL.as_secs() {
-                    pins.insert(checkpoint.request.run_id);
-                }
-            } else {
-                let modified = file
-                    .metadata()?
-                    .modified()?
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|_| LedgerError("reader checkpoint timestamp is invalid".into()))?
-                    .as_secs();
-                if now.saturating_sub(modified) < TTL.as_secs() {
-                    // An interrupted or corrupt checkpoint cannot identify its run.
-                    return Err(LedgerError("reader checkpoint pin is unknown".into()));
-                }
-            }
+        let durable = scan_checkpoints(&directory, now, Scan::Inspect, None)?;
+        if !durable.invalid.is_empty() {
+            // An interrupted or corrupt checkpoint cannot identify its run.
+            return Err(LedgerError("reader checkpoint pin is unknown".into()));
         }
+        pins.extend(
+            durable
+                .valid
+                .into_iter()
+                .map(|checkpoint| checkpoint.request.run_id),
+        );
         Ok(pins)
+    }
+
+    fn checkpoint_directory(&mut self, path: &Path) -> Result<PathBuf> {
+        let root = path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| LedgerError("reader canonical path has no ledger root".into()))?;
+        let parent = private_directory(root)?;
+        let directory = root.join("readers");
+        let created = match fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => return Err(error.into()),
+        };
+        private_directory(&directory)?;
+        // An earlier writer's mkdir may have survived a failed parent sync.
+        // Establish the namespace's durability once per writer, and again on
+        // every creation, before any checkpoint can be acknowledged.
+        if created || !self.directory_synced {
+            parent.sync_all()?;
+            self.directory_synced = true;
+        }
+        Ok(directory)
     }
 
     pub(crate) fn read(
@@ -568,8 +604,13 @@ impl Readers {
         };
         validate_request(request)?;
         let now = epoch_seconds()?;
-        let directory = checkpoint_directory(path)?;
-        let mut durable = checkpoints(&directory, now)?;
+        let directory = self.checkpoint_directory(path)?;
+        let mut durable = scan_checkpoints(&directory, now, Scan::Expire, Some(&mut self.parsed))?;
+        if durable.len() > MAX_SESSIONS {
+            return Err(LedgerError(
+                "reader checkpoint session limit exceeded".into(),
+            ));
+        }
         self.sessions
             .retain(|id, _| durable.valid.iter().any(|s| &s.id == id));
         let (id, token) = if let Some(cursor) = &request.cursor {
@@ -984,14 +1025,13 @@ impl Session {
             let digest = sha256_prefixed(&bytes[..bytes.len() - 1]);
             let record: Value =
                 serde_json::from_slice(&bytes[..bytes.len() - 1]).map_err(|_| invalid())?;
-            if record["request_id"]
-                .as_str()
-                .and_then(&accepted)
-                .is_none_or(|receipt| receipt.seq != position.next_seq || receipt.digest != digest)
-                || record["run_id"] != self.request.run_id
-                || record["seq"].as_u64() != Some(position.next_seq)
-                || record["prev"] != json!(position.previous_digest)
-                || !accepted_snapshot(position.next_seq, &digest, end, None)
+            if !self.corroborates(
+                &record,
+                &digest,
+                position.next_seq,
+                &position.previous_digest,
+                &accepted,
+            ) || !accepted_snapshot(position.next_seq, &digest, end, None)
             {
                 return Err(invalid());
             }
@@ -1036,6 +1076,25 @@ impl Session {
         self.previous_digest = position.previous_digest.clone();
         self.verified = position.verified;
         Ok(())
+    }
+
+    /// Whether a complete frame is exactly accepted record `seq`, following
+    /// `previous` in this run's chain.
+    fn corroborates(
+        &self,
+        record: &Value,
+        digest: &str,
+        seq: u64,
+        previous: &Option<String>,
+        accepted: impl Fn(&str) -> Option<AppendReceipt>,
+    ) -> bool {
+        record["request_id"]
+            .as_str()
+            .and_then(accepted)
+            .is_some_and(|receipt| receipt.seq == seq && receipt.digest == digest)
+            && record["run_id"] == self.request.run_id
+            && record["seq"].as_u64() == Some(seq)
+            && record["prev"] == json!(previous)
     }
 
     fn corrupt(&mut self, page: &mut ReadPage, reason: &str) {
@@ -1117,12 +1176,13 @@ impl Session {
                     }
                 };
                 let digest = sha256_prefixed(&bytes[..bytes.len() - 1]);
-                let receipt = record["request_id"].as_str().and_then(&accepted);
-                if receipt.is_none_or(|r| r.seq != self.next_seq || r.digest != digest)
-                    || record["run_id"] != self.request.run_id
-                    || record["seq"].as_u64() != Some(self.next_seq)
-                    || record["prev"] != json!(self.previous_digest)
-                {
+                if !self.corroborates(
+                    &record,
+                    &digest,
+                    self.next_seq,
+                    &self.previous_digest,
+                    &accepted,
+                ) {
                     self.corrupt(
                         page,
                         "canonical frame does not match the validated immutable record or chain",

@@ -3672,6 +3672,34 @@ mod tests {
     }
 
     #[test]
+    fn a_checkpoint_rewritten_in_place_is_validated_again() {
+        let (_temp, mut store, run) = create();
+        for n in 0..40 {
+            note(&mut store, &run, &format!("n{n}"), json!({"v":n})).unwrap();
+        }
+        let mut request = read_request(&run, crate::protocol::ReadSelector::All);
+        request.limit = 1;
+        let first = store.read(&request).unwrap();
+        request.cursor = first.next_cursor.clone();
+        let second = store.read(&request).unwrap();
+        let cursor = second.next_cursor.clone().unwrap();
+        let path = store
+            .root
+            .join("readers")
+            .join(format!("{}.json", &cursor[..32]));
+        let mut bytes = fs::read(&path).unwrap();
+        let digest = bytes.windows(7).position(|w| w == b"sha256:").unwrap();
+        bytes[digest + 7] = if bytes[digest + 7] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        fs::write(&path, &bytes).unwrap();
+        request.cursor = Some(cursor);
+        assert!(store.read(&request).is_err());
+    }
+
+    #[test]
     fn corrupt_reader_checkpoint_is_isolated_bounded_and_expires() {
         let (_temp, mut store, run) = create();
         for n in 0..40 {
