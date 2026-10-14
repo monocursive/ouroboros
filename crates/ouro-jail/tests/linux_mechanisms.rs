@@ -350,7 +350,18 @@ fn ordinary_file_hints_keep_protected_file_identity_and_mutation_detection() {
     // The original snapshot must refuse that mutation at mount handoff.
     fs::remove_file(root.join("ordinary-0")).unwrap();
     fs::create_dir_all(root.join("ordinary-0/.git")).unwrap();
-    assert!(scan.directories.iter().any(|stamp| stamp.verify().is_err()));
+    // Exactly the root's stamp refuses, and for the change: not a stamp that
+    // merely failed to open.
+    let refused: Vec<String> = scan
+        .directories
+        .iter()
+        .filter_map(|stamp| stamp.verify().err())
+        .map(|error| error.to_string())
+        .collect();
+    assert_eq!(
+        refused,
+        [format!("scanned directory changed: {}", root.display())]
+    );
     let rescanned = jfs::scan_pinned(&pin, &jfs::PROTECTED_LITERALS, jfs::ScanLimits::DEFAULT)
         .expect("fresh scan");
     assert!(

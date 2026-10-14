@@ -2501,9 +2501,11 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
     // socket's kind and identity, audit 2026-09-25-2 S2) and the filters
     // readback above; the same-uid /proc view refusing is the fix working.
     let sealed = std::fs::read_dir(format!("/proc/{bridge}/fd"));
-    assert!(
-        sealed.is_err(),
-        "a same-uid peer must not enumerate the sealed bridge's descriptors"
+    assert_eq!(
+        sealed.as_ref().err().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::PermissionDenied),
+        "a same-uid peer must be refused the sealed bridge's descriptors, not \
+         fail for another reason: {sealed:?}"
     );
     let helpers = &native["execution_cgroup"]["charged_helpers"];
     assert!(
@@ -3498,9 +3500,11 @@ fn review_x06_holds_with_observation_off() {
     // same-uid enumeration of its descriptors must refuse (its four
     // descriptors are the supervisor's takeover's to verify, not /proc's).
     let bridge_pid = native["helpers"][0]["pid"].as_i64().unwrap();
-    assert!(
-        std::fs::read_dir(format!("/proc/{bridge_pid}/fd")).is_err(),
-        "the sealed bridge must be unreachable through /proc"
+    let sealed = std::fs::read_dir(format!("/proc/{bridge_pid}/fd"));
+    assert_eq!(
+        sealed.as_ref().err().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::PermissionDenied),
+        "the sealed bridge must be refused through /proc, not gone: {sealed:?}"
     );
     assert_eq!(native["helpers"][0]["seccomp_filters"], 2);
     release(&mut spawned, &message, &receipt);

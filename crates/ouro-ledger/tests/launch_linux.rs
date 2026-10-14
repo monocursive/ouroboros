@@ -185,9 +185,13 @@ fn real_signed_bundles_keep_protection_and_verify_after_private_key_and_store_re
             "untrusted"
         );
         fs::write(path.join("stdout.bin"), b"changed output").unwrap();
-        assert!(
+        let error =
             ouro_ledger::bundle::verify_with_key(&path, Some(&keys.join("public-key.json")))
-                .is_err()
+                .expect_err("a changed member is refused under the trusted key")
+                .to_string();
+        assert!(
+            error.contains("bundle member size or digest mismatch"),
+            "the refusal is not the changed member: {error}"
         );
     }
 }
