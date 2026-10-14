@@ -12,11 +12,9 @@
 //! would be a lie about the platform rather than a check of it.
 #![cfg(target_os = "macos")]
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use jsonschema::{Registry, Resource, Validator};
 
 mod common;
 
@@ -136,51 +134,6 @@ impl Harness {
     }
 }
 
-fn specs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/specs/jail-v1")
-        .canonicalize()
-        .expect("the specification directory exists")
-}
-
-fn receipt_validator() -> Validator {
-    let mut schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    for entry in std::fs::read_dir(specs_dir()).expect("readable") {
-        let path = entry.expect("an entry").path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.ends_with(".schema.json") {
-            let text = std::fs::read_to_string(&path).expect("readable");
-            schemas.insert(
-                name.to_owned(),
-                serde_json::from_str(&text).expect("valid JSON"),
-            );
-        }
-    }
-    let pairs: Vec<(String, Resource)> = schemas
-        .values()
-        .map(|schema| {
-            (
-                schema["$id"].as_str().expect("an $id").to_owned(),
-                Resource::from_contents(schema.clone()),
-            )
-        })
-        .collect();
-    let registry: &'static Registry = Box::leak(Box::new(
-        Registry::new()
-            .extend(pairs)
-            .expect("valid URIs")
-            .prepare()
-            .expect("the registry resolves"),
-    ));
-    jsonschema::options()
-        .with_registry(registry)
-        .should_validate_formats(true)
-        .build(&schemas["jail-receipt.schema.json"])
-        .expect("the receipt schema compiles")
-}
-
 fn assert_refusal_tuple(receipt: &serde_json::Value, containment: &str, protection: &str) {
     assert_eq!(receipt["phase"], serde_json::json!("refused"));
     assert_eq!(receipt["containment"], serde_json::json!(containment));
@@ -258,7 +211,7 @@ fn m01_run_refuses_before_exec_and_the_marker_never_appears() {
     let receipts = harness.receipts();
     assert_eq!(receipts.len(), 1, "exactly one attempt was recorded");
     let receipt = &receipts[0];
-    receipt_validator()
+    common::validators()["jail-receipt"]
         .validate(receipt)
         .expect("the refusal receipt satisfies the checked-in schema");
     common::assert_semantic_receipt(receipt);
@@ -294,7 +247,7 @@ fn m01_none_also_refuses_and_stays_unprotected() {
     let receipts = harness.receipts();
     assert_eq!(receipts.len(), 1);
     let receipt = &receipts[0];
-    receipt_validator()
+    common::validators()["jail-receipt"]
         .validate(receipt)
         .expect("the refusal receipt satisfies the checked-in schema");
     common::assert_semantic_receipt(receipt);
@@ -1004,44 +957,6 @@ fn a_contained_profile_rejects_a_host_grant() {
 // Channels (§8.2, §13.3)
 // ---------------------------------------------------------------------------
 
-fn event_validator() -> Validator {
-    let mut schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    for entry in std::fs::read_dir(specs_dir()).expect("readable") {
-        let path = entry.expect("an entry").path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.ends_with(".schema.json") {
-            let text = std::fs::read_to_string(&path).expect("readable");
-            schemas.insert(
-                name.to_owned(),
-                serde_json::from_str(&text).expect("valid JSON"),
-            );
-        }
-    }
-    let pairs: Vec<(String, Resource)> = schemas
-        .values()
-        .map(|schema| {
-            (
-                schema["$id"].as_str().expect("an $id").to_owned(),
-                Resource::from_contents(schema.clone()),
-            )
-        })
-        .collect();
-    let registry: &'static Registry = Box::leak(Box::new(
-        Registry::new()
-            .extend(pairs)
-            .expect("valid URIs")
-            .prepare()
-            .expect("the registry resolves"),
-    ));
-    jsonschema::options()
-        .with_registry(registry)
-        .should_validate_formats(true)
-        .build(&schemas["jail-event.schema.json"])
-        .expect("the jail event schema compiles")
-}
-
 fn ndjson(path: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(path)
         .expect("the stream is readable")
@@ -1059,7 +974,7 @@ fn the_local_trace_records_the_wrapper_events_of_a_refusal() {
 
     let events = ndjson(&harness.attempt_dir().join("trace.ndjson"));
     assert_eq!(events.len(), 2, "a lifecycle note and the receipt event");
-    let validator = event_validator();
+    let validator = &common::validators()["jail-event"];
     for event in &events {
         validator
             .validate(event)
@@ -1143,7 +1058,7 @@ fn a_trace_descriptor_replaces_the_local_stream_rather_than_duplicating_it() {
         2,
         "the stream went to the supplied descriptor"
     );
-    let validator = event_validator();
+    let validator = &common::validators()["jail-event"];
     for event in &events {
         validator
             .validate(event)
@@ -1728,7 +1643,7 @@ fn a2_explicit_operator_grants_reach_the_receipt() {
     assert_eq!(grants.len(), 1, "one flag, one grant: {grants:?}");
     assert_eq!(grants[0]["kind"], serde_json::json!("read_only"));
     assert_eq!(grants[0]["by"], serde_json::json!("operator"));
-    receipt_validator()
+    common::validators()["jail-receipt"]
         .validate(receipt)
         .expect("the receipt with grants still satisfies the schema");
     common::assert_semantic_receipt(receipt);

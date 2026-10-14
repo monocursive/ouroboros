@@ -3,10 +3,8 @@
 //! whose target ended before any exec confirmation stays `prepared`, whatever
 //! the profile: the end-of-run code is shared. Simulated platform, portable.
 use clap::Parser;
-use jsonschema::{Registry, Resource, Validator};
 use ouro_jail::{capability::*, cli, config::EnvSettings, platform::*, records::*, supervisor};
 use serde_json::Value;
-use std::path::Path;
 use std::time::Duration;
 
 mod common;
@@ -120,39 +118,6 @@ impl RunningExecution for Running {
     }
 }
 
-fn receipt_validator() -> Validator {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1");
-    let mut resources = Vec::new();
-    let mut receipt = None;
-    for entry in std::fs::read_dir(&dir).unwrap() {
-        let path = entry.unwrap().path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".schema.json") {
-            continue;
-        }
-        let schema: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        if name == "jail-receipt.schema.json" {
-            receipt = Some(schema.clone());
-        }
-        let id = schema["$id"].as_str().unwrap().to_owned();
-        resources.push((id, Resource::from_contents(schema)));
-    }
-    let registry: &'static Registry = Box::leak(Box::new(
-        Registry::new()
-            .extend(resources)
-            .unwrap()
-            .prepare()
-            .unwrap(),
-    ));
-    jsonschema::options()
-        .with_registry(registry)
-        .should_validate_formats(true)
-        .build(&receipt.unwrap())
-        .unwrap()
-}
-
 fn run(script: Script) -> Value {
     run_keeping(script).1
 }
@@ -196,7 +161,7 @@ fn run_keeping(script: Script) -> (tempfile::TempDir, Value) {
         report.error
     );
     let receipt = serde_json::to_value(report.receipt.unwrap()).unwrap();
-    receipt_validator()
+    common::validators()["jail-receipt"]
         .validate(&receipt)
         .unwrap_or_else(|error| panic!("the receipt fails its schema: {error}\n{receipt:#}"));
     (root, receipt)

@@ -16,7 +16,6 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use jsonschema::{Registry, Resource, Validator};
 use ouro_jail::network::Rules;
 use ouro_jail::observer::CoverageClass;
 use ouro_jail::proxy::{
@@ -25,6 +24,8 @@ use ouro_jail::proxy::{
     SystemResolver, Transport,
 };
 use ouro_jail::records::{Completion, Decision};
+
+mod common;
 
 /// Upper bound for any wait. Never reached when the behaviour is correct.
 const WAIT: Duration = Duration::from_secs(20);
@@ -504,35 +505,6 @@ fn n02_chunked_body_is_forwarded_exactly_and_nothing_after_it() {
 
 const ATTEMPT: &str = "att_12345678-1234-4123-8123-123456789abc";
 
-fn specs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1")
-}
-
-fn jail_event_validator() -> Validator {
-    let mut pairs = Vec::new();
-    let mut jail_event = None;
-    for name in ["event.schema.json", "jail-event.schema.json"] {
-        let text = std::fs::read_to_string(specs_dir().join(name)).expect("readable schema");
-        let schema: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
-        let id = schema["$id"].as_str().expect("an $id").to_owned();
-        if name == "jail-event.schema.json" {
-            jail_event = Some(schema.clone());
-        }
-        pairs.push((id, Resource::from_contents(schema)));
-    }
-    let registry = Registry::new()
-        .extend(pairs)
-        .expect("valid identifiers")
-        .prepare()
-        .expect("the registry resolves");
-    let registry: &'static Registry = Box::leak(Box::new(registry));
-    jsonschema::options()
-        .with_registry(registry)
-        .should_validate_formats(true)
-        .build(&jail_event.expect("the producer schema"))
-        .expect("compiles")
-}
-
 #[test]
 fn n02_results_are_valid_distinct_proxy_source_events() {
     let (listener, port) = loopback();
@@ -573,7 +545,7 @@ fn n02_results_are_valid_distinct_proxy_source_events() {
     server.join().expect("the server ran");
 
     let results = harness.sink.wait_for(3);
-    let validator = jail_event_validator();
+    let validator = &common::validators()["jail-event"];
     let mut events = Vec::new();
     for (index, result) in results.iter().enumerate() {
         let seq = u64::try_from(index).expect("fits") + 1;
@@ -2401,7 +2373,7 @@ fn n02_a_resource_failure_event_is_truthful() {
     assert_eq!(event.fields["reason"], "resource_exhausted");
     assert_eq!(event.fields["end"], serde_json::Value::Null);
     let value = serde_json::to_value(&event).expect("serializes");
-    let errors: Vec<String> = jail_event_validator()
+    let errors: Vec<String> = common::validators()["jail-event"]
         .iter_errors(&value)
         .map(|e| e.to_string())
         .collect();

@@ -32,7 +32,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use clap::Parser as _;
-use jsonschema::{Registry, Resource, Validator};
 use ouro_jail::capability::{Capability, CapabilityScope, CapabilityStatus};
 use ouro_jail::config::EnvSettings;
 use ouro_jail::observer::{ClassSummary, CoverageClass, CoverageSummary};
@@ -448,43 +447,6 @@ impl Fixture {
     }
 }
 
-fn receipt_validator() -> &'static Validator {
-    static ONCE: std::sync::OnceLock<Validator> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1");
-        let mut resources = Vec::new();
-        let mut receipt = None;
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !name.ends_with(".schema.json") {
-                continue;
-            }
-            let schema: Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            if name == "jail-receipt.schema.json" {
-                receipt = Some(schema.clone());
-            }
-            let id = schema["$id"].as_str().unwrap().to_owned();
-            resources.push((id, Resource::from_contents(schema)));
-        }
-        let registry: &'static Registry = Box::leak(Box::new(
-            Registry::new()
-                .extend(resources)
-                .unwrap()
-                .prepare()
-                .unwrap(),
-        ));
-        jsonschema::options()
-            .with_registry(registry)
-            .should_validate_formats(true)
-            .build(&receipt.unwrap())
-            .unwrap()
-    })
-}
-
 fn valid_receipt(report: &supervisor::RunReport) -> Value {
     let receipt = serde_json::to_value(
         report
@@ -493,7 +455,7 @@ fn valid_receipt(report: &supervisor::RunReport) -> Value {
             .unwrap_or_else(|| panic!("a receipt; the run ended with {:?}", report.error)),
     )
     .unwrap();
-    let errors: Vec<String> = receipt_validator()
+    let errors: Vec<String> = common::validators()["jail-receipt"]
         .iter_errors(&receipt)
         .map(|error| error.to_string())
         .collect();

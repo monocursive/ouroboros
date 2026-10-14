@@ -16,7 +16,6 @@
 //! What this file does not prove: that a real bubblewrap boundary binds the
 //! staged objects. `conformance_j3_credentials.rs` does that on Linux.
 
-use std::collections::BTreeMap;
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -24,7 +23,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use clap::Parser as _;
-use jsonschema::{Registry, Resource, Validator};
 use ouro_jail::capability::{Capability, CapabilityScope, CapabilityStatus};
 use ouro_jail::cli::{self, PolicyArgs};
 use ouro_jail::config::EnvSettings;
@@ -203,57 +201,10 @@ fn receipt_json(report: &supervisor::RunReport) -> serde_json::Value {
 // The checked-in schemas
 // ---------------------------------------------------------------------------
 
-fn specs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/specs/jail-v1")
-        .canonicalize()
-        .unwrap()
-}
-
-fn validators() -> &'static BTreeMap<String, Validator> {
-    static ONCE: std::sync::OnceLock<BTreeMap<String, Validator>> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| {
-        let mut schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        for entry in std::fs::read_dir(specs_dir()).unwrap() {
-            let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if let Some(stem) = name.strip_suffix(".schema.json") {
-                schemas.insert(
-                    stem.to_owned(),
-                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap(),
-                );
-            }
-        }
-        let pairs: Vec<(String, Resource)> = schemas
-            .values()
-            .map(|schema| {
-                (
-                    schema["$id"].as_str().unwrap().to_owned(),
-                    Resource::from_contents(schema.clone()),
-                )
-            })
-            .collect();
-        let registry: &'static Registry = Box::leak(Box::new(
-            Registry::new().extend(pairs).unwrap().prepare().unwrap(),
-        ));
-        schemas
-            .into_iter()
-            .map(|(name, schema)| {
-                let validator = jsonschema::options()
-                    .with_registry(registry)
-                    .should_validate_formats(true)
-                    .build(&schema)
-                    .unwrap();
-                (name, validator)
-            })
-            .collect()
-    })
-}
-
 /// Schema validation; a receipt also keeps the rules the schema cannot state
 /// (`common::semantic_receipt`).
 fn assert_schema(name: &str, value: &serde_json::Value) {
-    let validator = &validators()[name];
+    let validator = &common::validators()[name];
     let errors: Vec<String> = validator
         .iter_errors(value)
         .map(|e| e.to_string())
