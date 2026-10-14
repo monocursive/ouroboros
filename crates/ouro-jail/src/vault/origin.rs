@@ -30,7 +30,7 @@ use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::proxy::Reason;
@@ -55,12 +55,13 @@ pub(crate) const RENDEZVOUS: Duration = Duration::from_secs(2);
 const RETENTION: Duration = Duration::from_secs(10);
 /// The most processes pinned at once.
 pub(crate) const MAX_PINNED: usize = 128;
-/// Descriptors one pinned process holds: its pidfd and its executable, and,
-/// until its connection claims its authority, that connection's socket.
+/// Descriptors per unit of the pin limit: a pinned process's pidfd and
+/// executable, and one held connection socket ([`Held`]), whose budget has
+/// the same limit.
 pub(crate) const FDS_PER_PIN: usize = 3;
 /// Published outcomes waiting for their connection. Each authority holds a
-/// pin, so the pin budget already bounds those and their descriptors; this
-/// bounds refusals too, which hold none.
+/// pin and a socket, so their budgets already bound those; this bounds
+/// refusals too, which hold neither.
 #[cfg(target_os = "linux")]
 const MAX_ENTRIES: usize = MAX_PINNED;
 const MAGIC: &[u8; 8] = b"OUROPID2";
@@ -138,8 +139,21 @@ struct Pinned {
     identity: Identity,
     _reservation: Option<Reservation>,
 }
-/// One unit of the pin budget, returned when its process is dropped.
+/// One unit of a budget (pinned processes, held sockets), returned when
+/// dropped.
 struct Reservation(Arc<AtomicUsize>);
+impl Reservation {
+    /// One unit of `taken`, when fewer than `limit` are.
+    #[cfg(target_os = "linux")]
+    fn take(taken: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        taken
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                (count < limit).then_some(count + 1)
+            })
+            .ok()?;
+        Some(Self(Arc::clone(taken)))
+    }
+}
 impl Drop for Reservation {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
@@ -232,15 +246,51 @@ impl Initiator {
 enum Outcome {
     /// The pinned process, held with its own duplicate of the socket of the
     /// connection it made: the authority is that connection's.
-    Authority(Process, OwnedFd),
+    Authority(Process, Held),
     Refused(Reason),
 }
 impl From<Outcome> for Initiator {
     fn from(outcome: Outcome) -> Self {
         match outcome {
-            // Claimed: the socket has served its purpose and is released.
+            // Claimed: the socket has served its purpose and is let go.
             Outcome::Authority(process, _) => Initiator::Pinned(process),
             Outcome::Refused(reason) => Initiator::Unverified(reason),
+        }
+    }
+}
+
+/// A connection's socket, held for its authority and closed by the closer
+/// thread, never where it is let go.
+///
+/// Closing a socket's last descriptor waits, when its process set it to
+/// linger, until the data it queued is delivered, which that process can
+/// put off for as long as it likes. The rendezvous lets go of sockets on
+/// mediator workers, proxy handlers and stop, under the table lock, so the
+/// closer takes that wait instead. A socket counts against the socket
+/// budget until it is closed: a process that keeps the closer waiting runs
+/// that budget out, and authorities are then refused as
+/// `resource_exhausted` rather than descriptors running out.
+struct Held {
+    /// Taken only when dropped.
+    closing: Option<Closing>,
+    closer: mpsc::Sender<Closing>,
+}
+/// A held socket, and the unit of the socket budget it releases once it is
+/// closed: fields drop in order.
+struct Closing {
+    socket: OwnedFd,
+    _reservation: Reservation,
+}
+impl Held {
+    fn socket(&self) -> Option<BorrowedFd<'_>> {
+        self.closing.as_ref().map(|closing| closing.socket.as_fd())
+    }
+}
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(closing) = self.closing.take() {
+            // The closer runs as long as any sender lives, this one too.
+            let _ = self.closer.send(closing);
         }
     }
 }
@@ -249,21 +299,6 @@ impl From<Outcome> for Initiator {
 /// why there is none. Published once the connect succeeded.
 #[cfg(target_os = "linux")]
 pub(crate) struct Prepared(Result<Process, Reason>);
-#[cfg(target_os = "linux")]
-impl Prepared {
-    /// The outcome published for the connection made on `socket`.
-    fn bind(self, socket: BorrowedFd<'_>) -> Outcome {
-        match self.0 {
-            Ok(process) => match socket.try_clone_to_owned() {
-                Ok(socket) => Outcome::Authority(process, socket),
-                // An authority without its socket could not be told from a
-                // later connection's on the same address: none is published.
-                Err(_) => Outcome::Refused(Reason::ResourceExhausted),
-            },
-            Err(reason) => Outcome::Refused(reason),
-        }
-    }
-}
 
 #[cfg_attr(
     not(target_os = "linux"),
@@ -279,7 +314,7 @@ impl Entry {
     /// still carries that connection.
     fn current(&self, key: Key) -> bool {
         match &self.outcome {
-            Outcome::Authority(_, socket) => carries(socket.as_fd(), key),
+            Outcome::Authority(_, held) => held.socket().is_some_and(|socket| carries(socket, key)),
             Outcome::Refused(_) => true,
         }
     }
@@ -309,6 +344,19 @@ pub(crate) struct Origins {
         expect(dead_code, reason = "only the Linux mediator pins")
     )]
     pins: Arc<AtomicUsize>,
+    /// Held sockets, in the table or waiting for the closer; at most the
+    /// pin limit.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(dead_code, reason = "only the Linux mediator publishes")
+    )]
+    sockets: Arc<AtomicUsize>,
+    /// The closer thread's queue, opened with the first held socket.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(dead_code, reason = "only the Linux mediator publishes")
+    )]
+    closer: Mutex<Option<mpsc::Sender<Closing>>>,
     rendezvous: Duration,
 }
 impl Default for Origins {
@@ -322,6 +370,8 @@ impl Origins {
             table: Mutex::new(Table::default()),
             published: Condvar::new(),
             pins: Arc::new(AtomicUsize::new(0)),
+            sockets: Arc::new(AtomicUsize::new(0)),
+            closer: Mutex::new(None),
             rendezvous,
         }
     }
@@ -368,16 +418,11 @@ impl Origins {
             prune(&mut table.entries);
             table.limit
         };
-        let reserved = self
-            .pins
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                (count < limit).then_some(count + 1)
-            });
-        let outcome = match reserved {
+        let outcome = match Reservation::take(&self.pins, limit) {
             // Published all the same, so the proxy learns at once that the
             // pin budget, not the process, is why there is no authority.
-            Err(_) => Err(Reason::ResourceExhausted),
-            Ok(_) => Process::capture(pid, start, Some(Reservation(Arc::clone(&self.pins))))
+            None => Err(Reason::ResourceExhausted),
+            Some(reservation) => Process::capture(pid, start, Some(reservation))
                 .ok_or(Reason::CredentialProcessUnverified),
         };
         Some(Prepared(outcome))
@@ -387,8 +432,52 @@ impl Origins {
     #[cfg(target_os = "linux")]
     pub(crate) fn connected(&self, prepared: Prepared, socket: BorrowedFd<'_>) {
         if let Some(key) = bridge_key(socket) {
-            self.publish(key, prepared.bind(socket));
+            self.publish(key, self.bind(prepared, socket));
         }
+    }
+    /// The outcome published for the connection made on `socket`: an
+    /// authority holds its own duplicate of that socket, or is refused, as
+    /// one that could not be told from a later connection's on the same
+    /// address.
+    #[cfg(target_os = "linux")]
+    fn bind(&self, prepared: Prepared, socket: BorrowedFd<'_>) -> Outcome {
+        match prepared.0 {
+            Ok(process) => self
+                .hold(socket)
+                .map_or(Outcome::Refused(Reason::ResourceExhausted), |held| {
+                    Outcome::Authority(process, held)
+                }),
+            Err(reason) => Outcome::Refused(reason),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn hold(&self, socket: BorrowedFd<'_>) -> Option<Held> {
+        let reservation = Reservation::take(&self.sockets, self.table().limit)?;
+        let closer = self.closer()?;
+        let socket = socket.try_clone_to_owned().ok()?;
+        Some(Held {
+            closing: Some(Closing {
+                socket,
+                _reservation: reservation,
+            }),
+            closer,
+        })
+    }
+    /// The closer's queue, its thread started the first time.
+    #[cfg(target_os = "linux")]
+    fn closer(&self) -> Option<mpsc::Sender<Closing>> {
+        let mut closer = self.closer.lock().unwrap_or_else(PoisonError::into_inner);
+        if closer.is_none() {
+            let (tx, rx) = mpsc::channel::<Closing>();
+            std::thread::Builder::new()
+                .name("ouro-origin-closer".to_owned())
+                // Ends once every sender is gone: this table's and each
+                // held socket's.
+                .spawn(move || rx.into_iter().for_each(drop))
+                .ok()?;
+            *closer = Some(tx);
+        }
+        closer.clone()
     }
     #[cfg(target_os = "linux")]
     fn publish(&self, key: Key, outcome: Outcome) {
@@ -776,8 +865,8 @@ mod linux_tests {
         pin(origins, pid, start)
     }
     /// The outcome the mediator publishes once `process` connected `client`.
-    fn authority(process: Process, client: &TcpStream) -> Outcome {
-        Prepared(Ok(process)).bind(client.as_fd())
+    fn authority(origins: &Origins, process: Process, client: &TcpStream) -> Outcome {
+        origins.bind(Prepared(Ok(process)), client.as_fd())
     }
 
     /// A loopback TCP connection to a stand-in for the bridge: the client
@@ -882,6 +971,39 @@ mod linux_tests {
         Outcome::Refused(Reason::ResourceExhausted)
     }
 
+    /// Makes closing the last descriptor of `client`'s socket wait, up to
+    /// `seconds`: it lingers, with more queued than its peer, which reads
+    /// nothing, will take.
+    fn lingering(client: &mut TcpStream, seconds: libc::c_int) {
+        use std::io::ErrorKind;
+        let value = libc::linger {
+            l_onoff: 1,
+            l_linger: seconds,
+        };
+        let len = libc::socklen_t::try_from(std::mem::size_of::<libc::linger>()).unwrap();
+        // SAFETY: `value` is a `linger` of `len` bytes that outlives the call,
+        // and the descriptor is borrowed from `client`, open for the call.
+        let rc = unsafe {
+            libc::setsockopt(
+                client.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const value).cast(),
+                len,
+            )
+        };
+        assert_eq!(rc, 0, "{}", io::Error::last_os_error());
+        client.set_nonblocking(true).unwrap();
+        let chunk = [0u8; 1 << 16];
+        loop {
+            match client.write(&chunk) {
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum Seen {
         /// Pinned, with the pinned process's pid.
@@ -951,7 +1073,7 @@ mod linux_tests {
         let connection = connection();
         let (_bridge, proxy) = bridged(connection.key);
         let (rx, thread) = receiving(&origins, proxy);
-        let outcome = authority(pinned(&origins), &connection.client);
+        let outcome = authority(&origins, pinned(&origins), &connection.client);
         origins.publish(connection.key, outcome);
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -969,7 +1091,10 @@ mod linux_tests {
         let origins = configured(true, Duration::ZERO);
         let connection = connection();
         let key = connection.key;
-        origins.publish(key, authority(pinned(&origins), &connection.client));
+        origins.publish(
+            key,
+            authority(&origins, pinned(&origins), &connection.client),
+        );
         let (_bridge, proxy) = bridged(key);
         assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
         assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
@@ -981,7 +1106,10 @@ mod linux_tests {
         let origins = configured(true, rendezvous);
         let connection = connection();
         let key = connection.key;
-        origins.publish(key, authority(pinned(&origins), &connection.client));
+        origins.publish(
+            key,
+            authority(&origins, pinned(&origins), &connection.client),
+        );
         let (_bridge, proxy) = bridged(key);
         assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
         let (_replay_bridge, replay_proxy) = bridged(key);
@@ -1002,7 +1130,7 @@ mod linux_tests {
         let connection = connection();
         origins.publish(
             connection.key,
-            authority(pinned(&origins), &connection.client),
+            authority(&origins, pinned(&origins), &connection.client),
         );
         assert!(matches!(
             rx.recv_timeout(Duration::from_millis(100)),
@@ -1028,10 +1156,13 @@ mod linux_tests {
         // An earlier connection on the same 4-tuple closed unclaimed; its
         // outcome is not the new connection's.
         origins.publish(key, refused());
-        origins.publish(key, authority(pinned(&origins), &connection.client));
+        origins.publish(
+            key,
+            authority(&origins, pinned(&origins), &connection.client),
+        );
         let (_bridge, proxy) = bridged(key);
         assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
-        let pending = authority(pinned(&origins), &connection.client);
+        let pending = authority(&origins, pinned(&origins), &connection.client);
         origins.stop();
         origins.publish(key, pending);
         // Stop is terminal: configuring again does not reopen it.
@@ -1055,7 +1186,7 @@ mod linux_tests {
         );
         origins.publish(
             connection.key,
-            authority(pinned(&origins), &connection.client),
+            authority(&origins, pinned(&origins), &connection.client),
         );
         let (_bridge, proxy) = bridged(elsewhere);
         assert_eq!(
@@ -1091,11 +1222,12 @@ mod linux_tests {
         let (_bridge, proxy) = bridged(connection.key);
         let (rx, thread) = receiving(&origins, proxy);
         // Refused without a descriptor taken for it.
-        let outcome = prepared.bind(connection.client.as_fd());
+        let outcome = origins.bind(prepared, connection.client.as_fd());
         assert!(matches!(
             outcome,
             Outcome::Refused(Reason::ResourceExhausted)
         ));
+        assert_eq!(origins.sockets.load(Ordering::SeqCst), 0);
         origins.publish(connection.key, outcome);
         // Learned at once, not after the whole rendezvous.
         assert_eq!(
@@ -1130,7 +1262,7 @@ mod linux_tests {
         let process = pin(&origins, child.pid(), child.start());
         let connection = connection();
         let key = connection.key;
-        origins.publish(key, authority(process, &connection.client));
+        origins.publish(key, authority(&origins, process, &connection.client));
         assert_eq!(origins.pins.load(Ordering::SeqCst), 1);
         child.0.kill().unwrap();
         child.0.wait().unwrap();
@@ -1185,7 +1317,7 @@ mod linux_tests {
         let mut connection = connection();
         origins.publish(
             connection.key,
-            authority(pinned(&origins), &connection.client),
+            authority(&origins, pinned(&origins), &connection.client),
         );
         // The client sends its request and ends its side, as some clients
         // do, and the bridge reads it all; none of that ends the connection.
@@ -1207,7 +1339,10 @@ mod linux_tests {
             SocketAddr::from(([127, 0, 0, 1], connection.key.client.port() ^ 1)),
             connection.key.bridge_port,
         );
-        origins.publish(elsewhere, authority(pinned(&origins), &connection.client));
+        origins.publish(
+            elsewhere,
+            authority(&origins, pinned(&origins), &connection.client),
+        );
         let (_bridge, proxy) = bridged(elsewhere);
         assert_eq!(
             seen(origins.receive(&proxy)),
@@ -1224,7 +1359,7 @@ mod linux_tests {
         let mut connection = connection();
         origins.publish(
             connection.key,
-            authority(pinned(&origins), &connection.client),
+            authority(&origins, pinned(&origins), &connection.client),
         );
         // The bridge's answer at capacity: a response, then both directions
         // shut down, long before the retention runs out.
@@ -1255,7 +1390,7 @@ mod linux_tests {
         );
         let key = first.key;
         let process = pin(&origins, allowed.pid(), allowed.start());
-        origins.publish(key, authority(process, &first.client));
+        origins.publish(key, authority(&origins, process, &first.client));
         // The bridge turns it away at capacity without reading its request,
         // so closing resets it, before any preamble: nothing claims it.
         first.client.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
@@ -1289,7 +1424,7 @@ mod linux_tests {
         // The stale authority was dropped, not handed out.
         assert!(!origins.table().entries.contains_key(&key));
         assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
-        origins.publish(key, authority(pinned(&origins), &reused.client));
+        origins.publish(key, authority(&origins, pinned(&origins), &reused.client));
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             Ok(Seen::Pinned(me()))
@@ -1299,10 +1434,48 @@ mod linux_tests {
     }
 
     #[test]
+    fn a_held_socket_left_to_linger_never_holds_up_a_claim_or_stop() {
+        const LINGER: libc::c_int = 5;
+        let origins = configured(true, RENDEZVOUS);
+        let (mut claimed, mut stopped) = (connection(), connection());
+        for connection in [&mut claimed, &mut stopped] {
+            lingering(&mut connection.client, LINGER);
+            let outcome = authority(&origins, pinned(&origins), &connection.client);
+            origins.publish(connection.key, outcome);
+        }
+        assert_eq!(origins.sockets.load(Ordering::SeqCst), 2);
+        // The process closes its own descriptors: each held duplicate is
+        // its socket's last.
+        let (claimed_peer, stopped_peer) = (claimed.accepted, stopped.accepted);
+        drop((claimed.client, stopped.client));
+        let began = Instant::now();
+        let (_bridge, proxy) = bridged(claimed.key);
+        assert_eq!(seen(origins.receive(&proxy)), Ok(Seen::Pinned(me())));
+        origins.stop();
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "a claim and stop waited {:?} on lingering sockets",
+            began.elapsed()
+        );
+        // The closer waits instead, until each peer goes (resetting the
+        // connection it never read) and the socket can close.
+        drop((claimed_peer, stopped_peer));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while origins.sockets.load(Ordering::SeqCst) != 0 {
+            assert!(Instant::now() < deadline, "the closer never closed them");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(origins.pins.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn a_full_table_evicts_its_oldest_outcome_and_never_escalates_the_evicted() {
         let origins = configured(true, Duration::from_millis(50));
         let oldest = connection();
-        origins.publish(oldest.key, authority(pinned(&origins), &oldest.client));
+        origins.publish(
+            oldest.key,
+            authority(&origins, pinned(&origins), &oldest.client),
+        );
         // Strictly older than everything published after it.
         std::thread::sleep(Duration::from_millis(2));
         let keys: Vec<Key> = (1..=MAX_ENTRIES)
@@ -1342,7 +1515,7 @@ mod linux_tests {
         let (rx, thread) = receiving(&origins, proxy);
         origins.publish(
             connection.key,
-            authority(pinned(&origins), &connection.client),
+            authority(&origins, pinned(&origins), &connection.client),
         );
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
