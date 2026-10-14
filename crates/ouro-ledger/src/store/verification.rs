@@ -432,6 +432,35 @@ mod tests {
     }
 
     #[test]
+    fn only_the_foreign_frame_is_restated_and_every_other_finding_stands() {
+        use std::io::Write as _;
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let run = store.prepare("foreign", &payload(), &peer()).unwrap();
+        let directory = store.run_dir(&run.run_id);
+        fs::write(directory.join(manifest::NAME), b"not a manifest").unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(directory.join(STREAM))
+            .unwrap()
+            .write_all(b"{\"foreign\":")
+            .unwrap();
+        let report = store.verify(None).unwrap().remove(0);
+        assert!(!report.local_consistency);
+        assert_eq!(report.problems.len(), 2, "{:?}", report.problems);
+        assert_eq!(
+            report.problems[0],
+            "11 canonical bytes follow what this writer accepted; it never wrote or acknowledged \
+             them"
+        );
+        assert!(
+            report.problems[1].starts_with("invalid segment manifest: "),
+            "{:?}",
+            report.problems
+        );
+    }
+
+    #[test]
     fn foreign_bytes_after_a_consistent_history_this_writer_never_accepted_hide_nothing() {
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path().join("data");
