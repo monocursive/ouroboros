@@ -475,9 +475,11 @@ it after handing off the durable response. Index errors are reported separately
 by `doctor`; they cannot authorize execution, poison a sound canonical stream
 or revoke a durable append receipt. SQLite lock contention fails immediately,
 so an unavailable projection does not stall the next writer request. Every run
-one request changed is upserted in one SQLite transaction after the reply. The
-first index failure, including another process holding its lock, leaves the
-projection unavailable until the writer restarts and rebuilds it.
+one request changed is upserted in one SQLite transaction after the reply, as
+the `run.json` its last acknowledged append or GC published: never a state the
+writer accepted in memory and then failed to acknowledge. The first index
+failure, including another process holding its lock, leaves the projection
+unavailable until the writer restarts and rebuilds it.
 Pruned runs recover their replay identities from the retained GC anchor described
 in §8. Portable bundles and explicit signer verification are described in §8.4–8.5.
 

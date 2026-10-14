@@ -422,6 +422,41 @@ fn index_failure_after_acknowledgement_does_not_poison_or_reexecute() {
 }
 
 #[test]
+fn the_index_takes_only_what_the_writer_acknowledged() {
+    use crate::faults::{self, Plan, Point, Replaced, Step};
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut store = Store::open(temp.path()).unwrap();
+    let run = store
+        .prepare("index-acknowledged", &payload(), &peer())
+        .unwrap();
+    store.flush_index();
+    // One request appends twice to the run. The second append is accepted
+    // in memory, then fails before it is acknowledged, poisoning the stream.
+    store.hold(&run.run_id, "hold", &peer()).unwrap();
+    let acknowledged = serde_json::to_value(store.show(&run.run_id).unwrap()).unwrap();
+    faults::arm(Plan::fail(Point::Replace(
+        Replaced::Manifest,
+        Step::BeforeWrite,
+    )));
+    let failed = store.release(&run.run_id, "release", &peer());
+    faults::disarm();
+    assert!(failed.is_err());
+    store.flush_index();
+    let (sequence, json): (String, String) =
+        rusqlite::Connection::open(store.root().join("index.sqlite"))
+            .unwrap()
+            .query_row(
+                "SELECT head_seq, run_json FROM runs WHERE run_id=?1",
+                [&run.run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!(sequence, acknowledged["chain"]["head_seq"].to_string());
+    assert_eq!(serde_json::from_str::<Value>(&json).unwrap(), acknowledged);
+}
+
+#[test]
 fn one_flush_publishes_every_queued_run_in_one_index_transaction() {
     // SQLite's file change counter (header bytes 24..28) advances once per
     // committed write transaction, and each commit costs its own fsyncs.

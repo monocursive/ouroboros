@@ -1,6 +1,6 @@
 //! The sole writer: it owns every loaded stream and appends to them.
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Write as _,
     os::fd::AsRawFd as _,
@@ -50,8 +50,9 @@ pub struct Store {
     readers: crate::reader::Readers,
     index: Option<crate::projection::Projection>,
     index_error: Option<String>,
-    /// Runs whose published projection the index has not taken yet.
-    index_pending: BTreeSet<String>,
+    /// The projection each run last published with an acknowledgement, not
+    /// yet taken by the index.
+    index_pending: BTreeMap<String, Vec<u8>>,
     /// Pending journals whose background reconciliation failed, and when
     /// each may be tried again.
     #[cfg(target_os = "linux")]
@@ -86,8 +87,9 @@ pub(super) fn projection_bytes(run: &RunRecord) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Durably replace the run's `run.json` in its pinned directory `dir`.
-pub(super) fn publish_projection(dir: &File, run: &RunRecord) -> Result<()> {
+/// Durably replace the run's `run.json` in its pinned directory `dir`, and
+/// return the bytes published.
+pub(super) fn publish_projection(dir: &File, run: &RunRecord) -> Result<Vec<u8>> {
     let bytes = projection_bytes(run)?;
     fsx::replace(
         dir,
@@ -95,7 +97,8 @@ pub(super) fn publish_projection(dir: &File, run: &RunRecord) -> Result<()> {
         c"run.json",
         &bytes,
         Replaced::Projection,
-    )
+    )?;
+    Ok(bytes)
 }
 
 /// Whether `path` is a private file holding exactly `expected`, synchronized
@@ -169,7 +172,7 @@ impl Store {
             readers: crate::reader::Readers::default(),
             index: None,
             index_error: None,
-            index_pending: BTreeSet::new(),
+            index_pending: BTreeMap::new(),
             #[cfg(target_os = "linux")]
             pending_failures: BTreeMap::new(),
             segment_limit: SEGMENT_BYTES,
@@ -270,11 +273,29 @@ impl Store {
         &mut self.readers
     }
 
-    /// Hand a run's durably published projection to the disposable index,
-    /// which takes it only after the reply is on its way (see `flush_index`).
+    /// Hand the run's projection, just durably published, to the
+    /// disposable index, which takes it only after the reply is on its way
+    /// (see `flush_index`).
     pub(super) fn queue_index(&mut self, run_id: &str) {
+        if self.index.is_some()
+            && let Some(stream) = self.streams.get(run_id)
+        {
+            match projection_bytes(stream.run()) {
+                Ok(projection) => self.queue_published(run_id, projection),
+                Err(error) => {
+                    self.index_error = Some(error.to_string());
+                    self.index = None;
+                }
+            }
+        }
+    }
+
+    /// Hand the projection an acknowledged append published to the index.
+    /// The bytes are kept, not the run: a later append in the same request
+    /// can change the run in memory and fail before it is acknowledged.
+    fn queue_published(&mut self, run_id: &str, projection: Vec<u8>) {
         if self.index.is_some() {
-            self.index_pending.insert(run_id.to_owned());
+            self.index_pending.insert(run_id.to_owned(), projection);
         }
     }
 
@@ -673,18 +694,18 @@ impl Store {
             payload_digest.into(),
         )?;
         let manifest = stream.manifest();
-        publish_projection(&dir, stream.run())?;
+        let published = publish_projection(&dir, stream.run())?;
         manifest::write(&dir, &manifest)?;
         faults::hit(Point::AppendBeforeDirectorySync)?;
         dir.sync_all()?;
         faults::hit(Point::AppendAfterDirectorySync)?;
-        self.queue_index(run_id);
+        self.queue_published(run_id, published);
         Ok(())
     }
 
     pub(super) fn write_projection(&self, run: &RunRecord) -> Result<()> {
         let dir = fsx::open_dir(&self.root.join(&run.run_id), RUN_DIRECTORY)?;
-        publish_projection(&dir, run)
+        publish_projection(&dir, run).map(drop)
     }
 
     pub fn show(&self, run_id: &str) -> Result<RunRecord> {
@@ -716,7 +737,9 @@ impl Store {
     /// Dispatch has already handed the durable response to the connection handler.
     /// Index failures cannot change that acknowledgement or canonical stream.
     ///
-    /// Every run the request touched goes in one index transaction. The first
+    /// Each run the request touched goes in one index transaction, as the
+    /// projection its last acknowledged append or GC published: never a state
+    /// the writer accepted in memory but did not acknowledge. The first
     /// failure, including another process holding the index lock, leaves the
     /// index unavailable until the writer restarts and rebuilds it; `doctor`
     /// reports the error.
@@ -725,11 +748,11 @@ impl Store {
         let Some(index) = &mut self.index else {
             return;
         };
-        let runs = pending
-            .iter()
-            .filter_map(|id| self.streams.get(id))
-            .map(Stream::run);
-        if let Err(error) = index.upsert(runs) {
+        let published = pending
+            .values()
+            .map(|projection| Ok(serde_json::from_slice::<RunRecord>(projection)?))
+            .collect::<Result<Vec<_>>>();
+        if let Err(error) = published.and_then(|runs| index.upsert(&runs)) {
             self.index_error = Some(error.to_string());
             self.index = None;
         }
