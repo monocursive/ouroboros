@@ -1192,6 +1192,9 @@ fn path_refusal(refusal: path::Refusal, key: &str) -> JailError {
         path::Refusal::HomeUnavailable => {
             "a `~/` path needs the operator home, which is unavailable"
         }
+        path::Refusal::HomeNotAbsolute => {
+            "a `~/` path needs the operator home, and HOME is not an absolute path"
+        }
     };
     refuse(ErrorCode::InvalidConfig, key, message.to_owned())
 }

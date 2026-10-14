@@ -1519,6 +1519,59 @@ fn a_config_file_cannot_give_tool_a_proxy() {
     );
 }
 
+/// An operator directory the environment names is absolute or refused,
+/// naming the variable. A relative `OURO_CONFIG_DIR` used to surface as "a
+/// relative path has no directory to resolve against" at the first relative
+/// grant in `config.toml`; a relative `HOME` made the configuration
+/// directory relative the same way, and made `~/x` in `config.toml` resolve
+/// beneath the configuration directory instead of refusing.
+#[test]
+fn a_relative_operator_directory_refuses_naming_its_variable() {
+    for variable in ["OURO_CONFIG_DIR", "OURO_DATA_DIR"] {
+        let error = ouro_jail::config::env_settings(&|name| {
+            (name == variable).then(|| std::ffi::OsString::from("relative/dir"))
+        })
+        .expect_err("a relative directory refuses");
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.key_path.as_deref(), Some(variable));
+        assert!(error.message.contains("absolute"), "{}", error.message);
+    }
+    let files = Files::new();
+    let plan = |env_settings: EnvSettings| {
+        let ctx = supervisor::Context {
+            platform: Box::new(ResolveOnly),
+            env_settings,
+            cwd: files.workspace.clone(),
+            home: Some(PathBuf::from("home")),
+            env_lookup: Box::new(|_| None),
+        };
+        supervisor::resolve_plan(&ctx, &files.args("tool"))
+    };
+    // The default directories come from HOME.
+    let error = refuses(
+        plan(EnvSettings::default()),
+        ErrorCode::InvalidConfig,
+        "HOME",
+    );
+    assert!(error.message.contains("absolute"), "{}", error.message);
+    // With both directories set, HOME still names what `~/` means.
+    std::fs::create_dir(files.config.join("x")).expect("a directory");
+    files.write(
+        &files.config.join("config.toml"),
+        "[jail.filesystem]\nread_only = [\"~/x\"]\n",
+    );
+    let error = refuses(
+        plan(EnvSettings {
+            config_dir: Some(files.config.clone()),
+            data_dir: Some(files.root.join("data")),
+            ..EnvSettings::default()
+        }),
+        ErrorCode::InvalidConfig,
+        "jail.filesystem.read_only",
+    );
+    assert!(error.message.contains("HOME"), "{}", error.message);
+}
+
 /// P02.13: `none` cannot be selected through an untrusted layer — neither a
 /// project file naming it nor an operator profile file extending it (§6.1:
 /// `--profile none` is the only way).

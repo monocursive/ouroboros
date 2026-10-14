@@ -60,6 +60,7 @@ pub fn config_dir(settings: &EnvSettings, home: Option<&Path>) -> Result<PathBuf
             "no home directory and no OURO_CONFIG_DIR",
         )
     })?;
+    let home = crate::config::absolute_dir(crate::config::HOME_VAR, home)?;
     Ok(home.join(".config").join("ouro"))
 }
 
@@ -78,6 +79,7 @@ pub fn data_dir(settings: &EnvSettings, home: Option<&Path>) -> Result<PathBuf, 
             "no home directory and no OURO_DATA_DIR",
         )
     })?;
+    let home = crate::config::absolute_dir(crate::config::HOME_VAR, home)?;
     Ok(home.join(".local").join("share").join("ouro"))
 }
 

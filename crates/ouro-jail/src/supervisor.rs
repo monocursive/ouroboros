@@ -305,10 +305,11 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
             let path = if args.profile.is_some() {
                 absolutize(&ctx.cwd, Path::new(&selection))
             } else if let Some(suffix) = selection.strip_prefix("~/") {
-                ctx.home
+                let home = ctx
+                    .home
                     .as_ref()
-                    .ok_or_else(|| usage("jail.profile", "operator home is unavailable"))?
-                    .join(suffix)
+                    .ok_or_else(|| usage("jail.profile", "operator home is unavailable"))?;
+                config::absolute_dir(config::HOME_VAR, home)?.join(suffix)
             } else {
                 absolutize(&config_dir, Path::new(&selection))
             };

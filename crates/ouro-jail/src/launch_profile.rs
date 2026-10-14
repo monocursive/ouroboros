@@ -346,6 +346,9 @@ fn credential_source(
                     Refusal::HomeUnavailable => {
                         "a `~/` source needs the operator home, which is unavailable"
                     }
+                    Refusal::HomeNotAbsolute => {
+                        "a `~/` source needs the operator home, and HOME is not an absolute path"
+                    }
                 },
             )
         })?;
