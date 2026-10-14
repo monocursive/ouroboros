@@ -1406,13 +1406,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             ));
         }
     };
-    send_control(
-        control.as_mut(),
-        &record,
-        ControlKind::Prepared,
-        Phase::Prepared,
-        &prepared_receipt,
-    );
+    send_control(control.as_mut(), ControlKind::Prepared, &prepared_receipt);
 
     // Step 6: wait for a valid external release, or release locally.
     let gate = match budget.check(ErrorStage::Prepared) {
@@ -1519,13 +1513,8 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         if let Some(control) = control.as_mut() {
             control.poll();
         }
-        if let Some(error) = settle_in_flight(
-            &mut in_flight,
-            false,
-            control.as_mut(),
-            &record,
-            &mut journal,
-        ) {
+        if let Some(error) = settle_in_flight(&mut in_flight, false, control.as_mut(), &mut journal)
+        {
             persistence_failed(running.as_mut(), &mut record, &mut outcome_error, error);
         }
         // §13.3 + I07: a trace-sink failure — budget exhausted, external
@@ -1676,13 +1665,9 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 );
                 // J4-R: a receipt still with the worker lands (or is given up
                 // on) before the refused one.
-                if let Some(failure) = settle_in_flight(
-                    &mut in_flight,
-                    true,
-                    control.as_mut(),
-                    &record,
-                    &mut journal,
-                ) {
+                if let Some(failure) =
+                    settle_in_flight(&mut in_flight, true, control.as_mut(), &mut journal)
+                {
                     record.errors.push(failure.to_object());
                 }
                 return Ok(refuse(
@@ -1798,13 +1783,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // and acknowledged in order before any terminal message. The loop is
     // over, so a failure here stopped nothing: it is a tool error (S5), not a
     // stop cause.
-    if let Some(error) = settle_in_flight(
-        &mut in_flight,
-        true,
-        control.as_mut(),
-        &record,
-        &mut journal,
-    ) {
+    if let Some(error) = settle_in_flight(&mut in_flight, true, control.as_mut(), &mut journal) {
         persistence_failed_after(&mut record, &mut outcome_error, error);
     }
     // Audit 2026-10-08 L2: a storage enforcement loss is recorded in
@@ -2031,7 +2010,6 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     }
     send_control(
         control.as_mut(),
-        &record,
         if settled {
             ControlKind::Settled
         } else {
@@ -2040,7 +2018,6 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             // an owner that no command executed.
             ControlKind::Unsettled
         },
-        phase,
         &receipt,
     );
 
@@ -2877,13 +2854,7 @@ fn refuse(
     let exit_code = error.refusal_exit_code();
     match receipt {
         Ok(receipt) => {
-            send_control(
-                control.as_deref_mut(),
-                record,
-                ControlKind::Refused,
-                Phase::Refused,
-                &receipt,
-            );
+            send_control(control.as_deref_mut(), ControlKind::Refused, &receipt);
             RunReport {
                 exit_code,
                 receipt: Some(receipt),
@@ -3003,7 +2974,6 @@ fn unrecorded(
 struct InFlight {
     pending: state::Pending<Result<(), JailError>>,
     receipt: Receipt,
-    phase: Phase,
     ack: Option<ControlKind>,
 }
 
@@ -3048,7 +3018,6 @@ fn submit_receipt(
     Ok(InFlight {
         pending,
         receipt,
-        phase,
         ack: None,
     })
 }
@@ -3063,7 +3032,6 @@ fn settle_in_flight(
     in_flight: &mut std::collections::VecDeque<InFlight>,
     wait: bool,
     mut control: Option<&mut ControlSink>,
-    record: &AttemptRecord,
     journal: &mut Journal,
 ) -> Option<JailError> {
     while let Some(front) = in_flight.front() {
@@ -3078,7 +3046,7 @@ fn settle_in_flight(
         };
         let done = in_flight.pop_front().expect("the front was just seen");
         match outcome {
-            Ok(()) => acknowledge(&done, control.as_deref_mut(), record, journal),
+            Ok(()) => acknowledge(&done, control.as_deref_mut(), journal),
             Err(error) => {
                 // Nothing after a failed transition is acknowledged either;
                 // dropping them makes the worker skip what has not started.
@@ -3099,15 +3067,10 @@ fn stalled_error(stalled: state::Stalled) -> JailError {
     )
 }
 
-fn acknowledge(
-    done: &InFlight,
-    control: Option<&mut ControlSink>,
-    record: &AttemptRecord,
-    journal: &mut Journal,
-) {
-    journal.receipt(done.phase, &done.receipt, false);
+fn acknowledge(done: &InFlight, control: Option<&mut ControlSink>, journal: &mut Journal) {
+    journal.receipt(&done.receipt, false);
     if let Some(kind) = done.ack {
-        send_control(control, record, kind, done.phase, &done.receipt);
+        send_control(control, kind, &done.receipt);
     }
 }
 
@@ -3560,7 +3523,8 @@ impl Journal {
     /// `jail.json` alone. A receipt that cannot be canonicalized (a float,
     /// which no receipt field is) gets no note with an invented digest: the
     /// missing note is recorded as trace loss.
-    fn receipt(&mut self, phase: Phase, receipt: &Receipt, terminal: bool) {
+    fn receipt(&mut self, receipt: &Receipt, terminal: bool) {
+        let phase = receipt.phase;
         self.durable(receipt);
         let digest = match receipt_digest(receipt) {
             Ok(digest) => digest,
@@ -3733,7 +3697,7 @@ fn persist_noted(
         args.receipt.as_deref(),
         &*io,
     )?;
-    journal.receipt(phase, &receipt, final_note);
+    journal.receipt(&receipt, final_note);
     Ok(receipt)
 }
 
@@ -4145,13 +4109,7 @@ fn open_trace(
 /// The message number comes from the sink, so it counts every message of the
 /// attempt in order: it used to restart at 1 for a refusal, which made
 /// `prepared` and `refused` indistinguishable from two separate attempts.
-fn send_control(
-    control: Option<&mut ControlSink>,
-    record: &AttemptRecord,
-    kind: ControlKind,
-    phase: Phase,
-    receipt: &Receipt,
-) {
+fn send_control(control: Option<&mut ControlSink>, kind: ControlKind, receipt: &Receipt) {
     let Some(control) = control else { return };
     // J4 W3, P6: the receipt's one name, the canonical digest its trace note
     // uses (§13.1). It used to be over the compact serialization, which only
@@ -4167,13 +4125,12 @@ fn send_control(
     };
     // J4-R: the message states what the acknowledged receipt says, which
     // for a receipt persisted by the worker is not what the record says now.
-    let _ = record;
     let message = ControlMessage {
         schema: crate::records::SCHEMA_CONTROL.to_owned(),
         attempt_id: receipt.attempt_id.clone(),
         seq: control.next_seq(),
         kind,
-        receipt_phase: phase,
+        receipt_phase: receipt.phase,
         receipt_digest: digest,
         outcome: receipt.outcome.clone(),
         error: receipt.outcome.error.clone(),
