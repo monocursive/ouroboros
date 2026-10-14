@@ -500,6 +500,35 @@ pub enum GapReason {
 }
 
 impl GapReason {
+    /// Every reason, in declaration order: `reason as usize` is its index.
+    pub const ALL: [GapReason; 25] = [
+        GapReason::QueueFull,
+        GapReason::MediationResponseUndelivered,
+        GapReason::UnmatchedExit,
+        GapReason::EntryAbandoned,
+        GapReason::InflightExhausted,
+        GapReason::PathUnreadable,
+        GapReason::SockaddrUnreadable,
+        GapReason::FlagsUnavailable,
+        GapReason::SyscallInfoUnavailable,
+        GapReason::IdentityUnavailable,
+        GapReason::FinalStatusUnknown,
+        GapReason::UnexpectedTraceStop,
+        GapReason::TraceesAbandoned,
+        GapReason::UnreapedChildren,
+        GapReason::RestartFailed,
+        GapReason::LifecycleDropped,
+        GapReason::DeathUnattributed,
+        GapReason::ForeignAbi,
+        GapReason::ChildNotificationListener,
+        GapReason::UntracedDescendant,
+        GapReason::RestartUnresolved,
+        GapReason::ArgumentSnapshotUnstable,
+        GapReason::MemoryFlagsUnverified,
+        GapReason::ExecImageMismatch,
+        GapReason::PathClaimUnverified,
+    ];
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -736,58 +765,21 @@ pub enum TracerEvent {
 
 /// One counter per closed-set operation, counting emitted results.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct OpCounts {
-    pub exec: u64,
-    pub open: u64,
-    pub truncate: u64,
-    pub rename: u64,
-    pub unlink: u64,
-    pub rmdir: u64,
-    pub mkdir: u64,
-    pub mknod: u64,
-    pub link: u64,
-    pub symlink: u64,
-    pub connect: u64,
-}
+pub struct OpCounts([u64; ClosedOp::ALL.len()]);
 
 impl OpCounts {
     #[must_use]
     pub fn get(&self, op: ClosedOp) -> u64 {
-        match op {
-            ClosedOp::Exec => self.exec,
-            ClosedOp::Open => self.open,
-            ClosedOp::Truncate => self.truncate,
-            ClosedOp::Rename => self.rename,
-            ClosedOp::Unlink => self.unlink,
-            ClosedOp::Rmdir => self.rmdir,
-            ClosedOp::Mkdir => self.mkdir,
-            ClosedOp::Mknod => self.mknod,
-            ClosedOp::Link => self.link,
-            ClosedOp::Symlink => self.symlink,
-            ClosedOp::Connect => self.connect,
-        }
+        self.0[op.index()]
     }
 
     #[must_use]
     pub fn total(&self) -> u64 {
-        ClosedOp::ALL.iter().map(|op| self.get(*op)).sum()
+        self.0.iter().sum()
     }
 
     fn bump(&mut self, op: ClosedOp) {
-        let slot = match op {
-            ClosedOp::Exec => &mut self.exec,
-            ClosedOp::Open => &mut self.open,
-            ClosedOp::Truncate => &mut self.truncate,
-            ClosedOp::Rename => &mut self.rename,
-            ClosedOp::Unlink => &mut self.unlink,
-            ClosedOp::Rmdir => &mut self.rmdir,
-            ClosedOp::Mkdir => &mut self.mkdir,
-            ClosedOp::Mknod => &mut self.mknod,
-            ClosedOp::Link => &mut self.link,
-            ClosedOp::Symlink => &mut self.symlink,
-            ClosedOp::Connect => &mut self.connect,
-        };
-        *slot += 1;
+        self.0[op.index()] += 1;
     }
 }
 
@@ -852,28 +844,59 @@ impl LossCounters {
     /// one: the result is there and says its path is incomplete.
     #[must_use]
     pub fn total(&self) -> u64 {
-        self.queue_dropped
-            + self.unmatched_exits
-            + self.abandoned_entries
-            + self.inflight_rejected
-            + self.path_unreadable
-            + self.sockaddr_unreadable
-            + self.flags_unavailable
-            + self.syscall_info_unavailable
-            + self.identity_unavailable
-            + self.final_status_unknown
-            + self.unexpected_trace_stops
-            + self.abandoned_tracees
-            + self.unreaped_children
-            + self.restart_failed
-            + self.lifecycle_dropped
-            + self.death_unattributed
-            + self.foreign_abi
-            + self.notification_listeners
-            + self.untraced_descendants
-            + self.restart_unresolved
-            + self.argument_snapshot_unstable
-            + self.memory_flags_unverified
+        // Destructured without `..`: a new counter does not compile until it
+        // is placed on one side of this line or the other.
+        let LossCounters {
+            queue_dropped,
+            unmatched_exits,
+            abandoned_entries,
+            inflight_rejected,
+            path_unreadable,
+            path_truncated: _,
+            sockaddr_unreadable,
+            flags_unavailable,
+            syscall_info_unavailable,
+            identity_unavailable,
+            final_status_unknown,
+            unexpected_trace_stops,
+            abandoned_tracees,
+            unreaped_children,
+            restart_failed,
+            lifecycle_dropped,
+            death_unattributed,
+            foreign_abi,
+            notification_listeners,
+            untraced_descendants,
+            restart_unresolved,
+            argument_snapshot_unstable,
+            memory_flags_unverified,
+        } = *self;
+        [
+            queue_dropped,
+            unmatched_exits,
+            abandoned_entries,
+            inflight_rejected,
+            path_unreadable,
+            sockaddr_unreadable,
+            flags_unavailable,
+            syscall_info_unavailable,
+            identity_unavailable,
+            final_status_unknown,
+            unexpected_trace_stops,
+            abandoned_tracees,
+            unreaped_children,
+            restart_failed,
+            lifecycle_dropped,
+            death_unattributed,
+            foreign_abi,
+            notification_listeners,
+            untraced_descendants,
+            restart_unresolved,
+            argument_snapshot_unstable,
+            memory_flags_unverified,
+        ]
+        .iter()
+        .sum()
     }
 }
 
@@ -1496,32 +1519,109 @@ mod tests {
     }
 
     #[test]
-    fn gap_reasons_have_distinct_names() {
-        let reasons = [
-            GapReason::QueueFull,
-            GapReason::SockaddrUnreadable,
-            GapReason::UnreapedChildren,
-            GapReason::RestartFailed,
-            GapReason::LifecycleDropped,
-            GapReason::DeathUnattributed,
-            GapReason::UnmatchedExit,
-            GapReason::EntryAbandoned,
-            GapReason::InflightExhausted,
-            GapReason::PathUnreadable,
-            GapReason::FlagsUnavailable,
-            GapReason::SyscallInfoUnavailable,
-            GapReason::IdentityUnavailable,
-            GapReason::FinalStatusUnknown,
-            GapReason::UnexpectedTraceStop,
-            GapReason::TraceesAbandoned,
-            GapReason::MediationResponseUndelivered,
-            GapReason::ForeignAbi,
-            GapReason::ChildNotificationListener,
-            GapReason::UntracedDescendant,
-            GapReason::RestartUnresolved,
-            GapReason::ArgumentSnapshotUnstable,
-        ];
-        let names: std::collections::BTreeSet<&str> = reasons.iter().map(|r| r.as_str()).collect();
-        assert_eq!(names.len(), reasons.len());
+    fn gap_reasons_are_all_listed_with_distinct_names() {
+        for (index, reason) in GapReason::ALL.into_iter().enumerate() {
+            assert_eq!(reason as usize, index, "{reason:?} is out of order");
+        }
+        // Exhaustive: a new reason does not compile here until it says
+        // whether it is the last one declared, and the last one declared
+        // closes `ALL` — so with the order check above, `ALL` has them all.
+        let last_declared = |reason: GapReason| match reason {
+            GapReason::PathClaimUnverified => true,
+            GapReason::QueueFull
+            | GapReason::MediationResponseUndelivered
+            | GapReason::UnmatchedExit
+            | GapReason::EntryAbandoned
+            | GapReason::InflightExhausted
+            | GapReason::PathUnreadable
+            | GapReason::SockaddrUnreadable
+            | GapReason::FlagsUnavailable
+            | GapReason::SyscallInfoUnavailable
+            | GapReason::IdentityUnavailable
+            | GapReason::FinalStatusUnknown
+            | GapReason::UnexpectedTraceStop
+            | GapReason::TraceesAbandoned
+            | GapReason::UnreapedChildren
+            | GapReason::RestartFailed
+            | GapReason::LifecycleDropped
+            | GapReason::DeathUnattributed
+            | GapReason::ForeignAbi
+            | GapReason::ChildNotificationListener
+            | GapReason::UntracedDescendant
+            | GapReason::RestartUnresolved
+            | GapReason::ArgumentSnapshotUnstable
+            | GapReason::MemoryFlagsUnverified
+            | GapReason::ExecImageMismatch => false,
+        };
+        assert!(last_declared(GapReason::ALL[GapReason::ALL.len() - 1]));
+        let names: std::collections::BTreeSet<&str> =
+            GapReason::ALL.iter().map(|r| r.as_str()).collect();
+        assert_eq!(names.len(), GapReason::ALL.len());
+    }
+
+    /// Every counter but `path_truncated` is a missing result, and each one
+    /// is counted once.
+    #[test]
+    fn every_loss_counter_but_a_truncated_path_is_in_the_total() {
+        let mut each = 0u64;
+        let mut loss = LossCounters::default();
+        let mut set = |field: &mut u64| {
+            *field = 1;
+            each += 1;
+        };
+        let LossCounters {
+            queue_dropped,
+            unmatched_exits,
+            abandoned_entries,
+            inflight_rejected,
+            path_unreadable,
+            path_truncated: _,
+            sockaddr_unreadable,
+            flags_unavailable,
+            syscall_info_unavailable,
+            identity_unavailable,
+            final_status_unknown,
+            unexpected_trace_stops,
+            abandoned_tracees,
+            unreaped_children,
+            restart_failed,
+            lifecycle_dropped,
+            death_unattributed,
+            foreign_abi,
+            notification_listeners,
+            untraced_descendants,
+            restart_unresolved,
+            argument_snapshot_unstable,
+            memory_flags_unverified,
+        } = &mut loss;
+        for field in [
+            queue_dropped,
+            unmatched_exits,
+            abandoned_entries,
+            inflight_rejected,
+            path_unreadable,
+            sockaddr_unreadable,
+            flags_unavailable,
+            syscall_info_unavailable,
+            identity_unavailable,
+            final_status_unknown,
+            unexpected_trace_stops,
+            abandoned_tracees,
+            unreaped_children,
+            restart_failed,
+            lifecycle_dropped,
+            death_unattributed,
+            foreign_abi,
+            notification_listeners,
+            untraced_descendants,
+            restart_unresolved,
+            argument_snapshot_unstable,
+            memory_flags_unverified,
+        ] {
+            set(field);
+        }
+        assert_eq!(loss.total(), each);
+        loss.path_truncated = 5;
+        assert_eq!(loss.total(), each, "a truncated path is not a lost result");
     }
 }

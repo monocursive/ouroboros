@@ -59,6 +59,13 @@ impl ClosedOp {
         1u16 << (self as u16)
     }
 
+    /// This operation's position in [`ClosedOp::ALL`], which is declaration
+    /// order.
+    #[must_use]
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
     /// The §11.2 audit operation a result of this family is reported as
     /// when it is not a denial. `flags` decides the open family: an
     /// `O_CREAT` open is `fs.create`, any other mutation open `fs.write`, and
@@ -279,6 +286,13 @@ pub fn open_is_covered(flags: u64) -> bool {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn every_operation_is_listed_at_its_own_index() {
+        for (index, op) in ClosedOp::ALL.into_iter().enumerate() {
+            assert_eq!(op.index(), index, "{op:?}");
+        }
+    }
 
     #[test]
     fn the_set_has_exactly_the_rows_of_the_spec_for_this_table() {

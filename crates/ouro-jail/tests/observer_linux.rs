@@ -1590,7 +1590,8 @@ fn o03_queue_loss_is_bounded_counted_and_coalesced() {
     };
 
     assert_eq!(
-        observed.summary.ops.open, STORM,
+        observed.summary.ops.get(ClosedOp::Open),
+        STORM,
         "every call was observed exactly once, whether or not it could be delivered"
     );
     assert!(
@@ -1688,7 +1689,7 @@ fn o04_write_read_and_mmap_produce_no_events_and_no_stops() {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    assert_eq!(observed.summary.ops.open, 1);
+    assert_eq!(observed.summary.ops.get(ClosedOp::Open), 1);
     assert_eq!(observed.summary.ops.total(), 1, "nothing else is claimed");
     assert!(
         observed.summary.stops < 100,
@@ -1844,14 +1845,14 @@ fn perf_the_j0_file_workload_costs_what_the_spike_cost() {
         "perf accounting: stops={} events={} open={} rename={} unlink={} loss={}",
         observed.summary.stops,
         observed.summary.emitted,
-        observed.summary.ops.open,
-        observed.summary.ops.rename,
-        observed.summary.ops.unlink,
+        observed.summary.ops.get(ClosedOp::Open),
+        observed.summary.ops.get(ClosedOp::Rename),
+        observed.summary.ops.get(ClosedOp::Unlink),
         observed.summary.loss.total(),
     );
-    assert_eq!(observed.summary.ops.open, 5000);
-    assert_eq!(observed.summary.ops.rename, 5000);
-    assert_eq!(observed.summary.ops.unlink, 5000);
+    assert_eq!(observed.summary.ops.get(ClosedOp::Open), 5000);
+    assert_eq!(observed.summary.ops.get(ClosedOp::Rename), 5000);
+    assert_eq!(observed.summary.ops.get(ClosedOp::Unlink), 5000);
     assert_eq!(
         observed.summary.loss.total(),
         0,
@@ -2011,7 +2012,8 @@ fn o06_a_path_is_bytes_and_a_short_snapshot_declares_itself_incomplete() {
         observed.summary.loss
     );
     assert_eq!(
-        observed.summary.ops.open, 1,
+        observed.summary.ops.get(ClosedOp::Open),
+        1,
         "the result itself is still reported"
     );
 }

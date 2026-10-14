@@ -1601,7 +1601,8 @@ fn r10_the_queue_bound_is_the_four_mib_of_the_spec() {
         observed.summary.loss.queue_dropped
     );
     assert_eq!(
-        observed.summary.ops.rename, N,
+        observed.summary.ops.get(ClosedOp::Rename),
+        N,
         "every call was still observed"
     );
     assert!(
@@ -1788,7 +1789,11 @@ fn r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount() {
          dropped={} emitted={}",
         observed.summary.loss.queue_dropped, observed.summary.emitted
     );
-    assert_eq!(observed.summary.ops.rename, N, "every call still observed");
+    assert_eq!(
+        observed.summary.ops.get(ClosedOp::Rename),
+        N,
+        "every call still observed"
+    );
     assert!(
         stalled < Duration::from_secs(10),
         "a consumer that never reads must cost one bounded stall, not one per event"
@@ -2258,7 +2263,8 @@ fn r26_a_tracee_cannot_manufacture_the_observers_loss() {
         observed.summary.loss
     );
     assert_eq!(
-        observed.summary.ops.open, N,
+        observed.summary.ops.get(ClosedOp::Open),
+        N,
         "every result is still reported"
     );
 }
@@ -2368,7 +2374,7 @@ fn r28_concurrent_threads_pair_their_own_entries_and_exits() {
         }
     }
     assert_eq!(
-        observed.summary.ops.open,
+        observed.summary.ops.get(ClosedOp::Open),
         2 * N,
         "both threads' calls are results"
     );

@@ -1536,7 +1536,14 @@ fn j4_o03_unmatched_exit_is_unreachable() {
     // Every path was taken.
     assert!(summary.filtered_readonly_opens >= 100, "{summary:?}");
     assert!(
-        summary.ops.mkdir >= 50 && summary.ops.rmdir >= 50,
+        summary
+            .ops
+            .get(ouro_jail::platform::linux::tracer::ClosedOp::Mkdir)
+            >= 50
+            && summary
+                .ops
+                .get(ouro_jail::platform::linux::tracer::ClosedOp::Rmdir)
+                >= 50,
         "{summary:?}"
     );
     assert!(summary.restarts >= 1, "the SA_RESTART restart: {summary:?}");

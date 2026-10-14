@@ -1656,7 +1656,8 @@ fn j4_w3_a_leaders_entry_is_never_paired_with_a_non_leader_execs_exit() {
         }
         assert_eq!(observed.exit_status(), Some(0), "{label}: exit0 ran");
         assert_eq!(
-            observed.summary.ops.open, 0,
+            observed.summary.ops.get(ClosedOp::Open),
+            0,
             "{label}: {:?}",
             observed.summary
         );
