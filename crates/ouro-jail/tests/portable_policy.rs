@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ouro_jail::cli::PolicyArgs;
+use ouro_jail::cli::{PolicyArgs, Selection};
 use ouro_jail::config::EnvSettings;
 use ouro_jail::network::{HostRule, NetworkMode};
 use ouro_jail::policy::{
@@ -1343,8 +1343,11 @@ impl Files {
 
     fn args(&self, profile: &str) -> PolicyArgs {
         PolicyArgs {
-            profile: Some(profile.to_owned()),
-            workspace: Some(self.workspace.clone()),
+            selection: Selection {
+                profile: Some(profile.to_owned()),
+                workspace: Some(self.workspace.clone()),
+                ..Selection::default()
+            },
             ..PolicyArgs::default()
         }
     }
@@ -1447,9 +1450,10 @@ fn p02_widening_through_a_launch_profile_refuses_with_its_key_path() {
         "name = \"hosts\"\njail = \"agent\"\n[network]\nallow = [\"example.test:443\"]\n",
     );
     files.launch("plain", "name = \"plain\"\njail = \"tool\"\n");
-    let with = |profile: &str, launch: &str| PolicyArgs {
-        launch: Some(launch.to_owned()),
-        ..files.args(profile)
+    let with = |profile: &str, launch: &str| {
+        let mut args = files.args(profile);
+        args.selection.launch = Some(launch.to_owned());
+        args
     };
     refuses(
         files.plan(&with("tool", "creds")),
@@ -1620,10 +1624,8 @@ fn p01_a_semantic_change_in_a_canonical_toml_input_changes_only_the_policy_diges
             &format!("name = \"fx\"\njail = \"tool\"\n[environment]\nFIXTURE_VALUE = {value:?}\n"),
         );
     };
-    let args = PolicyArgs {
-        launch: Some("fx".to_owned()),
-        ..files.args(profile.to_str().expect("UTF-8"))
-    };
+    let mut args = files.args(profile.to_str().expect("UTF-8"));
+    args.selection.launch = Some("fx".to_owned());
     let argv: Vec<Vec<u8>> = vec![b"/usr/bin/true".to_vec()];
     let argv_digest = ouro_jail::canonical::argv_digest(&argv);
 
@@ -1677,11 +1679,12 @@ fn i02_launch_reads_only_the_operators_configuration() {
         files.write(&decoy.join("opencode.toml"), &bundled);
     }
     let args = PolicyArgs {
-        launch: Some("opencode".to_owned()),
-        ..PolicyArgs {
+        selection: Selection {
+            launch: Some("opencode".to_owned()),
             workspace: Some(files.workspace.clone()),
-            ..PolicyArgs::default()
-        }
+            ..Selection::default()
+        },
+        ..PolicyArgs::default()
     };
     let plan = files
         .plan(&args)

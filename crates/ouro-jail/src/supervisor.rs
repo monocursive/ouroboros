@@ -240,7 +240,7 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
     // independently: a run sharing either sees them.
     let epoch = state::uncontained_epoch(&[&data_dir, &config_dir])?;
     let launch = read_launch_profile(ctx, args, &config_dir, &epoch)?;
-    let workspace = canonical_root(&ctx.cwd, args.workspace.as_deref(), "--workspace")?;
+    let workspace = canonical_root(&ctx.cwd, args.selection.workspace.as_deref(), "--workspace")?;
     if !workspace.is_dir() {
         return Err(usage(
             "--workspace",
@@ -331,7 +331,7 @@ fn read_launch_profile(
     config_dir: &Path,
     epoch: &state::UncontainedEpoch,
 ) -> Result<Option<launch_profile::LaunchProfile>, JailError> {
-    let Some(name) = &args.launch else {
+    let Some(name) = &args.selection.launch else {
         return Ok(None);
     };
     refuse_stale_trusted_file(
@@ -373,7 +373,10 @@ fn select_profile(
     launch: Option<&launch_profile::LaunchProfile>,
 ) -> Result<String, JailError> {
     Ok(
-        match (args.profile.as_deref(), operator_jail.profile.as_deref()) {
+        match (
+            args.selection.profile.as_deref(),
+            operator_jail.profile.as_deref(),
+        ) {
             (Some(cli), _) => cli.to_owned(),
             // §6.1: `--profile none` is the only way to select `none`; files
             // and environment cannot select it. `config.toml` is a defaults
@@ -432,7 +435,7 @@ fn select_base(
             layer: None,
         });
     }
-    let path = if args.profile.is_some() {
+    let path = if args.selection.profile.is_some() {
         absolutize(&ctx.cwd, Path::new(&selection))
     } else if let Some(suffix) = selection.strip_prefix("~/") {
         let home = ctx
@@ -500,7 +503,7 @@ fn check_launch_base(
     profile: ProfileName,
     launch: &launch_profile::LaunchProfile,
 ) -> Result<(), JailError> {
-    if args.profile.is_none()
+    if args.selection.profile.is_none()
         && let Some(configured) = operator_jail.profile.as_deref()
         && launch.jail != profile
     {
@@ -632,7 +635,7 @@ fn project_layer(workspace: &Path) -> Result<Option<Layer>, JailError> {
 /// [`ErrorCode::InvalidConfig`] at `--scratch` for a path that cannot be
 /// resolved or recorded.
 fn scratch_root(ctx: &Context, args: &PolicyArgs) -> Result<ScratchRoot, JailError> {
-    let Some(path) = &args.scratch else {
+    let Some(path) = &args.selection.scratch else {
         return Ok(ScratchRoot::Managed);
     };
     let path = canonical_root(&ctx.cwd, Some(path), "--scratch")?;
@@ -1040,7 +1043,7 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
     // §14.1 launch readiness; a missing or unsafe source
     // makes the plan unavailable (north star §4.5: it refuses the launch).
     // Only `--launch` has credential sources to place.
-    let launch = match &args.launch {
+    let launch = match &args.selection.launch {
         Some(name) => {
             let forbidden = forbidden_identities(&plan.resolved, &plan.workspace)?;
             Some(LaunchReadiness {
@@ -4296,7 +4299,10 @@ mod tests {
             env_lookup: Box::new(|_| None),
         };
         let args = PolicyArgs {
-            workspace: Some(workspace),
+            selection: crate::cli::Selection {
+                workspace: Some(workspace),
+                ..crate::cli::Selection::default()
+            },
             ..PolicyArgs::default()
         };
         let plan = resolve_learning_plan(&ctx, &args).unwrap();

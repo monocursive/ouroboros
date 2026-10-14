@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use clap::Parser as _;
 use ouro_jail::capability::Capability;
-use ouro_jail::cli::{self, PolicyArgs};
+use ouro_jail::cli::{self, PolicyArgs, Selection};
 use ouro_jail::config::EnvSettings;
 use ouro_jail::credentials::LaunchHandoff;
 use ouro_jail::platform::{
@@ -156,8 +156,11 @@ impl Fixture {
 
 fn launch_args(name: &str, workspace: &Path) -> PolicyArgs {
     PolicyArgs {
-        launch: Some(name.to_owned()),
-        workspace: Some(workspace.to_path_buf()),
+        selection: Selection {
+            launch: Some(name.to_owned()),
+            workspace: Some(workspace.to_path_buf()),
+            ..Selection::default()
+        },
         ..PolicyArgs::default()
     }
 }
@@ -795,7 +798,7 @@ fn s6_1_tool_and_build_reject_credentials_and_none_rejects_any_launch() {
     let config = fixture.credential("config.toml", b"b");
     agent_profile(&fixture, &auth, &config);
     let mut args = launch_args("fixture", &fixture.workspace);
-    args.profile = Some("tool".into());
+    args.selection.profile = Some("tool".into());
     let error = refused(fixture.plan(args), "tool rejects credentials");
     assert_eq!(error.key_path.as_deref(), Some("launch.credentials"));
 
@@ -818,7 +821,7 @@ fn s6_1_tool_and_build_reject_credentials_and_none_rejects_any_launch() {
         "name = \"plain\"\njail = \"tool\"\nstate_var = \"PLAIN_HOME\"\n",
     );
     let mut args = launch_args("plain", &fixture.workspace);
-    args.profile = Some("none".into());
+    args.selection.profile = Some("none".into());
     let error = refused(fixture.plan(args), "none never runs a launch profile");
     assert_eq!(error.code, ErrorCode::PolicyWidening);
     let plan = fixture
@@ -834,7 +837,7 @@ fn s6_1_tool_and_build_reject_credentials_and_none_rejects_any_launch() {
     );
 
     let mut args = launch_args("plain", &fixture.workspace);
-    args.profile = Some("agent".into());
+    args.selection.profile = Some("agent".into());
     assert_eq!(
         fixture.plan(args).unwrap().resolved.snapshot.profile,
         ProfileName::Agent,
@@ -915,7 +918,7 @@ fn a_launch_file_must_be_private_single_linked_regular_and_outside_writable_gran
     // The configuration directory inside the workspace: the child could
     // rewrite its own launch authority.
     let mut args = launch_args("fixture", &fixture.root);
-    args.workspace = Some(fixture.root.clone());
+    args.selection.workspace = Some(fixture.root.clone());
     let error = refused(fixture.plan(args), "inside the workspace refuses");
     assert_eq!(error.key_path.as_deref(), Some("--launch"));
 
@@ -1857,10 +1860,10 @@ fn doctor_readiness_needs_every_credential_and_reports_support_apart_from_it() {
     agent_profile(&fixture, &auth, &config);
     let ctx = fixture.context(Box::new(Sim::default()), Some(fixture.root.join("home")));
     let args = cli::DoctorArgs {
-        profile: None,
-        launch: Some("fixture".into()),
-        workspace: None,
-        scratch: None,
+        selection: Selection {
+            launch: Some("fixture".into()),
+            ..Selection::default()
+        },
         json: true,
     };
     let report = supervisor::doctor(&ctx, &args).unwrap();
@@ -2128,7 +2131,10 @@ fn m3_a_configured_profile_is_kept_or_the_conflict_refuses_never_replaced() {
         |plan: &supervisor::Plan| serde_json::to_value(&plan.resolved.snapshot.limits).unwrap();
     let without = fixture
         .plan(PolicyArgs {
-            workspace: Some(fixture.workspace.clone()),
+            selection: Selection {
+                workspace: Some(fixture.workspace.clone()),
+                ..Selection::default()
+            },
             ..PolicyArgs::default()
         })
         .unwrap_or_else(|error| panic!("{error:?}"));
@@ -2163,7 +2169,7 @@ fn m3_a_configured_profile_is_kept_or_the_conflict_refuses_never_replaced() {
 
     // `--profile` decides; with no configured profile the launch default does.
     let mut args = launch_args("agented", &fixture.workspace);
-    args.profile = Some("agent".into());
+    args.selection.profile = Some("agent".into());
     assert_eq!(
         fixture.plan(args).unwrap().resolved.snapshot.profile,
         ProfileName::Agent

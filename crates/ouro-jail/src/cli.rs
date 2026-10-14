@@ -49,10 +49,10 @@ pub enum Command {
     Version(VersionArgs),
 }
 
-/// Policy selection and override flags, shared by `run` and `explain`
-/// (§6.1). `doctor` has the narrower grammar of [`DoctorArgs`].
-#[derive(Debug, Default, Args)]
-pub struct PolicyArgs {
+/// The policy a command selects and the roots it applies to (§6.1): every
+/// verb that resolves a plan takes these, `doctor` included.
+#[derive(Clone, Debug, Default, Args)]
+pub struct Selection {
     /// Built-in profile name or a policy file path.
     #[arg(long, value_name = "agent|tool|build|none|FILE")]
     pub profile: Option<String>,
@@ -65,6 +65,15 @@ pub struct PolicyArgs {
     /// An explicit scratch directory; defaults to a private attempt directory.
     #[arg(long, value_name = "PATH")]
     pub scratch: Option<PathBuf>,
+}
+
+/// Policy selection and override flags, shared by `run` and `explain`
+/// (§6.1). `doctor` takes the [`Selection`] alone.
+#[derive(Debug, Default, Args)]
+pub struct PolicyArgs {
+    /// The selected policy and roots.
+    #[command(flatten)]
+    pub selection: Selection,
     /// Grant a writable path.
     #[arg(long = "rw", value_name = "PATH")]
     pub rw: Vec<PathBuf>,
@@ -181,19 +190,9 @@ pub struct ExplainArgs {
 /// current directory as the workspace).
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
-    /// Built-in profile name or a policy file path.
-    #[arg(long, value_name = "agent|tool|build|none|FILE")]
-    pub profile: Option<String>,
-    /// Launch profile name.
-    #[arg(long, value_name = "NAME")]
-    pub launch: Option<String>,
-    /// Workspace root, like `run --workspace`; defaults to the current
-    /// directory.
-    #[arg(long, value_name = "PATH")]
-    pub workspace: Option<std::path::PathBuf>,
-    /// Scratch root, like `run --scratch`; defaults to the managed scratch.
-    #[arg(long, value_name = "PATH")]
-    pub scratch: Option<std::path::PathBuf>,
+    /// The selected policy and roots, as `run` takes them.
+    #[command(flatten)]
+    pub selection: Selection,
     /// Print JSON on stdout instead of text.
     #[arg(long)]
     pub json: bool,
@@ -201,15 +200,11 @@ pub struct DoctorArgs {
 
 impl DoctorArgs {
     /// The plan this doctor call checks: the policy `run` would resolve from
-    /// the same selection flags and roots, with no override (§6.1's doctor
-    /// grammar has none).
+    /// the same selection, with no override (§6.1's doctor grammar has none).
     #[must_use]
     pub fn policy(&self) -> PolicyArgs {
         PolicyArgs {
-            profile: self.profile.clone(),
-            launch: self.launch.clone(),
-            workspace: self.workspace.clone(),
-            scratch: self.scratch.clone(),
+            selection: self.selection.clone(),
             ..PolicyArgs::default()
         }
     }
@@ -385,7 +380,7 @@ mod tests {
             ],
             "flags after `--` belong to the child, not to the jail"
         );
-        assert_eq!(args.policy.profile, None);
+        assert_eq!(args.policy.selection.profile, None);
     }
 
     /// `--observe` and `--evidence` parse to the policy's own modes, with
