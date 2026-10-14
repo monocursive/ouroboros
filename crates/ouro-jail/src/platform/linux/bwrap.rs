@@ -8,7 +8,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -16,7 +16,8 @@ use std::process::{Command, Stdio};
 use super::clock::Deadline;
 use super::exec::run_captured;
 use super::fs::{RootSpec, exists_resolved, resolve_runtime_root};
-use super::sys::{PathError, cstring_from_os, empty_stat, errno_name, last_errno};
+use super::sys::{PathError, cstring_from_os, errno_name, last_errno};
+use crate::state::anchored::{Dir, Kind, Name, fstat};
 
 /// Where the jail's own binary is bound inside the sandbox.
 pub const JAIL_INSIDE_PATH: &str = "/run/ouro/jail";
@@ -242,9 +243,28 @@ pub enum PlaceholderOutcome {
     KeptError(PathBuf, i32),
 }
 
+/// The parent of `path`, opened without following a symlink at its final
+/// component, and `path`'s last component.
+fn anchor(path: &Path) -> io::Result<(Dir, Name)> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    };
+    let name =
+        Name::new(name.as_bytes()).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    Ok((Dir::open_trusted(parent)?, name))
+}
+
+fn errno_of(error: &io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(libc::EIO)
+}
+
 impl Placeholder {
     /// Create the empty source directory and the destination mount point, and
     /// register the destination's identity.
+    ///
+    /// The destination is created, opened and later removed relative to one
+    /// handle on its parent, never by its full path, so a symlinked parent
+    /// cannot redirect any of the three.
     ///
     /// # Errors
     ///
@@ -253,7 +273,11 @@ impl Placeholder {
     /// segment — or an I/O errno.
     pub fn create(source: &Path, destination: &Path) -> Result<Self, PlaceholderError> {
         let source_c = cstring_from_os(source.as_os_str()).map_err(PlaceholderError::Path)?;
-        let dest_c = cstring_from_os(destination.as_os_str()).map_err(PlaceholderError::Path)?;
+        cstring_from_os(destination.as_os_str()).map_err(PlaceholderError::Path)?;
+        let at_destination = |error: io::Error| PlaceholderError::Io {
+            path: destination.to_owned(),
+            errno: errno_of(&error),
+        };
 
         // SAFETY: `source_c` is a NUL-terminated path that outlives the call.
         if unsafe { libc::mkdir(source_c.as_ptr(), 0o700) } != 0 {
@@ -265,46 +289,25 @@ impl Placeholder {
                 });
             }
         }
-        // SAFETY: `dest_c` is a NUL-terminated path that outlives the call.
-        if unsafe { libc::mkdir(dest_c.as_ptr(), 0o700) } != 0 {
-            let errno = last_errno();
-            return Err(if errno == libc::EEXIST {
+        let (parent, name) = anchor(destination).map_err(at_destination)?;
+        let created = parent.mkdir_at(&name, 0o700).map_err(|error| {
+            if error.raw_os_error() == Some(libc::EEXIST) {
                 PlaceholderError::DestinationExists(destination.to_owned())
             } else {
-                PlaceholderError::Io {
-                    path: destination.to_owned(),
-                    errno,
-                }
-            });
-        }
+                at_destination(error)
+            }
+        })?;
 
         // The handle is taken immediately, so the identity registered below is
-        // one that cannot be handed to another object while this lives.
-        // SAFETY: `dest_c` is NUL-terminated and outlives the call. `O_PATH`
-        // acquires no I/O authority and `O_NOFOLLOW` refuses a symlink at the
-        // final component.
-        let handle = unsafe {
-            libc::open(
-                dest_c.as_ptr(),
-                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if handle < 0 {
+        // one that cannot be handed to another object while this lives. It is
+        // checked against the directory `mkdir_at` opened, so it is the
+        // directory just created.
+        let handle = parent.open_path_at(&name).map_err(at_destination)?;
+        let stat = fstat(handle.as_fd()).map_err(at_destination)?;
+        if stat.identity() != created.stat().map_err(at_destination)?.identity() {
             return Err(PlaceholderError::Io {
                 path: destination.to_owned(),
-                errno: last_errno(),
-            });
-        }
-        // SAFETY: `handle` was just opened and is owned here.
-        let handle = unsafe { OwnedFd::from_raw_fd(handle) };
-
-        let mut stat = empty_stat();
-        // SAFETY: `handle` is live and `stat` is a writable buffer; fstat on
-        // an `O_PATH` descriptor is permitted.
-        if unsafe { libc::fstat(handle.as_raw_fd(), &raw mut stat) } != 0 {
-            return Err(PlaceholderError::Io {
-                path: destination.to_owned(),
-                errno: last_errno(),
+                errno: libc::ESTALE,
             });
         }
         Ok(Self {
@@ -312,10 +315,10 @@ impl Placeholder {
                 source: source.to_owned(),
                 destination: destination.to_owned(),
             },
-            dev: stat.st_dev,
-            ino: stat.st_ino,
-            uid: stat.st_uid,
-            mode: stat.st_mode & 0o7777,
+            dev: stat.dev,
+            ino: stat.ino,
+            uid: stat.uid,
+            mode: stat.mode,
             birth: birth_time(&handle),
             handle,
         })
@@ -372,97 +375,78 @@ impl Placeholder {
     #[must_use]
     pub fn remove_if_unchanged(&self) -> PlaceholderOutcome {
         let path = self.mount.destination.clone();
-        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-            return PlaceholderOutcome::KeptError(path, libc::EINVAL);
-        };
-        let Ok(parent_fd) = open_directory(parent) else {
-            return PlaceholderOutcome::KeptError(path, last_errno());
-        };
-        let Ok(name_c) = cstring_from_os(name) else {
-            return PlaceholderOutcome::KeptError(path, libc::EINVAL);
+        let (parent, name) = match anchor(&path) {
+            Ok(anchored) => anchored,
+            Err(error) => return PlaceholderOutcome::KeptError(path, errno_of(&error)),
         };
 
         // What this code is holding.
-        let mut held = empty_stat();
-        // SAFETY: the handle is live and `held` is a writable buffer.
-        if unsafe { libc::fstat(self.handle.as_raw_fd(), &raw mut held) } != 0 {
-            return PlaceholderOutcome::KeptError(path, last_errno());
-        }
+        let held = match fstat(self.handle.as_fd()) {
+            Ok(held) => held,
+            Err(error) => return PlaceholderOutcome::KeptError(path, errno_of(&error)),
+        };
 
         // What the name refers to now.
-        let mut now = empty_stat();
-        // SAFETY: `parent_fd` is a live directory descriptor, `name_c` is
-        // NUL-terminated, and `AT_SYMLINK_NOFOLLOW` stats the entry itself.
-        if unsafe {
-            libc::fstatat(
-                parent_fd.as_raw_fd(),
-                name_c.as_ptr(),
-                &raw mut now,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        } != 0
-        {
-            let errno = last_errno();
-            return match errno {
-                libc::ENOENT => PlaceholderOutcome::AlreadyGone(path),
-                other => PlaceholderOutcome::KeptError(path, other),
-            };
-        }
-        if now.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        let now = match parent.stat_at(&name) {
+            Ok(now) => now,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+                return PlaceholderOutcome::AlreadyGone(path);
+            }
+            Err(error) => return PlaceholderOutcome::KeptError(path, errno_of(&error)),
+        };
+        if now.kind != Kind::Directory {
             return PlaceholderOutcome::KeptChanged(path, "no longer a directory".to_owned());
         }
-        if (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino) {
+        if now.identity() != held.identity() {
             return PlaceholderOutcome::KeptChanged(
                 path,
                 format!(
                     "identity changed from {}:{} to {}:{}",
-                    held.st_dev, held.st_ino, now.st_dev, now.st_ino
+                    held.dev, held.ino, now.dev, now.ino
                 ),
             );
         }
-        if now.st_uid != self.uid {
+        if now.uid != self.uid {
             return PlaceholderOutcome::KeptChanged(path, "owner changed".to_owned());
         }
-        if now.st_mode & 0o7777 != self.mode {
+        if now.mode != self.mode {
             return PlaceholderOutcome::KeptChanged(path, "permissions changed".to_owned());
         }
 
         // Emptiness, through a fresh descriptor for the same entry — and that
         // descriptor is checked against the handle too, so the window between
         // the stat above and this open cannot be used to swap the object.
-        let entry = match open_entry(&parent_fd, &name_c) {
+        let entry = match parent.open_dir_at(&name, None) {
             Ok(entry) => entry,
-            Err(libc::ENOENT) => return PlaceholderOutcome::AlreadyGone(path),
-            Err(errno @ (libc::ENOTDIR | libc::ELOOP)) => {
-                let _ = errno;
-                return PlaceholderOutcome::KeptChanged(path, "no longer a directory".to_owned());
+            Err(error) => {
+                return match error.raw_os_error() {
+                    Some(libc::ENOENT) => PlaceholderOutcome::AlreadyGone(path),
+                    Some(libc::ENOTDIR | libc::ELOOP) => {
+                        PlaceholderOutcome::KeptChanged(path, "no longer a directory".to_owned())
+                    }
+                    _ => PlaceholderOutcome::KeptError(path, errno_of(&error)),
+                };
             }
-            Err(errno) => return PlaceholderOutcome::KeptError(path, errno),
         };
-        let mut opened = empty_stat();
-        // SAFETY: `entry` is live and `opened` is a writable buffer.
-        if unsafe { libc::fstat(entry.as_raw_fd(), &raw mut opened) } != 0 {
-            return PlaceholderOutcome::KeptError(path, last_errno());
+        match entry.stat() {
+            Ok(opened) if opened.identity() == held.identity() => {}
+            Ok(_) => {
+                return PlaceholderOutcome::KeptChanged(
+                    path,
+                    "the entry was replaced while it was being checked".to_owned(),
+                );
+            }
+            Err(error) => return PlaceholderOutcome::KeptError(path, errno_of(&error)),
         }
-        if (opened.st_dev, opened.st_ino) != (held.st_dev, held.st_ino) {
-            return PlaceholderOutcome::KeptChanged(
-                path,
-                "the entry was replaced while it was being checked".to_owned(),
-            );
-        }
-        match directory_is_empty(&entry) {
-            Ok(true) => {}
-            Ok(false) => return PlaceholderOutcome::KeptNotEmpty(path),
-            Err(errno) => return PlaceholderOutcome::KeptError(path, errno),
+        match entry.names(1) {
+            Ok(names) if names.is_empty() => {}
+            Ok(_) => return PlaceholderOutcome::KeptNotEmpty(path),
+            Err(error) => return PlaceholderOutcome::KeptError(path, errno_of(&error)),
         }
         drop(entry);
 
-        // SAFETY: `parent_fd` is live and `name_c` is NUL-terminated;
-        // AT_REMOVEDIR removes the directory entry the checks above described.
-        if unsafe { libc::unlinkat(parent_fd.as_raw_fd(), name_c.as_ptr(), libc::AT_REMOVEDIR) }
-            != 0
-        {
-            return PlaceholderOutcome::KeptError(path, last_errno());
+        if let Err(error) = parent.rmdir_at(&name) {
+            return PlaceholderOutcome::KeptError(path, errno_of(&error));
         }
         let _ = std::fs::remove_dir(&self.mount.source);
         PlaceholderOutcome::Removed(path)
@@ -516,24 +500,6 @@ impl Drop for PlaceholderSet {
     }
 }
 
-/// Open one entry of a directory as a directory, without following a symlink.
-fn open_entry(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<OwnedFd, i32> {
-    // SAFETY: `parent` is a live directory descriptor and `name` is a
-    // NUL-terminated name valid for the call.
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(last_errno());
-    }
-    // SAFETY: `fd` was just opened and is owned here.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
 /// The creation time of an open object, where the filesystem records one.
 ///
 /// `None` on a filesystem that keeps no birth time, which is why this is
@@ -560,72 +526,6 @@ fn birth_time(handle: &OwnedFd) -> Option<(i64, u32)> {
         return None;
     }
     Some((buffer.stx_btime.tv_sec, buffer.stx_btime.tv_nsec))
-}
-
-/// Open a directory without following a symlink at its final component.
-fn open_directory(path: &Path) -> Result<OwnedFd, i32> {
-    let c = cstring_from_os(path.as_os_str()).map_err(|_| libc::EINVAL)?;
-    // SAFETY: `c` is a NUL-terminated path that outlives the call.
-    let fd = unsafe {
-        libc::open(
-            c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(last_errno());
-    }
-    // SAFETY: `fd` was just opened and is owned here.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-/// Whether an open directory has any entry besides `.` and `..`.
-fn directory_is_empty(dir: &OwnedFd) -> Result<bool, i32> {
-    // `fdopendir` takes ownership of what it is given, so it gets a duplicate.
-    // SAFETY: `dir` is a live directory descriptor.
-    let duplicate = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-    if duplicate < 0 {
-        return Err(last_errno());
-    }
-    // SAFETY: `duplicate` is a fresh directory descriptor; closedir releases
-    // it exactly once.
-    let stream = unsafe { libc::fdopendir(duplicate) };
-    if stream.is_null() {
-        let errno = last_errno();
-        // SAFETY: fdopendir failed, so the descriptor is still ours to close.
-        unsafe { libc::close(duplicate) };
-        return Err(errno);
-    }
-    let mut empty = true;
-    let mut failure = None;
-    loop {
-        // SAFETY: errno is this thread's own.
-        unsafe { *libc::__errno_location() = 0 };
-        // SAFETY: `stream` is the DIR* just created; the returned pointer is
-        // valid until the next call on the same stream.
-        let entry = unsafe { libc::readdir(stream) };
-        if entry.is_null() {
-            let errno = last_errno();
-            if errno != 0 {
-                failure = Some(errno);
-            }
-            break;
-        }
-        // SAFETY: `entry` is non-null and `d_name` is a NUL-terminated array
-        // inside it.
-        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
-        let bytes = name.to_bytes();
-        if bytes != b"." && bytes != b".." {
-            empty = false;
-            break;
-        }
-    }
-    // SAFETY: `stream` was created above and is closed exactly once here.
-    unsafe { libc::closedir(stream) };
-    match failure {
-        Some(errno) => Err(errno),
-        None => Ok(empty),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1395,6 +1295,7 @@ pub fn parse_json_status(raw: &str) -> BwrapStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
     #[test]
     fn versions_parse() {
@@ -1408,7 +1309,6 @@ mod tests {
 
     /// A stand-in backend named `name`: a shell script that does `body`.
     fn fake_backend(dir: &Path, name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1423,8 +1323,11 @@ mod tests {
         // version is unknown rather than awaited.
         let hung = fake_backend(dir.path(), "hung", "exec sleep 60");
         let started = std::time::Instant::now();
-        let error = bwrap_version(&hung, Deadline::after(std::time::Duration::from_millis(200)))
-            .expect_err("a hung backend has no version");
+        let error = bwrap_version(
+            &hung,
+            Deadline::after(std::time::Duration::from_millis(200)),
+        )
+        .expect_err("a hung backend has no version");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         // The operator's environment does not reach it: `HOME` is set for
@@ -1458,6 +1361,35 @@ mod tests {
             }
         );
         assert_eq!(parse_json_status("{}"), BwrapStatus::default());
+    }
+
+    #[test]
+    fn a_placeholder_is_made_beneath_its_parent_never_through_a_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let real = root.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        match Placeholder::create(&root.join("holder"), &link.join(".git")) {
+            Err(PlaceholderError::Io { errno, .. }) => {
+                assert!(errno == libc::ELOOP || errno == libc::ENOTDIR, "{errno}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(
+            !real.join(".git").exists(),
+            "nothing is made through a symlinked parent"
+        );
+        // Through the real parent it is made, registered and removed.
+        let placeholder = Placeholder::create(&root.join("holder"), &real.join(".git")).unwrap();
+        let held = std::fs::metadata(real.join(".git")).unwrap();
+        assert_eq!(placeholder.identity(), (held.dev(), held.ino()));
+        assert_eq!(held.permissions().mode() & 0o7777, 0o700);
+        assert_eq!(
+            placeholder.remove_if_unchanged(),
+            PlaceholderOutcome::Removed(real.join(".git"))
+        );
     }
 
     #[test]
