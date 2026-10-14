@@ -15,7 +15,8 @@ Regenerate (from the repository root) with:
     uv run crates/ouro-jail/data/gen_uts46_tables.py /tmp/ucd17 \
         crates/ouro-jail/data/uts46_unicode17_tables.rs
 
-The output must be byte-identical to the checked-in file. Every input is
+The output must be byte-identical to the checked-in file; the `uts46`
+workflow regenerates it and diffs whenever this directory changes. Every input is
 pinned by URL and SHA-256 below; a mismatch aborts, so the output can only
 ever be the tables of exactly these files. The output is Rust source that
 `crates/ouro-jail/src/network/unicode.rs` includes. It carries no behaviour:
@@ -75,7 +76,7 @@ def load(ucd, name):
     url, pin = PINS[name]
     actual = hashlib.sha256(data).hexdigest()
     if actual != pin:
-        sys.exit(f"{name}: sha256 {actual} does not match the pin {pin}")
+        sys.exit(f"{name}: sha256 {actual} does not match the pin {pin} of {url}")
     return data.decode("utf-8")
 
 
