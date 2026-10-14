@@ -147,8 +147,10 @@ pub(super) struct RunState {
     /// `target_outcome` it stays set once the outcome is reported.
     pub(super) target_exit_seen: bool,
     pub(super) pending: VecDeque<RunEvent>,
-    stop_requested: Option<StopReason>,
-    stop_at: Option<u64>,
+    /// Boot-clock time of the first stop request. The reason is the
+    /// supervisor's to record (`outcome.cause`); the tree is stopped the
+    /// same way whatever it is.
+    stop_requested_at: Option<u64>,
     pub(super) hard_killed: bool,
     pub(super) hard_deadline: Option<clock::Deadline>,
     /// The observer's thread stopped.
@@ -178,8 +180,7 @@ impl RunState {
             target_outcome: None,
             target_exit_seen: false,
             pending: VecDeque::new(),
-            stop_requested: None,
-            stop_at: None,
+            stop_requested_at: None,
             hard_killed: false,
             hard_deadline: None,
             finished: false,
@@ -290,9 +291,8 @@ impl RunState {
     fn grace_spent(&self) -> bool {
         let grace = u64::try_from(STOP_GRACE.as_nanos()).unwrap_or(u64::MAX);
         !self.hard_killed
-            && self.stop_requested.is_some()
             && self
-                .stop_at
+                .stop_requested_at
                 .is_some_and(|at| clock::boottime_ns().saturating_sub(at) >= grace)
     }
 
@@ -645,12 +645,11 @@ impl<T: Tree> RunningExecution for Run<T> {
         RunEvent::Poll
     }
 
-    fn request_stop(&mut self, reason: StopReason) {
-        if self.state.stop_requested.is_some() {
+    fn request_stop(&mut self, _reason: StopReason) {
+        if self.state.stop_requested_at.is_some() {
             return;
         }
-        self.state.stop_requested = Some(reason);
-        self.state.stop_at = Some(boottime_ns());
+        self.state.stop_requested_at = Some(boottime_ns());
         self.tree.cooperative_stop(&mut self.state);
     }
 
