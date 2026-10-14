@@ -12,7 +12,7 @@
 //! seam of [`persist`], and every write names its site (R02).
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
@@ -205,10 +205,13 @@ pub fn uncontained_epoch(dirs: &[&Path]) -> Result<UncontainedEpoch, JailError> 
 /// directory before the target is released, and refuses the run when it
 /// cannot. Dropping the guard — after the run's tree is gone, so no live
 /// descendant can order its own writes after the marker — writes the
-/// settled marker, then removes the live one. A failure to settle leaves the
-/// live marker in place, which later runs read as "cannot date", so the
-/// failure fails closed; it is also reported on stderr, because a `Drop`
-/// cannot refuse the run.
+/// settled marker durably (its directory synced), and only then removes the
+/// live one and syncs the directory again, so no crash can leave the live
+/// marker gone without the settled one. A failure to settle leaves the live
+/// marker in place, which later runs read as "cannot date", so the failure
+/// fails closed; it is also reported on stderr, because a `Drop` cannot
+/// refuse the run. Every write goes through the persistence seam at
+/// [`Site::UncontainedMarker`].
 pub(crate) struct UncontainedRun {
     markers: Vec<(PathBuf, PathBuf)>,
 }
@@ -231,7 +234,10 @@ impl UncontainedRun {
                 .recursive(true)
                 .mode(DIRECTORY_MODE)
                 .create(dir)
-                .and_then(|()| write_marker(dir, &live, contents.as_bytes()))
+                .map_err(|error| error.to_string())
+                .and_then(|()| {
+                    write_marker(&live, contents.as_bytes()).map_err(|error| error.message)
+                })
                 .map_err(|error| {
                     // Nothing was released yet: the markers already written
                     // have nothing to settle.
@@ -265,17 +271,23 @@ impl Drop for UncontainedRun {
                 .map_or(0, |elapsed| elapsed.as_nanos())
         );
         for (dir, live) in &self.markers {
-            match settle(dir, contents.as_bytes()) {
-                Ok(()) => {
-                    let _ = std::fs::remove_file(live);
-                }
-                Err(error) => eprintln!(
+            if let Err(error) = settle(dir, contents.as_bytes()) {
+                eprintln!(
                     "ouro-jail: warning: the uncontained-run marker {} could not be written \
                      ({error}); {} stays in place, so later runs refuse every trusted \
                      configuration file until it is checked and the marker removed",
                     uncontained_settled_path(dir).display(),
                     live.display()
-                ),
+                );
+                continue;
+            }
+            if let Err(error) = remove_marker(dir, live) {
+                eprintln!(
+                    "ouro-jail: warning: the live uncontained-run marker {} could not be \
+                     removed durably ({error}); while it stays, later runs refuse every \
+                     trusted configuration file",
+                    live.display()
+                );
             }
         }
     }
@@ -285,50 +297,50 @@ impl Drop for UncontainedRun {
 /// could have put in its way: a non-file at the marker's path, or the
 /// operator's own directory made unwritable. The child is gone by now, so
 /// nothing re-creates the obstacle.
-fn settle(dir: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let metadata = std::fs::symlink_metadata(dir)?;
-    if metadata.is_dir() && metadata.uid() == effective_uid() && metadata.mode() & 0o700 != 0o700 {
-        std::fs::set_permissions(
-            dir,
-            std::fs::Permissions::from_mode((metadata.mode() & 0o7777) | 0o700),
-        )?;
-    }
-    let settled = uncontained_settled_path(dir);
-    match std::fs::symlink_metadata(&settled) {
-        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&settled)?,
-        Ok(metadata) if !metadata.is_file() => std::fs::remove_file(&settled)?,
-        _ => {}
-    }
-    write_marker(dir, &settled, contents)
+fn settle(dir: &Path, contents: &[u8]) -> Result<(), String> {
+    let cleared = || -> std::io::Result<()> {
+        let metadata = std::fs::symlink_metadata(dir)?;
+        if metadata.is_dir()
+            && metadata.uid() == effective_uid()
+            && metadata.mode() & 0o700 != 0o700
+        {
+            std::fs::set_permissions(
+                dir,
+                std::fs::Permissions::from_mode((metadata.mode() & 0o7777) | 0o700),
+            )?;
+        }
+        let settled = uncontained_settled_path(dir);
+        match std::fs::symlink_metadata(&settled) {
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&settled)?,
+            Ok(metadata) if !metadata.is_file() => std::fs::remove_file(&settled)?,
+            _ => {}
+        }
+        Ok(())
+    };
+    cleared().map_err(|error| error.to_string())?;
+    write_marker(&uncontained_settled_path(dir), contents).map_err(|error| error.message)
 }
 
-/// Replaces `target` in `dir` durably: a fresh, unpredictable temporary
-/// created exclusively (never through a planted name or link), `fsync`,
-/// rename over the target, then the directory `fsync`.
-fn write_marker(dir: &Path, target: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let temp = dir.join(format!(
-        ".uncontained.{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .mode(FILE_MODE)
-        .open(&temp)?;
-    let written = file
-        .write_all(contents)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&temp, target));
-    drop(file);
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temp);
+/// Replaces the marker `target` durably through the persistence seam: an
+/// exclusively created temporary beside it (never a planted name or link),
+/// written and synced, renamed over it, then its directory synced; a failed
+/// directory sync fails the write.
+fn write_marker(target: &Path, contents: &[u8]) -> Result<(), JailError> {
+    let io = current_io();
+    TempWrite::create_at(Site::UncontainedMarker, target, contents, &*io)?.commit()
+}
+
+/// Removes the live marker `live` from `dir` and syncs `dir`, through the
+/// persistence seam, so the removal is as durable as the settled marker
+/// written before it.
+fn remove_marker(dir: &Path, live: &Path) -> std::io::Result<()> {
+    let io = current_io();
+    match io.remove(Site::UncontainedMarker, live) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
-    written?;
-    if let Ok(directory) = File::open(dir) {
-        let _ = directory.sync_all();
-    }
-    Ok(())
+    io.sync_dir(Site::UncontainedMarker, dir)
 }
 
 /// An attempt identifier: `att_` plus a UUIDv4 with the RFC 9562 variant (§7).
@@ -2332,6 +2344,100 @@ mod tests {
         assert!(
             live.exists(),
             "the live marker must stay when settling failed"
+        );
+    }
+
+    /// A persistence seam that logs the marker steps that order the settle,
+    /// and can fail the markers' directory syncs.
+    #[derive(Default)]
+    struct MarkerIo {
+        steps: std::sync::Mutex<Vec<String>>,
+        fail_dir_sync: bool,
+    }
+
+    impl MarkerIo {
+        fn log(&self, step: &str, path: &Path) {
+            let name = path
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+            self.steps.lock().unwrap().push(format!("{step} {name}"));
+        }
+    }
+
+    impl PersistIo for MarkerIo {
+        fn rename(&self, site: Site, from: &Path, to: &Path) -> std::io::Result<()> {
+            assert_eq!(site, Site::UncontainedMarker);
+            self.log("rename", to);
+            RealIo.rename(site, from, to)
+        }
+        fn sync_dir(&self, site: Site, dir: &Path) -> std::io::Result<()> {
+            assert_eq!(site, Site::UncontainedMarker);
+            self.log("sync_dir", dir);
+            if self.fail_dir_sync {
+                return Err(std::io::Error::from_raw_os_error(libc::EIO));
+            }
+            RealIo.sync_dir(site, dir)
+        }
+        fn remove(&self, site: Site, path: &Path) -> std::io::Result<()> {
+            assert_eq!(site, Site::UncontainedMarker);
+            self.log("remove", path);
+            RealIo.remove(site, path)
+        }
+    }
+
+    /// The settle is durably ordered: the settled marker is renamed and its
+    /// directory synced before the live marker is removed, and the removal
+    /// is synced too. A crash can then leave both markers, which later runs
+    /// read as "cannot date", but never the live one gone without the
+    /// settled one.
+    #[test]
+    fn the_live_marker_goes_only_after_the_settled_one_is_durable() {
+        let dir = private_tempdir();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let guard = UncontainedRun::arm(&[data.as_path()], "att_ordered").unwrap();
+        let io = std::sync::Arc::new(MarkerIo::default());
+        let installed = install(io.clone());
+        drop(guard);
+        drop(installed);
+        assert_eq!(
+            *io.steps.lock().unwrap(),
+            [
+                "rename uncontained.epoch",
+                "sync_dir data",
+                "remove uncontained.att_ordered.live",
+                "sync_dir data",
+            ]
+        );
+        assert!(!uncontained_live_path(&data, "att_ordered").exists());
+    }
+
+    /// A settled marker whose directory sync fails is not durable, so the
+    /// settle fails and the live marker stays: later runs keep refusing to
+    /// date trusted files rather than trust a marker a crash could lose.
+    #[test]
+    fn a_settle_whose_directory_sync_fails_leaves_the_run_live() {
+        let dir = private_tempdir();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let guard = UncontainedRun::arm(&[data.as_path()], "att_unsynced").unwrap();
+        let io = std::sync::Arc::new(MarkerIo {
+            fail_dir_sync: true,
+            ..MarkerIo::default()
+        });
+        let installed = install(io.clone());
+        drop(guard);
+        drop(installed);
+        assert!(
+            uncontained_live_path(&data, "att_unsynced").exists(),
+            "{:?}",
+            io.steps.lock().unwrap()
+        );
+        assert!(
+            !uncontained_epoch(&[data.as_path()])
+                .unwrap()
+                .live
+                .is_empty()
         );
     }
 

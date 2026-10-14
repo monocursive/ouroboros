@@ -29,7 +29,8 @@ use std::sync::{Arc, OnceLock};
 use super::FILE_MODE;
 
 /// A named place where a record is made durable (R02). The J4 plan numbers
-/// them P1 to P13 in this order; J4 wave 2 adds P14 to P16.
+/// them P1 to P13 in this order; J4 wave 2 adds P14 to P16, and P17 is the
+/// uncontained-run markers.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Site {
     /// P1: the exclusive claim of `jail-state.json` (§7).
@@ -68,13 +69,16 @@ pub enum Site {
     /// P16: the execution leaf's device and inode in jail state, right after
     /// `mkdir` and before anything is placed in it (N7).
     ExecutionLeafIdentity,
+    /// P17: an uncontained run's live and settled markers in the data and
+    /// configuration directories (`state::UncontainedRun`).
+    UncontainedMarker,
     /// A replacement written through the plain API, outside any site.
     Unnamed,
 }
 
 impl Site {
-    /// Every named site, P1 to P16.
-    pub const ALL: [Site; 16] = [
+    /// Every named site, P1 to P17.
+    pub const ALL: [Site; 17] = [
         Site::Claim,
         Site::Policy,
         Site::LaunchState,
@@ -91,6 +95,7 @@ impl Site {
         Site::GcRecord,
         Site::ExecutionLeaf,
         Site::ExecutionLeafIdentity,
+        Site::UncontainedMarker,
     ];
 
     /// The snake_case name used by [`ABORT_AT_SEAM`] and in test names.
@@ -113,6 +118,7 @@ impl Site {
             Site::GcRecord => "gc_record",
             Site::ExecutionLeaf => "execution_leaf",
             Site::ExecutionLeafIdentity => "execution_leaf_identity",
+            Site::UncontainedMarker => "uncontained_marker",
             Site::Unnamed => "unnamed",
         }
     }
