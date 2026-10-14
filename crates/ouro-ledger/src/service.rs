@@ -340,19 +340,7 @@ mod linux {
                 .arg("--unit")
                 .arg(&unit),
         )?;
-        let deadline = Instant::now() + START_TIMEOUT;
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && Instant::now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(10))
-                }
-                Err(error) => return Err(error.into()),
-            }
-        };
+        let mut stream = await_owner(&listener, &unit, Instant::now() + START_TIMEOUT)?;
         stream.set_read_timeout(Some(START_TIMEOUT))?;
         stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
         let peer = peer_credentials(&stream)?;
@@ -366,6 +354,28 @@ mod linux {
         match read_frame::<Started>(&mut stream)? {
             Started::Owned { run } => Ok(*run),
             Started::Refused { reason } => Err(LedgerError(reason)),
+        }
+    }
+
+    /// The bootstrap connection from the owner service just started. One that
+    /// never connects is named, so the operator can inspect that unit.
+    fn await_owner(listener: &UnixListener, unit: &str, deadline: Instant) -> Result<UnixStream> {
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Ok(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(LedgerError(format!(
+                            "owner service {unit} did not connect within {} seconds; \
+                             inspect it with `systemctl --user status {unit}`",
+                            START_TIMEOUT.as_secs()
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error.into()),
+            }
         }
     }
 
@@ -494,5 +504,21 @@ mod linux {
             return Err(std::io::Error::last_os_error().into());
         }
         Ok(json!({"run_id":run_id,"status":"stop_requested","settlement":"pending"}))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn an_owner_that_never_connects_is_named_not_an_eagain() {
+            let temp = tempfile::tempdir().unwrap();
+            let listener = UnixListener::bind(temp.path().join("start.sock")).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let unit = "ouro-ledger-owner-00000000000000000000000000000000.service";
+            let refused = await_owner(&listener, unit, Instant::now()).unwrap_err();
+            assert!(refused.0.contains(unit), "{refused}");
+            assert!(refused.0.contains("did not connect"), "{refused}");
+        }
     }
 }
