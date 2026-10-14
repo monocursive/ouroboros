@@ -98,6 +98,8 @@ const RESPONSE_MAX: usize = 64 * 1024;
 /// The longest token lifetime accepted from an issuer: one year, in
 /// seconds.
 const MAX_TOKEN_LIFETIME: u64 = 365 * 24 * 60 * 60;
+/// The refresh step a response the issuer should not have sent fails at.
+const ISSUER_INVALID: &str = "issuer_invalid_response";
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -111,6 +113,14 @@ fn encode(doc: &Document) -> Result<Zeroizing<Vec<u8>>, Reason> {
 }
 pub(crate) type Audit = Arc<dyn Fn(&str, u64, &'static str) -> bool + Send + Sync>;
 type SourceLocation = (Vec<u8>, Vec<(u64, u64)>);
+/// Where a refreshed document is committed: the source, and the pending
+/// document it must still hold, at the identity it was marked at.
+struct Commit<'a> {
+    path: &'a [u8],
+    forbidden: &'a [(u64, u64)],
+    pending: &'a [u8],
+    identity: (u64, u64),
+}
 struct Pending {
     bytes: Zeroizing<Vec<u8>>,
     epoch: crate::state::anchored::Stat,
@@ -279,6 +289,11 @@ impl Runtime {
         state.epoch = Some(epoch);
         Ok((state.value.clone(), state.generation))
     }
+    /// Refreshes the access token of `doc`, the document read as `raw` at
+    /// `source_epoch`: the pending marker is persisted first, then the one
+    /// exchange with the issuer, then the new document is committed before
+    /// its token is served. Any failure after the marker leaves it in place
+    /// (never retried) and withdraws the credential.
     fn exchange_token(
         &self,
         policy: &RefreshPolicy,
@@ -287,6 +302,39 @@ impl Runtime {
         raw: Zeroizing<Vec<u8>>,
         source_epoch: crate::state::anchored::Stat,
         mut doc: Document,
+    ) -> Result<Zeroizing<Vec<u8>>, Reason> {
+        let pending = self.mark_pending(path, forbidden, &raw, source_epoch, &mut doc)?;
+        let source = Commit {
+            path,
+            forbidden,
+            pending: &pending,
+            identity: source_epoch.identity(),
+        };
+        let result = self
+            .request_token(policy, &doc.refresh_token.0)
+            .and_then(|response| self.commit_token(&source, doc, response));
+        lock(&self.state).pending = None;
+        if result.is_err() {
+            self.deny(Reason::CredentialUnavailable);
+            let generation = lock(&self.state).generation;
+            let _ = self.emit(generation, "refresh_failed");
+        }
+        result
+    }
+
+    /// Persists `doc` with its pending marker over `raw` and audits the
+    /// start of the refresh: from here a failure, or a crash, leaves a
+    /// document no attempt retries, so a rotating refresh token is never
+    /// presented twice. The value served now stays served during the
+    /// exchange only while it is unexpired and loaded from this very source
+    /// version; otherwise it is withdrawn first. Returns the marked bytes.
+    fn mark_pending(
+        &self,
+        path: &[u8],
+        forbidden: &[(u64, u64)],
+        raw: &[u8],
+        source_epoch: crate::state::anchored::Stat,
+        doc: &mut Document,
     ) -> Result<Zeroizing<Vec<u8>>, Reason> {
         let identity = source_epoch.identity();
         let preserve = {
@@ -302,8 +350,8 @@ impl Runtime {
             self.deny(Reason::CredentialUnavailable);
         }
         doc.refresh_pending = true;
-        let pending = encode(&doc)?;
-        update_vault_source(path, forbidden, &raw, identity, &pending)
+        let pending = encode(doc)?;
+        update_vault_source(path, forbidden, raw, identity, &pending)
             .map_err(|_| self.deny(Reason::CredentialUnavailable))?;
         let (confirmed, pending_epoch) = read_vault_source_version(path, forbidden, SOURCE_MAX)
             .map_err(|_| self.deny(Reason::CredentialRevoked))?;
@@ -322,94 +370,113 @@ impl Runtime {
         if !self.emit(generation, "refresh_started") {
             return Err(self.deny(Reason::CredentialUnavailable));
         }
-        let result = (|| {
-            let agent: ureq::Agent = ureq::Agent::config_builder()
-                .proxy(None)
-                .max_redirects(0)
-                .http_status_as_error(false)
-                .max_idle_connections(0)
-                .timeout_global(Some(Duration::from_secs(8)))
-                .max_response_header_size(16384)
-                .build()
-                .into();
-            // Each failure names its own step.
-            const INVALID: &str = "issuer_invalid_response";
-            let unavailable = |label| self.failed(label, Reason::CredentialUnavailable);
-            let (content_type, body) = grant_body(policy, &doc.refresh_token.0)
-                .map_err(|reason| self.failed("grant_unencodable", reason))?;
-            let mut response = agent
-                .post(&policy.token_url)
-                .header("Content-Type", content_type)
-                .send(body.as_slice())
-                .map_err(|_| unavailable("issuer_transport"))?;
-            if response.status().as_u16() != 200 {
-                return Err(unavailable(match response.status().as_u16() {
-                    400 => "issuer_http_400",
-                    401 => "issuer_http_401",
-                    403 => "issuer_http_403",
-                    429 => "issuer_http_429",
-                    500..=599 => "issuer_http_5xx",
-                    300..=399 => "issuer_redirect_refused",
-                    _ => "issuer_http_refused",
-                }));
-            }
-            let mut bytes = Zeroizing::new(Vec::new());
-            response
-                .body_mut()
-                .as_reader()
-                .take(u64::try_from(RESPONSE_MAX + 1).unwrap_or(u64::MAX))
-                .read_to_end(&mut bytes)
-                .map_err(|_| unavailable(INVALID))?;
-            if bytes.len() > RESPONSE_MAX {
-                return Err(unavailable(INVALID));
-            }
-            let response: Response =
-                serde_json::from_slice(&bytes).map_err(|_| unavailable(INVALID))?;
-            if !valid(response.access_token.0.as_bytes())
-                || response
-                    .token_type
-                    .as_ref()
-                    .is_some_and(|t| !t.eq_ignore_ascii_case("bearer"))
-            {
-                return Err(unavailable(INVALID));
-            }
-            let expiry = expiry(&response).map_err(|_| unavailable(INVALID))?;
-            doc.access_token = response.access_token;
-            if response.id_token.is_some() {
-                doc.id_token = response.id_token;
-            }
-            if let Some(token) = response.refresh_token {
-                if !valid(token.0.as_bytes()) {
-                    return Err(unavailable(INVALID));
-                }
-                doc.refresh_token = token;
-            }
-            doc.expires_at = expiry;
-            doc.refresh_pending = false;
-            let replacement =
-                encode(&doc).map_err(|reason| self.failed("document_unencodable", reason))?;
-            update_vault_source(path, forbidden, &pending, identity, &replacement)
-                .map_err(|_| self.failed("source_commit_failed", Reason::CredentialRevoked))?;
-            // Deletion/replacement during exchange or commit never releases a token.
-            let check = read_vault_source(path, forbidden, SOURCE_MAX)
-                .map_err(|_| self.failed("source_changed", Reason::CredentialRevoked))?;
-            if check.as_slice() != replacement.as_slice() {
-                return Err(self.failed("source_changed", Reason::CredentialRevoked));
-            }
-            let generation = lock(&self.state).generation;
-            if !self.emit(generation, "refreshed") {
-                return Err(unavailable("audit_unavailable"));
-            }
-            *lock(&self.last_error) = None;
-            Ok(Zeroizing::new(doc.access_token.0.as_bytes().to_vec()))
-        })();
-        lock(&self.state).pending = None;
-        if result.is_err() {
-            self.deny(Reason::CredentialUnavailable);
-            let generation = lock(&self.state).generation;
-            let _ = self.emit(generation, "refresh_failed");
+        Ok(pending)
+    }
+
+    /// The one exchange with the issuer: the refresh grant, then a bounded
+    /// `200` response carrying a valid bearer access token. Each failure
+    /// names its own step.
+    fn request_token(
+        &self,
+        policy: &RefreshPolicy,
+        refresh_token: &str,
+    ) -> Result<Response, Reason> {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .proxy(None)
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .max_idle_connections(0)
+            .timeout_global(Some(Duration::from_secs(8)))
+            .max_response_header_size(16384)
+            .build()
+            .into();
+        let unavailable = |label| self.failed(label, Reason::CredentialUnavailable);
+        let (content_type, body) = grant_body(policy, refresh_token)
+            .map_err(|reason| self.failed("grant_unencodable", reason))?;
+        let mut response = agent
+            .post(&policy.token_url)
+            .header("Content-Type", content_type)
+            .send(body.as_slice())
+            .map_err(|_| unavailable("issuer_transport"))?;
+        if response.status().as_u16() != 200 {
+            return Err(unavailable(match response.status().as_u16() {
+                400 => "issuer_http_400",
+                401 => "issuer_http_401",
+                403 => "issuer_http_403",
+                429 => "issuer_http_429",
+                500..=599 => "issuer_http_5xx",
+                300..=399 => "issuer_redirect_refused",
+                _ => "issuer_http_refused",
+            }));
         }
-        result
+        let mut bytes = Zeroizing::new(Vec::new());
+        response
+            .body_mut()
+            .as_reader()
+            .take(u64::try_from(RESPONSE_MAX + 1).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes)
+            .map_err(|_| unavailable(ISSUER_INVALID))?;
+        if bytes.len() > RESPONSE_MAX {
+            return Err(unavailable(ISSUER_INVALID));
+        }
+        let response: Response =
+            serde_json::from_slice(&bytes).map_err(|_| unavailable(ISSUER_INVALID))?;
+        if !valid(response.access_token.0.as_bytes())
+            || response
+                .token_type
+                .as_ref()
+                .is_some_and(|t| !t.eq_ignore_ascii_case("bearer"))
+        {
+            return Err(unavailable(ISSUER_INVALID));
+        }
+        Ok(response)
+    }
+
+    /// Applies the issuer's `response` to `doc` and commits it over the
+    /// pending document, then reads it back: a source deleted or replaced
+    /// during the exchange or the commit never releases a token. Audits the
+    /// refresh before returning the new access token.
+    fn commit_token(
+        &self,
+        source: &Commit<'_>,
+        mut doc: Document,
+        response: Response,
+    ) -> Result<Zeroizing<Vec<u8>>, Reason> {
+        let unavailable = |label| self.failed(label, Reason::CredentialUnavailable);
+        let expiry = expiry(&response).map_err(|_| unavailable(ISSUER_INVALID))?;
+        doc.access_token = response.access_token;
+        if response.id_token.is_some() {
+            doc.id_token = response.id_token;
+        }
+        if let Some(token) = response.refresh_token {
+            if !valid(token.0.as_bytes()) {
+                return Err(unavailable(ISSUER_INVALID));
+            }
+            doc.refresh_token = token;
+        }
+        doc.expires_at = expiry;
+        doc.refresh_pending = false;
+        let replacement =
+            encode(&doc).map_err(|reason| self.failed("document_unencodable", reason))?;
+        update_vault_source(
+            source.path,
+            source.forbidden,
+            source.pending,
+            source.identity,
+            &replacement,
+        )
+        .map_err(|_| self.failed("source_commit_failed", Reason::CredentialRevoked))?;
+        let check = read_vault_source(source.path, source.forbidden, SOURCE_MAX)
+            .map_err(|_| self.failed("source_changed", Reason::CredentialRevoked))?;
+        if check.as_slice() != replacement.as_slice() {
+            return Err(self.failed("source_changed", Reason::CredentialRevoked));
+        }
+        let generation = lock(&self.state).generation;
+        if !self.emit(generation, "refreshed") {
+            return Err(unavailable("audit_unavailable"));
+        }
+        *lock(&self.last_error) = None;
+        Ok(Zeroizing::new(doc.access_token.0.as_bytes().to_vec()))
     }
     /// Records `label` as the refresh's last error and returns `reason`.
     fn failed(&self, label: &'static str, reason: Reason) -> Reason {
