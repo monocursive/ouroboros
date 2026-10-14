@@ -1,36 +1,45 @@
 //! The contained boundary: preparation, discovery, release and teardown.
+//!
+//! Preparation runs in typed phases, each holding only facts that exist by
+//! then: the [`Planned`] mount plan, the [`Channels`] to the backend, the
+//! [`Started`] backend (and everything that ends with it), and the
+//! [`Discovered`] namespace init and launcher. The [`Boundary`] the run
+//! drives is built from them once discovery read everything back, so none of
+//! its fields stands for a value not known yet. A refusal before the spawn
+//! drops what the earlier phases hold (the placeholder set, the bootstrap
+//! child's kill guard, the watcher); one from the spawn on runs the one
+//! teardown, [`Started::tear_down`], which the release and the abort share.
 
-use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
-use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Map, Value};
 
-use crate::platform::{
-    BoundaryIdentity, PreparedExecution, PreparedPlan, RunningExecution, Sinks, Teardown,
-    TreeObservation,
-};
+use crate::observer::CoverageSummary;
+use crate::platform::{BoundaryIdentity, PreparedPlan, RunEvent, Sinks, TreeObservation};
 use crate::policy::{PolicySnapshot, ProfileName, ProtectedCoverage, ScratchRoot};
 use crate::records::{
-    Applied, AppliedFilesystem, AppliedMount, AppliedNetwork, AppliedSyscalls, ErrorCode,
-    ErrorStage, JailError, NativeLifetime, NativeString, ObserveMode, Os,
+    Applied, AppliedFilesystem, AppliedLimit, AppliedMount, AppliedNetwork, AppliedSyscalls,
+    ErrorCode, ErrorStage, JailError, NativeLifetime, NativeString, ObserveMode, Os,
     ProcessIdentity as RecordIdentity, ProcessRecord, Remediation,
 };
 use crate::supervisor::TREE_BUDGET;
 
+use super::agent::AgentNet;
 use super::audit::AuditWriter;
-use super::bwrap::{self, Placeholder, PlaceholderOutcome};
+use super::bpf::Program;
+use super::bwrap::{self, BwrapPlan, Placeholder, PlaceholderOutcome, PlaceholderSet, Rendered};
 use super::cgroup::ExecutionCgroup;
-use super::clock::{self};
+use super::clock;
 use super::exec::{self, BootstrapChild, BootstrapSpawn, FdMap};
 use super::fs as jfs;
-use super::identity;
-use super::identity::read_environment_names;
+use super::identity::{self, read_environment_names};
 use super::mounts::{
-    PlanPaths, absent_runtime_candidate, host_path_of, is_allowed_device_node,
+    PlanPaths, StagedMounts, absent_runtime_candidate, host_path_of, is_allowed_device_node,
     mount_swap_rendezvous, plan_for, prepare_mounts, read_mount_table, recordable_mounts,
     refuse_pseudo_fs_grants, refuse_unrecordable_mounts, resolve_path_ref, scan_coverage,
     skipped_protected_names, stage_sanitized_resolv_conf, staged_mounts,
@@ -39,12 +48,22 @@ use super::platform::{
     ARGS_FD, ERROR_FD, PINNED_FD_BASE, RELEASE_FD, SECCOMP_FD, STATUS_FD, TRACE_DATA_FD,
     VENDOR_STATE_FD, error, preparing,
 };
-use super::running::{LinuxRunning, WAIT_STEP, shared};
+use super::running::{
+    Counters, ErrorPipe, Launched, Run, RunState, Tree, WAIT_STEP, ceiling_rows,
+    refuse_privileged_supervisor, sample_counters, wrong_guess_stops_detail,
+};
 use super::seccomp;
-use super::stdio::{StdioPlan, StdioRelay, validate_stdio};
+use super::stdio::{
+    OUTPUT_DRAIN_BUDGET, StdioPlan, StdioRelay, drain_output_relays, pump_stdio_relays,
+    validate_stdio,
+};
 use super::sys::{nap, set_nonblocking, write_all, write_until};
-use super::tracer::{Tracer, TracerSummary};
-use super::verdict::{AbortInputs, abort_verdict, observer_verdict};
+use super::tracer::Tracer;
+use super::verdict::{AbortInputs, TreeInputs, abort_verdict, observer_verdict, verdict};
+use super::watch::{self, Watcher};
+
+/// The most a stop gives the proxy to drain its last results (§10).
+const AGENT_STOP_BUDGET: Duration = Duration::from_secs(2);
 
 /// Audit 2026-09-25-2, S14; reworded by audit 3 (A5): a per-attempt value for
 /// the narrowing filter's `SECCOMP_RET_DATA`, unpredictable to the child. The
@@ -57,7 +76,7 @@ use super::verdict::{AbortInputs, abort_verdict, observer_verdict};
 /// `requested_by_other_filters`, which the receipt's
 /// `lifetime.native.details` carries. Guessing is therefore never silent:
 /// every stop lands in the receipt as a gap or as a count.
-pub(super) fn random_trace_data() -> u16 {
+fn random_trace_data() -> u16 {
     use std::hash::{BuildHasher, Hasher as _};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
     hasher.write_u64(u64::from(std::process::id()));
@@ -68,15 +87,12 @@ pub(super) fn random_trace_data() -> u16 {
     }
 }
 
-/// The most a stop gives the proxy to drain its last results (§10).
-pub(super) const AGENT_STOP_BUDGET: Duration = Duration::from_secs(2);
-
 /// The named roots the audit path classification knows besides the workspace
 /// and scratch (issue draft 10): every operator grant by its in-jail
 /// spelling, and the system read-only roots, so exec paths like
 /// `/usr/bin/git` and writes under a `--ro` grant are named instead of
 /// digested.
-pub(super) fn audit_named_roots(bplan: &bwrap::BwrapPlan) -> Vec<(Vec<u8>, String)> {
+fn audit_named_roots(bplan: &bwrap::BwrapPlan) -> Vec<(Vec<u8>, String)> {
     let mut roots = Vec::new();
     for (_, dest) in bplan
         .extra_ro_binds
@@ -95,19 +111,103 @@ pub(super) fn audit_named_roots(bplan: &bwrap::BwrapPlan) -> Vec<(Vec<u8>, Strin
     roots
 }
 
-// ---------------------------------------------------------------------------
-// Preparation
-// ---------------------------------------------------------------------------
+pub(super) fn prepare_timeout(message: &str) -> JailError {
+    error(
+        ErrorCode::PrepareTimeout,
+        ErrorStage::Preparing,
+        Remediation::Retry,
+        message.to_owned(),
+    )
+}
+
+/// The refusal for a launcher that ended before it blocked, from its exit
+/// status (as bubblewrap reported it) and the errno it wrote: the agent
+/// launcher's mediation and bridge failures name themselves; anything else
+/// is the backend's.
+fn launcher_failure(exit_code: Option<i32>, errno_bytes: &[u8], diagnostic: &str) -> JailError {
+    let errno = super::launch::decode_error_report(errno_bytes)
+        .map_or("no errno reported".into(), super::sys::errno_name);
+    match exit_code {
+        Some(super::launch::EXIT_MEDIATION_FAILED) => preparing(
+            ErrorCode::MissingCapability,
+            format!(
+                "the `agent` unix-peer mediation could not be established: the launcher could \
+                 not install the mediation filter with its listener or open sock_diag ({errno})"
+            ),
+        ),
+        Some(super::launch::EXIT_BRIDGE_FAILED) => preparing(
+            ErrorCode::MissingCapability,
+            format!(
+                "the `agent` bridge could not be established: the launcher could not start it \
+                 ({errno})"
+            ),
+        ),
+        _ => preparing(
+            ErrorCode::BackendUnavailable,
+            format!("bubblewrap exited before the launcher blocked: {diagnostic}"),
+        ),
+    }
+}
+
+/// Accepts an existing directory as it is, or creates it (and its missing
+/// parents) private. Only for directories that are not supervisor state:
+/// [`crate::state::create_private_dir`] checks those, ancestors included.
+fn ensure_dir(path: &Path) -> Result<(), JailError> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    if path.is_dir() {
+        return Ok(());
+    }
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|err| {
+            error(
+                ErrorCode::StateWriteFailed,
+                ErrorStage::Preparing,
+                Remediation::InspectState,
+                format!("{} could not be created: {err}", path.display()),
+            )
+        })
+}
+
+/// Whether `filter`, the baseline bubblewrap installs, denies `link` and
+/// `linkat`, read from the program itself: it is matched against its
+/// profile's baseline (`tool`'s, or `agent`'s in `variant`) built with and
+/// without the storage rules.
+///
+/// # Errors
+/// Why the answer is unknown: a baseline that cannot be built, or a program
+/// that is neither of the two, which no preparation installs.
+fn installed_hard_link_rule(
+    filter: &Program,
+    variant: Option<seccomp::AgentVariant>,
+) -> Result<bool, String> {
+    let baseline = |storage| {
+        match variant {
+            Some(variant) => seccomp::agent_baseline_with_storage(variant, storage),
+            None => seccomp::tool_baseline_with_storage(storage),
+        }
+        .map_err(|err| format!("its baseline cannot be built: {err}"))
+    };
+    if *filter == baseline(true)? {
+        Ok(true)
+    } else if *filter == baseline(false)? {
+        Ok(false)
+    } else {
+        Err("it is not its profile's baseline".to_owned())
+    }
+}
 
 /// bubblewrap's JSON status documents, read incrementally.
-pub(super) struct StatusReader {
-    pub(super) fd: OwnedFd,
-    pub(super) text: String,
-    pub(super) eof: bool,
+struct StatusReader {
+    fd: OwnedFd,
+    text: String,
+    eof: bool,
 }
 
 impl StatusReader {
-    pub(super) fn new(fd: OwnedFd) -> Self {
+    fn new(fd: OwnedFd) -> Self {
         StatusReader {
             fd,
             text: String::new(),
@@ -116,7 +216,7 @@ impl StatusReader {
     }
 
     /// Reads whatever is available without blocking.
-    pub(super) fn pump(&mut self) {
+    fn pump(&mut self) {
         if self.eof {
             return;
         }
@@ -144,11 +244,11 @@ impl StatusReader {
         }
     }
 
-    pub(super) fn parsed(&self) -> bwrap::BwrapStatus {
+    fn parsed(&self) -> bwrap::BwrapStatus {
         bwrap::parse_json_status(&self.text)
     }
 
-    pub(super) fn namespace(&self, key: &str) -> Option<u64> {
+    fn namespace(&self, key: &str) -> Option<u64> {
         let at = self.text.find(&format!("\"{key}\""))?;
         let rest = &self.text[at..];
         let colon = rest.find(':')?;
@@ -161,194 +261,604 @@ impl StatusReader {
     }
 }
 
-/// Everything the boundary owns, from preparation through settlement.
-pub(super) struct Boundary {
-    pub(super) snapshot: PolicySnapshot,
-    pub(super) workspace: PathBuf,
-    pub(super) child: Option<BootstrapChild>,
-    pub(super) bootstrap_spawn: BootstrapSpawn,
-    pub(super) bwrap_pid: libc::pid_t,
+/// The namespace init: the host pid bubblewrap reported, and a pidfd opened
+/// right then. Every later signal and liveness check goes through the
+/// descriptor, so neither can reach a process that merely inherited the
+/// number.
+struct Init {
+    pid: libc::pid_t,
+    fd: OwnedFd,
+}
+
+impl Init {
+    /// Whether the init is still running: its pidfd turns readable at its
+    /// exit, a zombie's included, and cannot come to name another process.
+    fn alive(&self) -> bool {
+        !watch::readable(self.fd.as_raw_fd())
+    }
+}
+
+/// What the spawn started, and how all of it ends: the backend with its
+/// status pipe and its watcher, the execution leaf, the placeholders, the
+/// `agent` network and the stdio relays.
+struct Started {
+    /// The backend, while this process may still collect its status.
+    child: Option<BootstrapChild>,
+    bootstrap_spawn: BootstrapSpawn,
+    bwrap_pid: libc::pid_t,
     /// A descriptor for bubblewrap, taken while it was this process's
     /// unreaped child. A pid number can come to mean another process; a
     /// pidfd cannot (§9.3).
-    pub(super) bwrap_fd: OwnedFd,
-    pub(super) init_pid: libc::pid_t,
-    /// The same, for the namespace init. Discovery refuses without it, so it
-    /// is missing only before discovery.
-    pub(super) init_fd: Option<OwnedFd>,
-    pub(super) launcher: identity::ProcessIdentity,
-    /// The launcher's own descriptor, for the cooperative stop. Discovery
-    /// refuses without it, so it is missing only before discovery.
-    pub(super) launcher_fd: Option<OwnedFd>,
-    pub(super) launcher_argv: Vec<Vec<u8>>,
-    /// The paths the launcher will try to `execve`, derived from the same
-    /// program name and `PATH` the launcher itself uses. The observer's exec
-    /// snapshot must be one of them.
-    pub(super) target_images: Vec<Vec<u8>>,
-    pub(super) release: Option<OwnedFd>,
-    pub(super) error: OwnedFd,
-    pub(super) error_bytes: Vec<u8>,
-    pub(super) error_eof: bool,
-    pub(super) status: StatusReader,
-    pub(super) tracer: Option<Tracer>,
-    pub(super) tracer_summary: Option<TracerSummary>,
-    pub(super) audit: AuditWriter,
-    pub(super) placeholders: Vec<Placeholder>,
-    pub(super) placeholder_outcomes: Vec<PlaceholderOutcome>,
-    pub(super) applied: Applied,
-    /// What the backend reported, read again for this attempt; `None` when
-    /// it could not be asked.
-    pub(super) backend_version: Option<String>,
-    pub(super) resolv_sanitization: &'static str,
-    pub(super) observe_on: bool,
-    /// The §11.4 bounds the observer runs with, decided once; `None` with
-    /// observation off.
-    pub(super) observer_plan: Option<super::observed::ObserverPlan>,
-    /// Audit 2026-09-25-2, S14: the narrowing filter's per-attempt
-    /// `SECCOMP_RET_DATA`, shared only with the launcher (through the
-    /// trace-data pipe) and the tracer.
-    pub(super) trace_data: u16,
-    pub(super) ns_ids: identity::NsIds,
-    pub(super) cgroup: Option<ExecutionCgroup>,
-    pub(super) storage: Option<super::storage::Storage>,
-    /// Whether the installed baseline denies `link` and `linkat`, read from
-    /// the program itself; the storage ceiling's evidence states it.
-    pub(super) hard_links_denied: bool,
-    pub(super) cgroup_lost: bool,
-    /// Why no execution cgroup exists, when preferred ceilings run unenforced.
-    pub(super) cgroup_unavailable: Option<String>,
-    /// Audit 2026-10-08 H1 follow-up: the regular-file stdio streams,
-    /// relayed through supervisor-owned pipes so the child holds no
-    /// reopenable handle on any file.
-    pub(super) stdio_relays: Vec<StdioRelay>,
-    pub(super) watcher: super::watch::Watcher,
-    // The agent network, and the filter count read back
+    bwrap_fd: OwnedFd,
+    status: StatusReader,
+    watcher: Watcher,
+    cgroup: Option<ExecutionCgroup>,
+    /// The leaf's identity or counters were lost while the target ran.
+    cgroup_lost: bool,
+    /// Why no execution cgroup exists, when preferred ceilings run
+    /// unenforced.
+    cgroup_unavailable: Option<String>,
+    placeholders: Vec<Placeholder>,
+    placeholder_outcomes: Vec<PlaceholderOutcome>,
     /// The proxy, mediator and bridge of an `agent` attempt.
-    pub(super) agent: Option<super::agent::AgentNet>,
+    agent: Option<AgentNet>,
+    /// Audit 2026-10-08 H1 follow-up: the regular-file and socket stdio
+    /// streams, relayed through supervisor-owned pipes so the child holds no
+    /// reopenable handle on any file.
+    stdio_relays: Vec<StdioRelay>,
     /// Set before this boundary kills anything: what dies after it did not
     /// die on its own.
-    pub(super) killing: std::sync::atomic::AtomicBool,
-    /// `Seccomp_filters` of the blocked launcher, read back and checked
-    /// against what this boundary installs.
-    pub(super) seccomp_filters: Option<u32>,
+    killing: AtomicBool,
 }
-impl Boundary {
+
+impl Started {
     /// Whether the backend's pidfd reports its exit, independent of whether
     /// its status has been collected yet.
-    pub(super) fn backend_exited(&self) -> bool {
-        super::watch::readable(self.bwrap_fd.as_raw_fd())
+    fn backend_exited(&self) -> bool {
+        watch::readable(self.bwrap_fd.as_raw_fd())
     }
+
     /// The watcher stays until released or until this supervisor is gone
     /// (§9.3). It is released only once the backend has ended, so its end
     /// still means the backend's end to the verdicts that wait for it.
-    pub(super) fn release_watcher_after_backend(&mut self) {
+    fn release_watcher_after_backend(&mut self) {
         if self.backend_exited() {
             self.watcher.release();
         }
     }
-    pub(super) fn cgroup_empty(&self) -> bool {
+
+    fn cgroup_empty(&self) -> bool {
         !self.cgroup_lost
             && self
                 .cgroup
                 .as_ref()
                 .is_none_or(|leaf| matches!(leaf.populated(), Ok(false)))
     }
-    #[allow(clippy::too_many_lines)]
-    pub(super) fn create(
-        bwrap_path: &Path,
-        backend_pin: &jfs::PinnedPath,
-        plan: PreparedPlan,
-        sinks: Sinks,
-        deadline: clock::Deadline,
-    ) -> Result<Boundary, JailError> {
-        let snapshot = plan.request.snapshot.clone();
-        shared::refuse_privileged_supervisor()?;
-        if !snapshot.profile.is_contained() {
-            // `prepare` hands `none` to its own boundary before this point.
-            return Err(error(
-                ErrorCode::InternalError,
-                ErrorStage::Preparing,
-                Remediation::InspectState,
-                "the contained boundary was asked to run the uncontained `none` profile".to_owned(),
+
+    /// Whether the backend has exited, collecting its status. Only for
+    /// discovery: from the observer's attach on, its thread owns every
+    /// `waitpid` in this process.
+    fn exited(&mut self) -> bool {
+        match self.child.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+            None => true,
+        }
+    }
+
+    fn diagnostic(&self) -> String {
+        self.status.text.clone()
+    }
+
+    /// Kills the namespace init, when it was named, and the backend through
+    /// their descriptors, and the leaf through `cgroup.kill`.
+    ///
+    /// §9.3: never signal a pid without revalidating its identity. A pidfd
+    /// is that revalidation made permanent — the kernel refuses to deliver
+    /// through it once the process is gone, so no signal of this attempt's
+    /// can land on whatever later holds the number. Killing the init makes
+    /// the kernel kill the namespace; the backend outside it goes too.
+    fn kill(&self, init: Option<&Init>) {
+        self.killing.store(true, Ordering::SeqCst);
+        if let Some(leaf) = &self.cgroup {
+            let _ = leaf.kill();
+        }
+        for fd in init
+            .map(|init| &init.fd)
+            .into_iter()
+            .chain([&self.bwrap_fd])
+        {
+            let _ = identity::pidfd_send_signal(fd.as_raw_fd(), libc::SIGKILL);
+        }
+    }
+
+    /// Stops the proxy and the mediator, draining what they last reported.
+    /// Called once the tree is dead or given up on: until then the proxy and
+    /// the mediator are part of the boundary the child relies on.
+    fn stop_agent(&mut self, audit: &mut AuditWriter, observe_on: bool, budget: Duration) {
+        if let Some(agent) = self.agent.as_mut() {
+            agent.stop(audit, observe_on, budget.min(AGENT_STOP_BUDGET));
+        }
+    }
+
+    /// The one teardown of a boundary whose target never ran: a refusal,
+    /// a failed release or an abort (§13.2 row 4). Kills the boundary, stops
+    /// the observer (`run`, once there is one) and the `agent` network, and
+    /// reports whether the tree's death was verified.
+    ///
+    /// Verified means exactly what settlement requires, without the target:
+    /// the namespace init's pidfd reports its death (PID-namespace semantics:
+    /// every other member, the blocked launcher included, died first); the
+    /// backend (this supervisor's child) and the outside watcher are dead and
+    /// reaped; the execution cgroup, when one exists, was observed
+    /// unpopulated and its identity was never lost; and the observer, when
+    /// attached, finished without abandoning a tracee or losing a child's
+    /// status. Everything is polled within one fresh tree budget; whatever is
+    /// still unknown at its end leaves the tree `pending` and `tree_empty`
+    /// null. "The trusted launcher died" is not on the list: it is implied by
+    /// the init's death and proves nothing without it. Before bubblewrap
+    /// named an init there is none to wait for: the backend's own end, the
+    /// watcher's and an empty leaf are then what is left to see.
+    fn tear_down(&mut self, init: Option<&Init>, witness: Witness<'_>) -> TreeObservation {
+        let deadline = clock::Deadline::after(TREE_BUDGET);
+        self.kill(init);
+        // The observer is stopped first, so after this nothing but this
+        // thread waits for children; its account is kept for the verdict.
+        let (audit, observe_on, observer) = match witness {
+            Witness::Run(run) => {
+                run.stop_observer(deadline.remaining());
+                (&mut run.audit, run.observe_on, run.tracer_summary.as_ref())
+            }
+            Witness::Audit { audit, observe_on } => (audit, observe_on, None),
+        };
+        // The target never ran; nothing is left to serve.
+        self.stop_agent(audit, observe_on, deadline.remaining());
+        let backend_reaped = match self.child.take() {
+            Some(mut child) => {
+                child.reap_until(deadline);
+                match child.try_wait() {
+                    Ok(Some(_)) => true,
+                    // The tracer's `waitpid(-1)` reaped it before it was
+                    // stopped. Nothing else in this process waits, so an
+                    // exited backend whose status is gone was reaped here.
+                    Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                        self.backend_exited()
+                    }
+                    _ => false,
+                }
+            }
+            None => false,
+        };
+        let init_dead = || init.is_none_or(|init| !init.alive());
+        loop {
+            self.release_watcher_after_backend();
+            let settled = init_dead() && self.watcher.ended() && self.cgroup_empty();
+            if settled || deadline.expired() {
+                break;
+            }
+            std::thread::sleep(WAIT_STEP);
+        }
+        self.watcher.reap();
+        let watcher_reaped = self.watcher.ended();
+        // The observer's own account, with one difference from settlement:
+        // its "unreaped children" are this supervisor's own children (the
+        // backend and the watcher) that were still exiting when it stopped.
+        // Here they were reaped above, by this thread, so that loss has a
+        // route after all. Any other unreaped child, an abandoned tracee or
+        // a panicked observer still refuses the verdict.
+        let verified = abort_verdict(&AbortInputs {
+            backend_reaped,
+            watcher_reaped,
+            init_dead: init_dead(),
+            cgroup_empty: self.cgroup_empty(),
+            abandoned_tracees: observer.map_or(0, |summary| summary.loss.abandoned_tracees),
+            observer_panicked: observer.is_some_and(|summary| summary.thread_panicked),
+            unreaped_children: observer
+                .map(|summary| summary.unreaped_children.clone())
+                .unwrap_or_default(),
+            // Security 2026-09-27 (audit 3 A5): carried for the receipt;
+            // never a verdict input, because the stop was continued and
+            // nothing was lost.
+            requested_by_other_filters: observer
+                .map_or(0, |summary| summary.requested_by_other_filters),
+            backend_pid: self.bwrap_pid,
+            watcher_pid: i32::try_from(self.watcher.pid()).unwrap_or(-1),
+        });
+        // Placeholders go only once the tree is known dead, and on this
+        // verdict rather than the settlement-time one, whose observer check
+        // would count the children reaped above as lost.
+        if verified && self.placeholder_outcomes.is_empty() {
+            self.placeholder_outcomes = self
+                .placeholders
+                .iter()
+                .map(Placeholder::remove_if_unchanged)
+                .collect();
+        }
+        if verified {
+            TreeObservation {
+                tree_empty: Some(true),
+                verified_at: Some(SystemTime::now()),
+                verification_scope: "attempt_tree".to_owned(),
+                integrity: "verified".to_owned(),
+            }
+        } else {
+            TreeObservation {
+                tree_empty: None,
+                verified_at: None,
+                verification_scope: "attempt_tree".to_owned(),
+                integrity: if self.cgroup_lost { "lost" } else { "pending" }.to_owned(),
+            }
+        }
+    }
+
+    /// Tears the boundary down after a refusal before the run exists and
+    /// returns `refusal`, which then also says which placeholders it leaves
+    /// in the operator's workspace and why, when it leaves any.
+    fn refuse(
+        &mut self,
+        mut refusal: JailError,
+        init: Option<&Init>,
+        audit: &mut AuditWriter,
+        observe_on: bool,
+    ) -> JailError {
+        self.tear_down(init, Witness::Audit { audit, observe_on });
+        if let Some(left) = self.placeholders_left() {
+            refusal.message = format!("{}; {left}", refusal.message);
+            // What the record says is left stays left: nothing removes them
+            // after the refusal named them.
+            self.placeholders.clear();
+        }
+        refusal
+    }
+
+    /// The placeholders a teardown did not remove, for a refusal's message;
+    /// `None` when every one is gone.
+    fn placeholders_left(&self) -> Option<String> {
+        if self.placeholder_outcomes.is_empty() {
+            if self.placeholders.is_empty() {
+                return None;
+            }
+            let paths: Vec<String> = self
+                .placeholders
+                .iter()
+                .map(|placeholder| placeholder.destination().display().to_string())
+                .collect();
+            return Some(format!(
+                "the placeholder directories {} are left in the workspace: the boundary's tree \
+                 was not shown dead within its budget",
+                paths.join(", ")
             ));
         }
-        let observe_on = snapshot.observation.mode == ObserveMode::On;
-        let exe = std::env::current_exe().map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("this binary's own path cannot be read: {err}"),
+        let kept: Vec<String> = self
+            .placeholder_outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                PlaceholderOutcome::Removed(_) | PlaceholderOutcome::AlreadyGone(_) => None,
+                PlaceholderOutcome::KeptChanged(path, reason) => {
+                    Some(format!("{} ({reason})", path.display()))
+                }
+                PlaceholderOutcome::KeptNotEmpty(path) => {
+                    Some(format!("{} (not empty)", path.display()))
+                }
+                PlaceholderOutcome::KeptError(path, errno) => Some(format!(
+                    "{} ({})",
+                    path.display(),
+                    super::sys::errno_name(*errno)
+                )),
+            })
+            .collect();
+        (!kept.is_empty()).then(|| {
+            format!(
+                "the placeholder directories {} are kept in the workspace",
+                kept.join(", ")
             )
-        })?;
+        })
+    }
+}
 
-        // `<data>/attempts/<id>` is the attempt; the state root is two levels
-        // up, and everything under it is supervisor state (§7).
-        let state_root = plan
-            .attempt_dir
-            .parent()
-            .and_then(Path::parent)
-            .unwrap_or(plan.attempt_dir.as_path());
-        let stdio_plans = validate_stdio(state_root, &plan.config_dir)?;
+/// Whose account a teardown records into: the run's, which also has an
+/// observer to stop first, or before the run exists the audit preparation
+/// holds.
+enum Witness<'a> {
+    Run(&'a mut RunState),
+    Audit {
+        audit: &'a mut AuditWriter,
+        observe_on: bool,
+    },
+}
 
-        // The scratch directory the child sees as /tmp. A managed one is
-        // supervisor state and gets the private identity; an operator's
-        // `--scratch` is the operator's own directory (resolved and checked
-        // against the state root at resolving), whose mode is theirs.
-        let scratch = match &snapshot.roots.scratch {
-            ScratchRoot::Managed => {
-                let scratch = plan.attempt_dir.join("scratch");
-                crate::state::create_private_dir(&scratch)?;
-                scratch
-            }
-            ScratchRoot::Host { path } => {
-                let scratch = PathBuf::from(OsString::from_vec(path.as_bytes().to_vec()));
-                ensure_dir(&scratch)?;
-                scratch
-            }
-        };
+/// Creates the contained boundary and its blocked launcher, read back and,
+/// with observation on, observed: the run the supervisor releases.
+///
+/// # Errors
+/// A typed refusal (§6.4) naming the step that failed; whatever the earlier
+/// steps made is torn down first.
+pub(super) fn create(
+    bwrap_path: &Path,
+    backend_pin: &jfs::PinnedPath,
+    plan: PreparedPlan,
+    sinks: Sinks,
+    deadline: clock::Deadline,
+) -> Result<Run<Boundary>, JailError> {
+    let snapshot = plan.request.snapshot.clone();
+    refuse_privileged_supervisor()?;
+    if !snapshot.profile.is_contained() {
+        // `prepare` hands `none` to its own boundary before this point.
+        return Err(error(
+            ErrorCode::InternalError,
+            ErrorStage::Preparing,
+            Remediation::InspectState,
+            "the contained boundary was asked to run the uncontained `none` profile".to_owned(),
+        ));
+    }
+    let observe_on = snapshot.observation.mode == ObserveMode::On;
+    let exe = std::env::current_exe().map_err(|err| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("this binary's own path cannot be read: {err}"),
+        )
+    })?;
 
-        let cgroup_required = [
-            &snapshot.limits.pids,
-            &snapshot.limits.mem,
-            &snapshot.limits.swap,
-            &snapshot.limits.cpu,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|limit| limit.required);
-        let mut cgroup_unavailable = None;
-        // J4 W2-S: N7 — registered in jail state before `mkdir` and before
-        // anything is placed in it; a failed registration refuses (S5).
-        let created = ExecutionCgroup::create_for_attempt(&snapshot.limits, &plan.attempt_dir)?;
-        let cgroup = match created {
-            Ok(leaf) => Some(leaf),
-            Err(err) if cgroup_required => {
-                return Err(preparing(
-                    ErrorCode::MissingCapability,
-                    format!("required execution cgroup could not be configured: {err}"),
-                ));
-            }
-            // Preferred ceilings run unenforced, and the record says why
-            // (§6.4): the reason reaches the native details and a wrapper note.
-            Err(err) => {
-                cgroup_unavailable = Some(err.to_string());
-                None
-            }
-        };
+    // `<data>/attempts/<id>` is the attempt; the state root is two levels
+    // up, and everything under it is supervisor state (§7).
+    let state_root = plan
+        .attempt_dir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(plan.attempt_dir.as_path());
+    let stdio_plans = validate_stdio(state_root, &plan.config_dir)?;
+    let scratch = scratch_directory(&snapshot, &plan.attempt_dir)?;
+    let (cgroup, cgroup_unavailable) = execution_cgroup(&snapshot, &plan.attempt_dir)?;
 
-        // north-star §4.4 / jail-v1 §9.1: Linux cannot enforce
-        // all_descendants; a profile that requires it refuses (125) rather
-        // than underclaim.
-        if snapshot.filesystem.protected_coverage == ProtectedCoverage::AllDescendants {
-            return Err(error(
-                ErrorCode::MissingCapability,
-                ErrorStage::Preparing,
-                Remediation::Unsupported,
-                "the all_descendants protected-path coverage cannot be enforced on Linux; \
-                 it refuses rather than underclaim (north-star §4.4)"
-                    .to_owned(),
-            ));
+    // north-star §4.4 / jail-v1 §9.1: Linux cannot enforce all_descendants;
+    // a profile that requires it refuses (125) rather than underclaim.
+    if snapshot.filesystem.protected_coverage == ProtectedCoverage::AllDescendants {
+        return Err(error(
+            ErrorCode::MissingCapability,
+            ErrorStage::Preparing,
+            Remediation::Unsupported,
+            "the all_descendants protected-path coverage cannot be enforced on Linux; it refuses \
+             rather than underclaim (north-star §4.4)"
+                .to_owned(),
+        ));
+    }
+
+    let mut planned = Planned::new(
+        &snapshot, &plan, &sinks, bwrap_path, &exe, &scratch, observe_on,
+    )?;
+    let mut channels = Channels::open(&mut planned, backend_pin)?;
+    planned.verify_before_spawn(backend_pin)?;
+    let stdio_relays = attach_stdio(stdio_plans, &mut channels.fds)?;
+    let (mut started, release, mut launcher_error) = spawn(
+        &exe,
+        &mut planned,
+        channels,
+        stdio_relays,
+        (cgroup, cgroup_unavailable),
+        deadline,
+    )?;
+
+    let mut audit = AuditWriter::new(
+        &plan.attempt_id,
+        sinks.trace.clone(),
+        plan.workspace.as_os_str().as_bytes(),
+        bwrap::SCRATCH_INSIDE_PATH.as_bytes(),
+    )
+    .with_learning(snapshot.observation.learning)
+    .with_roots(audit_named_roots(&planned.bplan));
+    // The proxy starts only now that the backend exists, so the descriptor
+    // limit it raises never reaches the child.
+    if let Some(agent) = started.agent.as_mut()
+        && let Err(err) = agent.start_proxy()
+    {
+        return Err(started.refuse(err, None, &mut audit, observe_on));
+    }
+    if let Some(reason) = started.cgroup_unavailable.clone() {
+        for (key, ceiling) in [
+            ("pids", &snapshot.limits.pids),
+            ("mem", &snapshot.limits.mem),
+            ("swap", &snapshot.limits.swap),
+            ("cpu", &snapshot.limits.cpu),
+        ] {
+            if ceiling.is_some() {
+                audit.record_limit_unapplied(key, &reason);
+            }
         }
+    }
 
+    let inputs = DiscoveryInputs {
+        bwrap_path,
+        deadline,
+        snapshot: &snapshot,
+        workspace: &plan.workspace,
+        launcher_argv: &planned.launcher_argv,
+        filter_digest: &planned.filter_digest,
+        scan: &planned.scan,
+        observe_on,
+    };
+    let discovered = match discover(&mut started, &mut launcher_error, &inputs) {
+        Ok(discovered) => discovered,
+        Err(Refused { error, init }) => {
+            return Err(started.refuse(error, init.as_ref(), &mut audit, observe_on));
+        }
+    };
+    let Discovered {
+        init,
+        launcher,
+        launcher_fd,
+        ns_ids,
+        seccomp_filters,
+        backend_version,
+        storage,
+        applied,
+    } = discovered;
+    // Audit 2026-10-08 M2: storage and inode ceilings expose occupancy, not
+    // refusal counters — their hit evidence is positive-only saturation
+    // sampling (§11.4), so the `limits` class starts degraded with a null
+    // count and names its gap.
+    if storage
+        .as_ref()
+        .is_some_and(|storage| storage.limits().iter().any(|limit| limit.hit.is_none()))
+    {
+        audit.record_limit_evidence_missing("storage_hit_evidence_positive_only");
+    }
+    if let Some(leaf) = started.cgroup.as_mut()
+        && let Err(err) = leaf
+            .verify_member(launcher.pid)
+            .and_then(|()| leaf.verify_member(started.bwrap_pid))
+            .and_then(|()| leaf.verify_member(init.pid))
+            .and_then(|()| leaf.arm())
+    {
+        // Placement can have succeeded before read-back failed. Never
+        // discard that leaf and claim the target has no resource boundary.
+        let refusal = preparing(
+            ErrorCode::MissingCapability,
+            format!("target cgroup placement failed: {err}"),
+        );
+        return Err(started.refuse(refusal, Some(&init), &mut audit, observe_on));
+    }
+    let trace_data = planned
+        .trace_data
+        .unwrap_or(super::tracer::filter::NARROWING_TRACE_DATA);
+    let observer_plan = observe_on.then(super::observed::ObserverPlan::from_env);
+    let tracer = match observer_plan.as_ref() {
+        Some(observer) => match attach_observer(
+            observer,
+            &snapshot,
+            trace_data,
+            launcher.pid,
+            &planned.target_images,
+        ) {
+            Ok(tracer) => Some(tracer),
+            Err(refusal) => {
+                return Err(started.refuse(refusal, Some(&init), &mut audit, observe_on));
+            }
+        },
+        None => None,
+    };
+    let state = RunState::new(Launched {
+        launcher,
+        target_images: std::mem::take(&mut planned.target_images),
+        release,
+        error: launcher_error,
+        audit,
+        observe_on,
+        tracer,
+        applied,
+    });
+    let boundary = Boundary {
+        started,
+        init,
+        launcher_fd,
+        snapshot,
+        ns_ids,
+        seccomp_filters,
+        backend_version,
+        storage,
+        hard_links_denied: planned.hard_links_denied,
+        resolv_sanitization: planned.resolv_sanitization,
+        observer_plan,
+        trace_data,
+        bwrap_status: None,
+        storage_lost_live: false,
+    };
+    Ok(Run::new(state, boundary))
+}
+
+/// The scratch directory the child sees as /tmp. A managed one is
+/// supervisor state and gets the private identity; an operator's
+/// `--scratch` is the operator's own directory (resolved and checked against
+/// the state root at resolving), whose mode is theirs.
+fn scratch_directory(snapshot: &PolicySnapshot, attempt_dir: &Path) -> Result<PathBuf, JailError> {
+    match &snapshot.roots.scratch {
+        ScratchRoot::Managed => {
+            let scratch = attempt_dir.join("scratch");
+            crate::state::create_private_dir(&scratch)?;
+            Ok(scratch)
+        }
+        ScratchRoot::Host { path } => {
+            let scratch = PathBuf::from(OsString::from_vec(path.as_bytes().to_vec()));
+            ensure_dir(&scratch)?;
+            Ok(scratch)
+        }
+    }
+}
+
+/// The attempt's execution cgroup, or why there is none when every ceiling
+/// that needs one is preferred: those then run unenforced, and the record
+/// says why (§6.4), in the native details and a wrapper note.
+///
+/// # Errors
+/// A failed registration, or no leaf for a required ceiling.
+fn execution_cgroup(
+    snapshot: &PolicySnapshot,
+    attempt_dir: &Path,
+) -> Result<(Option<ExecutionCgroup>, Option<String>), JailError> {
+    let required = [
+        &snapshot.limits.pids,
+        &snapshot.limits.mem,
+        &snapshot.limits.swap,
+        &snapshot.limits.cpu,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|limit| limit.required);
+    // N7: registered in jail state before `mkdir` and before anything is
+    // placed in it; a failed registration refuses (S5).
+    match ExecutionCgroup::create_for_attempt(&snapshot.limits, attempt_dir)? {
+        Ok(leaf) => Ok((Some(leaf), None)),
+        Err(err) if required => Err(preparing(
+            ErrorCode::MissingCapability,
+            format!("required execution cgroup could not be configured: {err}"),
+        )),
+        Err(err) => Ok((None, Some(err.to_string()))),
+    }
+}
+
+/// The mount plan and everything decided with it, before any descriptor is
+/// handed over.
+struct Planned {
+    bplan: BwrapPlan,
+    rendered: Rendered,
+    scan: jfs::ProtectedScan,
+    /// Held until the handoff verification just before the spawn.
+    pins: Vec<jfs::PinnedPath>,
+    /// The descriptors bubblewrap binds from, at their numbers.
+    pinned_fds: Vec<(OwnedFd, RawFd)>,
+    /// Until the spawn takes them, dropping the set removes every
+    /// placeholder it made in the operator's workspace.
+    placeholders: PlaceholderSet,
+    staged: StagedMounts,
+    filter: Program,
+    filter_digest: String,
+    /// Whether the installed baseline denies `link` and `linkat`, read from
+    /// the program itself; the storage ceiling's evidence states it.
+    hard_links_denied: bool,
+    /// Audit 2026-09-25-2, S14: the narrowing filter's per-attempt
+    /// `SECCOMP_RET_DATA`, with observation on; shared only with the
+    /// launcher (through the trace-data pipe) and the tracer.
+    trace_data: Option<u16>,
+    /// The launcher's argv, by which discovery finds it.
+    launcher_argv: Vec<Vec<u8>>,
+    /// The paths the launcher will try to `execve`, derived from the same
+    /// program name and `PATH` the launcher itself uses.
+    target_images: Vec<Vec<u8>>,
+    resolv_sanitization: &'static str,
+    agent: Option<AgentNet>,
+}
+
+impl Planned {
+    /// The plan of a contained snapshot, made concrete for this attempt:
+    /// grants, staged hand-offs, the sanitized resolver, pinned sources and
+    /// placeholders, the installed filter and the launcher's command line.
+    fn new(
+        snapshot: &PolicySnapshot,
+        plan: &PreparedPlan,
+        sinks: &Sinks,
+        bwrap_path: &Path,
+        exe: &Path,
+        scratch: &Path,
+        observe_on: bool,
+    ) -> Result<Planned, JailError> {
         // Protected segments. A bound reached is a refusal, never a shorter
         // answer (§9.1). The walk's names are the snapshot's own segments:
         // every contained baseline carries exactly its literals (`tool` the
@@ -361,86 +871,27 @@ impl Boundary {
         names.dedup();
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut bplan = plan_for(
-            &snapshot,
+            snapshot,
             &PlanPaths {
                 bwrap: bwrap_path,
                 workspace: &plan.workspace,
-                scratch: &scratch,
-                jail_exe: &exe,
+                scratch,
+                jail_exe: exe,
                 proxy_dir: plan
                     .proxy
                     .as_ref()
                     .map(|handoff| handoff.host_path.as_path()),
             },
         )?;
-        let mut agent = if snapshot.profile == ProfileName::Agent {
-            let Some(handoff) = plan.proxy.as_ref() else {
-                return Err(preparing(
-                    ErrorCode::MissingCapability,
-                    "the `agent` proxy could not be established: no proxy directory was prepared",
-                ));
-            };
-            let agent = super::agent::AgentNet::prepare(
-                &plan.attempt_id,
-                sinks.trace.clone(),
-                &snapshot,
-                handoff,
-                &exe,
-                bwrap_path,
-            )?;
-            Some(agent)
-        } else {
-            None
-        };
+        let mut agent = agent_network(snapshot, plan, sinks, exe, bwrap_path)?;
         if let Some(handoff) = &plan.launch
             && !handoff.vault.is_empty()
         {
-            use std::os::fd::AsFd as _;
-            let vault_io = |e| {
-                preparing(
-                    ErrorCode::CredentialUnavailable,
-                    format!("vault public CA cannot be staged: {e}"),
-                )
-            };
-            let vault = std::sync::Arc::new(
-                crate::vault::Vault::new(&plan.attempt_id, handoff.vault.clone())
-                    .map_err(|e| preparing(ErrorCode::CredentialUnavailable, e))?,
-            );
-            let vendor = handoff
-                .vendor_state
-                .as_ref()
-                .ok_or_else(|| preparing(ErrorCode::InternalError, "vault has no private state"))?;
-            let dir = crate::state::anchored::Dir::from_owned(
-                vendor.fd.as_fd().try_clone_to_owned().map_err(vault_io)?,
-            );
-            let name =
-                crate::state::anchored::Name::new(b".ouro-vault-ca.pem").map_err(vault_io)?;
-            let mut cert = dir.create_file_at(&name, 0o600).map_err(vault_io)?;
-            use std::io::Write as _;
-            cert.write_all(vault.ca_pem().as_bytes())
-                .map_err(vault_io)?;
-            let destination = PathBuf::from("/run/ouro/vault-ca.pem");
-            bplan.extra_ro_binds.push((
-                vendor.host_path.join(".ouro-vault-ca.pem"),
-                destination.clone(),
-            ));
-            for (name, value) in vault.environment() {
-                bplan.env.push((name.into(), value.into()));
-            }
-            for name in ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"] {
-                bplan.env.retain(|(key, _)| key != name);
-                bplan
-                    .env
-                    .push((name.into(), destination.clone().into_os_string()));
-            }
-            agent
-                .as_mut()
-                .ok_or_else(|| preparing(ErrorCode::InvalidConfig, "vault requires agent network"))?
-                .configure_vault(vault);
+            stage_vault(&mut bplan, agent.as_mut(), &plan.attempt_id, handoff)?;
         }
-        // The staged vendor state and bind_ro sources, bound
-        // by the descriptors staging examined (§9.1, §12).
-        let staged = staged_mounts(&snapshot, plan.launch.as_ref())?;
+        // The staged vendor state and bind_ro sources, bound by the
+        // descriptors staging examined (§9.1, §12).
+        let staged = staged_mounts(snapshot, plan.launch.as_ref())?;
         if staged.vendor.is_some() {
             bplan.vendor_state = plan
                 .launch
@@ -459,100 +910,7 @@ impl Boundary {
                 destination: destination.clone(),
             })
             .collect();
-
-        // Operator grants are enforced, not merely recorded (I02, north-star
-        // §4.2): read-only grants become additional ro-binds at their
-        // resolved paths, host-rooted writable grants become binds, and
-        // denied paths are masked with a sealed directory or file. A writable
-        // grant inside the writable workspace or the scratch is covered by
-        // their base binds already; a read-only grant there is layered over
-        // them.
-        for reference in &snapshot.filesystem.read_write {
-            if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
-                // Issue draft 15: an allowlisted device node (the NVIDIA
-                // class) binds individually with `--dev-bind`, never as a
-                // devtmpfs surface.
-                if is_allowed_device_node(&host) {
-                    let destination = resolve_path_ref(reference, &plan.workspace)?;
-                    bplan
-                        .extra_dev_binds
-                        .push((host, PathBuf::from(destination)));
-                    continue;
-                }
-                if (bplan.workspace_access == bwrap::WorkspaceAccess::Writable
-                    && host.starts_with(&plan.workspace))
-                    || host.starts_with(&scratch)
-                {
-                    // Inside a base writable bind already; layering an extra
-                    // bind of the same content would add nothing.
-                    continue;
-                }
-                let destination = resolve_path_ref(reference, &plan.workspace)?;
-                bplan
-                    .extra_rw_binds
-                    .push((host, PathBuf::from(destination)));
-            }
-        }
-        for reference in &snapshot.filesystem.read_only {
-            if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
-                // The runtime plan already renders merged-/usr aliases as
-                // symlinks and pins their real roots. Do not reopen /bin or
-                // /lib as an operator bind (or mount over those aliases).
-                // Baseline runtime candidates are optional distribution
-                // paths: ARM64 Debian, for example, has /lib but no /lib64.
-                // BwrapPlan already discovers and records the roots that
-                // exist. Do not turn an absent default into a required bind.
-                // Errors other than absence still reach pinning and refuse.
-                if absent_runtime_candidate(reference, &host)
-                    || bplan.etc_paths.contains(&host)
-                    || bplan.roots.iter().any(|root| match root {
-                        jfs::RootSpec::RoBind(path) | jfs::RootSpec::Symlink { path, .. } => {
-                            path == &host
-                        }
-                    })
-                {
-                    continue;
-                }
-                if is_allowed_device_node(&host) {
-                    return Err(error(
-                        ErrorCode::InvalidConfig,
-                        ErrorStage::Preparing,
-                        Remediation::Configuration,
-                        format!(
-                            "the device grant {} binds only read-write (--rw): bubblewrap has \
-                             no read-only device bind",
-                            host.display()
-                        ),
-                    ));
-                }
-                let destination = resolve_path_ref(reference, &plan.workspace)?;
-                bplan
-                    .extra_ro_binds
-                    .push((host, PathBuf::from(destination)));
-            }
-        }
-        for reference in &snapshot.filesystem.deny_read {
-            let destination = resolve_path_ref(reference, &plan.workspace)?;
-            let path = PathBuf::from(destination);
-            // Classification changes only the overlay's type, never grants
-            // access to the denied object. A type swap before mounting fails
-            // setup rather than releasing an unmasked target.
-            let host = host_path_of(reference, &plan.workspace, &scratch)?;
-            let mask = match std::fs::metadata(&host) {
-                Ok(metadata) if !metadata.is_dir() => bwrap::Mask::File(path),
-                Ok(_) => bwrap::Mask::Directory(path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    bwrap::Mask::Directory(path)
-                }
-                Err(error) => {
-                    return Err(preparing(
-                        ErrorCode::BackendUnavailable,
-                        format!("cannot classify denied path {}: {error}", host.display()),
-                    ));
-                }
-            };
-            bplan.masked.push(mask);
-        }
+        bind_grants(&mut bplan, snapshot, &plan.workspace, scratch)?;
 
         // Security 2026-09-25 (audit F5): bind a sanitized resolver view.
         // The host's `/etc/resolv.conf` can carry the operator's search
@@ -561,23 +919,7 @@ impl Boundary {
         // the copy keeps the nameservers and drops `search`/`domain` lines.
         let (resolv_source, resolv_sanitization) = stage_sanitized_resolv_conf(&plan.attempt_dir)?;
         bplan.resolv_source = Some(resolv_source);
-
-        // §9.1: an operator grant may not expose host /proc, /sys or
-        // cgroupfs. Checked here, before any mount, on the resolved source by
-        // filesystem type and mount topology (never by spelling), so it
-        // refuses before exec. The baseline runtime roots are on the root
-        // filesystem and pass; the child's private /proc and /dev are made by
-        // bubblewrap, not bound from these sources.
-        refuse_pseudo_fs_grants(
-            &[(plan.workspace.clone(), plan.workspace.clone())],
-            "workspace",
-        )?;
-        if let crate::policy::ScratchRoot::Host { path } = &plan.request.snapshot.roots.scratch {
-            let source = PathBuf::from(std::ffi::OsString::from_vec(path.as_bytes().to_vec()));
-            refuse_pseudo_fs_grants(&[(source.clone(), source)], "scratch")?;
-        }
-        refuse_pseudo_fs_grants(&bplan.extra_ro_binds, "filesystem.read_only")?;
-        refuse_pseudo_fs_grants(&bplan.extra_rw_binds, "filesystem.read_write")?;
+        refuse_pseudo_fs_sources(snapshot, &plan.workspace, &bplan)?;
 
         // Until the boundary owns them, every refusal drops `placeholders`,
         // which removes the directories it made in the operator's workspace.
@@ -587,73 +929,21 @@ impl Boundary {
             &name_refs,
             snapshot.filesystem.protected_coverage,
         )?;
-        // Credential views take the slots after the pins
+        // Credential views take the slots after the pins.
         let credential_base = PINNED_FD_BASE + pinned_fds.len() as RawFd;
         for (index, view) in bplan.credential_binds.iter_mut().enumerate() {
             view.fd = Some(credential_base + index as RawFd);
         }
 
-        // A storage ceiling rests on a filter that denies new mounts, which
-        // the `NamespaceInner` agent variant permits.
-        if bplan.bounded_storage
-            && agent
-                .as_ref()
-                .is_some_and(|agent| agent.variant() == seccomp::AgentVariant::NamespaceInner)
-        {
-            return Err(preparing(
-                ErrorCode::MissingCapability,
-                "storage ceilings require a profile that cannot create new mounts",
-            ));
-        }
-        // `agent` installs the baseline its network built once, in the variant
-        // the measured nested-namespace capability selected (§9.2), so the
-        // digest its receipt detail names is the digest of what runs.
-        let filter = match agent.as_ref() {
-            Some(agent) => agent.baseline().clone(),
-            None => seccomp::tool_baseline_with_storage(bplan.bounded_storage).map_err(|err| {
-                preparing(
-                    ErrorCode::BackendUnavailable,
-                    format!("the syscall filter could not be built: {err}"),
-                )
-            })?,
-        };
+        let (filter, hard_links_denied) = installed_filter(&bplan, agent.as_ref())?;
         let filter_digest = filter.digest();
-        // A storage ceiling rests on the hard-link denials (a link could
-        // charge a foreign inode to the bounded tree), and its receipt
-        // evidence states them. Both read the program that is installed, so
-        // neither can claim a rule it lacks.
-        let variant = agent.as_ref().map(super::agent::AgentNet::variant);
-        let hard_links_denied = match installed_hard_link_rule(&filter, variant) {
-            Ok(denied) if denied == bplan.bounded_storage => denied,
-            Ok(denied) => {
-                return Err(preparing(
-                    ErrorCode::InternalError,
-                    format!(
-                        "the syscall filter {} hard links while a storage ceiling is {}",
-                        if denied { "denies" } else { "permits" },
-                        if denied { "not requested" } else { "requested" }
-                    ),
-                ));
-            }
-            Err(reason) => {
-                return Err(preparing(
-                    ErrorCode::InternalError,
-                    format!("the syscall filter's hard-link rule cannot be read: {reason}"),
-                ));
-            }
-        };
-
         let target: Vec<OsString> = plan
             .argv
             .iter()
             .map(|bytes| OsString::from_vec(bytes.clone()))
             .collect();
-        // The agent launcher mediates and starts the bridge
-        let trace_data = if observe_on {
-            Some(random_trace_data())
-        } else {
-            None
-        };
+        let trace_data = observe_on.then(random_trace_data);
+        // The agent launcher mediates and starts the bridge.
         bplan.inner = super::launch::LaunchArgs {
             release_fd: RELEASE_FD,
             error_fd: ERROR_FD,
@@ -710,100 +1000,35 @@ impl Boundary {
                 err.to_string(),
             )
         })?;
+        Ok(Planned {
+            bplan,
+            rendered,
+            scan,
+            pins,
+            pinned_fds,
+            placeholders,
+            staged,
+            filter,
+            filter_digest,
+            hard_links_denied,
+            trace_data,
+            launcher_argv,
+            target_images,
+            resolv_sanitization,
+            agent,
+        })
+    }
 
-        // Room for the credential views after the pins
-        let mut fds = FdMap::with_target_limit(
-            PINNED_FD_BASE + pinned_fds.len() as RawFd + staged.credentials.len() as RawFd,
-        );
-        // §8.2: a wait that the preparation budget ended (the watcher's
-        // readiness, the arguments' write) refuses as the budget's timeout,
-        // with remediation `retry`, not as a host failure of the step that
-        // happened to be waiting.
-        let io = |err: std::io::Error| {
-            if err.kind() == std::io::ErrorKind::TimedOut {
-                return prepare_timeout(&format!(
-                    "preparation did not complete within its budget: {err}"
-                ));
-            }
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the boundary's channels could not be created: {err}"),
-            )
-        };
-        fds.add(seccomp::program_pipe(&filter).map_err(io)?, SECCOMP_FD)
-            .map_err(io)?;
-        let (release_r, release_w) = exec::pipe().map_err(io)?;
-        let (error_r, error_w) = exec::pipe().map_err(io)?;
-        let (status_r, status_w) = exec::pipe().map_err(io)?;
-        let (start_r, start_w) = exec::pipe().map_err(io)?;
-        fds.add(start_r, super::watch::START_FD).map_err(io)?;
-        fds.add(
-            backend_pin.borrow_fd().try_clone_to_owned().map_err(io)?,
-            super::watch::BACKEND_FD,
-        )
-        .map_err(io)?;
-        fds.add(release_r, RELEASE_FD).map_err(io)?;
-        fds.add(error_w, ERROR_FD).map_err(io)?;
-        // Audit 2026-09-25-2, S14: the narrowing data is already in the pipe
-        // before the spawn, so the launcher's blocking read always completes;
-        // the descriptor closes in the launcher and never reaches the target.
-        if let Some(data) = trace_data {
-            let (trace_r, trace_w) = exec::pipe().map_err(io)?;
-            // Two bytes always fit the pipe's capacity, so the write
-            // completes before any reader exists.
-            write_all(trace_w.as_raw_fd(), &super::sys::trace_data_bytes(data)).map_err(io)?;
-            fds.add(trace_r, TRACE_DATA_FD).map_err(io)?;
-        }
-        fds.add(status_w, STATUS_FD).map_err(io)?;
-        for (copy, target) in pinned_fds {
-            fds.add(copy, target).map_err(io)?;
-        }
-        // Hand the staged descriptors to bubblewrap
-        if let Some(vendor) = staged.vendor {
-            fds.add(vendor, VENDOR_STATE_FD).map_err(io)?;
-        }
-        // The proxy directory, bound read-only by descriptor
-        if let Some(agent) = agent.as_ref() {
-            fds.add(agent.dir_fd().map_err(io)?, super::agent::PROXY_DIR_FD)
-                .map_err(io)?;
-        }
-        for ((source, _), view) in staged.credentials.into_iter().zip(&bplan.credential_binds) {
-            let Some(target) = view.fd else {
-                return Err(preparing(
-                    ErrorCode::InternalError,
-                    "a credential view has no descriptor slot",
-                ));
-            };
-            fds.add(source, target).map_err(io)?;
-        }
-        // jail-v1 §2 I07 (every wait bounded): the `--args` payload can exceed
-        // the pipe's capacity, so it must be written while the reader exists.
-        // bwrap is spawned below first and blocks reading ARGS_FD; writing
-        // before the spawn deadlocked the supervisor on a full pipe with no
-        // reader. If bwrap dies before consuming the payload, the write fails
-        // with EPIPE instead of hanging. `exec::pipe` is close-on-exec on both
-        // ends, so the parent's write end never reaches bwrap and its EOF is
-        // seen as soon as this side closes.
-        let mut args_writer = None;
-        if rendered.args_payload.is_some() {
-            let (args_r, args_w) = exec::pipe().map_err(io)?;
-            fds.add(args_r, ARGS_FD).map_err(io)?;
-            args_writer = Some(args_w);
-        }
-        set_nonblocking(error_r.as_raw_fd()).map_err(io)?;
-        set_nonblocking(status_r.as_raw_fd()).map_err(io)?;
-
-        let arguments: Vec<OsString> = std::iter::once(OsString::from("__backend"))
-            .chain(rendered.argv.iter().cloned())
-            .collect();
-        // J5-B2 seam: give a test a deterministic window between pinning and
-        // the mount-handoff verification below to replace a pinned source, so
-        // the source-identity-swap refusal (F04) can be proved through the CLI.
+    /// §9.1 mount-handoff verification: the workspace and every pinned
+    /// protected segment must still resolve to the objects that were
+    /// scanned, and the backend must still be the pinned file, or the run
+    /// refuses rather than bind a replacement.
+    fn verify_before_spawn(&self, backend_pin: &jfs::PinnedPath) -> Result<(), JailError> {
+        // A test seam: a deterministic window between pinning and this
+        // verification, so the source-identity-swap refusal (F04) can be
+        // proved through the CLI.
         mount_swap_rendezvous();
-        // §9.1 mount-handoff verification: the workspace and every pinned
-        // protected segment must still resolve to the objects that were
-        // scanned, or the run refuses rather than bind a replacement.
-        for directory in &scan.directories {
+        for directory in &self.scan.directories {
             directory
                 .verify()
                 .map_err(|e| preparing(ErrorCode::MissingCapability, e.to_string()))?;
@@ -814,7 +1039,7 @@ impl Boundary {
                 format!("the pinned backend changed before spawn: {e}"),
             )
         })?;
-        for pin in &pins {
+        for pin in &self.pins {
             pin.verify().map_err(|err| {
                 preparing(
                     ErrorCode::BackendUnavailable,
@@ -822,812 +1047,1195 @@ impl Boundary {
                 )
             })?;
         }
-        // §8.3: stdio passes through without capture except regular files and sockets,
-        // which are relayed through supervisor-owned pipes (audit
-        // 2026-10-08 H1): the child gets a pipe end here and never the
-        // file, so no `/dev/stdin` reopen can reach the host mount. Every
-        // other descriptor the supervisor holds is closed on exec.
-        let mut stdio_relays = Vec::new();
-        for (fd, plan) in stdio_plans.into_iter().enumerate() {
-            if let StdioPlan::Relay { socket } = plan {
-                stdio_relays.push(StdioRelay::attach(
-                    i32::try_from(fd).unwrap_or(-1),
-                    fd == 0,
-                    socket,
-                    &mut fds,
-                )?);
-            }
-        }
-        let spawn_cgroup = cgroup
-            .as_ref()
-            .map(ExecutionCgroup::spawn_handle)
-            .transpose()
-            .map_err(io)?;
-        let child = exec::spawn_bootstrap(&exe, &arguments, &fds, spawn_cgroup.as_ref(), deadline)
-            .map_err(|err| {
-                // The exec handshake spends the same preparation budget.
-                if err.kind() == std::io::ErrorKind::TimedOut {
-                    return io(err);
-                }
-                preparing(
-                    ErrorCode::BackendUnavailable,
-                    format!(
-                        "the backend bootstrap ({}) could not be started: {err}",
-                        exe.display()
-                    ),
-                )
-            })?;
-        // Until the boundary owns it, every refusal below kills and reaps the
-        // backend, within a fresh tree budget (§8.1: a pre-exec failure
-        // refuses and leaves no orphan).
-        let child = exec::KillOnDrop::new(child);
-        let bootstrap_spawn = child.spawn();
-        // In particular close our duplicate of ARGS_FD before streaming: if
-        // the backend exits there must be no reader left to suppress EPIPE.
-        drop(fds);
-        let bwrap_pid = libc::pid_t::try_from(child.id()).map_err(|_| {
-            preparing(
-                ErrorCode::InternalError,
-                format!("the backend's pid {} does not fit a pid_t", child.id()),
-            )
-        })?;
-        // Taken while the backend is this process's unreaped child, so the
-        // descriptor names it; every later signal and exit check uses it.
-        let bwrap_fd = identity::pidfd_open(bwrap_pid).map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the backend's pidfd could not be opened: {err}"),
-            )
-        })?;
-        // Root the cgroup namespace in this attempt's leaf. Moving only the
-        // target after bubblewrap unshares exposes a /../../host-leaf path in
-        // /proc/self/cgroup. Direct creation still requires the same parent
-        // readback; the compatibility path moves the blocked bootstrap first.
-        if let Some(leaf) = &cgroup {
-            if child.created_in_cgroup() {
-                leaf.verify_member(bwrap_pid)
-            } else {
-                leaf.place(bwrap_pid)
-            }
-            .map_err(io)?;
-        }
-        let cgroup_kill = cgroup
-            .as_ref()
-            .map(ExecutionCgroup::kill_handle)
-            .transpose()
-            .map_err(io)?;
-        let watcher =
-            super::watch::Watcher::start(&exe, bwrap_pid, cgroup_kill, deadline).map_err(io)?;
-        write_all(start_w.as_raw_fd(), &[1]).map_err(io)?;
-        drop(start_w);
-        // The payload write happens with bwrap already blocked on ARGS_FD, so
-        // a payload larger than the pipe's capacity flows through instead of
-        // deadlocking. A failure here means bwrap died reading.
-        if let (Some(args_w), Some(payload)) =
-            (args_writer.as_ref(), rendered.args_payload.as_ref())
-        {
-            write_until(args_w.as_raw_fd(), payload, deadline).map_err(io)?;
-        }
-        drop(args_writer);
-
-        let workspace_path = plan.workspace.clone();
-        let mut boundary = Boundary {
-            audit: AuditWriter::new(
-                &plan.attempt_id,
-                sinks.trace.clone(),
-                plan.workspace.as_os_str().as_bytes(),
-                bwrap::SCRATCH_INSIDE_PATH.as_bytes(),
-            )
-            .with_learning(snapshot.observation.learning)
-            .with_roots(audit_named_roots(&bplan)),
-            snapshot,
-            workspace: workspace_path,
-            child: Some(child.hand_over()),
-            bootstrap_spawn,
-            bwrap_pid,
-            bwrap_fd,
-            init_pid: -1,
-            init_fd: None,
-            launcher: identity::ProcessIdentity {
-                pid: -1,
-                boot_id: String::new(),
-                start_time_ticks: 0,
-            },
-            launcher_fd: None,
-            launcher_argv,
-            target_images,
-            release: Some(release_w),
-            error: error_r,
-            error_bytes: Vec::new(),
-            error_eof: false,
-            status: StatusReader::new(status_r),
-            tracer: None,
-            tracer_summary: None,
-            placeholders: placeholders.hand_over(),
-            placeholder_outcomes: Vec::new(),
-            applied: Applied {
-                filesystem: None,
-                network: AppliedNetwork {
-                    mode: "pending".to_owned(),
-                    mechanism: None,
-                    allowed_hosts: Vec::new(),
-                    tls_only: Vec::new(),
-                },
-                syscalls: None,
-                limits: Vec::new(),
-                environment_names: Vec::new(),
-                removed_environment_names: Vec::new(),
-            },
-            backend_version: None,
-            resolv_sanitization,
-            observe_on,
-            observer_plan: observe_on.then(super::observed::ObserverPlan::from_env),
-            trace_data: trace_data.unwrap_or(super::tracer::filter::NARROWING_TRACE_DATA),
-            ns_ids: identity::NsIds::default(),
-            cgroup,
-            cgroup_lost: false,
-            cgroup_unavailable,
-            storage: None,
-            hard_links_denied,
-            stdio_relays,
-            watcher,
-            agent: agent.take(),
-            killing: std::sync::atomic::AtomicBool::new(false),
-            seccomp_filters: None,
-        };
-        // The proxy starts only now that the backend exists,
-        // so the descriptor limit it raises never reaches the child.
-        if let Some(agent) = boundary.agent.as_mut()
-            && let Err(err) = agent.start_proxy()
-        {
-            return Err(boundary.refuse(err));
-        }
-        if let Some(reason) = boundary.cgroup_unavailable.clone() {
-            for (key, ceiling) in [
-                ("pids", &boundary.snapshot.limits.pids),
-                ("mem", &boundary.snapshot.limits.mem),
-                ("swap", &boundary.snapshot.limits.swap),
-                ("cpu", &boundary.snapshot.limits.cpu),
-            ] {
-                if ceiling.is_some() {
-                    boundary.audit.record_limit_unapplied(key, &reason);
-                }
-            }
-        }
-
-        if let Err(err) = boundary.discover(bwrap_path, deadline, &filter_digest, &scan) {
-            return Err(boundary.refuse(err));
-        }
-        // Audit 2026-10-08 M2: storage and inode ceilings expose occupancy,
-        // not refusal counters — their hit evidence is positive-only
-        // saturation sampling (§11.4), so the `limits` class starts degraded
-        // with a null count and names its gap.
-        if boundary
-            .storage
-            .as_ref()
-            .is_some_and(|storage| storage.limits().iter().any(|limit| limit.hit.is_none()))
-        {
-            boundary
-                .audit
-                .record_limit_evidence_missing("storage_hit_evidence_positive_only");
-        }
-        if let Some(leaf) = boundary.cgroup.as_mut()
-            && let Err(err) = leaf
-                .verify_member(boundary.launcher.pid)
-                .and_then(|()| leaf.verify_member(boundary.bwrap_pid))
-                .and_then(|()| leaf.verify_member(boundary.init_pid))
-                .and_then(|()| leaf.arm())
-        {
-            // Placement can have succeeded before read-back failed. Never
-            // discard that leaf and claim the target has no resource boundary.
-            return Err(boundary.refuse(preparing(
-                ErrorCode::MissingCapability,
-                format!("target cgroup placement failed: {err}"),
-            )));
-        }
-        if let Some(plan) = boundary.observer_plan.as_ref() {
-            // §13.1: gap intervals count from supervisor start on the same
-            // CLOCK_BOOTTIME base as every other monotonic_ns. §11.4: the
-            // bounds are the plan's, which the receipt records.
-            let mut config = plan.tracer_config(clock::mark_supervisor_start());
-            // Audit 2026-09-25-2, S14: the tracer expects exactly the data
-            // this attempt's narrowing filter carries.
-            config.trace_data = boundary.trace_data;
-            config.learning = boundary.snapshot.observation.learning;
-            // Resolution validated these rules; rules that no longer
-            // compile are refused, never matched in part.
-            config.commands = match boundary.snapshot.commands.compile() {
-                Ok(filter) => filter,
-                Err(reason) => {
-                    return Err(boundary.refuse(
-                        error(
-                            ErrorCode::InvalidConfig,
-                            ErrorStage::Preparing,
-                            Remediation::Configuration,
-                            format!("the command rules do not compile: {reason}"),
-                        )
-                        .with_key_path("jail.commands"),
-                    ));
-                }
-            };
-            config.target = Some((boundary.launcher.pid, boundary.target_images.clone()));
-            match Tracer::attach(boundary.launcher.pid, config) {
-                Ok(tracer) => boundary.tracer = Some(tracer),
-                Err(err) => {
-                    // §11.4: an observer that cannot attach refuses before
-                    // exec, whatever the evidence mode says.
-                    return Err(boundary.refuse(error(
-                        ErrorCode::ObserverUnavailable,
-                        ErrorStage::Preparing,
-                        Remediation::HostSetup,
-                        format!("the closed-set observer could not attach: {err}"),
-                    )));
-                }
-            }
-        }
-        Ok(boundary)
-    }
-
-    /// Finds the namespace init and the launcher, and reads back what the
-    /// boundary actually applied.
-    pub(super) fn discover(
-        &mut self,
-        bwrap_path: &Path,
-        deadline: clock::Deadline,
-        filter_digest: &str,
-        scan: &jfs::ProtectedScan,
-    ) -> Result<(), JailError> {
-        // bubblewrap reports the namespace init's host pid as soon as the
-        // namespaces exist. Waiting on that document is the synchronisation
-        // point; nothing here guesses a delay.
-        let init_pid = loop {
-            self.status.pump();
-            if let Some(pid) = self.status.parsed().child_pid {
-                break pid;
-            }
-            if self.status.eof || self.exited() {
-                let diagnostic = self.diagnostic().trim().to_owned();
-                let detail = if diagnostic.is_empty() {
-                    // bwrap's own message (for example "Unknown option")
-                    // went to this console's stderr, which the supervisor
-                    // passes through untouched; the error must still say
-                    // something useful instead of ending on a colon.
-                    let status = self
-                        .child
-                        .as_mut()
-                        .and_then(|child| child.try_wait().ok().flatten())
-                        .and_then(|wait| wait.code().map(|code| format!("exit {code}")))
-                        .unwrap_or_else(|| "no wait status".to_owned());
-                    format!(
-                        "bubblewrap exited during setup ({status}) without a status \
-                         document; its own stderr on this console names the cause"
-                    )
-                } else {
-                    format!("bubblewrap exited during setup: {diagnostic}")
-                };
-                return Err(preparing(ErrorCode::BackendUnavailable, detail));
-            }
-            if deadline.expired() {
-                return Err(prepare_timeout(
-                    "bubblewrap did not report a namespace init",
-                ));
-            }
-            nap();
-        };
-        self.init_pid = init_pid;
-        // Taken now, while the kernel has just named this pid as the
-        // namespace init: every later signal and liveness check goes through
-        // the descriptor, so neither can reach a process that merely
-        // inherited the number. Without it the tree's death could not be
-        // verified, so its absence refuses.
-        self.init_fd = Some(identity::pidfd_open(init_pid).map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the namespace init's pidfd could not be opened: {err}"),
-            )
-        })?);
-
-        // The launcher is the init's child whose argv is the one we asked for.
-        let launcher = loop {
-            if let Some(pid) = super::tracer::children(init_pid)
-                .into_iter()
-                .find(|pid| super::tracer::cmdline(*pid).as_ref() == Some(&self.launcher_argv))
-            {
-                break pid;
-            }
-            if deadline.expired() {
-                return Err(prepare_timeout("the inside launcher never appeared"));
-            }
-            if self.exited() {
-                return Err(self.launcher_setup_failure());
-            }
-            nap();
-        };
-
-        // Wait until it is blocked in read(2) on its release descriptor,
-        // which is what the observer's attach contract requires.
-        // `/proc/<pid>/syscall` names the call and its first argument, so
-        // this is a read-back and not an assumption. The descriptor is part
-        // of the check: the launcher reads its trace-data descriptor before
-        // it installs the narrowing filter, and that read is not the gate.
-        loop {
-            if matches!(identity::blocked_in_read(launcher, RELEASE_FD), Ok(true)) {
-                break;
-            }
-            if deadline.expired() {
-                return Err(prepare_timeout(
-                    "the inside launcher did not block on its release pipe",
-                ));
-            }
-            if self.exited() {
-                return Err(self.launcher_setup_failure());
-            }
-            nap();
-        }
-
-        self.launcher = identity::ProcessIdentity::capture(launcher).map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the launcher's identity could not be recorded: {err}"),
-            )
-        })?;
-        // The cooperative stop and the `agent` mediation hand-off go through
-        // this descriptor; without it neither could, so its absence refuses.
-        let launcher_fd = identity::pidfd_open(launcher).map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the launcher's pidfd could not be opened: {err}"),
-            )
-        })?;
-        // bubblewrap reports the namespace ids it created; `/proc` says which
-        // namespaces the launcher is actually in. Recording the first without
-        // checking the second would be taking the backend's word for the
-        // boundary, so both are read and they must agree.
-        self.ns_ids = identity::ns_ids(launcher);
-        // Every namespace the plan asked for has to be one the launcher is
-        // actually in, and a different one from this process's.
-        // SAFETY: getpid takes no arguments and cannot fail.
-        let own = identity::ns_ids(unsafe { libc::getpid() });
-        for (name, inside, outside) in [
-            ("pid", self.ns_ids.pid, own.pid),
-            ("mnt", self.ns_ids.mnt, own.mnt),
-            ("net", self.ns_ids.net, own.net),
-            ("user", self.ns_ids.user, own.user),
-            ("cgroup", self.ns_ids.cgroup, own.cgroup),
-        ] {
-            match (inside, outside) {
-                (Some(inside), Some(outside)) if inside == outside => {
-                    return Err(preparing(
-                        ErrorCode::BackendUnavailable,
-                        format!("the launcher shares this process's {name} namespace"),
-                    ));
-                }
-                (None, _) => {
-                    return Err(preparing(
-                        ErrorCode::BackendUnavailable,
-                        format!("the launcher's {name} namespace could not be read"),
-                    ));
-                }
-                _ => {}
-            }
-        }
-        for (key, seen) in [
-            ("pid-namespace", self.ns_ids.pid),
-            ("mnt-namespace", self.ns_ids.mnt),
-            ("net-namespace", self.ns_ids.net),
-        ] {
-            let reported = self.status.namespace(key);
-            if let (Some(reported), Some(seen)) = (reported, seen)
-                && reported != seen
-            {
-                return Err(preparing(
-                    ErrorCode::BackendUnavailable,
-                    format!("the backend reports {key} {reported} but the launcher is in {seen}"),
-                ));
-            }
-        }
-
-        // Read back the boundary rather than trusting the flags we passed.
-        // The launcher is blocked: these facts come from one kernel status
-        // snapshot rather than reopening the same file for every field.
-        let privilege = identity::Privilege::read(launcher).map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the launcher's privilege cannot be read back: {err}"),
-            )
-        })?;
-        if !privilege.no_new_privs {
-            return Err(preparing(
-                ErrorCode::BackendUnavailable,
-                "no_new_privs is not set inside the boundary",
-            ));
-        }
-        if privilege.cap_eff != 0 {
-            return Err(preparing(
-                ErrorCode::BackendUnavailable,
-                format!(
-                    "the boundary retains capabilities: CapEff {:016x}",
-                    privilege.cap_eff
-                ),
-            ));
-        }
-        if privilege.seccomp.as_deref() != Some("2") {
-            return Err(preparing(
-                ErrorCode::BackendUnavailable,
-                format!(
-                    "the syscall filter is not in force: Seccomp {:?}",
-                    privilege.seccomp
-                ),
-            ));
-        }
-        // The J2 gap — `Seccomp: 2` says a filter is in
-        // force, not that every filter this boundary installs is: a missing
-        // narrowing or mediation filter leaves the mode at 2. The count is
-        // read back and must be exactly the number installed.
-        let expected =
-            super::agent::expected_launcher_filters(self.agent.is_some(), self.observe_on);
-        self.seccomp_filters = Some(
-            super::agent::verify_filter_count(
-                privilege.seccomp_filters.as_deref().unwrap_or_default(),
-                expected,
-            )
-            .map_err(|mut error| {
-                error.message = format!("the launcher: {}", error.message);
-                error
-            })?,
-        );
-        let nspid = super::tracer::nspid(launcher).unwrap_or_default();
-        if nspid.len() < 2 {
-            return Err(preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the launcher is not inside a pid namespace: NSpid {nspid:?}"),
-            ));
-        }
-
-        // While the launcher is blocked, take its mediation
-        // listener and sock_diag socket, start the mediator, and read back
-        // the bridge it started (§10). Either one missing refuses, naming it.
-        if let Some(agent) = self.agent.as_mut() {
-            agent.take_mediation(std::os::fd::AsFd::as_fd(&launcher_fd))?;
-            let bridge = agent.discover_bridge(self.init_pid, self.ns_ids, &deadline)?;
-            if let Some(leaf) = self.cgroup.as_ref() {
-                // Charged to the attempt (§9.3): the bridge is in the leaf.
-                leaf.verify_member(bridge).map_err(|err| {
-                    preparing(
-                        ErrorCode::MissingCapability,
-                        format!(
-                            "the `agent` bridge could not be established: it is not in the \
-                             attempt's cgroup: {err}"
-                        ),
-                    )
-                })?;
-            }
-        }
-        self.launcher_fd = Some(launcher_fd);
-
-        // Keep this fresh readback: a process can create a new platform after
-        // a backend upgrade, while its minimum-version decision is cached.
-        self.backend_version = bwrap::bwrap_version(bwrap_path, deadline)
-            .ok()
-            .map(|version| version.raw);
-
-        if super::storage::requested(&self.snapshot.limits) {
-            self.storage = Some(
-                super::storage::Storage::admit(launcher, &self.snapshot.limits, deadline).map_err(
-                    |err| {
-                        preparing(
-                            ErrorCode::MissingCapability,
-                            format!("storage ceiling unavailable: {err}"),
-                        )
-                    },
-                )?,
-            );
-        }
-        self.applied = self.read_applied(launcher, filter_digest, scan)?;
         Ok(())
     }
+}
 
-    // Why the launcher ended before it blocked
-    /// The refusal for a backend that ended before the launcher blocked.
-    /// The agent launcher's own setup failures carry their exit status and
-    /// errno, so the refusal names the mechanism that could not be
-    /// established instead of a generic backend failure.
-    pub(super) fn launcher_setup_failure(&mut self) -> JailError {
-        self.status.pump();
-        let (mut errno_bytes, mut eof) = (Vec::new(), false);
-        shared::drain_error_pipe(&self.error, &mut errno_bytes, &mut eof);
-        launcher_failure(
-            self.status.parsed().exit_code,
-            &errno_bytes,
-            self.diagnostic().trim(),
-        )
+/// The `agent` network, prepared from the attempt's proxy directory; `None`
+/// for every other profile.
+///
+/// # Errors
+/// `agent` without a prepared proxy directory, or the network's own
+/// refusal.
+fn agent_network(
+    snapshot: &PolicySnapshot,
+    plan: &PreparedPlan,
+    sinks: &Sinks,
+    exe: &Path,
+    bwrap_path: &Path,
+) -> Result<Option<AgentNet>, JailError> {
+    if snapshot.profile != ProfileName::Agent {
+        return Ok(None);
     }
-
-    /// The `applied` group, read back from the boundary that exists. A
-    /// read-back that fails refuses: an empty mount table or environment in
-    /// the receipt would be a claim about the child's view nothing measured.
-    pub(super) fn read_applied(
-        &self,
-        launcher: libc::pid_t,
-        filter_digest: &str,
-        scan: &jfs::ProtectedScan,
-    ) -> Result<Applied, JailError> {
-        let mounts = read_mount_table(launcher).map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the launcher's mount table cannot be read back: {err}"),
-            )
-        })?;
-        let environment_names = read_environment_names(launcher).map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the launcher's environment cannot be read back: {err}"),
-            )
-        })?;
-        let mut limits = Vec::new();
-        if let Some(storage) = &self.storage {
-            limits.extend(storage.limits());
-        }
-        limits.extend(shared::ceiling_rows(
-            &self.snapshot.limits,
-            self.cgroup.as_ref(),
+    let Some(handoff) = plan.proxy.as_ref() else {
+        return Err(preparing(
+            ErrorCode::MissingCapability,
+            "the `agent` proxy could not be established: no proxy directory was prepared",
         ));
-        let mut mounts = mounts;
-        // A protected name the walk refused to follow is authority this plan
-        // did not apply. The mount table is where §13.2 lists what the child's
-        // view is, and `hidden` is the mode the schema has for a path that is
-        // named and not granted, so each one appears there rather than being
-        // left out of the record entirely.
-        for name in skipped_protected_names(scan) {
-            let path = self.workspace_bytes_joined(&name);
-            if let Ok(native) = NativeString::from_bytes(path) {
-                mounts.push(AppliedMount {
-                    path: native,
-                    mode: "hidden".to_owned(),
-                });
+    };
+    AgentNet::prepare(
+        &plan.attempt_id,
+        sinks.trace.clone(),
+        snapshot,
+        handoff,
+        exe,
+        bwrap_path,
+    )
+    .map(Some)
+}
+
+/// Stages the vault's public CA in the vendor state, binds it read-only and
+/// points the CA variables at it, and hands the vault to the `agent` proxy.
+///
+/// # Errors
+/// A vault that cannot be built or staged, or no `agent` network to run it.
+fn stage_vault(
+    bplan: &mut BwrapPlan,
+    agent: Option<&mut AgentNet>,
+    attempt_id: &str,
+    handoff: &crate::credentials::LaunchHandoff,
+) -> Result<(), JailError> {
+    let vault_io = |e| {
+        preparing(
+            ErrorCode::CredentialUnavailable,
+            format!("vault public CA cannot be staged: {e}"),
+        )
+    };
+    let vault = std::sync::Arc::new(
+        crate::vault::Vault::new(attempt_id, handoff.vault.clone())
+            .map_err(|e| preparing(ErrorCode::CredentialUnavailable, e))?,
+    );
+    let vendor = handoff
+        .vendor_state
+        .as_ref()
+        .ok_or_else(|| preparing(ErrorCode::InternalError, "vault has no private state"))?;
+    let dir = crate::state::anchored::Dir::from_owned(
+        vendor.fd.as_fd().try_clone_to_owned().map_err(vault_io)?,
+    );
+    let name = crate::state::anchored::Name::new(b".ouro-vault-ca.pem").map_err(vault_io)?;
+    let mut cert = dir.create_file_at(&name, 0o600).map_err(vault_io)?;
+    std::io::Write::write_all(&mut cert, vault.ca_pem().as_bytes()).map_err(vault_io)?;
+    let destination = PathBuf::from("/run/ouro/vault-ca.pem");
+    bplan.extra_ro_binds.push((
+        vendor.host_path.join(".ouro-vault-ca.pem"),
+        destination.clone(),
+    ));
+    for (name, value) in vault.environment() {
+        bplan.env.push((name.into(), value.into()));
+    }
+    for name in ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE"] {
+        bplan.env.retain(|(key, _)| key != name);
+        bplan
+            .env
+            .push((name.into(), destination.clone().into_os_string()));
+    }
+    agent
+        .ok_or_else(|| preparing(ErrorCode::InvalidConfig, "vault requires agent network"))?
+        .configure_vault(vault);
+    Ok(())
+}
+
+/// Operator grants are enforced, not merely recorded (I02, north-star §4.2):
+/// read-only grants become additional ro-binds at their resolved paths,
+/// host-rooted writable grants become binds, and denied paths are masked
+/// with a sealed directory or file. A writable grant inside the writable
+/// workspace or the scratch is covered by their base binds already; a
+/// read-only grant there is layered over them.
+///
+/// # Errors
+/// A grant that does not resolve, a device granted read-only, or a denied
+/// path that cannot be classified.
+fn bind_grants(
+    bplan: &mut BwrapPlan,
+    snapshot: &PolicySnapshot,
+    workspace: &Path,
+    scratch: &Path,
+) -> Result<(), JailError> {
+    for reference in &snapshot.filesystem.read_write {
+        if let Ok(host) = host_path_of(reference, workspace, scratch) {
+            // Issue draft 15: an allowlisted device node (the NVIDIA class)
+            // binds individually with `--dev-bind`, never as a devtmpfs
+            // surface.
+            if is_allowed_device_node(&host) {
+                let destination = resolve_path_ref(reference, workspace)?;
+                bplan
+                    .extra_dev_binds
+                    .push((host, PathBuf::from(destination)));
+                continue;
             }
+            if (bplan.workspace_access == bwrap::WorkspaceAccess::Writable
+                && host.starts_with(workspace))
+                || host.starts_with(scratch)
+            {
+                // Inside a base writable bind already; layering an extra
+                // bind of the same content would add nothing.
+                continue;
+            }
+            let destination = resolve_path_ref(reference, workspace)?;
+            bplan
+                .extra_rw_binds
+                .push((host, PathBuf::from(destination)));
         }
-        let mounts = recordable_mounts(mounts)?;
-        Ok(Applied {
-            filesystem: Some(AppliedFilesystem {
-                mechanism: "bubblewrap-binds".to_owned(),
-                protected_coverage: if self.snapshot.filesystem.protected_coverage
-                    == ProtectedCoverage::None
-                {
-                    // Audit 2026-09-25-2, S5: nothing was requested or
-                    // scanned, so the walk's vacuous pass must not be
-                    // reported as existing-and-covered.
-                    "none".to_owned()
-                } else {
-                    scan_coverage(scan)
-                },
-                mounts,
-            }),
-            // The agent network and its two stacked filters
-            network: self.agent.as_ref().map_or_else(
-                || AppliedNetwork {
-                    mode: "none".to_owned(),
-                    mechanism: Some("network-namespace".to_owned()),
-                    allowed_hosts: Vec::new(),
-                    tls_only: Vec::new(),
-                },
-                super::agent::AgentNet::applied_network,
+    }
+    for reference in &snapshot.filesystem.read_only {
+        if let Ok(host) = host_path_of(reference, workspace, scratch) {
+            // The runtime plan already renders merged-/usr aliases as
+            // symlinks and pins their real roots. Do not reopen /bin or
+            // /lib as an operator bind (or mount over those aliases).
+            // Baseline runtime candidates are optional distribution paths:
+            // ARM64 Debian, for example, has /lib but no /lib64. BwrapPlan
+            // already discovers and records the roots that exist. Do not
+            // turn an absent default into a required bind. Errors other
+            // than absence still reach pinning and refuse.
+            if absent_runtime_candidate(reference, &host)
+                || bplan.etc_paths.contains(&host)
+                || bplan.roots.iter().any(|root| match root {
+                    jfs::RootSpec::RoBind(path) | jfs::RootSpec::Symlink { path, .. } => {
+                        path == &host
+                    }
+                })
+            {
+                continue;
+            }
+            if is_allowed_device_node(&host) {
+                return Err(error(
+                    ErrorCode::InvalidConfig,
+                    ErrorStage::Preparing,
+                    Remediation::Configuration,
+                    format!(
+                        "the device grant {} binds only read-write (--rw): bubblewrap has no \
+                         read-only device bind",
+                        host.display()
+                    ),
+                ));
+            }
+            let destination = resolve_path_ref(reference, workspace)?;
+            bplan
+                .extra_ro_binds
+                .push((host, PathBuf::from(destination)));
+        }
+    }
+    for reference in &snapshot.filesystem.deny_read {
+        let destination = resolve_path_ref(reference, workspace)?;
+        let path = PathBuf::from(destination);
+        // Classification changes only the overlay's type, never grants
+        // access to the denied object. A type swap before mounting fails
+        // setup rather than releasing an unmasked target.
+        let host = host_path_of(reference, workspace, scratch)?;
+        let mask = match std::fs::metadata(&host) {
+            Ok(metadata) if !metadata.is_dir() => bwrap::Mask::File(path),
+            Ok(_) => bwrap::Mask::Directory(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                bwrap::Mask::Directory(path)
+            }
+            Err(error) => {
+                return Err(preparing(
+                    ErrorCode::BackendUnavailable,
+                    format!("cannot classify denied path {}: {error}", host.display()),
+                ));
+            }
+        };
+        bplan.masked.push(mask);
+    }
+    Ok(())
+}
+
+/// §9.1: an operator grant may not expose host /proc, /sys or cgroupfs.
+/// Checked before any mount, on the resolved source by filesystem type and
+/// mount topology (never by spelling), so it refuses before exec. The
+/// baseline runtime roots are on the root filesystem and pass; the child's
+/// private /proc and /dev are made by bubblewrap, not bound from these
+/// sources.
+fn refuse_pseudo_fs_sources(
+    snapshot: &PolicySnapshot,
+    workspace: &Path,
+    bplan: &BwrapPlan,
+) -> Result<(), JailError> {
+    refuse_pseudo_fs_grants(
+        &[(workspace.to_path_buf(), workspace.to_path_buf())],
+        "workspace",
+    )?;
+    if let ScratchRoot::Host { path } = &snapshot.roots.scratch {
+        let source = PathBuf::from(OsString::from_vec(path.as_bytes().to_vec()));
+        refuse_pseudo_fs_grants(&[(source.clone(), source)], "scratch")?;
+    }
+    refuse_pseudo_fs_grants(&bplan.extra_ro_binds, "filesystem.read_only")?;
+    refuse_pseudo_fs_grants(&bplan.extra_rw_binds, "filesystem.read_write")
+}
+
+/// The baseline bubblewrap installs and whether it denies hard links. A
+/// storage ceiling rests on a filter that denies new mounts, which the
+/// `NamespaceInner` agent variant permits, and on the hard-link denials (a
+/// link could charge a foreign inode to the bounded tree); both are read
+/// from the program that is installed, so neither can claim a rule it lacks.
+/// `agent` installs the baseline its network built once, in the variant the
+/// measured nested-namespace capability selected (§9.2), so the digest its
+/// receipt detail names is the digest of what runs.
+///
+/// # Errors
+/// A storage ceiling the variant cannot hold, or a filter that cannot be
+/// built or read.
+fn installed_filter(
+    bplan: &BwrapPlan,
+    agent: Option<&AgentNet>,
+) -> Result<(Program, bool), JailError> {
+    if bplan.bounded_storage
+        && agent.is_some_and(|agent| agent.variant() == seccomp::AgentVariant::NamespaceInner)
+    {
+        return Err(preparing(
+            ErrorCode::MissingCapability,
+            "storage ceilings require a profile that cannot create new mounts",
+        ));
+    }
+    let filter = match agent {
+        Some(agent) => agent.baseline().clone(),
+        None => seccomp::tool_baseline_with_storage(bplan.bounded_storage).map_err(|err| {
+            preparing(
+                ErrorCode::BackendUnavailable,
+                format!("the syscall filter could not be built: {err}"),
+            )
+        })?,
+    };
+    let variant = agent.map(AgentNet::variant);
+    match installed_hard_link_rule(&filter, variant) {
+        Ok(denied) if denied == bplan.bounded_storage => Ok((filter, denied)),
+        Ok(denied) => Err(preparing(
+            ErrorCode::InternalError,
+            format!(
+                "the syscall filter {} hard links while a storage ceiling is {}",
+                if denied { "denies" } else { "permits" },
+                if denied { "not requested" } else { "requested" }
             ),
-            syscalls: Some(AppliedSyscalls {
-                mechanism: if self.agent.is_some() {
-                    "seccomp-bpf+seccomp-user-notification".to_owned()
-                } else {
-                    "seccomp-bpf".to_owned()
-                },
-                digest: filter_digest.to_owned(),
-            }),
-            limits,
-            environment_names,
-            removed_environment_names: Vec::new(),
+        )),
+        Err(reason) => Err(preparing(
+            ErrorCode::InternalError,
+            format!("the syscall filter's hard-link rule cannot be read: {reason}"),
+        )),
+    }
+}
+
+/// §8.2: a wait that the preparation budget ended (the watcher's readiness,
+/// the arguments' write) refuses as the budget's timeout, with remediation
+/// `retry`, not as a host failure of the step that happened to be waiting.
+fn channel_failure(err: std::io::Error) -> JailError {
+    if err.kind() == std::io::ErrorKind::TimedOut {
+        return prepare_timeout(&format!(
+            "preparation did not complete within its budget: {err}"
+        ));
+    }
+    preparing(
+        ErrorCode::BackendUnavailable,
+        format!("the boundary's channels could not be created: {err}"),
+    )
+}
+
+/// The backend's descriptor map and this side of each channel.
+struct Channels {
+    fds: FdMap,
+    /// The release pipe's write end, which the run writes the release to.
+    release: OwnedFd,
+    /// The launcher's error pipe, non-blocking.
+    error: OwnedFd,
+    /// bubblewrap's JSON status, non-blocking.
+    status: OwnedFd,
+    /// The bootstrap's start pipe, written once the watcher is ready.
+    start: OwnedFd,
+    /// The `--args` payload's write end, when the options go by descriptor.
+    args: Option<OwnedFd>,
+}
+
+impl Channels {
+    /// Opens every channel at its fixed number in the backend's map
+    /// (§8.3), and moves the pinned sources and staged descriptors into it.
+    fn open(planned: &mut Planned, backend_pin: &jfs::PinnedPath) -> Result<Channels, JailError> {
+        // Room for the credential views after the pins.
+        let mut fds = FdMap::with_target_limit(
+            PINNED_FD_BASE
+                + planned.pinned_fds.len() as RawFd
+                + planned.staged.credentials.len() as RawFd,
+        );
+        let io = channel_failure;
+        fds.add(
+            seccomp::program_pipe(&planned.filter).map_err(io)?,
+            SECCOMP_FD,
+        )
+        .map_err(io)?;
+        let (release_r, release_w) = exec::pipe().map_err(io)?;
+        let (error_r, error_w) = exec::pipe().map_err(io)?;
+        let (status_r, status_w) = exec::pipe().map_err(io)?;
+        let (start_r, start_w) = exec::pipe().map_err(io)?;
+        fds.add(start_r, watch::START_FD).map_err(io)?;
+        fds.add(
+            backend_pin.borrow_fd().try_clone_to_owned().map_err(io)?,
+            watch::BACKEND_FD,
+        )
+        .map_err(io)?;
+        fds.add(release_r, RELEASE_FD).map_err(io)?;
+        fds.add(error_w, ERROR_FD).map_err(io)?;
+        // Audit 2026-09-25-2, S14: the narrowing data is already in the pipe
+        // before the spawn, so the launcher's blocking read always
+        // completes; the descriptor closes in the launcher and never
+        // reaches the target.
+        if let Some(data) = planned.trace_data {
+            let (trace_r, trace_w) = exec::pipe().map_err(io)?;
+            // Two bytes always fit the pipe's capacity, so the write
+            // completes before any reader exists.
+            write_all(trace_w.as_raw_fd(), &super::sys::trace_data_bytes(data)).map_err(io)?;
+            fds.add(trace_r, TRACE_DATA_FD).map_err(io)?;
+        }
+        fds.add(status_w, STATUS_FD).map_err(io)?;
+        for (copy, target) in std::mem::take(&mut planned.pinned_fds) {
+            fds.add(copy, target).map_err(io)?;
+        }
+        // Hand the staged descriptors to bubblewrap.
+        if let Some(vendor) = planned.staged.vendor.take() {
+            fds.add(vendor, VENDOR_STATE_FD).map_err(io)?;
+        }
+        // The proxy directory, bound read-only by descriptor.
+        if let Some(agent) = planned.agent.as_ref() {
+            fds.add(agent.dir_fd().map_err(io)?, super::agent::PROXY_DIR_FD)
+                .map_err(io)?;
+        }
+        let credentials = std::mem::take(&mut planned.staged.credentials);
+        for ((source, _), view) in credentials.into_iter().zip(&planned.bplan.credential_binds) {
+            let Some(target) = view.fd else {
+                return Err(preparing(
+                    ErrorCode::InternalError,
+                    "a credential view has no descriptor slot",
+                ));
+            };
+            fds.add(source, target).map_err(io)?;
+        }
+        // jail-v1 §2 I07 (every wait bounded): the `--args` payload can
+        // exceed the pipe's capacity, so it is written while the reader
+        // exists, after the spawn: bwrap blocks reading ARGS_FD, and if it
+        // dies before consuming the payload the write fails with EPIPE
+        // instead of hanging. `exec::pipe` is close-on-exec on both ends, so
+        // the parent's write end never reaches bwrap and its EOF is seen as
+        // soon as this side closes.
+        let mut args = None;
+        if planned.rendered.args_payload.is_some() {
+            let (args_r, args_w) = exec::pipe().map_err(io)?;
+            fds.add(args_r, ARGS_FD).map_err(io)?;
+            args = Some(args_w);
+        }
+        set_nonblocking(error_r.as_raw_fd()).map_err(io)?;
+        set_nonblocking(status_r.as_raw_fd()).map_err(io)?;
+        Ok(Channels {
+            fds,
+            release: release_w,
+            error: error_r,
+            status: status_r,
+            start: start_w,
+            args,
         })
     }
+}
 
-    /// A workspace-relative name as the absolute bytes the child sees.
-    pub(super) fn workspace_bytes_joined(&self, relative: &str) -> Vec<u8> {
-        let mut out = self.workspace.as_os_str().as_bytes().to_vec();
-        if out.last() != Some(&b'/') {
-            out.push(b'/');
-        }
-        out.extend_from_slice(relative.as_bytes());
-        out
-    }
-
-    pub(super) fn diagnostic(&self) -> String {
-        self.status.text.clone()
-    }
-
-    /// Whether the backend has exited, collecting its status. Only for
-    /// discovery: from the observer's attach on, its thread owns every
-    /// `waitpid` in this process.
-    pub(super) fn exited(&mut self) -> bool {
-        debug_assert!(self.tracer.is_none(), "the observer owns waitpid");
-        match self.child.as_mut() {
-            Some(child) => matches!(child.try_wait(), Ok(Some(_))),
-            None => true,
+/// §8.3: stdio passes through without capture except regular files and
+/// sockets, which are relayed through supervisor-owned pipes (audit
+/// 2026-10-08 H1): the child gets a pipe end here and never the file, so no
+/// `/dev/stdin` reopen can reach the host mount. Every other descriptor the
+/// supervisor holds is closed on exec.
+fn attach_stdio(plans: [StdioPlan; 3], fds: &mut FdMap) -> Result<Vec<StdioRelay>, JailError> {
+    let mut relays = Vec::new();
+    for (fd, plan) in plans.into_iter().enumerate() {
+        if let StdioPlan::Relay { socket } = plan {
+            relays.push(StdioRelay::attach(
+                i32::try_from(fd).unwrap_or(-1),
+                fd == 0,
+                socket,
+                fds,
+            )?);
         }
     }
+    Ok(relays)
+}
 
-    /// Kills and reaps everything this boundary owns, and removes its
-    /// placeholders once the tree is known dead.
-    pub(super) fn teardown(&mut self) {
-        let deadline = clock::Deadline::after(TREE_BUDGET);
-        self.kill_boundary();
-        self.stop_observer(deadline.remaining());
-        if let Some(mut child) = self.child.take() {
-            child.reap_until(deadline);
-        }
-        while !self.watcher.ended() && !deadline.expired() {
-            self.release_watcher_after_backend();
-            std::thread::sleep(WAIT_STEP);
-        }
-        self.watcher.reap();
-        // The init's pidfd and the leaf report the tree's death a little
-        // after the kill. Wait for them inside the same budget, so the
-        // placeholders are not kept only because the first look came early.
-        while self.tree_death_provable() && !self.tree_dead() && !deadline.expired() {
-            std::thread::sleep(WAIT_STEP);
-        }
-        self.remove_placeholders();
-        self.stop_agent(deadline.remaining());
-    }
-
-    /// Tears the boundary down after a refusal and returns `refusal`, which
-    /// then also says which placeholders it leaves in the operator's
-    /// workspace and why, when it leaves any.
-    pub(super) fn refuse(&mut self, mut refusal: JailError) -> JailError {
-        self.teardown();
-        if let Some(left) = self.placeholders_left() {
-            refusal.message = format!("{}; {left}", refusal.message);
-            // What the record says is left stays left: nothing removes them
-            // after the refusal named them.
-            self.placeholders.clear();
-        }
-        refusal
-    }
-
-    /// The placeholders a teardown did not remove, for a refusal's message;
-    /// `None` when every one is gone.
-    pub(super) fn placeholders_left(&self) -> Option<String> {
-        if self.placeholder_outcomes.is_empty() {
-            if self.placeholders.is_empty() {
-                return None;
+/// Starts the backend through the trusted bootstrap, in the attempt's leaf
+/// when there is one, starts the outside watcher, releases the bootstrap and
+/// streams the backend's options: the [`Started`] boundary, the release
+/// pipe's write end and the launcher's error pipe.
+///
+/// Until the boundary owns it, a refusal here kills and reaps the backend
+/// within a fresh tree budget ([`exec::KillOnDrop`]; §8.1: a pre-exec
+/// failure refuses and leaves no orphan), and the placeholders stay with
+/// `planned`, which removes them when it is dropped.
+fn spawn(
+    exe: &Path,
+    planned: &mut Planned,
+    channels: Channels,
+    stdio_relays: Vec<StdioRelay>,
+    (cgroup, cgroup_unavailable): (Option<ExecutionCgroup>, Option<String>),
+    deadline: clock::Deadline,
+) -> Result<(Started, OwnedFd, ErrorPipe), JailError> {
+    let io = channel_failure;
+    let Channels {
+        fds,
+        release,
+        error,
+        status,
+        start,
+        args,
+    } = channels;
+    let arguments: Vec<OsString> = std::iter::once(OsString::from("__backend"))
+        .chain(planned.rendered.argv.iter().cloned())
+        .collect();
+    let spawn_cgroup = cgroup
+        .as_ref()
+        .map(ExecutionCgroup::spawn_handle)
+        .transpose()
+        .map_err(io)?;
+    let child = exec::spawn_bootstrap(exe, &arguments, &fds, spawn_cgroup.as_ref(), deadline)
+        .map_err(|err| {
+            // The exec handshake spends the same preparation budget.
+            if err.kind() == std::io::ErrorKind::TimedOut {
+                return io(err);
             }
-            let paths: Vec<String> = self
-                .placeholders
-                .iter()
-                .map(|placeholder| placeholder.destination().display().to_string())
-                .collect();
-            return Some(format!(
-                "the placeholder directories {} are left in the workspace: the boundary's tree \
-                 was not shown dead within its budget",
-                paths.join(", ")
+            preparing(
+                ErrorCode::BackendUnavailable,
+                format!(
+                    "the backend bootstrap ({}) could not be started: {err}",
+                    exe.display()
+                ),
+            )
+        })?;
+    let child = exec::KillOnDrop::new(child);
+    let bootstrap_spawn = child.spawn();
+    // In particular close our duplicate of ARGS_FD before streaming: if the
+    // backend exits there must be no reader left to suppress EPIPE.
+    drop(fds);
+    let bwrap_pid = libc::pid_t::try_from(child.id()).map_err(|_| {
+        preparing(
+            ErrorCode::InternalError,
+            format!("the backend's pid {} does not fit a pid_t", child.id()),
+        )
+    })?;
+    // Taken while the backend is this process's unreaped child, so the
+    // descriptor names it; every later signal and exit check uses it.
+    let bwrap_fd = identity::pidfd_open(bwrap_pid).map_err(|err| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("the backend's pidfd could not be opened: {err}"),
+        )
+    })?;
+    // Root the cgroup namespace in this attempt's leaf. Moving only the
+    // target after bubblewrap unshares exposes a /../../host-leaf path in
+    // /proc/self/cgroup. Direct creation still requires the same parent
+    // readback; the compatibility path moves the blocked bootstrap first.
+    if let Some(leaf) = &cgroup {
+        if child.created_in_cgroup() {
+            leaf.verify_member(bwrap_pid)
+        } else {
+            leaf.place(bwrap_pid)
+        }
+        .map_err(io)?;
+    }
+    let cgroup_kill = cgroup
+        .as_ref()
+        .map(ExecutionCgroup::kill_handle)
+        .transpose()
+        .map_err(io)?;
+    let watcher = Watcher::start(exe, bwrap_pid, cgroup_kill, deadline).map_err(io)?;
+    write_all(start.as_raw_fd(), &[watch::RELEASED]).map_err(io)?;
+    drop(start);
+    // The payload write happens with bwrap already blocked on ARGS_FD, so a
+    // payload larger than the pipe's capacity flows through instead of
+    // deadlocking. A failure here means bwrap died reading.
+    if let (Some(args), Some(payload)) = (args.as_ref(), planned.rendered.args_payload.as_ref()) {
+        write_until(args.as_raw_fd(), payload, deadline).map_err(io)?;
+    }
+    drop(args);
+    let started = Started {
+        child: Some(child.hand_over()),
+        bootstrap_spawn,
+        bwrap_pid,
+        bwrap_fd,
+        status: StatusReader::new(status),
+        watcher,
+        cgroup,
+        cgroup_lost: false,
+        cgroup_unavailable,
+        placeholders: std::mem::take(&mut planned.placeholders).hand_over(),
+        placeholder_outcomes: Vec::new(),
+        agent: planned.agent.take(),
+        stdio_relays,
+        killing: AtomicBool::new(false),
+    };
+    Ok((started, release, ErrorPipe::new(error)))
+}
+
+/// The observer, attached to the blocked launcher (§11.4): with the bounds
+/// of its plan, the attempt's trace data and the operator's command rules.
+///
+/// # Errors
+/// Rules that no longer compile, or an observer that cannot attach: both
+/// refuse before exec, whatever the evidence mode says.
+fn attach_observer(
+    plan: &super::observed::ObserverPlan,
+    snapshot: &PolicySnapshot,
+    trace_data: u16,
+    launcher: libc::pid_t,
+    target_images: &[Vec<u8>],
+) -> Result<Tracer, JailError> {
+    // §13.1: gap intervals count from supervisor start on the same
+    // CLOCK_BOOTTIME base as every other monotonic_ns. §11.4: the bounds are
+    // the plan's, which the receipt records.
+    let mut config = plan.tracer_config(clock::mark_supervisor_start());
+    // Audit 2026-09-25-2, S14: the tracer expects exactly the data this
+    // attempt's narrowing filter carries.
+    config.trace_data = trace_data;
+    config.learning = snapshot.observation.learning;
+    // Resolution validated these rules; rules that no longer compile are
+    // refused, never matched in part.
+    config.commands = snapshot.commands.compile().map_err(|reason| {
+        error(
+            ErrorCode::InvalidConfig,
+            ErrorStage::Preparing,
+            Remediation::Configuration,
+            format!("the command rules do not compile: {reason}"),
+        )
+        .with_key_path("jail.commands")
+    })?;
+    config.target = Some((launcher, target_images.to_vec()));
+    Tracer::attach(launcher, config).map_err(|err| {
+        error(
+            ErrorCode::ObserverUnavailable,
+            ErrorStage::Preparing,
+            Remediation::HostSetup,
+            format!("the closed-set observer could not attach: {err}"),
+        )
+    })
+}
+
+/// What discovery reads besides the started boundary.
+struct DiscoveryInputs<'a> {
+    bwrap_path: &'a Path,
+    deadline: clock::Deadline,
+    snapshot: &'a PolicySnapshot,
+    workspace: &'a Path,
+    launcher_argv: &'a [Vec<u8>],
+    filter_digest: &'a str,
+    scan: &'a jfs::ProtectedScan,
+    observe_on: bool,
+}
+
+/// The namespace init and the blocked launcher, and what the boundary
+/// actually applied, all read back.
+struct Discovered {
+    init: Init,
+    launcher: identity::ProcessIdentity,
+    /// The launcher's own descriptor, for the cooperative stop and the
+    /// `agent` mediation hand-off.
+    launcher_fd: OwnedFd,
+    ns_ids: identity::NsIds,
+    /// `Seccomp_filters` of the blocked launcher, checked against what this
+    /// boundary installs.
+    seccomp_filters: u32,
+    /// What the backend reported, read again for this attempt; `None` when it
+    /// could not be asked.
+    backend_version: Option<String>,
+    storage: Option<super::storage::Storage>,
+    applied: Applied,
+}
+
+/// A refused discovery, with the init when bubblewrap had named one: the
+/// teardown kills and waits for it.
+struct Refused {
+    error: JailError,
+    init: Option<Init>,
+}
+
+/// Finds the namespace init and the launcher, and reads back what the
+/// boundary actually applied.
+fn discover(
+    started: &mut Started,
+    launcher_error: &mut ErrorPipe,
+    inputs: &DiscoveryInputs<'_>,
+) -> Result<Discovered, Refused> {
+    let init =
+        find_init(started, inputs.deadline).map_err(|error| Refused { error, init: None })?;
+    match read_back(started, launcher_error, &init, inputs) {
+        Ok(found) => Ok(found.with_init(init)),
+        Err(error) => Err(Refused {
+            error,
+            init: Some(init),
+        }),
+    }
+}
+
+/// bubblewrap reports the namespace init's host pid as soon as the
+/// namespaces exist. Waiting on that document is the synchronisation point;
+/// nothing here guesses a delay.
+fn find_init(started: &mut Started, deadline: clock::Deadline) -> Result<Init, JailError> {
+    let pid = loop {
+        started.status.pump();
+        if let Some(pid) = started.status.parsed().child_pid {
+            break pid;
+        }
+        if started.status.eof || started.exited() {
+            let diagnostic = started.diagnostic().trim().to_owned();
+            let detail = if diagnostic.is_empty() {
+                // bwrap's own message (for example "Unknown option") went to
+                // this console's stderr, which the supervisor passes through
+                // untouched; the error must still say something useful
+                // instead of ending on a colon.
+                let status = started
+                    .child
+                    .as_mut()
+                    .and_then(|child| child.try_wait().ok().flatten())
+                    .and_then(|wait| wait.code().map(|code| format!("exit {code}")))
+                    .unwrap_or_else(|| "no wait status".to_owned());
+                format!(
+                    "bubblewrap exited during setup ({status}) without a status document; its \
+                     own stderr on this console names the cause"
+                )
+            } else {
+                format!("bubblewrap exited during setup: {diagnostic}")
+            };
+            return Err(preparing(ErrorCode::BackendUnavailable, detail));
+        }
+        if deadline.expired() {
+            return Err(prepare_timeout(
+                "bubblewrap did not report a namespace init",
             ));
         }
-        let kept: Vec<String> = self
-            .placeholder_outcomes
-            .iter()
-            .filter_map(|outcome| match outcome {
-                PlaceholderOutcome::Removed(_) | PlaceholderOutcome::AlreadyGone(_) => None,
-                PlaceholderOutcome::KeptChanged(path, reason) => {
-                    Some(format!("{} ({reason})", path.display()))
-                }
-                PlaceholderOutcome::KeptNotEmpty(path) => {
-                    Some(format!("{} (not empty)", path.display()))
-                }
-                PlaceholderOutcome::KeptError(path, errno) => Some(format!(
-                    "{} ({})",
-                    path.display(),
-                    super::sys::errno_name(*errno)
-                )),
-            })
-            .collect();
-        (!kept.is_empty()).then(|| {
-            format!(
-                "the placeholder directories {} are kept in the workspace",
-                kept.join(", ")
-            )
-        })
+        nap();
+    };
+    // Taken now, while the kernel has just named this pid as the namespace
+    // init. Without it the tree's death could not be verified, so its
+    // absence refuses.
+    let fd = identity::pidfd_open(pid).map_err(|err| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("the namespace init's pidfd could not be opened: {err}"),
+        )
+    })?;
+    Ok(Init { pid, fd })
+}
+
+/// [`Discovered`] before the init joins it.
+struct ReadBack {
+    launcher: identity::ProcessIdentity,
+    launcher_fd: OwnedFd,
+    ns_ids: identity::NsIds,
+    seccomp_filters: u32,
+    backend_version: Option<String>,
+    storage: Option<super::storage::Storage>,
+    applied: Applied,
+}
+
+impl ReadBack {
+    fn with_init(self, init: Init) -> Discovered {
+        Discovered {
+            init,
+            launcher: self.launcher,
+            launcher_fd: self.launcher_fd,
+            ns_ids: self.ns_ids,
+            seccomp_filters: self.seccomp_filters,
+            backend_version: self.backend_version,
+            storage: self.storage,
+            applied: self.applied,
+        }
+    }
+}
+
+/// The refusal for a backend that ended before the launcher blocked. The
+/// agent launcher's own setup failures carry their exit status and errno, so
+/// the refusal names the mechanism that could not be established instead of
+/// a generic backend failure.
+fn launcher_setup_failure(started: &mut Started, launcher_error: &mut ErrorPipe) -> JailError {
+    started.status.pump();
+    launcher_error.drain();
+    launcher_failure(
+        started.status.parsed().exit_code,
+        &launcher_error.bytes,
+        started.diagnostic().trim(),
+    )
+}
+
+/// The launcher found under the init, blocked on its release pipe, and the
+/// boundary read back from it.
+fn read_back(
+    started: &mut Started,
+    launcher_error: &mut ErrorPipe,
+    init: &Init,
+    inputs: &DiscoveryInputs<'_>,
+) -> Result<ReadBack, JailError> {
+    let deadline = inputs.deadline;
+    let launcher = find_blocked_launcher(started, launcher_error, init, inputs)?;
+    let identity = identity::ProcessIdentity::capture(launcher).map_err(|err| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("the launcher's identity could not be recorded: {err}"),
+        )
+    })?;
+    // The cooperative stop and the `agent` mediation hand-off go through
+    // this descriptor; without it neither could, so its absence refuses.
+    let launcher_fd = identity::pidfd_open(launcher).map_err(|err| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("the launcher's pidfd could not be opened: {err}"),
+        )
+    })?;
+    let ns_ids = launcher_namespaces(launcher, &started.status)?;
+    let seccomp_filters = launcher_privilege(launcher, started.agent.is_some(), inputs.observe_on)?;
+    if let Some(agent) = started.agent.as_mut() {
+        connect_agent(
+            agent,
+            started.cgroup.as_ref(),
+            init,
+            &launcher_fd,
+            ns_ids,
+            deadline,
+        )?;
+    }
+    // Keep this fresh readback: a process can create a new platform after
+    // a backend upgrade, while its minimum-version decision is cached.
+    let backend_version = bwrap::bwrap_version(inputs.bwrap_path, deadline)
+        .ok()
+        .map(|version| version.raw);
+
+    let storage = if super::storage::requested(&inputs.snapshot.limits) {
+        Some(
+            super::storage::Storage::admit(launcher, &inputs.snapshot.limits, deadline).map_err(
+                |err| {
+                    preparing(
+                        ErrorCode::MissingCapability,
+                        format!("storage ceiling unavailable: {err}"),
+                    )
+                },
+            )?,
+        )
+    } else {
+        None
+    };
+    let applied = read_applied(
+        launcher,
+        inputs,
+        storage.as_ref(),
+        started.cgroup.as_ref(),
+        started.agent.as_ref(),
+    )?;
+    Ok(ReadBack {
+        launcher: identity,
+        launcher_fd,
+        ns_ids,
+        seccomp_filters,
+        backend_version,
+        storage,
+        applied,
+    })
+}
+
+/// The launcher: the init's child whose argv is the one asked for, once it
+/// is blocked on its release pipe.
+fn find_blocked_launcher(
+    started: &mut Started,
+    launcher_error: &mut ErrorPipe,
+    init: &Init,
+    inputs: &DiscoveryInputs<'_>,
+) -> Result<libc::pid_t, JailError> {
+    let deadline = inputs.deadline;
+    // The launcher is the init's child whose argv is the one we asked for.
+    let launcher = loop {
+        if let Some(pid) = super::tracer::children(init.pid)
+            .into_iter()
+            .find(|pid| super::tracer::cmdline(*pid).as_deref() == Some(inputs.launcher_argv))
+        {
+            break pid;
+        }
+        if deadline.expired() {
+            return Err(prepare_timeout("the inside launcher never appeared"));
+        }
+        if started.exited() {
+            return Err(launcher_setup_failure(started, launcher_error));
+        }
+        nap();
+    };
+
+    // Wait until it is blocked in read(2) on its release descriptor, which
+    // is what the observer's attach contract requires. `/proc/<pid>/syscall`
+    // names the call and its first argument, so this is a read-back and not
+    // an assumption. The descriptor is part of the check: the launcher reads
+    // its trace-data descriptor before it installs the narrowing filter, and
+    // that read is not the gate.
+    loop {
+        if matches!(identity::blocked_in_read(launcher, RELEASE_FD), Ok(true)) {
+            break;
+        }
+        if deadline.expired() {
+            return Err(prepare_timeout(
+                "the inside launcher did not block on its release pipe",
+            ));
+        }
+        if started.exited() {
+            return Err(launcher_setup_failure(started, launcher_error));
+        }
+        nap();
     }
 
-    // The agent network ends after the tree it served
-    /// Stops the proxy and the mediator, draining what they last reported.
-    /// Called once the tree is dead or given up on: until then the proxy and
-    /// the mediator are part of the boundary the child relies on.
-    pub(super) fn stop_agent(&mut self, budget: Duration) {
-        if let Some(agent) = self.agent.as_mut() {
-            agent.stop(
-                &mut self.audit,
-                self.observe_on,
-                budget.min(AGENT_STOP_BUDGET),
-            );
+    Ok(launcher)
+}
+
+/// The launcher's namespaces, each one the plan asked for and none this
+/// process's own, and agreeing with what bubblewrap reports.
+fn launcher_namespaces(
+    launcher: libc::pid_t,
+    status: &StatusReader,
+) -> Result<identity::NsIds, JailError> {
+    // bubblewrap reports the namespace ids it created; `/proc` says which
+    // namespaces the launcher is actually in. Recording the first without
+    // checking the second would be taking the backend's word for the
+    // boundary, so both are read and they must agree.
+    let ns_ids = identity::ns_ids(launcher);
+    // Every namespace the plan asked for has to be one the launcher is
+    // actually in, and a different one from this process's.
+    // SAFETY: getpid takes no arguments and cannot fail.
+    let own = identity::ns_ids(unsafe { libc::getpid() });
+    for (name, inside, outside) in [
+        ("pid", ns_ids.pid, own.pid),
+        ("mnt", ns_ids.mnt, own.mnt),
+        ("net", ns_ids.net, own.net),
+        ("user", ns_ids.user, own.user),
+        ("cgroup", ns_ids.cgroup, own.cgroup),
+    ] {
+        match (inside, outside) {
+            (Some(inside), Some(outside)) if inside == outside => {
+                return Err(preparing(
+                    ErrorCode::BackendUnavailable,
+                    format!("the launcher shares this process's {name} namespace"),
+                ));
+            }
+            (None, _) => {
+                return Err(preparing(
+                    ErrorCode::BackendUnavailable,
+                    format!("the launcher's {name} namespace could not be read"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    for (key, seen) in [
+        ("pid-namespace", ns_ids.pid),
+        ("mnt-namespace", ns_ids.mnt),
+        ("net-namespace", ns_ids.net),
+    ] {
+        let reported = status.namespace(key);
+        if let (Some(reported), Some(seen)) = (reported, seen)
+            && reported != seen
+        {
+            return Err(preparing(
+                ErrorCode::BackendUnavailable,
+                format!("the backend reports {key} {reported} but the launcher is in {seen}"),
+            ));
         }
     }
 
-    /// Mediated connects and helper facts, while the target runs; the
-    /// reason of a new evidence loss, when there is one.
-    pub(super) fn pump_agent(&mut self) -> Option<String> {
-        let (init_pid, init_fd, killing) = (self.init_pid, self.init_fd.as_ref(), &self.killing);
+    Ok(ns_ids)
+}
+
+/// The launcher's privilege, read back: no new privileges, no capability,
+/// every filter this boundary installs in force and inside a pid namespace;
+/// the number of filters it found.
+fn launcher_privilege(
+    launcher: libc::pid_t,
+    agent: bool,
+    observe_on: bool,
+) -> Result<u32, JailError> {
+    // Read back the boundary rather than trusting the flags we passed. The
+    // launcher is blocked: these facts come from one kernel status snapshot
+    // rather than reopening the same file for every field.
+    let privilege = identity::Privilege::read(launcher).map_err(|err| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("the launcher's privilege cannot be read back: {err}"),
+        )
+    })?;
+    if !privilege.no_new_privs {
+        return Err(preparing(
+            ErrorCode::BackendUnavailable,
+            "no_new_privs is not set inside the boundary",
+        ));
+    }
+    if privilege.cap_eff != 0 {
+        return Err(preparing(
+            ErrorCode::BackendUnavailable,
+            format!(
+                "the boundary retains capabilities: CapEff {:016x}",
+                privilege.cap_eff
+            ),
+        ));
+    }
+    if privilege.seccomp.as_deref() != Some("2") {
+        return Err(preparing(
+            ErrorCode::BackendUnavailable,
+            format!(
+                "the syscall filter is not in force: Seccomp {:?}",
+                privilege.seccomp
+            ),
+        ));
+    }
+    // `Seccomp: 2` says a filter is in force, not that every filter this
+    // boundary installs is: a missing narrowing or mediation filter leaves
+    // the mode at 2. The count is read back and must be exactly the number
+    // installed.
+    let expected = super::agent::expected_launcher_filters(agent, observe_on);
+    let seccomp_filters = super::agent::verify_filter_count(
+        privilege.seccomp_filters.as_deref().unwrap_or_default(),
+        expected,
+    )
+    .map_err(|mut error| {
+        error.message = format!("the launcher: {}", error.message);
+        error
+    })?;
+    let nspid = super::tracer::nspid(launcher).unwrap_or_default();
+    if nspid.len() < 2 {
+        return Err(preparing(
+            ErrorCode::BackendUnavailable,
+            format!("the launcher is not inside a pid namespace: NSpid {nspid:?}"),
+        ));
+    }
+
+    Ok(seccomp_filters)
+}
+
+/// While the launcher is blocked, takes its mediation listener and
+/// sock_diag socket, starts the mediator, and reads back the bridge it
+/// started (§10). Either one missing refuses, naming it.
+fn connect_agent(
+    agent: &mut AgentNet,
+    cgroup: Option<&ExecutionCgroup>,
+    init: &Init,
+    launcher_fd: &OwnedFd,
+    ns_ids: identity::NsIds,
+    deadline: clock::Deadline,
+) -> Result<(), JailError> {
+    agent.take_mediation(launcher_fd.as_fd())?;
+    let bridge = agent.discover_bridge(init.pid, ns_ids, &deadline)?;
+    if let Some(leaf) = cgroup {
+        // Charged to the attempt (§9.3): the bridge is in the leaf.
+        leaf.verify_member(bridge).map_err(|err| {
+            preparing(
+                ErrorCode::MissingCapability,
+                format!(
+                    "the `agent` bridge could not be established: it is not in the attempt's \
+                     cgroup: {err}"
+                ),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// The `applied` group, read back from the boundary that exists. A read-back
+/// that fails refuses: an empty mount table or environment in the receipt
+/// would be a claim about the child's view nothing measured.
+fn read_applied(
+    launcher: libc::pid_t,
+    inputs: &DiscoveryInputs<'_>,
+    storage: Option<&super::storage::Storage>,
+    cgroup: Option<&ExecutionCgroup>,
+    agent: Option<&AgentNet>,
+) -> Result<Applied, JailError> {
+    let mounts = read_mount_table(launcher).map_err(|err| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("the launcher's mount table cannot be read back: {err}"),
+        )
+    })?;
+    let environment_names = read_environment_names(launcher).map_err(|err| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("the launcher's environment cannot be read back: {err}"),
+        )
+    })?;
+    let mut limits = Vec::new();
+    if let Some(storage) = storage {
+        limits.extend(storage.limits());
+    }
+    limits.extend(ceiling_rows(&inputs.snapshot.limits, cgroup));
+    let mut mounts = mounts;
+    // A protected name the walk refused to follow is authority this plan did
+    // not apply. The mount table is where §13.2 lists what the child's view
+    // is, and `hidden` is the mode the schema has for a path that is named
+    // and not granted, so each one appears there rather than being left out
+    // of the record entirely.
+    for name in skipped_protected_names(inputs.scan) {
+        let path = workspace_bytes_joined(inputs.workspace, &name);
+        if let Ok(native) = NativeString::from_bytes(path) {
+            mounts.push(AppliedMount {
+                path: native,
+                mode: "hidden".to_owned(),
+            });
+        }
+    }
+    let mounts = recordable_mounts(mounts)?;
+    Ok(Applied {
+        filesystem: Some(AppliedFilesystem {
+            mechanism: "bubblewrap-binds".to_owned(),
+            protected_coverage: if inputs.snapshot.filesystem.protected_coverage
+                == ProtectedCoverage::None
+            {
+                // Audit 2026-09-25-2, S5: nothing was requested or scanned,
+                // so the walk's vacuous pass must not be reported as
+                // existing-and-covered.
+                "none".to_owned()
+            } else {
+                scan_coverage(inputs.scan)
+            },
+            mounts,
+        }),
+        // The agent network and its two stacked filters.
+        network: agent.map_or_else(
+            || AppliedNetwork {
+                mode: "none".to_owned(),
+                mechanism: Some("network-namespace".to_owned()),
+                allowed_hosts: Vec::new(),
+                tls_only: Vec::new(),
+            },
+            AgentNet::applied_network,
+        ),
+        syscalls: Some(AppliedSyscalls {
+            mechanism: if agent.is_some() {
+                "seccomp-bpf+seccomp-user-notification".to_owned()
+            } else {
+                "seccomp-bpf".to_owned()
+            },
+            digest: inputs.filter_digest.to_owned(),
+        }),
+        limits,
+        environment_names,
+        removed_environment_names: Vec::new(),
+    })
+}
+
+/// A workspace-relative name as the absolute bytes the child sees.
+fn workspace_bytes_joined(workspace: &Path, relative: &str) -> Vec<u8> {
+    let mut out = workspace.as_os_str().as_bytes().to_vec();
+    if out.last() != Some(&b'/') {
+        out.push(b'/');
+    }
+    out.extend_from_slice(relative.as_bytes());
+    out
+}
+
+/// The contained boundary, as the run drives it: what the spawn started,
+/// and what discovery read back.
+pub(super) struct Boundary {
+    started: Started,
+    init: Init,
+    /// The launcher's own descriptor, for the cooperative stop.
+    launcher_fd: OwnedFd,
+    snapshot: PolicySnapshot,
+    ns_ids: identity::NsIds,
+    /// `Seccomp_filters` of the blocked launcher, read back and checked
+    /// against what this boundary installs.
+    seccomp_filters: u32,
+    /// What the backend reported, read again for this attempt; `None` when
+    /// it could not be asked.
+    backend_version: Option<String>,
+    storage: Option<super::storage::Storage>,
+    /// Whether the installed baseline denies `link` and `linkat`, read from
+    /// the program itself; the storage ceiling's evidence states it.
+    hard_links_denied: bool,
+    resolv_sanitization: &'static str,
+    /// The §11.4 bounds the observer runs with, decided once; `None` with
+    /// observation off.
+    observer_plan: Option<super::observed::ObserverPlan>,
+    /// Audit 2026-09-25-2, S14: the narrowing filter's per-attempt
+    /// `SECCOMP_RET_DATA`.
+    trace_data: u16,
+    /// bubblewrap's raw wait status, once collected (from the observer, or
+    /// with observation off from this process's own wait).
+    bwrap_status: Option<i32>,
+    /// Audit 2026-10-08 L2: storage enforcement was found lost while the
+    /// target still ran — the only timing that may make it `outcome.cause`
+    /// (§6.4). A loss first seen after the target's own end never does.
+    storage_lost_live: bool,
+}
+
+impl Boundary {
+    /// Mediated connects and helper facts, while the target runs; the reason
+    /// of a new evidence loss, when there is one.
+    fn pump_agent(&mut self, run: &mut RunState) -> Option<String> {
+        let (init, killing) = (&self.init, &self.started.killing);
         // Asked only once the bridge is seen dead: the boundary was up after
         // the bridge died, so the bridge did not die with it. A namespace
         // init sets PF_EXITING before it kills its namespace, and this
         // supervisor sets `killing` before it kills anything.
         let boundary_up = || {
-            super::agent::boundary_up(
-                killing.load(std::sync::atomic::Ordering::SeqCst),
-                &|| init_fd.is_none_or(|fd| super::watch::readable(fd.as_raw_fd())),
-                &|| identity::exiting(init_pid),
-            )
+            super::agent::boundary_up(killing.load(Ordering::SeqCst), &|| !init.alive(), &|| {
+                identity::exiting(init.pid)
+            })
         };
-        let agent = self.agent.as_mut()?;
-        agent.pump(&mut self.audit, self.observe_on, &boundary_up)
+        let agent = self.started.agent.as_mut()?;
+        agent.pump(&mut run.audit, run.observe_on, &boundary_up)
     }
 
-    /// Kills the namespace init and the backend through their descriptors.
-    ///
-    /// §9.3: never signal a pid without revalidating its identity. A pidfd
-    /// taken at discovery is that revalidation made permanent — the kernel
-    /// refuses to deliver through it once the process is gone, so no signal of
-    /// this attempt's can land on whatever later holds the number. Killing the
-    /// init makes the kernel kill the namespace; the backend outside it goes
-    /// too.
-    pub(super) fn kill_boundary(&self) {
-        self.killing
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(leaf) = &self.cgroup {
-            let _ = leaf.kill();
-        }
-        for fd in self.init_fd.iter().chain([&self.bwrap_fd]) {
-            let _ = identity::pidfd_send_signal(fd.as_raw_fd(), libc::SIGKILL);
-        }
-    }
-
-    /// Stops the observer within `budget` and keeps its account.
-    ///
-    /// `finish_within` always returns: it interrupts the tracer thread, gives
-    /// a live tree up to `budget` to end, and on expiry kills what is left
-    /// and says how much it had to kill. Draining the channel first matters
-    /// because finishing drops the receiver with whatever is still in it.
-    pub(super) fn stop_observer(&mut self, budget: Duration) {
-        let Some(tracer) = self.tracer.take() else {
+    /// bubblewrap's status document, and with observation off its exit,
+    /// which is then the only fact about the target's end.
+    fn pump_status(&mut self, run: &RunState) {
+        self.started.status.pump();
+        if run.tracer.is_some() {
             return;
-        };
-        let target = super::observed::Target {
-            launcher: self.launcher.pid,
-            images: &self.target_images,
-        };
-        // Late facts change nothing here: the run loop has already ended.
-        let summary = super::observed::stop(tracer, budget, &mut self.audit, &target, |_| {});
-        self.tracer_summary = Some(summary);
+        }
+        if let Some(child) = self.started.child.as_mut()
+            && let Ok(Some(status)) = child.try_wait()
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            self.bwrap_status = Some(status.into_raw());
+        }
     }
 
-    /// Whether the observer's own account permits a claim of tree death.
-    pub(super) fn observer_verified_the_tree(&self) -> bool {
-        observer_verdict(self.tracer_summary.as_ref())
+    /// Moves relayed stdio while the run is live (audit 2026-10-08 H1);
+    /// `true` while a relay made progress.
+    fn pump_stdio(&mut self, run: &mut RunState) -> bool {
+        match pump_stdio_relays(&mut self.started.stdio_relays) {
+            Ok(active) => active,
+            Err(err) => {
+                run.pending.push_back(RunEvent::StdioFailed {
+                    reason: format!("a stdio relay failed: {err}"),
+                    after_target_end: self.target_ended(run),
+                });
+                // Failed streams cannot deliver more. Close them once and let
+                // the supervisor record the error and stop a live tree.
+                self.started.stdio_relays.clear();
+                false
+            }
+        }
+    }
+
+    /// Whether the target's end is known: the observer reported it, or the
+    /// backend's status was collected.
+    fn target_ended(&self, run: &RunState) -> bool {
+        run.target_exit_seen || self.bwrap_status.is_some()
+    }
+
+    fn stop_agent(&mut self, run: &mut RunState, budget: Duration) {
+        self.started
+            .stop_agent(&mut run.audit, run.observe_on, budget);
     }
 
     /// Whether the tree's death can still be shown: the observer's account
     /// does not object and the leaf's identity was never lost.
-    pub(super) fn tree_death_provable(&self) -> bool {
-        self.observer_verified_the_tree() && !self.cgroup_lost
+    fn tree_death_provable(&self, run: &RunState) -> bool {
+        observer_verdict(run.tracer_summary.as_ref()) && !self.started.cgroup_lost
     }
 
     /// Whether the tree is seen dead now: the namespace init has ended and
     /// the leaf, when there is one, is unpopulated.
-    pub(super) fn tree_dead(&self) -> bool {
-        !init_alive(self.init_fd.as_ref(), self.init_pid) && self.cgroup_empty()
+    fn tree_dead(&self) -> bool {
+        !self.init.alive() && self.started.cgroup_empty()
     }
 
-    pub(super) fn remove_placeholders(&mut self) {
-        if !(self.tree_death_provable() && self.tree_dead()) {
+    fn remove_placeholders(&mut self, run: &RunState) {
+        if !(self.tree_death_provable(run) && self.tree_dead()) {
             return;
         }
-        if self.placeholder_outcomes.is_empty() {
-            self.placeholder_outcomes = self
+        if self.started.placeholder_outcomes.is_empty() {
+            self.started.placeholder_outcomes = self
+                .started
                 .placeholders
                 .iter()
                 .map(Placeholder::remove_if_unchanged)
@@ -1635,126 +2243,68 @@ impl Boundary {
         }
     }
 
-    // A verified teardown for a boundary whose target never
-    // ran (abort, failed release; §13.2 row 4)
-    /// Kills the boundary and reports whether its death was verified.
-    ///
-    /// Verified means exactly what settlement requires, without the target:
-    /// the namespace init's pidfd reports its death (PID-namespace semantics:
-    /// every other member, the blocked launcher included, died first); the
-    /// backend (this supervisor's child) and the outside watcher are dead and
-    /// reaped; the execution cgroup, when one exists, was observed
-    /// unpopulated and its identity was never lost; and the observer, when
-    /// attached, finished without abandoning a tracee or losing a child's
-    /// status. Everything is polled within one tree budget; whatever is still
-    /// unknown at its end leaves the tree `pending` and `tree_empty` null.
-    /// "The trusted launcher died" is not on the list: it is implied by the
-    /// init's death and proves nothing without it.
-    pub(super) fn verified_teardown(&mut self) -> TreeObservation {
-        let deadline = clock::Deadline::after(TREE_BUDGET);
-        self.kill_boundary();
-        // The observer is stopped first, so after this nothing but this
-        // thread waits for children; its account is kept for the verdict.
-        self.stop_observer(deadline.remaining());
-        // The target never ran; nothing is left to serve
-        self.stop_agent(deadline.remaining());
-        let backend_reaped = match self.child.take() {
-            Some(mut child) => {
-                child.reap_until(deadline);
-                match child.try_wait() {
-                    Ok(Some(_)) => true,
-                    // The tracer's `waitpid(-1)` reaped it before it was
-                    // stopped. Nothing else in this process waits, so an
-                    // exited backend whose status is gone was reaped here.
-                    Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
-                        self.backend_exited()
-                    }
-                    _ => false,
-                }
-            }
-            None => false,
-        };
-        let init_dead = || {
-            self.init_fd
-                .as_ref()
-                .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
-        };
-        loop {
-            // As release_watcher_after_backend, by field: `init_dead` holds
-            // a borrow of the init's pidfd.
-            if super::watch::readable(self.bwrap_fd.as_raw_fd()) {
-                self.watcher.release();
-            }
-            let settled = init_dead() && self.watcher.ended() && self.cgroup_empty();
-            if settled || deadline.expired() {
-                break;
-            }
-            std::thread::sleep(WAIT_STEP);
-        }
-        self.watcher.reap();
-        let watcher_reaped = self.watcher.ended();
-        // The observer's own account, with one difference from settlement:
-        // its "unreaped children" are this supervisor's own children (the
-        // backend and the watcher) that were still exiting when it stopped.
-        // Here they were reaped above, by this thread, so that loss has a
-        // route after all. Any other unreaped child, an abandoned tracee or
-        // a panicked observer still refuses the verdict.
-        let verified = abort_verdict(&AbortInputs {
-            backend_reaped,
-            watcher_reaped,
-            init_dead: init_dead(),
-            cgroup_empty: self.cgroup_empty(),
-            abandoned_tracees: self
-                .tracer_summary
-                .as_ref()
-                .map_or(0, |summary| summary.loss.abandoned_tracees),
-            observer_panicked: self
-                .tracer_summary
-                .as_ref()
-                .is_some_and(|summary| summary.thread_panicked),
-            unreaped_children: self
-                .tracer_summary
-                .as_ref()
-                .map(|summary| summary.unreaped_children.clone())
-                .unwrap_or_default(),
-            // Security 2026-09-27 (audit 3 A5): carried for the receipt; never a
-            // verdict input, because the stop was continued and nothing was
-            // lost.
-            requested_by_other_filters: self
-                .tracer_summary
-                .as_ref()
-                .map_or(0, |summary| summary.requested_by_other_filters),
-            backend_pid: self.bwrap_pid,
-            watcher_pid: i32::try_from(self.watcher.pid()).unwrap_or(-1),
-        });
-        // Placeholders go only once the tree is known dead, and on this
-        // verdict rather than the settlement-time one, whose observer check
-        // would count the children reaped above as lost.
-        if verified && self.placeholder_outcomes.is_empty() {
-            self.placeholder_outcomes = self
-                .placeholders
-                .iter()
-                .map(Placeholder::remove_if_unchanged)
-                .collect();
-        }
-        if verified {
-            TreeObservation {
-                tree_empty: Some(true),
-                verified_at: Some(SystemTime::now()),
-                verification_scope: "attempt_tree".to_owned(),
-                integrity: "verified".to_owned(),
-            }
-        } else {
-            TreeObservation {
-                tree_empty: None,
-                verified_at: None,
-                verification_scope: "attempt_tree".to_owned(),
-                integrity: if self.cgroup_lost { "lost" } else { "pending" }.to_owned(),
-            }
+    fn status_outcome(&self, bwrap_status: i32) -> RunEvent {
+        let code = self
+            .started
+            .status
+            .parsed()
+            .exit_code
+            .or_else(|| libc::WIFEXITED(bwrap_status).then(|| libc::WEXITSTATUS(bwrap_status)));
+        match code {
+            // Measured on bubblewrap 0.11.1: a child killed by a signal is
+            // reported as 128 + signal, indistinguishable from an exit with
+            // that code. Without an observer the two cannot be told apart,
+            // so the ambiguous range stays unknown rather than being claimed.
+            Some(value) if (0..128).contains(&value) => RunEvent::TargetExited {
+                code: u8::try_from(value).unwrap_or(0),
+            },
+            Some(value) => RunEvent::Unknown {
+                reason: format!(
+                    "with observation off the backend reports a signal death as 128+signal, \
+                     so exit code {value} is ambiguous"
+                ),
+            },
+            None => RunEvent::Unknown {
+                reason: "the backend reported no exit code for the target".to_owned(),
+            },
         }
     }
+}
 
-    pub(super) fn boundary_identity(&self) -> BoundaryIdentity {
+/// What the backend's end says when the observer reported no final status:
+/// a failed exec's errno first; then, when nothing confirmed the exec,
+/// ExecUnconfirmed without an observer (§6.4) — with one attached, its end
+/// without having witnessed the exec is an unknown, not the observation-off
+/// error; otherwise the backend's own report.
+fn backend_outcome(
+    exec_confirmed: bool,
+    observer_attached: bool,
+    error_bytes: &[u8],
+    outcome: impl FnOnce() -> RunEvent,
+) -> RunEvent {
+    if !error_bytes.is_empty() {
+        let (errno, detail) = super::launch::exec_failure_parts(error_bytes);
+        return RunEvent::ExecError { errno, detail };
+    }
+    if !exec_confirmed {
+        if observer_attached {
+            return RunEvent::Unknown {
+                reason: "the observer ended without witnessing the target's exec".to_owned(),
+            };
+        }
+        return RunEvent::ExecUnconfirmed {
+            reason: "the backend ended without independent evidence of target exec".to_owned(),
+        };
+    }
+    outcome()
+}
+
+impl Tree for Boundary {
+    fn snapshot(&self) -> &PolicySnapshot {
+        &self.snapshot
+    }
+
+    fn boundary_identity(&self, run: &RunState) -> BoundaryIdentity {
         let mut details = Map::new();
         if self
             .snapshot
@@ -1776,21 +2326,25 @@ impl Boundary {
             "resolv_sanitization".to_owned(),
             Value::from(self.resolv_sanitization),
         );
-        details.insert("watcher_pid".to_owned(), Value::from(self.watcher.pid()));
+        details.insert(
+            "watcher_pid".to_owned(),
+            Value::from(self.started.watcher.pid()),
+        );
         // J4 autoscope: §9.3 — where the supervisor stood when the leaf was
         // made: already delegated, entered a scope of its own, or why not.
         details.insert("supervisor_scope".to_owned(), super::scope::details());
         details.insert(
             "bootstrap_spawn".to_owned(),
-            self.bootstrap_spawn.evidence(),
+            self.started.bootstrap_spawn.evidence(),
         );
         details.insert(
             "execution_cgroup".to_owned(),
-            match &self.cgroup {
+            match &self.started.cgroup {
                 // The bridge is a helper charged to the leaf
                 Some(leaf) => {
-                    let mut registration = leaf.registration(self.bwrap_pid, self.init_pid);
+                    let mut registration = leaf.registration(self.started.bwrap_pid, self.init.pid);
                     if let Some(bridge) = self
+                        .started
                         .agent
                         .as_ref()
                         .and_then(super::agent::AgentNet::bridge_pid)
@@ -1804,6 +2358,7 @@ impl Boundary {
                 }
                 None => serde_json::json!({
                     "unavailable": self
+                        .started
                         .cgroup_unavailable
                         .as_deref()
                         .unwrap_or("not attempted"),
@@ -1812,7 +2367,7 @@ impl Boundary {
         );
         details.insert(
             "bwrap_pid".to_owned(),
-            Value::from(i64::from(self.bwrap_pid)),
+            Value::from(i64::from(self.started.bwrap_pid)),
         );
         if let Some(storage) = &self.storage {
             details.insert(
@@ -1822,15 +2377,15 @@ impl Boundary {
         }
         details.insert(
             "readonly_open_fast_path".to_owned(),
-            Value::from(self.observe_on && !self.snapshot.observation.learning),
+            Value::from(run.observe_on && !self.snapshot.observation.learning),
         );
         details.insert(
             "namespace_init_pid".to_owned(),
-            Value::from(i64::from(self.init_pid)),
+            Value::from(i64::from(self.init.pid)),
         );
         details.insert(
             "launcher_pid".to_owned(),
-            Value::from(i64::from(self.launcher.pid)),
+            Value::from(i64::from(run.launcher.pid)),
         );
         // Two filters are in force and they are not the same program: the
         // baseline bubblewrap loads, recorded in `applied.syscalls`, and the
@@ -1844,7 +2399,7 @@ impl Boundary {
         // digest alone no longer identifies the running program.
         details.insert(
             "narrowing_filter_digest".to_owned(),
-            if self.observe_on {
+            if run.observe_on {
                 Value::from(super::tracer::narrowing_filter_digest())
             } else {
                 Value::Null
@@ -1852,7 +2407,7 @@ impl Boundary {
         );
         details.insert(
             "narrowing_filter_digest_installed".to_owned(),
-            if self.observe_on {
+            if run.observe_on {
                 Value::from(super::tracer::filter::narrowing_filter_digest_for(
                     self.trace_data,
                     self.snapshot.observation.learning,
@@ -1871,17 +2426,15 @@ impl Boundary {
         // The filter count read back, and the agent network
         details.insert(
             "seccomp_filters".to_owned(),
-            self.seccomp_filters.map_or(Value::Null, |count| {
-                serde_json::json!({
-                    "expected": super::agent::expected_launcher_filters(
-                        self.agent.is_some(),
-                        self.observe_on,
-                    ),
-                    "observed": count,
-                })
+            serde_json::json!({
+                "expected": super::agent::expected_launcher_filters(
+                    self.started.agent.is_some(),
+                    run.observe_on,
+                ),
+                "observed": self.seccomp_filters,
             }),
         );
-        if let Some(agent) = self.agent.as_ref() {
+        if let Some(agent) = self.started.agent.as_ref() {
             let (agent_details, helpers) = agent.details();
             details.insert("agent".to_owned(), agent_details);
             details.insert("helpers".to_owned(), helpers);
@@ -1896,14 +2449,14 @@ impl Boundary {
             details.insert(key.to_owned(), value.map_or(Value::Null, Value::from));
         }
         let mut identity_value = Map::new();
-        identity_value.insert("pid".to_owned(), Value::from(i64::from(self.launcher.pid)));
+        identity_value.insert("pid".to_owned(), Value::from(i64::from(run.launcher.pid)));
         identity_value.insert(
             "boot_id".to_owned(),
-            Value::from(self.launcher.boot_id.clone()),
+            Value::from(run.launcher.boot_id.clone()),
         );
         identity_value.insert(
             "start_time_ticks".to_owned(),
-            Value::from(self.launcher.start_time_ticks),
+            Value::from(run.launcher.start_time_ticks),
         );
         BoundaryIdentity {
             boundary: "pid_namespace".to_owned(),
@@ -1913,7 +2466,7 @@ impl Boundary {
                 details,
             }),
             process: Some(ProcessRecord {
-                pid: u32::try_from(self.launcher.pid).unwrap_or(0),
+                pid: u32::try_from(run.launcher.pid).unwrap_or(0),
                 identity: RecordIdentity {
                     kind: "linux_boot_start".to_owned(),
                     value: identity_value,
@@ -1923,229 +2476,316 @@ impl Boundary {
             backend_version: self.backend_version.clone(),
         }
     }
-}
 
-pub(super) fn prepare_timeout(message: &str) -> JailError {
-    error(
-        ErrorCode::PrepareTimeout,
-        ErrorStage::Preparing,
-        Remediation::Retry,
-        message.to_owned(),
-    )
-}
-
-// Naming the mechanism a launcher could not establish
-/// The refusal for a launcher that ended before it blocked, from its exit
-/// status (as bubblewrap reported it) and the errno it wrote: the agent
-/// launcher's mediation and bridge failures name themselves; anything else
-/// is the backend's.
-pub(super) fn launcher_failure(
-    exit_code: Option<i32>,
-    errno_bytes: &[u8],
-    diagnostic: &str,
-) -> JailError {
-    let errno = super::launch::decode_error_report(errno_bytes)
-        .map_or("no errno reported".into(), super::sys::errno_name);
-    match exit_code {
-        Some(super::launch::EXIT_MEDIATION_FAILED) => preparing(
-            ErrorCode::MissingCapability,
-            format!(
-                "the `agent` unix-peer mediation could not be established: the launcher could \
-                 not install the mediation filter with its listener or open sock_diag ({errno})"
-            ),
-        ),
-        Some(super::launch::EXIT_BRIDGE_FAILED) => preparing(
-            ErrorCode::MissingCapability,
-            format!(
-                "the `agent` bridge could not be established: the launcher could not start it \
-                 ({errno})"
-            ),
-        ),
-        _ => preparing(
-            ErrorCode::BackendUnavailable,
-            format!("bubblewrap exited before the launcher blocked: {diagnostic}"),
-        ),
-    }
-}
-
-/// Accepts an existing directory as it is, or creates it (and its missing
-/// parents) private. Only for directories that are not supervisor state:
-/// [`crate::state::create_private_dir`] checks those, ancestors included.
-pub(super) fn ensure_dir(path: &Path) -> Result<(), JailError> {
-    use std::os::unix::fs::DirBuilderExt as _;
-    if path.is_dir() {
-        return Ok(());
-    }
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-        .map_err(|err| {
-            error(
-                ErrorCode::StateWriteFailed,
-                ErrorStage::Preparing,
-                Remediation::InspectState,
-                format!("{} could not be created: {err}", path.display()),
-            )
-        })
-}
-
-/// Whether `filter`, the baseline bubblewrap installs, denies `link` and
-/// `linkat`, read from the program itself: it is matched against its
-/// profile's baseline (`tool`'s, or `agent`'s in `variant`) built with and
-/// without the storage rules.
-///
-/// # Errors
-/// Why the answer is unknown: a baseline that cannot be built, or a program
-/// that is neither of the two, which no preparation installs.
-pub(super) fn installed_hard_link_rule(
-    filter: &super::bpf::Program,
-    variant: Option<seccomp::AgentVariant>,
-) -> Result<bool, String> {
-    let baseline = |storage| {
-        match variant {
-            Some(variant) => seccomp::agent_baseline_with_storage(variant, storage),
-            None => seccomp::tool_baseline_with_storage(storage),
-        }
-        .map_err(|err| format!("its baseline cannot be built: {err}"))
-    };
-    if *filter == baseline(true)? {
-        Ok(true)
-    } else if *filter == baseline(false)? {
-        Ok(false)
-    } else {
-        Err("it is not its profile's baseline".to_owned())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Prepared
-// ---------------------------------------------------------------------------
-
-pub(super) struct LinuxPrepared {
-    pub(super) boundary: Boundary,
-}
-
-impl PreparedExecution for LinuxPrepared {
-    fn boundary(&self) -> BoundaryIdentity {
-        self.boundary.boundary_identity()
-    }
-
-    fn applied(&self) -> Option<Applied> {
-        Some(self.boundary.applied.clone())
-    }
-
-    // A failed release runs the verified teardown and says
-    // what it established, instead of tearing down without a verdict.
-    fn release(
-        self: Box<Self>,
-    ) -> Result<Box<dyn RunningExecution>, Box<crate::platform::ReleaseFailure>> {
-        let mut boundary = self.boundary;
-        if boundary.watcher.ended()
-            || boundary
+    fn check_before_release(&mut self, _run: &mut RunState) -> Result<(), JailError> {
+        let started = &mut self.started;
+        if started.watcher.ended()
+            || self
                 .storage
                 .as_mut()
                 .is_some_and(|storage| storage.sample().is_err())
-            || boundary
+            || started
                 .cgroup
                 .as_ref()
                 .is_some_and(|leaf| leaf.verify().is_err())
         {
-            let tree = boundary.verified_teardown();
-            return Err(Box::new(crate::platform::ReleaseFailure {
-                error: preparing(
-                    ErrorCode::BackendUnavailable,
-                    "lifetime resources were lost before release",
-                ),
-                teardown: Some(Teardown { tree: Some(tree) }),
-            }));
+            return Err(preparing(
+                ErrorCode::BackendUnavailable,
+                "lifetime resources were lost before release",
+            ));
         }
-        // Parsed once, before the release: an unparseable ceiling refuses
-        // with the launcher still blocked, rather than after the target was
-        // released without the deadline the receipt's limit row claims.
-        let wall = match clock::wall_ceiling(&boundary.snapshot.limits) {
-            Ok(wall) => wall,
-            Err(what) => {
-                let tree = boundary.verified_teardown();
-                return Err(Box::new(crate::platform::ReleaseFailure {
-                    error: preparing(
-                        ErrorCode::InternalError,
-                        format!("the wall limit cannot be enforced: {what}"),
-                    ),
-                    teardown: Some(Teardown { tree: Some(tree) }),
-                }));
+        Ok(())
+    }
+
+    fn tear_down(&mut self, run: &mut RunState) -> TreeObservation {
+        self.started.tear_down(Some(&self.init), Witness::Run(run))
+    }
+
+    /// Mediated connects and a loss of mediation or proxy evidence (which
+    /// strict evidence stops for), bubblewrap's status, the stdio relays and
+    /// the watcher, which must outlive a backend that still runs.
+    fn poll(&mut self, run: &mut RunState) -> bool {
+        if let Some(reason) = self.pump_agent(run) {
+            // R-2: the target's end as this loop knows it: the observer's
+            // exit, or without one the backend's.
+            let after_target_end =
+                run.target_exit_seen || (run.tracer.is_none() && self.bwrap_status.is_some());
+            run.pending.push_back(RunEvent::EvidenceLost {
+                reason,
+                after_target_end,
+            });
+        }
+        self.pump_status(run);
+        let relay_active = self.pump_stdio(run);
+        self.started.release_watcher_after_backend();
+        // The watcher follows the backend out, and its exit can be seen
+        // before the backend's status has been pumped; only a watcher gone
+        // while the backend still runs is a lost helper.
+        if self.started.watcher.ended()
+            && self.bwrap_status.is_none()
+            && !self.started.backend_exited()
+        {
+            self.hard_kill(run);
+        }
+        relay_active
+    }
+
+    fn sample(&mut self, run: &mut RunState) {
+        if let Some(storage) = self.storage.as_mut() {
+            match storage.sample() {
+                Ok(hits) => {
+                    for _ in hits {
+                        run.audit.record_limit_hit();
+                    }
+                }
+                Err(_) => {
+                    // Audit 2026-10-08 L1: the loss is sticky (`Storage::sample`
+                    // replays it every call), and losing the storage read must
+                    // not also blind the cgroup ceilings. L2: only a loss found
+                    // before the target's end may become the cause, and that
+                    // end stays known after its outcome was reported.
+                    self.storage_lost_live |= !self.target_ended(run);
+                    run.audit
+                        .record_limit_evidence_missing("storage_enforcement_lost");
+                    self.hard_kill(run);
+                }
             }
-        };
-        let Some(release) = boundary.release.take() else {
-            let tree = boundary.verified_teardown();
-            return Err(Box::new(crate::platform::ReleaseFailure {
-                error: preparing(
-                    ErrorCode::BackendUnavailable,
-                    "the release pipe is already closed",
-                ),
-                teardown: Some(Teardown { tree: Some(tree) }),
-            }));
-        };
-        if let Err(err) = write_all(release.as_raw_fd(), &[1]) {
-            let tree = boundary.verified_teardown();
-            return Err(Box::new(crate::platform::ReleaseFailure {
-                error: preparing(
-                    ErrorCode::BackendUnavailable,
-                    format!("the release byte could not be written: {err}"),
-                ),
-                teardown: Some(Teardown { tree: Some(tree) }),
-            }));
         }
-        // Closing it makes a second release impossible (X03).
-        drop(release);
-        Ok(Box::new(LinuxRunning {
-            boundary,
-            // The wall runs from the release.
-            wall: wall.map(clock::Deadline::after),
-            wall_reported: false,
-            exec_confirmed: false,
-            target_outcome: None,
-            pending: VecDeque::new(),
-            stop_requested: None,
-            stop_at: None,
-            hard_killed: false,
-            hard_deadline: None,
-            bwrap_status: None,
-            finished: false,
-            evidence_reported: false,
-            sampled_at_ns: 0,
-            storage_lost_live: false,
-        }))
+        let Some(leaf) = self.started.cgroup.as_mut() else {
+            return;
+        };
+        match sample_counters(leaf, &mut run.audit) {
+            Counters::Read { oom_killed } => {
+                if oom_killed {
+                    self.hard_kill(run);
+                }
+            }
+            Counters::Lost => {
+                self.started.cgroup_lost = true;
+                self.hard_kill(run);
+            }
+        }
     }
 
-    fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
-        let mut boundary = self.boundary;
-        // The target never ran, but the boundary existed, and
-        // whether its teardown completed is a measured fact, established by
-        // the same facts settlement requires (see `verified_teardown`).
-        Ok(Teardown {
-            tree: Some(boundary.verified_teardown()),
-        })
+    fn kill(&mut self, _run: &mut RunState) {
+        self.started.kill(Some(&self.init));
     }
-}
 
-/// Whether the namespace init is still running: from its pidfd once
-/// discovery took one, which turns readable at its exit and cannot come to
-/// name another process; before that, whether bubblewrap named an init whose
-/// `/proc` entry is still there.
-pub(super) fn init_alive(init_fd: Option<&OwnedFd>, init_pid: libc::pid_t) -> bool {
-    match init_fd {
-        Some(fd) => !super::watch::readable(fd.as_raw_fd()),
-        None => init_pid > 0 && Path::new(&format!("/proc/{init_pid}")).exists(),
+    fn untraced_exit(&mut self, pid: libc::pid_t, status: i32) {
+        if pid == self.started.bwrap_pid {
+            self.bwrap_status = Some(status);
+        }
     }
-}
 
-impl Drop for Boundary {
-    fn drop(&mut self) {
-        if self.child.is_some() || self.tracer.is_some() {
-            self.teardown();
+    /// The backend's end, and with an observer its account of the target:
+    /// the observer's final status, or its own end.
+    fn target_done(&self, run: &RunState) -> bool {
+        self.bwrap_status.is_some()
+            && (run.tracer.is_none() || run.finished || run.target_exit_seen)
+    }
+
+    /// The child's end has closed by now; what it wrote through the relays
+    /// reaches the operator before the outcome is recorded.
+    fn deliver_output(&mut self, run: &mut RunState) {
+        let relays = &mut self.started.stdio_relays;
+        if let Err(err) = drain_output_relays(relays, OUTPUT_DRAIN_BUDGET) {
+            run.pending.push_back(RunEvent::StdioFailed {
+                reason: format!("a stdio relay failed: {err}"),
+                after_target_end: true,
+            });
+            relays.clear();
+        }
+        if relays
+            .iter()
+            .any(|relay| !relay.to_child && !relay.buffer.is_empty())
+        {
+            run.pending.push_back(RunEvent::StdioFailed {
+                reason: "a stdio relay could not drain its output within the delivery budget"
+                    .to_owned(),
+                after_target_end: true,
+            });
+            relays.clear();
+        }
+    }
+
+    /// Without the observer's final status, the backend's report is all
+    /// there is.
+    fn unobserved_outcome(&mut self, run: &mut RunState) -> Option<RunEvent> {
+        let status = self.bwrap_status?;
+        Some(backend_outcome(
+            run.exec_confirmed,
+            run.tracer_attached,
+            &run.error.bytes,
+            || self.status_outcome(status),
+        ))
+    }
+
+    fn cooperative_stop(&mut self, _run: &mut RunState) {
+        // Measured on the reference host: a SIGTERM sent to the outer
+        // bubblewrap kills bubblewrap itself and never reaches the target,
+        // while a SIGTERM to the target's own host pid runs its handler. So
+        // the cooperative stop goes to the target, through the pidfd
+        // discovery took.
+        let _ = identity::pidfd_send_signal(self.launcher_fd.as_raw_fd(), libc::SIGTERM);
+    }
+
+    fn tree_ended(&mut self, run: &mut RunState) -> bool {
+        self.pump_status(run);
+        // The observer finishes once every tracee and the backend are reaped
+        // (J5-T); the watcher, released here, is reaped at settlement.
+        self.started.release_watcher_after_backend();
+        self.bwrap_status.is_some() && !self.init.alive() && self.started.cgroup_empty()
+    }
+
+    fn settle(
+        &mut self,
+        run: &mut RunState,
+        deadline: clock::Deadline,
+        natural: bool,
+    ) -> TreeObservation {
+        // The tree is dead or given up on; the proxy drains its last results
+        // and the mediator stops.
+        self.stop_agent(run, deadline.remaining());
+        self.sample(run);
+        while !self.started.watcher.ended() && !deadline.expired() {
+            self.started.release_watcher_after_backend();
+            std::thread::sleep(WAIT_STEP);
+        }
+        self.started.watcher.reap();
+        self.remove_placeholders(run);
+        let observer = run.tracer_summary.as_ref();
+        let mut tree = verdict(&TreeInputs {
+            init_alive: self.init.alive(),
+            backend_reaped: self.bwrap_status.is_some() && self.started.watcher.ended(),
+            tracer_finished: run.tracer.is_none() || run.finished,
+            natural_end: natural,
+            abandoned_tracees: observer.map_or(0, |summary| summary.loss.abandoned_tracees),
+            unreaped_children: observer.map_or(0, |summary| summary.unreaped_children.len()),
+            observer_panicked: observer.is_some_and(|summary| summary.thread_panicked),
+            // Security 2026-09-27 (audit 3 A5): carried for the receipt;
+            // never a verdict input, because the stop was continued and
+            // nothing was lost.
+            requested_by_other_filters: observer
+                .map_or(0, |summary| summary.requested_by_other_filters),
+        });
+        if !self.started.cgroup_empty() {
+            tree.tree_empty = None;
+            tree.verified_at = None;
+            tree.integrity = if self.started.cgroup_lost {
+                "lost"
+            } else {
+                "pending"
+            }
+            .to_owned();
+        }
+        tree
+    }
+
+    /// The backend's status, which no observer collects any more, and the
+    /// `agent` network: `proxy.net` is the proxy's own class, with or
+    /// without the observer (§11.4).
+    fn before_summary(&mut self, run: &mut RunState) {
+        if run.tracer.is_none()
+            && let Some(mut child) = self.started.child.take()
+        {
+            let _ = child.try_wait();
+        }
+        self.stop_agent(run, TREE_BUDGET);
+    }
+
+    fn supply_coverage(&self, summary: &mut CoverageSummary) {
+        if let Some(agent) = self.started.agent.as_ref() {
+            agent.apply_coverage(summary);
+        }
+    }
+
+    fn final_limits(&self) -> Vec<AppliedLimit> {
+        let mut limits = self
+            .started
+            .cgroup
+            .as_ref()
+            .map_or_else(Vec::new, ExecutionCgroup::limits);
+        if let Some(storage) = &self.storage {
+            limits.extend(storage.limits());
+        }
+        limits
+    }
+
+    fn limit_cause(&self) -> Option<String> {
+        // Audit 2026-10-08 L2 (§6.4): a storage enforcement loss becomes the
+        // cause only when it was found while the target still ran. A loss
+        // discovered after the target's own end — including the settlement
+        // sample — is recorded in `errors[]` but is never the cause.
+        if self.storage_lost_live
+            && self
+                .storage
+                .as_ref()
+                .is_some_and(super::storage::Storage::lost)
+        {
+            return Some("storage_enforcement_lost".to_owned());
+        }
+        self.started
+            .cgroup
+            .as_ref()
+            .is_some_and(ExecutionCgroup::oom_killed)
+            .then(|| "memory_oom".to_owned())
+    }
+
+    /// The storage enforcement loss's own message, for the receipt's
+    /// `errors[]` (audit 2026-10-08 L2); `None` while enforcement holds.
+    fn storage_loss(&self) -> Option<String> {
+        self.storage.as_ref()?.loss().map(str::to_owned)
+    }
+
+    /// The bridge's counts, once it and the mediator stopped, and the
+    /// observer's counts the receipt carries.
+    fn final_native_details(&self, run: &RunState) -> Map<String, Value> {
+        let mut details = Map::new();
+        if let Some(storage) = &self.storage {
+            details.insert(
+                "storage_ceiling".to_owned(),
+                storage.evidence(self.hard_links_denied),
+            );
+        }
+        if let Some(agent) = self.started.agent.as_ref() {
+            details.insert("helpers".to_owned(), agent.details().1);
+        }
+        let observer = run.tracer_summary.as_ref();
+        // Security 2026-09-27 (audit 4 B9): the honest count of read-only
+        // open verdicts the observer certified (register-sourced flags, and
+        // the memory-sourced ones every `memory_flags_unverified` gap already
+        // names). A count that never leaves the tracer is unauditable.
+        details.insert(
+            "filtered_readonly_opens".to_owned(),
+            observer.map_or(Value::Null, |summary| {
+                Value::from(summary.filtered_readonly_opens)
+            }),
+        );
+        // Security 2026-09-29 (audit 6 N1): open events delivered with their
+        // pathname claim downgraded because the descriptor link did not
+        // corroborate it. Not loss, so no class counts it; the receipt does.
+        details.insert(
+            "path_claims_unverified".to_owned(),
+            observer.map_or(Value::Null, |summary| {
+                Value::from(summary.path_claims_unverified)
+            }),
+        );
+        // Security 2026-09-27 (audit 3 A5): wrong-guess trace stops are
+        // counted in the receipt, so a child probing the trace-data space
+        // shows up in `lifetime.native.details` instead of continuing
+        // silently.
+        details.insert(
+            "requested_by_other_filters".to_owned(),
+            wrong_guess_stops_detail(observer),
+        );
+        details
+    }
+
+    fn dropped(&mut self, run: &mut RunState) {
+        if self.started.child.is_some() || run.tracer.is_some() {
+            self.tear_down(run);
         } else {
-            self.remove_placeholders();
+            self.remove_placeholders(run);
         }
     }
 }
@@ -2191,11 +2831,14 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = libc::pid_t::try_from(child.id()).unwrap();
-        let fd = identity::pidfd_open(pid).unwrap();
-        assert!(init_alive(Some(&fd), pid));
+        let init = Init {
+            pid,
+            fd: identity::pidfd_open(pid).unwrap(),
+        };
+        assert!(init.alive());
         child.kill().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !super::super::watch::readable(fd.as_raw_fd()) {
+        while !super::super::watch::readable(init.fd.as_raw_fd()) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "SIGKILL not delivered"
@@ -2206,9 +2849,8 @@ mod tests {
             Path::new(&format!("/proc/{pid}")).exists(),
             "the unreaped zombie keeps its /proc entry"
         );
-        assert!(!init_alive(Some(&fd), pid), "an exited init is not alive");
+        assert!(!init.alive(), "an exited init is not alive");
         child.wait().unwrap();
-        assert!(!init_alive(None, -1), "no init named: none alive");
     }
 
     /// A storage or inode ceiling in the snapshot adds the hard-link denials
@@ -2331,5 +2973,29 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Without an observer's final status the backend's report decides; an
+    /// exec nothing confirmed is the observation-off error only without an
+    /// observer, and an unknown with one, which is not that error.
+    #[test]
+    fn an_unconfirmed_exec_is_the_observation_off_error_only_without_an_observer() {
+        let exited = || RunEvent::TargetExited { code: 3 };
+        assert!(matches!(
+            backend_outcome(false, false, &[], exited),
+            RunEvent::ExecUnconfirmed { .. }
+        ));
+        let RunEvent::Unknown { reason } = backend_outcome(false, true, &[], exited) else {
+            panic!("an observed run reports no ExecUnconfirmed");
+        };
+        assert!(reason.contains("observer"), "{reason}");
+        assert_eq!(
+            backend_outcome(true, true, &[], exited),
+            RunEvent::TargetExited { code: 3 }
+        );
+        assert!(matches!(
+            backend_outcome(false, true, &libc::ENOENT.to_le_bytes(), exited),
+            RunEvent::ExecError { .. }
+        ));
     }
 }

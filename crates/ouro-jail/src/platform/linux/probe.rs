@@ -2187,7 +2187,7 @@ mod tests {
                 CapabilityScope::Tree,
             ),
         ] {
-            let capability = super::super::platform::shared::capability_from(
+            let capability = super::super::requirements::capability_from(
                 requirement,
                 probes,
                 "test",

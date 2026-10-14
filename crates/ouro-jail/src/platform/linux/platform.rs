@@ -30,7 +30,7 @@ use crate::platform::{
 use crate::policy::ProfileName;
 use crate::records::{ErrorCode, ErrorStage, JailError, Os, Remediation, rfc3339_utc};
 
-use super::boundary::{Boundary, LinuxPrepared, prepare_timeout};
+use super::boundary::prepare_timeout;
 use super::bwrap;
 use super::clock;
 use super::fs as jfs;
@@ -41,7 +41,6 @@ use super::requirements::{derive, probes_for};
 pub use super::mounts::MOUNT_SWAP_SEAM;
 pub(crate) use super::mounts::refuse_pseudo_fs_grants;
 pub(crate) use super::mounts::{PlanPaths, plan_for};
-pub(super) use super::running::shared;
 pub use super::verdict::{AbortInputs, TreeInputs, abort_verdict, verdict};
 
 // Fixed descriptor numbers (§8.3). The backend's descriptor map installs
@@ -315,8 +314,9 @@ impl Platform for LinuxPlatform {
             .backend_pin
             .as_ref()
             .map_err(|e| preparing(ErrorCode::BackendUnavailable, e.clone()))?;
-        let prepared = Boundary::create(bwrap, pin, plan, sinks, deadline)?;
-        Ok(Box::new(LinuxPrepared { boundary: prepared }))
+        Ok(Box::new(super::boundary::create(
+            bwrap, pin, plan, sinks, deadline,
+        )?))
     }
 }
 

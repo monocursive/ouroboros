@@ -59,13 +59,14 @@
 //! that snapshot and orphaned here is indistinguishable from an escaped
 //! attempt process and is treated as one (a recorded limit).
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+use std::path::Path;
 use std::process::{Child, Command};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use serde_json::{Map, Value};
 
@@ -74,11 +75,8 @@ use crate::capability::{
     REQ_NETWORK_NONE, REQ_NETWORK_PROXY, REQ_SYSCALL_FILTER, REQ_TREE_TERMINATION,
 };
 use crate::environment;
-use crate::observer::{CoverageClass, CoverageSummary};
-use crate::platform::ReleaseFailure;
 use crate::platform::{
-    BoundaryIdentity, Deadline as PortableDeadline, PreparedExecution, PreparedPlan, RunEvent,
-    RunningExecution, Sinks, StopReason, Teardown, TreeObservation,
+    BoundaryIdentity, PreparedExecution, PreparedPlan, RunEvent, Sinks, TreeObservation,
 };
 use crate::policy::{EnvValue, PolicySnapshot, ProfileName, ProtectedCoverage};
 use crate::records::{
@@ -90,17 +88,23 @@ use crate::trace::{Priority, SharedTrace};
 
 use super::audit::AuditWriter;
 use super::cgroup::{self, ExecutionCgroup};
-use super::clock::{self, boottime_ns};
+use super::clock;
 use super::exec::{self, FdMap, reap_until};
 use super::identity;
 use super::launch;
-use super::observed::{self, Fact};
-use super::platform::shared;
+use super::observed;
 use super::probe::ProbeResult;
-use super::tracer::{self, Tracer, TracerEvent, TracerSummary};
+use super::requirements::capability_from;
+use super::running::{
+    Counters, ErrorPipe, Launched, Run, RunState, Tree, ceiling_rows, counters_lost,
+    outcome_from_status, refuse_privileged_supervisor, sample_counters,
+};
+use super::sys::{nap, set_nonblocking};
+use super::tracer::{self, Tracer};
+use super::verdict::{REGISTERED_SCOPE, observer_verdict};
 use super::watch;
 
-use super::verdict::REGISTERED_SCOPE;
+use super::verdict::none_verdict;
 pub use super::verdict::{NoneTreeInputs, none_verdict as verdict};
 
 /// The descriptor the launcher blocks reading.
@@ -165,7 +169,7 @@ pub fn capability_for(
         ));
     }
     let probes = probes_for(profile, requirement)?;
-    Some(shared::capability_from(
+    Some(capability_from(
         requirement,
         probes,
         TREE_MECHANISM,
@@ -269,8 +273,7 @@ pub fn prepare(
             "the uncontained `none` boundary stages no vendor state or credentials".to_owned(),
         ));
     }
-    let boundary = Uncontained::create(plan, sinks, deadline)?;
-    Ok(Box::new(Prepared { boundary }))
+    Ok(Box::new(Uncontained::create(plan, sinks, deadline)?))
 }
 
 /// J5-T: the processes below this supervisor before it started the
@@ -297,12 +300,11 @@ impl Inherited {
     }
 }
 
-/// Everything the `none` boundary owns, from preparation through settlement.
+/// Everything the `none` boundary owns besides the run's own state.
 struct Uncontained {
     snapshot: PolicySnapshot,
     attempt_id: String,
     trace: Option<SharedTrace>,
-    observe_on: bool,
     /// The §11.4 bounds the observer runs with, decided once; `None` with
     /// observation off.
     observer_plan: Option<observed::ObserverPlan>,
@@ -311,21 +313,8 @@ struct Uncontained {
     /// The launcher as a child, for the wait status when no observer owns
     /// this process's waits.
     child: Option<Child>,
-    launcher: identity::ProcessIdentity,
     /// Taken while it was this process's unreaped child, so it names it.
     launcher_fd: OwnedFd,
-    /// The paths the launcher will try to `execve` (see `platform.rs`).
-    target_images: Vec<Vec<u8>>,
-    release: Option<OwnedFd>,
-    error: OwnedFd,
-    error_bytes: Vec<u8>,
-    error_eof: bool,
-    tracer: Option<Tracer>,
-    /// Set once the observer attached: from then on it owns every `waitpid`.
-    tracer_attached: bool,
-    tracer_summary: Option<TracerSummary>,
-    audit: AuditWriter,
-    applied: Applied,
     leaf: ExecutionCgroup,
     /// The leaf as `/proc/<pid>/cgroup` names it.
     leaf_relative: String,
@@ -340,31 +329,199 @@ struct Uncontained {
     escaped: Vec<(libc::pid_t, OwnedFd)>,
     /// J5-T: what was below this supervisor before the launcher existed.
     inherited: Inherited,
-    wall: Option<clock::Deadline>,
-    wall_reported: bool,
-    exec_confirmed: bool,
-    target_outcome: Option<RunEvent>,
-    /// The observer reported the target's final status.
-    target_exit_seen: bool,
     /// The target's raw wait status, when this process collected it.
     target_status: Option<i32>,
-    pending: VecDeque<RunEvent>,
-    stop_requested: Option<StopReason>,
-    stop_at: Option<u64>,
-    hard_killed: bool,
-    hard_deadline: Option<clock::Deadline>,
-    finished: bool,
-    evidence_reported: bool,
-    sampled_at_ns: u64,
+}
+
+/// The launcher, started and still blocked, with its two channels.
+struct SpawnedLauncher {
+    child: Child,
+    pid: libc::pid_t,
+    /// Opened while the launcher was this process's unreaped child.
+    pidfd: OwnedFd,
+    /// The release pipe's write end.
+    release: OwnedFd,
+    /// The error pipe's read end, non-blocking.
+    error: OwnedFd,
+}
+
+/// What the blocked launcher was read back as.
+struct Established {
+    launcher: identity::ProcessIdentity,
+    applied: Applied,
+    tracer: Option<Tracer>,
+}
+
+/// The launcher's environment.
+struct LaunchEnvironment {
+    vars: Vec<(OsString, OsString)>,
+    /// The reserved names removed from the host's; the receipt lists them,
+    /// never a value.
+    removed: Vec<String>,
+}
+
+/// §12: the host environment minus every reserved name, plus the snapshot's
+/// own bindings.
+///
+/// # Errors
+/// A binding with a reserved name or a path value.
+fn launch_environment(snapshot: &PolicySnapshot) -> Result<LaunchEnvironment, JailError> {
+    let (mut env, removed) = if snapshot.environment.inherit_host {
+        environment::strip_reserved(std::env::vars_os())
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    for binding in &snapshot.environment.bindings {
+        let name = OsString::from(&binding.name);
+        if environment::is_reserved(&name) {
+            return Err(refusal(
+                ErrorCode::InvalidConfig,
+                Remediation::Configuration,
+                format!(
+                    "the environment binding {} uses a reserved name",
+                    binding.name
+                ),
+            ));
+        }
+        let EnvValue::Native(value) = &binding.value else {
+            return Err(refusal(
+                ErrorCode::InvalidConfig,
+                Remediation::Unsupported,
+                format!(
+                    "the uncontained profile binds no path-valued environment ({})",
+                    binding.name
+                ),
+            ));
+        };
+        env.retain(|(existing, _)| existing != &name);
+        env.push((name, OsString::from_vec(value.as_bytes().to_vec())));
+    }
+    Ok(LaunchEnvironment { vars: env, removed })
+}
+
+/// Makes this supervisor a child subreaper, so orphans of the target come to
+/// it rather than to init and a descendant that outlives its parent stays
+/// enumerable.
+///
+/// # Errors
+/// The refusal when the kernel does not allow it.
+fn become_subreaper() -> Result<(), JailError> {
+    // SAFETY: PR_SET_CHILD_SUBREAPER takes scalars and dereferences nothing.
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
+        return Err(host_setup(
+            ErrorCode::BackendUnavailable,
+            format!(
+                "the supervisor could not become a child subreaper, so an escaped descendant \
+                 would be invisible: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Starts the trusted launcher on the host, in a new session, with its
+/// release and error pipes at their fixed numbers.
+///
+/// # Errors
+/// A refusal naming the channel or the start that failed; a launcher started
+/// but not opened by pidfd is killed and reaped first.
+fn spawn_launcher(
+    exe: &Path,
+    argv: &[OsString],
+    env: &[(OsString, OsString)],
+    workspace: &Path,
+    observe_on: bool,
+) -> Result<SpawnedLauncher, JailError> {
+    let io = |err: std::io::Error| {
+        host_setup(
+            ErrorCode::BackendUnavailable,
+            format!("the launcher's channels could not be created: {err}"),
+        )
+    };
+    let (release_r, release_w) = exec::pipe().map_err(io)?;
+    let (error_r, error_w) = exec::pipe().map_err(io)?;
+    set_nonblocking(error_r.as_raw_fd()).map_err(io)?;
+    let mut fds = FdMap::new();
+    fds.add(release_r, RELEASE_FD).map_err(io)?;
+    fds.add(error_w, ERROR_FD).map_err(io)?;
+
+    let mut command = Command::new(exe);
+    command
+        .arg(launch::SUBCOMMAND)
+        .args(
+            launch::LaunchArgs {
+                release_fd: RELEASE_FD,
+                error_fd: ERROR_FD,
+                narrow: observe_on,
+                read_open_fast_path: false,
+                trace_data_fd: None,
+                mediate: None,
+                bridge: None,
+                sigmask: None,
+                argv: argv.to_vec(),
+            }
+            .to_argv(),
+        )
+        .env_clear()
+        .envs(env.iter().map(|(name, value)| (name, value)))
+        .current_dir(workspace);
+    // §8.3: every descriptor above stdio closes before exec, the channels
+    // above are installed at fixed numbers, and the parent-death signal is
+    // armed and rechecked.
+    fds.apply(&mut command);
+    // §8.3: the command runs in a new session.
+    // SAFETY: runs between fork and exec and calls only setsid, which is
+    // async-signal-safe; the error is built from errno without allocating.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|err| {
+        host_setup(
+            ErrorCode::BackendUnavailable,
+            format!(
+                "the launcher ({}) could not be started: {err}",
+                exe.display()
+            ),
+        )
+    })?;
+    drop(fds);
+    // Opened while the launcher is this process's unreaped child, so the
+    // descriptor names it and nothing that inherits the number later. A pid
+    // that does not fit `pid_t` names no process: refuse, never a stand-in
+    // number.
+    let opened = libc::pid_t::try_from(child.id())
+        .map_err(|_| std::io::Error::other("the launcher's pid does not fit pid_t"))
+        .and_then(|pid| identity::pidfd_open(pid).map(|fd| (pid, fd)));
+    match opened {
+        Ok((pid, pidfd)) => Ok(SpawnedLauncher {
+            child,
+            pid,
+            pidfd,
+            release: release_w,
+            error: error_r,
+        }),
+        Err(err) => {
+            let _ = child.kill();
+            reap_until(&mut child, clock::Deadline::after(TREE_BUDGET));
+            Err(io(err))
+        }
+    }
 }
 
 impl Uncontained {
-    #[allow(clippy::too_many_lines)]
+    /// Creates the boundary and its blocked launcher, read back and, with
+    /// observation on, observed: the run the supervisor releases.
     fn create(
         plan: PreparedPlan,
         sinks: Sinks,
         deadline: clock::Deadline,
-    ) -> Result<Uncontained, JailError> {
+    ) -> Result<Run<Uncontained>, JailError> {
         let snapshot = plan.request.snapshot.clone();
         if snapshot.profile != ProfileName::None {
             return Err(refusal(
@@ -373,7 +530,7 @@ impl Uncontained {
                 "the uncontained boundary was asked to run a contained profile",
             ));
         }
-        shared::refuse_privileged_supervisor()?;
+        refuse_privileged_supervisor()?;
         if let Some(key) = unapplied_restriction(&snapshot) {
             return Err(refusal(
                 ErrorCode::MissingCapability,
@@ -392,40 +549,7 @@ impl Uncontained {
                 format!("this binary's own path cannot be read: {err}"),
             )
         })?;
-
-        // §12: the host environment minus every reserved name; the receipt
-        // lists the removed names, never a value.
-        let (mut env, removed) = if snapshot.environment.inherit_host {
-            environment::strip_reserved(std::env::vars_os())
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        for binding in &snapshot.environment.bindings {
-            let name = OsString::from(&binding.name);
-            if environment::is_reserved(&name) {
-                return Err(refusal(
-                    ErrorCode::InvalidConfig,
-                    Remediation::Configuration,
-                    format!(
-                        "the environment binding {} uses a reserved name",
-                        binding.name
-                    ),
-                ));
-            }
-            let EnvValue::Native(value) = &binding.value else {
-                return Err(refusal(
-                    ErrorCode::InvalidConfig,
-                    Remediation::Unsupported,
-                    format!(
-                        "the uncontained profile binds no path-valued environment ({})",
-                        binding.name
-                    ),
-                ));
-            };
-            env.retain(|(existing, _)| existing != &name);
-            env.push((name, OsString::from_vec(value.as_bytes().to_vec())));
-        }
-
+        let LaunchEnvironment { vars: env, removed } = launch_environment(&snapshot)?;
         let argv: Vec<OsString> = plan
             .argv
             .iter()
@@ -453,8 +577,8 @@ impl Uncontained {
 
         // §9.3: the supervisor-owned execution cgroup is required, observation
         // on or off. No fallback to a process-group kill (north star §4.2).
-        // J4 W2-S: N7 — registered in jail state before `mkdir` and before
-        // anything is placed in it; a failed registration refuses (S5).
+        // N7: registered in jail state before `mkdir` and before anything is
+        // placed in it; a failed registration refuses (S5).
         let created = ExecutionCgroup::create_for_attempt(&snapshot.limits, &plan.attempt_dir)?;
         let leaf = created.map_err(|err| {
             host_setup(
@@ -472,177 +596,64 @@ impl Uncontained {
                  cannot be read back",
             ));
         };
-
-        // Orphans of the target come to this process rather than to init, so
-        // a descendant that outlives its parent stays enumerable.
-        // SAFETY: PR_SET_CHILD_SUBREAPER takes scalars and dereferences nothing.
-        if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
-            return Err(host_setup(
-                ErrorCode::BackendUnavailable,
-                format!(
-                    "the supervisor could not become a child subreaper, so an escaped \
-                     descendant would be invisible: {}",
-                    std::io::Error::last_os_error()
-                ),
-            ));
-        }
-
+        become_subreaper()?;
         // J5-T: before the launcher exists, everything below this process
         // is something it was started beside, not the attempt.
         // SAFETY: getpid takes no arguments and cannot fail.
         let inherited = Inherited::below(unsafe { libc::getpid() });
 
-        let io = |err: std::io::Error| {
-            host_setup(
-                ErrorCode::BackendUnavailable,
-                format!("the launcher's channels could not be created: {err}"),
-            )
-        };
-        let (release_r, release_w) = exec::pipe().map_err(io)?;
-        let (error_r, error_w) = exec::pipe().map_err(io)?;
-        shared::set_nonblocking(error_r.as_raw_fd()).map_err(io)?;
-        let mut fds = FdMap::new();
-        fds.add(release_r, RELEASE_FD).map_err(io)?;
-        fds.add(error_w, ERROR_FD).map_err(io)?;
-
-        let mut command = Command::new(&exe);
-        command
-            .arg(launch::SUBCOMMAND)
-            .args(
-                launch::LaunchArgs {
-                    release_fd: RELEASE_FD,
-                    error_fd: ERROR_FD,
-                    narrow: observe_on,
-                    read_open_fast_path: false,
-                    trace_data_fd: None,
-                    mediate: None,
-                    bridge: None,
-                    sigmask: None,
-                    argv: argv.clone(),
-                }
-                .to_argv(),
-            )
-            .env_clear()
-            .envs(env.iter().map(|(name, value)| (name, value)))
-            .current_dir(&plan.workspace);
-        // §8.3: every descriptor above stdio closes before exec, the channels
-        // above are installed at fixed numbers, and the parent-death signal
-        // is armed and rechecked.
-        fds.apply(&mut command);
-        // §8.3: the command runs in a new session.
-        // SAFETY: runs between fork and exec and calls only setsid, which is
-        // async-signal-safe; the error is built from errno without allocating.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let mut child = command.spawn().map_err(|err| {
-            host_setup(
-                ErrorCode::BackendUnavailable,
-                format!(
-                    "the launcher ({}) could not be started: {err}",
-                    exe.display()
-                ),
-            )
-        })?;
-        drop(fds);
-        // Opened while the launcher is this process's unreaped child, so the
-        // descriptor names it and nothing that inherits the number later. A
-        // pid that does not fit `pid_t` names no process: refuse, never a
-        // stand-in number.
-        let opened = libc::pid_t::try_from(child.id())
-            .map_err(|_| std::io::Error::other("the launcher's pid does not fit pid_t"))
-            .and_then(|pid| identity::pidfd_open(pid).map(|fd| (pid, fd)));
-        let (pid, launcher_fd) = match opened {
-            Ok(opened) => opened,
-            Err(err) => {
-                let _ = child.kill();
-                reap_until(&mut child, clock::Deadline::after(TREE_BUDGET));
-                return Err(io(err));
-            }
-        };
-
+        let spawned = spawn_launcher(&exe, &argv, &env, &plan.workspace, observe_on)?;
+        let audit = AuditWriter::new(
+            &plan.attempt_id,
+            sinks.trace.clone(),
+            plan.workspace.as_os_str().as_bytes(),
+            // No scratch: a path is workspace-relative or a digest.
+            b"",
+        );
         let mut boundary = Uncontained {
-            audit: AuditWriter::new(
-                &plan.attempt_id,
-                sinks.trace.clone(),
-                plan.workspace.as_os_str().as_bytes(),
-                // No scratch: a path is workspace-relative or a digest.
-                b"",
-            ),
             snapshot,
-            attempt_id: plan.attempt_id,
+            attempt_id: plan.attempt_id.clone(),
             trace: sinks.trace,
-            observe_on,
             observer_plan: observe_on.then(observed::ObserverPlan::from_env),
-            pid,
-            child: Some(child),
-            launcher: identity::ProcessIdentity {
-                pid,
-                boot_id: String::new(),
-                start_time_ticks: 0,
-            },
-            launcher_fd,
-            target_images,
-            release: Some(release_w),
-            error: error_r,
-            error_bytes: Vec::new(),
-            error_eof: false,
-            tracer: None,
-            tracer_attached: false,
-            tracer_summary: None,
-            applied: Applied {
-                filesystem: None,
-                network: AppliedNetwork {
-                    mode: "host".to_owned(),
-                    mechanism: None,
-                    allowed_hosts: Vec::new(),
-                    tls_only: Vec::new(),
-                },
-                syscalls: None,
-                limits: Vec::new(),
-                environment_names: Vec::new(),
-                removed_environment_names: Vec::new(),
-            },
+            pid: spawned.pid,
+            child: Some(spawned.child),
+            launcher_fd: spawned.pidfd,
             leaf,
             leaf_relative,
             cgroup_of: cgroup::process_cgroup,
             losses: Vec::new(),
             escaped: Vec::new(),
             inherited,
-            wall: None,
-            wall_reported: false,
-            exec_confirmed: false,
-            target_outcome: None,
-            target_exit_seen: false,
             target_status: None,
-            pending: VecDeque::new(),
-            stop_requested: None,
-            stop_at: None,
-            hard_killed: false,
-            hard_deadline: None,
-            finished: false,
-            evidence_reported: false,
-            sampled_at_ns: 0,
         };
-        if let Err(err) = boundary.establish(deadline, removed) {
-            boundary.teardown();
-            return Err(err);
-        }
-        Ok(boundary)
+        let established = match boundary.establish(deadline, removed, &target_images) {
+            Ok(established) => established,
+            Err(err) => {
+                boundary.shut_down(None);
+                return Err(err);
+            }
+        };
+        let state = RunState::new(Launched {
+            launcher: established.launcher,
+            target_images,
+            release: spawned.release,
+            error: ErrorPipe::new(spawned.error),
+            audit,
+            observe_on,
+            tracer: established.tracer,
+            applied: established.applied,
+        });
+        Ok(Run::new(state, boundary))
     }
 
     /// Places the blocked launcher, reads everything back and attaches the
-    /// observer. Any failure refuses; the caller tears down.
+    /// observer. Any failure refuses; the caller shuts the boundary down.
     fn establish(
         &mut self,
         deadline: clock::Deadline,
         removed: Vec<String>,
-    ) -> Result<(), JailError> {
+        target_images: &[Vec<u8>],
+    ) -> Result<Established, JailError> {
         let pid = self.pid;
         // §9.3: in the identity-pinned leaf before release, confirmed by the
         // leaf's own member list and by the process's own cgroup file, the
@@ -688,14 +699,14 @@ impl Uncontained {
                     "the launcher did not block on its release pipe".to_owned(),
                 ));
             }
-            shared::nap();
+            nap();
         }
 
         // With observation on, the narrowing filter must be in force before
         // the seize: without it the observer would see nothing and say so
         // nowhere. One more filter than this process has is the read-back;
         // a filter inherited from the operator's own session is not ours.
-        if self.observe_on {
+        if self.observer_plan.is_some() {
             // One status snapshot per process, parsed as every other
             // privilege read-back parses it: the launcher's filter count and
             // its NoNewPrivs come from the same read.
@@ -729,13 +740,13 @@ impl Uncontained {
             }
         }
 
-        self.launcher = identity::ProcessIdentity::capture(pid).map_err(|err| {
+        let launcher = identity::ProcessIdentity::capture(pid).map_err(|err| {
             host_setup(
                 ErrorCode::BackendUnavailable,
                 format!("the launcher's identity could not be recorded: {err}"),
             )
         })?;
-        self.applied = self.read_applied(removed)?;
+        let applied = self.read_applied(removed)?;
         self.leaf
             .verify_member(pid)
             .and_then(|()| self.leaf.arm())
@@ -746,32 +757,37 @@ impl Uncontained {
                 )
             })?;
 
-        if let Some(plan) = self.observer_plan.as_ref() {
-            // §13.1: gap intervals count from supervisor start on the same
-            // CLOCK_BOOTTIME base as every other monotonic_ns. §11.4: the
-            // bounds are the plan's, which the receipt records.
-            let mut config = plan.tracer_config(clock::mark_supervisor_start());
-            config.target = Some((pid, self.target_images.clone()));
-            let tracer = Tracer::attach(pid, config).map_err(|err| {
-                // §11.4: an observer that cannot attach refuses before exec,
-                // whatever the evidence mode says.
-                host_setup(
-                    ErrorCode::ObserverUnavailable,
-                    format!("the closed-set observer could not attach: {err}"),
-                )
-            })?;
-            self.tracer = Some(tracer);
-            self.tracer_attached = true;
-        }
-        Ok(())
+        let tracer = match self.observer_plan.as_ref() {
+            Some(plan) => {
+                // §13.1: gap intervals count from supervisor start on the same
+                // CLOCK_BOOTTIME base as every other monotonic_ns. §11.4: the
+                // bounds are the plan's, which the receipt records.
+                let mut config = plan.tracer_config(clock::mark_supervisor_start());
+                config.target = Some((pid, target_images.to_vec()));
+                Some(Tracer::attach(pid, config).map_err(|err| {
+                    // §11.4: an observer that cannot attach refuses before
+                    // exec, whatever the evidence mode says.
+                    host_setup(
+                        ErrorCode::ObserverUnavailable,
+                        format!("the closed-set observer could not attach: {err}"),
+                    )
+                })?)
+            }
+            None => None,
+        };
+        Ok(Established {
+            launcher,
+            applied,
+            tracer,
+        })
     }
 
     /// The `applied` group: nothing but the leaf's limits, the wall and the
     /// environment, which is read back from the launcher; a read-back that
     /// fails refuses rather than record an empty environment.
     fn read_applied(&self, removed: Vec<String>) -> Result<Applied, JailError> {
-        let limits = shared::ceiling_rows(&self.snapshot.limits, Some(&self.leaf));
-        let environment_names = shared::read_environment_names(self.pid).map_err(|err| {
+        let limits = ceiling_rows(&self.snapshot.limits, Some(&self.leaf));
+        let environment_names = identity::read_environment_names(self.pid).map_err(|err| {
             host_setup(
                 ErrorCode::BackendUnavailable,
                 format!("the launcher's environment cannot be read back: {err}"),
@@ -790,71 +806,6 @@ impl Uncontained {
             environment_names,
             removed_environment_names: removed,
         })
-    }
-
-    fn boundary_identity(&self) -> BoundaryIdentity {
-        let (device, inode) = self.leaf.identity();
-        let mut details = Map::new();
-        details.insert(
-            "execution_cgroup".to_owned(),
-            serde_json::json!({
-                "path": self.leaf.path(),
-                "device": device,
-                "inode": inode,
-                // The launcher occupies the target slot; nothing else is charged.
-                "charged_helpers": [],
-                "scope": "target_descendants_and_listed_helpers",
-            }),
-        );
-        details.insert("launcher_pid".to_owned(), Value::from(i64::from(self.pid)));
-        // J4 autoscope: §9.3 — where the supervisor stood when the leaf was
-        // made: already delegated, entered a scope of its own, or why not.
-        details.insert("supervisor_scope".to_owned(), super::scope::details());
-        // Observation, not containment: the observer's filter is in the
-        // target, and the receipt names it by the digest it reports.
-        details.insert(
-            "narrowing_filter_digest".to_owned(),
-            if self.observe_on {
-                Value::from(tracer::narrowing_filter_digest())
-            } else {
-                Value::Null
-            },
-        );
-        // §11.4: "Record actual values in the observer plan."
-        details.insert(
-            "observer_plan".to_owned(),
-            self.observer_plan
-                .as_ref()
-                .map_or(Value::Null, observed::ObserverPlan::details),
-        );
-        details.insert("child_subreaper".to_owned(), Value::from(true));
-        let mut identity_value = Map::new();
-        identity_value.insert("pid".to_owned(), Value::from(i64::from(self.launcher.pid)));
-        identity_value.insert(
-            "boot_id".to_owned(),
-            Value::from(self.launcher.boot_id.clone()),
-        );
-        identity_value.insert(
-            "start_time_ticks".to_owned(),
-            Value::from(self.launcher.start_time_ticks),
-        );
-        BoundaryIdentity {
-            boundary: "supervisor_cgroup".to_owned(),
-            verification_scope: REGISTERED_SCOPE.to_owned(),
-            native: Some(NativeLifetime {
-                os: Os::Linux,
-                details,
-            }),
-            process: Some(ProcessRecord {
-                pid: u32::try_from(self.launcher.pid).unwrap_or(0),
-                identity: RecordIdentity {
-                    kind: "linux_boot_start".to_owned(),
-                    value: identity_value,
-                },
-            }),
-            backend: Some("none".to_owned()),
-            backend_version: None,
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -891,16 +842,16 @@ impl Uncontained {
     }
 
     /// Whether the target's final status has been collected.
-    fn target_reaped(&self) -> bool {
-        if self.tracer_attached {
+    fn target_reaped(&self, run: &RunState) -> bool {
+        if run.tracer_attached {
             // The observer reaps what it traces. Its Exit event is the reap of
             // an exec'd target; a clean finish is the reap of everything.
-            self.target_exit_seen
-                || (self.tracer.is_none()
-                    && self
+            run.target_exit_seen
+                || (run.tracer.is_none()
+                    && run
                         .tracer_summary
                         .as_ref()
-                        .is_some_and(|summary| shared::observer_verdict(Some(summary))))
+                        .is_some_and(|summary| observer_verdict(Some(summary))))
         } else {
             self.target_status.is_some()
         }
@@ -1009,8 +960,8 @@ impl Uncontained {
 
     /// Collects the target's wait status, reading the cgroup its zombie
     /// died in first.
-    fn collect_target(&mut self) {
-        if self.tracer_attached || self.target_status.is_some() || !peek_exited(self.pid) {
+    fn collect_target(&mut self, observer_attached: bool) {
+        if observer_attached || self.target_status.is_some() || !peek_exited(self.pid) {
             return;
         }
         // An unreaped zombie keeps its pid, so this read is of the target. A
@@ -1030,8 +981,8 @@ impl Uncontained {
 
     /// Reaps exited orphans that were reparented here, checking where each
     /// zombie died before it goes.
-    fn reap_orphans(&mut self) {
-        if self.tracer_attached {
+    fn reap_orphans(&mut self, observer_attached: bool) {
+        if observer_attached {
             return;
         }
         // SAFETY: getpid takes no arguments and cannot fail.
@@ -1064,144 +1015,8 @@ impl Uncontained {
     }
 
     // -----------------------------------------------------------------------
-    // Channels and the observer
+    // Termination
     // -----------------------------------------------------------------------
-
-    /// Reads whatever the launcher wrote about a failed exec.
-    fn pump_error(&mut self) {
-        shared::drain_error_pipe(&self.error, &mut self.error_bytes, &mut self.error_eof);
-    }
-
-    fn pump_tracer(&mut self, block: Duration) {
-        let Some(tracer) = self.tracer.as_ref() else {
-            return;
-        };
-        for event in observed::drain(tracer, block) {
-            self.handle_tracer_event(&event);
-        }
-    }
-
-    fn handle_tracer_event(&mut self, event: &TracerEvent) {
-        let target = observed::Target {
-            launcher: self.pid,
-            images: &self.target_images,
-        };
-        match observed::record(&mut self.audit, &target, event) {
-            Fact::TargetExec if !self.exec_confirmed => {
-                self.exec_confirmed = true;
-                self.pending.push_back(RunEvent::ExecConfirmed);
-            }
-            Fact::TargetExit(status) => {
-                self.target_exit_seen = true;
-                if self.target_outcome.is_none() {
-                    self.target_outcome = Some(shared::outcome_from_status(status));
-                }
-            }
-            // §11.4: only a hole where a result went missing stops a strict
-            // run, exactly as for the contained profiles.
-            Fact::CoverageLost(reason) if !self.evidence_reported => {
-                self.evidence_reported = true;
-                self.pending.push_back(RunEvent::EvidenceLost {
-                    reason: format!("the closed-set observer lost coverage: {}", reason.as_str()),
-                    // J4 W2-S: R-2 — processed after the target's own exit.
-                    after_target_end: self.target_exit_seen,
-                });
-            }
-            Fact::Finished => self.finished = true,
-            // Every child of this subreaper is a tracee; nothing else is a
-            // fact about this attempt's lifecycle.
-            _ => {}
-        }
-    }
-
-    /// Stops the observer within `budget` and keeps its account; a late
-    /// target exit or the end still delivered counts as seen.
-    fn stop_observer(&mut self, budget: Duration) {
-        let Some(tracer) = self.tracer.take() else {
-            return;
-        };
-        let target = observed::Target {
-            launcher: self.pid,
-            images: &self.target_images,
-        };
-        let exit_seen = &mut self.target_exit_seen;
-        let finished = &mut self.finished;
-        let summary = observed::stop(
-            tracer,
-            budget,
-            &mut self.audit,
-            &target,
-            |fact| match fact {
-                Fact::TargetExit(_) => *exit_seen = true,
-                Fact::Finished => *finished = true,
-                _ => {}
-            },
-        );
-        self.tracer_summary = Some(summary);
-    }
-
-    // -----------------------------------------------------------------------
-    // Limits, deadlines and termination
-    // -----------------------------------------------------------------------
-
-    /// Counters, the leaf's identity and every descendant's membership, at
-    /// the contained profiles' counter cadence (and always when `force`).
-    fn sample(&mut self, force: bool) {
-        if !shared::sample_due(&mut self.sampled_at_ns, force) {
-            return;
-        }
-        if self.scan_leaf().is_some() {
-            match shared::sample_counters(&mut self.leaf, &mut self.audit) {
-                shared::Counters::Read { oom_killed } => {
-                    if oom_killed {
-                        self.hard_kill();
-                    }
-                }
-                shared::Counters::Lost => self.lose(Subject::Boundary, Loss::VerificationFailed),
-            }
-        } else {
-            // The leaf cannot even be scanned, so no counter claim stands.
-            shared::counters_lost(&mut self.leaf, &mut self.audit, "cgroup_leaf_scan_failed");
-        }
-        self.scan_descendants();
-    }
-
-    /// Exec confirmation with no observer while the target lives
-    /// ([`shared::exec_without_observer`]).
-    fn check_exec_without_tracer(&mut self) {
-        if shared::exec_without_observer(
-            self.tracer_attached || self.exec_confirmed,
-            &self.error_bytes,
-            self.error_eof,
-            &self.launcher,
-        ) {
-            self.exec_confirmed = true;
-            self.pending.push_back(RunEvent::ExecConfirmed);
-        }
-    }
-
-    fn check_wall(&mut self) {
-        if let Some(event) = shared::check_wall(self.wall, &mut self.wall_reported, &mut self.audit)
-        {
-            self.pending.push_back(event);
-        }
-    }
-
-    fn check_grace(&mut self) {
-        if shared::grace_spent(
-            self.hard_killed,
-            self.stop_requested.is_some(),
-            self.stop_at,
-        ) {
-            self.hard_kill();
-        }
-    }
-
-    fn hard_kill(&mut self) {
-        if shared::arm_hard_kill(&mut self.hard_killed, &mut self.hard_deadline) {
-            self.kill_all();
-        }
-    }
 
     /// `cgroup.kill` on the identity-checked leaf (never on a replacement:
     /// the control is opened only after the path check), SIGKILL to the
@@ -1220,65 +1035,23 @@ impl Uncontained {
         }
     }
 
-    /// Kills and reaps everything this boundary owns, within the tree budget.
-    fn teardown(&mut self) {
+    /// Kills and reaps everything this boundary owns, within one tree budget.
+    /// `run` is the run's state once there is one: its observer is stopped
+    /// inside the same budget, and owns the waits it attached for.
+    fn shut_down(&mut self, run: Option<&mut RunState>) {
         let deadline = clock::Deadline::after(TREE_BUDGET);
         self.kill_all();
-        self.stop_observer(deadline.remaining());
-        if !self.tracer_attached
-            && let Some(child) = self.child.as_mut()
-        {
+        let attached = run.is_some_and(|run| {
+            run.stop_observer(deadline.remaining());
+            run.tracer_attached
+        });
+        if !attached && let Some(child) = self.child.as_mut() {
             reap_until(child, deadline);
             if let Ok(Some(status)) = child.try_wait() {
                 self.target_status = Some(status.into_raw());
             }
         }
-        self.reap_orphans();
-    }
-
-    /// The outcome once no more facts about the target can arrive.
-    ///
-    /// Observation off, the exit status is this process's own wait status of
-    /// the target, which is exact. Exec is confirmed without an observer by
-    /// the launcher's protocol: after it was seen blocked on the release
-    /// descriptor and released, its only ways to end before exec are an exec
-    /// failure, which writes the errno first, or a signal. So an exit with no
-    /// errno bytes is the target's own exit (§8.1 step 7: "EOF alone is
-    /// insufficient if launcher death could also have closed that fd" — a
-    /// signal death stays unknown).
-    fn terminal_event(&mut self) -> Option<RunEvent> {
-        if let Some(event) = shared::observed_outcome(
-            &mut self.target_outcome,
-            &mut self.exec_confirmed,
-            &mut self.pending,
-        ) {
-            return Some(event);
-        }
-        if self.tracer_attached {
-            return self.finished.then(|| RunEvent::Unknown {
-                reason: "the observer ended without the target's final status".to_owned(),
-            });
-        }
-        let status = self.target_status?;
-        self.pump_error();
-        if !self.error_bytes.is_empty() {
-            let (errno, detail) = launch::exec_failure_parts(&self.error_bytes);
-            return Some(RunEvent::ExecError { errno, detail });
-        }
-        let outcome = shared::outcome_from_status(status);
-        if !self.exec_confirmed {
-            if libc::WIFEXITED(status) && self.error_eof {
-                self.exec_confirmed = true;
-                self.pending.push_back(outcome);
-                return Some(RunEvent::ExecConfirmed);
-            }
-            return Some(RunEvent::Unknown {
-                reason: "the target ended by a signal before its exec was independently \
-                         confirmed"
-                    .to_owned(),
-            });
-        }
-        Some(outcome)
+        self.reap_orphans(attached);
     }
 }
 
@@ -1355,178 +1128,184 @@ fn classify(
     }
 }
 
-// ---------------------------------------------------------------------------
-// The platform traits
-// ---------------------------------------------------------------------------
-
-struct Prepared {
-    boundary: Uncontained,
-}
-
-impl PreparedExecution for Prepared {
-    fn boundary(&self) -> BoundaryIdentity {
-        self.boundary.boundary_identity()
+impl Tree for Uncontained {
+    fn snapshot(&self) -> &PolicySnapshot {
+        &self.snapshot
     }
 
-    fn applied(&self) -> Option<Applied> {
-        Some(self.boundary.applied.clone())
+    fn boundary_identity(&self, run: &RunState) -> BoundaryIdentity {
+        let (device, inode) = self.leaf.identity();
+        let mut details = Map::new();
+        details.insert(
+            "execution_cgroup".to_owned(),
+            serde_json::json!({
+                "path": self.leaf.path(),
+                "device": device,
+                "inode": inode,
+                // The launcher occupies the target slot; nothing else is charged.
+                "charged_helpers": [],
+                "scope": "target_descendants_and_listed_helpers",
+            }),
+        );
+        details.insert("launcher_pid".to_owned(), Value::from(i64::from(self.pid)));
+        // J4 autoscope: §9.3 — where the supervisor stood when the leaf was
+        // made: already delegated, entered a scope of its own, or why not.
+        details.insert("supervisor_scope".to_owned(), super::scope::details());
+        // Observation, not containment: the observer's filter is in the
+        // target, and the receipt names it by the digest it reports.
+        details.insert(
+            "narrowing_filter_digest".to_owned(),
+            if run.observe_on {
+                Value::from(tracer::narrowing_filter_digest())
+            } else {
+                Value::Null
+            },
+        );
+        // §11.4: "Record actual values in the observer plan."
+        details.insert(
+            "observer_plan".to_owned(),
+            self.observer_plan
+                .as_ref()
+                .map_or(Value::Null, observed::ObserverPlan::details),
+        );
+        details.insert("child_subreaper".to_owned(), Value::from(true));
+        let mut identity_value = Map::new();
+        identity_value.insert("pid".to_owned(), Value::from(i64::from(run.launcher.pid)));
+        identity_value.insert(
+            "boot_id".to_owned(),
+            Value::from(run.launcher.boot_id.clone()),
+        );
+        identity_value.insert(
+            "start_time_ticks".to_owned(),
+            Value::from(run.launcher.start_time_ticks),
+        );
+        BoundaryIdentity {
+            boundary: "supervisor_cgroup".to_owned(),
+            verification_scope: REGISTERED_SCOPE.to_owned(),
+            native: Some(NativeLifetime {
+                os: Os::Linux,
+                details,
+            }),
+            process: Some(ProcessRecord {
+                pid: u32::try_from(run.launcher.pid).unwrap_or(0),
+                identity: RecordIdentity {
+                    kind: "linux_boot_start".to_owned(),
+                    value: identity_value,
+                },
+            }),
+            backend: Some("none".to_owned()),
+            backend_version: None,
+        }
     }
 
-    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, Box<ReleaseFailure>> {
-        let mut boundary = self.boundary;
+    fn check_before_release(&mut self, _run: &mut RunState) -> Result<(), JailError> {
         // The blocked launcher must still be the only thing in the pinned
         // leaf. A same-UID process can have changed either since prepared;
         // the refusal then carries the teardown, `lost` included (§13.2).
-        boundary.scan_target();
-        let populated = boundary.scan_leaf();
-        boundary.scan_descendants();
-        if !boundary.losses.is_empty() || boundary.target_exited() || populated != Some(true) {
-            return Err(boundary.fail_release(host_setup(
+        self.scan_target();
+        let populated = self.scan_leaf();
+        self.scan_descendants();
+        if !self.losses.is_empty() || self.target_exited() || populated != Some(true) {
+            return Err(host_setup(
                 ErrorCode::BackendUnavailable,
                 "the registered boundary or the blocked launcher was lost before release",
-            )));
+            ));
         }
-        // Parsed once, before the release: an unparseable ceiling refuses
-        // with the launcher still blocked, rather than after the target was
-        // released without the deadline the receipt's limit row claims.
-        let wall = match clock::wall_ceiling(&boundary.snapshot.limits) {
-            Ok(wall) => wall,
-            Err(what) => {
-                return Err(boundary.fail_release(host_setup(
-                    ErrorCode::InternalError,
-                    format!("the wall limit cannot be enforced: {what}"),
-                )));
-            }
-        };
-        let Some(release) = boundary.release.take() else {
-            return Err(boundary.fail_release(host_setup(
-                ErrorCode::BackendUnavailable,
-                "the release pipe is already closed",
-            )));
-        };
-        if let Err(err) = shared::write_all(release.as_raw_fd(), &[1]) {
-            return Err(boundary.fail_release(host_setup(
-                ErrorCode::BackendUnavailable,
-                format!("the release byte could not be written: {err}"),
-            )));
-        }
-        // X03 does not rest on this: the launcher reads exactly one byte and
-        // this descriptor would close at the end of the function anyway.
-        // Closing it here only makes the single release visible at a glance
-        // (an equivalent mutant; nothing can test it).
-        drop(release);
-        // The wall runs from the release.
-        boundary.wall = wall.map(clock::Deadline::after);
-        Ok(Box::new(boundary))
+        Ok(())
     }
 
-    fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
-        let mut boundary = self.boundary;
-        Ok(boundary.torn_down())
-    }
-}
-
-impl Uncontained {
-    /// Tears everything down and says what that established (§13.2 row 4):
-    /// verified only on a reaped launcher, an empty identity-checked leaf and
-    /// a clean observer; `lost` after any detected loss.
-    fn torn_down(&mut self) -> Teardown {
-        self.teardown();
+    /// Verified only on a reaped launcher, an empty identity-checked leaf and
+    /// a clean observer; `lost` after any detected loss (§13.2 row 4).
+    fn tear_down(&mut self, run: &mut RunState) -> TreeObservation {
+        self.shut_down(Some(run));
         let populated = self.scan_leaf();
-        let reaped = self.target_reaped();
-        Teardown {
-            tree: Some(verdict(&NoneTreeInputs {
-                integrity_lost: !self.losses.is_empty(),
-                natural_end: reaped,
-                target_reaped: reaped,
-                leaf_verified_empty: populated == Some(false),
-                observer_clean: shared::observer_verdict(self.tracer_summary.as_ref()),
-            })),
-        }
-    }
-
-    /// A refused release, with the teardown it ran.
-    fn fail_release(mut self, error: JailError) -> Box<ReleaseFailure> {
-        let teardown = self.torn_down();
-        Box::new(ReleaseFailure {
-            error,
-            teardown: Some(teardown),
+        let reaped = self.target_reaped(run);
+        none_verdict(&NoneTreeInputs {
+            integrity_lost: !self.losses.is_empty(),
+            natural_end: reaped,
+            target_reaped: reaped,
+            leaf_verified_empty: populated == Some(false),
+            observer_clean: observer_verdict(run.tracer_summary.as_ref()),
         })
     }
-}
 
-impl RunningExecution for Uncontained {
-    fn final_limits(&self) -> Vec<AppliedLimit> {
-        self.leaf.limits()
-    }
-
-    fn limit_cause(&self) -> Option<String> {
-        self.leaf.oom_killed().then(|| "memory_oom".to_owned())
-    }
-
-    fn integrity_lost(&self) -> bool {
-        !self.losses.is_empty()
-    }
-
-    fn wait(&mut self, deadline: PortableDeadline) -> RunEvent {
-        if let Some(event) = self.pending.pop_front() {
-            return event;
-        }
-        self.pump_error();
-        self.pump_tracer(Duration::ZERO);
-        self.collect_target();
-        self.reap_orphans();
-        self.sample(false);
+    fn poll(&mut self, run: &mut RunState) -> bool {
+        self.collect_target(run.tracer_attached);
+        self.reap_orphans(run.tracer_attached);
         self.scan_target();
-        self.check_exec_without_tracer();
-        self.check_wall();
-        self.check_grace();
-        if let Some(event) = self.pending.pop_front() {
-            return event;
+        false
+    }
+
+    /// Counters, the leaf's identity and every descendant's membership.
+    fn sample(&mut self, run: &mut RunState) {
+        if self.scan_leaf().is_some() {
+            match sample_counters(&mut self.leaf, &mut run.audit) {
+                Counters::Read { oom_killed } => {
+                    if oom_killed {
+                        self.hard_kill(run);
+                    }
+                }
+                Counters::Lost => self.lose(Subject::Boundary, Loss::VerificationFailed),
+            }
+        } else {
+            // The leaf cannot even be scanned, so no counter claim stands.
+            counters_lost(&mut self.leaf, &mut run.audit, "cgroup_leaf_scan_failed");
         }
-        if !self.error_bytes.is_empty() && self.exec_confirmed {
-            // Bytes after a confirmed exec cannot happen; keep them out of
-            // the way rather than reporting a second event.
-            self.error_bytes.clear();
-        }
-        if !self.error_bytes.is_empty() {
-            let (errno, detail) = launch::exec_failure_parts(&self.error_bytes);
-            self.error_bytes.clear();
-            return RunEvent::ExecError { errno, detail };
-        }
-        let done = if self.tracer_attached {
-            self.target_outcome.is_some() || self.finished
+        self.scan_descendants();
+    }
+
+    fn kill(&mut self, _run: &mut RunState) {
+        self.kill_all();
+    }
+
+    /// The observer's final status or its end with observation on, the wait
+    /// status with it off: never population, since an empty leaf with a
+    /// live target is a live target.
+    fn target_done(&self, run: &RunState) -> bool {
+        if run.tracer_attached {
+            run.target_exit_seen || run.finished
         } else {
             self.target_status.is_some()
-        };
-        if done {
-            // The counters must be in hand before the outcome is classified:
-            // an OOM kill is attributed from them.
-            self.sample(true);
-            if let Some(event) = self.terminal_event() {
-                return event;
-            }
         }
-        if self.hard_deadline.is_some_and(clock::Deadline::expired) {
-            return RunEvent::Unknown {
-                reason: "termination could not be observed within the tree budget".to_owned(),
-            };
-        }
-        let step = shared::step_for(deadline);
-        if self.tracer.is_some() {
-            self.pump_tracer(step);
-        } else {
-            std::thread::sleep(step);
-        }
-        RunEvent::Poll
     }
 
-    fn request_stop(&mut self, reason: StopReason) {
-        if self.stop_requested.is_some() {
-            return;
+    /// Observation off, the exit status is this process's own wait status of
+    /// the target, which is exact. Exec is confirmed without an observer by
+    /// the launcher's protocol: after it was seen blocked on the release
+    /// descriptor and released, its only ways to end before exec are an exec
+    /// failure, which writes the errno first, or a signal. So an exit with no
+    /// errno bytes is the target's own exit (§8.1 step 7: "EOF alone is
+    /// insufficient if launcher death could also have closed that fd" — a
+    /// signal death stays unknown).
+    fn unobserved_outcome(&mut self, run: &mut RunState) -> Option<RunEvent> {
+        if run.tracer_attached {
+            return run.finished.then(|| RunEvent::Unknown {
+                reason: "the observer ended without the target's final status".to_owned(),
+            });
         }
-        self.stop_requested = Some(reason);
-        self.stop_at = Some(boottime_ns());
+        let status = self.target_status?;
+        run.error.drain();
+        if !run.error.bytes.is_empty() {
+            let (errno, detail) = launch::exec_failure_parts(&run.error.bytes);
+            return Some(RunEvent::ExecError { errno, detail });
+        }
+        let outcome = outcome_from_status(status);
+        if !run.exec_confirmed {
+            if libc::WIFEXITED(status) && run.error.eof {
+                run.exec_confirmed = true;
+                run.pending.push_back(outcome);
+                return Some(RunEvent::ExecConfirmed);
+            }
+            return Some(RunEvent::Unknown {
+                reason: "the target ended by a signal before its exec was independently \
+                         confirmed"
+                    .to_owned(),
+            });
+        }
+        Some(outcome)
+    }
+
+    fn cooperative_stop(&mut self, _run: &mut RunState) {
         // Where everything is, read before anything is signalled: a target
         // that left the leaf is still stopped through its pidfd, and the
         // record says it left. Defence in depth: `wait` checks the target on
@@ -1541,87 +1320,59 @@ impl RunningExecution for Uncontained {
         let _ = identity::pidfd_send_signal(self.launcher_fd.as_raw_fd(), libc::SIGTERM);
     }
 
-    fn wait_tree(&mut self, budget: Duration) -> TreeObservation {
-        let deadline = self
-            .hard_deadline
-            .unwrap_or_else(|| clock::Deadline::after(budget));
-        let settle = clock::Deadline::after(shared::SETTLE_GRACE.min(budget));
-        let mut natural = false;
-        loop {
-            self.pump_error();
-            self.pump_tracer(Duration::ZERO);
-            self.collect_target();
-            self.reap_orphans();
-            self.scan_target();
-            let populated = self.scan_leaf();
-            self.scan_descendants();
-            if self.hard_killed {
-                // Orphans reparented here by the kill are ours to end too.
-                self.kill_escaped();
-            }
-            let tracer_done = self.tracer.is_none() || self.finished;
-            let escaped_alive = self
-                .escaped
-                .iter()
-                .any(|(_, fd)| !watch::readable(fd.as_raw_fd()));
-            // An unreadable leaf after a recorded loss has nothing more to
-            // say; a readable one must be seen empty.
-            let leaf_done =
-                populated == Some(false) || (populated.is_none() && !self.losses.is_empty());
-            if tracer_done && self.target_reaped() && leaf_done && !escaped_alive {
-                natural = true;
-                break;
-            }
-            if settle.expired() {
-                // §9.3: target exit is itself a termination trigger.
-                self.hard_kill();
-            }
-            if deadline.expired() {
-                break;
-            }
-            if self.tracer.is_some() {
-                self.pump_tracer(shared::WAIT_STEP);
-            } else {
-                std::thread::sleep(shared::WAIT_STEP);
-            }
-        }
-        self.pump_tracer(Duration::ZERO);
-        self.stop_observer(deadline.remaining());
-        self.sample(true);
+    fn tree_ended(&mut self, run: &mut RunState) -> bool {
+        self.collect_target(run.tracer_attached);
+        self.reap_orphans(run.tracer_attached);
+        self.scan_target();
         let populated = self.scan_leaf();
-        verdict(&NoneTreeInputs {
+        self.scan_descendants();
+        if run.hard_killed {
+            // Orphans reparented here by the kill are ours to end too.
+            self.kill_escaped();
+        }
+        let escaped_alive = self
+            .escaped
+            .iter()
+            .any(|(_, fd)| !watch::readable(fd.as_raw_fd()));
+        // An unreadable leaf after a recorded loss has nothing more to say; a
+        // readable one must be seen empty.
+        let leaf_done =
+            populated == Some(false) || (populated.is_none() && !self.losses.is_empty());
+        self.target_reaped(run) && leaf_done && !escaped_alive
+    }
+
+    fn settle(
+        &mut self,
+        run: &mut RunState,
+        _deadline: clock::Deadline,
+        natural: bool,
+    ) -> TreeObservation {
+        self.sample(run);
+        let populated = self.scan_leaf();
+        none_verdict(&NoneTreeInputs {
             integrity_lost: !self.losses.is_empty(),
             natural_end: natural,
-            target_reaped: self.target_reaped(),
+            target_reaped: self.target_reaped(run),
             leaf_verified_empty: populated == Some(false),
-            observer_clean: shared::observer_verdict(self.tracer_summary.as_ref()),
+            observer_clean: observer_verdict(run.tracer_summary.as_ref()),
         })
     }
 
-    fn observer_summary(&mut self) -> Option<CoverageSummary> {
-        // `wait_tree` already stopped the observer inside its budget; this
-        // only covers a caller that skipped it.
-        self.stop_observer(TREE_BUDGET);
-        if self.observe_on {
-            return Some(self.audit.summary(
-                self.tracer_summary.as_ref(),
-                CoverageSummary::applied(self.tracer_attached),
-            ));
-        }
-        // §11.4: observation off makes every audit class unsupported with a
-        // null count; the wrapper's own `limits` class still exists.
-        let mut summary = CoverageSummary::unobserved();
-        summary
-            .classes
-            .insert(CoverageClass::Limits, self.audit.limits_class());
-        Some(summary)
+    fn final_limits(&self) -> Vec<AppliedLimit> {
+        self.leaf.limits()
     }
-}
 
-impl Drop for Uncontained {
-    fn drop(&mut self) {
-        if self.tracer.is_some() || !self.target_reaped() {
-            self.teardown();
+    fn limit_cause(&self) -> Option<String> {
+        self.leaf.oom_killed().then(|| "memory_oom".to_owned())
+    }
+
+    fn integrity_lost(&self) -> bool {
+        !self.losses.is_empty()
+    }
+
+    fn dropped(&mut self, run: &mut RunState) {
+        if run.tracer.is_some() || !self.target_reaped(run) {
+            self.shut_down(Some(run));
         }
     }
 }
@@ -1629,6 +1380,7 @@ impl Drop for Uncontained {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn none_keeps_the_contained_probes_for_what_it_shares() {
@@ -1850,7 +1602,7 @@ mod tests {
     fn exited_child_boundary(
         leaf: &std::path::Path,
         cgroup_of: fn(libc::pid_t) -> std::io::Result<String>,
-    ) -> Uncontained {
+    ) -> Run<Uncontained> {
         let child = Command::new("/bin/true").spawn().expect("/bin/true runs");
         let pid = libc::pid_t::try_from(child.id()).unwrap();
         let launcher_fd = identity::pidfd_open(pid).expect("a pidfd of the child");
@@ -1863,6 +1615,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         let (error, _writer) = exec::pipe().unwrap();
+        let (_reader, release) = exec::pipe().unwrap();
         let snapshot = crate::policy::resolve(&crate::policy::ResolveInputs {
             platform: Os::Linux,
             base_profile: ProfileName::None,
@@ -1877,34 +1630,23 @@ mod tests {
         })
         .unwrap()
         .snapshot;
-        Uncontained {
-            snapshot,
-            attempt_id: "att_00000000-0000-4000-8000-000000000001".to_owned(),
-            trace: None,
-            observe_on: false,
-            observer_plan: None,
-            pid,
-            child: Some(child),
+        let mut state = RunState::new(Launched {
             launcher: identity::ProcessIdentity {
                 pid,
                 boot_id: String::new(),
                 start_time_ticks: 0,
             },
-            launcher_fd,
             target_images: Vec::new(),
-            release: None,
-            error,
-            error_bytes: Vec::new(),
-            error_eof: true,
-            tracer: None,
-            tracer_attached: false,
-            tracer_summary: None,
+            release,
+            error: ErrorPipe::new(error),
             audit: AuditWriter::new(
                 "att_00000000-0000-4000-8000-000000000001",
                 None,
                 b"/work",
                 b"",
             ),
+            observe_on: false,
+            tracer: None,
             applied: Applied {
                 filesystem: None,
                 network: AppliedNetwork {
@@ -1918,34 +1660,32 @@ mod tests {
                 environment_names: Vec::new(),
                 removed_environment_names: Vec::new(),
             },
+        });
+        state.error.eof = true;
+        let tree = Uncontained {
+            snapshot,
+            attempt_id: "att_00000000-0000-4000-8000-000000000001".to_owned(),
+            trace: None,
+            observer_plan: None,
+            pid,
+            child: Some(child),
+            launcher_fd,
             leaf: ExecutionCgroup::open_for_test(leaf).unwrap(),
             leaf_relative: FAKE_LEAF.to_owned(),
             cgroup_of,
             losses: Vec::new(),
             escaped: Vec::new(),
             inherited: Inherited::default(),
-            wall: None,
-            wall_reported: false,
-            exec_confirmed: false,
-            target_outcome: None,
-            target_exit_seen: false,
             target_status: None,
-            pending: VecDeque::new(),
-            stop_requested: None,
-            stop_at: None,
-            hard_killed: false,
-            hard_deadline: None,
-            finished: false,
-            evidence_reported: false,
-            sampled_at_ns: 0,
-        }
+        };
+        Run::new(state, tree)
     }
 
-    fn final_integrity(boundary: &Uncontained, leaf_empty: bool) -> String {
+    fn final_integrity(boundary: &Run<Uncontained>, leaf_empty: bool) -> String {
         verdict(&NoneTreeInputs {
-            integrity_lost: boundary.integrity_lost(),
+            integrity_lost: boundary.tree.integrity_lost(),
             natural_end: true,
-            target_reaped: boundary.target_reaped(),
+            target_reaped: boundary.tree.target_reaped(&boundary.state),
             leaf_verified_empty: leaf_empty,
             observer_clean: true,
         })
@@ -1960,20 +1700,23 @@ mod tests {
         let leaf = fake_leaf(root.path());
 
         let mut control = exited_child_boundary(&leaf, read_inside);
-        control.collect_target();
-        assert!(control.target_reaped());
-        assert!(control.losses.is_empty());
-        assert_eq!(control.scan_leaf(), Some(false));
+        control.tree.collect_target(false);
+        assert!(control.tree.target_reaped(&control.state));
+        assert!(control.tree.losses.is_empty());
+        assert_eq!(control.tree.scan_leaf(), Some(false));
         assert_eq!(final_integrity(&control, true), "verified");
 
         let mut failing = exited_child_boundary(&leaf, read_fails);
-        failing.collect_target();
-        assert!(failing.target_reaped(), "the status is still collected");
+        failing.tree.collect_target(false);
+        assert!(
+            failing.tree.target_reaped(&failing.state),
+            "the status is still collected"
+        );
         assert_eq!(
-            failing.losses,
+            failing.tree.losses,
             vec![(Subject::Target, Loss::VerificationFailed)]
         );
-        assert!(failing.integrity_lost());
+        assert!(failing.tree.integrity_lost());
         assert_eq!(final_integrity(&failing, true), "lost");
     }
 
@@ -2018,26 +1761,27 @@ mod tests {
 
         // Inherited, with its own birth: never walked, nothing recorded.
         let mut kept = exited_child_boundary(&leaf, read_outside);
-        kept.collect_target();
-        kept.losses.clear();
-        kept.inherited = Inherited(vec![(pid, birth)]);
-        kept.scan_children(own, vec![pid]);
-        assert!(kept.losses.is_empty(), "{:?}", kept.losses);
-        assert!(kept.escaped.is_empty());
+        kept.tree.collect_target(false);
+        kept.tree.losses.clear();
+        kept.tree.inherited = Inherited(vec![(pid, birth)]);
+        kept.tree.scan_children(own, vec![pid]);
+        assert!(kept.tree.losses.is_empty(), "{:?}", kept.tree.losses);
+        assert!(kept.tree.escaped.is_empty());
 
         // The record's birth is not this process's: it is this supervisor's
         // child outside the leaf, an escape, and kept for signalling.
         let mut reused = exited_child_boundary(&leaf, read_outside);
-        reused.collect_target();
-        reused.losses.clear();
-        reused.inherited = Inherited(vec![(pid, birth + 1)]);
-        reused.scan_children(own, vec![pid]);
+        reused.tree.collect_target(false);
+        reused.tree.losses.clear();
+        reused.tree.inherited = Inherited(vec![(pid, birth + 1)]);
+        reused.tree.scan_children(own, vec![pid]);
         assert_eq!(
-            reused.losses,
+            reused.tree.losses,
             vec![(Subject::Descendant, Loss::MembershipEscape)]
         );
         assert_eq!(
             reused
+                .tree
                 .escaped
                 .iter()
                 .map(|(known, _)| *known)
@@ -2062,15 +1806,16 @@ mod tests {
         let child = spawn_sleeper();
         let pid = libc::pid_t::try_from(child.id()).unwrap();
         let mut boundary = exited_child_boundary(&leaf, read_outside);
-        boundary.collect_target();
-        boundary.losses.clear();
-        boundary.scan_walked(own, vec![pid]);
+        boundary.tree.collect_target(false);
+        boundary.tree.losses.clear();
+        boundary.tree.scan_walked(own, vec![pid]);
         assert_eq!(
-            boundary.losses,
+            boundary.tree.losses,
             vec![(Subject::Descendant, Loss::MembershipEscape)]
         );
         assert_eq!(
             boundary
+                .tree
                 .escaped
                 .iter()
                 .map(|(known, _)| *known)
@@ -2081,22 +1826,22 @@ mod tests {
         // The same process in a walk that does not contain its parent is a
         // reused pid as far as this boundary can tell: nothing recorded.
         let mut foreign = exited_child_boundary(&leaf, read_outside);
-        foreign.collect_target();
-        foreign.losses.clear();
-        foreign.scan_walked(1, vec![pid]);
-        assert!(foreign.losses.is_empty());
-        assert!(foreign.escaped.is_empty());
+        foreign.tree.collect_target(false);
+        foreign.tree.losses.clear();
+        foreign.tree.scan_walked(1, vec![pid]);
+        assert!(foreign.tree.losses.is_empty());
+        assert!(foreign.tree.escaped.is_empty());
 
         // Alive, ours, and its cgroup unreadable: a failed verification.
         let mut unreadable = exited_child_boundary(&leaf, read_fails);
-        unreadable.collect_target();
-        unreadable.losses.clear();
-        unreadable.scan_walked(own, vec![pid]);
+        unreadable.tree.collect_target(false);
+        unreadable.tree.losses.clear();
+        unreadable.tree.scan_walked(own, vec![pid]);
         assert_eq!(
-            unreadable.losses,
+            unreadable.tree.losses,
             vec![(Subject::Descendant, Loss::VerificationFailed)]
         );
-        assert!(unreadable.escaped.is_empty());
+        assert!(unreadable.tree.escaped.is_empty());
         end(child);
 
         // A grandchild outside the leaf: recorded, never signalled.
@@ -2114,15 +1859,16 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         };
         let mut deeper = exited_child_boundary(&leaf, read_outside);
-        deeper.collect_target();
-        deeper.losses.clear();
-        deeper.scan_walked(own, vec![shell_pid, grandchild]);
+        deeper.tree.collect_target(false);
+        deeper.tree.losses.clear();
+        deeper.tree.scan_walked(own, vec![shell_pid, grandchild]);
         assert_eq!(
-            deeper.losses,
+            deeper.tree.losses,
             vec![(Subject::Descendant, Loss::MembershipEscape)]
         );
         assert_eq!(
             deeper
+                .tree
                 .escaped
                 .iter()
                 .map(|(known, _)| *known)
@@ -2153,15 +1899,15 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(2));
         }
-        boundary.reap_exited_children(vec![pid]);
+        boundary.tree.reap_exited_children(vec![pid]);
         assert_eq!(
-            boundary.losses,
+            boundary.tree.losses,
             vec![(Subject::Descendant, Loss::VerificationFailed)]
         );
         assert!(!peek_exited(pid), "the zombie was reaped");
         // The target's own collection is untouched by the orphan's.
-        boundary.collect_target();
-        assert!(boundary.target_reaped());
+        boundary.tree.collect_target(false);
+        assert!(boundary.tree.target_reaped(&boundary.state));
         drop(orphan);
     }
 
@@ -2172,15 +1918,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let leaf = fake_leaf(root.path());
         let mut boundary = exited_child_boundary(&leaf, read_inside);
-        boundary.collect_target();
-        assert_eq!(boundary.scan_leaf(), Some(false), "the control reads");
-        assert!(boundary.losses.is_empty());
+        boundary.tree.collect_target(false);
+        assert_eq!(boundary.tree.scan_leaf(), Some(false), "the control reads");
+        assert!(boundary.tree.losses.is_empty());
 
         std::fs::write(leaf.join("cgroup.events"), "populated maybe\n").unwrap();
-        assert!(boundary.leaf.verify().is_ok(), "the identity is intact");
-        assert_eq!(boundary.scan_leaf(), None);
+        assert!(
+            boundary.tree.leaf.verify().is_ok(),
+            "the identity is intact"
+        );
+        assert_eq!(boundary.tree.scan_leaf(), None);
         assert_eq!(
-            boundary.losses,
+            boundary.tree.losses,
             vec![(Subject::Boundary, Loss::VerificationFailed)]
         );
         assert_eq!(final_integrity(&boundary, false), "lost");
@@ -2188,9 +1937,10 @@ mod tests {
         // A replaced directory at the same path is the other loss.
         std::fs::rename(&leaf, root.path().join("moved")).unwrap();
         fake_leaf(root.path());
-        assert_eq!(boundary.scan_leaf(), None);
+        assert_eq!(boundary.tree.scan_leaf(), None);
         assert!(
             boundary
+                .tree
                 .losses
                 .contains(&(Subject::Boundary, Loss::IdentityReplaced))
         );
