@@ -492,7 +492,7 @@ fn pump(
         if websocket && client_eof && up.is_empty() {
             outgoing.send_close_notify();
         }
-        // The timeout bounds how long a revoked lease can go unnoticed.
+        // The wait between revocation checks is the lease poll.
         let revents = match sys::poll(
             &[
                 interest(socket.as_fd(), &incoming, !client_eof && up.len() < limit),
@@ -505,7 +505,7 @@ fn pump(
             Some(if progress {
                 Duration::ZERO
             } else {
-                Duration::from_millis(100)
+                crate::vault::lifecycle::LEASE_POLL
             }),
         ) {
             Ok(revents) => revents,
@@ -578,7 +578,7 @@ fn pump(
 }
 
 #[cfg(test)]
-mod websocket_tests {
+mod tests {
     use super::*;
     #[test]
     fn websocket_response_is_bound_to_the_request_nonce_and_protocol() {

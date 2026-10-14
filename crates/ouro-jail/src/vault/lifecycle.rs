@@ -572,18 +572,81 @@ impl Lease {
         self.entries.is_empty()
     }
 }
+/// The receipt's `lease_poll_ms`: how often a live lease is re-checked
+/// against its source (the lease watch, and the TLS lane's wait between
+/// revocation checks), and how often the refresh monitor looks for
+/// credentials due for refresh.
+pub(crate) const LEASE_POLL_MS: u64 = 100;
+/// [`LEASE_POLL_MS`] as a duration.
+pub(crate) const LEASE_POLL: Duration = Duration::from_millis(LEASE_POLL_MS);
+
+/// A background thread that calls its tick every [`LEASE_POLL`], until the
+/// tick returns `false` or the ticker is dropped. The tick gets a check for
+/// "stopping" to consult between steps of a long tick. Dropping the ticker
+/// wakes and joins the thread.
+struct Ticker {
+    stop: Arc<(Mutex<bool>, Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Ticker {
+    fn spawn(
+        name: &str,
+        stack_size: Option<usize>,
+        mut tick: impl FnMut(&dyn Fn() -> bool) -> bool + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
+        let stopping = Arc::clone(&stop);
+        let mut builder = std::thread::Builder::new().name(name.into());
+        if let Some(size) = stack_size {
+            builder = builder.stack_size(size);
+        }
+        let thread = builder.spawn(move || {
+            let (flag, wake) = &*stopping;
+            let stopped = || *flag.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if stopped() || !tick(&stopped) {
+                    break;
+                }
+                // The flag and its wakeup share the lock: a stop between the
+                // check and the wait cannot be slept through.
+                let lock = flag.lock().unwrap_or_else(|e| e.into_inner());
+                if *lock {
+                    break;
+                }
+                let (lock, _) = wake
+                    .wait_timeout(lock, LEASE_POLL)
+                    .unwrap_or_else(|e| e.into_inner());
+                if *lock {
+                    break;
+                }
+            }
+        })?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        *self.stop.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.stop.1.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(super) struct Monitor {
-    stop: Arc<(Mutex<bool>, Condvar)>,
-    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    ticker: Mutex<Option<Ticker>>,
     secrets: Vec<Arc<Secret>>,
 }
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl Monitor {
     pub(super) fn new(secrets: Vec<Arc<Secret>>) -> Self {
         Self {
-            stop: Arc::new((Mutex::new(false), Condvar::new())),
-            thread: Mutex::new(None),
+            ticker: Mutex::new(None),
             secrets,
         }
     }
@@ -620,60 +683,29 @@ impl Monitor {
         if !self.secrets.iter().any(|s| s.runtime.refresh.is_some()) {
             return Ok(());
         }
-        let stop = self.stop.clone();
         let secrets = self.secrets.clone();
-        let handle = std::thread::Builder::new()
-            .name("vault-refresh".into())
-            .spawn(move || {
-                loop {
-                    let lock = stop.0.lock().unwrap_or_else(|e| e.into_inner());
-                    if *lock {
-                        break;
-                    }
-                    let (lock, _) = stop
-                        .1
-                        .wait_timeout(lock, Duration::from_millis(100))
-                        .unwrap_or_else(|e| e.into_inner());
-                    if *lock {
-                        break;
-                    }
-                    drop(lock);
-                    for secret in &secrets {
-                        if *stop.0.lock().unwrap_or_else(|e| e.into_inner()) {
-                            break;
-                        }
-                        if secret.runtime.refresh.is_some() {
-                            let _ = secret.runtime.current();
-                        }
-                    }
+        let ticker = Ticker::spawn("vault-refresh", None, move |stopped| {
+            for secret in &secrets {
+                if stopped() {
+                    break;
                 }
-            })
-            .map_err(|_| "vault refresh worker unavailable".to_owned())?;
-        *self.thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+                if secret.runtime.refresh.is_some() {
+                    let _ = secret.runtime.current();
+                }
+            }
+            true
+        })
+        .map_err(|_| "vault refresh worker unavailable".to_owned())?;
+        *self.ticker.lock().unwrap_or_else(|e| e.into_inner()) = Some(ticker);
         Ok(())
-    }
-}
-impl Drop for Monitor {
-    fn drop(&mut self) {
-        *self.stop.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
-        self.stop.1.notify_all();
-        if let Some(handle) = self
-            .thread
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            let _ = handle.join();
-        }
     }
 }
 
 /// Interrupt even blocked response headers/uploads when the source is revoked.
 /// Reuses the admitted socket Arcs; no additional descriptors or secret copies.
 pub(crate) struct Watch {
-    stop: Arc<(Mutex<bool>, Condvar)>,
     revoked: Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    _ticker: Option<Ticker>,
 }
 impl Watch {
     pub(crate) fn start(
@@ -681,58 +713,31 @@ impl Watch {
         client: Arc<std::os::unix::net::UnixStream>,
         upstream: Arc<std::net::TcpStream>,
     ) -> Result<Self, Reason> {
-        let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread = if lease.is_empty() {
+        let ticker = if lease.is_empty() {
             None
         } else {
-            let stopped = stop.clone();
-            let failed = revoked.clone();
+            let failed = Arc::clone(&revoked);
             Some(
-                std::thread::Builder::new()
-                    .name("vault-lease".into())
-                    .stack_size(96 * 1024)
-                    .spawn(move || {
-                        loop {
-                            if lease.check().is_err() {
-                                failed.store(true, std::sync::atomic::Ordering::SeqCst);
-                                let _ = client.shutdown(std::net::Shutdown::Both);
-                                let _ = upstream.shutdown(std::net::Shutdown::Both);
-                                break;
-                            }
-                            let lock = stopped.0.lock().unwrap_or_else(|e| e.into_inner());
-                            if *lock {
-                                break;
-                            }
-                            let (lock, _) = stopped
-                                .1
-                                .wait_timeout(lock, Duration::from_millis(100))
-                                .unwrap_or_else(|e| e.into_inner());
-                            if *lock {
-                                break;
-                            }
-                        }
-                    })
-                    .map_err(|_| Reason::ResourceExhausted)?,
+                Ticker::spawn("vault-lease", Some(96 * 1024), move |_| {
+                    if lease.check().is_ok() {
+                        return true;
+                    }
+                    failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = client.shutdown(std::net::Shutdown::Both);
+                    let _ = upstream.shutdown(std::net::Shutdown::Both);
+                    false
+                })
+                .map_err(|_| Reason::ResourceExhausted)?,
             )
         };
         Ok(Self {
-            stop,
             revoked,
-            thread,
+            _ticker: ticker,
         })
     }
     pub(crate) fn revoked(&self) -> bool {
         self.revoked.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-impl Drop for Watch {
-    fn drop(&mut self) {
-        *self.stop.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
-        self.stop.1.notify_all();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
     }
 }
 impl std::fmt::Debug for Lease {
@@ -891,6 +896,44 @@ mod tests {
         );
         assert!(runtime.current().is_err());
     }
+    #[test]
+    fn a_ticker_ticks_until_its_tick_ends_or_it_is_dropped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&ticks);
+        let ticker = Ticker::spawn("test-ticker", None, move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            true
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while ticks.load(Ordering::SeqCst) < 2 {
+            assert!(std::time::Instant::now() < deadline, "it ticks again");
+            std::thread::yield_now();
+        }
+        // Dropping joins the thread: no tick runs afterwards.
+        drop(ticker);
+        let after = ticks.load(Ordering::SeqCst);
+        std::thread::sleep(LEASE_POLL * 2);
+        assert_eq!(ticks.load(Ordering::SeqCst), after);
+        // A tick that says so ends the thread on its own.
+        let ended = Ticker::spawn("test-ticker", None, |_| false).unwrap();
+        let thread = ended.thread.as_ref().unwrap();
+        while !thread.is_finished() {
+            assert!(std::time::Instant::now() < deadline, "the tick ended it");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn the_receipt_states_the_lease_poll_it_runs() {
+        let vault = super::super::Vault::new("test-attempt", Vec::new()).unwrap();
+        assert_eq!(
+            vault.details()["lease_poll_ms"],
+            serde_json::json!(LEASE_POLL.as_millis())
+        );
+    }
+
     #[test]
     fn refresh_authority_rejects_redirect_shapes_and_plaintext_without_opt_in() {
         for url in [

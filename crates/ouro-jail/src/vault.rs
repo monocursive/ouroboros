@@ -270,7 +270,7 @@ impl Vault {
     pub(crate) fn details(&self) -> serde_json::Value {
         serde_json::json!({
             "source_lifecycle":"private_nofollow_live_file",
-            "lease_poll_ms":100,
+            "lease_poll_ms":lifecycle::LEASE_POLL_MS,
             "process_binding":"kernel_connection_initiator_executable",
             "peer_authority":"mediator_connect_for_pinned_sealed_bridge",
             "path_binding":"exact_or_unescaped_segment_prefix",
