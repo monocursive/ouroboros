@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -99,7 +101,7 @@ class AttemptTests(unittest.TestCase):
     def tearDown(self):
         os.umask(self.umask)
 
-    def attempt(self, scenario):
+    def attempt(self, scenario, clone=shutil.copyfile):
         (self.root / 'scenario.json').write_text(json.dumps(scenario))
         custodian = self.image / 'custodian'
         custodian.write_text('#!/bin/sh\nexec ' + ' '.join(shlex.quote(str(part)) for part in (
@@ -112,7 +114,7 @@ class AttemptTests(unittest.TestCase):
         args = argparse.Namespace(image=self.image, workspace=self.workspace, out=self.root / 'out',
                                   profile='tool', wall=30, keep_disk=False, command=['/bin/true'])
         stdout = io.TextIOWrapper(io.BytesIO())
-        with mock.patch.object(run, 'clone_disk', shutil.copyfile), mock.patch('sys.stdout', stdout), \
+        with mock.patch.object(run, 'clone_disk', clone), mock.patch('sys.stdout', stdout), \
                 mock.patch('sys.stderr', io.TextIOWrapper(io.BytesIO())):
             code = run.execute(args)
             stdout.flush()
@@ -175,6 +177,48 @@ class AttemptTests(unittest.TestCase):
             self.attempt({'guest': True})
         report = json.loads((self.root / 'out' / 'attempt.json').read_text())
         self.assertEqual((report['status'], report['error']), ('failed', 'ZeroDivisionError: bug'))
+
+    def test_failed_disk_clone_leaves_a_terminal_record(self):
+        def clone(_base, _destination):
+            raise subprocess.CalledProcessError(1, ['cp', '-c'])
+
+        code, report, _ = self.attempt({'guest': True}, clone=clone)
+        self.assertEqual((code, report['status']), (125, 'failed'))
+        self.assertIn('cp', report['error'])
+        self.assertNotIn('custodian_pid', report)
+
+    def test_a_failing_cleanup_step_still_saves_a_terminal_record(self):
+        # The helper names its owner, then fails; releasing that owner raises too.
+        owner = {'event': 'owner', 'pid': 7, 'audit_token': [0, 0, 0, 0, 0, 7, 0, 0]}
+        with mock.patch.object(run, 'terminate_owner', side_effect=TypeError('bug')) as terminate:
+            code, report, _ = self.attempt({'helper_lines': [json.dumps(owner), '{"event": "error", "error": "boom"}']})
+        terminate.assert_called_once_with(owner['audit_token'])
+        self.assertEqual((code, report['status'], report['error']), (125, 'failed', 'boom'))
+        self.assertEqual(report['owner_cleanup_error'], 'TypeError: bug')
+        self.assertIn('elapsed_seconds', report)
+
+    def test_a_signal_after_the_transport_ends_is_a_cancelled_attempt(self):
+        transport = run.Transport.run
+
+        def run_then_signal(session):
+            transport(session)
+            signal.raise_signal(signal.SIGTERM)
+
+        with mock.patch.object(run.Transport, 'run', run_then_signal):
+            code, report, _ = self.attempt({'guest': True,
+                                            'outputs': [['evidence', 'jail.json', json.dumps(RECEIPT)]]})
+        self.assertEqual((code, report['status'], report['signal']), (125, 'cancelled', signal.SIGTERM))
+        self.assertEqual(report['guest_exit_code'], 3)
+
+    def test_ill_formed_image_metadata_is_refused_before_any_output(self):
+        args = argparse.Namespace(image=self.image, workspace=self.workspace, out=self.root / 'out',
+                                  profile='tool', wall=30, keep_disk=False, command=['/bin/true'])
+        for metadata in ({}, [], {'status': 'prepared'}, 'prepared'):
+            with self.subTest(metadata=metadata):
+                (self.image / 'image.json').write_text(json.dumps(metadata))
+                with self.assertRaisesRegex(ValueError, 'does not match prepared metadata'):
+                    run.execute(args)
+                self.assertFalse((self.root / 'out').exists())
 
 
 if __name__ == '__main__':
