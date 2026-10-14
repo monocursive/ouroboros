@@ -29,24 +29,35 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd as _, AsRawFd, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use super::{clock::Deadline, exec, identity};
 
-pub const START_FD: i32 = 15;
+// The descriptors each helper inherits, at fixed numbers on both sides.
+/// Where the bootstrap receives the read end of its start pipe: one
+/// [`RELEASED`] byte lets it exec the backend, anything else ends it.
+pub const START_FD: RawFd = 15;
 /// Pinned backend, closed atomically on successful exec.
-pub const BACKEND_FD: i32 = 8;
+pub const BACKEND_FD: RawFd = 8;
+/// Where the watcher receives a pidfd of the supervisor that started it.
+const SUPERVISOR_PIDFD_FD: RawFd = 3;
+/// Where the watcher receives a pidfd of the backend it guards.
+const BACKEND_PIDFD_FD: RawFd = 4;
+/// Where the watcher receives the write end of its ready pipe, on which it
+/// writes [`RELEASED`] once it holds everything it needs.
+const READY_FD: RawFd = 5;
 /// Where the watcher receives the leaf's `cgroup.kill`, when there is a leaf.
-pub const CGROUP_KILL_FD: i32 = 6;
+pub const CGROUP_KILL_FD: RawFd = 6;
 const CGROUP_KILL_ARG: &str = "--cgroup-kill-fd";
 /// Where the watcher receives the read end of its release pipe.
-pub const RELEASE_FD: i32 = 7;
+pub const RELEASE_FD: RawFd = 7;
 const RELEASE_ARG: &str = "--release-fd";
-/// The byte that releases the watcher; end-of-file means the supervisor is gone.
-const RELEASED: u8 = 1;
+/// The byte that releases the reader of a release, ready or start pipe;
+/// end-of-file means the writer is gone.
+pub const RELEASED: u8 = 1;
 /// How long the watcher waits, after the backend ended unreleased, for a
 /// dying supervisor's death to show. A supervisor killed with SIGKILL exits
 /// within this on the reference host under load; a live one releases the
@@ -70,14 +81,15 @@ impl Watcher {
         cgroup_kill: Option<OwnedFd>,
         deadline: Deadline,
     ) -> io::Result<Self> {
+        // SAFETY: getpid takes no arguments and cannot fail.
         let supervisor = identity::pidfd_open(unsafe { libc::getpid() })?;
         let backend = identity::pidfd_open(backend)?;
         let (ready_r, ready_w) = exec::pipe()?;
         let (release_r, release_w) = exec::pipe()?;
         let mut fds = exec::FdMap::new();
-        fds.add(supervisor, 3)?;
-        fds.add(backend, 4)?;
-        fds.add(ready_w, 5)?;
+        fds.add(supervisor, SUPERVISOR_PIDFD_FD)?;
+        fds.add(backend, BACKEND_PIDFD_FD)?;
+        fds.add(ready_w, READY_FD)?;
         fds.add(release_r, RELEASE_FD)?;
         let mut command = Command::new(exe);
         command
@@ -97,7 +109,7 @@ impl Watcher {
         drop(fds);
         let result = (|| {
             let fd = identity::pidfd_open(child.id() as i32)?;
-            if !read_release(ready_r.as_raw_fd(), deadline) {
+            if !read_release(ready_r.as_fd(), deadline) {
                 // A wait the deadline ended is a timeout, which the caller
                 // reports as the preparation budget's, not as a host failure.
                 let kind = if deadline.expired() {
@@ -159,27 +171,35 @@ impl Drop for Watcher {
 }
 
 /// A pidfd is readable on process exit, including while its zombie is waiting
-/// for this supervisor's tracer thread to reap it.
-pub fn readable(fd: i32) -> bool {
+/// for this supervisor's tracer thread to reap it. Only `POLLIN` says so: an
+/// invalid descriptor (`POLLNVAL`) or an error is not an exit.
+pub fn readable(fd: RawFd) -> bool {
     let mut pfd = libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
     };
-    unsafe { libc::poll(&raw mut pfd, 1, 0) > 0 }
+    // SAFETY: one live pollfd; a zero timeout never waits.
+    let rc = unsafe { libc::poll(&raw mut pfd, 1, 0) };
+    rc > 0 && pfd.revents & libc::POLLIN != 0
 }
 
-fn read_release(fd: i32, deadline: Deadline) -> bool {
+/// Waits until `deadline` for one byte on `fd`: true only for [`RELEASED`].
+fn read_release(fd: BorrowedFd<'_>, deadline: Deadline) -> bool {
     let mut pfd = libc::pollfd {
-        fd,
+        fd: fd.as_raw_fd(),
         events: libc::POLLIN,
         revents: 0,
     };
     loop {
+        // SAFETY: one live pollfd, bounded by the deadline.
         let rc = unsafe { libc::poll(&raw mut pfd, 1, deadline.remaining_millis_capped(1000)) };
         if rc > 0 {
             let mut byte = 0u8;
-            return unsafe { libc::read(fd, (&raw mut byte).cast(), 1) } == 1 && byte == 1;
+            // SAFETY: a one-byte read into a live byte from a descriptor the
+            // caller holds open.
+            let n = unsafe { libc::read(fd.as_raw_fd(), (&raw mut byte).cast(), 1) };
+            return n == 1 && byte == RELEASED;
         }
         if deadline.expired()
             || (rc < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted)
@@ -189,13 +209,26 @@ fn read_release(fd: i32, deadline: Deadline) -> bool {
     }
 }
 
+/// Takes the descriptor the supervisor installed at `fd` for this helper,
+/// or `None` when nothing is open there.
+fn inherited(fd: RawFd) -> Option<OwnedFd> {
+    // SAFETY: F_GETFD takes a scalar and dereferences nothing.
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return None;
+    }
+    // SAFETY: the descriptor is open (just checked) and was installed at this
+    // number for this helper process alone; nothing else in it owns it.
+    Some(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 pub fn bootstrap_main(args: &[OsString]) -> ! {
-    if args.is_empty() || !read_release(START_FD, Deadline::after(Duration::from_secs(30))) {
+    let Some(start) = inherited(START_FD) else {
+        std::process::exit(125);
+    };
+    if args.is_empty() || !read_release(start.as_fd(), Deadline::after(Duration::from_secs(30))) {
         std::process::exit(125);
     }
-    unsafe {
-        libc::close(START_FD);
-    }
+    drop(start);
     use std::os::unix::ffi::OsStrExt as _;
     let argv: Vec<_> = args
         .iter()
@@ -221,6 +254,9 @@ pub fn bootstrap_main(args: &[OsString]) -> ! {
         .chain(std::iter::once(std::ptr::null()))
         .collect();
     // The descriptor, not args[0], identifies the executable. No pathname fallback.
+    // SAFETY: F_SETFD takes scalars; fexecve reads the NUL-terminated argv
+    // and environment arrays, built above and alive for the call, and returns
+    // only on failure.
     unsafe {
         if libc::fcntl(BACKEND_FD, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
             std::process::exit(125);
@@ -244,61 +280,64 @@ pub fn bootstrap_main(args: &[OsString]) -> ! {
 }
 
 pub fn watcher_main(args: &[OsString]) -> ! {
-    // pidfd validity is checked by poll below; malformed direct invocations
-    // refuse rather than busy-looping or signalling a numeric pid.
-    let open = |fd: i32| unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0;
-    let mut release = false;
+    // Malformed direct invocations refuse rather than busy-looping or
+    // signalling a numeric pid.
+    let mut release = None;
     let mut cgroup_kill = None;
     for pair in args.chunks(2) {
         match pair {
             [flag, fd] if flag == RELEASE_ARG && fd.to_str() == Some(&RELEASE_FD.to_string()) => {
-                release = open(RELEASE_FD);
+                release = inherited(RELEASE_FD);
             }
             [flag, fd]
-                if flag == CGROUP_KILL_ARG
-                    && fd.to_str() == Some(&CGROUP_KILL_FD.to_string())
-                    && open(CGROUP_KILL_FD) =>
+                if flag == CGROUP_KILL_ARG && fd.to_str() == Some(&CGROUP_KILL_FD.to_string()) =>
             {
-                cgroup_kill = Some(CGROUP_KILL_FD);
+                let Some(kill) = inherited(CGROUP_KILL_FD) else {
+                    std::process::exit(125);
+                };
+                cgroup_kill = Some(kill);
             }
             _ => std::process::exit(125),
         }
     }
-    if !release {
+    let (Some(release), Some(supervisor), Some(backend), Some(ready)) = (
+        release,
+        inherited(SUPERVISOR_PIDFD_FD),
+        inherited(BACKEND_PIDFD_FD),
+        inherited(READY_FD),
+    ) else {
+        std::process::exit(125);
+    };
+    // SAFETY: a one-byte write from a live byte to the inherited ready pipe.
+    if unsafe { libc::write(ready.as_raw_fd(), [RELEASED].as_ptr().cast(), 1) } != 1 {
         std::process::exit(125);
     }
-    let byte = 1u8;
-    if unsafe { libc::write(5, (&raw const byte).cast(), 1) } != 1 {
-        std::process::exit(125);
-    }
-    unsafe {
-        libc::close(5);
-    }
+    drop(ready);
     // The whole leaf first: it also holds what the backend started, including
     // a namespace init whose own parent-death signal is not armed yet. Then
     // the backend, in case it never reached the leaf.
     let end_the_tree = || -> ! {
-        if let Some(fd) = cgroup_kill {
+        if let Some(kill) = cgroup_kill.as_ref() {
             // SAFETY: a one-byte write from a live byte to an inherited
             // descriptor; a failure leaves the pidfd kill below.
-            unsafe { libc::write(fd, b"1".as_ptr().cast(), 1) };
+            unsafe { libc::write(kill.as_raw_fd(), b"1".as_ptr().cast(), 1) };
         }
-        let _ = identity::pidfd_send_signal(4, libc::SIGKILL);
+        let _ = identity::pidfd_send_signal(backend.as_raw_fd(), libc::SIGKILL);
         std::process::exit(0);
     };
     let mut fds = [
         libc::pollfd {
-            fd: 3,
+            fd: supervisor.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         },
         libc::pollfd {
-            fd: 4,
+            fd: backend.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         },
         libc::pollfd {
-            fd: RELEASE_FD,
+            fd: release.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         },
@@ -313,6 +352,7 @@ pub fn watcher_main(args: &[OsString]) -> ! {
             )
             .unwrap_or(0)
         });
+        // SAFETY: a live three-element pollfd array; poll writes revents only.
         let rc = unsafe { libc::poll(fds.as_mut_ptr(), 3, timeout) };
         if rc < 0 {
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
@@ -333,7 +373,7 @@ pub fn watcher_main(args: &[OsString]) -> ! {
         if fds[2].revents & (libc::POLLIN | libc::POLLHUP) != 0 {
             let mut byte = 0u8;
             // SAFETY: a one-byte read into a live byte from an inherited pipe.
-            let n = unsafe { libc::read(RELEASE_FD, (&raw mut byte).cast(), 1) };
+            let n = unsafe { libc::read(release.as_raw_fd(), (&raw mut byte).cast(), 1) };
             if n == 1 && byte == RELEASED {
                 std::process::exit(0);
             }
@@ -350,5 +390,45 @@ pub fn watcher_main(args: &[OsString]) -> ! {
             // left of the tree.
             std::process::exit(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `readable` is "the process exited" for a pidfd, so only `POLLIN`
+    /// counts: a hang-up with nothing to read is not it.
+    #[test]
+    fn only_pollin_is_readable() {
+        let (read, write) = exec::pipe().expect("pipe");
+        assert!(!readable(read.as_raw_fd()), "an empty pipe");
+        drop(write);
+        assert!(
+            !readable(read.as_raw_fd()),
+            "POLLHUP alone: the writer left nothing to read"
+        );
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("a child to watch");
+        let pidfd = identity::pidfd_open(i32::try_from(child.id()).unwrap()).expect("pidfd");
+        assert!(!readable(pidfd.as_raw_fd()), "a live process");
+        child.kill().expect("kill the child");
+        child.wait().expect("reap the child");
+        assert!(readable(pidfd.as_raw_fd()), "an exited process");
+    }
+
+    #[test]
+    fn a_release_is_exactly_the_released_byte() {
+        let deadline = || Deadline::after(Duration::from_secs(5));
+        for (byte, released) in [(RELEASED, true), (RELEASED + 1, false)] {
+            let (read, write) = exec::pipe().expect("pipe");
+            std::io::Write::write_all(&mut std::fs::File::from(write), &[byte]).unwrap();
+            assert_eq!(read_release(read.as_fd(), deadline()), released, "{byte}");
+        }
+        let (read, write) = exec::pipe().expect("pipe");
+        drop(write);
+        assert!(!read_release(read.as_fd(), deadline()), "end-of-file");
     }
 }
