@@ -33,8 +33,7 @@ use crate::platform::{
     StopReason, Teardown,
 };
 use crate::policy::{
-    self, Layer, LayerOrigin, LimitKey, PolicyDelta, ProfileName, ResolveInputs, Resolved,
-    ScratchRoot,
+    self, Layer, LayerOrigin, PolicyDelta, ProfileName, ResolveInputs, Resolved, ScratchRoot,
 };
 use crate::profiles;
 use crate::records::StateCleanup;
@@ -3137,38 +3136,6 @@ fn pending_applied(plan: &Plan) -> Applied {
         environment_names: Vec::new(),
         removed_environment_names: Vec::new(),
     }
-}
-
-/// The requested limits as an unapplied `applied.limits` table.
-///
-/// Used once a boundary exists; a refusal before boundary creation reports an
-/// empty table because nothing was requested of any mechanism yet.
-#[must_use]
-pub fn requested_limits(plan: &Plan) -> Vec<AppliedLimit> {
-    let mut out = Vec::new();
-    for key in LimitKey::ALL {
-        let ceiling = match key {
-            LimitKey::Wall => &plan.resolved.ceilings.wall,
-            LimitKey::Pids => &plan.resolved.ceilings.pids,
-            LimitKey::Mem => &plan.resolved.ceilings.mem,
-            LimitKey::Swap => &plan.resolved.ceilings.swap,
-            LimitKey::Storage => &plan.resolved.ceilings.storage,
-            LimitKey::Inodes => &plan.resolved.ceilings.inodes,
-            LimitKey::Cpu => &plan.resolved.ceilings.cpu,
-        };
-        if let Some(ceiling) = ceiling {
-            out.push(AppliedLimit {
-                key: key.as_str().to_owned(),
-                requested: ceiling.requested.clone(),
-                required: ceiling.required,
-                applied: false,
-                mechanism: None,
-                scope: None,
-                hit: None,
-            });
-        }
-    }
-    out
 }
 
 // Vendor state and credential staging (§7, §8.1, §12)

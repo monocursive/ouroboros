@@ -555,56 +555,10 @@ pub fn current() -> Box<dyn Platform> {
     {
         Box::new(linux::platform::LinuxPlatform::new())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        Box::new(Unimplemented)
-    }
 }
 
-/// The placeholder platform for targets whose slice is not in this build.
-///
-/// It refuses with `backend_unavailable` rather than pretending to run
-/// anything. On Linux the execution slice replaces it; until then a Linux build
-/// compiles and refuses honestly instead of silently doing nothing.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Unimplemented;
-
-impl Platform for Unimplemented {
-    fn identity(&self) -> PlatformIdentity {
-        PlatformIdentity {
-            os: if cfg!(target_os = "linux") {
-                Os::Linux
-            } else {
-                Os::Macos
-            },
-            arch: std::env::consts::ARCH.to_owned(),
-            kernel: kernel_release(),
-        }
-    }
-
-    fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
-        plan.requirements
-            .iter()
-            .map(|name| {
-                Capability::unsupported(
-                    name.clone(),
-                    crate::capability::CapabilityScope::Tree,
-                    "platform_slice_absent",
-                )
-            })
-            .collect()
-    }
-
-    fn prepare(
-        &self,
-        _plan: PreparedPlan,
-        _sinks: Sinks,
-    ) -> Result<Box<dyn PreparedExecution>, JailError> {
-        Err(JailError::new(
-            crate::records::ErrorCode::BackendUnavailable,
-            crate::records::ErrorStage::Probing,
-            crate::records::Remediation::Unsupported,
-            "this build does not contain an execution slice for the running platform".to_owned(),
-        ))
-    }
-}
+// jail-v1 §3.2's support matrix has two columns, and the receipt's
+// `platform.os` two values: a build for any other OS has no honest
+// identity to report.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("ouro-jail builds for Linux and macOS only (jail-v1 §3.2)");

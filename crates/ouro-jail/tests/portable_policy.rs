@@ -1203,6 +1203,39 @@ fn p02_the_workspace_root_itself_is_a_real_directory() {
 // The real file layers, through supervisor::resolve_plan
 // (P01.6, P02.6, P02.9, P02.10, P02.13, I02.4)
 
+/// A platform for resolution only: this host's OS, which the baseline
+/// depends on, and nothing that probes or prepares.
+struct ResolveOnly;
+
+impl ouro_jail::platform::Platform for ResolveOnly {
+    fn identity(&self) -> ouro_jail::platform::PlatformIdentity {
+        ouro_jail::platform::PlatformIdentity {
+            os: if cfg!(target_os = "linux") {
+                Os::Linux
+            } else {
+                Os::Macos
+            },
+            arch: std::env::consts::ARCH.to_owned(),
+            kernel: "resolution-only".to_owned(),
+        }
+    }
+
+    fn probe(
+        &self,
+        _: &ouro_jail::platform::PlanRequest,
+    ) -> Vec<ouro_jail::capability::Capability> {
+        unreachable!("resolution probes nothing")
+    }
+
+    fn prepare(
+        &self,
+        _: ouro_jail::platform::PreparedPlan,
+        _: ouro_jail::platform::Sinks,
+    ) -> Result<Box<dyn ouro_jail::platform::PreparedExecution>, JailError> {
+        unreachable!("resolution prepares nothing")
+    }
+}
+
 /// An operator config directory, a private state root and a workspace, and
 /// the real resolution path the `run` command takes (`resolve_plan`): files
 /// parsed by the product, layered by the product, refused by the product.
@@ -1264,7 +1297,7 @@ impl Files {
 
     fn plan(&self, args: &PolicyArgs) -> Result<supervisor::Plan, JailError> {
         let ctx = supervisor::Context {
-            platform: Box::new(ouro_jail::platform::Unimplemented),
+            platform: Box::new(ResolveOnly),
             env_settings: EnvSettings {
                 config_dir: Some(self.config.clone()),
                 data_dir: Some(self.root.join("data")),
