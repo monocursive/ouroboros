@@ -178,11 +178,16 @@ pub fn is_readable(fd: BorrowedFd<'_>) -> bool {
 }
 
 /// [`is_readable`] for a caller that holds only the descriptor's number.
+/// `poll` takes the number as it is: one that is not open answers
+/// `POLLNVAL`, which is not readable, and one that names another object
+/// answers for that object.
 pub fn readable(fd: RawFd) -> bool {
-    // SAFETY: the caller's descriptor stays open for this call; poll only
-    // reads its state, and a number that is not open answers `POLLNVAL`,
-    // which is not readable.
-    is_readable(unsafe { BorrowedFd::borrow_raw(fd) })
+    let mut waits = [libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    super::sys::poll(&mut waits, 0).is_ok_and(|_| waits[0].revents & libc::POLLIN != 0)
 }
 
 /// Waits until `deadline` for one byte on `fd`: true only for [`RELEASED`].
@@ -407,6 +412,19 @@ mod tests {
         child.kill().expect("kill the child");
         child.wait().expect("reap the child");
         assert!(is_readable(pidfd.as_fd()), "an exited process");
+    }
+
+    /// By number, a pipe with bytes in it is readable, and a number that is
+    /// no longer open is not: `poll` answers it `POLLNVAL`.
+    #[test]
+    fn a_descriptor_number_is_readable_only_while_open_with_input() {
+        let (read, write) = exec::pipe().expect("pipe");
+        let number = read.as_raw_fd();
+        assert!(!readable(number), "an empty pipe");
+        std::io::Write::write_all(&mut std::fs::File::from(write), b"x").unwrap();
+        assert!(readable(number), "a pipe with a byte in it");
+        drop(read);
+        assert!(!readable(number), "a closed number");
     }
 
     #[test]

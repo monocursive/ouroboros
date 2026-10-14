@@ -4,11 +4,14 @@
 //! are sampled, how it is killed, how its end is seen and what its teardown
 //! and settlement establish. Everything else a run does is written once, in
 //! [`Run`] and [`RunState`]: the observer's facts and its account, the
-//! launcher's error pipe, exec confirmation without an observer, the wall,
-//! the cooperative grace and the forced stop, the order of a run's events,
-//! the release and the observer summary. The contained boundary
-//! ([`super::boundary`]) and `none` ([`super::uncontained`]) both run as a
-//! [`Run`], so a fix to any of these reaches both.
+//! launcher's error pipe, exec confirmation without an observer while the
+//! target runs, the wall, the cooperative grace and the forced stop, the
+//! order of a run's events, the release and the observer summary. The
+//! contained boundary ([`super::boundary`]) and `none`
+//! ([`super::uncontained`]) both run as a [`Run`], so a fix to any of these
+//! reaches both. One rule is not shared: at the target's end without an
+//! observer, `none` also confirms the exec from its own exact wait status
+//! of the target, which the contained boundary does not have.
 
 use std::collections::VecDeque;
 use std::os::fd::{AsRawFd as _, OwnedFd};
