@@ -342,113 +342,17 @@ pub(crate) fn validate_source(event: &Value, attempt_id: &str) -> Result<records
     Ok(typed)
 }
 
-fn is_digest(value: &Value) -> bool {
-    value.as_str().is_some_and(|value| {
-        value.len() == 71
-            && value.starts_with("sha256:")
-            && value[7..]
-                .bytes()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-    })
-}
-
+/// The frozen request schema states the whole plan, and the run projection
+/// embeds it by reference: any hand-written copy that drifted from it could
+/// acknowledge a preparation whose projection then refuses at every start.
 pub(crate) fn validate_payload(payload: &Value) -> Result<()> {
-    let keys = [
-        "schema",
-        "argv_digest",
-        "policy_digest",
-        "requirements",
-        "profile",
-        "jail_image_digest",
-        "io",
-        "capture",
-        "evidence",
-    ];
-    let Some(object) = payload.as_object() else {
-        return Err(LedgerError("prepare payload must be an object".into()));
-    };
-    let optional = ["owner_lifetime", "launch", "tags", "redact"];
-    crate::redaction::validate_policy(payload)?;
-    let detached = object.contains_key("owner_lifetime");
-    if keys.iter().any(|key| !object.contains_key(*key))
-        || object
-            .keys()
-            .any(|key| !keys.contains(&key.as_str()) && !optional.contains(&key.as_str()))
-        || detached
-            && (payload["owner_lifetime"] != "systemd_user_service"
-                || payload["io"]["mode"] != "batch")
-        || payload["schema"] != "ouro.ledger.request/1"
-        || !is_digest(&payload["argv_digest"])
-        || !is_digest(&payload["policy_digest"])
-        || !is_digest(&payload["jail_image_digest"])
-        || !payload["profile"].as_str().is_some_and(valid_id)
-        || !["strict", "best-effort"].contains(&payload["evidence"].as_str().unwrap_or(""))
-    {
+    validate_frozen("request", payload).map_err(|_| {
+        LedgerError("prepare only accepts the versioned digest-only request plan".into())
+    })?;
+    // JSON Schema's integer also admits 1.0; the limit is a byte count.
+    if !payload["capture"]["limit_bytes"].is_u64() {
         return Err(LedgerError(
-            "prepare only accepts the versioned digest-only request plan".into(),
-        ));
-    }
-    if payload
-        .get("launch")
-        .is_some_and(|v| !v.as_str().is_some_and(valid_id))
-    {
-        return Err(LedgerError("launch must be a bounded profile name".into()));
-    }
-    if let Some(tags) = payload.get("tags") {
-        let tags: Vec<String> = serde_json::from_value(tags.clone())?;
-        crate::discovery::validate_tags(&tags)?;
-    }
-    let requirements = payload["requirements"]
-        .as_array()
-        .ok_or_else(|| LedgerError("requirements must be an array".into()))?;
-    if requirements.len() > 64
-        || requirements
-            .iter()
-            .any(|value| !value.as_str().is_some_and(valid_id))
-    {
-        return Err(LedgerError(
-            "requirements are bounded named capabilities".into(),
-        ));
-    }
-    let mut unique = std::collections::BTreeSet::new();
-    if requirements
-        .iter()
-        .any(|value| !unique.insert(value.as_str().unwrap_or("")))
-    {
-        return Err(LedgerError("duplicate requirement".into()));
-    }
-    let io = payload["io"]
-        .as_object()
-        .ok_or_else(|| LedgerError("io must be an object".into()))?;
-    if io.len() != 2 + usize::from(io.contains_key("control"))
-        || io
-            .get("control")
-            .is_some_and(|role| role != "separate_fd" || detached)
-        || !["foreground", "batch"].contains(&payload["io"]["mode"].as_str().unwrap_or(""))
-        || payload["io"]["pty"] != false
-    {
-        return Err(LedgerError("unsupported io plan".into()));
-    }
-    let capture = payload["capture"]
-        .as_object()
-        .ok_or_else(|| LedgerError("capture must be an object".into()))?;
-    let streams = payload["capture"]["streams"]
-        .as_array()
-        .ok_or_else(|| LedgerError("capture streams must be an array".into()))?;
-    let mut unique = std::collections::BTreeSet::new();
-    if capture.len() != 2
-        || payload["capture"]["limit_bytes"]
-            .as_u64()
-            .is_none_or(|limit| limit > 16 * 1_048_576)
-        || streams.len() > 3
-        || streams.iter().any(|stream| {
-            ![Some("stdout"), Some("stderr"), Some("argv")].contains(&stream.as_str())
-                || !unique.insert(stream.as_str().unwrap_or(""))
-        })
-    {
-        return Err(LedgerError(
-            "capture only accepts unique stdout/stderr/argv selections and at most 16 MiB per stream"
-                .into(),
+            "capture limit must be a whole number of bytes".into(),
         ));
     }
     Ok(())
