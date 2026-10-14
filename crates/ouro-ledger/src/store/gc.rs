@@ -39,15 +39,15 @@ pub(super) fn file_hash(file: &mut File, bytes: u64) -> Result<String> {
         let limit = remaining.min(buffer.len() as u64) as usize;
         let n = file.read(&mut buffer[..limit])?;
         if n == 0 {
-            return Err(LedgerError(
-                "GC file was truncated during verification".into(),
+            return Err(LedgerError::refused(
+                "GC file was truncated during verification",
             ));
         }
         hash.update(&buffer[..n]);
         remaining -= n as u64;
     }
     if file.read(&mut buffer[..1])? != 0 {
-        return Err(LedgerError("GC file grew during verification".into()));
+        return Err(LedgerError::refused("GC file grew during verification"));
     }
     Ok(format!("sha256:{:x}", hash.finalize()))
 }
@@ -56,7 +56,7 @@ pub(super) fn file_hash(file: &mut File, bytes: u64) -> Result<String> {
 pub(super) fn member(root: &Path, name: &str) -> Result<(File, CString, Option<File>)> {
     let (parent, leaf) = if let Some(leaf) = name.strip_prefix("artifacts/") {
         if !["stdout.bin", "stderr.bin", "argv.bin"].contains(&leaf) {
-            return Err(LedgerError("unsafe GC capture path".into()));
+            return Err(LedgerError::refused("unsafe GC capture path"));
         }
         (root.join("artifacts"), leaf)
     } else {
@@ -67,13 +67,13 @@ pub(super) fn member(root: &Path, name: &str) -> Result<(File, CString, Option<F
         if !number
             .is_some_and(|i| (1..=manifest::MAX_SEGMENTS).contains(&i) && name == manifest::name(i))
         {
-            return Err(LedgerError("unsafe GC segment path".into()));
+            return Err(LedgerError::refused("unsafe GC segment path"));
         }
         (root.to_owned(), name)
     };
     directory(root)?;
     let parent = directory(&parent)?;
-    let leaf = CString::new(leaf).map_err(|_| LedgerError("unsafe GC filename".into()))?;
+    let leaf = CString::new(leaf).map_err(|_| LedgerError::refused("unsafe GC filename"))?;
     let file = fsx::find_file_at(&parent, &leaf, UNSAFE_FILE)?;
     Ok((parent, leaf, file))
 }
@@ -89,8 +89,8 @@ pub(super) fn check_member(root: &Path, entry: &RemovedFile) -> Result<(File, CS
         || metadata.len() != entry.bytes
         || file_hash(&mut file, entry.bytes)? != entry.digest
     {
-        return Err(LedgerError(
-            "GC inventory file identity or content changed; bytes preserved".into(),
+        return Err(LedgerError::refused(
+            "GC inventory file identity or content changed; bytes preserved",
         ));
     }
     // Check the namespace again after hashing, before unlinking through the same parent.
@@ -111,8 +111,8 @@ pub(super) fn check_member(root: &Path, entry: &RemovedFile) -> Result<(File, CS
     if i128::from(current.st_dev) != i128::from(metadata.dev())
         || i128::from(current.st_ino) != i128::from(metadata.ino())
     {
-        return Err(LedgerError(
-            "GC inventory path changed during verification".into(),
+        return Err(LedgerError::refused(
+            "GC inventory path changed during verification",
         ));
     }
     Ok((parent, leaf, true))
@@ -122,11 +122,11 @@ pub(super) fn read_json(path: &Path, max: usize) -> Result<Value> {
     const REFUSAL: &str = "oversized or interrupted GC metadata";
     let mut bytes = crate::protocol::read_bounded(safe_file(path)?, max as u64, REFUSAL)?;
     if bytes.pop() != Some(b'\n') {
-        return Err(LedgerError(REFUSAL.into()));
+        return Err(LedgerError::refused(REFUSAL));
     }
     let value: Value = serde_json::from_slice(&bytes)?;
     if canonical(&value)? != bytes {
-        return Err(LedgerError("noncanonical GC metadata".into()));
+        return Err(LedgerError::refused("noncanonical GC metadata"));
     }
     Ok(value)
 }
@@ -134,14 +134,14 @@ pub(super) fn read_json(path: &Path, max: usize) -> Result<Value> {
 pub(super) fn publish(root: &Path, name: &str, value: &Value, max: usize) -> Result<()> {
     let mut bytes = canonical(value)?;
     if bytes.len() + 1 > max {
-        return Err(LedgerError(
-            "GC retained metadata exceeds its bounded size; no files removed".into(),
+        return Err(LedgerError::refused(
+            "GC retained metadata exceeds its bounded size; no files removed",
         ));
     }
     // Never replace an existing authority or completion marker.
     if fs::symlink_metadata(root.join(name)).is_ok() {
         if read_json(&root.join(name), max)? != *value {
-            return Err(LedgerError("existing GC metadata conflicts".into()));
+            return Err(LedgerError::refused("existing GC metadata conflicts"));
         }
         safe_file(&root.join(name))?.sync_all()?;
         directory(root)?.sync_all()?;
@@ -150,7 +150,7 @@ pub(super) fn publish(root: &Path, name: &str, value: &Value, max: usize) -> Res
     // The process-lifetime writer lock serializes publication. A temporary
     // file never becomes authority until its atomic rename is visible.
     bytes.push(b'\n');
-    let name = CString::new(name).map_err(|_| LedgerError("unsafe GC filename".into()))?;
+    let name = CString::new(name).map_err(|_| LedgerError::refused("unsafe GC filename"))?;
     fsx::replace(
         &directory(root)?,
         &fsx::temporary("gc"),
@@ -207,7 +207,7 @@ pub(super) trait Authority: Serialize + DeserializeOwned {
             Err(e) => Err(e.into()),
             Ok(_) => {
                 if read_json(&root.join(Self::DONE), DONE_BYTES)? != self.completion()? {
-                    return Err(LedgerError(Self::MISMATCH.into()));
+                    return Err(LedgerError::refused(Self::MISMATCH));
                 }
                 Ok(true)
             }
@@ -232,7 +232,7 @@ pub(super) fn read<A: Authority>(root: &Path, id: &str) -> Result<Option<A>> {
     match fs::symlink_metadata(root.join(A::ANCHOR)) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if fs::symlink_metadata(root.join(A::DONE)).is_ok() {
-                return Err(LedgerError(A::ORPHANED.into()));
+                return Err(LedgerError::refused(A::ORPHANED));
             }
             return Ok(None);
         }
@@ -242,7 +242,7 @@ pub(super) fn read<A: Authority>(root: &Path, id: &str) -> Result<Option<A>> {
     let value = read_json(&root.join(A::ANCHOR), A::MAX_ANCHOR)?;
     let envelope: Envelope<A> = serde_json::from_value(value.clone())?;
     if envelope.digest != envelope.retained.digest()? || serde_json::to_value(&envelope)? != value {
-        return Err(LedgerError(A::CORRUPT.into()));
+        return Err(LedgerError::refused(A::CORRUPT));
     }
     envelope.retained.validate(root, id)?;
     Ok(Some(envelope.retained))
@@ -263,9 +263,9 @@ pub(super) fn publish_anchor<A: Authority>(root: &Path, retained: &A) -> Result<
 /// re-hashed, then unlinked by name in its pinned parent; the completion
 /// marker is published only after every namespace is synchronized.
 pub(super) fn finish<A: Authority>(root: &Path, id: &str, retained: &A) -> Result<()> {
-    let current = read::<A>(root, id)?.ok_or_else(|| LedgerError(A::VANISHED.into()))?;
+    let current = read::<A>(root, id)?.ok_or_else(|| LedgerError::refused(A::VANISHED))?;
     if current.digest()? != retained.digest()? {
-        return Err(LedgerError(A::CHANGED.into()));
+        return Err(LedgerError::refused(A::CHANGED));
     }
     let complete = retained.complete(root)?;
     retained.check_remaining(root, complete)?;
@@ -313,7 +313,7 @@ impl Store {
             || !verified.retention_time_valid()
             || verified.last_activity_at().is_none_or(|t| t > cutoff)
         {
-            return Err(LedgerError(refusal.into()));
+            return Err(LedgerError::refused(refusal));
         }
         Ok(verified)
     }

@@ -104,7 +104,7 @@ fn read_prefix(root: &Path, run: &str, name: &str, stored: u64) -> Result<Vec<u8
     let mut file = files::private_member(&artifacts, &format!("{name}.bin"))?;
     let before = file.metadata()?;
     if before.len() != stored {
-        return Err(LedgerError("capture size differs from its record".into()));
+        return Err(LedgerError::refused("capture size differs from its record"));
     }
     let limit = stored.min(DISPLAY_BYTES);
     let mut bytes = Vec::with_capacity(limit as usize);
@@ -117,7 +117,7 @@ fn read_prefix(root: &Path, run: &str, name: &str, stored: u64) -> Result<Vec<u8
         || before.ctime_nsec() != after.ctime_nsec()
         || after.nlink() != 1
     {
-        return Err(LedgerError("capture changed while being read".into()));
+        return Err(LedgerError::refused("capture changed while being read"));
     }
     crate::fsx::ensure_file(&file, files::SENSITIVE)?;
     Ok(bytes)

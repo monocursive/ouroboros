@@ -58,7 +58,7 @@ impl Store {
             });
         }
         if !(1..=MAX_VERIFY_LIMIT).contains(&limit) {
-            return Err(LedgerError(format!(
+            return Err(LedgerError::refused(format!(
                 "verify limit must be between 1 and {MAX_VERIFY_LIMIT}"
             )));
         }

@@ -64,13 +64,13 @@ fn check_run_id(id: &str) -> Result<()> {
             .bytes()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
     {
-        return Err(LedgerError("invalid run id".into()));
+        return Err(LedgerError::refused("invalid run id"));
     }
     Ok(())
 }
 
 fn canonical(value: &Value) -> Result<Vec<u8>> {
-    to_jcs(value).map_err(|error| LedgerError(error.to_string()))
+    to_jcs(value).map_err(|error| LedgerError::refused(error.to_string()))
 }
 
 fn digest(value: &Value) -> Result<String> {

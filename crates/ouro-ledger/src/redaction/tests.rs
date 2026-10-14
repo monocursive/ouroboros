@@ -73,7 +73,7 @@ fn redaction_cannot_launder_private_fields_invalid_native_bytes_or_policy() {
     let mut event = fixture("path");
     event["fields"]["raw_environment"] = json!("do-not-echo-private-value");
     let error = apply(&event, &policy).unwrap_err();
-    assert!(!error.0.contains("do-not-echo"));
+    assert!(!error.message().contains("do-not-echo"));
     let mut event = fixture("path");
     event["fields"]["path"]["value"] = json!({"encoding":"base64","data":"eA=="});
     assert!(apply(&event, &policy).is_err()); // UTF-8 bytes must use the string form.

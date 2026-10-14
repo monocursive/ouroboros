@@ -28,11 +28,13 @@ fn validate_body(kind: &str, effect: Option<&str>, body: &Value) -> Result<()> {
         || effect.is_some_and(|id| !valid_name(id))
         || (kind != "note" && effect.is_none())
     {
-        return Err(LedgerError("operator intent needs a supported kind, object body and an effect id for lifecycle decisions".into()));
+        return Err(LedgerError::refused(
+            "operator intent needs a supported kind, object body and an effect id for lifecycle decisions",
+        ));
     }
     check_reserved(body, "operator")?;
     if canonical(body)?.len() > 65_536 {
-        return Err(LedgerError("operator body exceeds 64 KiB bound".into()));
+        return Err(LedgerError::refused("operator body exceeds 64 KiB bound"));
     }
     Ok(())
 }
@@ -51,8 +53,8 @@ pub(super) fn validate(stream: &Stream, record: &Value) -> Result<()> {
             && (has("admitted") || has("denied") || has("settled")))
             || (kind == "settled" && (!has("admitted") || has("denied") || has("settled")))
         {
-            return Err(LedgerError(
-                "operator effect lifecycle conflicts with its durable decisions".into(),
+            return Err(LedgerError::refused(
+                "operator effect lifecycle conflicts with its durable decisions",
             ));
         }
     }
@@ -66,8 +68,8 @@ impl Store {
         peer: &Peer,
     ) -> Result<AppendReceipt> {
         if !valid_name(&intent.request_id) {
-            return Err(LedgerError(
-                "operator intent needs a bounded request id".into(),
+            return Err(LedgerError::refused(
+                "operator intent needs a bounded request id",
             ));
         }
         validate_body(&intent.kind, intent.effect_id.as_deref(), &intent.body)?;

@@ -34,7 +34,7 @@ fn position<T: serde::de::DeserializeOwned>(value: Option<&str>) -> Result<Optio
     value
         .map(|v| {
             if v.len() > MAX_POSITION_BYTES {
-                return Err(LedgerError("discovery position exceeds bound".into()));
+                return Err(LedgerError::refused("discovery position exceeds bound"));
             }
             Ok(serde_json::from_str(v)?)
         })
@@ -156,12 +156,12 @@ impl Store {
     pub fn catalog(&self, request: &CatalogRequest) -> Result<CatalogPage> {
         validate_filter(&request.filter)?;
         if !(1..=MAX_CATALOG_LIMIT).contains(&request.limit) {
-            return Err(LedgerError(format!(
+            return Err(LedgerError::refused(format!(
                 "catalog limit must be between 1 and {MAX_CATALOG_LIMIT}"
             )));
         }
         if self.streams().len() > MAX_CATALOG_RUNS {
-            return Err(LedgerError(format!(
+            return Err(LedgerError::refused(format!(
                 "catalog exceeds {MAX_CATALOG_RUNS}-run scan bound; explicit run readers remain available"
             )));
         }
@@ -172,8 +172,8 @@ impl Store {
         if let Some(prior) = &prior {
             check_run_id(&prior.last_run)?;
             if prior.schema != schemas::CATALOG_POSITION || prior.scope != scope {
-                return Err(LedgerError(
-                    "catalog position belongs to a different scope or limit".into(),
+                return Err(LedgerError::refused(
+                    "catalog position belongs to a different scope or limit",
                 ));
             }
         }
@@ -202,7 +202,7 @@ impl Store {
                 continue;
             }
             if encoded.len() > READ_OUTPUT_BYTES {
-                return Err(LedgerError("catalog summary exceeds page bound".into()));
+                return Err(LedgerError::refused("catalog summary exceeds page bound"));
             }
             full |=
                 runs.len() >= request.limit as usize || bytes + encoded.len() > READ_OUTPUT_BYTES;
@@ -215,8 +215,8 @@ impl Store {
         }
         let snapshot = format!("sha256:{:x}", hash.finalize());
         if prior.as_ref().is_some_and(|p| p.snapshot != snapshot) || !prior_exists {
-            return Err(LedgerError(
-                "matching catalog changed; restart discovery".into(),
+            return Err(LedgerError::refused(
+                "matching catalog changed; restart discovery",
             ));
         }
         let next_after = if more {
@@ -247,8 +247,8 @@ impl Store {
     pub fn discover(&mut self, request: &DiscoveryRequest) -> Result<DiscoveryPage> {
         validate_filter(&request.runs)?;
         if request.filter.selector == ReadSelector::All {
-            return Err(LedgerError(
-                "discovered query requires an evidence class".into(),
+            return Err(LedgerError::refused(
+                "discovered query requires an evidence class",
             ));
         }
         crate::reader::validate_request(&ReadRequest {
@@ -265,8 +265,8 @@ impl Store {
             .as_ref()
             .is_some_and(|p| p.schema != schemas::DISCOVERY_POSITION || p.scope != scope)
         {
-            return Err(LedgerError(
-                "query discovery position belongs to a different scope or limit".into(),
+            return Err(LedgerError::refused(
+                "query discovery position belongs to a different scope or limit",
             ));
         }
         let catalog_after = prior.as_ref().and_then(|p| p.catalog_after.clone());
@@ -279,8 +279,8 @@ impl Store {
             .as_ref()
             .is_some_and(|p| p.snapshot != catalog.snapshot)
         {
-            return Err(LedgerError(
-                "matching catalog changed; restart discovery".into(),
+            return Err(LedgerError::refused(
+                "matching catalog changed; restart discovery",
             ));
         }
         let run = catalog.runs.into_iter().next();
@@ -306,8 +306,8 @@ impl Store {
         let continuation = match read {
             Ok(page) => {
                 if page.snapshot != run.chain || page.run_id != run.run_id {
-                    return Err(LedgerError(
-                        "reader snapshot differs from the selected catalog head".into(),
+                    return Err(LedgerError::refused(
+                        "reader snapshot differs from the selected catalog head",
                     ));
                 }
                 let progress = if page.done {

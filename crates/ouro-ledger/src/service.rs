@@ -28,13 +28,13 @@ pub fn wait(data: &Path, run_id: &str, timeout: std::time::Duration) -> Result<R
             .as_ref()
             .is_some_and(|peer| !crate::daemon::peer_alive(peer))
         {
-            return Err(LedgerError(
-                "launch owner is gone; run settle-orphans to record the unknown outcome".into(),
+            return Err(LedgerError::refused(
+                "launch owner is gone; run settle-orphans to record the unknown outcome",
             ));
         }
         if std::time::Instant::now() >= deadline {
-            return Err(LedgerError(
-                "wait timed out; the run was not cancelled".into(),
+            return Err(LedgerError::refused(
+                "wait timed out; the run was not cancelled",
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -46,14 +46,14 @@ pub use linux::{cancel, cancel_requested, launch, prepare, probe, serve, start_w
 
 #[cfg(not(target_os = "linux"))]
 pub fn start_writer(_: &Path) -> Result<()> {
-    Err(LedgerError(
-        "independent writer service requires Linux".into(),
+    Err(LedgerError::refused(
+        "independent writer service requires Linux",
     ))
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn prepare(_: &runner::RunOptions) -> Result<RunRecord> {
-    Err(LedgerError("detached preparation requires Linux".into()))
+    Err(LedgerError::refused("detached preparation requires Linux"))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -62,17 +62,17 @@ pub fn probe() -> Value {
 }
 #[cfg(not(target_os = "linux"))]
 pub fn launch(_: &runner::RunOptions) -> Result<RunRecord> {
-    Err(LedgerError(probe()["reason"].as_str().unwrap().into()))
+    Err(LedgerError::refused(probe()["reason"].as_str().unwrap()))
 }
 #[cfg(not(target_os = "linux"))]
 /// # Safety
 /// Same entry-point-only contract as the Linux implementation.
 pub unsafe fn serve(_: &Path, _: &str) -> Result<()> {
-    Err(LedgerError("detached owner requires Linux".into()))
+    Err(LedgerError::refused("detached owner requires Linux"))
 }
 #[cfg(not(target_os = "linux"))]
 pub fn cancel(_: &Path, _: &str) -> Result<Value> {
-    Err(LedgerError("local cancellation requires Linux".into()))
+    Err(LedgerError::refused("local cancellation requires Linux"))
 }
 
 #[cfg(target_os = "linux")]
@@ -134,22 +134,24 @@ mod linux {
             if let Some(status) = child.try_wait()? {
                 const REFUSAL: &str =
                     "systemd user-manager command failed or exceeded its output bound";
-                let stdout = child
-                    .stdout
-                    .take()
-                    .ok_or_else(|| LedgerError("systemd user-manager output unavailable".into()))?;
+                let stdout = child.stdout.take().ok_or_else(|| {
+                    LedgerError::refused("systemd user-manager output unavailable")
+                })?;
                 let bytes = crate::protocol::read_bounded(stdout, 16_384, REFUSAL)?;
                 if !status.success() {
-                    return Err(LedgerError(REFUSAL.into()));
+                    return Err(LedgerError::refused(REFUSAL));
                 }
-                let text = String::from_utf8(bytes)
-                    .map_err(|_| LedgerError("systemd user-manager output is not UTF-8".into()))?;
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    LedgerError::refused("systemd user-manager output is not UTF-8")
+                })?;
                 return Ok(text.trim().to_owned());
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(LedgerError("systemd user-manager command timed out".into()));
+                return Err(LedgerError::refused(
+                    "systemd user-manager command timed out",
+                ));
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -164,8 +166,8 @@ mod linux {
             "--value",
         ]))? != "yes"
         {
-            return Err(LedgerError(
-                "detached runs require an operator-provisioned lingering user manager".into(),
+            return Err(LedgerError::refused(
+                "detached runs require an operator-provisioned lingering user manager",
             ));
         }
         command_output(Command::new("/usr/bin/systemctl").args([
@@ -196,7 +198,7 @@ mod linux {
             "--value",
         ]))?
         .parse()
-        .map_err(|_| LedgerError("user manager did not identify the launch owner".into()))
+        .map_err(|_| LedgerError::refused("user manager did not identify the launch owner"))
     }
 
     fn unit_command(unit: &str) -> Command {
@@ -221,8 +223,8 @@ mod linux {
 
     pub fn prepare(options: &runner::RunOptions) -> Result<RunRecord> {
         if !options.batch || !options.detached || options.prepared.is_some() {
-            return Err(LedgerError(
-                "preparation requires detached batch mode and a request id".into(),
+            return Err(LedgerError::refused(
+                "preparation requires detached batch mode and a request id",
             ));
         }
         ready()?;
@@ -248,8 +250,8 @@ mod linux {
             if let Some(config) = std::env::var_os("OURO_CONFIG_DIR") {
                 let config = PathBuf::from(config);
                 if !config.is_absolute() {
-                    return Err(LedgerError(
-                        "OURO_CONFIG_DIR must be absolute for a detached writer".into(),
+                    return Err(LedgerError::refused(
+                        "OURO_CONFIG_DIR must be absolute for a detached writer",
                     ));
                 }
                 let mut setting = std::ffi::OsString::from("--setenv=OURO_CONFIG_DIR=");
@@ -277,14 +279,16 @@ mod linux {
                     || peer.pid != main_pid(&unit)?
                     || !peer_alive(&peer)
                 {
-                    return Err(LedgerError("the existing ledger writer is not an independent user service; stop it after active runs settle before using --detach".into()));
+                    return Err(LedgerError::refused(
+                        "the existing ledger writer is not an independent user service; stop it after active runs settle before using --detach",
+                    ));
                 }
                 Client::connect(data)?.ping()?;
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err(LedgerError(
-                    "independent writer did not become ready".into(),
+                return Err(LedgerError::refused(
+                    "independent writer did not become ready",
                 ));
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -303,7 +307,7 @@ mod linux {
 
     pub fn launch(options: &runner::RunOptions) -> Result<RunRecord> {
         if !options.batch || !options.detached {
-            return Err(LedgerError("--detach requires --io batch".into()));
+            return Err(LedgerError::refused("--detach requires --io batch"));
         }
         ready()?;
         // Start the writer before handing off. The service checks its continuing
@@ -345,15 +349,15 @@ mod linux {
         stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
         let peer = peer_credentials(&stream)?;
         if peer.uid != crate::fsx::euid() || peer.pid != main_pid(&unit)? || !peer_alive(&peer) {
-            return Err(LedgerError(
-                "bootstrap peer is not the independent service owner".into(),
+            return Err(LedgerError::refused(
+                "bootstrap peer is not the independent service owner",
             ));
         }
         use std::io::Write as _;
         stream.write_all(&frame)?;
         match read_frame::<Started>(&mut stream)? {
             Started::Owned { run } => Ok(*run),
-            Started::Refused { reason } => Err(LedgerError(reason)),
+            Started::Refused { reason } => Err(LedgerError::refused(reason)),
         }
     }
 
@@ -365,11 +369,14 @@ mod linux {
                 Ok((stream, _)) => return Ok(stream),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
-                        return Err(LedgerError(format!(
-                            "owner service {unit} did not connect within {} seconds; \
-                             inspect it with `systemctl --user status {unit}`",
-                            START_TIMEOUT.as_secs()
-                        )));
+                        return Err(LedgerError::new(
+                            crate::protocol::ErrorKind::Io(std::io::ErrorKind::TimedOut),
+                            format!(
+                                "owner service {unit} did not connect within {} seconds; \
+                                 inspect it with `systemctl --user status {unit}`",
+                                START_TIMEOUT.as_secs()
+                            ),
+                        ));
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -391,8 +398,8 @@ mod linux {
     /// Call only from the hidden process entry point before creating any threads.
     pub unsafe fn serve(path: &Path, unit: &str) -> Result<()> {
         if !valid_unit(unit) || main_pid(unit)? != std::process::id() {
-            return Err(LedgerError(
-                "owner must be started by its independent user service".into(),
+            return Err(LedgerError::refused(
+                "owner must be started by its independent user service",
             ));
         }
         let mut stream = UnixStream::connect(path)?;
@@ -400,7 +407,7 @@ mod linux {
         stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
         let peer = peer_credentials(&stream)?;
         if peer.uid != crate::fsx::euid() {
-            return Err(LedgerError("bootstrap peer uid mismatch".into()));
+            return Err(LedgerError::refused("bootstrap peer uid mismatch"));
         }
         // Remove the rendezvous before receiving secrets; a killed caller leaves
         // no abandoned socket once the service connects.
@@ -410,14 +417,16 @@ mod linux {
             || !launch.options.batch
             || !launch.options.detached
         {
-            return Err(LedgerError("invalid detached launch frame".into()));
+            return Err(LedgerError::refused("invalid detached launch frame"));
         }
         for (key, value) in &launch.environment {
             if key.is_empty()
                 || key.as_bytes().iter().any(|b| *b == 0 || *b == b'=')
                 || value.as_bytes().contains(&0)
             {
-                return Err(LedgerError("invalid bootstrap environment encoding".into()));
+                return Err(LedgerError::refused(
+                    "invalid bootstrap environment encoding",
+                ));
             }
         }
         std::env::set_current_dir(&launch.cwd)?;
@@ -469,13 +478,13 @@ mod linux {
             return Ok(json!({"run_id":run_id,"status":"already_terminal","run":run}));
         }
         if run.payload["owner_lifetime"] != "systemd_user_service" {
-            return Err(LedgerError(
-                "cancel requires a detached service owner".into(),
+            return Err(LedgerError::refused(
+                "cancel requires a detached service owner",
             ));
         }
         let peer = run
             .owner
-            .ok_or_else(|| LedgerError("attempt has no launch owner".into()))?;
+            .ok_or_else(|| LedgerError::refused("attempt has no launch owner"))?;
         // Open first, then validate birth. Signal the pinned task, never a reused pid.
         // SAFETY: pidfd_open takes a pid and flags by value and reads no memory.
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, peer.pid as libc::pid_t, 0) };
@@ -485,8 +494,8 @@ mod linux {
         // SAFETY: a successful pidfd_open returned a new descriptor owned only here.
         let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
         if peer.uid != crate::fsx::euid() || !peer_alive(&peer) {
-            return Err(LedgerError(
-                "launch owner is gone; reconcile before reporting an outcome".into(),
+            return Err(LedgerError::refused(
+                "launch owner is gone; reconcile before reporting an outcome",
             ));
         }
         // SAFETY: the pidfd stays open through the call; a null siginfo asks the
@@ -517,8 +526,8 @@ mod linux {
             listener.set_nonblocking(true).unwrap();
             let unit = "ouro-ledger-owner-00000000000000000000000000000000.service";
             let refused = await_owner(&listener, unit, Instant::now()).unwrap_err();
-            assert!(refused.0.contains(unit), "{refused}");
-            assert!(refused.0.contains("did not connect"), "{refused}");
+            assert!(refused.message().contains(unit), "{refused}");
+            assert!(refused.message().contains("did not connect"), "{refused}");
         }
     }
 }

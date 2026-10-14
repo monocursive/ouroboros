@@ -541,7 +541,7 @@ fn a_bundle_exported_under_projection_rule_one_still_verifies_and_says_so() {
         let path = rule_one_bundle(temp.path());
         alter_manifest(&path, |value| edit(&mut value["run"]));
         assert_eq!(
-            verify(&path).unwrap_err().0,
+            verify(&path).unwrap_err().message(),
             "bundle run labels differ from canonical replay"
         );
     }

@@ -90,14 +90,14 @@ impl Authority for Retained {
             || r.last_activity_at > r.cutoff
             || r.cutoff >= r.collected_at
         {
-            return Err(LedgerError("invalid capture GC authority".into()));
+            return Err(LedgerError::refused("invalid capture GC authority"));
         }
         for (i, f) in r.files.iter().enumerate() {
             let name = match f.path.as_str() {
                 "artifacts/stdout.bin" => "stdout",
                 "artifacts/stderr.bin" => "stderr",
                 "artifacts/argv.bin" => "argv",
-                _ => return Err(LedgerError("unsafe capture GC inventory".into())),
+                _ => return Err(LedgerError::refused("unsafe capture GC inventory")),
             };
             if f.bytes > crate::protocol::MAX_CAPTURE_BYTES
                 || !crate::protocol::sha256_digest(&f.digest)
@@ -108,8 +108,8 @@ impl Authority for Retained {
                     Some("captured" | "incomplete")
                 )
             {
-                return Err(LedgerError(
-                    "capture GC inventory differs from recorded capture".into(),
+                return Err(LedgerError::refused(
+                    "capture GC inventory differs from recorded capture",
                 ));
             }
         }
@@ -122,8 +122,8 @@ impl Authority for Retained {
                 .iter()
                 .any(|f| f.path == format!("artifacts/{name}.bin"))
             {
-                return Err(LedgerError(
-                    "capture GC inventory omits a recorded stream".into(),
+                return Err(LedgerError::refused(
+                    "capture GC inventory omits a recorded stream",
                 ));
             }
         }
@@ -133,8 +133,8 @@ impl Authority for Retained {
     fn check_remaining(&self, root: &Path, complete: bool) -> Result<()> {
         for file in &self.files {
             if check_member(root, file)?.2 && complete {
-                return Err(LedgerError(
-                    "pruned capture reappeared after completion".into(),
+                return Err(LedgerError::refused(
+                    "pruned capture reappeared after completion",
                 ));
             }
         }
@@ -158,8 +158,8 @@ pub(super) fn apply(root: &Path, stream: &mut Stream) -> Result<()> {
                 && ["settled", "denied"].contains(&a.state)
         })
     {
-        return Err(LedgerError(
-            "capture GC authority does not match canonical terminal history".into(),
+        return Err(LedgerError::refused(
+            "capture GC authority does not match canonical terminal history",
         ));
     }
     let complete = retained.complete(root)?;
@@ -180,8 +180,8 @@ pub(super) fn check_pruned_history(root: &Path, run: &RunRecord) -> Result<()> {
         {
             r.check_remaining(root, true)
         }
-        _ => Err(LedgerError(
-            "capture GC authority differs from retained history".into(),
+        _ => Err(LedgerError::refused(
+            "capture GC authority differs from retained history",
         )),
     }
 }
@@ -213,8 +213,8 @@ impl Store {
                     .as_ref()
                     .is_none_or(|h| h.anchor_digest != r.digest().unwrap_or_default())
                 {
-                    return Err(LedgerError(
-                        "uncertain capture GC publication requires writer restart".into(),
+                    return Err(LedgerError::refused(
+                        "uncertain capture GC publication requires writer restart",
                     ));
                 }
                 r
@@ -224,11 +224,11 @@ impl Store {
                     "capture GC canonical verification differs from accepted writer state";
                 let verified = self.verified_for_gc(id, cutoff, DIFFERS)?;
                 if verified.run().capture_history.is_some() {
-                    return Err(LedgerError(DIFFERS.into()));
+                    return Err(LedgerError::refused(DIFFERS));
                 }
                 let files = inventory(&root, verified.run())?;
                 if files.is_empty() {
-                    return Err(LedgerError("no captures available for expiry".into()));
+                    return Err(LedgerError::refused("no captures available for expiry"));
                 }
                 let r = Retained {
                     schema: schemas::CAPTURE_GC_ANCHOR.into(),
@@ -295,8 +295,8 @@ pub(super) fn inventory(root: &Path, run: &RunRecord) -> Result<Vec<RemovedFile>
                     Some("captured" | "incomplete")
                 )
             {
-                return Err(LedgerError(
-                    "GC capture does not match recorded selection and size".into(),
+                return Err(LedgerError::refused(
+                    "GC capture does not match recorded selection and size",
                 ));
             }
             files.push(RemovedFile {
@@ -312,7 +312,7 @@ pub(super) fn inventory(root: &Path, run: &RunRecord) -> Result<Vec<RemovedFile>
                 Some("captured" | "incomplete")
             )
         {
-            return Err(LedgerError("GC recorded capture is missing".into()));
+            return Err(LedgerError::refused("GC recorded capture is missing"));
         }
     }
     Ok(files)

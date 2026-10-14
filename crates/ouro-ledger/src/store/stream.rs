@@ -300,15 +300,19 @@ impl Stream {
 
     /// Shared by store recovery and read-only portable bundle verification.
     pub(super) fn accept_canonical(&mut self, run_id: &str, bytes: &[u8]) -> Result<()> {
-        let decoded: Value = serde_json::from_slice(bytes)
-            .map_err(|error| LedgerError(format!("invalid canonical JSON: {error}")))?;
+        let decoded: Value = serde_json::from_slice(bytes).map_err(|error| {
+            LedgerError::new(
+                crate::protocol::ErrorKind::Decode,
+                format!("invalid canonical JSON: {error}"),
+            )
+        })?;
         if !canonical(&decoded).is_ok_and(|encoded| encoded == bytes) {
-            return Err(LedgerError(
-                "noncanonical or unsupported stream bytes".into(),
+            return Err(LedgerError::refused(
+                "noncanonical or unsupported stream bytes",
             ));
         }
         validate_frozen("record", &decoded).map_err(|_| {
-            LedgerError("canonical ledger record violates its versioned schema".into())
+            LedgerError::refused("canonical ledger record violates its versioned schema")
         })?;
         let expected_seq = self.run.chain.head_seq + 1;
         let expected_schema = if decoded["kind"] == "source" {
@@ -321,14 +325,14 @@ impl Stream {
             || decoded["seq"].as_u64() != Some(expected_seq)
             || decoded["prev"] != json!(self.run.chain.head_digest)
         {
-            return Err(LedgerError(
-                "canonical identity, sequence or hash-chain link mismatch".into(),
+            return Err(LedgerError::refused(
+                "canonical identity, sequence or hash-chain link mismatch",
             ));
         }
         if expected_seq == 1 {
             if decoded["kind"] != "prepared" {
-                return Err(LedgerError(
-                    "stream does not start at durable preparation".into(),
+                return Err(LedgerError::refused(
+                    "stream does not start at durable preparation",
                 ));
             }
             self.run = initial_run(
@@ -340,7 +344,7 @@ impl Stream {
             validate_payload(&self.run.payload)?;
         }
         if decoded["attempt_id"] != self.run.attempt_id {
-            return Err(LedgerError("mixed attempt identity".into()));
+            return Err(LedgerError::refused("mixed attempt identity"));
         }
         let payload = original_payload(&decoded);
         if decoded["kind"] == "source" {
@@ -350,12 +354,12 @@ impl Stream {
                 &self.run.attempt_id,
             )
             .map_err(|_| {
-                LedgerError("canonical producer violates the frozen source contract".into())
+                LedgerError::refused("canonical producer violates the frozen source contract")
             })?;
         }
         if let Some(receipt) = decoded["body"].get("receipt") {
             validate_receipt(receipt).map_err(|_| {
-                LedgerError("canonical receipt violates the frozen receipt contract".into())
+                LedgerError::refused("canonical receipt violates the frozen receipt contract")
             })?;
         }
         let payload_digest = digest(&payload)?;
@@ -432,7 +436,7 @@ impl Stream {
             "denied" => "denied",
             "settled" => "settled",
             "outcome_unknown" => "outcome_unknown",
-            _ => return Err(LedgerError("unsupported canonical run state".into())),
+            _ => return Err(LedgerError::refused("unsupported canonical run state")),
         };
         let labels_digest = crate::reader::snapshot_labels_digest(
             &self.run.child_protection,

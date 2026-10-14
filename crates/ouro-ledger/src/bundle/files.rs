@@ -26,9 +26,9 @@ const KEYS: [&str; 2] = ["private-key.pk8", "public-key.json"];
 
 fn name(value: &str) -> Result<CString> {
     if value.is_empty() || value == "." || value == ".." || value.contains('/') {
-        return Err(LedgerError("unsafe bundle member name".into()));
+        return Err(LedgerError::refused("unsafe bundle member name"));
     }
-    CString::new(value).map_err(|_| LedgerError("unsafe bundle member name".into()))
+    CString::new(value).map_err(|_| LedgerError::refused("unsafe bundle member name"))
 }
 
 fn owned(fd: libc::c_int) -> Result<File> {
@@ -94,8 +94,8 @@ pub(crate) fn member(parent: &File, leaf: &str, create: bool) -> Result<File> {
     })?;
     let m = file.metadata()?;
     if !m.is_file() || m.nlink() != 1 {
-        return Err(LedgerError(
-            "bundle refuses nonregular or hard-linked files".into(),
+        return Err(LedgerError::refused(
+            "bundle refuses nonregular or hard-linked files",
         ));
     }
     Ok(file)
@@ -160,12 +160,12 @@ pub(super) fn names(parent: &File) -> Result<BTreeSet<String>> {
         // that stays valid until the next readdir on this stream.
         let leaf = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }
             .to_str()
-            .map_err(|_| LedgerError("non-UTF8 bundle member".into()))?;
+            .map_err(|_| LedgerError::refused("non-UTF8 bundle member"))?;
         if leaf == "." || leaf == ".." {
             continue;
         }
         if !MEMBERS.contains(&leaf) {
-            return Err(LedgerError("unexpected bundle members".into()));
+            return Err(LedgerError::refused("unexpected bundle members"));
         }
         result.insert(leaf.to_owned());
     }
@@ -185,7 +185,7 @@ impl Staging {
         let leaf = output
             .file_name()
             .and_then(|s| s.to_str())
-            .ok_or_else(|| LedgerError("bundle output needs a UTF-8 directory name".into()))?;
+            .ok_or_else(|| LedgerError::refused("bundle output needs a UTF-8 directory name"))?;
         let destination = name(leaf)?;
         let parent_path = output
             .parent()
@@ -242,16 +242,23 @@ impl Staging {
         };
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let result = {
-            return Err(LedgerError(
-                "bundle publication unsupported on this platform".into(),
+            return Err(LedgerError::refused(
+                "bundle publication unsupported on this platform",
             ));
         };
         if result != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
         self.published = true;
-        self.parent.sync_all().map_err(|e| LedgerError(format!(
-            "bundle was published but parent sync failed: {e}; verify the destination before retrying")))
+        self.parent.sync_all().map_err(|e| {
+            LedgerError::new(
+                crate::protocol::ErrorKind::Io(e.kind()),
+                format!(
+                    "bundle was published but parent sync failed: {e}; verify the destination \
+                     before retrying"
+                ),
+            )
+        })
     }
 }
 

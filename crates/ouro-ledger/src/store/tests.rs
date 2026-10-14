@@ -10,9 +10,9 @@ pub(super) fn assert_refused<T>(result: Result<T>, expected: &str) {
     match result {
         Ok(_) => panic!("expected a refusal containing {expected:?}, but the call succeeded"),
         Err(error) => assert!(
-            error.0.contains(expected),
+            error.message().contains(expected),
             "expected a refusal containing {expected:?}, got {:?}",
-            error.0
+            error.message()
         ),
     }
 }
@@ -170,7 +170,10 @@ fn orphan_settlement_records_why_pending_evidence_was_refused() {
     let refusal = store
         .reconcile_pending(&run.run_id, &peer(), &|_| false)
         .unwrap_err();
-    assert!(refusal.0.contains("journal-value-7f3a"), "{refusal}");
+    assert!(
+        refusal.message().contains("journal-value-7f3a"),
+        "{refusal}"
+    );
     let settled = store.settle_orphans(&peer(), |_| false).unwrap();
     assert_eq!(settled[0].state, "outcome_unknown");
     assert_eq!(
@@ -969,7 +972,7 @@ fn gc_prunes_segments_and_captures_but_preserves_replays_effects_and_none_labels
         store
             .read(&read_request(&run, crate::protocol::ReadSelector::All))
             .unwrap_err()
-            .0
+            .message()
             .contains("pruned")
     );
     assert_refused(
@@ -1178,7 +1181,7 @@ fn gc_keeps_held_unknown_recent_and_live_reader_runs_and_refuses_active_launches
         store
             .gc_at(1, None, 100, &peer(), gc_future())
             .unwrap_err()
-            .0
+            .message()
             .contains("quiescent")
     );
     store.settle_orphans(&peer(), |_| false).unwrap();
@@ -1553,10 +1556,22 @@ fn reader_cursor_cannot_change_scope_and_survives_restart() {
     resumed.cursor = page.next_cursor;
     let mut wrong = resumed.clone();
     wrong.filter.selector = crate::protocol::ReadSelector::Execs;
-    assert!(store.read(&wrong).unwrap_err().0.contains("mismatch"));
+    assert!(
+        store
+            .read(&wrong)
+            .unwrap_err()
+            .message()
+            .contains("mismatch")
+    );
     wrong = resumed.clone();
     wrong.limit += 1;
-    assert!(store.read(&wrong).unwrap_err().0.contains("mismatch"));
+    assert!(
+        store
+            .read(&wrong)
+            .unwrap_err()
+            .message()
+            .contains("mismatch")
+    );
     wrong = resumed.clone();
     wrong.cursor.as_mut().unwrap().replace_range(63..64, "z");
     assert_refused(store.read(&wrong), "invalid reader cursor");
@@ -1639,7 +1654,11 @@ fn durable_reader_refuses_rechecksummed_forged_snapshot_labels() {
 
         let mut recovered = Store::open(&data).unwrap();
         let error = recovered.read(&request).unwrap_err();
-        assert!(error.0.contains("snapshot"), "forged {field}: {}", error.0);
+        assert!(
+            error.message().contains("snapshot"),
+            "forged {field}: {}",
+            error.message()
+        );
         assert!(recovered.verify(None).unwrap()[0].local_consistency);
         let canonical_run = recovered.show(&run.run_id).unwrap();
         assert_eq!(canonical_run.state, "prepared");
@@ -1825,7 +1844,13 @@ fn corrupt_reader_checkpoint_is_isolated_bounded_and_expires() {
     }
     assert_eq!(fs::read(&checkpoint_path).unwrap(), altered);
     assert_eq!(fs::read_dir(&directory).unwrap().count(), 32);
-    assert!(store.read(&fresh).unwrap_err().0.contains("session limit"));
+    assert!(
+        store
+            .read(&fresh)
+            .unwrap_err()
+            .message()
+            .contains("session limit")
+    );
     assert_refused(
         store.read(&corrupt_request),
         "reader checkpoint is corrupt or unavailable; start a new snapshot",
@@ -1899,7 +1924,7 @@ fn durable_reader_refuses_a_rechecksummed_empty_snapshot_template() {
 
     let mut recovered = Store::open(&data).unwrap();
     let error = recovered.read(&request).unwrap_err();
-    assert!(error.0.contains("corrupt"), "forged empty: {error}");
+    assert!(error.message().contains("corrupt"), "forged empty: {error}");
     assert!(recovered.verify(None).unwrap()[0].local_consistency);
     let canonical_run = recovered.show(&run.run_id).unwrap();
     assert_eq!(canonical_run.state, "prepared");
@@ -1912,7 +1937,7 @@ fn durable_reader_refuses_a_rechecksummed_empty_snapshot_template() {
 fn lifetime_lock_refuses_a_second_writer() {
     let (temp, _store, _) = create();
     assert!(
-        matches!(Store::open(&temp.path().join("data")), Err(error) if error.0.contains("writer"))
+        matches!(Store::open(&temp.path().join("data")), Err(error) if error.message().contains("writer"))
     );
 }
 
@@ -2645,11 +2670,11 @@ fn strict_transport_gap_and_private_metadata_refuse_without_an_ack() {
     let error = store
         .append_source(&run.run_id, &source, &peer(), TOKEN)
         .unwrap_err();
-    assert!(!error.0.contains("seed-secret"));
+    assert!(!error.message().contains("seed-secret"));
     let mut plan = payload();
     plan["argv"] = json!(["seed-secret-must-not-leak"]);
     let error = store.prepare("raw-metadata", &plan, &peer()).unwrap_err();
-    assert!(!error.0.contains("seed-secret"));
+    assert!(!error.message().contains("seed-secret"));
     assert_eq!(store.show(&run.run_id).unwrap().chain.head_seq, 3);
     assert_eq!(
         store.show(&run.run_id).unwrap().coverage["ledger"]["status"],

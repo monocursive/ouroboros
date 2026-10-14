@@ -30,21 +30,21 @@ impl Store {
     pub fn tail(&self, request: &TailRequest) -> Result<TailPage> {
         let stream = self.stream(&request.run_id)?;
         if stream.pruned().is_some() {
-            return Err(LedgerError(
-                "run history was pruned; tail cannot resume".into(),
+            return Err(LedgerError::refused(
+                "run history was pruned; tail cannot resume",
             ));
         }
         if stream.is_poisoned() {
-            return Err(LedgerError(
-                "stream durability or recovery is ambiguous; tail refuses".into(),
+            return Err(LedgerError::refused(
+                "stream durability or recovery is ambiguous; tail refuses",
             ));
         }
         let mut cursor = if let Some(text) = &request.cursor {
             if text.len() > 2048 {
-                return Err(LedgerError("tail cursor exceeds bounded size".into()));
+                return Err(LedgerError::refused("tail cursor exceeds bounded size"));
             }
             serde_json::from_str::<Cursor>(text)
-                .map_err(|_| LedgerError("invalid tail cursor".into()))?
+                .map_err(|_| LedgerError::refused("invalid tail cursor"))?
         } else {
             Cursor {
                 version: 1,
@@ -62,28 +62,30 @@ impl Store {
             || cursor.emitted >= MAX_FRAME_BYTES
             || ((cursor.emitted == 0) != cursor.pending_digest.is_none())
         {
-            return Err(LedgerError(
-                "tail cursor identity or position is invalid".into(),
+            return Err(LedgerError::refused(
+                "tail cursor identity or position is invalid",
             ));
         }
         let mut offset = if cursor.after.head_seq == 0 {
             if cursor.after.head_digest.is_some() {
-                return Err(LedgerError("tail cursor empty anchor is invalid".into()));
+                return Err(LedgerError::refused("tail cursor empty anchor is invalid"));
             }
             0
         } else {
             let anchor = stream
                 .anchor(cursor.after.head_seq)
                 .filter(|a| Some(&a.digest) == cursor.after.head_digest.as_ref())
-                .ok_or_else(|| LedgerError("tail cursor does not match accepted history".into()))?;
+                .ok_or_else(|| {
+                    LedgerError::refused("tail cursor does not match accepted history")
+                })?;
             anchor.bytes
         };
         let path = self.run_dir(&request.run_id).join(STREAM);
         let mut file = crate::segments::Snapshot::open(&path, stream.accepted_bytes())?;
         file.validate()?;
         if file.physical_bytes() != stream.accepted_bytes() {
-            return Err(LedgerError(
-                "canonical length differs from accepted history; tail refuses".into(),
+            return Err(LedgerError::refused(
+                "canonical length differs from accepted history; tail refuses",
             ));
         }
         let mut ndjson = String::new();
@@ -91,8 +93,8 @@ impl Store {
         for _ in 0..READ_SCAN_FRAMES {
             if cursor.after.head_seq == stream.run().chain.head_seq {
                 if cursor.emitted != 0 {
-                    return Err(LedgerError(
-                        "tail cursor points beyond the accepted head".into(),
+                    return Err(LedgerError::refused(
+                        "tail cursor points beyond the accepted head",
                     ));
                 }
                 break;
@@ -101,15 +103,15 @@ impl Store {
                 .after
                 .head_seq
                 .checked_add(1)
-                .ok_or_else(|| LedgerError("tail sequence exhausted".into()))?;
+                .ok_or_else(|| LedgerError::refused("tail sequence exhausted"))?;
             let anchor = stream
                 .anchor(seq)
-                .ok_or_else(|| LedgerError("tail canonical anchor is missing".into()))?;
+                .ok_or_else(|| LedgerError::refused("tail canonical anchor is missing"))?;
             let size = anchor
                 .bytes
                 .checked_sub(offset)
                 .filter(|n| (1..=MAX_FRAME_BYTES as u64).contains(n))
-                .ok_or_else(|| LedgerError("tail canonical frame size is invalid".into()))?
+                .ok_or_else(|| LedgerError::refused("tail canonical frame size is invalid"))?
                 as usize;
             // One large legal frame can exceed the ordinary scan budget. It is
             // verified whole before any of its <=64 KiB output fragments escape.
@@ -122,27 +124,29 @@ impl Store {
                     .as_ref()
                     .is_some_and(|d| d != &anchor.digest)
             {
-                return Err(LedgerError(
-                    "tail partial record does not match accepted history".into(),
+                return Err(LedgerError::refused(
+                    "tail partial record does not match accepted history",
                 ));
             }
             file.seek(SeekFrom::Start(offset))?;
             let mut bytes = vec![0; size];
             file.read_exact(&mut bytes)?;
             let record: Value = serde_json::from_slice(&bytes[..size - 1])
-                .map_err(|_| LedgerError("tail canonical frame is invalid JSON".into()))?;
+                .map_err(|_| LedgerError::refused("tail canonical frame is invalid JSON"))?;
             if bytes.last() != Some(&b'\n')
                 || sha256_prefixed(&bytes[..size - 1]) != anchor.digest
                 || record["seq"].as_u64() != Some(seq)
                 || record["run_id"] != request.run_id
                 || record["prev"] != json!(cursor.after.head_digest)
             {
-                return Err(LedgerError("tail canonical record or chain changed".into()));
+                return Err(LedgerError::refused(
+                    "tail canonical record or chain changed",
+                ));
             }
             let text = std::str::from_utf8(&bytes)
-                .map_err(|_| LedgerError("tail record is not UTF-8".into()))?;
+                .map_err(|_| LedgerError::refused("tail record is not UTF-8"))?;
             if !text.is_char_boundary(cursor.emitted) {
-                return Err(LedgerError("tail cursor splits UTF-8".into()));
+                return Err(LedgerError::refused("tail cursor splits UTF-8"));
             }
             let mut end = size.min(cursor.emitted + READ_CHUNK_BYTES - ndjson.len());
             while !text.is_char_boundary(end) {

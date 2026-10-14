@@ -33,8 +33,8 @@ impl Store {
         peer: &Peer,
     ) -> Result<AppendReceipt> {
         if !valid_name(request_id) {
-            return Err(LedgerError(
-                "retention intent needs a bounded request id".into(),
+            return Err(LedgerError::refused(
+                "retention intent needs a bounded request id",
             ));
         }
         self.append(
@@ -66,7 +66,7 @@ impl Store {
         let policy = self
             .retention
             .resolve(history, captures)
-            .map_err(|e| LedgerError(e.into()))?;
+            .map_err(LedgerError::refused)?;
         self.gc_plan_policy_at(policy, after, limit, SystemTime::now())
     }
 
@@ -81,7 +81,7 @@ impl Store {
         let policy = self
             .retention
             .resolve(Some(retain_days), None)
-            .map_err(|e| LedgerError(e.into()))?;
+            .map_err(LedgerError::refused)?;
         self.gc_plan_policy_at(policy, after, limit, now)
     }
 
@@ -101,7 +101,7 @@ impl Store {
             || !RETAIN_DAYS.contains(&retain_days)
             || !(1..=MAX_GC_LIMIT).contains(&limit)
         {
-            return Err(LedgerError(format!(
+            return Err(LedgerError::refused(format!(
                 "GC preview requires 1..{MAX_RETAIN_DAYS} retention days and 1..{MAX_GC_LIMIT} runs per page"
             )));
         }
@@ -110,23 +110,23 @@ impl Store {
         }
         let epoch = now
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| LedgerError("retention clock predates Unix epoch".into()))?
+            .map_err(|_| LedgerError::refused("retention clock predates Unix epoch"))?
             .as_secs();
         let cutoff = now
             .checked_sub(Duration::from_secs(u64::from(retain_days) * 86_400))
-            .ok_or_else(|| LedgerError("retention cutoff is outside the clock range".into()))?;
+            .ok_or_else(|| LedgerError::refused("retention cutoff is outside the clock range"))?;
         let cutoff = records::rfc3339_utc(cutoff);
         let capture_cutoff = records::rfc3339_utc(
             now.checked_sub(Duration::from_secs(u64::from(capture_retain_days) * 86_400))
-                .ok_or_else(|| LedgerError("capture cutoff outside clock range".into()))?,
+                .ok_or_else(|| LedgerError::refused("capture cutoff outside clock range"))?,
         );
         let evaluated_at = records::rfc3339_utc(now);
         if !crate::reader::utc_second(&cutoff)
             || !crate::reader::utc_second(&capture_cutoff)
             || !crate::reader::utc_second(&evaluated_at)
         {
-            return Err(LedgerError(
-                "retention clock is outside the supported UTC range".into(),
+            return Err(LedgerError::refused(
+                "retention clock is outside the supported UTC range",
             ));
         }
         let pins = self.readers().retention_pins(self.root(), epoch);

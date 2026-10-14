@@ -54,7 +54,7 @@ pub(in crate::store) fn check_reserved(body: &Value, what: &str) -> Result<()> {
         .iter()
         .find(|key| body.get(**key).is_some())
     {
-        Some(key) => Err(LedgerError(format!(
+        Some(key) => Err(LedgerError::refused(format!(
             "{what} body cannot supply reserved identity {key}"
         ))),
         None => Ok(()),
@@ -73,26 +73,26 @@ pub(in crate::store) fn validate_intent(stream: &Stream, record: &Value) -> Resu
             .iter()
             .any(|field| body.get(field).is_some())
     {
-        return Err(LedgerError(
-            "notes cannot replace receipt or state projections".into(),
+        return Err(LedgerError::refused(
+            "notes cannot replace receipt or state projections",
         ));
     }
     let run = &stream.run;
     if let Some(receipt) = body.get("receipt") {
         validate_receipt(receipt)?;
         if receipt["attempt_id"] != run.attempt_id {
-            return Err(LedgerError("receipt belongs to a different attempt".into()));
+            return Err(LedgerError::refused(
+                "receipt belongs to a different attempt",
+            ));
         }
         if let Some(claimed) = body.get("receipt_digest")
             && claimed
-                != &json!(
-                    records::semantic::receipt_digest(receipt).map_err(|_| LedgerError(
-                        "receipt has unsupported canonical values".into()
-                    ))?
-                )
+                != &json!(records::semantic::receipt_digest(receipt).map_err(|_| {
+                    LedgerError::refused("receipt has unsupported canonical values")
+                })?)
         {
-            return Err(LedgerError(
-                "intent receipt digest does not match the embedded receipt".into(),
+            return Err(LedgerError::refused(
+                "intent receipt digest does not match the embedded receipt",
             ));
         }
         if body
@@ -102,12 +102,12 @@ pub(in crate::store) fn validate_intent(stream: &Stream, record: &Value) -> Resu
                 .get("coverage")
                 .is_some_and(|coverage| coverage != &receipt["coverage"])
         {
-            return Err(LedgerError(
-                "intent outcome or coverage does not match its receipt".into(),
+            return Err(LedgerError::refused(
+                "intent outcome or coverage does not match its receipt",
             ));
         }
         if kind == "denied" && receipt["phase"] != "refused" {
-            return Err(LedgerError("denial requires a refused receipt".into()));
+            return Err(LedgerError::refused("denial requires a refused receipt"));
         }
     }
     if kind == "admitted" || kind == "settled" {
@@ -124,19 +124,18 @@ pub(in crate::store) fn validate_intent(stream: &Stream, record: &Value) -> Resu
             || receipt["policy"]["digest"] != run.payload["policy_digest"]
             || receipt["policy"]["requirements"] != run.payload["requirements"]
         {
-            return Err(LedgerError(
-                "intent receipt does not match prepared policy, argv, requirements and attempt"
-                    .into(),
+            return Err(LedgerError::refused(
+                "intent receipt does not match prepared policy, argv, requirements and attempt",
             ));
         }
         if run.payload["profile"] == "none" && receipt["child_protection"] != "unprotected" {
-            return Err(LedgerError(
-                "none cannot claim enforced child protection".into(),
+            return Err(LedgerError::refused(
+                "none cannot claim enforced child protection",
             ));
         }
         if run.payload["evidence"] == "strict" && !stream.source_gaps.is_empty() {
-            return Err(LedgerError(
-                "strict source loss blocks admission and settlement".into(),
+            return Err(LedgerError::refused(
+                "strict source loss blocks admission and settlement",
             ));
         }
     }
@@ -149,8 +148,8 @@ pub(in crate::store) fn validate_intent(stream: &Stream, record: &Value) -> Resu
             correlation.push(last.clone());
         }
         if !records::semantic::trace_ends_with(&correlation, &body["receipt"]).is_empty() {
-            return Err(LedgerError(
-                "terminal trace and receipt do not corroborate".into(),
+            return Err(LedgerError::refused(
+                "terminal trace and receipt do not corroborate",
             ));
         }
     }
@@ -172,18 +171,18 @@ pub(in crate::store) fn known_exec_failure(receipt: &Value) -> bool {
 pub(in crate::store) fn validate_transition(stream: &Stream, record: &Value) -> Result<()> {
     let kind = record["kind"].as_str().unwrap_or("");
     if kind == "prepared" && stream.run.chain.head_seq != 0 {
-        return Err(LedgerError("duplicate preparation".into()));
+        return Err(LedgerError::refused("duplicate preparation"));
     }
     if let Some(effect_id) = record["effect_id"].as_str() {
         let effect_key = operator::effect_key(record, effect_id);
         if let Some(previous) = stream.replay.get(&effect_key) {
             if previous.digest != digest(record)? {
-                return Err(LedgerError(
-                    "effect id conflicts with its immutable payload".into(),
+                return Err(LedgerError::refused(
+                    "effect id conflicts with its immutable payload",
                 ));
             }
-            return Err(LedgerError(
-                "effect id already belongs to another request id".into(),
+            return Err(LedgerError::refused(
+                "effect id already belongs to another request id",
             ));
         }
     }
@@ -197,47 +196,49 @@ pub(in crate::store) fn validate_transition(stream: &Stream, record: &Value) -> 
                 || body["owner"] != serde_json::to_value(&stream.run.owner)?
                 || body.as_object().is_none_or(|o| o.len() != 3)
             {
-                return Err(LedgerError("invalid best-effort outage marker".into()));
+                return Err(LedgerError::refused("invalid best-effort outage marker"));
             }
         }
         "operator_intent" => operator::validate(stream, record)?,
         "admitted" | "denied" if stream.run.state != "prepared" => {
-            return Err(LedgerError(
-                "admission or refusal is only valid from prepared".into(),
+            return Err(LedgerError::refused(
+                "admission or refusal is only valid from prepared",
             ));
         }
         "settled" if stream.run.state != "admitted" => {
-            return Err(LedgerError("settlement requires durable admission".into()));
+            return Err(LedgerError::refused(
+                "settlement requires durable admission",
+            ));
         }
         "owner_claimed" if stream.run.owner.is_some() => {
-            return Err(LedgerError("owner identity is immutable".into()));
+            return Err(LedgerError::refused("owner identity is immutable"));
         }
         "outcome_unknown" if ["settled", "denied"].contains(&stream.run.state.as_str()) => {
-            return Err(LedgerError(
-                "a recorded terminal outcome is immutable".into(),
+            return Err(LedgerError::refused(
+                "a recorded terminal outcome is immutable",
             ));
         }
         "source" => {
             if ["settled", "denied", "outcome_unknown"].contains(&stream.run.state.as_str()) {
-                return Err(LedgerError(
-                    "terminal run cannot ingest new observations".into(),
+                return Err(LedgerError::refused(
+                    "terminal run cannot ingest new observations",
                 ));
             }
             let source = record["body"]["source"]
                 .as_str()
-                .ok_or_else(|| LedgerError("source name missing".into()))?;
+                .ok_or_else(|| LedgerError::refused("source name missing"))?;
             let seq = record["body"]["source_seq"]
                 .as_u64()
-                .ok_or_else(|| LedgerError("source seq missing".into()))?;
+                .ok_or_else(|| LedgerError::refused("source seq missing"))?;
             if seq <= stream.source_heads.get(source).copied().unwrap_or(0) {
-                return Err(LedgerError(
-                    "producer source sequence reused or reordered".into(),
+                return Err(LedgerError::refused(
+                    "producer source sequence reused or reordered",
                 ));
             }
             if record["body"]["operation"] == "jail.receipt" {
                 let phase = record["body"]["fields"]["phase"]
                     .as_str()
-                    .ok_or_else(|| LedgerError("receipt note phase missing".into()))?;
+                    .ok_or_else(|| LedgerError::refused("receipt note phase missing"))?;
                 if stream.receipt_phase.as_deref().is_some_and(|previous| {
                     previous != phase
                         && !matches!(
@@ -246,22 +247,22 @@ pub(in crate::store) fn validate_transition(stream: &Stream, record: &Value) -> 
                                 | ("enforced", "settled")
                         )
                 }) {
-                    return Err(LedgerError(
-                        "receipt note lifecycle order is invalid".into(),
+                    return Err(LedgerError::refused(
+                        "receipt note lifecycle order is invalid",
                     ));
                 }
             }
         }
         "hold" | "release" => {
             if record["body"] != json!({}) || record.get("effect_id").is_some() {
-                return Err(LedgerError(
-                    "retention intents require an empty body and no effect id".into(),
+                return Err(LedgerError::refused(
+                    "retention intents require an empty body and no effect id",
                 ));
             }
         }
         "prepared" | "owner_claimed" | "admitted" | "denied" | "settled" | "note"
         | "outcome_unknown" => {}
-        _ => return Err(LedgerError("unknown durable record kind".into())),
+        _ => return Err(LedgerError::refused("unknown durable record kind")),
     }
     Ok(())
 }
@@ -274,10 +275,10 @@ pub(in crate::store) fn apply_record(
 ) -> Result<()> {
     let request_id = record["request_id"]
         .as_str()
-        .ok_or_else(|| LedgerError("record has no request identity".into()))?;
+        .ok_or_else(|| LedgerError::refused("record has no request identity"))?;
     if stream.replay.contains_key(request_id) {
-        return Err(LedgerError(
-            "duplicate request id in canonical stream".into(),
+        return Err(LedgerError::refused(
+            "duplicate request id in canonical stream",
         ));
     }
     let replay = Replay {
@@ -407,13 +408,13 @@ pub(in crate::store) fn validate_recovery(
             || !["source", "evidence_gap", "settled", "outcome_unknown"]
                 .contains(&record["kind"].as_str().unwrap_or("")))
     {
-        return Err(LedgerError(
-            "recovery requires an already admitted best-effort run".into(),
+        return Err(LedgerError::refused(
+            "recovery requires an already admitted best-effort run",
         ));
     }
     if record["kind"] == "evidence_gap" && role != "recovery" {
-        return Err(LedgerError(
-            "outage markers require recovery provenance".into(),
+        return Err(LedgerError::refused(
+            "outage markers require recovery provenance",
         ));
     }
     Ok(())

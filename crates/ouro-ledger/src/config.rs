@@ -23,7 +23,7 @@ pub fn load() -> Result<LedgerRetention> {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|p| Path::new(&p).join(".config/ouro")))
         .ok_or_else(|| {
-            LedgerError("HOME or OURO_CONFIG_DIR is required to locate retention settings".into())
+            LedgerError::refused("HOME or OURO_CONFIG_DIR is required to locate retention settings")
         })?;
     load_path(&directory.join("config.toml"))
 }
@@ -44,16 +44,19 @@ pub fn load_path(path: &Path) -> Result<LedgerRetention> {
         || metadata.uid() != crate::fsx::euid()
         || metadata.mode() & 0o022 != 0
     {
-        return Err(LedgerError(
-            "retention config must be an owned regular file without group/other write access"
-                .into(),
+        return Err(LedgerError::refused(
+            "retention config must be an owned regular file without group/other write access",
         ));
     }
     let bytes = crate::protocol::read_bounded(file, 65_536, "retention config exceeds 64 KiB")?;
     let text = String::from_utf8(bytes)
-        .map_err(|_| LedgerError("retention config is not UTF-8".into()))?;
-    let config: Config =
-        toml::from_str(&text).map_err(|e| LedgerError(format!("invalid operator config: {e}")))?;
+        .map_err(|_| LedgerError::refused("retention config is not UTF-8"))?;
+    let config: Config = toml::from_str(&text).map_err(|e| {
+        LedgerError::new(
+            crate::protocol::ErrorKind::Decode,
+            format!("invalid operator config: {e}"),
+        )
+    })?;
     let Config {
         ledger,
         _jail: _,
@@ -62,7 +65,7 @@ pub fn load_path(path: &Path) -> Result<LedgerRetention> {
     let retention = ledger.unwrap_or_default();
     retention
         .resolve(None, None)
-        .map_err(|e| LedgerError(e.into()))?;
+        .map_err(LedgerError::refused)?;
     Ok(retention)
 }
 

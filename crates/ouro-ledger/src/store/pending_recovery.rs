@@ -115,24 +115,24 @@ impl Store {
         use PendingRefusal::*;
         let refused = |refusal| move |error| Refused(refusal, error);
         if self.stream(id).map_err(Other)?.is_poisoned() {
-            return Err(Other(LedgerError(
-                "ambiguous canonical history refuses pending recovery".into(),
+            return Err(Other(LedgerError::refused(
+                "ambiguous canonical history refuses pending recovery",
             )));
         }
         let run = self.show(id).map_err(Other)?;
         if run.payload["evidence"] != "best-effort" {
-            return Err(Other(LedgerError(
-                "strict runs cannot recover pending owner evidence".into(),
+            return Err(Other(LedgerError::refused(
+                "strict runs cannot recover pending owner evidence",
             )));
         }
         let owner = run.owner.as_ref().ok_or_else(|| {
-            Other(LedgerError(
-                "pending recovery requires a durable owner".into(),
+            Other(LedgerError::refused(
+                "pending recovery requires a durable owner",
             ))
         })?;
         if peer != owner && alive(owner) {
-            return Err(Other(LedgerError(
-                "only the live owner may reconcile its journal".into(),
+            return Err(Other(LedgerError::refused(
+                "only the live owner may reconcile its journal",
             )));
         }
         if !self.pending_exists(id) {
@@ -141,14 +141,14 @@ impl Store {
             }
             return Err(Refused(
                 JournalMissing,
-                LedgerError("nonterminal recovery requires its pending journal".into()),
+                LedgerError::refused("nonterminal recovery requires its pending journal"),
             ));
         }
         let journal = Journal::try_open(&self.run_dir(id))
             .map_err(refused(JournalUnreadable))?
             .ok_or_else(|| {
-                Other(LedgerError(
-                    "another process holds the pending journal's lock".into(),
+                Other(LedgerError::refused(
+                    "another process holds the pending journal's lock",
                 ))
             })?;
         let mut state = journal.read(&run).map_err(refused(JournalUnreadable))?;
@@ -159,7 +159,7 @@ impl Store {
         if run.state != "admitted" {
             return Err(Refused(
                 NotAdmitted,
-                LedgerError("pending evidence cannot supply admission".into()),
+                LedgerError::refused("pending evidence cannot supply admission"),
             ));
         }
         if let Some(completion) = &state.completion {
@@ -268,7 +268,8 @@ fn validate_completion(run: &RunRecord, completion: &Completion) -> Result<()> {
         || control.attempt_id != run.attempt_id
         || control.receipt_phase != typed.phase
         || control.receipt_digest
-            != records::semantic::receipt_digest(receipt).map_err(|e| LedgerError(e.to_string()))?
+            != records::semantic::receipt_digest(receipt)
+                .map_err(|e| LedgerError::refused(e.to_string()))?
         || !match control.kind {
             records::ControlKind::Settled => typed.phase == records::Phase::Settled,
             records::ControlKind::Refused => typed.phase == records::Phase::Refused,
@@ -279,8 +280,8 @@ fn validate_completion(run: &RunRecord, completion: &Completion) -> Result<()> {
             && !(typed.phase == records::Phase::Settled && typed.lifetime.tree_empty == Some(true)
                 || known_exec_failure(receipt)))
     {
-        return Err(LedgerError(
-            "pending exit record lacks corroborating terminal control".into(),
+        return Err(LedgerError::refused(
+            "pending exit record lacks corroborating terminal control",
         ));
     }
     Ok(())

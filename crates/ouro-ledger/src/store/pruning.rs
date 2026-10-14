@@ -105,31 +105,31 @@ impl Authority for Retained {
             || self.files.len() < self.manifest.segments.len()
             || self.files.len() > self.manifest.segments.len() + 3
         {
-            return Err(LedgerError("invalid retained GC authority".into()));
+            return Err(LedgerError::refused("invalid retained GC authority"));
         }
         let last = self
             .manifest
             .segments
             .last()
-            .ok_or_else(|| LedgerError("GC anchor has no segments".into()))?;
+            .ok_or_else(|| LedgerError::refused("GC anchor has no segments"))?;
         if self.run.chain.head_seq != last.last_seq
             || self.run.chain.head_digest.as_ref() != Some(&last.head_digest)
         {
-            return Err(LedgerError(
-                "GC chain anchor differs from terminal projection".into(),
+            return Err(LedgerError::refused(
+                "GC chain anchor differs from terminal projection",
             ));
         }
         for (i, file) in self.files.iter().enumerate() {
             if !crate::protocol::sha256_digest(&file.digest) || file.bytes > 1024 * 1024 * 1024 {
-                return Err(LedgerError("invalid GC file anchor".into()));
+                return Err(LedgerError::refused("invalid GC file anchor"));
             }
             if let Some(segment) = self.manifest.segments.get(i) {
                 if file.path != segment.name
                     || file.bytes != segment.bytes
                     || file.digest != segment.digest
                 {
-                    return Err(LedgerError(
-                        "GC segment inventory differs from chain anchors".into(),
+                    return Err(LedgerError::refused(
+                        "GC segment inventory differs from chain anchors",
                     ));
                 }
             } else if ![
@@ -140,10 +140,10 @@ impl Authority for Retained {
             .contains(&file.path.as_str())
                 || file.bytes > crate::protocol::MAX_CAPTURE_BYTES
             {
-                return Err(LedgerError("invalid GC capture inventory".into()));
+                return Err(LedgerError::refused("invalid GC capture inventory"));
             }
             if self.files[..i].iter().any(|prior| prior.path == file.path) {
-                return Err(LedgerError("duplicate GC file inventory".into()));
+                return Err(LedgerError::refused("duplicate GC file inventory"));
             }
         }
         for (key, replay) in &self.replay {
@@ -154,7 +154,7 @@ impl Authority for Retained {
                 || replay.receipt.seq == 0
                 || replay.receipt.seq > self.run.chain.head_seq
             {
-                return Err(LedgerError("invalid retained replay identity".into()));
+                return Err(LedgerError::refused("invalid retained replay identity"));
             }
         }
         let preparation = json!({"kind":"prepared","body":{"request_id":self.run.request_id,"payload":self.run.payload},"request_id":format!("prepare:{}",self.run.request_id)});
@@ -165,8 +165,8 @@ impl Authority for Retained {
                 r.receipt.seq == 1 && digest(&preparation).is_ok_and(|d| d == r.digest)
             })
         {
-            return Err(LedgerError(
-                "GC anchor does not preserve preparation identity".into(),
+            return Err(LedgerError::refused(
+                "GC anchor does not preserve preparation identity",
             ));
         }
         Ok(())
@@ -183,13 +183,13 @@ impl Authority for Retained {
                     .iter()
                     .any(|f| name == std::ffi::OsStr::new(&f.path))
             {
-                return Err(LedgerError("unlisted canonical segment during GC".into()));
+                return Err(LedgerError::refused("unlisted canonical segment during GC"));
             }
         }
         for entry in &self.files {
             if check_member(root, entry)?.2 && complete {
-                return Err(LedgerError(
-                    "pruned file reappeared after GC completion".into(),
+                return Err(LedgerError::refused(
+                    "pruned file reappeared after GC completion",
                 ));
             }
         }
@@ -224,7 +224,7 @@ impl Store {
         let policy = self
             .retention
             .resolve(history, captures)
-            .map_err(|e| LedgerError(e.into()))?;
+            .map_err(LedgerError::refused)?;
         self.gc_policy_at(policy, after, limit, peer, SystemTime::now())
     }
 
@@ -240,7 +240,7 @@ impl Store {
         let policy = self
             .retention
             .resolve(Some(retain_days), None)
-            .map_err(|e| LedgerError(e.into()))?;
+            .map_err(LedgerError::refused)?;
         self.gc_policy_at(policy, after, limit, peer, now)
     }
 
@@ -258,9 +258,8 @@ impl Store {
         if self.streams().values().any(|s| {
             s.run().owner.is_some() && ["prepared", "admitted"].contains(&s.run().state.as_str())
         }) {
-            return Err(LedgerError(
-                "GC requires a quiescent writer; finish or reconcile active launch owners first"
-                    .into(),
+            return Err(LedgerError::refused(
+                "GC requires a quiescent writer; finish or reconcile active launch owners first",
             ));
         }
         let plan = self.gc_plan_policy_at(policy, after, limit, now)?;
@@ -348,13 +347,13 @@ impl Store {
     ) -> Result<Retained> {
         let root = self.run_dir(id);
         if fs::symlink_metadata(root.join(Retained::ANCHOR)).is_ok() {
-            return Err(LedgerError(
-                "uncertain GC publication requires writer restart".into(),
+            return Err(LedgerError::refused(
+                "uncertain GC publication requires writer restart",
             ));
         }
         if self.stream(id)?.replay().len() > MAX_REPLAYS {
-            return Err(LedgerError(
-                "GC replay inventory exceeds its bounded size; run retained".into(),
+            return Err(LedgerError::refused(
+                "GC replay inventory exceeds its bounded size; run retained",
             ));
         }
         let verified = self.verified_for_gc(
@@ -367,7 +366,7 @@ impl Store {
             let file = safe_file(&root.join(&segment.name))?;
             let m = file.metadata()?;
             if m.len() != segment.bytes {
-                return Err(LedgerError("GC segment length changed".into()));
+                return Err(LedgerError::refused("GC segment length changed"));
             }
             files.push(RemovedFile {
                 path: segment.name.clone(),
@@ -439,22 +438,22 @@ pub(super) fn verify_pruned(
 ) -> VerifyReport {
     let checked = (|| -> Result<()> {
         let current =
-            read(root, id)?.ok_or_else(|| LedgerError("GC authority is missing".into()))?;
+            read(root, id)?.ok_or_else(|| LedgerError::refused("GC authority is missing"))?;
         if current.digest()? != retained.digest()? {
-            return Err(LedgerError("GC authority changed".into()));
+            return Err(LedgerError::refused("GC authority changed"));
         }
         let complete = retained.complete(root)?;
         retained.check_remaining(root, complete)?;
         if !complete {
-            return Err(LedgerError(
-                "GC deletion is incomplete; retry GC or restart the writer".into(),
+            return Err(LedgerError::refused(
+                "GC deletion is incomplete; retry GC or restart the writer",
             ));
         }
         if read_json(&root.join("run.json"), crate::projection::MAX_RUN_BYTES)?
             != serde_json::to_value(run)?
         {
-            return Err(LedgerError(
-                "pruned run projection differs from retained authority".into(),
+            return Err(LedgerError::refused(
+                "pruned run projection differs from retained authority",
             ));
         }
         Ok(())

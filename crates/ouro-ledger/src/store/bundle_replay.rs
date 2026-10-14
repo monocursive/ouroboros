@@ -35,13 +35,15 @@ pub(crate) fn replay(reader: impl std::io::Read, run_id: &str) -> Result<Replaye
             break;
         }
         if length > MAX_FRAME_BYTES || bytes.pop() != Some(b'\n') {
-            return Err(LedgerError("oversized or interrupted bundle record".into()));
+            return Err(LedgerError::refused(
+                "oversized or interrupted bundle record",
+            ));
         }
         if stream.run().chain.head_seq >= crate::bundle::MAX_RECORDS
             || stream.accepted_bytes() + length as u64 > crate::bundle::MAX_STREAM_BYTES
         {
-            return Err(LedgerError(
-                "bundle snapshot exceeds its record or byte bound".into(),
+            return Err(LedgerError::refused(
+                "bundle snapshot exceeds its record or byte bound",
             ));
         }
         stream.accept_canonical(run_id, &bytes)?;
@@ -53,7 +55,7 @@ pub(crate) fn replay(reader: impl std::io::Read, run_id: &str) -> Result<Replaye
         }
     }
     if stream.run().chain.head_seq == 0 {
-        return Err(LedgerError("bundle snapshot is empty".into()));
+        return Err(LedgerError::refused("bundle snapshot is empty"));
     }
     let rule_one_outcome = (stream.run().state == "outcome_unknown")
         .then(|| rule_one_unknown_outcome(reported.flatten().as_ref()));

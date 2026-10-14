@@ -35,17 +35,17 @@ pub(crate) fn names(directory: &Path) -> Result<Vec<String>> {
         if name.as_encoded_bytes().starts_with(b"events-") {
             names.push(
                 name.into_string()
-                    .map_err(|_| LedgerError("invalid segment name".into()))?,
+                    .map_err(|_| LedgerError::refused("invalid segment name"))?,
             );
             if names.len() > MAX_SEGMENTS {
-                return Err(LedgerError("segment count exceeds bounded limit".into()));
+                return Err(LedgerError::refused("segment count exceeds bounded limit"));
             }
         }
     }
     names.sort();
     if names.is_empty() || names.iter().enumerate().any(|(i, n)| *n != name(i + 1)) {
-        return Err(LedgerError(
-            "missing, reordered or invalid canonical segments".into(),
+        return Err(LedgerError::refused(
+            "missing, reordered or invalid canonical segments",
         ));
     }
     Ok(names)
@@ -102,8 +102,8 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
     const REFUSAL: &str = "oversized or interrupted segment manifest";
     let mut bytes = read_bounded(fsx::read_file(&path, UNSAFE)?, MAX_BYTES, REFUSAL)?;
     if bytes.last() != Some(&b'\n') {
-        return Err(LedgerError(
-            "oversized or interrupted segment manifest".into(),
+        return Err(LedgerError::refused(
+            "oversized or interrupted segment manifest",
         ));
     }
     bytes.pop();
@@ -118,7 +118,7 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
             segments: vec![m.segment],
             replay_digest: m.replay_digest,
         },
-        _ => return Err(LedgerError("unsupported segment manifest version".into())),
+        _ => return Err(LedgerError::refused("unsupported segment manifest version")),
     };
     let mut next_seq = Some(1);
     let valid_segments = !manifest.segments.is_empty()
@@ -133,13 +133,13 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
             next_seq = s.last_seq.checked_add(1);
             valid
         });
-    if to_jcs(&value).map_err(|e| LedgerError(e.to_string()))? != bytes
+    if to_jcs(&value).map_err(|e| LedgerError::refused(e.to_string()))? != bytes
         || manifest.run_id != run_id
         || !valid_segments
         || !sha256_digest(&manifest.replay_digest)
     {
-        return Err(LedgerError(
-            "segment manifest identity or canonical encoding mismatch".into(),
+        return Err(LedgerError::refused(
+            "segment manifest identity or canonical encoding mismatch",
         ));
     }
     Ok(Some(manifest))
@@ -147,11 +147,13 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
 
 /// The exact published bytes: canonical JSON and one LF, within the bound.
 pub(crate) fn encode(manifest: &Manifest) -> Result<Vec<u8>> {
-    let mut bytes =
-        to_jcs(&serde_json::to_value(manifest)?).map_err(|e| LedgerError(e.to_string()))?;
+    let mut bytes = to_jcs(&serde_json::to_value(manifest)?)
+        .map_err(|e| LedgerError::refused(e.to_string()))?;
     bytes.push(b'\n');
     if bytes.len() as u64 > MAX_BYTES {
-        return Err(LedgerError("segment manifest exceeds bounded size".into()));
+        return Err(LedgerError::refused(
+            "segment manifest exceeds bounded size",
+        ));
     }
     Ok(bytes)
 }

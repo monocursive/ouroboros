@@ -17,7 +17,7 @@ const DELIVERY_LIMIT: Duration = Duration::from_secs(2);
 pub(crate) struct ControlOutput(File);
 
 fn error(message: impl std::fmt::Display) -> LedgerError {
-    LedgerError(format!("--control-fd: {message}"))
+    LedgerError::refused(format!("--control-fd: {message}"))
 }
 
 fn stat(fd: RawFd) -> Option<libc::stat> {

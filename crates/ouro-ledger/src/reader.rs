@@ -140,7 +140,7 @@ struct Envelope {
 fn epoch_seconds() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| LedgerError("reader clock predates Unix epoch".into()))?
+        .map_err(|_| LedgerError::refused("reader clock predates Unix epoch"))?
         .as_secs())
 }
 
@@ -153,7 +153,7 @@ fn token_valid(value: &str) -> bool {
 
 fn durable_digest(value: &impl Serialize) -> Result<String> {
     let bytes = to_jcs(&serde_json::to_value(value)?)
-        .map_err(|_| LedgerError("reader checkpoint cannot be canonicalized".into()))?;
+        .map_err(|_| LedgerError::refused("reader checkpoint cannot be canonicalized"))?;
     Ok(sha256_prefixed(&bytes))
 }
 
@@ -165,7 +165,7 @@ fn checkpoint_file(path: &Path) -> Result<File> {
     const REFUSAL: &str = "reader checkpoint file is unsafe or oversized";
     let file = fsx::read_file(path, REFUSAL)?;
     if file.metadata()?.len() > MAX_CHECKPOINT_BYTES {
-        return Err(LedgerError(REFUSAL.into()));
+        return Err(LedgerError::refused(REFUSAL));
     }
     Ok(file)
 }
@@ -188,7 +188,7 @@ fn parse_checkpoint(file: &mut File, id: &str) -> Result<Checkpoint> {
         "reader checkpoint exceeds bounded size",
     )?;
     let envelope: Envelope = serde_json::from_slice(&bytes)
-        .map_err(|_| LedgerError("reader checkpoint is corrupt".into()))?;
+        .map_err(|_| LedgerError::refused("reader checkpoint is corrupt"))?;
     let checkpoint = envelope.checkpoint;
     if envelope.digest != durable_digest(&checkpoint)?
         || !matches!(
@@ -211,8 +211,8 @@ fn parse_checkpoint(file: &mut File, id: &str) -> Result<Checkpoint> {
         || checkpoint.template.done
         || checkpoint.template.oversized_record.is_some()
     {
-        return Err(LedgerError(
-            "reader checkpoint checksum or identity is corrupt".into(),
+        return Err(LedgerError::refused(
+            "reader checkpoint checksum or identity is corrupt",
         ));
     }
     validate_request(&checkpoint.request)?;
@@ -226,8 +226,8 @@ fn parse_checkpoint(file: &mut File, id: &str) -> Result<Checkpoint> {
         || (!checkpoint.template.local_consistency
             && !["corrupt", "incomplete"].contains(&checkpoint.template.stream_status.as_str()))
     {
-        return Err(LedgerError(
-            "reader checkpoint labels are inconsistent".into(),
+        return Err(LedgerError::refused(
+            "reader checkpoint labels are inconsistent",
         ));
     }
     Ok(checkpoint)
@@ -260,7 +260,7 @@ fn modified_seconds(metadata: &fs::Metadata) -> Result<u64> {
         .modified()?
         .duration_since(UNIX_EPOCH)
         .map(|time| time.as_secs())
-        .map_err(|_| LedgerError("reader checkpoint timestamp is invalid".into()))
+        .map_err(|_| LedgerError::refused("reader checkpoint timestamp is invalid"))
 }
 
 /// Scan a bounded private checkpoint directory. Unexpired valid checkpoints
@@ -279,8 +279,8 @@ fn scan_checkpoints(
     let mut present = BTreeSet::new();
     for (count, entry) in fs::read_dir(directory)?.enumerate() {
         if count >= MAX_SESSIONS * 2 {
-            return Err(LedgerError(
-                "reader checkpoint directory exceeds bounded size".into(),
+            return Err(LedgerError::refused(
+                "reader checkpoint directory exceeds bounded size",
             ));
         }
         let entry = entry?;
@@ -289,7 +289,7 @@ fn scan_checkpoints(
             .to_str()
             .and_then(|name| name.rsplit_once('.'))
             .filter(|(id, suffix)| token_valid(id) && ["json", "tmp"].contains(suffix))
-            .ok_or_else(|| LedgerError("reader checkpoint filename is unsafe".into()))?;
+            .ok_or_else(|| LedgerError::refused("reader checkpoint filename is unsafe"))?;
         let mut file = checkpoint_file(&entry.path())?;
         let metadata = file.metadata()?;
         let checkpoint = if suffix == "json" {
@@ -366,7 +366,9 @@ pub(crate) fn utc_second(value: &str) -> bool {
 
 pub(crate) fn validate_request(request: &ReadRequest) -> Result<()> {
     if !(1..=MAX_READ_LIMIT).contains(&request.limit) {
-        return Err(LedgerError("read limit must be between 1 and 1000".into()));
+        return Err(LedgerError::refused(
+            "read limit must be between 1 and 1000",
+        ));
     }
     if request
         .filter
@@ -380,8 +382,8 @@ pub(crate) fn validate_request(request: &ReadRequest) -> Result<()> {
             .is_some_and(|v| !utc_second(v))
         || matches!((&request.filter.since, &request.filter.until), (Some(a), Some(b)) if a >= b)
     {
-        return Err(LedgerError(
-            "reader times need a valid increasing whole-second UTC interval".into(),
+        return Err(LedgerError::refused(
+            "reader times need a valid increasing whole-second UTC interval",
         ));
     }
     if request.filter.selector == ReadSelector::All
@@ -389,8 +391,8 @@ pub(crate) fn validate_request(request: &ReadRequest) -> Result<()> {
             || request.filter.since.is_some()
             || request.filter.until.is_some())
     {
-        return Err(LedgerError(
-            "canonical export does not accept query filters".into(),
+        return Err(LedgerError::refused(
+            "canonical export does not accept query filters",
         ));
     }
     Ok(())
@@ -532,7 +534,7 @@ impl Readers {
         let durable = scan_checkpoints(&directory, now, Scan::Inspect, None)?;
         if !durable.invalid.is_empty() {
             // An interrupted or corrupt checkpoint cannot identify its run.
-            return Err(LedgerError("reader checkpoint pin is unknown".into()));
+            return Err(LedgerError::refused("reader checkpoint pin is unknown"));
         }
         pins.extend(
             durable
@@ -547,7 +549,7 @@ impl Readers {
         let root = path
             .parent()
             .and_then(Path::parent)
-            .ok_or_else(|| LedgerError("reader canonical path has no ledger root".into()))?;
+            .ok_or_else(|| LedgerError::refused("reader canonical path has no ledger root"))?;
         let parent = private_directory(root)?;
         let directory = root.join("readers");
         let created = match fs::DirBuilder::new().mode(0o700).create(&directory) {
@@ -588,8 +590,8 @@ impl Readers {
         let directory = self.checkpoint_directory(path)?;
         let mut durable = scan_checkpoints(&directory, now, Scan::Expire, Some(&mut self.parsed))?;
         if durable.len() > MAX_SESSIONS {
-            return Err(LedgerError(
-                "reader checkpoint session limit exceeded".into(),
+            return Err(LedgerError::refused(
+                "reader checkpoint session limit exceeded",
             ));
         }
         self.sessions
@@ -600,12 +602,12 @@ impl Readers {
                     .bytes()
                     .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
             {
-                return Err(LedgerError("invalid reader cursor".into()));
+                return Err(LedgerError::refused("invalid reader cursor"));
             }
             let id = cursor[..32].to_owned();
             if durable.invalid.contains(&id) {
-                return Err(LedgerError(
-                    "reader checkpoint is corrupt or unavailable; start a new snapshot".into(),
+                return Err(LedgerError::refused(
+                    "reader checkpoint is corrupt or unavailable; start a new snapshot",
                 ));
             }
             if !self.sessions.contains_key(&id)
@@ -617,8 +619,8 @@ impl Readers {
                     || checkpoint.request.filter != request.filter
                     || checkpoint.request.limit != request.limit
                 {
-                    return Err(LedgerError(
-                        "reader cursor run, filter or limit mismatch".into(),
+                    return Err(LedgerError::refused(
+                        "reader cursor run, filter or limit mismatch",
                     ));
                 }
                 // A visible rename is not proof of its directory sync. Flush
@@ -650,8 +652,8 @@ impl Readers {
                 durable.valid.retain(|s| s.id != oldest);
             }
             if durable.len() >= MAX_SESSIONS {
-                return Err(LedgerError(
-                    "reader session limit reached; wait for expiry".into(),
+                return Err(LedgerError::refused(
+                    "reader session limit reached; wait for expiry",
                 ));
             }
             let file = crate::segments::Snapshot::open(path, accepted_bytes)?;
@@ -726,14 +728,13 @@ impl Readers {
             );
             (id, token)
         };
-        let session = self.sessions.get_mut(&id).ok_or_else(|| LedgerError(
-            "reader cursor expired or is unknown; start a new snapshot, do not append it to an old export".into()))?;
+        let session = self.sessions.get_mut(&id).ok_or_else(|| LedgerError::refused("reader cursor expired or is unknown; start a new snapshot, do not append it to an old export"))?;
         if request.run_id != session.request.run_id
             || request.filter != session.request.filter
             || request.limit != session.request.limit
         {
-            return Err(LedgerError(
-                "reader cursor run, filter or limit mismatch".into(),
+            return Err(LedgerError::refused(
+                "reader cursor run, filter or limit mismatch",
             ));
         }
         if let Some((prior, page)) = &session.prior
@@ -742,8 +743,8 @@ impl Readers {
             return Ok(page.clone());
         }
         if session.current != token {
-            return Err(LedgerError(
-                "reader cursor position is stale or forged".into(),
+            return Err(LedgerError::refused(
+                "reader cursor position is stale or forged",
             ));
         }
         let mut page = session.template.clone();
@@ -793,7 +794,7 @@ impl Session {
         let (token, page) = self
             .prior
             .as_ref()
-            .ok_or_else(|| LedgerError("reader checkpoint has no response".into()))?;
+            .ok_or_else(|| LedgerError::refused("reader checkpoint has no response"))?;
         let mut request = self.request.clone();
         request.cursor = None;
         let checkpoint = Checkpoint {
@@ -811,7 +812,7 @@ impl Session {
             prior: Replay {
                 token: token.clone(),
                 before: self.prior_position.clone().ok_or_else(|| {
-                    LedgerError("reader checkpoint has no replay position".into())
+                    LedgerError::refused("reader checkpoint has no replay position")
                 })?,
                 response_digest: durable_digest(page)?,
                 next_cursor: page.next_cursor.clone(),
@@ -824,7 +825,9 @@ impl Session {
         };
         let bytes = serde_json::to_vec(&envelope)?;
         if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
-            return Err(LedgerError("reader checkpoint exceeds bounded size".into()));
+            return Err(LedgerError::refused(
+                "reader checkpoint exceeds bounded size",
+            ));
         }
         let parent = private_directory(directory)?;
         let final_path = directory.join(format!("{id}.json"));
@@ -833,7 +836,7 @@ impl Session {
         }
         let name = |suffix| {
             CString::new(format!("{id}.{suffix}"))
-                .map_err(|_| LedgerError("reader checkpoint id is not a filename".into()))
+                .map_err(|_| LedgerError::refused("reader checkpoint id is not a filename"))
         };
         fsx::replace(
             &parent,
@@ -859,8 +862,8 @@ impl Session {
                 None => !file.is_single_segment(),
             }
         {
-            return Err(LedgerError(
-                "reader canonical snapshot is corrupt: identity or length changed".into(),
+            return Err(LedgerError::refused(
+                "reader canonical snapshot is corrupt: identity or length changed",
             ));
         }
         let mut session = Self {
@@ -882,8 +885,8 @@ impl Session {
             prior_position: Some(checkpoint.prior.before.clone()),
         };
         if token != checkpoint.prior.token && token != session.current {
-            return Err(LedgerError(
-                "reader cursor position is stale or forged".into(),
+            return Err(LedgerError::refused(
+                "reader cursor position is stale or forged",
             ));
         }
         // Canonical recovery already validated the accepted prefix. Corroborate
@@ -910,8 +913,8 @@ impl Session {
                         && cursor == &format!("{}{}", checkpoint.id, checkpoint.prior.token))
             })
         {
-            return Err(LedgerError(
-                "reader checkpoint replay did not corroborate".into(),
+            return Err(LedgerError::refused(
+                "reader checkpoint replay did not corroborate",
             ));
         }
         session.prior = Some((checkpoint.prior.token, page));
@@ -925,7 +928,7 @@ impl Session {
         accepted_snapshot: impl Fn(u64, &str, u64, Option<&ReadPage>) -> bool,
     ) -> Result<()> {
         let invalid =
-            || LedgerError("reader checkpoint position or canonical snapshot is corrupt".into());
+            || LedgerError::refused("reader checkpoint position or canonical snapshot is corrupt");
         let terminal = self
             .template
             .snapshot
@@ -1159,7 +1162,7 @@ impl Session {
                     break;
                 }
                 let bytes = String::from_utf8(bytes)
-                    .map_err(|_| LedgerError("validated canonical UTF-8 unavailable".into()))?;
+                    .map_err(|_| LedgerError::refused("validated canonical UTF-8 unavailable"))?;
                 self.verified = self.next_seq;
                 self.ready = Some(Ready {
                     bytes,

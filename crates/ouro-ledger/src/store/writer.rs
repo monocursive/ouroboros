@@ -117,13 +117,12 @@ impl Store {
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::WouldBlock {
-                return Err(LedgerError(
-                    "another ledger writer holds the process-lifetime lock".into(),
+                return Err(LedgerError::refused(
+                    "another ledger writer holds the process-lifetime lock",
                 ));
             }
-            return Err(LedgerError(format!(
-                "cannot take the ledger writer lock: {error}"
-            )));
+            let message = format!("cannot take the ledger writer lock: {error}");
+            return Err(LedgerError::from(error).with_message(message));
         }
         let mut store = Self {
             retention: Default::default(),
@@ -147,7 +146,7 @@ impl Store {
             let name = entry
                 .file_name()
                 .into_string()
-                .map_err(|_| LedgerError("non-UTF-8 store entry".into()))?;
+                .map_err(|_| LedgerError::refused("non-UTF-8 store entry"))?;
             if !name.starts_with("run_") {
                 continue;
             }
@@ -173,8 +172,8 @@ impl Store {
                     .insert(request_id, (payload_digest, name.clone()))
                     .is_some()
             {
-                return Err(LedgerError(
-                    "duplicate prepare request identity in durable streams".into(),
+                return Err(LedgerError::refused(
+                    "duplicate prepare request identity in durable streams",
                 ));
             }
             if !stream.is_poisoned() {
@@ -290,26 +289,26 @@ impl Store {
 
     pub fn prepare(&mut self, request_id: &str, payload: &Value, peer: &Peer) -> Result<RunRecord> {
         if !valid_name(request_id) {
-            return Err(LedgerError("prepare needs a bounded request id".into()));
+            return Err(LedgerError::refused("prepare needs a bounded request id"));
         }
         validate_payload(payload)?;
         let payload_digest = digest(payload)?;
         if let Some((expected, run_id)) = self.preparations.get(request_id) {
             if expected != &payload_digest {
-                return Err(LedgerError(
-                    "request id already maps to a different prepare payload".into(),
+                return Err(LedgerError::refused(
+                    "request id already maps to a different prepare payload",
                 ));
             }
             if self.stream(run_id)?.is_poisoned() {
-                return Err(LedgerError(
-                    "ambiguous preparation cannot acknowledge before recovery".into(),
+                return Err(LedgerError::refused(
+                    "ambiguous preparation cannot acknowledge before recovery",
                 ));
             }
             return self.show(run_id);
         }
         if self.recovery_ambiguous {
-            return Err(LedgerError(
-                "ambiguous recovery blocks new preparation; inspect verify".into(),
+            return Err(LedgerError::refused(
+                "ambiguous recovery blocks new preparation; inspect verify",
             ));
         }
         let run_id = format!("run_{}", Uuid::new_v4().simple());
@@ -333,17 +332,19 @@ impl Store {
     pub fn claim_owner(&mut self, run_id: &str, peer: &Peer) -> Result<()> {
         let stream = self.stream(run_id)?;
         if stream.is_poisoned() {
-            return Err(LedgerError("poisoned stream refuses ownership".into()));
+            return Err(LedgerError::refused("poisoned stream refuses ownership"));
         }
         if let Some(owner) = &stream.run().owner {
             if owner != peer {
-                return Err(LedgerError("attempt already has an owner; dead owners require reconciliation and are never restarted".into()));
+                return Err(LedgerError::refused(
+                    "attempt already has an owner; dead owners require reconciliation and are never restarted",
+                ));
             }
             return Ok(());
         }
         if stream.pruned().is_some() {
-            return Err(LedgerError(
-                "pruned run cannot acquire a new launch owner".into(),
+            return Err(LedgerError::refused(
+                "pruned run cannot acquire a new launch owner",
             ));
         }
         self.append(
@@ -373,11 +374,11 @@ impl Store {
             || !body.is_object()
             || !["admitted", "denied", "settled", "note", "outcome_unknown"].contains(&kind)
         {
-            return Err(LedgerError("invalid owner intent".into()));
+            return Err(LedgerError::refused("invalid owner intent"));
         }
         if self.stream(run_id)?.run().owner.as_ref() != Some(peer) {
-            return Err(LedgerError(
-                "owner identity does not match the durable claim".into(),
+            return Err(LedgerError::refused(
+                "owner identity does not match the durable claim",
             ));
         }
         self.append(
@@ -415,8 +416,8 @@ impl Store {
             || event_typed.attempt_id != self.stream(run_id)?.run().attempt_id
             || event_typed.source_seq == 0
         {
-            return Err(LedgerError(
-                "source event schema, attempt or sequence is invalid".into(),
+            return Err(LedgerError::refused(
+                "source event schema, attempt or sequence is invalid",
             ));
         }
         let source = event.get("source").and_then(Value::as_str).unwrap_or("");
@@ -441,8 +442,8 @@ impl Store {
             _ => false,
         };
         if !allowed || !records::semantic::event(event).is_empty() {
-            return Err(LedgerError(
-                "source event violates the jail producer contract".into(),
+            return Err(LedgerError::refused(
+                "source event violates the jail producer contract",
             ));
         }
         let request_id = format!("source:{source}:{}", event_typed.source_seq);
@@ -457,9 +458,8 @@ impl Store {
         if stream.run().payload["evidence"] == "strict" && !stream.source_gaps().is_empty() {
             // The actual evidence is durable, but strict execution gets no success
             // acknowledgement, including on retries after a lost failure reply.
-            return Err(LedgerError(
-                "strict producer transport loss was durably recorded; stop admission and execution"
-                    .into(),
+            return Err(LedgerError::refused(
+                "strict producer transport loss was durably recorded; stop admission and execution",
             ));
         }
         Ok(receipt)
@@ -479,7 +479,7 @@ impl Store {
         check_run_id(run_id)?;
         self.streams
             .get(run_id)
-            .ok_or_else(|| LedgerError("unknown run".into()))
+            .ok_or_else(|| LedgerError::refused("unknown run"))
     }
 
     pub(super) fn append(
@@ -493,31 +493,30 @@ impl Store {
         let stream = self.stream(run_id)?;
         let key = record["request_id"]
             .as_str()
-            .ok_or_else(|| LedgerError("missing request identity".into()))?
+            .ok_or_else(|| LedgerError::refused("missing request identity"))?
             .to_owned();
         let payload_digest = digest(&record)?;
         if let Some(replay) = stream.replay().get(&key) {
             if replay.digest != payload_digest {
-                return Err(LedgerError(
-                    "request id conflicts with its immutable payload".into(),
+                return Err(LedgerError::refused(
+                    "request id conflicts with its immutable payload",
                 ));
             }
             if stream.is_poisoned() {
-                return Err(LedgerError(
-                    "stream durability is ambiguous; replay cannot acknowledge before recovery"
-                        .into(),
+                return Err(LedgerError::refused(
+                    "stream durability is ambiguous; replay cannot acknowledge before recovery",
                 ));
             }
             return Ok(replay.receipt.clone());
         }
         if stream.is_poisoned() {
-            return Err(LedgerError(
-                "stream is poisoned; no dependent dispatch or sequence reuse".into(),
+            return Err(LedgerError::refused(
+                "stream is poisoned; no dependent dispatch or sequence reuse",
             ));
         }
         if stream.pruned().is_some() {
-            return Err(LedgerError(
-                "run history was pruned; new mutations are refused".into(),
+            return Err(LedgerError::refused(
+                "run history was pruned; new mutations are refused",
             ));
         }
         if stream
@@ -526,8 +525,8 @@ impl Store {
             .as_ref()
             .is_some_and(|h| h.state == "pruning")
         {
-            return Err(LedgerError(
-                "capture pruning is incomplete; retry GC or restart before mutations".into(),
+            return Err(LedgerError::refused(
+                "capture pruning is incomplete; retry GC or restart before mutations",
             ));
         }
         // Exactly the checks recovery repeats: anything acknowledged here must
@@ -538,7 +537,7 @@ impl Store {
             .chain
             .head_seq
             .checked_add(1)
-            .ok_or_else(|| LedgerError("sequence exhausted".into()))?;
+            .ok_or_else(|| LedgerError::refused("sequence exhausted"))?;
         record["schema"] = json!(schemas::RECORD);
         record["run_id"] = json!(run_id);
         record["attempt_id"] = json!(stream.run().attempt_id);
@@ -559,8 +558,8 @@ impl Store {
         validate_frozen("record", &record)?;
         let bytes = canonical(&record)?;
         if bytes.len() + 1 > MAX_FRAME_BYTES {
-            return Err(LedgerError(
-                "canonical event exceeds bounded frame limit".into(),
+            return Err(LedgerError::refused(
+                "canonical event exceeds bounded frame limit",
             ));
         }
         let receipt = AppendReceipt {
@@ -596,8 +595,8 @@ impl Store {
             && segment_bytes.saturating_add(bytes.len() as u64 + 1) > self.segment_limit;
         let mut file = if rotate {
             if active == manifest::MAX_SEGMENTS {
-                return Err(LedgerError(
-                    "segment count limit reached; no history was removed".into(),
+                return Err(LedgerError::refused(
+                    "segment count limit reached; no history was removed",
                 ));
             }
             let next = active + 1;
@@ -621,8 +620,8 @@ impl Store {
             )?
         };
         if file.metadata()?.len() != stream.active_segment().1 {
-            return Err(LedgerError(
-                "active segment length changed before append".into(),
+            return Err(LedgerError::refused(
+                "active segment length changed before append",
             ));
         }
         faults::hit(Point::EventBeforeWrite)?;
@@ -702,10 +701,10 @@ impl Store {
         let stream = self
             .streams
             .get(&request.run_id)
-            .ok_or_else(|| LedgerError("unknown run".into()))?;
+            .ok_or_else(|| LedgerError::refused("unknown run"))?;
         if stream.pruned().is_some() {
-            return Err(LedgerError(
-                "run history was pruned; canonical query and export are unavailable".into(),
+            return Err(LedgerError::refused(
+                "run history was pruned; canonical query and export are unavailable",
             ));
         }
         self.readers.read(
@@ -793,9 +792,10 @@ impl Store {
                     // Not the journal's doing: nothing is recorded for this
                     // run, and a later settlement can retry it.
                     Err(pending_recovery::PendingFailure::Other(problem)) => {
-                        return Err(LedgerError(format!(
+                        let message = format!(
                             "{id}: pending evidence could not be reconciled now: {problem}"
-                        )));
+                        );
+                        return Err(problem.with_message(message));
                     }
                 }
             }

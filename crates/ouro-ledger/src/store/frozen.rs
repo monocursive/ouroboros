@@ -70,14 +70,18 @@ pub(super) fn validate_frozen(name: &str, value: &Value) -> Result<()> {
     if validators[name].is_valid(value) {
         Ok(())
     } else {
-        Err(LedgerError(format!("record violates frozen {name} schema")))
+        Err(LedgerError::refused(format!(
+            "record violates frozen {name} schema"
+        )))
     }
 }
 
 pub(super) fn validate_receipt(receipt: &Value) -> Result<()> {
     validate_frozen("jail-receipt", receipt)?;
     if !records::semantic::receipt(receipt).is_empty() {
-        return Err(LedgerError("record violates jail receipt semantics".into()));
+        return Err(LedgerError::refused(
+            "record violates jail receipt semantics",
+        ));
     }
     Ok(())
 }
@@ -86,8 +90,8 @@ pub(crate) fn validate_source(event: &Value, attempt_id: &str) -> Result<records
     validate_frozen("jail-event", event)?;
     let typed: records::Event = serde_json::from_value(event.clone())?;
     if typed.attempt_id != attempt_id || !records::semantic::event(event).is_empty() {
-        return Err(LedgerError(
-            "source attempt or semantic contract mismatch".into(),
+        return Err(LedgerError::refused(
+            "source attempt or semantic contract mismatch",
         ));
     }
     Ok(typed)
@@ -98,12 +102,12 @@ pub(crate) fn validate_source(event: &Value, attempt_id: &str) -> Result<records
 /// acknowledge a preparation whose projection then refuses at every start.
 pub(crate) fn validate_payload(payload: &Value) -> Result<()> {
     validate_frozen("request", payload).map_err(|_| {
-        LedgerError("prepare only accepts the versioned digest-only request plan".into())
+        LedgerError::refused("prepare only accepts the versioned digest-only request plan")
     })?;
     // JSON Schema's integer also admits 1.0; the limit is a byte count.
     if !payload["capture"]["limit_bytes"].is_u64() {
-        return Err(LedgerError(
-            "capture limit must be a whole number of bytes".into(),
+        return Err(LedgerError::refused(
+            "capture limit must be a whole number of bytes",
         ));
     }
     Ok(())

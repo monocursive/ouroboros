@@ -29,7 +29,7 @@ use crate::{
     faults,
     protocol::{
         AppendReceipt, CatalogPage, CatalogRequest, ClaimedOwner, DEFAULT_VERIFY_LIMIT,
-        DiscoveryPage, DiscoveryRequest, GcPlan, GcResult, LedgerError, MAX_CONNECTIONS,
+        DiscoveryPage, DiscoveryRequest, ErrorKind, GcPlan, GcResult, LedgerError, MAX_CONNECTIONS,
         MAX_FRAME_BYTES, OperatorIntent, PROTOCOL_VERSION, Peer, ReadPage, ReadRequest, Request,
         Response, Result, RunRecord, StoreStatus, TailPage, TailRequest, VerifyPage, VerifyReport,
     },
@@ -73,15 +73,17 @@ impl Client {
         let path = data.join("ledger/serve.sock");
         let meta = fs::symlink_metadata(&path)?;
         if meta.uid() != crate::fsx::euid() || meta.mode() & 0o077 != 0 {
-            return Err(LedgerError("daemon socket is not owned and private".into()));
+            return Err(LedgerError::refused(
+                "daemon socket is not owned and private",
+            ));
         }
         let stream = UnixStream::connect(path)?;
         stream.set_read_timeout(Some(TIMEOUT))?;
         stream.set_write_timeout(Some(TIMEOUT))?;
         let server = peer_credentials(&stream)?;
         if server.uid != crate::fsx::euid() {
-            return Err(LedgerError(
-                "daemon peer uid is not the current user".into(),
+            return Err(LedgerError::refused(
+                "daemon peer uid is not the current user",
             ));
         }
         Ok(Self {
@@ -111,7 +113,10 @@ impl Client {
         // Any incomplete exchange poisons this connection; never reuse it after
         // a lost reply. Explicit writer refusals remain hard errors.
         if self.transport_failed {
-            return Err(LedgerError("daemon connection requires reconnect".into()));
+            return Err(LedgerError::new(
+                ErrorKind::Io(std::io::ErrorKind::BrokenPipe),
+                "daemon connection requires reconnect",
+            ));
         }
         self.transport_failed = true;
         write_frame(&mut self.stream, &request)?;
@@ -123,7 +128,7 @@ impl Client {
         self.transport_failed = false;
         match response {
             Response::Ok { value } => Ok(serde_json::from_value(value)?),
-            Response::Error { message } => Err(LedgerError(message)),
+            Response::Error { message } => Err(LedgerError::remote(message)),
         }
     }
     #[cfg(target_os = "linux")]
@@ -311,7 +316,7 @@ pub fn protocol_mismatch(writer: &Value) -> Option<LedgerError> {
         Some(version) => format!("protocol {version}"),
         None => "an unversioned protocol".into(),
     };
-    Some(LedgerError(format!(
+    Some(LedgerError::refused(format!(
         "ledger writer speaks {spoken}, this client speaks protocol {PROTOCOL_VERSION}; \
          restart the writer once its runs settle"
     )))
@@ -320,8 +325,8 @@ pub fn protocol_mismatch(writer: &Value) -> Option<LedgerError> {
 pub fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     if bytes.is_empty() || bytes.len() > MAX_FRAME_BYTES {
-        return Err(LedgerError(
-            "socket frame exceeds its 1048576-byte limit".into(),
+        return Err(LedgerError::refused(
+            "socket frame exceeds its 1048576-byte limit",
         ));
     }
     writer.write_all(&(bytes.len() as u32).to_be_bytes())?;
@@ -555,7 +560,10 @@ fn verify(
     let unanswered = std::cell::Cell::new(None);
     let lost = |problem| {
         unanswered.set(Some(problem));
-        LedgerError("the writer did not answer".into())
+        LedgerError::new(
+            ErrorKind::Io(std::io::ErrorKind::TimedOut),
+            "the writer did not answer",
+        )
     };
     let page = crate::store::verify_page(
         &mut |run_id, after, limit| {
@@ -578,7 +586,9 @@ fn verify(
     }
     let response = match page.and_then(|page| Ok(serde_json::to_value(page)?)) {
         Ok(value) => Response::Ok { value },
-        Err(error) => Response::Error { message: error.0 },
+        Err(error) => Response::Error {
+            message: error.into_message(),
+        },
     };
     Ok(response)
 }
@@ -617,7 +627,9 @@ pub fn serve(data: &Path) -> Result<()> {
     if let Ok(meta) = fs::symlink_metadata(&path) {
         use std::os::unix::fs::FileTypeExt as _;
         if !meta.file_type().is_socket() || meta.uid() != crate::fsx::euid() {
-            return Err(LedgerError("refusing unsafe existing daemon socket".into()));
+            return Err(LedgerError::refused(
+                "refusing unsafe existing daemon socket",
+            ));
         }
         fs::remove_file(&path)?;
     }
@@ -649,7 +661,9 @@ pub fn serve(data: &Path) -> Result<()> {
                 let response = match dispatch(&mut store, &mut capabilities, request, &message.peer)
                 {
                     Ok(value) => Response::Ok { value },
-                    Err(error) => Response::Error { message: error.0 },
+                    Err(error) => Response::Error {
+                        message: error.into_message(),
+                    },
                 };
                 if matches!(response, Response::Ok { .. }) {
                     faults::hit(faults::Point::ReplyBeforeSend)?;
@@ -672,12 +686,14 @@ pub fn serve(data: &Path) -> Result<()> {
         }
         store.flush_index();
     }
-    let problem = acceptor
-        .join()
-        .unwrap_or_else(|_| LedgerError("the connection acceptor panicked".into()));
-    Err(LedgerError(format!(
-        "ledger writer stopped accepting connections: {problem}"
-    )))
+    let problem = acceptor.join().unwrap_or_else(|_| {
+        LedgerError::new(
+            ErrorKind::Io(std::io::ErrorKind::Other),
+            "the connection acceptor panicked",
+        )
+    });
+    let message = format!("ledger writer stopped accepting connections: {problem}");
+    Err(problem.with_message(message))
 }
 
 fn authorize<'a>(
@@ -689,15 +705,15 @@ fn authorize<'a>(
 ) -> Result<&'a str> {
     let capability = tokens
         .get(token)
-        .ok_or_else(|| LedgerError("unknown role capability".into()))?;
+        .ok_or_else(|| LedgerError::refused("unknown role capability"))?;
     if capability.run_id != run_id || capability.role != role || capability.peer != *peer {
-        return Err(LedgerError(
-            "capability role, attempt or peer mismatch".into(),
+        return Err(LedgerError::refused(
+            "capability role, attempt or peer mismatch",
         ));
     }
     if !peer_alive(peer) {
-        return Err(LedgerError(
-            "authenticated peer birth identity is no longer live".into(),
+        return Err(LedgerError::refused(
+            "authenticated peer birth identity is no longer live",
         ));
     }
     Ok(&capability.token_id)
@@ -724,7 +740,9 @@ fn dispatch(
         )?)?),
         Request::ClaimOwner { run_id } => {
             if !cfg!(target_os = "linux") {
-                return Err(LedgerError("launch ownership currently requires Linux pid birth identities; readers remain available".into()));
+                return Err(LedgerError::refused(
+                    "launch ownership currently requires Linux pid birth identities; readers remain available",
+                ));
             }
             store.claim_owner(&run_id, peer)?;
             // Only one live pair per owner/run; repeated claims revoke the old pair.
@@ -771,13 +789,13 @@ fn dispatch(
         Request::Catalog { request } => Ok(serde_json::to_value(store.catalog(&request)?)?),
         Request::Discover { request } => Ok(serde_json::to_value(store.discover(&request)?)?),
         // Connections re-read history themselves; see `verify`.
-        Request::Verify { .. } => Err(LedgerError(
-            "fresh verification is never run on the writer thread".into(),
+        Request::Verify { .. } => Err(LedgerError::refused(
+            "fresh verification is never run on the writer thread",
         )),
         Request::Status => Ok(serde_json::to_value(store.status())?),
         Request::Read { request } => Ok(serde_json::to_value(store.read(&request)?)?),
         Request::Ping => Ok(
-            json!({"schema":crate::schemas::DOCTOR,"protocol":PROTOCOL_VERSION,"writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status(),"retention":{"retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.retain_days,"capture_retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.capture_retain_days}}),
+            json!({"schema":crate::schemas::DOCTOR,"protocol":PROTOCOL_VERSION,"writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status(),"retention":{"retain_days":store.retention.resolve(None,None).map_err(LedgerError::refused)?.retain_days,"capture_retain_days":store.retention.resolve(None,None).map_err(LedgerError::refused)?.capture_retain_days}}),
         ),
         Request::ReconcilePending { run_id } => Ok(serde_json::to_value(
             store.reconcile_pending(&run_id, peer, &peer_alive)?,
@@ -873,12 +891,12 @@ pub(crate) fn peer_identity(uid: u32, pid: u32) -> Result<Peer> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let suffix = stat
         .rsplit_once(')')
-        .ok_or_else(|| LedgerError("process stat identity is malformed".into()))?
+        .ok_or_else(|| LedgerError::refused("process stat identity is malformed"))?
         .1;
     let start = suffix
         .split_whitespace()
         .nth(19)
-        .ok_or_else(|| LedgerError("process start identity unavailable".into()))?;
+        .ok_or_else(|| LedgerError::refused("process start identity unavailable"))?;
     Ok(Peer {
         uid,
         pid,
@@ -1097,9 +1115,9 @@ mod tests {
                 "ledger writer speaks {spoken}, this client speaks protocol {PROTOCOL_VERSION}; \
                  restart the writer once its runs settle"
             );
-            assert_eq!(Client::connect(&data).err().unwrap().0, expected);
+            assert_eq!(Client::connect(&data).err().unwrap().message(), expected);
             // Reachable but incompatible is a refusal, not an absent writer.
-            assert_eq!(Client::reachable(&data).err().unwrap().0, expected);
+            assert_eq!(Client::reachable(&data).err().unwrap().message(), expected);
         }
         let temp = tempfile::tempdir().unwrap();
         let (data, listener) = listening(temp.path());

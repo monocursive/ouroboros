@@ -20,8 +20,8 @@ pub fn validate_tags(tags: &[String]) -> Result<()> {
             .iter()
             .any(|tag| tag.len() > 64 || !valid_name(tag) || !seen.insert(tag))
     {
-        return Err(LedgerError(
-            "tags require at most sixteen unique names of 1..64 ASCII identifier bytes".into(),
+        return Err(LedgerError::refused(
+            "tags require at most sixteen unique names of 1..64 ASCII identifier bytes",
         ));
     }
     Ok(())
@@ -30,8 +30,8 @@ pub fn validate_tags(tags: &[String]) -> Result<()> {
 pub(crate) fn validate_filter(filter: &RunFilter) -> Result<()> {
     validate_tags(&filter.tags)?;
     if filter.launch.as_deref().is_some_and(|v| !valid_name(v)) {
-        return Err(LedgerError(
-            "launch filter needs a bounded profile name".into(),
+        return Err(LedgerError::refused(
+            "launch filter needs a bounded profile name",
         ));
     }
     if filter
@@ -44,8 +44,8 @@ pub(crate) fn validate_filter(filter: &RunFilter) -> Result<()> {
             .is_some_and(|v| !crate::reader::utc_second(v))
         || matches!((&filter.since, &filter.until), (Some(a), Some(b)) if a >= b)
     {
-        return Err(LedgerError(
-            "run times need a valid increasing whole-second UTC interval".into(),
+        return Err(LedgerError::refused(
+            "run times need a valid increasing whole-second UTC interval",
         ));
     }
     if filter.outcome.as_deref().is_some_and(|v| {
@@ -59,7 +59,7 @@ pub(crate) fn validate_filter(filter: &RunFilter) -> Result<()> {
         ]
         .contains(&v)
     }) {
-        return Err(LedgerError("unsupported recorded outcome filter".into()));
+        return Err(LedgerError::refused("unsupported recorded outcome filter"));
     }
     Ok(())
 }

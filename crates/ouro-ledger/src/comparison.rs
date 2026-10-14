@@ -93,8 +93,10 @@ impl Counts {
             };
             observation["target"] = identity;
         }
-        let key = String::from_utf8(to_jcs(&observation).map_err(|e| LedgerError(e.to_string()))?)
-            .map_err(|e| LedgerError(e.to_string()))?;
+        let key = String::from_utf8(
+            to_jcs(&observation).map_err(|e| LedgerError::refused(e.to_string()))?,
+        )
+        .map_err(|e| LedgerError::refused(e.to_string()))?;
         if let Some(entry) = self.entries.get_mut(&key) {
             entry["count"] = json!(entry["count"].as_u64().unwrap() + 1);
             return Ok(());
@@ -103,8 +105,8 @@ impl Counts {
             || self.entries.len() >= MAX_BUCKETS
             || self.key_bytes + key.len() > MAX_KEYS
         {
-            return Err(LedgerError(
-                "diff count bucket budget exceeded; narrow the evidence outside diff".into(),
+            return Err(LedgerError::refused(
+                "diff count bucket budget exceeded; narrow the evidence outside diff",
             ));
         }
         self.key_bytes += key.len();
@@ -165,7 +167,7 @@ fn collect(
         let mut bytes = 0;
         for _ in 0..MAX_PAGES {
             if Instant::now() >= deadline {
-                return Err(LedgerError("diff time budget exceeded".into()));
+                return Err(LedgerError::refused("diff time budget exceeded"));
             }
             let page = read(&request)?;
             if evidence.summary["snapshot"].is_null() {
@@ -176,21 +178,21 @@ fn collect(
             if !page.local_consistency
                 || matches!(page.stream_status.as_str(), "corrupt" | "incomplete")
             {
-                return Err(LedgerError(format!(
+                return Err(LedgerError::refused(format!(
                     "snapshot cannot be compared: {} {:?}",
                     page.stream_status, page.problems
                 )));
             }
             bytes += page.ndjson.len();
             if bytes > MAX_BYTES {
-                return Err(LedgerError(
-                    "diff snapshot exceeds 64 MiB byte budget".into(),
+                return Err(LedgerError::refused(
+                    "diff snapshot exceeds 64 MiB byte budget",
                 ));
             }
             pending.push_str(&page.ndjson);
             while let Some(end) = pending.find('\n') {
                 if end > MAX_FRAME_BYTES {
-                    return Err(LedgerError("diff record exceeds frame bound".into()));
+                    return Err(LedgerError::refused("diff record exceeds frame bound"));
                 }
                 evidence
                     .counts
@@ -198,11 +200,11 @@ fn collect(
                 pending.drain(..=end);
             }
             if pending.len() > MAX_FRAME_BYTES {
-                return Err(LedgerError("diff record exceeds frame bound".into()));
+                return Err(LedgerError::refused("diff record exceeds frame bound"));
             }
             if page.done {
                 if !pending.is_empty() {
-                    return Err(LedgerError("diff received a partial final record".into()));
+                    return Err(LedgerError::refused("diff received a partial final record"));
                 }
                 evidence.summary["complete"] = json!(true);
                 evidence.summary["local_consistency"] = json!(true);
@@ -210,10 +212,10 @@ fn collect(
             }
             request.cursor = Some(
                 page.next_cursor
-                    .ok_or_else(|| LedgerError("diff reader omitted continuation".into()))?,
+                    .ok_or_else(|| LedgerError::refused("diff reader omitted continuation"))?,
             );
         }
-        Err(LedgerError("diff page budget exceeded".into()))
+        Err(LedgerError::refused("diff page budget exceeded"))
     })();
     if let Err(error) = result {
         evidence.summary["problem"] = json!(error.to_string());
@@ -290,7 +292,9 @@ fn compare_with(
     read: &mut impl FnMut(&ReadRequest) -> Result<ReadPage>,
 ) -> Result<Value> {
     if !(1..=1000).contains(&limit) {
-        return Err(LedgerError("diff limit must be between 1 and 1000".into()));
+        return Err(LedgerError::refused(
+            "diff limit must be between 1 and 1000",
+        ));
     }
     for run in [left, right] {
         if run.len() != 36
@@ -299,13 +303,13 @@ fn compare_with(
                 .iter()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
         {
-            return Err(LedgerError("diff requires canonical run ids".into()));
+            return Err(LedgerError::refused("diff requires canonical run ids"));
         }
     }
     let position: Option<Position> = after
         .map(|v| {
             if v.len() > 1024 {
-                return Err(LedgerError("diff position exceeds bound".into()));
+                return Err(LedgerError::refused("diff position exceeds bound"));
             }
             Ok(serde_json::from_str(v)?)
         })
@@ -314,8 +318,8 @@ fn compare_with(
         .as_ref()
         .is_some_and(|p| p.left_run != left || p.right_run != right || p.mode != mode)
     {
-        return Err(LedgerError(
-            "diff position belongs to different runs or comparison mode".into(),
+        return Err(LedgerError::refused(
+            "diff position belongs to different runs or comparison mode",
         ));
     }
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -325,8 +329,8 @@ fn compare_with(
         && (a.summary["snapshot"] != serde_json::to_value(&p.left_head)?
             || b.summary["snapshot"] != serde_json::to_value(&p.right_head)?)
     {
-        return Err(LedgerError(
-            "diff snapshot changed; start a new comparison".into(),
+        return Err(LedgerError::refused(
+            "diff snapshot changed; start a new comparison",
         ));
     }
     let mut classes = BTreeMap::new();
@@ -392,14 +396,14 @@ fn compare_with(
     let total = changes.len();
     let offset = position.as_ref().map_or(0, |p| p.offset);
     if offset > total {
-        return Err(LedgerError("diff position exceeds result length".into()));
+        return Err(LedgerError::refused("diff position exceeds result length"));
     }
     let mut items = Vec::new();
     let mut bytes = 0;
     for item in changes.into_iter().skip(offset).take(limit as usize) {
         let size = serde_json::to_vec(&item)?.len();
         if size > READ_OUTPUT_BYTES {
-            return Err(LedgerError("diff item exceeds output bound".into()));
+            return Err(LedgerError::refused("diff item exceeds output bound"));
         }
         if bytes + size > READ_OUTPUT_BYTES {
             break;

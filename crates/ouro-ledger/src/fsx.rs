@@ -55,7 +55,7 @@ pub(crate) fn is_private_file(metadata: &Metadata) -> bool {
 /// member.
 fn opening(error: io::Error, refusal: &str) -> LedgerError {
     if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
-        LedgerError(refusal.into())
+        LedgerError::refused(refusal)
     } else {
         error.into()
     }
@@ -66,7 +66,7 @@ pub(crate) fn ensure_dir(dir: &File, refusal: &str) -> Result<()> {
     if is_private_dir(&dir.metadata()?) {
         Ok(())
     } else {
-        Err(LedgerError(refusal.into()))
+        Err(LedgerError::refused(refusal))
     }
 }
 
@@ -75,7 +75,7 @@ pub(crate) fn ensure_file(file: &File, refusal: &str) -> Result<()> {
     if is_private_file(&file.metadata()?) {
         Ok(())
     } else {
-        Err(LedgerError(refusal.into()))
+        Err(LedgerError::refused(refusal))
     }
 }
 
@@ -171,7 +171,7 @@ pub(crate) fn create_dir_all(path: &Path) -> Result<File> {
     if fs::symlink_metadata(path).is_err() {
         let parent = path
             .parent()
-            .ok_or_else(|| LedgerError("directory has no parent".into()))?;
+            .ok_or_else(|| LedgerError::refused("directory has no parent"))?;
         if fs::symlink_metadata(parent).is_err() {
             create_dir_all(parent)?;
         }

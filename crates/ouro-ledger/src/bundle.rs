@@ -46,7 +46,7 @@ pub struct Manifest {
 }
 
 fn error(message: &str) -> LedgerError {
-    LedgerError(message.into())
+    LedgerError::refused(message)
 }
 fn check_time(start: Instant) -> Result<()> {
     if start.elapsed() >= DEADLINE {
@@ -57,7 +57,7 @@ fn check_time(start: Instant) -> Result<()> {
 }
 fn canonical_json(value: &impl Serialize) -> Result<Vec<u8>> {
     let mut bytes =
-        to_jcs(&serde_json::to_value(value)?).map_err(|e| LedgerError(e.to_string()))?;
+        to_jcs(&serde_json::to_value(value)?).map_err(|e| LedgerError::refused(e.to_string()))?;
     bytes.push(b'\n');
     if bytes.len() as u64 > MAX_JSON_BYTES {
         return Err(error("bundle JSON exceeds 4 MiB"));

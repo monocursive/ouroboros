@@ -41,7 +41,7 @@ fn open(path: &Path) -> Result<File> {
     const UNSAFE_DIRECTORY: &str = "reader directory is unsafe";
     let run = path
         .parent()
-        .ok_or_else(|| LedgerError("missing run directory".into()))?;
+        .ok_or_else(|| LedgerError::refused("missing run directory"))?;
     if let Some(root) = run.parent() {
         fsx::open_dir(root, UNSAFE_DIRECTORY)?;
     }
@@ -49,7 +49,7 @@ fn open(path: &Path) -> Result<File> {
     let name = path
         .file_name()
         .and_then(|name| CString::new(name.as_encoded_bytes()).ok())
-        .ok_or_else(|| LedgerError("reader canonical file is unsafe".into()))?;
+        .ok_or_else(|| LedgerError::refused("reader canonical file is unsafe"))?;
     fsx::open_file_at(
         &run,
         &name,
@@ -62,7 +62,7 @@ impl Snapshot {
     pub(crate) fn open(path: &Path, expected: u64) -> Result<Self> {
         let directory = path
             .parent()
-            .ok_or_else(|| LedgerError("missing run directory".into()))?;
+            .ok_or_else(|| LedgerError::refused("missing run directory"))?;
         let mut parts = Vec::new();
         let mut physical_bytes = 0u64;
         for name in manifest::names(directory)? {
@@ -79,7 +79,7 @@ impl Snapshot {
             }
             physical_bytes = physical_bytes
                 .checked_add(m.len())
-                .ok_or_else(|| LedgerError("canonical byte length overflow".into()))?;
+                .ok_or_else(|| LedgerError::refused("canonical byte length overflow"))?;
         }
         Ok(Self {
             directory: directory.into(),
@@ -100,8 +100,8 @@ impl Snapshot {
     }
 
     pub(crate) fn identity(&self) -> Result<String> {
-        let bytes =
-            to_jcs(&serde_json::to_value(&self.parts)?).map_err(|e| LedgerError(e.to_string()))?;
+        let bytes = to_jcs(&serde_json::to_value(&self.parts)?)
+            .map_err(|e| LedgerError::refused(e.to_string()))?;
         Ok(sha256_prefixed(&bytes))
     }
 
@@ -111,20 +111,20 @@ impl Snapshot {
 
     pub(crate) fn validate(&self) -> Result<()> {
         if self.physical_bytes < self.expected {
-            return Err(LedgerError("canonical snapshot was truncated".into()));
+            return Err(LedgerError::refused("canonical snapshot was truncated"));
         }
         for (i, part) in self.parts.iter().enumerate() {
             let file = open(&self.directory.join(&part.name))?;
             let m = file.metadata()?;
             if m.len() < part.bytes {
-                return Err(LedgerError("canonical snapshot was truncated".into()));
+                return Err(LedgerError::refused("canonical snapshot was truncated"));
             }
             if m.dev() != part.device
                 || m.ino() != part.inode
                 || (i + 1 < self.parts.len() && m.len() != part.bytes)
             {
-                return Err(LedgerError(
-                    "canonical segment identity or length changed".into(),
+                return Err(LedgerError::refused(
+                    "canonical segment identity or length changed",
                 ));
             }
         }

@@ -63,7 +63,12 @@ pub struct Projection {
 }
 
 fn sqlite<T>(result: rusqlite::Result<T>) -> Result<T> {
-    result.map_err(|error| LedgerError(format!("SQLite projection: {error}")))
+    result.map_err(|error| {
+        LedgerError::new(
+            crate::protocol::ErrorKind::Index,
+            format!("SQLite projection: {error}"),
+        )
+    })
 }
 
 const UNSAFE: &str = "unsafe SQLite projection path";
@@ -77,7 +82,7 @@ fn private_metadata(metadata: &fs::Metadata, directory: bool) -> Result<()> {
     if private {
         Ok(())
     } else {
-        Err(LedgerError(UNSAFE.into()))
+        Err(LedgerError::refused(UNSAFE))
     }
 }
 
@@ -100,8 +105,8 @@ fn sidecars(root: &Path) -> Result<()> {
             Ok(_) => {
                 let file = private_file(&path, false)?;
                 if file.metadata()?.len() > MAX_INDEX_BYTES {
-                    return Err(LedgerError(
-                        "SQLite projection sidecar exceeds its bound".into(),
+                    return Err(LedgerError::refused(
+                        "SQLite projection sidecar exceeds its bound",
                     ));
                 }
             }
@@ -230,8 +235,8 @@ impl Projection {
         private_metadata(&directory, true)?;
         private_metadata(&named_directory, true)?;
         if !same_file(&directory, &named_directory) {
-            return Err(LedgerError(
-                "SQLite projection directory was replaced".into(),
+            return Err(LedgerError::refused(
+                "SQLite projection directory was replaced",
             ));
         }
         let file = self.file.metadata()?;
@@ -239,7 +244,7 @@ impl Projection {
         private_metadata(&file, false)?;
         private_metadata(&named_file, false)?;
         if !same_file(&file, &named_file) {
-            return Err(LedgerError("SQLite projection file was replaced".into()));
+            return Err(LedgerError::refused("SQLite projection file was replaced"));
         }
         sidecars(&self.anchored())
     }
@@ -256,7 +261,9 @@ impl Projection {
             if fs::symlink_metadata(&path).is_ok() {
                 let file = private_file(&path, false)?;
                 if !same_file(&file.metadata()?, &fs::symlink_metadata(&path)?) {
-                    return Err(LedgerError("SQLite projection sidecar was replaced".into()));
+                    return Err(LedgerError::refused(
+                        "SQLite projection sidecar was replaced",
+                    ));
                 }
                 fs::remove_file(path)?;
             }
@@ -308,7 +315,8 @@ fn insert(connection: &Connection, run: &RunRecord) -> Result<()> {
     }
     let mut json = Bounded(Vec::new());
     serde_json::to_writer(&mut json, run)?;
-    let json = String::from_utf8(json.0).map_err(|error| LedgerError(error.to_string()))?;
+    let json = String::from_utf8(json.0)
+        .map_err(|error| LedgerError::new(crate::protocol::ErrorKind::Decode, error.to_string()))?;
     sqlite(connection.execute(
         UPSERT,
         params![

@@ -245,10 +245,11 @@ fn append_command(data: &std::path::Path, args: AppendArgs) -> Result<i32> {
         )
     })();
     result.map_err(|e| {
-        LedgerError(format!(
+        let message = format!(
             "append request {}: {e}; inspect or retry with the same request id and body",
             args.request_id
-        ))
+        );
+        e.with_message(message)
     })?;
     Ok(0)
 }
@@ -458,7 +459,7 @@ struct RunArgs {
 fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit.or_else(|| std::env::var_os("OURO_DATA_DIR").map(PathBuf::from)) {
         if !path.is_absolute() {
-            return Err(LedgerError("data directory must be absolute".into()));
+            return Err(LedgerError::refused("data directory must be absolute"));
         }
         return Ok(path);
     }
@@ -467,11 +468,11 @@ fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
         if path.is_absolute() {
             return Ok(path.join("ouro"));
         }
-        return Err(LedgerError("XDG_DATA_HOME must be absolute".into()));
+        return Err(LedgerError::refused("XDG_DATA_HOME must be absolute"));
     }
     std::env::var_os("HOME")
         .map(|h| PathBuf::from(h).join(".local/share/ouro"))
-        .ok_or_else(|| LedgerError("HOME is absent; use --data-dir".into()))
+        .ok_or_else(|| LedgerError::refused("HOME is absent; use --data-dir"))
 }
 
 fn output(value: &Value, json_output: bool) -> Result<()> {
@@ -504,9 +505,10 @@ fn retention_command(data: &std::path::Path, args: RetentionArgs, hold: bool) ->
         )
     })();
     result.map_err(|error| {
-        LedgerError(format!(
+        let message = format!(
             "{operation} request {request_id}: {error}; inspect or retry using this same request id"
-        ))
+        );
+        error.with_message(message)
     })?;
     Ok(0)
 }
@@ -521,13 +523,13 @@ fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
     } else if args.denials {
         ReadSelector::Denials
     } else {
-        return Err(LedgerError("query requires one evidence class".into()));
+        return Err(LedgerError::refused("query requires one evidence class"));
     };
     let stage = match args.stage.as_deref() {
         Some("attempt") => Some(ReadStage::Attempt),
         Some("result") => Some(ReadStage::Result),
         None => None,
-        _ => return Err(LedgerError("unsupported source stage".into())),
+        _ => return Err(LedgerError::refused("unsupported source stage")),
     };
     let filter = ReadFilter {
         selector,
@@ -537,8 +539,8 @@ fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
     };
     if args.run.is_empty() {
         if args.cursor.is_some() || !args.resume.is_empty() {
-            return Err(LedgerError(
-                "automatic discovery uses --after; --cursor and --resume require --run".into(),
+            return Err(LedgerError::refused(
+                "automatic discovery uses --after; --cursor and --resume require --run",
             ));
         }
         let page = client.discover(&DiscoveryRequest {
@@ -559,20 +561,20 @@ fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
     }
     let unique: std::collections::BTreeSet<_> = args.run.iter().collect();
     if args.run.len() > 8 || unique.len() != args.run.len() {
-        return Err(LedgerError(
-            "query needs one through eight unique runs".into(),
+        return Err(LedgerError::refused(
+            "query needs one through eight unique runs",
         ));
     }
     if args.run.len() > 1 && args.cursor.is_some() {
-        return Err(LedgerError(
-            "multi-run query needs --resume RUN=POSITION".into(),
+        return Err(LedgerError::refused(
+            "multi-run query needs --resume RUN=POSITION",
         ));
     }
     let mut positions = std::collections::BTreeMap::new();
     for resume in args.resume {
         let (run, position) = resume
             .split_once('=')
-            .ok_or_else(|| LedgerError("resume needs RUN=POSITION".into()))?;
+            .ok_or_else(|| LedgerError::refused("resume needs RUN=POSITION"))?;
         if !args.run.iter().any(|r| r == run)
             || position.len() != 64
             || !position.bytes().all(|b| b.is_ascii_hexdigit())
@@ -580,8 +582,8 @@ fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
                 .insert(run.to_owned(), position.to_owned())
                 .is_some()
         {
-            return Err(LedgerError(
-                "resume needs a unique selected run and a valid reader position".into(),
+            return Err(LedgerError::refused(
+                "resume needs a unique selected run and a valid reader position",
             ));
         }
     }
@@ -665,16 +667,16 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
         };
         if let Some((seq, digest)) = &snapshot {
             if page.snapshot.head_seq != *seq || page.snapshot.head_digest != *digest {
-                return Err(LedgerError(
-                    "export snapshot changed during pagination".into(),
+                return Err(LedgerError::refused(
+                    "export snapshot changed during pagination",
                 ));
             }
         } else {
             snapshot = Some((page.snapshot.head_seq, page.snapshot.head_digest.clone()));
         }
         if !page.records.is_empty() || page.oversized_record.is_some() {
-            return Err(LedgerError(
-                "export received an invalid chunk response".into(),
+            return Err(LedgerError::refused(
+                "export received an invalid chunk response",
             ));
         }
         stdout.write_all(page.ndjson.as_bytes())?;
@@ -716,9 +718,9 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
         }
         let cursor = page
             .next_cursor
-            .ok_or_else(|| LedgerError("unfinished export has no continuation cursor".into()))?;
+            .ok_or_else(|| LedgerError::refused("unfinished export has no continuation cursor"))?;
         if request.cursor.as_ref() == Some(&cursor) {
-            return Err(LedgerError("export cursor made no progress".into()));
+            return Err(LedgerError::refused("export cursor made no progress"));
         }
         if args.json {
             let mut stderr = std::io::stderr().lock();
@@ -931,11 +933,11 @@ fn execute(cli: Cli) -> Result<i32> {
         Action::Run(args) => {
             ouro_ledger::discovery::validate_tags(&args.tag)?;
             if args.detach && args.io != "batch" {
-                return Err(LedgerError("--detach requires --io batch".into()));
+                return Err(LedgerError::refused("--detach requires --io batch"));
             }
             if args.json && args.io != "batch" && control.is_none() {
-                return Err(LedgerError(
-                    "run --json requires --io batch or --control-fd so child output has an independent sink".into(),
+                return Err(LedgerError::refused(
+                    "run --json requires --io batch or --control-fd so child output has an independent sink",
                 ));
             }
             let mut policy: Vec<OsString> = vec![
@@ -1003,19 +1005,27 @@ fn execute(cli: Cli) -> Result<i32> {
                 return Ok(0);
             }
             if args.detach {
-                let record = service::launch(&options).map_err(|error| LedgerError(format!(
-                    "detached request {}: {}; inspect or replay this same request id, never invent a replacement",
-                    options.request_id, error
-                )))?;
+                let record = service::launch(&options).map_err(|error| {
+                    let message = format!(
+                        "detached request {}: {}; inspect or replay this same request id, never \
+                         invent a replacement",
+                        options.request_id, error
+                    );
+                    error.with_message(message)
+                })?;
                 output(&serde_json::to_value(&record)?, args.json)?;
                 return Ok(0);
             }
             let result = runner::run(&options)?;
             if let Some(control) = control {
-                control.deliver(&result.record).map_err(|problem| LedgerError(format!(
-                    "run {} (request {}): {problem}; result delivery failed; inspect or replay this same request id",
-                    result.record.run_id, result.record.request_id
-                )))?;
+                control.deliver(&result.record).map_err(|problem| {
+                    let message = format!(
+                        "run {} (request {}): {problem}; result delivery failed; inspect or \
+                         replay this same request id",
+                        result.record.run_id, result.record.request_id
+                    );
+                    problem.with_message(message)
+                })?;
             } else if args.json {
                 output(&serde_json::to_value(&result.record)?, true)?;
             } else {

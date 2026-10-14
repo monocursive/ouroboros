@@ -53,11 +53,11 @@ pub(crate) struct State {
 
 fn digest<T: Serialize>(value: &T) -> Result<String> {
     Ok(sha256_prefixed(
-        &to_jcs(&serde_json::to_value(value)?).map_err(|e| LedgerError(e.to_string()))?,
+        &to_jcs(&serde_json::to_value(value)?).map_err(|e| LedgerError::refused(e.to_string()))?,
     ))
 }
 fn invalid(message: &str) -> LedgerError {
-    LedgerError(format!("owner pending journal: {message}"))
+    LedgerError::refused(format!("owner pending journal: {message}"))
 }
 
 /// Every operation is relative to a pinned private run directory. A nonblocking

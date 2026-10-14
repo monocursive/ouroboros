@@ -131,7 +131,7 @@ fn resolve(options: &RunOptions) -> Result<Resolved> {
 }
 
 fn error(message: impl Into<String>) -> LedgerError {
-    LedgerError(message.into())
+    LedgerError::refused(message)
 }
 
 /// Start a writer on demand. The writer has no terminal or child-stream fds.

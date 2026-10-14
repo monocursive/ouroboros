@@ -15,23 +15,86 @@ pub const MAX_CONNECTIONS: usize = 32;
 /// clients refuse a writer that speaks another.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// What kind of failure a [`LedgerError`] is, so a caller can act on it
+/// without reading its message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The operating system failed or refused an operation.
+    Io(io::ErrorKind),
+    /// Bytes from a file, a peer or a request do not decode as what they
+    /// claim to be.
+    Decode,
+    /// The ledger refused: the input, a file or the run's state is invalid,
+    /// unsafe, conflicting or out of bounds.
+    Refused,
+    /// The disposable SQLite index failed.
+    Index,
+    /// The writer answered a request with this error.
+    Remote,
+}
+
+/// A ledger failure: its kind, and a message for the operator. The message
+/// is exactly what the CLI prints and the wire carries.
 #[derive(Debug)]
-pub struct LedgerError(pub String);
+pub struct LedgerError {
+    kind: ErrorKind,
+    message: String,
+}
+
+impl LedgerError {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// The ledger refused; the message says why.
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Refused, message)
+    }
+
+    /// The writer answered with `message`.
+    pub fn remote(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Remote, message)
+    }
+
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn into_message(self) -> String {
+        self.message
+    }
+
+    /// The same kind of failure, described as `message`.
+    pub fn with_message(self, message: impl Into<String>) -> Self {
+        Self::new(self.kind, message)
+    }
+}
 
 impl fmt::Display for LedgerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 impl std::error::Error for LedgerError {}
 impl From<io::Error> for LedgerError {
     fn from(error: io::Error) -> Self {
-        Self(error.to_string())
+        Self::new(ErrorKind::Io(error.kind()), error.to_string())
     }
 }
 impl From<serde_json::Error> for LedgerError {
     fn from(error: serde_json::Error) -> Self {
-        Self(error.to_string())
+        let kind = match error.io_error_kind() {
+            Some(kind) => ErrorKind::Io(kind),
+            None => ErrorKind::Decode,
+        };
+        Self::new(kind, error.to_string())
     }
 }
 
@@ -48,7 +111,7 @@ pub fn read_bounded(reader: impl io::Read, max: u64, refusal: &str) -> Result<Ve
     let mut bytes = Vec::new();
     reader.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > max {
-        return Err(LedgerError(refusal.into()));
+        return Err(LedgerError::refused(refusal));
     }
     Ok(bytes)
 }

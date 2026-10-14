@@ -35,7 +35,7 @@ pub(crate) fn validate_policy(payload: &Value) -> Result<()> {
 }
 
 fn invalid() -> LedgerError {
-    LedgerError("invalid structured redaction policy or marker".into())
+    LedgerError::refused("invalid structured redaction policy or marker")
 }
 
 fn selected(payload: &Value, name: &str) -> bool {
@@ -127,8 +127,8 @@ pub(crate) fn minimize(event: &Value, payload: &Value, attempt: &str) -> Result<
 /// Recovery must reject unminimized canonical bytes, never rewrite history.
 pub(crate) fn validate_stored(event: &Value, payload: &Value, attempt: &str) -> Result<()> {
     if minimize(event, payload, attempt)? != *event {
-        return Err(LedgerError(
-            "stored source violates immutable redaction policy".into(),
+        return Err(LedgerError::refused(
+            "stored source violates immutable redaction policy",
         ));
     }
     Ok(())
