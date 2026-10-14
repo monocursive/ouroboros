@@ -13,7 +13,7 @@ use std::time::Duration;
 use libc::pid_t;
 use serde_json::{Map, Value};
 
-use super::audit::{AuditWriter, CommandEnforcement};
+use super::audit::{AuditWriter, CommandEnforcement, SyscallResult};
 use super::tracer::{
     GapReason, KernelImage, OpSet, PathSnapshot, ShebangImage, Tracer, TracerConfig, TracerEvent,
     TracerSummary,
@@ -398,7 +398,15 @@ pub fn record(audit: &mut AuditWriter, target: &Target<'_>, event: &TracerEvent)
             ret,
             ..
         } => {
-            audit.record_syscall(*pid, *start_ticks, *tid, *op, syscall, args, *ret);
+            audit.record_syscall(&SyscallResult {
+                pid: *pid,
+                pid_start_ticks: *start_ticks,
+                tid: *tid,
+                op: *op,
+                syscall,
+                args,
+                ret: *ret,
+            });
             if let Some(hit) = &args.command
                 && hit.forbidden
             {

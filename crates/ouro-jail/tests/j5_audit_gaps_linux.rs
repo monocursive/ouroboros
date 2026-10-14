@@ -16,7 +16,7 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use ouro_jail::observer::CoverageSummary;
-use ouro_jail::platform::linux::audit::AuditWriter;
+use ouro_jail::platform::linux::audit::{AuditWriter, SyscallResult};
 use ouro_jail::platform::linux::tracer::{Args, ClosedOp, PathSnapshot, TracerSummary};
 use ouro_jail::records::{
     Applied, AppliedFilesystem, AppliedLimit, AppliedMount, AppliedNetwork, AppliedSyscalls,
@@ -167,13 +167,13 @@ fn j5_a_panicked_observer_writes_a_receipt_that_passes_the_frozen_contract() {
 #[test]
 fn j5_a_poisoned_trace_writes_a_receipt_that_passes_the_frozen_contract() {
     let mut writer = AuditWriter::new("att_test", Some(poisoned_trace()), b"/work/space", b"/tmp");
-    writer.record_syscall(
-        10,
-        Some(1),
-        10,
-        ClosedOp::Open,
-        "openat",
-        &Args {
+    writer.record_syscall(&SyscallResult {
+        pid: 10,
+        pid_start_ticks: Some(1),
+        tid: 10,
+        op: ClosedOp::Open,
+        syscall: "openat",
+        args: &Args {
             path: Some(PathSnapshot {
                 bytes: b"/work/space/f".to_vec(),
                 complete: true,
@@ -181,8 +181,8 @@ fn j5_a_poisoned_trace_writes_a_receipt_that_passes_the_frozen_contract() {
             flags: Some(1),
             ..Args::default()
         },
-        3,
-    );
+        ret: 3,
+    });
     let summary = writer.summary(&TracerSummary::default(), true);
     let receipt = settled_receipt(&summary);
     common::check_receipt(&receipt)

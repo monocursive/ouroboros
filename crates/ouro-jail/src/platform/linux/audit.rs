@@ -21,9 +21,6 @@ use crate::trace::{Priority, SharedTrace};
 
 use super::tracer::{Args, ClosedOp, GapReason, OpSet, PathSnapshot, TracerSummary};
 
-/// `AT_FDCWD`.
-const AT_FDCWD: i32 = -100;
-
 /// The observer backend name recorded in the receipt.
 pub const OBSERVER_BACKEND: &str = "ptrace";
 
@@ -70,6 +67,27 @@ pub struct MediatedConnect {
     pub ret: i64,
     /// The mediator's safe reason code.
     pub reason: &'static str,
+}
+
+/// One completed closed-set call, as the observer witnessed it.
+#[derive(Clone, Copy, Debug)]
+pub struct SyscallResult<'a> {
+    /// The calling process.
+    pub pid: libc::pid_t,
+    /// The birth of process `pid` (§11.3): with the receipt's `boot_id` it
+    /// names the process where `pid` alone would name whichever process
+    /// holds that number now.
+    pub pid_start_ticks: Option<u64>,
+    /// The calling thread.
+    pub tid: libc::pid_t,
+    /// The call's family in the closed set.
+    pub op: ClosedOp,
+    /// The call's name (`openat`, `renameat2`, ...).
+    pub syscall: &'a str,
+    /// The arguments the observer read at the entry stop.
+    pub args: &'a Args,
+    /// The signed raw return, so a failure is `-errno`.
+    pub ret: i64,
 }
 
 /// A complete path snapshot over raw bytes.
@@ -261,13 +279,30 @@ impl AuditWriter {
         }
     }
 
-    fn next_seq(&mut self) -> u64 {
+    /// Emits one audit result under the next audit sequence number, and
+    /// counts it in its operation's class (§11.4) once the trace took it: an
+    /// undelivered frame is not an observed result (§13.2), so it degrades
+    /// the class and adds nothing to its count.
+    fn emit_result(
+        &mut self,
+        operation: ClosedOperation,
+        outcome: EventOutcome,
+        fields: Map<String, Value>,
+    ) {
         self.seq += 1;
-        self.seq
-    }
-
-    fn bump(&mut self, class: CoverageClass) {
-        *self.counts.entry(class).or_insert(0) += 1;
+        let event = Event::audit_result(
+            &self.attempt_id,
+            self.seq,
+            SystemTime::now(),
+            crate::platform::elapsed_since_start_ns(),
+            operation.as_str(),
+            outcome,
+            fields,
+        );
+        let class = operation.coverage_class();
+        if self.emit(&event, class) {
+            *self.counts.entry(class).or_insert(0) += 1;
+        }
     }
 
     /// The `command_rule` note of one command-rule hit (jail-v2 §7.2):
@@ -335,27 +370,17 @@ impl AuditWriter {
     }
 
     /// One completed closed-set call.
-    ///
-    /// `ret` is the signed raw return, so a failure is `-errno`.
-    /// `pid_start_ticks` is the birth of process `pid` (§11.3): with the
-    /// receipt's `boot_id` it names the process where `pid` alone would
-    /// name whichever process holds that number now.
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_syscall(
-        &mut self,
-        pid: libc::pid_t,
-        pid_start_ticks: Option<u64>,
-        tid: libc::pid_t,
-        op: ClosedOp,
-        syscall: &str,
-        args: &Args,
-        ret: i64,
-    ) {
-        let errno = if ret < 0 {
-            i32::try_from(-ret).ok()
-        } else {
-            None
-        };
+    pub fn record_syscall(&mut self, call: &SyscallResult<'_>) {
+        let SyscallResult {
+            pid,
+            pid_start_ticks,
+            tid,
+            op,
+            syscall,
+            args,
+            ret,
+        } = *call;
+        let errno = errno_of(ret);
         if let Some(hit) = &args.command {
             self.record_command_rule(pid, hit, CommandEnforcement::EntryDenied);
         }
@@ -374,14 +399,7 @@ impl AuditWriter {
             };
             let mut fields = Map::new();
             fields.insert("kind".into(), Value::from(LEARNING_READ_KIND));
-            fields.insert(
-                "path".into(),
-                serde_json::to_value(
-                    crate::records::NativeString::from_bytes(path.bytes.clone())
-                        .unwrap_or(crate::records::NativeString::Text(String::new())),
-                )
-                .unwrap_or(Value::Null),
-            );
+            fields.insert("path".into(), native_value(&path.bytes));
             fields.insert(
                 "errno".into(),
                 errno.map_or(Value::Null, |e| Value::from(super::sys::errno_name(e))),
@@ -473,30 +491,7 @@ impl AuditWriter {
             fields.insert("address_complete".to_owned(), Value::from(address.complete));
         }
 
-        let outcome = EventOutcome {
-            ok: Some(ret >= 0),
-            return_value: Some(ret),
-            errno: errno.map(|code| super::sys::errno_name(code).into_owned()),
-            completion: Completion::SyscallReturn,
-            bytes_in: None,
-            bytes_out: None,
-            duration_ms: None,
-        };
-        let seq = self.next_seq();
-        let event = Event::audit_result(
-            &self.attempt_id,
-            seq,
-            SystemTime::now(),
-            crate::platform::elapsed_since_start_ns(),
-            operation.as_str(),
-            outcome,
-            fields,
-        );
-        // An undelivered frame is not an observed result (§13.2): it
-        // degrades the class and adds nothing to its count.
-        if self.emit(&event, operation.coverage_class()) {
-            self.bump(operation.coverage_class());
-        }
+        self.emit_result(operation, syscall_outcome(ret), fields);
     }
 
     // Mediated connects are audit-source results (§10, §11.4)
@@ -516,9 +511,7 @@ impl AuditWriter {
     /// facts are never merged into it: the proxy emits its own `net.connect`
     /// results.
     pub fn record_mediated_connect(&mut self, record: &MediatedConnect) {
-        let errno = (record.ret < 0)
-            .then(|| i32::try_from(-record.ret).ok())
-            .flatten();
+        let errno = errno_of(record.ret);
         let mut fields = Map::new();
         fields.insert("syscall".to_owned(), Value::from("connect"));
         fields.insert(
@@ -582,29 +575,11 @@ impl AuditWriter {
             Value::from("seccomp_user_notification"),
         );
         fields.insert("mediator_reason".to_owned(), Value::from(record.reason));
-        let outcome = EventOutcome {
-            ok: Some(record.ret >= 0),
-            return_value: Some(record.ret),
-            errno: errno.map(|code| super::sys::errno_name(code).into_owned()),
-            completion: Completion::SyscallReturn,
-            bytes_in: None,
-            bytes_out: None,
-            duration_ms: None,
-        };
-        let seq = self.next_seq();
-        let event = Event::audit_result(
-            &self.attempt_id,
-            seq,
-            SystemTime::now(),
-            crate::platform::elapsed_since_start_ns(),
-            ClosedOperation::NetConnect.as_str(),
-            outcome,
+        self.emit_result(
+            ClosedOperation::NetConnect,
+            syscall_outcome(record.ret),
             fields,
         );
-        let class = ClosedOperation::NetConnect.coverage_class();
-        if self.emit(&event, class) {
-            self.bump(class);
-        }
     }
 
     /// Mediation records that never reached this writer (the bounded queue
@@ -686,29 +661,12 @@ impl AuditWriter {
             Value::from("argument_snapshot".to_owned()),
         );
         self.describe_path(&mut fields, "path", image, dirfd);
-        let outcome = EventOutcome {
-            ok: Some(true),
-            return_value: None,
-            errno: None,
-            completion: Completion::ExecTransition,
-            bytes_in: None,
-            bytes_out: None,
-            duration_ms: None,
-        };
-        let seq = self.next_seq();
-        let event = Event::audit_result(
-            &self.attempt_id,
-            seq,
-            SystemTime::now(),
-            crate::platform::elapsed_since_start_ns(),
-            ClosedOperation::ProcExec.as_str(),
-            outcome,
+        // An exec transition has no return value: the call never returned.
+        self.emit_result(
+            ClosedOperation::ProcExec,
+            audit_outcome(true, None, None, Completion::ExecTransition),
             fields,
         );
-        let class = ClosedOperation::ProcExec.coverage_class();
-        if self.emit(&event, class) {
-            self.bump(class);
-        }
     }
 
     /// Final thread-group death of a process that was seen to exec.
@@ -744,29 +702,16 @@ impl AuditWriter {
                 Value::Null
             },
         );
-        let outcome = EventOutcome {
-            ok: Some(exited && libc::WEXITSTATUS(status) == 0),
-            return_value: Some(i64::from(status)),
-            errno: None,
-            completion: Completion::ProcessExit,
-            bytes_in: None,
-            bytes_out: None,
-            duration_ms: None,
-        };
-        let seq = self.next_seq();
-        let event = Event::audit_result(
-            &self.attempt_id,
-            seq,
-            SystemTime::now(),
-            crate::platform::elapsed_since_start_ns(),
-            ClosedOperation::ProcExit.as_str(),
-            outcome,
+        self.emit_result(
+            ClosedOperation::ProcExit,
+            audit_outcome(
+                exited && libc::WEXITSTATUS(status) == 0,
+                Some(i64::from(status)),
+                None,
+                Completion::ProcessExit,
+            ),
             fields,
         );
-        let class = ClosedOperation::ProcExit.coverage_class();
-        if self.emit(&event, class) {
-            self.bump(class);
-        }
     }
 
     /// A hole in coverage. The affected classes are named explicitly (§11.4).
@@ -890,15 +835,10 @@ impl AuditWriter {
         let mut gaps = self.gaps.clone();
         if tracer.thread_panicked {
             gaps.push(Gap {
-                classes: [
-                    CoverageClass::Exec,
-                    CoverageClass::FsWrite,
-                    CoverageClass::FsDeny,
-                    CoverageClass::Net,
-                ]
-                .iter()
-                .map(|class| class.as_str().to_owned())
-                .collect(),
+                classes: CoverageClass::AUDIT
+                    .iter()
+                    .map(|class| class.as_str().to_owned())
+                    .collect(),
                 source: "audit".to_owned(),
                 start_ns: self.created_ns.to_string(),
                 end_ns: Some(now_ns().max(self.created_ns).to_string()),
@@ -919,12 +859,7 @@ impl AuditWriter {
             SourceStatus::Degraded
         };
         let mut classes = BTreeMap::new();
-        for class in [
-            CoverageClass::Exec,
-            CoverageClass::FsWrite,
-            CoverageClass::FsDeny,
-            CoverageClass::Net,
-        ] {
+        for class in CoverageClass::AUDIT {
             let status = if self.degraded.contains(&class) || tracer.thread_panicked {
                 SourceStatus::Degraded
             } else {
@@ -1024,7 +959,7 @@ impl AuditWriter {
         let complete = snapshot.is_some_and(|snap| snap.complete);
         fields.insert(format!("{key}_complete"), Value::from(complete));
         if let Some(fd) = dirfd
-            && fd != AT_FDCWD
+            && fd != libc::AT_FDCWD
         {
             fields.insert(format!("{key}_dirfd"), Value::from(i64::from(fd)));
         }
@@ -1086,7 +1021,7 @@ impl AuditWriter {
             // against the thread's own cwd is resolved against that cwd,
             // observed at the syscall stop. Only the true dirfd cases (and a
             // cwd that could not be read) keep their distinct reasons.
-            if dirfd.is_none_or(|fd| fd == AT_FDCWD)
+            if dirfd.is_none_or(|fd| fd == libc::AT_FDCWD)
                 && let Some(cwd) = cwd
                 && cwd.first() == Some(&b'/')
             {
@@ -1103,7 +1038,7 @@ impl AuditWriter {
                 );
             }
             return match dirfd {
-                Some(fd) if fd != AT_FDCWD => PathClass::Unavailable("relative_to_dirfd"),
+                Some(fd) if fd != libc::AT_FDCWD => PathClass::Unavailable("relative_to_dirfd"),
                 _ => PathClass::Unavailable("relative_to_unobserved_cwd"),
             };
         }
@@ -1148,6 +1083,43 @@ const TRACE_WRITER_POISONED: &str = "trace_writer_poisoned";
 const OBSERVER_PANICKED: &str = "observer_panicked";
 /// The gap reason of a result whose operation the closed set does not name.
 const OPERATION_UNMAPPED: &str = "operation_unmapped";
+
+/// The errno a signed raw return carries: `Some` only for a failure
+/// (`-errno`) whose magnitude is an errno at all.
+fn errno_of(ret: i64) -> Option<i32> {
+    (ret < 0)
+        .then(|| ret.checked_neg().and_then(|code| i32::try_from(code).ok()))
+        .flatten()
+}
+
+/// An audit result's outcome. Proxy byte counts and durations belong to
+/// proxy results only.
+fn audit_outcome(
+    ok: bool,
+    return_value: Option<i64>,
+    errno: Option<i32>,
+    completion: Completion,
+) -> EventOutcome {
+    EventOutcome {
+        ok: Some(ok),
+        return_value,
+        errno: errno.map(|code| super::sys::errno_name(code).into_owned()),
+        completion,
+        bytes_in: None,
+        bytes_out: None,
+        duration_ms: None,
+    }
+}
+
+/// The outcome of a syscall that returned `ret` (`-errno` on failure).
+fn syscall_outcome(ret: i64) -> EventOutcome {
+    audit_outcome(
+        ret >= 0,
+        Some(ret),
+        errno_of(ret),
+        Completion::SyscallReturn,
+    )
+}
 
 /// Now, in the gap intervals' unit: nanoseconds since supervisor start.
 fn now_ns() -> u64 {
@@ -1255,6 +1227,28 @@ mod tests {
         }
     }
 
+    /// One call by thread 10 of process 10, born at tick 1.
+    fn call<'a>(op: ClosedOp, syscall: &'a str, args: &'a Args, ret: i64) -> SyscallResult<'a> {
+        SyscallResult {
+            pid: 10,
+            pid_start_ticks: Some(1),
+            tid: 10,
+            op,
+            syscall,
+            args,
+            ret,
+        }
+    }
+
+    /// Every event written to the trace file at `path`, in order.
+    fn trace_events(path: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
     #[test]
     fn a_create_open_is_fs_create_and_a_mutating_open_is_fs_write() {
         assert_eq!(
@@ -1307,15 +1301,7 @@ mod tests {
     fn a_denied_connect_counts_under_fs_deny_only() {
         let mut writer = writer();
         let connect = |writer: &mut AuditWriter, ret: i64| {
-            writer.record_syscall(
-                10,
-                Some(1),
-                10,
-                ClosedOp::Connect,
-                "connect",
-                &Args::default(),
-                ret,
-            );
+            writer.record_syscall(&call(ClosedOp::Connect, "connect", &Args::default(), ret));
         };
         connect(&mut writer, -i64::from(libc::EACCES));
         assert_eq!(writer.count(CoverageClass::FsDeny), 1);
@@ -1395,11 +1381,7 @@ mod tests {
             ret: -i64::from(libc::ENETUNREACH),
             reason: "non_unix",
         });
-        let events: Vec<Value> = std::fs::read_to_string(file.path())
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let events = trace_events(file.path());
         let unix_deny = events
             .iter()
             .find(|event| event["fields"]["mediator_reason"] == "path_unresolved")
@@ -1429,11 +1411,7 @@ mod tests {
             ret: 0,
             reason: "abstract",
         });
-        let events: Vec<Value> = std::fs::read_to_string(file.path())
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let events = trace_events(file.path());
         let abstracted = events
             .iter()
             .find(|event| event["fields"]["mediator_reason"] == "abstract")
@@ -1446,7 +1424,11 @@ mod tests {
     fn a_workspace_path_is_reported_relative_to_the_workspace() {
         let writer = writer();
         assert_eq!(
-            writer.classify(Some(&snap("/work/space/src/lib.rs")), Some(AT_FDCWD), None),
+            writer.classify(
+                Some(&snap("/work/space/src/lib.rs")),
+                Some(libc::AT_FDCWD),
+                None
+            ),
             PathClass::WorkspaceRelative(b"src/lib.rs".to_vec())
         );
         assert_eq!(
@@ -1503,12 +1485,7 @@ mod tests {
         assert_eq!(writer.gaps()[0].lost_count, Some(10_000));
         assert_eq!(writer.gaps()[0].end_ns.as_deref(), Some("10000"));
         let summary = writer.summary(&TracerSummary::default(), true);
-        for class in [
-            CoverageClass::Exec,
-            CoverageClass::FsWrite,
-            CoverageClass::FsDeny,
-            CoverageClass::Net,
-        ] {
+        for class in CoverageClass::AUDIT {
             assert_eq!(summary.classes[&class].status, SourceStatus::Degraded);
             assert_eq!(summary.classes[&class].observed_count, None);
         }
@@ -1539,11 +1516,7 @@ mod tests {
             .unwrap()
             .write_event(&note, Priority::Normal)
             .unwrap();
-        let events: Vec<Value> = std::fs::read_to_string(file.path())
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let events = trace_events(file.path());
         for (source, expected) in [("wrapper", vec![1, 2, 3]), ("audit", vec![1, 2])] {
             let seqs: Vec<_> = events
                 .iter()
@@ -1560,11 +1533,7 @@ mod tests {
         let trace = crate::trace::shared(crate::trace::FileSink::new(file.reopen().unwrap()));
         let mut writer = AuditWriter::new("att_test", Some(trace), b"/work/space", b"/tmp");
         writer.record_limit_unapplied("pids", "no delegated cgroup");
-        let events: Vec<Value> = std::fs::read_to_string(file.path())
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let events = trace_events(file.path());
         assert_eq!(events.len(), 1);
         let note = &events[0];
         assert_eq!(note["source"], "wrapper");
@@ -1653,12 +1622,7 @@ mod tests {
             true,
         );
         assert_degraded_classes_name_their_gaps(&summary);
-        for class in [
-            CoverageClass::Exec,
-            CoverageClass::FsWrite,
-            CoverageClass::FsDeny,
-            CoverageClass::Net,
-        ] {
+        for class in CoverageClass::AUDIT {
             let entry = &summary.classes[&class];
             assert_eq!(entry.status, SourceStatus::Degraded, "{class:?}");
             assert_eq!(entry.observed_count, None, "{class:?}");
@@ -1686,10 +1650,7 @@ mod tests {
     fn a_result_a_poisoned_trace_cannot_take_is_a_gap_of_its_class() {
         let mut writer =
             AuditWriter::new("att_test", Some(poisoned_trace()), b"/work/space", b"/tmp");
-        writer.record_syscall(
-            10,
-            Some(1),
-            10,
+        writer.record_syscall(&call(
             ClosedOp::Open,
             "openat",
             &Args {
@@ -1698,7 +1659,7 @@ mod tests {
                 ..Args::default()
             },
             3,
-        );
+        ));
         let summary = writer.summary(&TracerSummary::default(), true);
         assert_degraded_classes_name_their_gaps(&summary);
         let entry = &summary.classes[&CoverageClass::FsWrite];
@@ -1712,10 +1673,7 @@ mod tests {
             "not delivered, not counted"
         );
         // A second lost result in the same class extends the same gap.
-        writer.record_syscall(
-            10,
-            Some(1),
-            10,
+        writer.record_syscall(&call(
             ClosedOp::Open,
             "openat",
             &Args {
@@ -1724,7 +1682,7 @@ mod tests {
                 ..Args::default()
             },
             4,
-        );
+        ));
         let summary = writer.summary(&TracerSummary::default(), true);
         let entry = &summary.classes[&CoverageClass::FsWrite];
         assert_eq!(entry.gaps.len(), 1, "coalesced: {entry:?}");
@@ -1755,7 +1713,7 @@ mod tests {
     fn a_relative_path_is_never_joined_to_a_guessed_cwd() {
         let writer = writer();
         assert_eq!(
-            writer.classify(Some(&snap("relative/file")), Some(AT_FDCWD), None),
+            writer.classify(Some(&snap("relative/file")), Some(libc::AT_FDCWD), None),
             PathClass::Unavailable("relative_to_unobserved_cwd")
         );
         assert_eq!(
@@ -1821,10 +1779,7 @@ mod tests {
     #[test]
     fn a_gap_degrades_its_classes_and_nulls_their_counts() {
         let mut writer = writer();
-        writer.record_syscall(
-            10,
-            Some(1),
-            10,
+        writer.record_syscall(&call(
             ClosedOp::Open,
             "openat",
             &Args {
@@ -1833,7 +1788,7 @@ mod tests {
                 ..Args::default()
             },
             3,
-        );
+        ));
         assert_eq!(writer.count(CoverageClass::FsWrite), 1);
         writer.record_gap(
             GapReason::QueueFull,
@@ -1861,25 +1816,19 @@ mod tests {
             flags: Some(O_CREAT),
             ..Args::default()
         };
-        writer.record_syscall(10, Some(1), 10, ClosedOp::Open, "openat", &args, 3);
-        writer.record_syscall(
-            10,
-            Some(1),
-            10,
+        writer.record_syscall(&call(ClosedOp::Open, "openat", &args, 3));
+        writer.record_syscall(&call(
             ClosedOp::Open,
             "openat",
             &args,
             -i64::from(libc::EROFS),
-        );
-        writer.record_syscall(
-            10,
-            Some(1),
-            10,
+        ));
+        writer.record_syscall(&call(
             ClosedOp::Open,
             "openat",
             &args,
             -i64::from(libc::EACCES),
-        );
+        ));
         writer.record_exec(
             10,
             Some(1),
@@ -1905,10 +1854,7 @@ mod tests {
     #[test]
     fn a_truncation_by_path_says_which_mutation_it_was() {
         let mut writer = writer();
-        writer.record_syscall(
-            10,
-            Some(1),
-            10,
+        writer.record_syscall(&call(
             ClosedOp::Truncate,
             "truncate",
             &Args {
@@ -1916,7 +1862,7 @@ mod tests {
                 ..Args::default()
             },
             0,
-        );
+        ));
         assert_eq!(writer.count(CoverageClass::FsWrite), 1);
     }
 
@@ -1941,12 +1887,7 @@ mod tests {
         assert_eq!(gap.start_ns, "3");
         assert_eq!(gap.lost_count, None);
         let summary = writer.summary(&TracerSummary::default(), true);
-        for class in [
-            CoverageClass::Exec,
-            CoverageClass::FsWrite,
-            CoverageClass::FsDeny,
-            CoverageClass::Net,
-        ] {
+        for class in CoverageClass::AUDIT {
             assert_eq!(summary.classes[&class].status, SourceStatus::Degraded);
             assert_eq!(summary.classes[&class].observed_count, None);
         }
@@ -2047,18 +1988,20 @@ mod tests {
             Some(&snap("/work/space/t")),
             Some(3),
         );
-        writer.record_syscall(
-            10,
-            Some(4242),
-            11,
-            ClosedOp::Mkdir,
-            "mkdir",
-            &Args {
-                path: Some(snap("/work/space/d")),
-                ..Args::default()
-            },
-            0,
-        );
+        writer.record_syscall(&SyscallResult {
+            pid: 10,
+            pid_start_ticks: Some(4242),
+            tid: 11,
+            ..call(
+                ClosedOp::Mkdir,
+                "mkdir",
+                &Args {
+                    path: Some(snap("/work/space/d")),
+                    ..Args::default()
+                },
+                0,
+            )
+        });
         writer.record_exit(10, None, 0);
         writer.record_mediated_connect(&MediatedConnect {
             tid: 12,
@@ -2080,11 +2023,7 @@ mod tests {
             ret: 0,
             reason: "non_unix",
         });
-        let events: Vec<Value> = std::fs::read_to_string(file.path())
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let events = trace_events(file.path());
         let births: Vec<&Value> = events
             .iter()
             .map(|e| &e["fields"]["pid_start_ticks"])
