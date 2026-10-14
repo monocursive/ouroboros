@@ -3466,10 +3466,11 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         assert_eq!(excludes, vec!["/target", "/.git", "/evidence"]);
     }
 
-    /// Review RH-07: the copy is an allowlist of what the remote suite needs
-    /// (it was every file but four corpora: 121 MiB per run for 9 MiB of
-    /// code), never secrets, and of the retained results only the preview
-    /// evidence the release tests replay.
+    /// The copy is an allowlist of what the remote suite needs, never
+    /// secrets, and of the retained results only the preview evidence the
+    /// release tests replay: the tree is copied on every run, and most of it
+    /// is evidence the suite never reads. The list is checked as written;
+    /// where rsync is installed, it is also checked as rsync reads it.
     #[test]
     fn transfer_inventory_copies_only_what_the_suite_needs_and_never_secrets() {
         let root = tempfile::tempdir().unwrap();
@@ -3538,13 +3539,50 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         git(&["add", "docs"]);
         let inventory = destination.path().join("source-files.nul");
         source_inventory(root.path(), &inventory).unwrap();
-        let transfer = Command::new("rsync")
+
+        // The list as written: NUL-framed paths, so a name with spaces or a
+        // newline is one entry.
+        let bytes = std::fs::read(&inventory).unwrap();
+        let listed: std::collections::BTreeSet<&str> = bytes
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| std::str::from_utf8(entry).unwrap())
+            .collect();
+        for name in wanted.iter().chain([&PREVIEW_INDEX]) {
+            assert!(listed.contains(name), "not listed: {name}");
+        }
+        for name in unwanted {
+            assert!(!listed.contains(name), "listed {name}");
+        }
+        for name in secrets {
+            assert!(!listed.contains(name), "listed secret {name}");
+        }
+        assert!(
+            !listed
+                .iter()
+                .any(|name| name.split('/').any(|part| part == ".git")),
+            "{listed:?}"
+        );
+
+        // The list as rsync reads it (`--from0 --files-from`, as the driver
+        // passes it). The reference host has rsync, since the driver copies
+        // through it; a development VM may not.
+        let transfer = match Command::new("rsync")
             .args(["-a", "--from0", "--files-from"])
             .arg(&inventory)
             .arg(format!("{}/", root.path().display()))
             .arg(destination.path().join("copy"))
             .output()
-            .unwrap();
+        {
+            Ok(transfer) => transfer,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ouro_fixture::harness::skip_or_fail(
+                    "rsync is not installed: the inventory was checked, the copy it drives was not",
+                );
+                return;
+            }
+            Err(error) => panic!("rsync: {error}"),
+        };
         assert!(
             transfer.status.success(),
             "{}",
