@@ -1856,11 +1856,9 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
     if let Some(native) = record.lifetime.native.as_mut() {
         native.details.extend(running.final_native_details());
     }
-    record.lifetime.tree_empty = tree.tree_empty;
-    record.lifetime.verified_at = tree.verified_at.map(rfc3339_utc);
-    record.lifetime.verification_scope = Some(tree.verification_scope);
     // The last nonsettled phase without a confirmed exec is prepared (§8.1)
-    let prepared_integrity = std::mem::replace(&mut record.lifetime.integrity, tree.integrity);
+    let prepared_integrity = record.lifetime.integrity.clone();
+    record_tree(&mut record, &tree);
 
     let settled = tree.tree_empty == Some(true) && record.lifetime.integrity == "verified";
     // §13.2: "If tree death itself is unknown, retain the last nonsettled phase
@@ -2809,12 +2807,7 @@ fn merge_wall_limit(record: &mut AttemptRecord, plan: &Plan) {
 /// reported the boundary as verified with a null tree and no explanation.
 fn record_teardown(record: &mut AttemptRecord, teardown: &Result<Teardown, JailError>) {
     match teardown {
-        Ok(Teardown { tree: Some(tree) }) => {
-            record.lifetime.tree_empty = tree.tree_empty;
-            record.lifetime.verified_at = tree.verified_at.map(rfc3339_utc);
-            record.lifetime.verification_scope = Some(tree.verification_scope.clone());
-            record.lifetime.integrity = tree.integrity.clone();
-        }
+        Ok(Teardown { tree: Some(tree) }) => record_tree(record, tree),
         Ok(Teardown { tree: None }) => {
             // Teardown ran but verified nothing about the tree.
             record.lifetime.tree_empty = None;
@@ -3267,7 +3260,8 @@ fn forbidden_identities(
     )
 }
 
-/// Copies a tree observation into the receipt's lifetime group.
+/// Copies a tree observation into the receipt's lifetime group: the one
+/// place a verification, a teardown or a failed release reaches it.
 fn record_tree(record: &mut AttemptRecord, tree: &crate::platform::TreeObservation) {
     record.lifetime.tree_empty = tree.tree_empty;
     record.lifetime.verified_at = tree.verified_at.map(rfc3339_utc);
