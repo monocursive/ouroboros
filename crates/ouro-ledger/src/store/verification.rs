@@ -54,7 +54,7 @@ impl Store {
                 targets: vec![self.target(id)?],
                 next_after: None,
                 done: true,
-                gc_generation: self.gc_generation,
+                gc_generation: self.gc_generation(),
             });
         }
         if !(1..=MAX_VERIFY_LIMIT).contains(&limit) {
@@ -70,12 +70,12 @@ impl Store {
         let mut bytes = 0u64;
         let mut next_after = None;
         for (id, stream) in self
-            .streams
+            .streams()
             .range::<str, _>((lower, std::ops::Bound::Unbounded))
         {
-            let read = bytes.saturating_add(stream.accepted_bytes);
+            let read = bytes.saturating_add(stream.accepted_bytes());
             if let Some(last) = targets.last()
-                && (targets.len() >= limit as usize || read > self.verify_page_bytes)
+                && (targets.len() >= limit as usize || read > self.verify_page_bytes())
             {
                 next_after = Some(last.run_id.clone());
                 break;
@@ -87,17 +87,17 @@ impl Store {
             targets,
             done: next_after.is_none(),
             next_after,
-            gc_generation: self.gc_generation,
+            gc_generation: self.gc_generation(),
         })
     }
 
     fn target(&self, id: &str) -> Result<Target> {
         let stream = self.stream(id)?;
-        let directory = self.root.join(id);
-        let kind = match &stream.pruned {
+        let directory = self.run_dir(id);
+        let kind = match stream.pruned() {
             Some(retained) => TargetKind::Pruned {
                 retained: Box::new(retained.clone()),
-                run: Box::new(stream.run.clone()),
+                run: Box::new(stream.run().clone()),
             },
             None => TargetKind::Stream {
                 layout: Layout::read(&directory, id),
@@ -115,15 +115,10 @@ impl Store {
         Ok(Target {
             run_id: id.into(),
             directory,
-            poisoned: poison_details(&stream.poisoned),
-            accepted: stream.run.chain.clone(),
+            poisoned: poison_details(stream.poisoned()),
+            accepted: stream.run().chain.clone(),
             kind,
         })
-    }
-
-    /// Changes whenever a GC may have removed or rewritten run files.
-    pub(crate) fn gc_generation(&self) -> u64 {
-        self.gc_generation
     }
 
     /// One page planned and re-read on the calling thread, for direct store
@@ -136,7 +131,7 @@ impl Store {
     ) -> Result<VerifyPage> {
         verify_page(
             &mut |run_id, after, limit| self.plan_verify(run_id, after, limit),
-            &mut || Ok(self.gc_generation),
+            &mut || Ok(self.gc_generation()),
             &mut || true,
             run_id,
             after,
@@ -181,7 +176,7 @@ impl Target {
         };
         let loaded = load_stream(&self.directory, &self.run_id, layout, &|_| Ok(()), proceed)?;
         let stream = loaded.stream;
-        let mut problems = poison_details(&stream.poisoned);
+        let mut problems = poison_details(stream.poisoned());
         if let Some(read) = loaded.stopped {
             problems.push(format!(
                 "fresh verification stopped at its time limit after re-reading {read} canonical \
@@ -189,27 +184,27 @@ impl Target {
             ));
         }
         if stream
-            .run
+            .run()
             .capture_history
             .as_ref()
             .is_some_and(|h| h.state == "pruning")
         {
             problems.push("capture deletion is incomplete; retry GC or restart the writer".into());
         }
-        if stream.poisoned.is_empty() && loaded.stopped.is_none() {
+        if !stream.is_poisoned() && loaded.stopped.is_none() {
             let published = projection.ok().and_then(|bytes| {
                 let value: Value = serde_json::from_slice(&bytes).ok()?;
                 validate_frozen("run", &value).ok()?;
                 Some(value)
             });
             if published.is_none_or(|value| {
-                serde_json::to_value(&stream.run).is_ok_and(|expected| expected != value)
+                serde_json::to_value(stream.run()).is_ok_and(|expected| expected != value)
             }) {
                 problems.push("run projection does not match verified canonical records".into());
             }
             // A clean re-read must end exactly where the writer's acceptance
             // did; anything else on disk was never acknowledged by it.
-            if self.poisoned.is_empty() && stream.run.chain != self.accepted {
+            if self.poisoned.is_empty() && stream.run().chain != self.accepted {
                 problems.push(
                     "canonical history on disk differs from what this writer accepted".into(),
                 );
@@ -221,8 +216,8 @@ impl Target {
         Ok(VerifyReport {
             run_id: self.run_id,
             local_consistency: problems.is_empty(),
-            child_protection: stream.run.child_protection,
-            coverage: crate::reader::coverage_summary(&stream.run.coverage),
+            child_protection: stream.run().child_protection.clone(),
+            coverage: crate::reader::coverage_summary(&stream.run().coverage),
             events: loaded.events,
             problems,
             history: None,
@@ -312,7 +307,7 @@ mod tests {
         let data = temp.path().join("data");
         let mut store = Store::open(&data).unwrap();
         let run = store.prepare("forged", &payload(), &peer()).unwrap();
-        let directory = store.root.join(&run.run_id);
+        let directory = store.root().join(&run.run_id);
         let files = [STREAM, "run.json", manifest::NAME];
         let snapshot = || files.map(|name| fs::read(directory.join(name)).unwrap());
         let accepted = snapshot();

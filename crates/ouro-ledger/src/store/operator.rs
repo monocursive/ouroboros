@@ -36,7 +36,7 @@ pub(super) fn validate(stream: &Stream, record: &Value) -> Result<()> {
     if let Some(effect) = effect {
         let has = |phase| {
             stream
-                .replay
+                .replay()
                 .contains_key(&format!("effect:operator/{phase}:{effect}"))
         };
         if (matches!(kind, "admitted" | "denied")

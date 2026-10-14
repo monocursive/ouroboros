@@ -20,12 +20,12 @@ struct Cursor {
 impl Store {
     pub fn tail(&self, request: &TailRequest) -> Result<TailPage> {
         let stream = self.stream(&request.run_id)?;
-        if stream.pruned.is_some() {
+        if stream.pruned().is_some() {
             return Err(LedgerError(
                 "run history was pruned; tail cannot resume".into(),
             ));
         }
-        if !stream.poisoned.is_empty() {
+        if stream.is_poisoned() {
             return Err(LedgerError(
                 "stream durability or recovery is ambiguous; tail refuses".into(),
             ));
@@ -64,16 +64,15 @@ impl Store {
             0
         } else {
             let anchor = stream
-                .anchors
-                .get(&cursor.after.head_seq)
+                .anchor(cursor.after.head_seq)
                 .filter(|a| Some(&a.digest) == cursor.after.head_digest.as_ref())
                 .ok_or_else(|| LedgerError("tail cursor does not match accepted history".into()))?;
             anchor.bytes
         };
-        let path = self.root.join(&request.run_id).join(STREAM);
-        let mut file = crate::segments::Snapshot::open(&path, stream.accepted_bytes)?;
+        let path = self.run_dir(&request.run_id).join(STREAM);
+        let mut file = crate::segments::Snapshot::open(&path, stream.accepted_bytes())?;
         file.validate()?;
-        if file.physical_bytes() != stream.accepted_bytes {
+        if file.physical_bytes() != stream.accepted_bytes() {
             return Err(LedgerError(
                 "canonical length differs from accepted history; tail refuses".into(),
             ));
@@ -81,7 +80,7 @@ impl Store {
         let mut ndjson = String::new();
         let mut scanned = 0;
         for _ in 0..READ_SCAN_FRAMES {
-            if cursor.after.head_seq == stream.run.chain.head_seq {
+            if cursor.after.head_seq == stream.run().chain.head_seq {
                 if cursor.emitted != 0 {
                     return Err(LedgerError(
                         "tail cursor points beyond the accepted head".into(),
@@ -95,8 +94,7 @@ impl Store {
                 .checked_add(1)
                 .ok_or_else(|| LedgerError("tail sequence exhausted".into()))?;
             let anchor = stream
-                .anchors
-                .get(&seq)
+                .anchor(seq)
                 .ok_or_else(|| LedgerError("tail canonical anchor is missing".into()))?;
             let size = anchor
                 .bytes
@@ -160,8 +158,8 @@ impl Store {
             }
         }
         file.validate()?;
-        let caught_up = cursor.emitted == 0 && cursor.after == stream.run.chain;
-        let mut coverage = crate::reader::coverage_summary(&stream.run.coverage);
+        let caught_up = cursor.emitted == 0 && cursor.after == stream.run().chain;
+        let mut coverage = crate::reader::coverage_summary(&stream.run().coverage);
         coverage["selection_status"] = json!(crate::reader::selection_status(
             &crate::protocol::ReadFilter {
                 selector: crate::protocol::ReadSelector::All,
@@ -174,13 +172,13 @@ impl Store {
         Ok(TailPage {
             schema: schemas::TAIL.into(),
             run_id: request.run_id.clone(),
-            head: stream.run.chain.clone(),
-            state: stream.run.state.clone(),
-            child_protection: stream.run.child_protection.clone(),
+            head: stream.run().chain.clone(),
+            state: stream.run().state.clone(),
+            child_protection: stream.run().child_protection.clone(),
             coverage,
             local_consistency: true,
             stream_status: if ["settled", "denied", "outcome_unknown"]
-                .contains(&stream.run.state.as_str())
+                .contains(&stream.run().state.as_str())
             {
                 "complete"
             } else {

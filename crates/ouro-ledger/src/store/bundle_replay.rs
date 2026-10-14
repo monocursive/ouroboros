@@ -37,28 +37,28 @@ pub(crate) fn replay(reader: impl std::io::Read, run_id: &str) -> Result<Replaye
         if length > MAX_FRAME_BYTES || bytes.pop() != Some(b'\n') {
             return Err(LedgerError("oversized or interrupted bundle record".into()));
         }
-        if stream.run.chain.head_seq >= crate::bundle::MAX_RECORDS
-            || stream.accepted_bytes + length as u64 > crate::bundle::MAX_STREAM_BYTES
+        if stream.run().chain.head_seq >= crate::bundle::MAX_RECORDS
+            || stream.accepted_bytes() + length as u64 > crate::bundle::MAX_STREAM_BYTES
         {
             return Err(LedgerError(
                 "bundle snapshot exceeds its record or byte bound".into(),
             ));
         }
         stream.accept_canonical(run_id, &bytes)?;
-        if stream.run.state == "outcome_unknown" {
+        if stream.run().state == "outcome_unknown" {
             let record: Value = serde_json::from_slice(&bytes)?;
             if record["kind"] == "outcome_unknown" {
                 reported = Some(record["body"].get("outcome").cloned());
             }
         }
     }
-    if stream.run.chain.head_seq == 0 {
+    if stream.run().chain.head_seq == 0 {
         return Err(LedgerError("bundle snapshot is empty".into()));
     }
-    let rule_one_outcome = (stream.run.state == "outcome_unknown")
+    let rule_one_outcome = (stream.run().state == "outcome_unknown")
         .then(|| rule_one_unknown_outcome(reported.flatten().as_ref()));
     Ok(Replayed {
-        run: stream.run,
+        run: stream.into_run(),
         rule_one_outcome,
     })
 }
@@ -71,7 +71,7 @@ mod tests {
     fn rotated_records_bundle_after_capture_expiry_but_pruned_history_refuses() {
         use super::super::tests::{gc_fixture, gc_future};
         let (temp, mut store, run) = gc_fixture();
-        let directory = store.root.join(&run.run_id);
+        let directory = store.root().join(&run.run_id);
         let names = manifest::names(&directory).unwrap();
         assert!(names.len() > 1);
         let original: Vec<_> = names

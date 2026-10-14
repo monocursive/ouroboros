@@ -129,25 +129,25 @@ impl Store {
                 "retention clock is outside the supported UTC range".into(),
             ));
         }
-        let pins = self.readers.retention_pins(&self.root, epoch);
+        let pins = self.readers().retention_pins(self.root(), epoch);
         let lower = after.map_or(Bound::Unbounded, Bound::Excluded);
-        let mut streams = self.streams.range::<str, _>((lower, Bound::Unbounded));
+        let mut streams = self.streams().range::<str, _>((lower, Bound::Unbounded));
         let mut runs = Vec::new();
         for (id, stream) in streams.by_ref().take(limit as usize) {
             let mut reasons = Vec::new();
-            if stream.pruned.is_some() {
+            if stream.pruned().is_some() {
                 reasons.push("history_pruned");
             }
-            if !stream.poisoned.is_empty() {
+            if stream.is_poisoned() {
                 reasons.push("poisoned_stream");
             }
-            if stream.run.state == "outcome_unknown" {
+            if stream.run().state == "outcome_unknown" {
                 reasons.push("outcome_unknown");
-            } else if !["settled", "denied"].contains(&stream.run.state.as_str()) {
+            } else if !["settled", "denied"].contains(&stream.run().state.as_str()) {
                 reasons.push("active_run");
-            } else if stream.run.settlement != "recorded" {
+            } else if stream.run().settlement != "recorded" {
                 reasons.push("settlement_pending");
-            } else if stream.run.outcome.as_ref().is_none_or(|outcome| {
+            } else if stream.run().outcome.as_ref().is_none_or(|outcome| {
                 !matches!(
                     outcome["kind"].as_str(),
                     Some("exited" | "signaled" | "exec_error" | "refused")
@@ -155,23 +155,22 @@ impl Store {
             }) {
                 reasons.push("outcome_unknown");
             }
-            if !stream.run.holds.is_empty() {
+            if !stream.run().holds.is_empty() {
                 reasons.push("operator_hold");
             }
-            if stream.replay.keys().any(|key| {
+            if stream.replay().keys().any(|key| {
                 key.strip_prefix("effect:operator/admitted:")
                     .is_some_and(|effect| {
                         !stream
-                            .replay
+                            .replay()
                             .contains_key(&format!("effect:operator/settled:{effect}"))
                     })
             }) {
                 reasons.push("operator_effect_pending");
             }
             match stream
-                .last_activity_at
-                .as_deref()
-                .filter(|_| stream.retention_time_valid)
+                .last_activity_at()
+                .filter(|_| stream.retention_time_valid())
             {
                 None => reasons.push("activity_time_unknown"),
                 Some(time) if time > evaluated_at.as_str() => reasons.push("clock_before_activity"),
@@ -185,7 +184,7 @@ impl Store {
             }
             // This is a metadata/layout check, not a rescan of unbounded history.
             // A candidate still requires canonical verification before deletion.
-            if stream.pruned.is_none() && !self.retention_layout_matches(id, stream) {
+            if stream.pruned().is_none() && !self.retention_layout_matches(id, stream) {
                 reasons.push("canonical_layout_changed");
             }
             let mut capture_reasons: Vec<_> = reasons
@@ -194,17 +193,16 @@ impl Store {
                 .filter(|r| *r != "retention_window")
                 .collect();
             if stream
-                .last_activity_at
-                .as_deref()
+                .last_activity_at()
                 .is_some_and(|t| t > capture_cutoff.as_str())
             {
                 capture_reasons.push("retention_window");
             }
-            if stream.run.capture_history.is_some() {
+            if stream.run().capture_history.is_some() {
                 capture_reasons.push("captures_pruned");
             } else if !crate::protocol::CAPTURE_STREAMS.iter().any(|name| {
                 matches!(
-                    stream.run.capture[name]["state"].as_str(),
+                    stream.run().capture[name]["state"].as_str(),
                     Some("captured" | "incomplete")
                 )
             }) {
@@ -212,10 +210,10 @@ impl Store {
             }
             runs.push(GcCandidate {
                 run_id: id.clone(),
-                state: stream.run.state.clone(),
-                child_protection: stream.run.child_protection.clone(),
-                chain: stream.run.chain.clone(),
-                last_activity_at: stream.last_activity_at.clone(),
+                state: stream.run().state.clone(),
+                child_protection: stream.run().child_protection.clone(),
+                chain: stream.run().chain.clone(),
+                last_activity_at: stream.last_activity_at().map(str::to_owned),
                 candidate: reasons.is_empty(),
                 captures_candidate: capture_reasons.is_empty(),
                 captures_keep_reasons: capture_reasons.into_iter().map(str::to_owned).collect(),
@@ -243,12 +241,12 @@ impl Store {
     }
 
     fn retention_layout_matches(&self, run_id: &str, stream: &Stream) -> bool {
-        let directory = self.root.join(run_id);
+        let directory = self.run_dir(run_id);
         manifest::read(&directory, run_id)
             .is_ok_and(|manifest| manifest.as_ref() == Some(&stream.manifest()))
-            && crate::segments::Snapshot::open(&directory.join(STREAM), stream.accepted_bytes)
+            && crate::segments::Snapshot::open(&directory.join(STREAM), stream.accepted_bytes())
                 .is_ok_and(|snapshot| {
-                    snapshot.physical_bytes() == stream.accepted_bytes
+                    snapshot.physical_bytes() == stream.accepted_bytes()
                         && snapshot.validate().is_ok()
                 })
     }

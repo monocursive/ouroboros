@@ -8,24 +8,24 @@ pub(super) const VERIFY_PAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub struct Store {
     pub(crate) retention: ouro_records::retention::LedgerRetention,
-    pub(super) root: PathBuf,
-    pub(super) lock: File,
-    pub(super) streams: BTreeMap<String, Stream>,
-    pub(super) preparations: BTreeMap<String, (String, String)>,
-    pub(super) recovery_ambiguous: bool,
-    pub(super) readers: crate::reader::Readers,
-    pub(super) index: Option<crate::projection::Projection>,
-    pub(super) index_error: Option<String>,
-    pub(super) index_pending: BTreeMap<String, RunRecord>,
+    root: PathBuf,
+    lock: File,
+    streams: BTreeMap<String, Stream>,
+    preparations: BTreeMap<String, (String, String)>,
+    recovery_ambiguous: bool,
+    readers: crate::reader::Readers,
+    index: Option<crate::projection::Projection>,
+    index_error: Option<String>,
+    index_pending: BTreeMap<String, RunRecord>,
     /// Pending journals whose background reconciliation failed, as last seen.
     /// They are retried only once the journal changes.
     #[cfg(target_os = "linux")]
-    pub(super) pending_failures: BTreeMap<String, Option<pending_recovery::JournalSeen>>,
-    pub(super) segment_limit: u64,
-    pub(super) verify_page_bytes: u64,
+    pending_failures: BTreeMap<String, Option<pending_recovery::JournalSeen>>,
+    segment_limit: u64,
+    verify_page_bytes: u64,
     /// Advances whenever a GC may remove or rewrite run files, so a verifier
     /// reading off the writer thread can tell a GC race from damage.
-    pub(super) gc_generation: u64,
+    gc_generation: u64,
 }
 
 /// A run directory, like every store member, is private (see `fsx`).
@@ -159,14 +159,14 @@ impl Store {
             } else {
                 store.load_stream_with_sync(&name, &recovery_sync)?.0
             };
-            if stream.poisoned.is_empty() && stream.pruned.is_none() {
+            if !stream.is_poisoned() && stream.pruned().is_none() {
                 store.recover_captures(&name, &mut stream)?;
             }
-            if !stream.poisoned.is_empty() {
+            if stream.is_poisoned() {
                 store.recovery_ambiguous = true;
             }
-            let payload_digest = digest(&stream.run.payload)?;
-            let request_id = stream.run.request_id.clone();
+            let payload_digest = digest(&stream.run().payload)?;
+            let request_id = stream.run().request_id.clone();
             if !request_id.is_empty()
                 && store
                     .preparations
@@ -177,7 +177,7 @@ impl Store {
                     "duplicate prepare request identity in durable streams".into(),
                 ));
             }
-            if stream.poisoned.is_empty() {
+            if !stream.is_poisoned() {
                 // Every verified segment was synchronized before publishing
                 // recovered receipts, including a complete unacknowledged tail.
                 // Unchanged files are only synchronized again: an earlier
@@ -186,11 +186,11 @@ impl Store {
                 // several writes and syncs at every start.
                 let path = entry.path();
                 let mut published = false;
-                if !synced_unchanged(&path.join("run.json"), &projection_bytes(&stream.run)?) {
-                    publish_projection(&directory, &stream.run)?;
+                if !synced_unchanged(&path.join("run.json"), &projection_bytes(stream.run())?) {
+                    publish_projection(&directory, stream.run())?;
                     published = true;
                 }
-                if stream.pruned.is_none() {
+                if stream.pruned().is_none() {
                     let manifest = stream.manifest();
                     if !synced_unchanged(&path.join(manifest::NAME), &manifest::encode(&manifest)?)
                     {
@@ -218,6 +218,76 @@ impl Store {
         &self.root
     }
 
+    /// A run's directory under the ledger root.
+    pub(super) fn run_dir(&self, run_id: &str) -> PathBuf {
+        self.root.join(run_id)
+    }
+
+    /// Every loaded stream, by run id.
+    pub(super) fn streams(&self) -> &BTreeMap<String, Stream> {
+        &self.streams
+    }
+
+    pub(super) fn readers(&self) -> &crate::reader::Readers {
+        &self.readers
+    }
+
+    pub(super) fn readers_mut(&mut self) -> &mut crate::reader::Readers {
+        &mut self.readers
+    }
+
+    /// Hand a durably published projection to the disposable index, which
+    /// takes it only after the reply is on its way (see `flush_index`).
+    pub(super) fn queue_index(&mut self, run: RunRecord) {
+        if self.index.is_some() {
+            self.index_pending.insert(run.run_id.clone(), run);
+        }
+    }
+
+    /// A GC is about to remove or rewrite run files.
+    pub(super) fn gc_begins(&mut self) {
+        self.gc_generation += 1;
+    }
+
+    /// Changes whenever a GC may have removed or rewritten run files.
+    pub(crate) fn gc_generation(&self) -> u64 {
+        self.gc_generation
+    }
+
+    /// The most canonical history one verification page plans to re-read.
+    pub(super) fn verify_page_bytes(&self) -> u64 {
+        self.verify_page_bytes
+    }
+
+    /// Pending journals whose reconciliation failed, as last seen.
+    #[cfg(target_os = "linux")]
+    pub(super) fn failed_journals(
+        &mut self,
+    ) -> &mut BTreeMap<String, Option<pending_recovery::JournalSeen>> {
+        &mut self.pending_failures
+    }
+
+    /// Tests reach states no request can, and shrink the store's bounds.
+    #[cfg(test)]
+    pub(super) fn streams_mut(&mut self) -> &mut BTreeMap<String, Stream> {
+        &mut self.streams
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_segment_limit(&mut self, bytes: u64) {
+        self.segment_limit = bytes;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_verify_page_bytes(&mut self, bytes: u64) {
+        self.verify_page_bytes = bytes;
+    }
+
+    #[cfg(test)]
+    pub(super) fn lock(&self) -> &File {
+        &self.lock
+    }
+
     pub fn prepare(&mut self, request_id: &str, payload: &Value, peer: &Peer) -> Result<RunRecord> {
         if !valid_name(request_id) {
             return Err(LedgerError("prepare needs a bounded request id".into()));
@@ -230,7 +300,7 @@ impl Store {
                     "request id already maps to a different prepare payload".into(),
                 ));
             }
-            if !self.stream(run_id)?.poisoned.is_empty() {
+            if self.stream(run_id)?.is_poisoned() {
                 return Err(LedgerError(
                     "ambiguous preparation cannot acknowledge before recovery".into(),
                 ));
@@ -249,13 +319,7 @@ impl Store {
         fsx::create_dir_all(&directory.join("receipts"))?;
         fsx::create_dir_all(&directory.join("artifacts"))?;
         let run = initial_run(&run_id, request_id, &attempt_id, payload.clone());
-        self.streams.insert(
-            run_id.clone(),
-            Stream {
-                run,
-                ..Stream::empty(&run_id)
-            },
-        );
+        self.streams.insert(run_id.clone(), Stream::prepared(run));
         self.preparations
             .insert(request_id.into(), (payload_digest, run_id.clone()));
         let record = json!({"kind":"prepared","body":{"request_id":request_id,"payload":payload},"request_id":format!("prepare:{request_id}")});
@@ -268,16 +332,16 @@ impl Store {
 
     pub fn claim_owner(&mut self, run_id: &str, peer: &Peer) -> Result<()> {
         let stream = self.stream(run_id)?;
-        if !stream.poisoned.is_empty() {
+        if stream.is_poisoned() {
             return Err(LedgerError("poisoned stream refuses ownership".into()));
         }
-        if let Some(owner) = &stream.run.owner {
+        if let Some(owner) = &stream.run().owner {
             if owner != peer {
                 return Err(LedgerError("attempt already has an owner; dead owners require reconciliation and are never restarted".into()));
             }
             return Ok(());
         }
-        if stream.pruned.is_some() {
+        if stream.pruned().is_some() {
             return Err(LedgerError(
                 "pruned run cannot acquire a new launch owner".into(),
             ));
@@ -311,7 +375,7 @@ impl Store {
         {
             return Err(LedgerError("invalid owner intent".into()));
         }
-        if self.stream(run_id)?.run.owner.as_ref() != Some(peer) {
+        if self.stream(run_id)?.run().owner.as_ref() != Some(peer) {
             return Err(LedgerError(
                 "owner identity does not match the durable claim".into(),
             ));
@@ -343,12 +407,12 @@ impl Store {
         token_id: Option<&str>,
         role: &str,
     ) -> Result<AppendReceipt> {
-        let run = &self.stream(run_id)?.run;
+        let run = self.stream(run_id)?.run();
         let minimized = crate::redaction::minimize(event, &run.payload, &run.attempt_id)?;
         let event = &minimized;
         let event_typed = validate_source(&crate::redaction::envelope(event), &run.attempt_id)?;
         if event_typed.schema != records::SCHEMA_EVENT
-            || event_typed.attempt_id != self.stream(run_id)?.run.attempt_id
+            || event_typed.attempt_id != self.stream(run_id)?.run().attempt_id
             || event_typed.source_seq == 0
         {
             return Err(LedgerError(
@@ -390,7 +454,7 @@ impl Store {
             token_id,
         )?;
         let stream = self.stream(run_id)?;
-        if stream.run.payload["evidence"] == "strict" && !stream.source_gaps.is_empty() {
+        if stream.run().payload["evidence"] == "strict" && !stream.source_gaps().is_empty() {
             // The actual evidence is durable, but strict execution gets no success
             // acknowledgement, including on retries after a lost failure reply.
             return Err(LedgerError(
@@ -408,9 +472,7 @@ impl Store {
 
     /// Record why a loaded stream can no longer be trusted.
     pub(super) fn poison(&mut self, run_id: &str, kind: PoisonKind, detail: impl Into<String>) {
-        self.stream_mut(run_id)
-            .poisoned
-            .push(Poison::new(kind, detail));
+        self.stream_mut(run_id).poison(kind, detail);
     }
 
     pub(super) fn stream(&self, run_id: &str) -> Result<&Stream> {
@@ -434,13 +496,13 @@ impl Store {
             .ok_or_else(|| LedgerError("missing request identity".into()))?
             .to_owned();
         let payload_digest = digest(&record)?;
-        if let Some(replay) = stream.replay.get(&key) {
+        if let Some(replay) = stream.replay().get(&key) {
             if replay.digest != payload_digest {
                 return Err(LedgerError(
                     "request id conflicts with its immutable payload".into(),
                 ));
             }
-            if !stream.poisoned.is_empty() {
+            if stream.is_poisoned() {
                 return Err(LedgerError(
                     "stream durability is ambiguous; replay cannot acknowledge before recovery"
                         .into(),
@@ -448,18 +510,18 @@ impl Store {
             }
             return Ok(replay.receipt.clone());
         }
-        if !stream.poisoned.is_empty() {
+        if stream.is_poisoned() {
             return Err(LedgerError(
                 "stream is poisoned; no dependent dispatch or sequence reuse".into(),
             ));
         }
-        if stream.pruned.is_some() {
+        if stream.pruned().is_some() {
             return Err(LedgerError(
                 "run history was pruned; new mutations are refused".into(),
             ));
         }
         if stream
-            .run
+            .run()
             .capture_history
             .as_ref()
             .is_some_and(|h| h.state == "pruning")
@@ -470,20 +532,18 @@ impl Store {
         }
         // Exactly the checks recovery repeats: anything acknowledged here must
         // also be accepted from the canonical stream at the next start.
-        validate_recovery(stream, &record, role)?;
-        validate_transition(stream, &record)?;
-        validate_intent(stream, &record)?;
+        stream.check(&record, role)?;
         let seq = stream
-            .run
+            .run()
             .chain
             .head_seq
             .checked_add(1)
             .ok_or_else(|| LedgerError("sequence exhausted".into()))?;
         record["schema"] = json!(schemas::RECORD);
         record["run_id"] = json!(run_id);
-        record["attempt_id"] = json!(stream.run.attempt_id);
+        record["attempt_id"] = json!(stream.run().attempt_id);
         record["seq"] = json!(seq);
-        record["prev"] = json!(stream.run.chain.head_digest);
+        record["prev"] = json!(stream.run().chain.head_digest);
         record["received_at"] = json!(records::rfc3339_utc(SystemTime::now()));
         record["provenance"] = json!({"role":role,"peer_uid":peer.uid,"peer_pid":peer.pid,"peer_birth":peer.birth,"token_id":token_id});
         if record["kind"] == "source" {
@@ -531,15 +591,16 @@ impl Store {
         let directory = self.root.join(run_id);
         let dir = fsx::open_dir(&directory, RUN_DIRECTORY)?;
         let stream = loaded(&mut self.streams, run_id);
-        let rotate = stream.segment_bytes > 0
-            && stream.segment_bytes.saturating_add(bytes.len() as u64 + 1) > self.segment_limit;
+        let (active, segment_bytes) = stream.active_segment();
+        let rotate = segment_bytes > 0
+            && segment_bytes.saturating_add(bytes.len() as u64 + 1) > self.segment_limit;
         let mut file = if rotate {
-            if stream.active_segment == manifest::MAX_SEGMENTS {
+            if active == manifest::MAX_SEGMENTS {
                 return Err(LedgerError(
                     "segment count limit reached; no history was removed".into(),
                 ));
             }
-            let next = stream.active_segment + 1;
+            let next = active + 1;
             // Exclusive creation never appends over an unexpected successor.
             let file = private_file(
                 &directory.join(manifest::name(next)),
@@ -553,13 +614,13 @@ impl Store {
             file
         } else {
             private_file(
-                &directory.join(manifest::name(stream.active_segment)),
+                &directory.join(manifest::name(active)),
                 OpenOptions::new()
                     .append(true)
-                    .create(stream.active_segment == 1 && stream.segment_bytes == 0),
+                    .create(active == 1 && segment_bytes == 0),
             )?
         };
-        if file.metadata()?.len() != stream.segment_bytes {
+        if file.metadata()?.len() != stream.active_segment().1 {
             return Err(LedgerError(
                 "active segment length changed before append".into(),
             ));
@@ -572,24 +633,21 @@ impl Store {
         file.sync_all()?;
         faults::hit(Point::EventAfterSync)?;
         let stream = loaded(&mut self.streams, run_id);
-        apply_record(
-            stream,
+        stream.accept(
+            bytes,
+            record,
             &original_payload(record),
             receipt.clone(),
             payload_digest.into(),
         )?;
-        stream.accepted_bytes += (bytes.len() + 1) as u64;
-        stream.hash_record(bytes, record, receipt, payload_digest)?;
-        let run = stream.run.clone();
+        let run = stream.run().clone();
         let manifest = stream.manifest();
         publish_projection(&dir, &run)?;
         manifest::write(&dir, &manifest)?;
         faults::hit(Point::AppendBeforeDirectorySync)?;
         dir.sync_all()?;
         faults::hit(Point::AppendAfterDirectorySync)?;
-        if self.index.is_some() {
-            self.index_pending.insert(run_id.into(), run);
-        }
+        self.queue_index(run);
         Ok(())
     }
 
@@ -600,14 +658,14 @@ impl Store {
 
     pub fn show(&self, run_id: &str) -> Result<RunRecord> {
         let stream = self.stream(run_id)?;
-        let mut run = stream.run.clone();
-        if !stream.poisoned.is_empty() {
+        let mut run = stream.run().clone();
+        if stream.is_poisoned() {
             run.state = "outcome_unknown".into();
             run.settlement = "pending".into();
             run.outcome = Some(
                 json!({"kind":"unknown","unknown":true,"unknown_reason":"stream persistence or recovery is ambiguous"}),
             );
-            run.coverage = json!({"status":"degraded","gaps":poison_details(&stream.poisoned)});
+            run.coverage = json!({"status":"degraded","gaps":poison_details(stream.poisoned())});
         }
         Ok(run)
     }
@@ -645,7 +703,7 @@ impl Store {
             .streams
             .get(&request.run_id)
             .ok_or_else(|| LedgerError("unknown run".into()))?;
-        if stream.pruned.is_some() {
+        if stream.pruned().is_some() {
             return Err(LedgerError(
                 "run history was pruned; canonical query and export are unavailable".into(),
             ));
@@ -653,11 +711,11 @@ impl Store {
         self.readers.read(
             &self.root.join(&request.run_id).join(STREAM),
             request,
-            &stream.run,
-            &stream.poisoned,
-            stream.accepted_bytes,
+            stream.run(),
+            stream.poisoned(),
+            stream.accepted_bytes(),
             (
-                |key: &str| stream.replay.get(key).map(|r| r.receipt.clone()),
+                |key: &str| stream.replay().get(key).map(|r| r.receipt.clone()),
                 |seq, digest: &str, bytes, page: Option<&ReadPage>| {
                     if seq == 0 {
                         // A clean empty snapshot never restores: streams open
@@ -666,15 +724,15 @@ impl Store {
                         // canonical emptiness.
                         return bytes == 0
                             && digest.is_empty()
-                            && stream.run.chain.head_seq == 0
-                            && stream.accepted_bytes == 0
-                            && stream.poisoned.is_empty();
+                            && stream.run().chain.head_seq == 0
+                            && stream.accepted_bytes() == 0
+                            && !stream.is_poisoned();
                     }
                     !stream
-                        .poisoned
+                        .poisoned()
                         .iter()
                         .any(|problem| problem.kind == PoisonKind::Unanchored)
-                        && stream.anchors.get(&seq).is_some_and(|anchor| {
+                        && stream.anchor(seq).is_some_and(|anchor| {
                             anchor.bytes == bytes
                                 && anchor.digest == digest
                                 && page.is_none_or(|page| {
@@ -702,13 +760,13 @@ impl Store {
             .streams
             .iter()
             .filter_map(|(id, stream)| {
-                if ["settled", "denied", "outcome_unknown"].contains(&stream.run.state.as_str())
-                    || !stream.poisoned.is_empty()
+                if ["settled", "denied", "outcome_unknown"].contains(&stream.run().state.as_str())
+                    || stream.is_poisoned()
                 {
                     return None;
                 }
                 stream
-                    .run
+                    .run()
                     .owner
                     .as_ref()
                     .filter(|owner| !alive(owner))
@@ -721,7 +779,7 @@ impl Store {
                 // Corrupt or incomplete local evidence must never imply
                 // settlement; its refusal is recorded with the unknown outcome.
                 let result = self.reconcile(&id, peer, &alive);
-                if !["prepared", "admitted"].contains(&self.stream(&id)?.run.state.as_str()) {
+                if !["prepared", "admitted"].contains(&self.stream(&id)?.run().state.as_str()) {
                     reconciled.push(self.show(&id)?);
                     continue;
                 }
@@ -741,7 +799,7 @@ impl Store {
                     }
                 }
             }
-            let owner = self.stream(&id)?.run.owner.clone();
+            let owner = self.stream(&id)?.run().owner.clone();
             self.append(&id, json!({"kind":"outcome_unknown","request_id":"reconcile:owner-dead","body":{"owner":owner,"outcome":{"kind":"unknown","unknown":true,"unknown_reason":"owner birth identity is no longer live; tree termination and unrecorded effects are not inferred"},"coverage":{"status":"degraded","gaps":[{"reason":"owner_lost"}]}}}), "operator", peer, None)?;
             reconciled.push(self.show(&id)?);
         }
@@ -759,9 +817,9 @@ impl Store {
             preparation_blocked: self.recovery_ambiguous,
         };
         for stream in self.streams.values() {
-            status.ambiguous_runs += u32::from(!stream.poisoned.is_empty());
+            status.ambiguous_runs += u32::from(stream.is_poisoned());
             status.incomplete_deletions += u32::from(
-                [&stream.run.history, &stream.run.capture_history]
+                [&stream.run().history, &stream.run().capture_history]
                     .into_iter()
                     .flatten()
                     .any(|history| history.state == "pruning"),

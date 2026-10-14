@@ -24,7 +24,7 @@ fn intent(run: &RunRecord, request: &str, kind: &str, effect: Option<&str>) -> O
     }
 }
 fn bytes(store: &Store, run: &RunRecord) -> Vec<u8> {
-    let directory = store.root.join(&run.run_id);
+    let directory = store.root().join(&run.run_id);
     manifest::names(&directory)
         .unwrap()
         .iter()
@@ -167,7 +167,7 @@ fn operator_append_faults_recover_exactly_once_or_preserve_ambiguity() {
         Point::AppendBeforeDirectorySync,
     ] {
         let (temp, mut store, run) = create();
-        store.segment_limit = 1;
+        store.set_segment_limit(1);
         let request = intent(&run, "retry", "admitted", Some("external-effect"));
         faults::arm(Plan::fail(fault));
         assert!(store.append_operator(&request, &peer()).is_err());
@@ -200,7 +200,7 @@ fn operator_append_faults_recover_exactly_once_or_preserve_ambiguity() {
 fn tail_chunks_rotation_restart_and_growth_preserve_exact_bytes() {
     let (temp, mut store, run) = create();
     store.claim_owner(&run.run_id, &peer()).unwrap();
-    store.segment_limit = 1;
+    store.set_segment_limit(1);
     store
         .append_owner(
             &run.run_id,
@@ -245,7 +245,7 @@ fn tail_chunks_rotation_restart_and_growth_preserve_exact_bytes() {
     assert_eq!(got, expected);
     let idle = store.tail(&req).unwrap();
     assert!(idle.caught_up && idle.ndjson.is_empty());
-    assert!(!store.root.join("readers").exists());
+    assert!(!store.root().join("readers").exists());
     store
         .append_operator(&intent(&run, "later", "note", None), &peer())
         .unwrap();
@@ -278,7 +278,7 @@ fn tail_refuses_forged_positions_mutated_records_and_partial_tails() {
             run_id: run.run_id.clone(),
             cursor: None,
         };
-        let path = store.root.join(&run.run_id).join(STREAM);
+        let path = store.root().join(&run.run_id).join(STREAM);
         match damage {
             "cursor-digest" => {
                 cursor["after"]["head_digest"] = json!(format!("sha256:{}", "0".repeat(64)))

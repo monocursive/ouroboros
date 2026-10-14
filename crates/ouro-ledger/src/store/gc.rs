@@ -305,16 +305,13 @@ impl Store {
     pub(super) fn verified_for_gc(&self, id: &str, cutoff: &str, refusal: &str) -> Result<Stream> {
         let verified = self.load_stream_with_sync(id, &File::sync_all)?.0;
         let live = self.stream(id)?;
-        if !verified.poisoned.is_empty()
+        if verified.is_poisoned()
             || verified.manifest() != live.manifest()
-            || serde_json::to_value(&verified.run)? != serde_json::to_value(&live.run)?
-            || verified.replay != live.replay
-            || !verified.run.holds.is_empty()
-            || !verified.retention_time_valid
-            || verified
-                .last_activity_at
-                .as_deref()
-                .is_none_or(|t| t > cutoff)
+            || serde_json::to_value(verified.run())? != serde_json::to_value(live.run())?
+            || verified.replay() != live.replay()
+            || !verified.run().holds.is_empty()
+            || !verified.retention_time_valid()
+            || verified.last_activity_at().is_none_or(|t| t > cutoff)
         {
             return Err(LedgerError(refusal.into()));
         }

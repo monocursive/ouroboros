@@ -46,12 +46,21 @@ fn transcript_is_opt_in_bounded_and_lossless_for_hostile_bytes() {
 #[test]
 fn transcript_keeps_capture_loss_separate_from_display_limits() {
     let (_temp, mut store, run) = gc_fixture();
-    let metadata = &mut store.streams.get_mut(&run.run_id).unwrap().run.capture["stdout"];
+    let metadata = &mut store
+        .streams_mut()
+        .get_mut(&run.run_id)
+        .unwrap()
+        .run_mut()
+        .capture["stdout"];
     metadata["truncated"] = json!(true);
     assert_eq!(stream(&store, &run)["state"], "truncated");
     assert_eq!(stream(&store, &run)["display_truncated"], false);
-    store.streams.get_mut(&run.run_id).unwrap().run.capture["stdout"]["state"] =
-        json!("incomplete");
+    store
+        .streams_mut()
+        .get_mut(&run.run_id)
+        .unwrap()
+        .run_mut()
+        .capture["stdout"]["state"] = json!("incomplete");
     let shown = stream(&store, &run);
     assert_eq!(shown["state"], "incomplete");
     assert_eq!(shown["capture_truncated"], true);
@@ -66,7 +75,7 @@ fn transcript_keeps_capture_loss_separate_from_display_limits() {
 fn transcript_never_opens_live_unfinalized_or_unselected_artifacts() {
     for state in ["prepared", "owned", "admitted", "outcome_unknown"] {
         let (_temp, mut store, run) = gc_fixture();
-        let r = &mut store.streams.get_mut(&run.run_id).unwrap().run;
+        let r = &mut store.streams_mut().get_mut(&run.run_id).unwrap().run_mut();
         r.state = state.into();
         if state == "outcome_unknown" {
             r.capture["stdout"] = json!({"state":"not_captured"});
@@ -76,7 +85,12 @@ fn transcript_never_opens_live_unfinalized_or_unselected_artifacts() {
         assert!(shown.get("text").is_none());
     }
     let (_temp, mut store, run) = gc_fixture();
-    store.streams.get_mut(&run.run_id).unwrap().run.payload["capture"]["streams"] = json!([]);
+    store
+        .streams_mut()
+        .get_mut(&run.run_id)
+        .unwrap()
+        .run_mut()
+        .payload["capture"]["streams"] = json!([]);
     assert_eq!(stream(&store, &run)["state"], "not_captured");
     assert!(stream(&store, &run).get("text").is_none());
 }
@@ -96,7 +110,7 @@ fn transcript_refuses_missing_changed_linked_and_public_files_without_blocking()
         "path",
     ] {
         let (temp, mut store, run) = gc_fixture();
-        let root = store.root.join(&run.run_id);
+        let root = store.root().join(&run.run_id);
         let path = root.join("artifacts/stdout.bin");
         match case {
             "missing" => fs::remove_file(&path).unwrap(),
@@ -126,8 +140,12 @@ fn transcript_refuses_missing_changed_linked_and_public_files_without_blocking()
                 symlink(temp.path().join("other"), &target).unwrap();
             }
             "path" => {
-                store.streams.get_mut(&run.run_id).unwrap().run.capture["stdout"]["path"] =
-                    json!("../../private")
+                store
+                    .streams_mut()
+                    .get_mut(&run.run_id)
+                    .unwrap()
+                    .run_mut()
+                    .capture["stdout"]["path"] = json!("../../private")
             }
             _ => unreachable!(),
         }
@@ -188,7 +206,7 @@ fn argv_only_and_all_captures_follow_both_retention_paths() {
     ] {
         for capture_first in [false, true] {
             let (_temp, mut store, run) = gc_fixture_captures(&captures);
-            let root = store.root.join(&run.run_id);
+            let root = store.root().join(&run.run_id);
             let history = fs::read(root.join("events-0001.ndjson")).unwrap();
             if capture_first {
                 let result = store

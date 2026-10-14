@@ -12,7 +12,7 @@ fn redaction_is_durable_before_append_and_replay_preserves_minimized_bytes() {
     assert!(store.prepare("redacted", &payload(), &peer()).is_err());
     source_fixture(&mut store, &run, "path", 1, Some("private-file-name"));
     source_fixture(&mut store, &run, "proxy", 1, None);
-    let path = store.root.join(&run.run_id).join(STREAM);
+    let path = store.root().join(&run.run_id).join(STREAM);
     let bytes = fs::read(&path).unwrap();
     assert!(!String::from_utf8_lossy(&bytes).contains("private-file-name"));
     assert!(!String::from_utf8_lossy(&bytes).contains("blocked.example.test"));
@@ -49,7 +49,7 @@ fn canonical_replay_refuses_policy_bypass_and_false_redaction_markers() {
     let run = store.prepare("redacted", &plan, &peer()).unwrap();
     store.claim_owner(&run.run_id, &peer()).unwrap();
     source_fixture(&mut store, &run, "path", 1, Some("private-file-name"));
-    let bytes = fs::read(store.root.join(&run.run_id).join(STREAM)).unwrap();
+    let bytes = fs::read(store.root().join(&run.run_id).join(STREAM)).unwrap();
     let lines: Vec<_> = bytes
         .split(|b| *b == b'\n')
         .filter(|l| !l.is_empty())

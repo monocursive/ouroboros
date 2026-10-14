@@ -252,11 +252,11 @@ impl Store {
         peer: &Peer,
         now: SystemTime,
     ) -> Result<GcResult> {
-        self.gc_generation += 1;
+        self.gc_begins();
         let retain_days = policy.retain_days;
         // Full verification and fsync must not stall a live launch's strict channel.
-        if self.streams.values().any(|s| {
-            s.run.owner.is_some() && ["prepared", "admitted"].contains(&s.run.state.as_str())
+        if self.streams().values().any(|s| {
+            s.run().owner.is_some() && ["prepared", "admitted"].contains(&s.run().state.as_str())
         }) {
             return Err(LedgerError(
                 "GC requires a quiescent writer; finish or reconcile active launch owners first"
@@ -276,11 +276,11 @@ impl Store {
         };
         for candidate in plan.runs {
             let id = &candidate.run_id;
-            if self.stream(id)?.pruned.is_none()
+            if self.stream(id)?.pruned().is_none()
                 && ((candidate.captures_candidate && !candidate.candidate)
                     || self
                         .stream(id)?
-                        .run
+                        .run()
                         .capture_history
                         .as_ref()
                         .is_some_and(|h| h.state == "pruning"))
@@ -302,7 +302,7 @@ impl Store {
                     }
                 }
             }
-            if !candidate.candidate && self.stream(id)?.pruned.is_none() {
+            if !candidate.candidate && self.stream(id)?.pruned().is_none() {
                 if result
                     .captures_pruned
                     .last()
@@ -314,20 +314,17 @@ impl Store {
                 continue;
             }
             let collected = (|| -> Result<GcReceipt> {
-                let retained = if let Some(retained) = self.stream(id)?.pruned.clone() {
+                let retained = if let Some(retained) = self.stream(id)?.pruned().cloned() {
                     retained
                 } else {
                     self.begin_pruning(id, retain_days, &plan.evaluated_at, &plan.cutoff, peer)?
                 };
                 self.finish_pruning(id, &retained)?;
-                let stream = self.stream_mut(id);
-                stream.run = retained.projection(true)?;
-                let run = stream.run.clone();
+                let run = retained.projection(true)?;
+                self.stream_mut(id).finish_pruning(run.clone());
                 faults::hit(Point::GcProjection)?;
                 self.write_projection(&run)?;
-                if self.index.is_some() {
-                    self.index_pending.insert(id.clone(), run);
-                }
+                self.queue_index(run);
                 retained.receipt()
             })();
             match collected {
@@ -349,13 +346,13 @@ impl Store {
         cutoff: &str,
         peer: &Peer,
     ) -> Result<Retained> {
-        let root = self.root.join(id);
+        let root = self.run_dir(id);
         if fs::symlink_metadata(root.join(Retained::ANCHOR)).is_ok() {
             return Err(LedgerError(
                 "uncertain GC publication requires writer restart".into(),
             ));
         }
-        if self.stream(id)?.replay.len() > MAX_REPLAYS {
+        if self.stream(id)?.replay().len() > MAX_REPLAYS {
             return Err(LedgerError(
                 "GC replay inventory exceeds its bounded size; run retained".into(),
             ));
@@ -366,7 +363,7 @@ impl Store {
             "GC canonical verification differs from accepted writer state; nothing removed",
         )?;
         let mut files = Vec::new();
-        for segment in &verified.segments {
+        for segment in verified.segments() {
             let file = safe_file(&root.join(&segment.name))?;
             let m = file.metadata()?;
             if m.len() != segment.bytes {
@@ -380,17 +377,17 @@ impl Store {
                 inode: m.ino(),
             });
         }
-        files.extend(capture_pruning::inventory(&root, &verified.run)?);
+        files.extend(capture_pruning::inventory(&root, verified.run())?);
         let retained = Retained {
             schema: schemas::GC_ANCHOR.into(),
-            run: verified.run.clone(),
+            run: verified.run().clone(),
             manifest: verified.manifest(),
-            replay: verified.replay.clone(),
-            strict_source_loss: !verified.source_gaps.is_empty(),
+            replay: verified.replay().clone(),
+            strict_source_loss: !verified.source_gaps().is_empty(),
             last_activity_at: verified
-                .last_activity_at
-                .clone()
-                .expect("checked retention time"),
+                .last_activity_at()
+                .expect("checked retention time")
+                .into(),
             collected_at: now.into(),
             cutoff: cutoff.into(),
             retain_days,
@@ -408,33 +405,27 @@ impl Store {
             );
             return Err(error);
         }
-        let stream = self.stream_mut(id);
-        stream.pruned = Some(retained.clone());
-        stream.run = retained.projection(false)?;
+        let run = retained.projection(false)?;
+        self.stream_mut(id).begin_pruning(retained.clone(), run);
         // Expired in-memory sessions must release descriptors as well as pins.
-        self.readers.forget_run(id);
+        self.readers_mut().forget_run(id);
         faults::hit(Point::GcIntentSync)?;
         Ok(retained)
     }
 
     fn finish_pruning(&self, id: &str, retained: &Retained) -> Result<()> {
-        gc::finish(&self.root.join(id), id, retained)
+        gc::finish(&self.run_dir(id), id, retained)
     }
 
     pub(super) fn restore_pruned(&self, id: &str, retained: Retained) -> Result<Stream> {
         self.finish_pruning(id, &retained)?;
-        Ok(Stream {
-            run: retained.projection(true)?,
-            replay: retained.replay.clone(),
-            source_gaps: if retained.strict_source_loss {
-                vec![json!({"reason":"retained_source_loss"})]
-            } else {
-                vec![]
-            },
-            last_activity_at: Some(retained.last_activity_at.clone()),
-            pruned: Some(retained),
-            ..Stream::empty(id)
-        })
+        Ok(Stream::restored(
+            retained.projection(true)?,
+            retained.replay.clone(),
+            retained.strict_source_loss,
+            retained.last_activity_at.clone(),
+            retained,
+        ))
     }
 }
 

@@ -43,10 +43,10 @@ fn position<T: serde::de::DeserializeOwned>(value: Option<&str>) -> Result<Optio
 
 impl Stream {
     fn catalog_outcome(&self) -> &str {
-        if !self.poisoned.is_empty() {
+        if self.is_poisoned() {
             return "unknown";
         }
-        self.run
+        self.run()
             .outcome
             .as_ref()
             .and_then(|v| v["kind"].as_str())
@@ -62,7 +62,7 @@ impl Stream {
                 .contains(v)
             })
             .unwrap_or(
-                if self.run.state == "prepared" || self.run.state == "admitted" {
+                if self.run().state == "prepared" || self.run().state == "admitted" {
                     "pending"
                 } else {
                     "unknown"
@@ -74,15 +74,15 @@ impl Stream {
         if filter
             .since
             .as_ref()
-            .is_some_and(|since| self.last_activity_at.as_ref().is_none_or(|t| t < since))
+            .is_some_and(|since| self.last_activity_at().is_none_or(|t| t < since.as_str()))
             || filter
                 .until
                 .as_ref()
-                .is_some_and(|until| self.last_activity_at.as_ref().is_none_or(|t| t >= until))
+                .is_some_and(|until| self.last_activity_at().is_none_or(|t| t >= until.as_str()))
             || filter
                 .launch
                 .as_ref()
-                .is_some_and(|name| self.run.payload["launch"].as_str() != Some(name.as_str()))
+                .is_some_and(|name| self.run().payload["launch"].as_str() != Some(name.as_str()))
             || filter
                 .outcome
                 .as_ref()
@@ -91,18 +91,18 @@ impl Stream {
             return false;
         }
         filter.tags.iter().all(|tag| {
-            self.run.payload["tags"]
+            self.run().payload["tags"]
                 .as_array()
                 .is_some_and(|tags| tags.iter().any(|v| v.as_str() == Some(tag)))
         })
     }
 
     fn catalog_summary(&self) -> RunSummary {
-        let ambiguous = !self.poisoned.is_empty();
+        let ambiguous = self.is_poisoned();
         let mut coverage = if ambiguous {
-            json!({"scope":"snapshot_run","status":"degraded","classes":{},"gap_count":self.poisoned.len()})
+            json!({"scope":"snapshot_run","status":"degraded","classes":{},"gap_count":self.poisoned().len()})
         } else {
-            crate::reader::coverage_summary(&self.run.coverage)
+            crate::reader::coverage_summary(&self.run().coverage)
         };
         coverage["selection_status"] = json!(crate::reader::selection_status(
             &ReadFilter {
@@ -114,16 +114,16 @@ impl Stream {
             &coverage
         ));
         RunSummary {
-            run_id: self.run.run_id.clone(),
-            attempt_id: self.run.attempt_id.clone(),
-            request_id: self.run.request_id.clone(),
-            last_activity_at: self.last_activity_at.clone(),
-            profile: self.run.payload["profile"]
+            run_id: self.run().run_id.clone(),
+            attempt_id: self.run().attempt_id.clone(),
+            request_id: self.run().request_id.clone(),
+            last_activity_at: self.last_activity_at().map(str::to_owned),
+            profile: self.run().payload["profile"]
                 .as_str()
                 .unwrap_or("unknown")
                 .into(),
-            launch: self.run.payload["launch"].as_str().map(str::to_owned),
-            tags: self.run.payload["tags"]
+            launch: self.run().payload["launch"].as_str().map(str::to_owned),
+            tags: self.run().payload["tags"]
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -132,22 +132,22 @@ impl Stream {
             state: if ambiguous {
                 "outcome_unknown".into()
             } else {
-                self.run.state.clone()
+                self.run().state.clone()
             },
             outcome: self.catalog_outcome().into(),
-            child_protection: self.run.child_protection.clone(),
+            child_protection: self.run().child_protection.clone(),
             coverage,
-            chain: self.run.chain.clone(),
+            chain: self.run().chain.clone(),
             evidence_status: if ambiguous {
                 "ambiguous"
-            } else if self.pruned.is_some() {
+            } else if self.pruned().is_some() {
                 "pruned"
             } else {
                 "available"
             }
             .into(),
-            history: self.run.history.clone(),
-            capture_history: self.run.capture_history.clone(),
+            history: self.run().history.clone(),
+            capture_history: self.run().capture_history.clone(),
         }
     }
 }
@@ -160,7 +160,7 @@ impl Store {
                 "catalog limit must be between 1 and {MAX_CATALOG_LIMIT}"
             )));
         }
-        if self.streams.len() > MAX_CATALOG_RUNS {
+        if self.streams().len() > MAX_CATALOG_RUNS {
             return Err(LedgerError(format!(
                 "catalog exceeds {MAX_CATALOG_RUNS}-run scan bound; explicit run readers remain available"
             )));
@@ -186,7 +186,7 @@ impl Store {
         let mut matched_runs = 0;
         let mut prior_exists = prior.is_none();
         // One bounded pass, no SQLite dependency or copies of full RunRecords.
-        for (id, stream) in &self.streams {
+        for (id, stream) in self.streams() {
             if !stream.catalog_matches(&filter) {
                 continue;
             }
@@ -238,7 +238,7 @@ impl Store {
             snapshot,
             runs,
             matched_runs,
-            scanned_runs: self.streams.len() as u32,
+            scanned_runs: self.streams().len() as u32,
             next_after,
             done: !more,
         })
@@ -512,16 +512,20 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(&temp.path().join("data")).unwrap();
         let run = store.prepare("bounded", &payload(), &peer()).unwrap();
-        let template = store.streams[&run.run_id].clone();
-        store.streams.get_mut(&run.run_id).unwrap().run.receipts =
-            vec![json!({"large":"x".repeat(131072)})];
+        let template = store.streams()[&run.run_id].clone();
+        store
+            .streams_mut()
+            .get_mut(&run.run_id)
+            .unwrap()
+            .run_mut()
+            .receipts = vec![json!({"large":"x".repeat(131072)})];
         assert_eq!(store.catalog(&request()).unwrap().runs.len(), 1);
-        store.streams.clear();
+        store.streams_mut().clear();
         for i in 0..=MAX_CATALOG_RUNS {
             let id = format!("run_{i:032x}");
             let mut stream = template.clone();
-            stream.run.run_id = id.clone();
-            store.streams.insert(id, stream);
+            stream.run_mut().run_id = id.clone();
+            store.streams_mut().insert(id, stream);
         }
         assert!(
             store
@@ -530,7 +534,7 @@ mod tests {
                 .to_string()
                 .contains("scan bound")
         );
-        store.streams.pop_last();
+        store.streams_mut().pop_last();
         let page = store.catalog(&request()).unwrap();
         assert_eq!(page.scanned_runs, MAX_CATALOG_RUNS as u32);
         assert_eq!(page.runs.len(), 1);

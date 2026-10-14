@@ -85,7 +85,7 @@ fn pending_recovery_keeps_the_journal_through_canonical_persistence_failures() {
             )
             .unwrap();
         let run = store.show(&run.run_id).unwrap();
-        let dir = store.root.join(&run.run_id);
+        let dir = store.root().join(&run.run_id);
         let journal = Journal::open(&dir).unwrap();
         journal.create(&run, &peer()).unwrap();
         let mut pending = journal.read(&run).unwrap();
@@ -156,7 +156,7 @@ fn orphan_settlement_records_why_pending_evidence_was_refused() {
         )
         .unwrap();
     let run = store.show(&run.run_id).unwrap();
-    let directory = store.root.join(&run.run_id);
+    let directory = store.root().join(&run.run_id);
     Journal::open(&directory)
         .unwrap()
         .create(&run, &peer())
@@ -219,8 +219,8 @@ fn unreconcilable_pending_evidence_is_recorded_once_and_retried_only_after_a_cha
         )
         .unwrap();
     let run = store.show(&run.run_id).unwrap();
-    let journal = store.root.join(&run.run_id).join(STATE);
-    Journal::open(&store.root.join(&run.run_id))
+    let journal = store.root().join(&run.run_id).join(STATE);
+    Journal::open(&store.root().join(&run.run_id))
         .unwrap()
         .create(&run, &peer())
         .unwrap();
@@ -236,7 +236,7 @@ fn unreconcilable_pending_evidence_is_recorded_once_and_retried_only_after_a_cha
     assert!(journal.exists(), "the refused journal stays for inspection");
     // Reconciliation opens (and recreates) the journal's lock file, so its
     // absence shows an unchanged journal was not retried.
-    let lock = store.root.join(&run.run_id).join("owner-pending.lock");
+    let lock = store.root().join(&run.run_id).join("owner-pending.lock");
     fs::remove_file(&lock).unwrap();
     store.recover_pending_orphans(&peer());
     assert!(!lock.exists(), "an unchanged failed journal was retried");
@@ -272,7 +272,7 @@ fn a_reconciliation_the_journal_did_not_refuse_is_neither_recorded_nor_cached() 
         )
         .unwrap();
     let run = store.show(&run.run_id).unwrap();
-    let journal = Journal::open(&store.root.join(&run.run_id)).unwrap();
+    let journal = Journal::open(&store.root().join(&run.run_id)).unwrap();
     journal.create(&run, &peer()).unwrap();
     // While another holder keeps the journal locked, nothing is decided.
     store.recover_pending_orphans(&peer());
@@ -299,8 +299,8 @@ fn create() -> (tempfile::TempDir, Store, RunRecord) {
 #[test]
 fn retention_holds_replay_without_reapplying_an_old_intent_after_release() {
     let (temp, mut store, run) = create();
-    store.segment_limit = 1;
-    let original = fs::read(store.root.join(&run.run_id).join(STREAM)).unwrap();
+    store.set_segment_limit(1);
+    let original = fs::read(store.root().join(&run.run_id).join(STREAM)).unwrap();
     let held = store.hold(&run.run_id, "hold-1", &peer()).unwrap();
     assert_eq!(store.show(&run.run_id).unwrap().holds, ["operator"]);
     assert_eq!(store.hold(&run.run_id, "hold-1", &peer()).unwrap(), held);
@@ -324,7 +324,7 @@ fn retention_holds_replay_without_reapplying_an_old_intent_after_release() {
         ),
         "invalid owner intent",
     );
-    let path = store.root.join(&run.run_id).join(manifest::name(2));
+    let path = store.root().join(&run.run_id).join(manifest::name(2));
     let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert_eq!(record["provenance"]["role"], "operator");
     assert!(record["provenance"]["token_id"].is_null());
@@ -343,7 +343,7 @@ fn retention_holds_replay_without_reapplying_an_old_intent_after_release() {
     );
     assert_eq!(store.show(&run.run_id).unwrap().holds, ["operator"]);
     assert_eq!(
-        fs::read(store.root.join(&run.run_id).join(STREAM)).unwrap(),
+        fs::read(store.root().join(&run.run_id).join(STREAM)).unwrap(),
         original
     );
     assert!(store.verify(None).unwrap()[0].local_consistency);
@@ -375,7 +375,7 @@ fn retention_faults_preserve_history_and_recover_one_original_receipt() {
             if release {
                 store.hold(&run.run_id, "first-hold", &peer()).unwrap();
             }
-            store.segment_limit = 1;
+            store.set_segment_limit(1);
             let before = store.show(&run.run_id).unwrap().chain.head_seq;
             faults::arm(Plan::fail(fault));
             let apply = |store: &mut Store| {
@@ -391,7 +391,7 @@ fn retention_faults_preserve_history_and_recover_one_original_receipt() {
                 apply(&mut store).is_err(),
                 "uncertain writes cannot acknowledge before restart"
             );
-            let directory = store.root.join(&run.run_id);
+            let directory = store.root().join(&run.run_id);
             let history = manifest::names(&directory)
                 .unwrap()
                 .into_iter()
@@ -518,7 +518,7 @@ fn retention_preview_keeps_active_unknown_held_recent_and_damaged_runs() {
     );
     assert_refused(store.gc_plan(90, Some("../escape"), 1), "invalid run id");
     assert!(serde_json::to_vec(&plan).unwrap().len() < MAX_FRAME_BYTES);
-    let path = store.root.join(&run.run_id).join(STREAM);
+    let path = store.root().join(&run.run_id).join(STREAM);
     let mut file = OpenOptions::new().append(true).open(path).unwrap();
     file.write_all(b"partial").unwrap();
     let plan = store.gc_plan_at(90, None, 100, future).unwrap();
@@ -540,7 +540,7 @@ fn retention_preview_pins_durable_readers_without_expiring_or_repairing_files() 
     store
         .read(&read_request(&run, crate::protocol::ReadSelector::All))
         .unwrap();
-    let directory = store.root.join("readers");
+    let directory = store.root().join("readers");
     let checkpoint = fs::read_dir(&directory)
         .unwrap()
         .next()
@@ -603,7 +603,7 @@ pub(super) fn gc_fixture_captures(
     plan["capture"]["streams"] = json!(captures.iter().map(|(name, _)| *name).collect::<Vec<_>>());
     let run = store.prepare("gc-prepare", &plan, &peer()).unwrap();
     store.claim_owner(&run.run_id, &peer()).unwrap();
-    store.segment_limit = 1;
+    store.set_segment_limit(1);
     source_fixture(&mut store, &run, "exec", 1, None);
     store
         .append_owner(
@@ -620,7 +620,7 @@ pub(super) fn gc_fixture_captures(
     for (name, contents) in captures {
         let path = format!("artifacts/{name}.bin");
         let mut file = private_file(
-            &store.root.join(&run.run_id).join(&path),
+            &store.root().join(&run.run_id).join(&path),
             OpenOptions::new().create(true),
         )
         .unwrap();
@@ -656,7 +656,7 @@ fn capture_policy() -> ouro_records::retention::RetentionPolicy {
 #[test]
 fn capture_expiry_preserves_canonical_bytes_queries_replays_and_later_history_gc() {
     let (temp, mut store, run) = gc_fixture();
-    let directory = store.root.join(&run.run_id);
+    let directory = store.root().join(&run.run_id);
     let snapshots: Vec<_> = manifest::names(&directory)
         .unwrap()
         .into_iter()
@@ -730,7 +730,7 @@ fn capture_expiry_recovers_each_deletion_boundary_and_never_removes_history() {
     ] {
         let (temp, mut store, run) =
             gc_fixture_captures(&[("stdout", b"private-capture"), ("stderr", b"second")]);
-        let directory = store.root.join(&run.run_id);
+        let directory = store.root().join(&run.run_id);
         let names = manifest::names(&directory).unwrap();
         let original: Vec<_> = names
             .iter()
@@ -787,7 +787,7 @@ fn capture_expiry_refuses_changed_reappearing_or_unanchored_files() {
         "segment",
     ] {
         let (temp, mut store, run) = gc_fixture();
-        let directory = store.root.join(&run.run_id);
+        let directory = store.root().join(&run.run_id);
         faults::arm(Plan::fail(Point::GcBeforeUnlink));
         assert_eq!(
             store
@@ -858,7 +858,7 @@ fn capture_expiry_removes_empty_selected_files_without_claiming_removed_bytes() 
     assert_eq!(result.captures_pruned[0].removed_bytes, 0);
     assert!(
         !store
-            .root
+            .root()
             .join(&run.run_id)
             .join("artifacts/stdout.bin")
             .exists()
@@ -880,10 +880,20 @@ fn capture_expiry_keeps_holds_unknown_outcomes_active_runs_and_reader_pins() {
                 store.hold(&run.run_id, "keep-captures", &peer()).unwrap();
             }
             "outcome_unknown" => {
-                store.streams.get_mut(&run.run_id).unwrap().run.state = "outcome_unknown".into()
+                store
+                    .streams_mut()
+                    .get_mut(&run.run_id)
+                    .unwrap()
+                    .run_mut()
+                    .state = "outcome_unknown".into()
             }
             "active_run" => {
-                store.streams.get_mut(&run.run_id).unwrap().run.state = "admitted".into()
+                store
+                    .streams_mut()
+                    .get_mut(&run.run_id)
+                    .unwrap()
+                    .run_mut()
+                    .state = "admitted".into()
             }
             "reader_snapshot" => {
                 let request = ReadRequest {
@@ -923,7 +933,7 @@ fn capture_expiry_keeps_holds_unknown_outcomes_active_runs_and_reader_pins() {
         );
         assert!(
             store
-                .root
+                .root()
                 .join(&run.run_id)
                 .join("artifacts/stdout.bin")
                 .exists()
@@ -935,8 +945,8 @@ fn capture_expiry_keeps_holds_unknown_outcomes_active_runs_and_reader_pins() {
 fn gc_prunes_segments_and_captures_but_preserves_replays_effects_and_none_labels() {
     let (temp, mut store, run) = gc_fixture();
     let original = store.show(&run.run_id).unwrap();
-    let replay = store.stream(&run.run_id).unwrap().replay.clone();
-    let directory = store.root.join(&run.run_id);
+    let replay = store.stream(&run.run_id).unwrap().replay().clone();
+    let directory = store.root().join(&run.run_id);
     let manifest = fs::read(directory.join("segments.json")).unwrap();
     let result = store.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
     assert!(result.failed.is_empty(), "{:?}", result.failed);
@@ -1020,7 +1030,7 @@ fn gc_prunes_segments_and_captures_but_preserves_replays_effects_and_none_labels
         "request id conflicts with its immutable payload",
     );
     source_fixture(&mut recovered, &run, "exec", 1, None);
-    assert_eq!(recovered.stream(&run.run_id).unwrap().replay, replay);
+    assert_eq!(recovered.stream(&run.run_id).unwrap().replay(), &replay);
     let verified = recovered.verify(Some(&run.run_id)).unwrap();
     assert!(verified[0].local_consistency, "{:?}", verified[0]);
     assert_eq!(verified[0].events, 0);
@@ -1050,8 +1060,8 @@ fn gc_recovers_every_deletion_boundary_without_losing_replay_or_chain_anchors() 
         Point::GcProjection,
     ] {
         let (temp, mut store, run) = gc_fixture();
-        let replay = store.stream(&run.run_id).unwrap().replay.clone();
-        let directory = store.root.join(&run.run_id);
+        let replay = store.stream(&run.run_id).unwrap().replay().clone();
+        let directory = store.root().join(&run.run_id);
         let manifest = fs::read(directory.join("segments.json")).unwrap();
         faults::arm(Plan::fail(fault));
         let failed = store.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
@@ -1078,7 +1088,7 @@ fn gc_recovers_every_deletion_boundary_without_losing_replay_or_chain_anchors() 
         assert!(retried.failed.is_empty(), "{:?}", retried.failed);
         assert_eq!(retried.pruned.len(), 1);
         assert_eq!(fs::read(directory.join("segments.json")).unwrap(), manifest);
-        assert_eq!(recovered.stream(&run.run_id).unwrap().replay, replay);
+        assert_eq!(recovered.stream(&run.run_id).unwrap().replay(), &replay);
         assert!(!directory.join(STREAM).exists());
         assert!(!directory.join("artifacts/stdout.bin").exists());
         assert!(recovered.verify(None).unwrap()[0].local_consistency);
@@ -1089,7 +1099,7 @@ fn gc_recovers_every_deletion_boundary_without_losing_replay_or_chain_anchors() 
 fn gc_revalidates_bytes_and_refuses_changed_files_or_symlinked_capture_directories() {
     for mode in ["canonical", "capture", "symlink", "anchor"] {
         let (temp, mut store, run) = gc_fixture();
-        let directory = store.root.join(&run.run_id);
+        let directory = store.root().join(&run.run_id);
         let outside = temp.path().join("outside");
         fsx::create_dir_all(&outside).unwrap();
         fs::write(outside.join("stdout.bin"), b"must be kept").unwrap();
@@ -1177,7 +1187,7 @@ fn gc_keeps_held_unknown_recent_and_live_reader_runs_and_refuses_active_launches
         .unwrap();
     // Model a reader begun at the injected collection clock, after the run aged.
     let now = gc_future();
-    let entry = fs::read_dir(store.root.join("readers"))
+    let entry = fs::read_dir(store.root().join("readers"))
         .unwrap()
         .next()
         .unwrap()
@@ -1215,7 +1225,7 @@ fn gc_keeps_held_unknown_recent_and_live_reader_runs_and_refuses_active_launches
 #[test]
 fn gc_never_removes_files_reappearing_after_completion() {
     let (temp, mut store, run) = gc_fixture();
-    let directory = store.root.join(&run.run_id);
+    let directory = store.root().join(&run.run_id);
     assert_eq!(
         store
             .gc_at(1, None, 100, &peer(), gc_future())
@@ -1587,10 +1597,10 @@ fn durable_reader_refuses_rechecksummed_forged_snapshot_labels() {
         request.cursor = first.next_cursor;
         let cursor = request.cursor.as_ref().unwrap();
         let checkpoint_path = store
-            .root
+            .root()
             .join("readers")
             .join(format!("{}.json", &cursor[..32]));
-        let canonical_path = store.root.join(&run.run_id).join(STREAM);
+        let canonical_path = store.root().join(&run.run_id).join(STREAM);
         let original = fs::read(&canonical_path).unwrap();
         drop(store);
 
@@ -1650,7 +1660,7 @@ fn durable_reader_preserves_snapshot_labels_after_a_later_state_change() {
     for n in 0..40 {
         note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
     }
-    let original = fs::read_to_string(store.root.join(&run.run_id).join(STREAM)).unwrap();
+    let original = fs::read_to_string(store.root().join(&run.run_id).join(STREAM)).unwrap();
     let mut request = read_request(&run, crate::protocol::ReadSelector::All);
     let first = store.read(&request).unwrap();
     request.cursor = first.next_cursor.clone();
@@ -1700,14 +1710,14 @@ fn durable_reader_sync_failure_refuses_retries_until_recovery_barrier_succeeds()
     for n in 0..40 {
         note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
     }
-    let canonical_path = store.root.join(&run.run_id).join(STREAM);
+    let canonical_path = store.root().join(&run.run_id).join(STREAM);
     let original = fs::read_to_string(&canonical_path).unwrap();
     let mut request = read_request(&run, crate::protocol::ReadSelector::All);
     let first = store.read(&request).unwrap();
     request.cursor = first.next_cursor.clone();
     let cursor = request.cursor.as_ref().unwrap();
     let checkpoint_path = store
-        .root
+        .root()
         .join("readers")
         .join(format!("{}.json", &cursor[..32]));
     let initial_checkpoint = fs::read(&checkpoint_path).unwrap();
@@ -1757,7 +1767,7 @@ fn a_checkpoint_rewritten_in_place_is_validated_again() {
     let second = store.read(&request).unwrap();
     let cursor = second.next_cursor.clone().unwrap();
     let path = store
-        .root
+        .root()
         .join("readers")
         .join(format!("{}.json", &cursor[..32]));
     let mut bytes = fs::read(&path).unwrap();
@@ -1781,7 +1791,7 @@ fn corrupt_reader_checkpoint_is_isolated_bounded_and_expires() {
     for n in 0..40 {
         note(&mut store, &run, &format!("n:{n}"), json!({"n":n})).unwrap();
     }
-    let canonical_path = store.root.join(&run.run_id).join(STREAM);
+    let canonical_path = store.root().join(&run.run_id).join(STREAM);
     let original = fs::read(&canonical_path).unwrap();
     let fresh = read_request(&run, crate::protocol::ReadSelector::All);
     let initial = store.read(&fresh).unwrap();
@@ -1789,7 +1799,7 @@ fn corrupt_reader_checkpoint_is_isolated_bounded_and_expires() {
     let mut corrupt_request = fresh.clone();
     corrupt_request.cursor = initial.next_cursor;
     let cursor = corrupt_request.cursor.as_ref().unwrap();
-    let directory = store.root.join("readers");
+    let directory = store.root().join("readers");
     let checkpoint_path = directory.join(format!("{}.json", &cursor[..32]));
     let mut envelope: Value = serde_json::from_slice(&fs::read(&checkpoint_path).unwrap()).unwrap();
     envelope["digest"] = json!(format!("sha256:{}", "0".repeat(64)));
@@ -1858,10 +1868,10 @@ fn durable_reader_refuses_a_rechecksummed_empty_snapshot_template() {
     request.cursor = first.next_cursor;
     let cursor = request.cursor.as_ref().unwrap();
     let checkpoint_path = store
-        .root
+        .root()
         .join("readers")
         .join(format!("{}.json", &cursor[..32]));
-    let canonical_path = store.root.join(&run.run_id).join(STREAM);
+    let canonical_path = store.root().join(&run.run_id).join(STREAM);
     let original = fs::read(&canonical_path).unwrap();
     drop(store);
 
@@ -1911,7 +1921,7 @@ fn a_closed_writer_releases_its_lock_even_while_a_copy_of_its_descriptor_lives()
     let (temp, store, _) = create();
     // A child forked by another thread holds a copy until it execs.
     // SAFETY: dup takes the open descriptor by value; the copy is owned below.
-    let copy = unsafe { libc::dup(store.lock.as_raw_fd()) };
+    let copy = unsafe { libc::dup(store.lock().as_raw_fd()) };
     assert!(copy >= 0);
     // SAFETY: dup returned a new descriptor owned only here.
     let copy = unsafe { <File as std::os::fd::FromRawFd>::from_raw_fd(copy) };
@@ -1935,7 +1945,7 @@ fn full_length_request_id_prepares_replays_and_recovers_without_ambiguous_state(
             .run_id
     );
     assert!(store.verify(None).unwrap()[0].local_consistency);
-    assert!(!store.recovery_ambiguous);
+    assert!(!store.status().preparation_blocked);
     drop(store);
     let mut recovered = Store::open(&temp.path().join("data")).unwrap();
     assert_eq!(
@@ -1946,7 +1956,7 @@ fn full_length_request_id_prepares_replays_and_recovers_without_ambiguous_state(
             .run_id
     );
     assert!(recovered.verify(None).unwrap()[0].local_consistency);
-    assert!(!recovered.recovery_ambiguous);
+    assert!(!recovered.status().preparation_blocked);
 }
 
 #[test]
@@ -2030,7 +2040,7 @@ fn different_payload_cannot_rebind_prepare_or_effect_identity() {
 #[test]
 fn interrupted_write_is_retained_poisoned_and_never_truncated_on_recovery() {
     let (temp, mut store, run) = create();
-    let stream_path = store.root.join(&run.run_id).join(STREAM);
+    let stream_path = store.root().join(&run.run_id).join(STREAM);
     let before = fs::read(&stream_path).unwrap();
     faults::arm(Plan::fail(Point::EventPartialWrite));
     assert!(note(&mut store, &run, "partial", json!({"v":"half record"})).is_err());
@@ -2062,7 +2072,7 @@ fn interrupted_write_is_retained_poisoned_and_never_truncated_on_recovery() {
 /// Rewrite the canonical records and drop the segment manifest, so only the
 /// edited records' own rules can refuse them on the next start.
 fn rewrite_without_manifest(store: &Store, run: &RunRecord, edit: impl FnOnce(&mut Vec<Value>)) {
-    let directory = store.root.join(&run.run_id);
+    let directory = store.root().join(&run.run_id);
     let mut records: Vec<Value> = fs::read(directory.join(STREAM))
         .unwrap()
         .split(|byte| *byte == b'\n')
@@ -2132,7 +2142,7 @@ fn integrity_violations_read_as_corrupt_and_interruptions_as_incomplete() {
     );
     let (temp, mut store, run) = create();
     note(&mut store, &run, "first", json!({"v":1})).unwrap();
-    let path = store.root.join(&run.run_id).join(STREAM);
+    let path = store.root().join(&run.run_id).join(STREAM);
     drop(store);
     let mut torn = fs::read(&path).unwrap();
     torn.extend_from_slice(b"{\"torn\":");
@@ -2201,7 +2211,7 @@ fn verification_pages_are_bounded_by_runs_and_bytes_and_status_reads_no_history(
     assert_eq!(last.reports[0].run_id, ids[2]);
     assert!(last.done && last.next_after.is_none());
     // A page re-reads at most its byte budget, but never fewer than one run.
-    store.verify_page_bytes = 1;
+    store.set_verify_page_bytes(1);
     let one = store.verify_page(None, None, MAX_VERIFY_LIMIT).unwrap();
     assert_eq!(one.reports.len(), 1);
     assert_eq!(one.next_after.as_deref(), Some(ids[0].as_str()));
@@ -2214,7 +2224,7 @@ fn verification_pages_are_bounded_by_runs_and_bytes_and_status_reads_no_history(
     assert!(store.status().ready());
     assert_eq!(store.status().runs, 3);
     // Status reflects accepted state; damage on disk waits for verify.
-    fs::write(store.root.join(&ids[0]).join(STREAM), b"damaged\n").unwrap();
+    fs::write(store.root().join(&ids[0]).join(STREAM), b"damaged\n").unwrap();
     assert!(store.status().ready());
     assert!(!store.verify_page(Some(&ids[0]), None, 1).unwrap().reports[0].local_consistency);
     faults::arm(Plan::fail(Point::EventBeforeWrite));
@@ -2254,7 +2264,7 @@ fn every_persistence_failure_stops_acknowledgements_until_recovery() {
 #[test]
 fn recovery_sync_failure_cannot_publish_or_acknowledge_an_unflushed_tail() {
     let (temp, mut store, run) = create();
-    let directory = store.root.join(&run.run_id);
+    let directory = store.root().join(&run.run_id);
     let stream_path = directory.join(STREAM);
     let manifest_path = directory.join("segments.json");
     let projection_path = directory.join("run.json");
@@ -2311,7 +2321,7 @@ fn index_failure_after_acknowledgement_does_not_poison_or_reexecute() {
     let (temp, mut store, run) = create();
     let external = temp.path().join("outside-index");
     fs::write(&external, b"must stay unchanged").unwrap();
-    let index = store.root.join("index.sqlite");
+    let index = store.root().join("index.sqlite");
     fs::remove_file(&index).unwrap();
     std::os::unix::fs::symlink(&external, &index).unwrap();
     let receipt = note(&mut store, &run, "durable-without-index", json!({"v":1})).unwrap();
@@ -2589,7 +2599,7 @@ fn flattened_source_is_the_original_frozen_envelope_plus_writer_fields() {
     store
         .append_source(&run.run_id, &source, &peer(), TOKEN)
         .unwrap();
-    let bytes = fs::read(store.root.join(&run.run_id).join(STREAM)).unwrap();
+    let bytes = fs::read(store.root().join(&run.run_id).join(STREAM)).unwrap();
     let mut canonical: Value = serde_json::from_slice(
         bytes
             .split(|byte| *byte == b'\n')
@@ -3013,7 +3023,7 @@ fn recovery_rechecks_admission_bindings_even_with_a_recomputed_local_chain() {
             TOKEN,
         )
         .unwrap();
-    let path = store.root.join(&run.run_id).join(STREAM);
+    let path = store.root().join(&run.run_id).join(STREAM);
     let bytes = fs::read(&path).unwrap();
     let mut records: Vec<Value> = bytes
         .split(|byte| *byte == b'\n')
@@ -3042,7 +3052,7 @@ fn recovery_rechecks_admission_bindings_even_with_a_recomputed_local_chain() {
 #[test]
 fn verification_detects_projection_drift_and_recovery_rebuilds_it() {
     let (temp, store, run) = create();
-    let projection = store.root.join(&run.run_id).join("run.json");
+    let projection = store.root().join(&run.run_id).join("run.json");
     fs::write(&projection, b"{}\n").unwrap();
     assert!(!store.verify(None).unwrap()[0].local_consistency);
     drop(store);
@@ -3052,7 +3062,7 @@ fn verification_detects_projection_drift_and_recovery_rebuilds_it() {
 #[test]
 fn recovery_keeps_unchanged_projections_and_manifests_in_place() {
     let (temp, store, run) = create();
-    let directory = store.root.join(&run.run_id);
+    let directory = store.root().join(&run.run_id);
     let inode = |name: &str| fs::metadata(directory.join(name)).unwrap().ino();
     let before = (inode("run.json"), inode(manifest::NAME));
     drop(store);
@@ -3082,7 +3092,7 @@ fn a_failed_projection_write_leaves_no_temporary_file() {
     let refused = note(&mut store, &run, "unpublished", json!({"v":1}));
     faults::disarm();
     assert!(refused.is_err());
-    let leftovers: Vec<_> = fs::read_dir(store.root.join(&run.run_id))
+    let leftovers: Vec<_> = fs::read_dir(store.root().join(&run.run_id))
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .filter(|name| name.to_string_lossy().ends_with(".tmp"))
@@ -3101,8 +3111,8 @@ fn segment_bytes(directory: &Path) -> Vec<u8> {
 #[test]
 fn rotation_preserves_exact_export_global_chain_and_original_replay_after_restart() {
     let (temp, mut store, run) = create();
-    store.segment_limit = 2048;
-    let directory = store.root.join(&run.run_id);
+    store.set_segment_limit(2048);
+    let directory = store.root().join(&run.run_id);
     let initial = fs::read(directory.join(STREAM)).unwrap();
     let mut receipts = Vec::new();
     for i in 0..12 {
@@ -3168,8 +3178,8 @@ fn rotation_failure_boundaries_never_duplicate_or_truncate_history() {
         Point::AppendBeforeDirectorySync,
     ] {
         let (temp, mut store, run) = create();
-        store.segment_limit = 1;
-        let directory = store.root.join(&run.run_id);
+        store.set_segment_limit(1);
+        let directory = store.root().join(&run.run_id);
         let first = fs::read(directory.join(STREAM)).unwrap();
         faults::arm(Plan::fail(fault));
         assert!(note(&mut store, &run, "rotation-fault", json!({"v":1})).is_err());
@@ -3227,8 +3237,8 @@ fn rotation_failure_boundaries_never_duplicate_or_truncate_history() {
 #[test]
 fn rotation_recovery_syncs_each_segment_before_publishing_promoted_metadata() {
     let (temp, mut store, run) = create();
-    store.segment_limit = 1;
-    let directory = store.root.join(&run.run_id);
+    store.set_segment_limit(1);
+    let directory = store.root().join(&run.run_id);
     note(&mut store, &run, "sealed", json!({})).unwrap();
     let old = fs::read(directory.join(manifest::NAME)).unwrap();
     faults::arm(Plan::fail(Point::EventBeforeSync));
@@ -3277,8 +3287,8 @@ fn rotated_streams_refuse_missing_changed_reordered_and_unanchored_segments() {
         "symlink",
     ] {
         let (temp, mut store, run) = create();
-        store.segment_limit = 1;
-        let directory = store.root.join(&run.run_id);
+        store.set_segment_limit(1);
+        let directory = store.root().join(&run.run_id);
         note(&mut store, &run, "one", json!({"v":"original"})).unwrap();
         note(&mut store, &run, "two", json!({"v":"original"})).unwrap();
         drop(store);
@@ -3376,8 +3386,8 @@ fn rotated_streams_refuse_missing_changed_reordered_and_unanchored_segments() {
 #[test]
 fn reader_snapshot_and_lost_reply_survive_rotation_with_partial_utf8_export() {
     let (temp, mut store, run) = create();
-    store.segment_limit = 16_384;
-    let directory = store.root.join(&run.run_id);
+    store.set_segment_limit(16_384);
+    let directory = store.root().join(&run.run_id);
     note(&mut store, &run, "large", json!({"v":"€".repeat(90_000)})).unwrap();
     note(&mut store, &run, "last", json!({"v":3})).unwrap();
     let expected = String::from_utf8(segment_bytes(&directory)).unwrap();
@@ -3406,7 +3416,7 @@ fn reader_snapshot_and_lost_reply_survive_rotation_with_partial_utf8_export() {
 #[test]
 fn reader_cursor_refuses_replaced_later_segment_after_restart() {
     let (temp, mut store, run) = create();
-    store.segment_limit = 1;
+    store.set_segment_limit(1);
     note(
         &mut store,
         &run,
@@ -3417,7 +3427,7 @@ fn reader_cursor_refuses_replaced_later_segment_after_restart() {
     let mut request = read_request(&run, crate::protocol::ReadSelector::All);
     request.limit = 1;
     request.cursor = store.read(&request).unwrap().next_cursor;
-    let path = store.root.join(&run.run_id).join(manifest::name(2));
+    let path = store.root().join(&run.run_id).join(manifest::name(2));
     let bytes = fs::read(&path).unwrap();
     drop(store);
     fs::rename(&path, path.with_extension("old")).unwrap();
@@ -3445,13 +3455,13 @@ fn legacy_manifest_and_reader_checkpoint_migrate_before_rotation() {
         json!({"v":"x".repeat(100_000)}),
     )
     .unwrap();
-    let directory = store.root.join(&run.run_id);
+    let directory = store.root().join(&run.run_id);
     let mut request = read_request(&run, crate::protocol::ReadSelector::All);
     request.limit = 1;
     let first = store.read(&request).unwrap();
     request.cursor = first.next_cursor;
     let checkpoint = store
-        .root
+        .root()
         .join("readers")
         .join(format!("{}.json", &request.cursor.as_ref().unwrap()[..32]));
     let mut envelope: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
@@ -3473,7 +3483,7 @@ fn legacy_manifest_and_reader_checkpoint_migrate_before_rotation() {
     let original = fs::read(directory.join(STREAM)).unwrap();
     drop(store);
     let mut recovered = Store::open(&temp.path().join("data")).unwrap();
-    recovered.segment_limit = 1;
+    recovered.set_segment_limit(1);
     note(&mut recovered, &run, "rotate", json!({})).unwrap();
     let page = recovered.read(&request).unwrap();
     assert_eq!(page.snapshot.head_seq, 3);
@@ -3487,7 +3497,7 @@ fn legacy_manifest_and_reader_checkpoint_migrate_before_rotation() {
 fn rotated_queries_preserve_source_filters_and_effect_identity() {
     use crate::protocol::ReadSelector;
     let (temp, mut store, run) = create();
-    store.segment_limit = 1;
+    store.set_segment_limit(1);
     let effect = store
         .append_owner(
             &run.run_id,

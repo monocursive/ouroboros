@@ -148,18 +148,15 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
 
 /// A read-only projection overlay. `verify` must never resume deletion.
 pub(super) fn apply(root: &Path, stream: &mut Stream) -> Result<()> {
-    let Some(retained) = read(root, &stream.run.run_id)? else {
+    let Some(retained) = read(root, &stream.run().run_id)? else {
         return Ok(());
     };
-    if retained.attempt_id != stream.run.attempt_id
-        || retained.capture != stream.run.capture
-        || !stream
-            .anchors
-            .get(&retained.chain.head_seq)
-            .is_some_and(|a| {
-                Some(&a.digest) == retained.chain.head_digest.as_ref()
-                    && ["settled", "denied"].contains(&a.state)
-            })
+    if retained.attempt_id != stream.run().attempt_id
+        || retained.capture != stream.run().capture
+        || !stream.anchor(retained.chain.head_seq).is_some_and(|a| {
+            Some(&a.digest) == retained.chain.head_digest.as_ref()
+                && ["settled", "denied"].contains(&a.state)
+        })
     {
         return Err(LedgerError(
             "capture GC authority does not match canonical terminal history".into(),
@@ -167,8 +164,7 @@ pub(super) fn apply(root: &Path, stream: &mut Stream) -> Result<()> {
     }
     let complete = retained.complete(root)?;
     retained.check_remaining(root, complete)?;
-    stream.run.capture = retained.capture(complete);
-    stream.run.capture_history = Some(retained.history(complete)?);
+    stream.set_captures(retained.capture(complete), retained.history(complete)?);
     Ok(())
 }
 
@@ -192,10 +188,9 @@ pub(super) fn check_pruned_history(root: &Path, run: &RunRecord) -> Result<()> {
 
 impl Store {
     pub(super) fn recover_captures(&self, id: &str, stream: &mut Stream) -> Result<()> {
-        if let Some(r) = read(&self.root.join(id), id)? {
+        if let Some(r) = read(&self.run_dir(id), id)? {
             self.finish_capture_pruning(id, &r)?;
-            stream.run.capture = r.capture(true);
-            stream.run.capture_history = Some(r.history(true)?);
+            stream.set_captures(r.capture(true), r.history(true)?);
         }
         Ok(())
     }
@@ -208,12 +203,12 @@ impl Store {
         cutoff: &str,
         peer: &Peer,
     ) -> Result<CaptureGcReceipt> {
-        let root = self.root.join(id);
+        let root = self.run_dir(id);
         let retained = match read(&root, id)? {
             Some(r) => {
                 if self
                     .stream(id)?
-                    .run
+                    .run()
                     .capture_history
                     .as_ref()
                     .is_none_or(|h| h.anchor_digest != r.digest().unwrap_or_default())
@@ -228,20 +223,20 @@ impl Store {
                 const DIFFERS: &str =
                     "capture GC canonical verification differs from accepted writer state";
                 let verified = self.verified_for_gc(id, cutoff, DIFFERS)?;
-                if verified.run.capture_history.is_some() {
+                if verified.run().capture_history.is_some() {
                     return Err(LedgerError(DIFFERS.into()));
                 }
-                let files = inventory(&root, &verified.run)?;
+                let files = inventory(&root, verified.run())?;
                 if files.is_empty() {
                     return Err(LedgerError("no captures available for expiry".into()));
                 }
                 let r = Retained {
                     schema: schemas::CAPTURE_GC_ANCHOR.into(),
                     run_id: id.into(),
-                    attempt_id: verified.run.attempt_id.clone(),
-                    chain: verified.run.chain.clone(),
-                    capture: verified.run.capture.clone(),
-                    last_activity_at: verified.last_activity_at.clone().expect("checked time"),
+                    attempt_id: verified.run().attempt_id.clone(),
+                    chain: verified.run().chain.clone(),
+                    capture: verified.run().capture.clone(),
+                    last_activity_at: verified.last_activity_at().expect("checked time").into(),
                     collected_at: now.into(),
                     cutoff: cutoff.into(),
                     retain_days: days,
@@ -259,27 +254,23 @@ impl Store {
                     return Err(e);
                 }
                 let stream = self.stream_mut(id);
-                stream.run.capture = r.capture(false);
-                stream.run.capture_history = Some(r.history(false)?);
+                stream.set_captures(r.capture(false), r.history(false)?);
                 faults::hit(Point::GcIntentSync)?;
                 r
             }
         };
         self.finish_capture_pruning(id, &retained)?;
         let stream = self.stream_mut(id);
-        stream.run.capture = retained.capture(true);
-        stream.run.capture_history = Some(retained.history(true)?);
-        let run = stream.run.clone();
+        stream.set_captures(retained.capture(true), retained.history(true)?);
+        let run = stream.run().clone();
         faults::hit(Point::GcProjection)?;
         self.write_projection(&run)?;
-        if self.index.is_some() {
-            self.index_pending.insert(id.into(), run);
-        }
+        self.queue_index(run);
         retained.receipt()
     }
 
     fn finish_capture_pruning(&self, id: &str, r: &Retained) -> Result<()> {
-        gc::finish(&self.root.join(id), id, r)
+        gc::finish(&self.run_dir(id), id, r)
     }
 }
 

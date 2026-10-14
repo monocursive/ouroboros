@@ -136,7 +136,7 @@ fn check_recovery(data: &Path, kind: Scope, point: Point, before: &[u8]) {
         || (kind == Scope::Prepared && point == Point::EventBeforeWrite);
     if partial {
         assert!(
-            !store.stream(&run.run_id).unwrap().poisoned.is_empty(),
+            store.stream(&run.run_id).unwrap().is_poisoned(),
             "{kind:?}/{point:?}"
         );
         assert!(
@@ -147,7 +147,7 @@ fn check_recovery(data: &Path, kind: Scope, point: Point, before: &[u8]) {
         return;
     }
     assert!(
-        store.stream(&run.run_id).unwrap().poisoned.is_empty(),
+        !store.stream(&run.run_id).unwrap().is_poisoned(),
         "{kind:?}/{point:?}"
     );
     let head = run.chain.head_seq;

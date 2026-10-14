@@ -1,6 +1,7 @@
 //! One run's accepted canonical state: what the writer acknowledged, the
 //! anchors that corroborate it, and how it stopped being trustworthy.
 use super::*;
+use crate::protocol::PrunedHistory;
 
 pub(super) mod load;
 pub(super) mod rules;
@@ -76,24 +77,24 @@ pub(super) fn poison_details(poisoned: &[Poison]) -> Vec<String> {
 
 #[cfg_attr(test, derive(Clone))]
 pub(super) struct Stream {
-    pub(super) run: RunRecord,
-    pub(super) accepted_bytes: u64,
-    pub(super) replay: BTreeMap<String, Replay>,
-    pub(super) source_heads: BTreeMap<String, u64>,
-    pub(super) source_gaps: Vec<Value>,
-    pub(super) last_source: Option<Value>,
-    pub(super) first_loss: Option<Value>,
-    pub(super) receipt_phase: Option<String>,
-    pub(super) poisoned: Vec<Poison>,
-    pub(super) segments: Vec<manifest::Segment>,
-    pub(super) active_segment: usize,
-    pub(super) segment_bytes: u64,
-    pub(super) segment_hash: Sha256,
-    pub(super) replay_hash: Sha256,
-    pub(super) anchors: BTreeMap<u64, Anchor>,
-    pub(super) last_activity_at: Option<String>,
-    pub(super) retention_time_valid: bool,
-    pub(super) pruned: Option<pruning::Retained>,
+    run: RunRecord,
+    accepted_bytes: u64,
+    replay: BTreeMap<String, Replay>,
+    source_heads: BTreeMap<String, u64>,
+    source_gaps: Vec<Value>,
+    last_source: Option<Value>,
+    first_loss: Option<Value>,
+    receipt_phase: Option<String>,
+    poisoned: Vec<Poison>,
+    segments: Vec<manifest::Segment>,
+    active_segment: usize,
+    segment_bytes: u64,
+    segment_hash: Sha256,
+    replay_hash: Sha256,
+    anchors: BTreeMap<u64, Anchor>,
+    last_activity_at: Option<String>,
+    retention_time_valid: bool,
+    pruned: Option<pruning::Retained>,
 }
 
 pub(super) fn initial_run(
@@ -148,6 +149,153 @@ impl Stream {
             retention_time_valid: true,
             pruned: None,
         }
+    }
+
+    /// The stream of a run whose preparation is being appended.
+    pub(super) fn prepared(run: RunRecord) -> Self {
+        Self::empty(&run.run_id).with_run(run)
+    }
+
+    fn with_run(mut self, run: RunRecord) -> Self {
+        self.run = run;
+        self
+    }
+
+    /// A pruned run as its retained authority keeps it: its terminal
+    /// projection, replay identities, any strict source loss and its last
+    /// activity; no canonical bytes remain to re-read.
+    pub(super) fn restored(
+        run: RunRecord,
+        replay: BTreeMap<String, Replay>,
+        strict_source_loss: bool,
+        last_activity_at: String,
+        retained: pruning::Retained,
+    ) -> Self {
+        let mut stream = Self::empty(&run.run_id).with_run(run);
+        stream.replay = replay;
+        if strict_source_loss {
+            stream.source_gaps = vec![json!({"reason":"retained_source_loss"})];
+        }
+        stream.last_activity_at = Some(last_activity_at);
+        stream.pruned = Some(retained);
+        stream
+    }
+
+    /// The run as this stream has accepted it.
+    pub(super) fn run(&self) -> &RunRecord {
+        &self.run
+    }
+
+    pub(super) fn into_run(self) -> RunRecord {
+        self.run
+    }
+
+    /// Tests forge accepted state directly to reach states no record allows.
+    #[cfg(test)]
+    pub(super) fn run_mut(&mut self) -> &mut RunRecord {
+        &mut self.run
+    }
+
+    /// The canonical bytes this stream has accepted.
+    pub(super) fn accepted_bytes(&self) -> u64 {
+        self.accepted_bytes
+    }
+
+    /// Every request and effect identity with its acknowledged receipt.
+    pub(super) fn replay(&self) -> &BTreeMap<String, Replay> {
+        &self.replay
+    }
+
+    /// Why this stream stopped being trustworthy, if it did.
+    pub(super) fn poisoned(&self) -> &[Poison] {
+        &self.poisoned
+    }
+
+    pub(super) fn is_poisoned(&self) -> bool {
+        !self.poisoned.is_empty()
+    }
+
+    /// Record why this stream can no longer be trusted.
+    pub(super) fn poison(&mut self, kind: PoisonKind, detail: impl Into<String>) {
+        self.poisoned.push(Poison::new(kind, detail));
+    }
+
+    /// The retained authority of a pruned run.
+    pub(super) fn pruned(&self) -> Option<&pruning::Retained> {
+        self.pruned.as_ref()
+    }
+
+    /// The accepted head at `seq`, with what it corroborates.
+    pub(super) fn anchor(&self, seq: u64) -> Option<&Anchor> {
+        self.anchors.get(&seq)
+    }
+
+    /// The latest writer receipt time among accepted records.
+    pub(super) fn last_activity_at(&self) -> Option<&str> {
+        self.last_activity_at.as_deref()
+    }
+
+    /// Whether every accepted record carries a usable receipt time, so
+    /// `last_activity_at` can decide retention.
+    pub(super) fn retention_time_valid(&self) -> bool {
+        self.retention_time_valid
+    }
+
+    pub(super) fn segments(&self) -> &[manifest::Segment] {
+        &self.segments
+    }
+
+    /// Recorded producer transport loss and outage gaps.
+    pub(super) fn source_gaps(&self) -> &[Value] {
+        &self.source_gaps
+    }
+
+    /// The active segment's number and accepted length.
+    pub(super) fn active_segment(&self) -> (usize, u64) {
+        (self.active_segment, self.segment_bytes)
+    }
+
+    /// GC published this run's authority: until deletion completes the run
+    /// projects `run`, and its history is never appended to again.
+    pub(super) fn begin_pruning(&mut self, retained: pruning::Retained, run: RunRecord) {
+        self.pruned = Some(retained);
+        self.run = run;
+    }
+
+    /// GC completed this run's deletion; it projects `run` from now on.
+    pub(super) fn finish_pruning(&mut self, run: RunRecord) {
+        self.run = run;
+    }
+
+    /// Capture expiry relabels the run's captures and records its history.
+    pub(super) fn set_captures(&mut self, capture: Value, history: PrunedHistory) {
+        self.run.capture = capture;
+        self.run.capture_history = Some(history);
+    }
+
+    /// Refuse `payload` (an intent as appended) in `role` unless this
+    /// stream's state allows it. Appends and recovery ask exactly this, so a
+    /// record acknowledged now is accepted again at the next start.
+    pub(super) fn check(&self, payload: &Value, role: &str) -> Result<()> {
+        validate_recovery(self, payload, role)?;
+        validate_transition(self, payload)?;
+        validate_intent(self, payload)
+    }
+
+    /// Accept one checked canonical record: `bytes` are its frame without the
+    /// newline, `record` the canonical record and `payload` the intent it
+    /// carries.
+    pub(super) fn accept(
+        &mut self,
+        bytes: &[u8],
+        record: &Value,
+        payload: &Value,
+        receipt: AppendReceipt,
+        payload_digest: String,
+    ) -> Result<()> {
+        apply_record(self, payload, receipt.clone(), payload_digest.clone())?;
+        self.accepted_bytes += bytes.len() as u64 + 1;
+        self.hash_record(bytes, record, &receipt, &payload_digest)
     }
 
     /// Shared by store recovery and read-only portable bundle verification.
@@ -215,16 +363,11 @@ impl Stream {
             seq: expected_seq,
             digest: sha256_prefixed(bytes),
         };
-        validate_recovery(
-            self,
+        self.check(
             &payload,
             decoded["provenance"]["role"].as_str().unwrap_or(""),
         )?;
-        validate_transition(self, &payload)?;
-        validate_intent(self, &payload)?;
-        apply_record(self, &payload, receipt.clone(), payload_digest.clone())?;
-        self.accepted_bytes += bytes.len() as u64 + 1;
-        self.hash_record(bytes, &decoded, &receipt, &payload_digest)
+        self.accept(bytes, &decoded, &payload, receipt, payload_digest)
     }
 
     pub(super) fn begin_segment(&mut self, number: usize) {
@@ -233,7 +376,7 @@ impl Stream {
         self.segment_hash = Sha256::new();
     }
 
-    pub(super) fn hash_record(
+    fn hash_record(
         &mut self,
         bytes: &[u8],
         record: &Value,

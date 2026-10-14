@@ -64,7 +64,7 @@ impl Store {
             result["reason"] = json!("invalid_capture_metadata");
             return result;
         }
-        match read_prefix(&self.root, &run.run_id, name, stored) {
+        match read_prefix(self.root(), &run.run_id, name, stored) {
             Ok(bytes) => {
                 result["state"] = json!(if recorded["state"] == "incomplete" {
                     "incomplete"

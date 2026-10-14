@@ -58,12 +58,12 @@ impl PendingFailure {
 
 impl Store {
     pub(super) fn pending_exists(&self, id: &str) -> bool {
-        fs::symlink_metadata(self.root.join(id).join(STATE)).is_ok()
+        fs::symlink_metadata(self.run_dir(id).join(STATE)).is_ok()
     }
 
     #[cfg(target_os = "linux")]
     fn journal_seen(&self, id: &str) -> Option<JournalSeen> {
-        let m = fs::symlink_metadata(self.root.join(id).join(STATE)).ok()?;
+        let m = fs::symlink_metadata(self.run_dir(id).join(STATE)).ok()?;
         Some(JournalSeen {
             device: m.dev(),
             inode: m.ino(),
@@ -114,7 +114,7 @@ impl Store {
         use PendingFailure::{Other, Refused};
         use PendingRefusal::*;
         let refused = |refusal| move |error| Refused(refusal, error);
-        if !self.stream(id).map_err(Other)?.poisoned.is_empty() {
+        if self.stream(id).map_err(Other)?.is_poisoned() {
             return Err(Other(LedgerError(
                 "ambiguous canonical history refuses pending recovery".into(),
             )));
@@ -144,7 +144,7 @@ impl Store {
                 LedgerError("nonterminal recovery requires its pending journal".into()),
             ));
         }
-        let journal = Journal::try_open(&self.root.join(id))
+        let journal = Journal::try_open(&self.run_dir(id))
             .map_err(refused(JournalUnreadable))?
             .ok_or_else(|| {
                 Other(LedgerError(
@@ -174,7 +174,7 @@ impl Store {
         // persistence failure poisons it and is never the journal's fault.
         let appended = |store: &Self, result: Result<AppendReceipt>| {
             result.map(drop).map_err(|error| {
-                if store.stream(id).is_ok_and(|s| s.poisoned.is_empty()) {
+                if store.stream(id).is_ok_and(|s| !s.is_poisoned()) {
                     Refused(EvidenceRefused, error)
                 } else {
                     Other(error)
@@ -209,14 +209,14 @@ impl Store {
     #[cfg(target_os = "linux")]
     pub(crate) fn recover_pending_orphans(&mut self, peer: &Peer) {
         let ids: Vec<_> = self
-            .streams
+            .streams()
             .iter()
             .filter(|(id, s)| {
-                s.run.payload["evidence"] == "best-effort"
-                    && s.poisoned.is_empty()
+                s.run().payload["evidence"] == "best-effort"
+                    && !s.is_poisoned()
                     && (self.pending_exists(id)
-                        || ["prepared", "admitted"].contains(&s.run.state.as_str()))
-                    && s.run
+                        || ["prepared", "admitted"].contains(&s.run().state.as_str()))
+                    && s.run()
                         .owner
                         .as_ref()
                         .is_some_and(|owner| !crate::daemon::peer_alive(owner))
@@ -225,12 +225,12 @@ impl Store {
             .collect();
         for id in ids {
             let seen = self.journal_seen(&id);
-            if self.pending_failures.get(&id) == Some(&seen) {
+            if self.failed_journals().get(&id) == Some(&seen) {
                 continue;
             }
             let (refusal, problem) = match self.reconcile(&id, peer, &crate::daemon::peer_alive) {
                 Ok(_) => {
-                    self.pending_failures.remove(&id);
+                    self.failed_journals().remove(&id);
                     continue;
                 }
                 Err(PendingFailure::Other(problem)) => {
@@ -245,13 +245,13 @@ impl Store {
             // never sufficient evidence for a successful terminal outcome.
             if self
                 .stream(&id)
-                .is_ok_and(|s| ["prepared", "admitted"].contains(&s.run.state.as_str()))
+                .is_ok_and(|s| ["prepared", "admitted"].contains(&s.run().state.as_str()))
                 && let Err(error) = self.record_invalid_pending(&id, peer, refusal)
             {
                 eprintln!("recording unknown outcome for {id}: {error}");
             }
             // Retrying an unchanged journal every second cannot succeed.
-            self.pending_failures.insert(id, seen);
+            self.failed_journals().insert(id, seen);
         }
     }
 }
