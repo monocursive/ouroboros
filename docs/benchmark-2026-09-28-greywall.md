@@ -27,8 +27,9 @@ Same host, same workloads, same day: `ouro-jail` at HEAD `2c8f28dc`
 - ouro-jail rows: `ouro-jail run --profile tool -- …` with observation
   on (default) and `--observe off`. greywall rows: `greywall -- …`
   (default profile: cwd rw, network denied).
-- Scripts and raw JSON: `~/bench.sh`, `~/spotcheck.sh`,
-  `/tmp/bench-results/*.json` on the host.
+- Scripts: [bench.sh, spotcheck.sh, summarize.py and a5_gwsys.c](benchmarks/greywall-2026-09-28/),
+  run from `~` and `/tmp` on the host; the raw JSON in
+  `/tmp/bench-results/*.json` stayed on the host.
 
 ## Performance
 
@@ -133,9 +134,15 @@ by its own documentation it is a weaker boundary for a different
 
 ## Artifacts (on the VPS)
 
-- `~/bench.sh`, `/tmp/bench-results/*.json` — timing suite and raw data.
-- `~/spotcheck.sh`, `/tmp/spotcheck.log` — posture probes and results.
-- `/tmp/a5_gwsys(.c)`, `/tmp/a5_mnt2(.c)` — syscall and mount-chain
-  probes.
+- [bench.sh](benchmarks/greywall-2026-09-28/bench.sh) (run as `~/bench.sh`)
+  and [summarize.py](benchmarks/greywall-2026-09-28/summarize.py) — timing
+  suite and its table; raw data in `/tmp/bench-results/*.json` on the host,
+  not retained here.
+- [spotcheck.sh](benchmarks/greywall-2026-09-28/spotcheck.sh) (run as
+  `~/spotcheck.sh`), `/tmp/spotcheck.log` — posture probes and results.
+  Probe 8 temporarily replaces `~/.local/bin/greywall` and restores it.
+- [a5_gwsys.c](benchmarks/greywall-2026-09-28/a5_gwsys.c) (built as
+  `/tmp/a5_gwsys`; it stats the VPS path `/home/ubuntu/.ssh`) and
+  `/tmp/a5_mnt2(.c)` (not retained) — syscall and mount-chain probes.
 - Host state verified clean after the C3-analog demo (both binaries
   restored, no planted files).

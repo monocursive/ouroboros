@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
 # Sixth-pass mechanical boundary battery. Each line prints TEST|RESULT.
+#
+# Run it only INSIDE the jail under test. Several probes are real escape
+# attempts: they write /proc/sysrq-trigger (b = immediate reboot),
+# /proc/sys/kernel/core_pattern and /proc/sys/kernel/modprobe, and plant files
+# in the working directory, /tmp and /var/tmp. Outside a boundary, with enough
+# privilege, they reboot or reconfigure the host. Confirm the context
+# explicitly, inside the sandbox:
+#   ouro-jail run --profile agent -- env A6_INSIDE_SANDBOX_UNDER_TEST=1 bash a6_battery.sh
+if [ "${A6_INSIDE_SANDBOX_UNDER_TEST:-}" != 1 ]; then
+    echo 'a6_battery.sh: refusing to run: set A6_INSIDE_SANDBOX_UNDER_TEST=1 inside the sandbox under test' >&2
+    exit 2
+fi
 t() { local name="$1"; shift; local out; out="$("$@" 2>&1)"; local rc=$?; printf '%s|rc=%d|%s\n' "$name" "$rc" "$(printf '%s' "$out" | head -c 120 | tr '\n' ' ')"; }
 
 echo "== root view =="

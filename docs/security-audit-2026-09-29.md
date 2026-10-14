@@ -16,8 +16,9 @@ including model-driven red-teams through opencode 1.18.32 itself.
   after this pass's fixes, installed at `~/.local/bin/ouro-jail`.
 - Baseline first: the A01 reproduction ("Create a file named
   greeting.txt …") exited 0 in 7 s from a git-repo workspace.
-- Probes under `~/a6ws` (`a6_battery.sh`, `a6_net.py`) and the prior
-  passes' `~/a5ws` PoCs.
+- Probes under `~/a6ws` (`a6_battery.sh`, `a6_net.py`, kept in
+  [security-audits/2026-09-29-pass6/probes](security-audits/2026-09-29-pass6/probes/))
+  and the prior passes' `~/a5ws` PoCs.
 
 ## Verdict
 
@@ -262,7 +263,12 @@ fixes above were corrected as follows (unit tests beside each).
 ## Artifacts (on the VPS)
 
 - `~/a6ws/` — `a6_battery.sh` (mechanical battery), `a6_net.py`
-  (network attack probes), receipts under `~/.local/share/ouro/`.
+  (network attack probes), now in
+  [security-audits/2026-09-29-pass6/probes](security-audits/2026-09-29-pass6/probes/);
+  receipts under `~/.local/share/ouro/` on the VPS. The battery writes
+  `/proc/sysrq-trigger`, `core_pattern` and `modprobe`; it refuses to start
+  unless `A6_INSIDE_SANDBOX_UNDER_TEST=1` is set inside the sandbox under
+  test.
 - Host state restored after every demo; `~/.config/ouro/config.toml`
   never created outside the guarded demos.
 

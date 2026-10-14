@@ -76,8 +76,9 @@ formal J5 phase-timing/performance gate and contain no same-run greywall arm.
 The acceptance script uses disposable state and fixture-only secrets. Its
 network success checks use `https://example.com/`; signature tests use an
 ephemeral key without any publication authority. The vendored `a5_c3.c` and
-`a5_sysprobe.c` are the fifth audit's original probes. Other original audit
-scripts remain in the operator's working tree; this is not a claim to have
+`a5_sysprobe.c` are the fifth audit's original probes. The fifth and sixth
+audits' other probes are kept with those audits under
+[security-audits](../../security-audits/); this is not a claim to have
 reproduced every audit finding.
 
 ## macOS decision gate

@@ -330,13 +330,18 @@ Live-probed under `agent` with header-verified numbers:
   handling/restart codes/compat decoding/pid reuse — all re-verified
   with no additional bypass beyond the findings above.
 
-## Artifacts (on the VPS)
+## Artifacts
 
-- `~/a5ws/` — probes and PoCs: `a5_sysprobe(.c)` (drift sweep),
-  `a5_fsx2.c` (file_setattr ABI), `a5_battery.py` (mediation + ports),
-  `a5_verify.py`, `a5_stage2.py` (C1 two-stage swap), `a5_c3(.c)` (C4
-  clone3), `a5_linkat(.c)`, plus the supervisor-replacement demo
-  commands (C3, in the transcript).
+- Probes and PoCs, run from `~/a5ws/` on the VPS and kept in
+  [security-audits/2026-09-27-pass5/probes](security-audits/2026-09-27-pass5/probes/):
+  `a5_fsx.c` and `a5_fsx2.c` (file_setattr ABI), `a5_battery.py`
+  (mediation + ports; run inside the jail), `a5_verify.py`, `a5_stage2.py`
+  (C1 two-stage swap), `a5_linkat.c` (its default destination is the
+  VPS path `/home/ubuntu/a5ws/hardlink`; pass one as `argv[2]`). The drift
+  sweep `a5_sysprobe.c` and the C4 clone3 probe `a5_c3.c` are the copies
+  vendored, byte-identical, as acceptance fixtures in
+  [benchmarks/jail/fixtures](benchmarks/jail/fixtures/). The
+  supervisor-replacement demo commands (C3) are in the transcript only.
 - Receipts: `/tmp/a5-c3.json` (C4). C1 receipts under
   `~/.local/share/ouro/attempts/att_ff76a291…` and `att_fe431079…`.
 - Host state restored and verified after every demo: supervisor binary
