@@ -268,8 +268,8 @@ pub struct LimitCeiling {
     pub required: bool,
 }
 
-/// `limits` field group of the snapshot.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+/// `limits` field group of the snapshot. The default sets no ceiling.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsSnapshot {
     /// Wall clock, milliseconds. Wall always exists (§6.4).

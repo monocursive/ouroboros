@@ -5,7 +5,7 @@
 //! before target release; profiles that can create mounts cannot use this path.
 mod quota;
 
-use crate::policy::LimitsSnapshot;
+use crate::policy::{LimitCeiling, LimitKey, LimitsSnapshot};
 use crate::records::AppliedLimit;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -17,10 +17,97 @@ use std::path::{Path, PathBuf};
 
 pub(super) struct Storage {
     volumes: Vec<Volume>,
-    limits: Vec<AppliedLimit>,
+    limits: Vec<(StorageLimit, AppliedLimit)>,
     capacity_bytes: Option<u64>,
     capacity_inodes: Option<u64>,
     failure: Option<String>,
+}
+
+/// The two ceilings storage admission enforces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StorageLimit {
+    /// `storage`: aggregate writable filesystem bytes.
+    Bytes,
+    /// `inodes`: aggregate writable filesystem inodes.
+    Inodes,
+}
+
+impl StorageLimit {
+    /// The storage ceiling for a policy key, if storage admission enforces
+    /// it. Every key is named, so a new one does not compile until it is
+    /// placed.
+    fn for_key(key: LimitKey) -> Option<StorageLimit> {
+        match key {
+            LimitKey::Storage => Some(StorageLimit::Bytes),
+            LimitKey::Inodes => Some(StorageLimit::Inodes),
+            LimitKey::Wall | LimitKey::Pids | LimitKey::Mem | LimitKey::Swap | LimitKey::Cpu => {
+                None
+            }
+        }
+    }
+
+    /// Every storage ceiling, in the policy's key order.
+    fn all() -> impl Iterator<Item = StorageLimit> {
+        LimitKey::ALL.into_iter().filter_map(StorageLimit::for_key)
+    }
+
+    /// The policy key this ceiling is.
+    fn key(self) -> LimitKey {
+        match self {
+            StorageLimit::Bytes => LimitKey::Storage,
+            StorageLimit::Inodes => LimitKey::Inodes,
+        }
+    }
+
+    /// The ceiling the policy requested, if any.
+    fn requested(self, limits: &LimitsSnapshot) -> Option<&LimitCeiling> {
+        match self {
+            StorageLimit::Bytes => limits.storage.as_ref(),
+            StorageLimit::Inodes => limits.inodes.as_ref(),
+        }
+    }
+}
+
+/// How a writable filesystem's capacity is bounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StorageMechanism {
+    /// The calling user's ext4/XFS hard quota.
+    UserHardQuota,
+    /// A tmpfs mounted with a size and inode count.
+    BoundedTmpfs,
+}
+
+impl StorageMechanism {
+    /// The mechanism a whole admission records: a user quota when any volume
+    /// charges one, so the aggregate is never described as tmpfs alone.
+    fn of_all<'a>(volumes: impl IntoIterator<Item = &'a Volume>) -> Self {
+        if volumes
+            .into_iter()
+            .any(|volume| volume.mechanism() == StorageMechanism::UserHardQuota)
+        {
+            StorageMechanism::UserHardQuota
+        } else {
+            StorageMechanism::BoundedTmpfs
+        }
+    }
+
+    /// The spelling of the applied limit's `mechanism`, of the evidence's
+    /// overall `mechanism`, and of the doctor probe.
+    fn as_str(self) -> &'static str {
+        match self {
+            StorageMechanism::UserHardQuota => "filesystem-user-quota",
+            StorageMechanism::BoundedTmpfs => "bounded-tmpfs-capacity",
+        }
+    }
+
+    /// The spelling of one volume's `mechanism` in the evidence, which names
+    /// the quota itself rather than the filesystem that carries it.
+    fn volume_spelling(self) -> &'static str {
+        match self {
+            StorageMechanism::UserHardQuota => "user-hard-quota",
+            StorageMechanism::BoundedTmpfs => "bounded-tmpfs-capacity",
+        }
+    }
 }
 
 struct Volume {
@@ -31,6 +118,13 @@ struct Volume {
 }
 
 impl Volume {
+    fn mechanism(&self) -> StorageMechanism {
+        match self.uid {
+            Some(_) => StorageMechanism::UserHardQuota,
+            None => StorageMechanism::BoundedTmpfs,
+        }
+    }
+
     fn full(&self) -> io::Result<(bool, bool)> {
         if let Some(uid) = self.uid {
             let now = quota::read(&self.file, uid)?;
@@ -106,6 +200,15 @@ struct Ceiling {
     inodes: Option<u64>,
 }
 
+impl Ceiling {
+    fn mechanism(&self) -> StorageMechanism {
+        match self.uid {
+            Some(_) => StorageMechanism::UserHardQuota,
+            None => StorageMechanism::BoundedTmpfs,
+        }
+    }
+}
+
 /// Why a writable filesystem has no ceiling admission can charge.
 enum CeilingRefusal {
     /// Neither bounded tmpfs nor ext4/XFS: admission refuses the mount.
@@ -177,15 +280,7 @@ pub(super) fn probe_ceiling(path: &Path) -> CeilingProbe {
         Err(err) => return CeilingProbe::Failed(format!("{}: {err}", path.display())),
     };
     let (mechanism, bytes, inodes) = match ceiling(&file, &value) {
-        Ok(ceiling) => (
-            if ceiling.uid.is_some() {
-                "filesystem-user-quota"
-            } else {
-                "bounded-tmpfs-capacity"
-            },
-            ceiling.bytes,
-            ceiling.inodes,
-        ),
+        Ok(ceiling) => (ceiling.mechanism(), ceiling.bytes, ceiling.inodes),
         Err(CeilingRefusal::Quota(err)) => {
             return CeilingProbe::Unbounded {
                 reason: "no_user_hard_quota",
@@ -208,7 +303,8 @@ pub(super) fn probe_ceiling(path: &Path) -> CeilingProbe {
         (Some(bytes), Some(inodes)) => {
             return CeilingProbe::Bounded {
                 evidence: format!(
-                    "{mechanism}: {bytes} bytes, {inodes} inodes ({})",
+                    "{}: {bytes} bytes, {inodes} inodes ({})",
+                    mechanism.as_str(),
                     path.display()
                 ),
             };
@@ -218,13 +314,13 @@ pub(super) fn probe_ceiling(path: &Path) -> CeilingProbe {
         (Some(_), None) => "inodes",
     };
     CeilingProbe::Unbounded {
-        reason: if mechanism == "filesystem-user-quota" {
-            "no_user_hard_quota"
-        } else {
-            "tmpfs_unbounded"
+        reason: match mechanism {
+            StorageMechanism::UserHardQuota => "no_user_hard_quota",
+            StorageMechanism::BoundedTmpfs => "tmpfs_unbounded",
         },
         evidence: format!(
-            "{mechanism} on {} has no hard bound for {missing}",
+            "{} on {} has no hard bound for {missing}",
+            mechanism.as_str(),
             path.display()
         ),
     }
@@ -237,159 +333,223 @@ pub(super) fn probe_ceiling(path: &Path) -> CeilingProbe {
 const ALLOCATION_FREE_DEVICES: [(u32, u32); 6] = [(1, 3), (1, 5), (1, 7), (1, 8), (1, 9), (5, 0)];
 
 pub(super) fn requested(limits: &LimitsSnapshot) -> bool {
-    limits.storage.is_some() || limits.inodes.is_some()
+    StorageLimit::all().any(|limit| limit.requested(limits).is_some())
+}
+
+/// The largest mount inventory admission reads.
+const MOUNTINFO_MAX: usize = 1024 * 1024;
+
+/// The mount points of every writable mount in `raw`, a
+/// `/proc/<pid>/mountinfo`, decoded.
+///
+/// A read-only mount (`ro` in the per-mount options) needs no ceiling. An
+/// idmapped writable mount would charge a quota identity this code does not
+/// see, so it refuses, as does a row with too few fields or a mount point
+/// that is not an absolute path without NUL: a row that cannot be read is
+/// never a mount that was not there.
+///
+/// # Errors
+/// An empty or oversized inventory, a malformed row, or an idmapped
+/// writable mount.
+fn writable_mount_points(raw: &[u8]) -> io::Result<Vec<Vec<u8>>> {
+    if raw.is_empty() || raw.len() > MOUNTINFO_MAX {
+        return Err(io::Error::other(
+            "storage mount inventory missing or too large",
+        ));
+    }
+    let mut points = Vec::new();
+    for line in raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
+        let point = fields
+            .get(4)
+            .ok_or_else(|| io::Error::other("invalid storage mount row"))?;
+        let options = fields
+            .get(5)
+            .ok_or_else(|| io::Error::other("missing storage mount options"))?;
+        let mut options = options.split(|byte| *byte == b',');
+        if options.clone().any(|option| option == b"ro") {
+            continue;
+        }
+        if options.any(|option| option == b"idmapped") {
+            return Err(io::Error::other(
+                "storage ceilings do not support idmapped writable mounts",
+            ));
+        }
+        let point = super::platform::decode_mountinfo_path(point);
+        if !point.starts_with(b"/") || point.contains(&0) {
+            return Err(io::Error::other("invalid storage mount point"));
+        }
+        points.push(point);
+    }
+    Ok(points)
+}
+
+/// What one writable mount contributes to admission.
+enum Admitted {
+    /// It cannot allocate filesystem data: a device bubblewrap binds on its
+    /// own, process metadata, a pty.
+    Exempt,
+    /// It is bounded: the filesystem's device and the volume to sample.
+    Bounded(u64, Volume),
+}
+
+/// Classifies the writable mount at `point` in `pid`'s namespace, checking a
+/// quota-bounded mount's existing inodes all charge the quota's user.
+///
+/// # Errors
+/// A mount that cannot be opened or classified, or one with no ceiling
+/// admission can charge.
+fn admit_mount(
+    pid: libc::pid_t,
+    point: &[u8],
+    scanned: &mut usize,
+    deadline: super::clock::Deadline,
+) -> io::Result<Admitted> {
+    let mut path = format!("/proc/{pid}/root").into_bytes();
+    path.extend_from_slice(point);
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+        .open(PathBuf::from(std::ffi::OsString::from_vec(path)))?;
+    let value = stat(&file)?;
+    let metadata = file.metadata()?;
+    if metadata.file_type().is_char_device()
+        && ALLOCATION_FREE_DEVICES
+            .contains(&(libc::major(metadata.rdev()), libc::minor(metadata.rdev())))
+    {
+        return Ok(Admitted::Exempt);
+    }
+    // Process metadata and ptys do not allocate filesystem data.
+    if [libc::PROC_SUPER_MAGIC, libc::DEVPTS_SUPER_MAGIC].contains(&value.f_type) {
+        return Ok(Admitted::Exempt);
+    }
+    let file = sampling_file(file, &value)?;
+    let ceiling = match ceiling(&file, &value) {
+        Ok(ceiling) => ceiling,
+        Err(CeilingRefusal::Quota(err)) => {
+            return Err(io::Error::other(format!(
+                "writable disk mount {} needs an enforced user hard quota: {err}",
+                String::from_utf8_lossy(point)
+            )));
+        }
+        Err(CeilingRefusal::Overflow(err)) => return Err(err),
+        Err(CeilingRefusal::Unbounded) => {
+            return Err(io::Error::other(format!(
+                "writable mount {} needs bounded tmpfs or ext4/XFS user hard quotas",
+                String::from_utf8_lossy(point)
+            )));
+        }
+    };
+    if let Some(uid) = ceiling.uid {
+        // Check every grant, even another bind of an already-counted
+        // filesystem: its existing inodes may have different owners.
+        quota::check_owners(&file, uid, scanned, deadline)?;
+    }
+    Ok(Admitted::Bounded(
+        metadata.dev(),
+        Volume {
+            file,
+            uid: ceiling.uid,
+            bytes: ceiling.bytes,
+            inodes: ceiling.inodes,
+        },
+    ))
 }
 
 impl Storage {
+    /// Admits every writable mount of `pid`'s mount namespace: each must be
+    /// a bounded tmpfs or carry the calling user's hard quota, and their
+    /// capacities, one per filesystem, must fit the requested ceilings.
+    ///
+    /// # Errors
+    /// An unreadable inventory, a mount admission refuses, a requested
+    /// resource some filesystem does not bound, or an aggregate capacity
+    /// over the requested ceiling.
     pub(super) fn admit(
         pid: libc::pid_t,
         limits: &LimitsSnapshot,
         deadline: super::clock::Deadline,
     ) -> io::Result<Self> {
         let raw = fs::read(format!("/proc/{pid}/mountinfo"))?;
-        if raw.is_empty() || raw.len() > 1024 * 1024 {
-            return Err(io::Error::other(
-                "storage mount inventory missing or too large",
-            ));
-        }
         let mut volumes = BTreeMap::new();
-        let mut bytes = 0u64;
-        let mut inodes = 0u64;
-        let mut bytes_bounded = true;
-        let mut inodes_bounded = true;
         let mut scanned = 0;
-        for line in raw
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-        {
+        for point in writable_mount_points(&raw)? {
             if deadline.expired() {
                 return Err(io::Error::other("storage admission deadline expired"));
             }
-            let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
-            let point = fields
-                .get(4)
-                .ok_or_else(|| io::Error::other("invalid storage mount row"))?;
-            let options = fields
-                .get(5)
-                .ok_or_else(|| io::Error::other("missing storage mount options"))?;
-            if options
-                .split(|byte| *byte == b',')
-                .any(|option| option == b"ro")
-            {
+            let Admitted::Bounded(device, volume) =
+                admit_mount(pid, &point, &mut scanned, deadline)?
+            else {
                 continue;
-            }
-            if options
-                .split(|byte| *byte == b',')
-                .any(|option| option == b"idmapped")
-            {
-                return Err(io::Error::other(
-                    "storage ceilings do not support idmapped writable mounts",
-                ));
-            }
-            let point = super::platform::decode_mountinfo_path(point);
-            if !point.starts_with(b"/") || point.contains(&0) {
-                return Err(io::Error::other("invalid storage mount point"));
-            }
-            let mut path = format!("/proc/{pid}/root").into_bytes();
-            path.extend_from_slice(&point);
-            let file = OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
-                .open(PathBuf::from(std::ffi::OsString::from_vec(path)))?;
-            let value = stat(&file)?;
-            let metadata = file.metadata()?;
-            if metadata.file_type().is_char_device()
-                && ALLOCATION_FREE_DEVICES
-                    .contains(&(libc::major(metadata.rdev()), libc::minor(metadata.rdev())))
-            {
-                continue;
-            }
-            // Process metadata and ptys do not allocate filesystem data.
-            if [libc::PROC_SUPER_MAGIC, libc::DEVPTS_SUPER_MAGIC].contains(&value.f_type) {
-                continue;
-            }
-            let device = metadata.dev();
-            let file = sampling_file(file, &value)?;
-            let (uid, capacity_bytes, capacity_inodes) = match ceiling(&file, &value) {
-                Ok(ceiling) => (ceiling.uid, ceiling.bytes, ceiling.inodes),
-                Err(CeilingRefusal::Quota(err)) => {
-                    return Err(io::Error::other(format!(
-                        "writable disk mount {} needs an enforced user hard quota: {err}",
-                        String::from_utf8_lossy(&point)
-                    )));
-                }
-                Err(CeilingRefusal::Overflow(err)) => return Err(err),
-                Err(CeilingRefusal::Unbounded) => {
-                    return Err(io::Error::other(format!(
-                        "writable mount {} needs bounded tmpfs or ext4/XFS user hard quotas",
-                        String::from_utf8_lossy(&point)
-                    )));
-                }
             };
-            if let Some(uid) = uid {
-                // Check every grant, even another bind of an already-counted
-                // filesystem: its existing inodes may have different owners.
-                quota::check_owners(&file, uid, &mut scanned, deadline)?;
-            }
             if volumes.contains_key(&device) {
                 continue;
             }
-            if (limits.storage.is_some() && capacity_bytes.is_none())
-                || (limits.inodes.is_some() && capacity_inodes.is_none())
+            if (limits.storage.is_some() && volume.bytes.is_none())
+                || (limits.inodes.is_some() && volume.inodes.is_none())
             {
                 return Err(io::Error::other(
                     "writable filesystem has no hard ceiling for a requested resource",
                 ));
             }
-            bytes_bounded &= capacity_bytes.is_some();
-            inodes_bounded &= capacity_inodes.is_some();
-            bytes = bytes
-                .checked_add(capacity_bytes.unwrap_or(0))
-                .ok_or_else(|| io::Error::other("storage capacity overflow"))?;
-            inodes = inodes
-                .checked_add(capacity_inodes.unwrap_or(0))
-                .ok_or_else(|| io::Error::other("inode capacity overflow"))?;
-            volumes.insert(
-                device,
-                Volume {
-                    file,
-                    uid,
-                    bytes: capacity_bytes,
-                    inodes: capacity_inodes,
-                },
-            );
+            volumes.insert(device, volume);
         }
-        let mechanism = if volumes.values().any(|volume| volume.uid.is_some()) {
-            "filesystem-user-quota"
-        } else {
-            "bounded-tmpfs-capacity"
+        Self::aggregate(volumes.into_values().collect(), limits)
+    }
+
+    /// The admitted volumes' total capacity checked against the requested
+    /// ceilings, and the limits it applies.
+    fn aggregate(volumes: Vec<Volume>, limits: &LimitsSnapshot) -> io::Result<Self> {
+        let total = |capacity: fn(&Volume) -> Option<u64>, what: &str| -> io::Result<(u64, bool)> {
+            volumes
+                .iter()
+                .try_fold((0u64, true), |(sum, bounded), volume| {
+                    let value = capacity(volume);
+                    let sum = sum
+                        .checked_add(value.unwrap_or(0))
+                        .ok_or_else(|| io::Error::other(format!("{what} capacity overflow")))?;
+                    Ok((sum, bounded && value.is_some()))
+                })
         };
+        let (bytes, bytes_bounded) = total(|volume| volume.bytes, "storage")?;
+        let (inodes, inodes_bounded) = total(|volume| volume.inodes, "inode")?;
+        let mechanism = StorageMechanism::of_all(&volumes);
         let mut applied = Vec::new();
-        for (key, ceiling, capacity) in [
-            ("storage", &limits.storage, bytes),
-            ("inodes", &limits.inodes, inodes),
-        ] {
-            let Some(ceiling) = ceiling else { continue };
+        for limit in StorageLimit::all() {
+            let Some(ceiling) = limit.requested(limits) else {
+                continue;
+            };
+            let capacity = match limit {
+                StorageLimit::Bytes => bytes,
+                StorageLimit::Inodes => inodes,
+            };
+            let key = limit.key().as_str();
             let requested: u64 = ceiling.value.parse().map_err(io::Error::other)?;
             if capacity > requested {
                 return Err(io::Error::other(format!(
                     "{key}: aggregate writable storage capacity {capacity} exceeds requested ceiling {requested}"
                 )));
             }
-            applied.push(AppliedLimit {
-                key: key.into(),
-                requested: ceiling.value.clone(),
-                required: ceiling.required,
-                applied: true,
-                mechanism: Some(mechanism.into()),
-                scope: Some("tree".into()),
-                // Filesystems expose occupancy, not cumulative refusals.
-                // Never invent a negative hit claim from a polling sample.
-                hit: None,
-            });
+            applied.push((
+                limit,
+                AppliedLimit {
+                    key: key.into(),
+                    requested: ceiling.value.clone(),
+                    required: ceiling.required,
+                    applied: true,
+                    mechanism: Some(mechanism.as_str().into()),
+                    scope: Some("tree".into()),
+                    // Filesystems expose occupancy, not cumulative refusals.
+                    // Never invent a negative hit claim from a polling sample.
+                    hit: None,
+                },
+            ));
         }
         Ok(Self {
-            volumes: volumes.into_values().collect(),
+            volumes,
             limits: applied,
             capacity_bytes: bytes_bounded.then_some(bytes),
             capacity_inodes: inodes_bounded.then_some(inodes),
@@ -398,13 +558,12 @@ impl Storage {
     }
 
     pub(super) fn limits(&self) -> Vec<AppliedLimit> {
+        let rows = self.limits.iter().map(|(_, limit)| limit);
         if self.failure.is_some() {
-            // Audit 2026-10-08 L2: enforcement that was lost no longer claims
-            // `applied: true`, like `record_limit_unapplied`'s rows; the
-            // receipt's `errors[]` entry names `storage_enforcement_lost`.
-            return self
-                .limits
-                .iter()
+            // Enforcement that was lost no longer claims `applied: true`,
+            // like `record_limit_unapplied`'s rows; the receipt's `errors[]`
+            // entry names `storage_enforcement_lost`.
+            return rows
                 .map(|limit| AppliedLimit {
                     applied: false,
                     mechanism: None,
@@ -414,7 +573,7 @@ impl Storage {
                 })
                 .collect();
         }
-        self.limits.clone()
+        rows.cloned().collect()
     }
 
     /// The stored enforcement-loss message, for the receipt's `errors[]`.
@@ -424,11 +583,9 @@ impl Storage {
 
     pub(super) fn evidence(&self) -> serde_json::Value {
         serde_json::json!({
-            "mechanism": if self.volumes.iter().any(|volume| volume.uid.is_some()) {
-                "filesystem-user-quota"
-            } else { "bounded-tmpfs-capacity" },
+            "mechanism": StorageMechanism::of_all(&self.volumes).as_str(),
             "volumes": self.volumes.iter().map(|volume| serde_json::json!({
-                "mechanism": if volume.uid.is_some() { "user-hard-quota" } else { "bounded-tmpfs-capacity" },
+                "mechanism": volume.mechanism().volume_spelling(),
                 "uid": volume.uid,
                 "capacity_bytes": volume.bytes,
                 "capacity_inodes": volume.inodes,
@@ -469,11 +626,10 @@ impl Storage {
             inodes_full |= full_inodes;
         }
         let mut hits = Vec::new();
-        for limit in &mut self.limits {
-            let full = if limit.key == "storage" {
-                bytes_full
-            } else {
-                inodes_full
+        for (kind, limit) in &mut self.limits {
+            let full = match kind {
+                StorageLimit::Bytes => bytes_full,
+                StorageLimit::Inodes => inodes_full,
             };
             if full && limit.hit != Some(true) {
                 limit.hit = Some(true);
@@ -631,18 +787,135 @@ mod tests {
     }
 
     #[test]
+    fn the_mount_inventory_names_writable_mounts_and_refuses_what_it_cannot_read() {
+        let row = |point: &str, options: &str| {
+            format!("36 35 98:0 / {point} {options} master:1 - ext4 /dev/root rw\n")
+        };
+        let text = [
+            row("/", "ro,relatime"),
+            row("/work\\040space", "rw,nosuid"),
+            row("/tmp", "rw,noro"),
+        ]
+        .concat();
+        assert_eq!(
+            writable_mount_points(text.as_bytes()).unwrap(),
+            [b"/work space".to_vec(), b"/tmp".to_vec()],
+            "read-only mounts need no ceiling; an option merely containing ro is not ro"
+        );
+        for refused in [
+            String::new(),
+            row("/x", "rw,idmapped"),
+            "36 35 98:0 / /x\n".to_owned(),
+            row("relative", "rw"),
+            row("/a\\000b", "rw"),
+        ] {
+            assert!(
+                writable_mount_points(refused.as_bytes()).is_err(),
+                "{refused:?}"
+            );
+        }
+        assert!(writable_mount_points(&vec![b'x'; MOUNTINFO_MAX + 1]).is_err());
+    }
+
+    #[test]
+    fn admission_sums_one_capacity_per_filesystem_and_names_the_mechanism() {
+        let dir = tempfile::tempdir().unwrap();
+        let volume = |uid: Option<u32>, bytes: Option<u64>, inodes: Option<u64>| Volume {
+            file: File::open(dir.path()).unwrap(),
+            uid,
+            bytes,
+            inodes,
+        };
+        let ceiling = |value: &str| LimitCeiling {
+            value: value.to_owned(),
+            required: true,
+        };
+        let limits = LimitsSnapshot {
+            storage: Some(ceiling("300")),
+            inodes: Some(ceiling("30")),
+            ..LimitsSnapshot::default()
+        };
+        let tmpfs = Storage::aggregate(
+            vec![
+                volume(None, Some(100), Some(10)),
+                volume(None, Some(200), Some(20)),
+            ],
+            &limits,
+        )
+        .unwrap();
+        assert_eq!(
+            (tmpfs.capacity_bytes, tmpfs.capacity_inodes),
+            (Some(300), Some(30))
+        );
+        let rows = tmpfs.limits();
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.key.as_str(), row.mechanism.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("storage", Some("bounded-tmpfs-capacity")),
+                ("inodes", Some("bounded-tmpfs-capacity"))
+            ]
+        );
+        assert_eq!(
+            tmpfs.evidence()["volumes"][0]["mechanism"],
+            "bounded-tmpfs-capacity"
+        );
+        // One quota-backed volume makes the whole admission a quota's.
+        let mixed = Storage::aggregate(
+            vec![
+                volume(Some(1000), Some(100), Some(10)),
+                volume(None, Some(1), Some(1)),
+            ],
+            &limits,
+        )
+        .unwrap();
+        assert_eq!(
+            mixed.limits()[0].mechanism.as_deref(),
+            Some("filesystem-user-quota")
+        );
+        assert_eq!(mixed.evidence()["mechanism"], "filesystem-user-quota");
+        assert_eq!(
+            mixed.evidence()["volumes"][0]["mechanism"],
+            "user-hard-quota"
+        );
+        // More capacity than the ceiling refuses.
+        let over = Storage::aggregate(vec![volume(None, Some(301), Some(1))], &limits);
+        assert!(
+            over.err()
+                .is_some_and(|error| error.to_string().contains("exceeds requested ceiling"))
+        );
+        // Only the requested ceilings are applied.
+        let bytes_only = LimitsSnapshot {
+            storage: Some(ceiling("300")),
+            ..LimitsSnapshot::default()
+        };
+        let applied = Storage::aggregate(vec![volume(None, Some(1), None)], &bytes_only).unwrap();
+        assert_eq!(applied.limits().len(), 1);
+        assert_eq!(
+            applied.capacity_inodes, None,
+            "an unbounded inode count is not a sum"
+        );
+        assert!(requested(&bytes_only));
+        assert!(!requested(&LimitsSnapshot::default()));
+    }
+
+    #[test]
     fn a_lost_enforcement_no_longer_claims_applied() {
         let mut storage = Storage {
             volumes: Vec::new(),
-            limits: vec![AppliedLimit {
-                key: "storage".into(),
-                requested: "1".into(),
-                required: true,
-                applied: true,
-                mechanism: Some("bounded-tmpfs-capacity".into()),
-                scope: Some("tree".into()),
-                hit: None,
-            }],
+            limits: vec![(
+                StorageLimit::Bytes,
+                AppliedLimit {
+                    key: "storage".into(),
+                    requested: "1".into(),
+                    required: true,
+                    applied: true,
+                    mechanism: Some("bounded-tmpfs-capacity".into()),
+                    scope: Some("tree".into()),
+                    hit: None,
+                },
+            )],
             capacity_bytes: Some(1),
             capacity_inodes: None,
             failure: None,
@@ -651,8 +924,8 @@ mod tests {
         assert!(storage.loss().is_none());
         storage.failure = Some("tmpfs capacity changed after admission".into());
         let row = &storage.limits()[0];
-        // Audit 2026-10-08 L2: like `record_limit_unapplied`'s rows, the
-        // ceiling no longer claims `applied`, and its evidence is unknown.
+        // Like `record_limit_unapplied`'s rows, the ceiling no longer claims
+        // `applied`, and its evidence is unknown.
         assert!(!row.applied);
         assert_eq!(row.mechanism, None);
         assert_eq!(row.scope, None);
