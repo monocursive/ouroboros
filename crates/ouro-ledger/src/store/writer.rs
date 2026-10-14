@@ -1,6 +1,6 @@
 //! The sole writer: it owns every loaded stream and appends to them.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::Write as _,
     os::fd::AsRawFd as _,
@@ -50,7 +50,8 @@ pub struct Store {
     readers: crate::reader::Readers,
     index: Option<crate::projection::Projection>,
     index_error: Option<String>,
-    index_pending: BTreeMap<String, RunRecord>,
+    /// Runs whose published projection the index has not taken yet.
+    index_pending: BTreeSet<String>,
     /// Pending journals whose background reconciliation failed, and when
     /// each may be tried again.
     #[cfg(target_os = "linux")]
@@ -168,7 +169,7 @@ impl Store {
             readers: crate::reader::Readers::default(),
             index: None,
             index_error: None,
-            index_pending: BTreeMap::new(),
+            index_pending: BTreeSet::new(),
             #[cfg(target_os = "linux")]
             pending_failures: BTreeMap::new(),
             segment_limit: SEGMENT_BYTES,
@@ -269,11 +270,11 @@ impl Store {
         &mut self.readers
     }
 
-    /// Hand a durably published projection to the disposable index, which
-    /// takes it only after the reply is on its way (see `flush_index`).
-    pub(super) fn queue_index(&mut self, run: RunRecord) {
+    /// Hand a run's durably published projection to the disposable index,
+    /// which takes it only after the reply is on its way (see `flush_index`).
+    pub(super) fn queue_index(&mut self, run_id: &str) {
         if self.index.is_some() {
-            self.index_pending.insert(run.run_id.clone(), run);
+            self.index_pending.insert(run_id.to_owned());
         }
     }
 
@@ -671,14 +672,13 @@ impl Store {
             receipt.clone(),
             payload_digest.into(),
         )?;
-        let run = stream.run().clone();
         let manifest = stream.manifest();
-        publish_projection(&dir, &run)?;
+        publish_projection(&dir, stream.run())?;
         manifest::write(&dir, &manifest)?;
         faults::hit(Point::AppendBeforeDirectorySync)?;
         dir.sync_all()?;
         faults::hit(Point::AppendAfterDirectorySync)?;
-        self.queue_index(run);
+        self.queue_index(run_id);
         Ok(())
     }
 
@@ -715,16 +715,23 @@ impl Store {
 
     /// Dispatch has already handed the durable response to the connection handler.
     /// Index failures cannot change that acknowledgement or canonical stream.
+    ///
+    /// Every run the request touched goes in one index transaction. The first
+    /// failure, including another process holding the index lock, leaves the
+    /// index unavailable until the writer restarts and rebuilds it; `doctor`
+    /// reports the error.
     pub fn flush_index(&mut self) {
         let pending = std::mem::take(&mut self.index_pending);
-        if let Some(index) = &mut self.index {
-            for run in pending.values() {
-                if let Err(error) = index.upsert(run) {
-                    self.index_error = Some(error.to_string());
-                    self.index = None;
-                    break;
-                }
-            }
+        let Some(index) = &mut self.index else {
+            return;
+        };
+        let runs = pending
+            .iter()
+            .filter_map(|id| self.streams.get(id))
+            .map(Stream::run);
+        if let Err(error) = index.upsert(runs) {
+            self.index_error = Some(error.to_string());
+            self.index = None;
         }
     }
 

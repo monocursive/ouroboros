@@ -345,7 +345,7 @@ impl Store {
                 self.stream_mut(id).finish_pruning(run.clone());
                 faults::hit(Point::GcProjection)?;
                 self.write_projection(&run)?;
-                self.queue_index(run);
+                self.queue_index(id);
                 retained.receipt()
             })();
             match collected {

@@ -422,6 +422,34 @@ fn index_failure_after_acknowledgement_does_not_poison_or_reexecute() {
 }
 
 #[test]
+fn one_flush_publishes_every_queued_run_in_one_index_transaction() {
+    // SQLite's file change counter (header bytes 24..28) advances once per
+    // committed write transaction, and each commit costs its own fsyncs.
+    fn commits(index: &Path) -> u32 {
+        let header = fs::read(index).unwrap();
+        u32::from_be_bytes(header[24..28].try_into().unwrap())
+    }
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut store = Store::open(temp.path()).unwrap();
+    let index = store.root().join("index.sqlite");
+    let before = commits(&index);
+    for request in ["first", "second", "third"] {
+        store.prepare(request, &payload(), &peer()).unwrap();
+    }
+    assert_eq!(store.index_status()["pending_runs"], 3);
+    store.flush_index();
+    assert_eq!(store.index_status()["state"], "ready");
+    assert_eq!(store.index_status()["pending_runs"], 0);
+    assert_eq!(commits(&index), before + 1);
+    let rows: i64 = rusqlite::Connection::open(&index)
+        .unwrap()
+        .query_row("SELECT count(*) FROM runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 3);
+}
+
+#[test]
 fn unsafe_store_paths_and_oversized_events_are_refused() {
     let temp = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(temp.path(), temp.path().join("link")).unwrap();

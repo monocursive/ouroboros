@@ -289,9 +289,15 @@ impl Projection {
         self.check_paths()
     }
 
-    pub fn upsert(&mut self, run: &RunRecord) -> Result<()> {
+    /// Publish `runs` in one transaction: one commit, and its syncs, however
+    /// many runs one writer request touched.
+    pub fn upsert<'a>(&mut self, runs: impl IntoIterator<Item = &'a RunRecord>) -> Result<()> {
         self.check_paths()?;
-        insert(&self.connection, run)?;
+        let transaction = sqlite(self.connection.transaction())?;
+        for run in runs {
+            insert(&transaction, run)?;
+        }
+        sqlite(transaction.commit())?;
         self.check_paths()
     }
 }
@@ -389,7 +395,7 @@ mod tests {
         record.state = RunState::OutcomeUnknown;
         record.chain.head_seq = u64::MAX;
         record.coverage = json!({"loss": "explicit"});
-        projection.upsert(&record).unwrap();
+        projection.upsert([&record]).unwrap();
         drop(projection);
         let mut projection = Projection::open(root.path()).unwrap();
         assert_eq!(count(&projection), 2);
@@ -442,7 +448,7 @@ mod tests {
         ] {
             let root = root();
             let mut projection = Projection::open(root.path()).unwrap();
-            projection.upsert(&run("old")).unwrap();
+            projection.upsert([&run("old")]).unwrap();
             projection.connection.execute_batch(alteration).unwrap();
             drop(projection);
             let mut projection = Projection::open(root.path()).unwrap();
@@ -482,7 +488,7 @@ mod tests {
         for hardlink in [false, true] {
             let root = root();
             let mut projection = Projection::open(root.path()).unwrap();
-            projection.upsert(&run("one")).unwrap();
+            projection.upsert([&run("one")]).unwrap();
             if hardlink {
                 fs::hard_link(root.path().join(INDEX), root.path().join("linked")).unwrap();
             } else {
@@ -491,7 +497,7 @@ mod tests {
                 fs::set_permissions(root.path().join(INDEX), fs::Permissions::from_mode(0o600))
                     .unwrap();
             }
-            assert!(projection.upsert(&run("two")).is_err());
+            assert!(projection.upsert([&run("two")]).is_err());
             assert_eq!(count(&projection), 1);
         }
     }
@@ -503,11 +509,11 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let mut projection = Projection::open(&root).unwrap();
-        projection.upsert(&run("one")).unwrap();
+        projection.upsert([&run("one")]).unwrap();
         fs::rename(&root, parent.path().join("old-root")).unwrap();
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(projection.upsert(&run("two")).is_err());
+        assert!(projection.upsert([&run("two")]).is_err());
         assert!(!root.join(INDEX).exists());
         assert_eq!(count(&projection), 1);
 
@@ -517,7 +523,7 @@ mod tests {
         let mut projection = Projection::open(&root).unwrap();
         let sidecar = private_file(&root.join(SIDECARS[0]), true).unwrap();
         sidecar.set_len(MAX_INDEX_BYTES + 1).unwrap();
-        assert!(projection.upsert(&run("one")).is_err());
+        assert!(projection.upsert([&run("one")]).is_err());
         assert_eq!(count(&projection), 0);
     }
 
@@ -525,10 +531,10 @@ mod tests {
     fn oversized_payload_rolls_back_rebuild_and_keeps_the_previous_projection() {
         let root = root();
         let mut projection = Projection::open(root.path()).unwrap();
-        projection.upsert(&run("old")).unwrap();
+        projection.upsert([&run("old")]).unwrap();
         let mut oversized = run("large");
         oversized.payload = json!({"text": "x".repeat(MAX_RUN_BYTES)});
-        assert!(projection.upsert(&oversized).is_err());
+        assert!(projection.upsert([&oversized]).is_err());
         assert!(projection.rebuild(&[run("new"), oversized]).is_err());
         assert_eq!(count(&projection), 1);
         let id: String = projection

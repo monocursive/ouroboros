@@ -277,12 +277,11 @@ impl Store {
             }
         };
         self.finish_capture_pruning(id, &retained)?;
-        let stream = self.stream_mut(id);
-        stream.set_captures(retained.capture(true), retained.history(true)?);
-        let run = stream.run().clone();
+        self.stream_mut(id)
+            .set_captures(retained.capture(true), retained.history(true)?);
         faults::hit(Point::GcProjection)?;
-        self.write_projection(&run)?;
-        self.queue_index(run);
+        self.write_projection(self.stream(id)?.run())?;
+        self.queue_index(id);
         retained.receipt()
     }
 
