@@ -130,7 +130,6 @@ fn violation(rule: &'static str, at: impl Into<String>, detail: impl Into<String
 /// # Errors
 /// Why the value is not a canonical native string.
 pub fn native_bytes(value: &Value) -> Result<Vec<u8>, String> {
-    use base64::Engine as _;
     let raw = match value {
         Value::String(text) => text.as_bytes().to_vec(),
         Value::Object(map) => {
@@ -145,16 +144,7 @@ pub fn native_bytes(value: &Value) -> Result<Vec<u8>, String> {
             let data = map["data"]
                 .as_str()
                 .ok_or("a byte object's data is not a string")?;
-            let raw = base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .map_err(|error| format!("the base64 does not decode: {error}"))?;
-            if base64::engine::general_purpose::STANDARD.encode(&raw) != data {
-                return Err("the base64 is not canonical".to_owned());
-            }
-            if std::str::from_utf8(&raw).is_ok() {
-                return Err("UTF-8 bytes must use the JSON string form".to_owned());
-            }
-            raw
+            super::NativeString::decode_base64(data).map_err(|error| error.to_string())?
         }
         other => return Err(format!("{other} is not a native string")),
     };
