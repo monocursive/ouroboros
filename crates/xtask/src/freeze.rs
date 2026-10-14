@@ -225,6 +225,29 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
     let _ = writeln!(w, "schema = {}", quote(SCHEMA));
     let _ = writeln!(w, "milestone = 1");
 
+    toolchain_section(w, root)?;
+    lock_section(w, root)?;
+    filter_sections(w, root)?;
+    mounts_section(w, root)?;
+    launch_profile_sections(w, root)?;
+    contained_section(w)?;
+    baseline_sections(w)?;
+    // The backend plan each contained profile renders (review F3).
+    let _ = writeln!(
+        w,
+        "\n# The bubblewrap invocation each contained profile's plan renders to\n\
+         # (ouro_jail::platform::linux::freeze::backend_plans; generated on Linux)"
+    );
+    w.push_str(&backend_plan_section(root)?);
+
+    manifests_section(w, root)?;
+    frozen_schemas_section(w, root)?;
+
+    Ok(out)
+}
+
+/// The pinned toolchain and the workspace's minimum Rust version.
+fn toolchain_section(w: &mut String, root: &Path) -> Result<(), String> {
     // The toolchain.
     let toolchain = toml_value(root, "rust-toolchain.toml")?;
     let workspace = toml_value(root, "Cargo.toml")?;
@@ -251,7 +274,11 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
             "Cargo.toml"
         )?)
     );
+    Ok(())
+}
 
+/// `Cargo.lock`, byte for byte.
+fn lock_section(w: &mut String, root: &Path) -> Result<(), String> {
     // The lock file.
     let lock = std::fs::read(root.join("Cargo.lock")).map_err(|e| format!("Cargo.lock: {e}"))?;
     let lock_value: toml::Value = toml::from_str(&String::from_utf8_lossy(&lock))
@@ -264,7 +291,11 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
     let _ = writeln!(w, "[cargo_lock]");
     let _ = writeln!(w, "sha256 = {}", quote(&sha256_hex(&lock)));
     let _ = writeln!(w, "packages = {packages}");
+    Ok(())
+}
 
+/// The seccomp and closed-set digests and tables, per architecture.
+fn filter_sections(w: &mut String, root: &Path) -> Result<(), String> {
     // Keep the reference x86_64 sections stable and pin the ARM64 programs
     // independently: a native build must never compare against another ABI.
     for (arch, prefix) in [("x86_64", ""), ("aarch64", "aarch64_")] {
@@ -316,7 +347,11 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
             quote(&sha256_hex(closed.as_bytes()))
         );
     }
+    Ok(())
+}
 
+/// The contained mount baselines.
+fn mounts_section(w: &mut String, root: &Path) -> Result<(), String> {
     // The contained mount baselines.
     let _ = writeln!(
         w,
@@ -354,7 +389,11 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
         let _ = writeln!(w, "# {file} {name}");
         let _ = writeln!(w, "{key} = {}", quote_list(&values));
     }
+    Ok(())
+}
 
+/// The bundled launch profiles: mounts, environment, hosts, credentials.
+fn launch_profile_sections(w: &mut String, root: &Path) -> Result<(), String> {
     // The bundled launch profiles.
     let mut files: Vec<PathBuf> = std::fs::read_dir(root.join(LAUNCH_DIR))
         .map_err(|error| format!("{LAUNCH_DIR}: {error}"))?
@@ -448,7 +487,11 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
             }
         }
     }
+    Ok(())
+}
 
+/// What every contained profile passes from the operator's environment.
+fn contained_section(w: &mut String) -> Result<(), String> {
     // The contained environment (review F3).
     let _ = writeln!(
         w,
@@ -461,7 +504,11 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
         .collect();
     let _ = writeln!(w, "environment_names = {}", quote_list(&names));
     let _ = writeln!(w, "path = {}", quote(ouro_jail::profiles::CONTAINED_PATH));
+    Ok(())
+}
 
+/// Each built-in profile's resolved baseline.
+fn baseline_sections(w: &mut String) -> Result<(), String> {
     // Each built-in profile's resolved baseline (review F3).
     let _ = writeln!(
         w,
@@ -477,15 +524,11 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
         let _ = writeln!(w, "digest = {}", quote(&baseline.digest));
         let _ = writeln!(w, "snapshot = {}", literal(&snapshot)?);
     }
+    Ok(())
+}
 
-    // The backend plan each contained profile renders (review F3).
-    let _ = writeln!(
-        w,
-        "\n# The bubblewrap invocation each contained profile's plan renders to\n\
-         # (ouro_jail::platform::linux::freeze::backend_plans; generated on Linux)"
-    );
-    w.push_str(&backend_plan_section(root)?);
-
+/// Every Cargo manifest's build-deciding sections.
+fn manifests_section(w: &mut String, root: &Path) -> Result<(), String> {
     // Every manifest's profiles, dependency selections and features (F14).
     let _ = writeln!(
         w,
@@ -500,7 +543,11 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
             ouro_jail::platform::linux::freeze::canonical_json(&manifest_sections(&manifest), true);
         let _ = writeln!(w, "sections = {}", literal(&sections)?);
     }
+    Ok(())
+}
 
+/// The frozen wire schemas.
+fn frozen_schemas_section(w: &mut String, root: &Path) -> Result<(), String> {
     // The frozen schemas.
     let _ = writeln!(
         w,
@@ -528,8 +575,7 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
             }
         }
     }
-
-    Ok(out)
+    Ok(())
 }
 
 /// One of the backend's mount constants (`RUNTIME_ROOTS`, `ETC_PATHS`). They
