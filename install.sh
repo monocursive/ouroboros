@@ -102,6 +102,16 @@ EOF
         Darwin:arm64) target=macos-arm64 ;;
         *) fail 'supported hosts: Linux x86_64/ARM64 or Apple Silicon macOS 27+' ;;
     esac
+    # Rendered by crates/ouro-jail/dist/bootstrap.py; every release this
+    # installer accepts has its archive or disk image hash here.
+    # BEGIN SHA256 PINS
+    case "$version:$target" in
+        0.1.0-preview.1:macos-arm64) expected='f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0' ;;
+        0.1.0-rc.1:aarch64-unknown-linux-gnu) expected='100d0e8e78d27c08372b18352de987da447f157ef75c8ebeac0cf5e24dd0400a' ;;
+        0.1.0-rc.1:x86_64-unknown-linux-gnu) expected='9413e8fd0cea1417c1ba47e5e0fad07edf3a26b8615e68a5aa642662f1209da8' ;;
+        *) fail "no pinned SHA-256 for $version ($target); download the current installer" ;;
+    esac
+    # END SHA256 PINS
     if [ "$system" = Darwin ]; then
         [ "$bin_selected" = false ] || fail 'on macOS use --vm-prefix (contains bin and share), not --bin-dir or --prefix'
         [ "$allow_downgrade" = false ] || fail '--allow-downgrade applies only to the Linux installer'
@@ -112,10 +122,6 @@ EOF
         if ! [[ "$macos_major" =~ ^[0-9]+$ ]] || [ "$macos_major" -lt 27 ]; then
             fail 'macOS 27 or newer is required'
         fi
-        case "$version:$target" in
-            0.1.0-preview.1:macos-arm64) expected='f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0' ;;
-            *) fail "no pinned SHA-256 for $version ($target); download the current installer" ;;
-        esac
         artifact="ouro-vm-$version-$target.dmg"
         work=$(mktemp -d "${TMPDIR:-/tmp}/ouro-install.XXXXXX")
         if [ -n "$source_dir" ]; then
@@ -155,13 +161,6 @@ EOF
     else
         fail 'install sha256sum or shasum to verify downloads'
     fi
-    # BEGIN SHA256 PINS
-    case "$version:$target" in
-        0.1.0-rc.1:aarch64-unknown-linux-gnu) expected='100d0e8e78d27c08372b18352de987da447f157ef75c8ebeac0cf5e24dd0400a' ;;
-        0.1.0-rc.1:x86_64-unknown-linux-gnu) expected='9413e8fd0cea1417c1ba47e5e0fad07edf3a26b8615e68a5aa642662f1209da8' ;;
-        *) fail "no pinned SHA-256 for $version ($target); download the current installer" ;;
-    esac
-    # END SHA256 PINS
     if [ -n "$source_dir" ]; then
         [ -d "$source_dir" ] || fail '--from-dir must name an artifact directory'
     else
@@ -235,8 +234,6 @@ EOF
         [ ! -L "$prefix/$name" ] || { echo "Refusing a symlinked installation file: $name" >&2; exit 1; }
         [ ! -e "$prefix/$name" ] || [ -f "$prefix/$name" ] || { echo "Installation destination must be a regular file: $name" >&2; exit 1; }
     done
-    [ ! -L "$prefix/ouro-jail" ] || { echo 'Refusing to replace a symlink.' >&2; exit 1; }
-    [ ! -L "$prefix/ouro-jail.release" ] || { echo 'Refusing a symlinked release record.' >&2; exit 1; }
     if [ -e "$prefix/ouro-jail" ]; then
         if [ -e "$prefix/ouro-jail.release" ]; then
             installed_version=$(sed -n '1p' "$prefix/ouro-jail.release")
@@ -265,7 +262,6 @@ EOF
     record=$(mktemp "$prefix/.ouro-jail-release.XXXXXX")
     cat "$work/ouro-jail" > "$staged"
     chmod 755 "$staged"
-    [ ! -L "$prefix/ouro-jail.LICENSES.txt" ] || { echo 'Refusing a symlinked license notice.' >&2; exit 1; }
     cat "$work/ouro-jail.LICENSES.txt" > "$notice"
     chmod 644 "$notice"
     binary_digest=$(digest "$staged")

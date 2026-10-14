@@ -17,8 +17,9 @@ own offline DMG and Bash installer. It does not add Darwin artifacts to the
 Linux release or satisfy the native macOS clauses. Its [package qualification](benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
 records signing, notarization, installation and VM fault checks separately.
 The dedicated prerelease is `ouro-vm-v0.1.0-preview.1`. The public installer
-selects it on Apple Silicon and pins the final stapled DMG SHA-256:
-`f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0`.
+selects it on Apple Silicon and pins the final stapled DMG's SHA-256 in its
+managed pin block, rendered with `render_vm_pin` in
+[bootstrap.py](../crates/ouro-jail/dist/bootstrap.py).
 Use the [Mac quickstart](guide.md#macos-vm-preview) for installation and limits.
 The DMG's build-time notes and original qualification metadata retain their
 unpublished state; publication does not modify the tested artifact.
@@ -48,9 +49,12 @@ any download.
 
 To publish a new installer, assemble the reviewed native archives below. Assembly
 sets the default release and embeds both archive hashes in `bootstrap.sh`, while
-retaining previously pinned releases. After publication, copy that reviewed
-bootstrap to root `install.sh` and `website/public/install.sh`, update the docs,
-and deploy the website. Verify the website script's bytes and an actual public
+retaining previously pinned releases, the macOS preview's included. After
+publication, copy that reviewed bootstrap to the root `install.sh`, set the new
+version in [release.json](../crates/ouro-jail/dist/release.json) (the website,
+the VM tooling and the tests read the published coordinates there), update the
+docs, and deploy the website, which serves the root `install.sh` and
+`release.pub` directly. Verify the website script's bytes and an actual public
 installation. Never discover a trusted hash from a mutable remote manifest at
 install time.
 

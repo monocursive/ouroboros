@@ -6,12 +6,18 @@ import platform
 import subprocess
 import tempfile
 
+if not __debug__:
+    raise SystemExit('test_install.py must not run with python -O: its assertions are the test')
+
 parser = argparse.ArgumentParser()
 parser.add_argument('binary', type=pathlib.Path)
 args = parser.parse_args()
+if platform.system() != 'Linux':
+    # Only Linux archives are released; the installer refuses other hosts.
+    raise SystemExit('test_install.py needs a native Linux host')
 source = pathlib.Path(__file__).resolve().parent
 host = platform.machine()
-triple = ('aarch64' if host in ('arm64', 'aarch64') else 'x86_64') + ('-apple-darwin' if platform.system() == 'Darwin' else '-unknown-linux-gnu')
+triple = ('aarch64' if host in ('arm64', 'aarch64') else 'x86_64') + '-unknown-linux-gnu'
 release = '0.1.0-rc.1'
 with tempfile.TemporaryDirectory(prefix='ouro-install-test-') as tmp:
     root = pathlib.Path(tmp)

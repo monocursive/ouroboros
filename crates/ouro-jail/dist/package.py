@@ -10,8 +10,7 @@ import shutil
 import subprocess
 import tarfile
 
-TARGETS = ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu',
-           'x86_64-apple-darwin', 'aarch64-apple-darwin']
+from coordinates import LINUX_TARGETS as TARGETS
 
 # A semantic release version: the archive name and the installer's downgrade
 # check both key on it.

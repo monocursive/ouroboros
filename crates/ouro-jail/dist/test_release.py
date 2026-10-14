@@ -11,6 +11,7 @@ from unittest.mock import patch
 from package import create_archive
 from prepare_release import assemble, stage, verify_build, verify_stage, TARGETS
 from bootstrap import archive_pins
+from coordinates import JAIL_VERSION, REPOSITORY, VM_TARGET, VM_VERSION
 
 REVISION = 'a' * 40
 INPUTS = 'sha256:' + 'b' * 64
@@ -149,8 +150,9 @@ class ReleaseTests(unittest.TestCase):
         for directory in stages:
             record = json.loads((directory / 'artifact.json').read_text())
             self.assertEqual(pins['0.1.0-rc.2', record['target']], record['archive_sha256'])
-        # The current public version remains installable with its original pins.
-        self.assertEqual({target for release, target in pins if release == '0.1.0-rc.1'}, set(TARGETS))
+        # The current public releases remain installable with their original pins.
+        self.assertEqual({target for release, target in pins if release == JAIL_VERSION}, set(TARGETS))
+        self.assertIn((VM_VERSION, VM_TARGET), pins)
 
     def test_unsigned_preparation_remains_unpublished_and_names_signing_blocker(self):
         stages = [self.fixture(t) for t in TARGETS]
@@ -158,7 +160,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(plan['published']); self.assertFalse(plan['signature_verified'])
         self.assertTrue(plan['draft'])
         self.assertIn('production_signing_identity_not_configured', plan['publication_blockers'])
-        self.assertEqual(plan['repository'], 'monocursive/ouroboros')
+        self.assertEqual(plan['repository'], REPOSITORY)
         # The signed manifest covers the archives of this release and the
         # installer that ships beside them, nothing else.
         manifest = (self.root / 'out' / 'SHA256SUMS').read_text().splitlines()

@@ -15,11 +15,13 @@ Build with explicit provenance, then package with an operator-selected key:
 OURO_BUILD_REVISION=$(git rev-parse HEAD) OURO_BUILD_DIRTY=true \
   cargo +1.98.1 build --release -p ouro-jail
 python3 crates/ouro-jail/dist/package.py \
-  --binary target/release/ouro-jail --target aarch64-apple-darwin \
+  --binary target/release/ouro-jail --target x86_64-unknown-linux-gnu \
   --version 0.1.0-rc.1 --out /path/to/artifacts --signing-key /path/to/signing.key
 ```
 
-Use the actual target triple of the supplied binary. Set `OURO_BUILD_DIRTY=false`
+Use the actual target triple of the supplied binary. Only the Linux targets in
+[release.json](release.json) are packaged: native macOS execution refuses, and
+this installer sends macOS hosts to the Ouro VM preview instead. Set `OURO_BUILD_DIRTY=false`
 only for a clean checkout. The release version is part of the archive name. One
 invocation signs exactly its own outputs: the manifest covers the archive it
 created and the `install.sh` copy it stages beside it, never archives an

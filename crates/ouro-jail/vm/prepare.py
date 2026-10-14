@@ -3,6 +3,7 @@
 import argparse
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,10 +12,26 @@ import tarfile
 import urllib.request
 
 SOURCE = Path(__file__).resolve().parent
+
+
+def load_coordinates():
+    """dist/coordinates.py, loaded by path: dist/ also holds a package.py
+    that must not shadow this directory's."""
+    spec = importlib.util.spec_from_file_location('ouro_release_coordinates',
+                                                  SOURCE.parent / 'dist' / 'coordinates.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+coordinates = load_coordinates()
 IMAGE_URL = 'https://cloud-images.ubuntu.com/minimal/releases/resolute/release-20261009/ubuntu-26.04-minimal-cloudimg-arm64.img'
 IMAGE_SHA256 = '4e86a7819b4cc7b4a9c2e719dec3e0a723c4a2788dc3f23f17641cba7f5ca216'
-JAIL_URL = 'https://github.com/monocursive/ouroboros/releases/download/ouro-jail-v0.1.0-rc.1/ouro-jail-0.1.0-rc.1-aarch64-unknown-linux-gnu.tar.gz'
-JAIL_SHA256 = '100d0e8e78d27c08372b18352de987da447f157ef75c8ebeac0cf5e24dd0400a'
+# The guest runs the current public Linux release (dist/release.json), checked
+# against the SHA-256 the public installer pins for it.
+JAIL_TARGET = 'aarch64-unknown-linux-gnu'
+JAIL_URL = coordinates.jail_archive_url(coordinates.JAIL_VERSION, JAIL_TARGET)
+JAIL_SHA256 = coordinates.installer_pin(coordinates.JAIL_VERSION, JAIL_TARGET)
 
 
 def sha(path):

@@ -11,6 +11,7 @@ from prepare_release import TARGETS, assemble, stage
 from publish_release import ROOT, check, publication_gates, release_info, verify_remote_assets
 from test_release import INPUTS, REVISION, version
 from bootstrap import archive_pins, BLOCK
+from coordinates import UNSUPPORTED_CLAUSES
 
 
 class ReleaseLookupTests(unittest.TestCase):
@@ -64,7 +65,8 @@ class PublicationTests(unittest.TestCase):
         plan, names = check(self.candidate, self.key)
         self.assertEqual(plan['target_commit'], REVISION)
         self.assertEqual(plan['publication_scope'], 'linux-preview')
-        self.assertEqual(plan['unsupported_clauses'], ['K22.2', 'K23.1', 'K24.1', 'K26.1', 'K29.1'])
+        self.assertEqual(plan['unsupported_clauses'], UNSUPPORTED_CLAUSES)
+        self.assertTrue(UNSUPPORTED_CLAUSES and all(c.startswith('K') for c in UNSUPPORTED_CLAUSES))
         self.assertEqual(len(names), 8)
         bootstrap = (self.candidate / 'bootstrap.sh').read_text()
         pins = archive_pins(bootstrap)

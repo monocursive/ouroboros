@@ -7,11 +7,12 @@ import subprocess
 import tempfile
 import unittest
 
-from bootstrap import archive_pins, render_bootstrap
+from bootstrap import archive_pins, render_bootstrap, render_vm_pin
+from coordinates import JAIL_VERSION, LINUX_TARGETS, VM_TARGET, VM_VERSION, vm_tag
 from package import create_archive
 
 ROOT = Path(__file__).resolve().parents[3]
-TARGETS = ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu']
+TARGETS = list(LINUX_TARGETS)
 
 
 class BootstrapTests(unittest.TestCase):
@@ -173,13 +174,46 @@ cp "$BOOTSTRAP_ARTIFACTS/${url##*/}" "$output"
             self.assertTrue(destination.is_symlink())
             destination.unlink()
 
-    def test_published_pins_and_website_copy_are_consistent(self):
+    def test_published_installer_pins_the_release_coordinates(self):
         script = (ROOT / 'install.sh').read_text()
-        self.assertEqual(script, (ROOT / 'website/public/install.sh').read_text())
         pins = archive_pins(script)
-        self.assertEqual({target for release, target in pins if release == '0.1.0-rc.1'}, set(TARGETS))
+        self.assertEqual({target for release, target in pins if release == JAIL_VERSION}, set(TARGETS))
+        self.assertIn((VM_VERSION, VM_TARGET), pins)
+        self.assertIn(f'\n    version={JAIL_VERSION}\n', script)
+        self.assertIn(f'\n    macos_version={VM_VERSION}\n', script)
         self.assertNotIn('minisign', script)
         self.assertNotIn('SHA256SUMS', script)
+        # The website serves this file itself (website/src/pages/install.sh.ts);
+        # a second copy could drift from it.
+        self.assertFalse((ROOT / 'website/public/install.sh').exists())
+
+    def test_vm_pin_rendering_keeps_linux_pins_and_sets_the_mac_default(self):
+        script = (ROOT / 'install.sh').read_text()
+        rendered = render_vm_pin(script, '0.1.0-preview.9', 'c' * 64)
+        pins = archive_pins(rendered)
+        self.assertEqual(pins['0.1.0-preview.9', VM_TARGET], 'c' * 64)
+        self.assertEqual({k: v for k, v in pins.items() if k[1] != VM_TARGET},
+                         {k: v for k, v in archive_pins(script).items() if k[1] != VM_TARGET})
+        self.assertIn('\n    macos_version=0.1.0-preview.9\n', rendered)
+        self.assertIn(f'\n    version={JAIL_VERSION}\n', rendered)
+        # A Linux release keeps the macOS pins it does not name.
+        relinked = render_bootstrap(rendered, '0.1.0-rc.9', {t: 'd' * 64 for t in TARGETS})
+        self.assertEqual(archive_pins(relinked)['0.1.0-preview.9', VM_TARGET], 'c' * 64)
+        for version, digest in [('01.0.0', 'c' * 64), ('0.1.0-preview.9', 'C' * 64)]:
+            with self.assertRaises(ValueError):
+                render_vm_pin(script, version, digest)
+        with self.assertRaises(ValueError):
+            render_bootstrap(script, '0.1.0-rc.9', {VM_TARGET: 'd' * 64})
+
+    def test_signed_installer_sends_macos_to_the_vm_preview(self):
+        # Only Linux archives are released; a Mac must not look for a Darwin one.
+        self.env.update(BOOTSTRAP_OS='Darwin', BOOTSTRAP_ARCH='arm64')
+        result = subprocess.run(['sh', str(Path(__file__).with_name('install.sh')), '--from-dir',
+                                 str(self.artifacts), '--public-key', 'unused', '--prefix', str(self.prefix)],
+                                env=self.env, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b'Ouro VM preview', result.stderr)
+        self.assertFalse(self.prefix.exists())
 
     def mac_fixture(self):
         self.env.update(BOOTSTRAP_OS='Darwin', BOOTSTRAP_ARCH='arm64')
@@ -197,11 +231,10 @@ exit "${BOOTSTRAP_INSTALL_STATUS:-0}"
 INSTALL
 fi
 ''')
-        dmg = self.artifacts / 'ouro-vm-0.1.0-preview.1-macos-arm64.dmg'
+        dmg = self.artifacts / f'ouro-vm-{VM_VERSION}-{VM_TARGET}.dmg'
         dmg.write_bytes(b'checksum-verified test disk image')
-        self.installer.write_text(self.installer.read_text().replace(
-            'f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0',
-            hashlib.sha256(dmg.read_bytes()).hexdigest()))
+        self.installer.write_text(render_vm_pin(self.installer.read_text(), VM_VERSION,
+                                                hashlib.sha256(dmg.read_bytes()).hexdigest()))
         return dmg
 
     def run_mac(self, *args):
@@ -213,13 +246,13 @@ fi
         dmg = self.mac_fixture()
         result = self.run_mac()
         self.assertEqual(result.returncode, 0, result.stderr.decode())
-        self.assertIn('/releases/download/ouro-vm-v0.1.0-preview.1/' + dmg.name, self.log.read_text())
+        self.assertIn(f'/releases/download/{vm_tag(VM_VERSION)}/' + dmg.name, self.log.read_text())
         mount = self.mac_log.read_text()
         self.assertIn('-readonly\n', mount)
         self.assertIn('--prefix\n' + str(self.root / 'Mac prefix'), mount)
         self.assertIn('detach\n', mount)
         self.log.unlink()
-        result = self.run_mac('--version', 'ouro-vm-v0.1.0-preview.1', '--from-dir', str(self.artifacts))
+        result = self.run_mac('--version', vm_tag(VM_VERSION), '--from-dir', str(self.artifacts))
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertFalse(self.log.exists())
 
@@ -239,7 +272,7 @@ fi
 
     def test_mac_unsupported_hosts_and_options_refuse_before_download(self):
         self.mac_fixture()
-        for args in [('--version', '0.1.0-preview.2'), ('--vm-prefix', 'relative'),
+        for args in [('--version', '0.1.0-preview.99'), ('--vm-prefix', 'relative'),
                      ('--bin-dir', str(self.prefix)), ('--allow-downgrade',)]:
             self.assertNotEqual(self.run_mac(*args).returncode, 0)
             self.assertFalse(self.log.exists())

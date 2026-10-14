@@ -34,8 +34,9 @@ fi
 case "$(uname -s):$(uname -m)" in
     Linux:x86_64) target=x86_64-unknown-linux-gnu ;;
     Linux:aarch64|Linux:arm64) target=aarch64-unknown-linux-gnu ;;
-    Darwin:x86_64) target=x86_64-apple-darwin ;;
-    Darwin:arm64) target=aarch64-apple-darwin ;;
+    Darwin:*)
+        echo 'ouro-jail is not released for macOS: native execution refuses. On Apple Silicon, use the Ouro VM preview: https://ouroboros.monocursive.com/guide/#macos-vm-preview' >&2
+        exit 2 ;;
     *) echo 'Unsupported operating system or architecture.' >&2; exit 2 ;;
 esac
 work=$(mktemp -d)
@@ -152,8 +153,6 @@ for name in ouro-jail ouro-jail.release ouro-jail.LICENSES.txt; do
     [ ! -L "$prefix/$name" ] || { echo "Refusing a symlinked installation file: $name" >&2; exit 1; }
     [ ! -e "$prefix/$name" ] || [ -f "$prefix/$name" ] || { echo "Installation destination must be a regular file: $name" >&2; exit 1; }
 done
-[ ! -L "$prefix/ouro-jail" ] || { echo 'Refusing to replace a symlink.' >&2; exit 1; }
-[ ! -L "$prefix/ouro-jail.release" ] || { echo 'Refusing a symlinked release record.' >&2; exit 1; }
 if [ -e "$prefix/ouro-jail" ]; then
     [ "$upgrade" = true ] || { echo 'Already installed; use --upgrade to replace it.' >&2; exit 1; }
     if [ -e "$prefix/ouro-jail.release" ]; then
@@ -184,7 +183,6 @@ record=$(mktemp "$prefix/.ouro-jail-release.XXXXXX")
 trap 'rm -rf "$work"; rm -f "$staged" "$notice" "$record"' EXIT HUP INT TERM
 cat "$work/ouro-jail" > "$staged"
 chmod 755 "$staged"
-[ ! -L "$prefix/ouro-jail.LICENSES.txt" ] || { echo 'Refusing a symlinked license notice.' >&2; exit 1; }
 cat "$work/ouro-jail.LICENSES.txt" > "$notice"
 chmod 644 "$notice"
 digest=$(file_digest "$staged")

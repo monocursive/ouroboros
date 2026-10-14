@@ -8,11 +8,18 @@ import re
 import subprocess
 import tempfile
 
+from coordinates import JAIL_TAG_PREFIX, PUBLICATION_SCOPE, REPOSITORY, UNSUPPORTED_CLAUSES, jail_tag
 from package import VERSION
-from prepare_release import REPOSITORY, TARGETS, digest, verify_stage
+from prepare_release import TARGETS, digest, verify_stage
 from bootstrap import archive_pins
 
 ROOT = Path(__file__).resolve().parents[3]
+# Signed release metadata published beside the archives; with the archives and
+# SHA256SUMS(.minisig) these are exactly the release's assets.
+METADATA = ('release-plan.json', 'RELEASE_NOTES.md', 'install.sh', 'bootstrap.sh')
+# The first immutable preview predates embedded hashes: its bootstrap pins a
+# Minisign key instead. Only this exact tag and commit may verify that way.
+UNPINNED_PREVIEW = ('ouro-jail-v0.1.0-rc.1', '06a48d5a2de89d5d0ebffa84a9561d034cdd8b5d')
 
 
 def run(*args):
@@ -35,26 +42,26 @@ def check(directory, public_key):
             raise ValueError('invalid or duplicate signed manifest entry')
         hashes[match[2]] = match[1]
     # Verify signed metadata before using its revision, filenames or tag.
-    for name in ['release-plan.json', 'RELEASE_NOTES.md', 'install.sh', 'bootstrap.sh']:
+    for name in METADATA:
         if name not in hashes or digest(directory / name) != hashes[name]:
             raise ValueError('signed release asset changed: ' + name)
     plan = json.loads((directory / 'release-plan.json').read_text())
     revision = plan['target_commit']
     inputs = plan['inputs']
-    version = plan['tag'].removeprefix('ouro-jail-v')
+    version = plan['tag'].removeprefix(JAIL_TAG_PREFIX)
     if (plan.get('schema') != 'ouro.jail.release-candidate/1'
             or plan.get('repository') != REPOSITORY
-            or plan.get('publication_scope') != 'linux-preview'
-            or plan.get('unsupported_clauses') != ['K22.2', 'K23.1', 'K24.1', 'K26.1', 'K29.1']
+            or plan.get('publication_scope') != PUBLICATION_SCOPE
+            or plan.get('unsupported_clauses') != UNSUPPORTED_CLAUSES
             or not re.fullmatch('[0-9a-f]{40}', revision)
             or not re.fullmatch('sha256:[0-9a-f]{64}', inputs)
-            or not VERSION.fullmatch(version) or plan['tag'] != 'ouro-jail-v' + version
+            or not VERSION.fullmatch(version) or plan['tag'] != jail_tag(version)
             or plan.get('signature_verified') is not True):
         raise ValueError('invalid signed release plan')
     records = plan['artifacts']
     if sorted(r['target'] for r in records) != sorted(TARGETS):
         raise ValueError('release requires both distinct native Linux targets')
-    expected = {'release-plan.json', 'RELEASE_NOTES.md', 'install.sh', 'bootstrap.sh'}
+    expected = set(METADATA)
     for record in records:
         if record['release'] != version:
             raise ValueError('release versions disagree')
@@ -70,10 +77,9 @@ def check(directory, public_key):
         verified_bootstrap = all(pins.get((version, r['target'])) == r['archive_sha256']
                                  for r in records)
     else:
-        # The initial immutable preview predates embedded hashes. Keep its
-        # verification available without permitting new unpinned candidates.
-        verified_bootstrap = (plan['tag'] == 'ouro-jail-v0.1.0-rc.1'
-                              and revision == '06a48d5a2de89d5d0ebffa84a9561d034cdd8b5d'
+        # Keep the unpinned first preview verifiable without permitting new
+        # unpinned candidates.
+        verified_bootstrap = ((plan['tag'], revision) == UNPINNED_PREVIEW
                               and f"    public_key='{public_key}'\n" in bootstrap)
     if f'    version={version}\n' not in bootstrap or not verified_bootstrap:
         raise ValueError('bootstrap must pin the release version and both archive SHA-256 hashes')
@@ -150,7 +156,7 @@ def main():
             # No --clobber: previous releases and existing drafts are preserved.
             subprocess.run(['gh', 'release', 'create', plan['tag'], '--repo', REPOSITORY,
                             '--verify-tag', '--draft', '--prerelease', '--latest=false',
-                            '--title', 'Ouroboros Jail ' + plan['tag'].removeprefix('ouro-jail-v')
+                            '--title', 'Ouroboros Jail ' + plan['tag'].removeprefix(JAIL_TAG_PREFIX)
                             + ' — developer preview', '--notes-file', str(directory / 'RELEASE_NOTES.md'),
                             *(str(directory / name) for name in names)], check=True, timeout=180)
             release = release_info(plan)
