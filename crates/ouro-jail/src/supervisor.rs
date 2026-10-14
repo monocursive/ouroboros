@@ -1742,8 +1742,9 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 // recorded as the limit's hit, not as the cause.
                 record.outcome.cause.get_or_insert("wall_expiry".to_owned());
                 // §13.2: "Limits report hits in `applied.limits[].hit` with
-                // `outcome.cause`". The supervisor owns the wall deadline, so
-                // it is the source of this hit.
+                // `outcome.cause`". The expiry is the platform's report of
+                // the wall it enforces (on Linux its own boot-clock deadline,
+                // armed at release), so the `wall` row it applied is hit.
                 if let Some(wall) = record
                     .applied
                     .limits
@@ -2846,13 +2847,17 @@ fn interrupted(signals: Option<&signals::SignalPipe>, stage: ErrorStage) -> Resu
     }
 }
 
-/// Records the wall ceiling the supervisor itself enforces (§13.2).
+/// Records the wall ceiling as the supervisor's own deadline (§13.2), when
+/// the platform's `applied` reports no `wall` row.
 ///
-/// The supervisor owns the wall deadline on every platform, so it is the one
-/// that can say the ceiling was applied and, later, that it was hit. The
-/// mechanism name states the clock this code actually uses: `Instant` is
-/// `CLOCK_MONOTONIC`, and calling it a boot-time deadline would be a claim
-/// about suspend that portable code cannot make (§6.4, M10).
+/// Such a platform enforces the wall only through the deadline the
+/// supervisor hands to [`RunningExecution::wait`](crate::platform::RunningExecution::wait),
+/// so that deadline is the mechanism the row names. A platform that enforces
+/// its own wall (Linux, on `CLOCK_BOOTTIME` from release) reports its own
+/// row, which this leaves alone. The mechanism name states the clock this
+/// code actually uses: `Instant` is `CLOCK_MONOTONIC`, and calling it a
+/// boot-time deadline would be a claim about suspend that portable code
+/// cannot make (§6.4, M10).
 fn merge_wall_limit(record: &mut AttemptRecord, plan: &Plan) {
     let Some(wall) = plan.resolved.ceilings.wall.as_ref() else {
         return;

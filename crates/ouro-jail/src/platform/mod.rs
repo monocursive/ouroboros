@@ -326,10 +326,16 @@ impl ExecFailureDetail {
     }
 }
 
-/// A monotonic deadline (§6.4).
+/// The supervisor's wall deadline, handed to [`RunningExecution::wait`]
+/// (§6.4).
+///
+/// It is an `Instant`, so `CLOCK_MONOTONIC`, which stops during suspend. A
+/// platform that enforces the wall on its own continuous clock (Linux:
+/// `CLOCK_BOOTTIME`, armed at release) reports its expiry itself and uses
+/// this only to bound one wait step.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Deadline {
-    /// When the budget expires, or `None` when the caller is only draining.
+    /// When the wall expires, or `None` when there is no wall ceiling.
     pub at: Option<Instant>,
 }
 
