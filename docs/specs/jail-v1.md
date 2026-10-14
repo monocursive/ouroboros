@@ -1430,22 +1430,34 @@ outside Linux `existing_and_root` coverage. Requiring `all_descendants` refuses.
 
 For `agent`, the protected names are `.git/hooks` and `.git/config`, and
 `.git` itself stays writable so commits work. A multi-component name matches
-at any depth on whole components (`sub/.git/hooks`, never `x.git/hooks`). It
-is not a root literal: nothing is protected or held by a placeholder where it
-is absent. When a name starts with `.git/`, every existing file-form `.git`
-(a gitlink), the root's included, is protected whole, because it names the git
-directory those paths are read from; a `.git` symlink at any depth hides them
-and refuses `existing_and_root`. Not covered, and stated as such to the
-operator: submodule git directories under `.git/modules/`, whose
-`core.worktree` `git submodule update` rewrites on every run, which a
-read-only config would refuse; repositories, gitlinks and git directories
-created during the run, a moved-aside repository's replacement included;
-bare repositories; and the other files of a writable git directory that change
-where git reads its configuration and hooks — a planted `commondir` redirects
-the common directory, and `config.worktree` is read where
-`extensions.worktreeConfig` is enabled. The protection keeps a run from editing
-the existing hooks and configuration in place; it does not make the
-workspace's git metadata trustworthy after a run that set out to subvert it.
+at any depth on whole components of the entry's host path, so it covers a
+nested repository's `sub/.git/hooks` and the `hooks` of a writable root that
+is itself a git directory (a `--rw <repo>/.git` grant), never `x.git/hooks`.
+It is not a root literal: nothing is protected or held by a placeholder where
+it is absent. `.git/hooks` also covers the `hooks` of every submodule git
+directory under `.git/modules/` (a directory there holding `HEAD`, `objects`
+and `refs`); its `config` is not covered, because `git submodule update`
+rewrites `core.worktree` there on every run. A `.git` symlink at any depth, a
+symlink under `.git/modules/`, and a protected name that is a symlink hide
+what they would cover, and refuse `existing_and_root` naming them. A gitlink
+(a file-form `.git`) is not protected: a read-only one broke
+`git worktree remove`, `git worktree move` and `git rm` of a submodule inside
+the run, and left a half-removed worktree on the host, while the git
+directory it names stays writable.
+
+This raises the cost of accidental damage and naive planting, not of a run
+that sets out to make the operator's next `git` command run its code. Not
+covered, and stated as such to the operator: a submodule's config, where one
+`core.fsmonitor` line runs on a plain `git status` in the superproject; a git
+directory behind a gitlink under another name (`--separate-git-dir`, a
+linked worktree's administrative directory); a planted or rewritten
+`commondir`, and `config.worktree` where `extensions.worktreeConfig` is
+enabled; files a protected config includes; a `core.hooksPath` that points
+into the checkout; a repository without a hooks directory at launch;
+repositories, git directories and hooks directories created during the run,
+a moved-aside repository's replacement included; and bare repositories. Each
+nested repository costs two mount-table rows, so the 1024-row receipt bound
+refuses a workspace of more than about 500 of them.
 
 Vendor state is bound read-write at `/run/ouro/state`, and each `bind_ro`
 credential view read-only at its destination beneath it, after every operator

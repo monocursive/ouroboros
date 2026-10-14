@@ -314,10 +314,11 @@ fn s11_protected_access_fails() {
 }
 
 /// Audit 2026-10-08 M5: under `agent`, Git metadata stays writable except
-/// the two persistence points that would execute with the operator's
-/// authority on their next `git` command *outside* the jail. `.git/hooks`
-/// and `.git/config` refuse writes like `tool`'s whole-tree protection,
-/// while refs stay writable so commits work.
+/// the workspace repository's `.git/hooks` and `.git/config`, which refuse
+/// writes like `tool`'s whole-tree protection, while refs stay writable so
+/// commits work. This is not all git would run with the operator's
+/// authority on their next `git` command outside the jail (jail-v1 §9.1
+/// names the rest; `agent_git_metadata_linux.rs` shows them).
 #[test]
 fn s11_agent_protects_git_persistence_points() {
     if !live() {

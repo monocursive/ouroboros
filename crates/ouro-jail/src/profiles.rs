@@ -108,15 +108,14 @@ pub fn baseline(profile: ProfileName, platform: Os, lookup: &EnvLookup) -> Profi
             read_write: vec![workspace_root, scratch_root, vendor_root],
             read_only: runtime_roots,
             deny_read: Vec::new(),
-            // Audit 2026-10-08 M5: the workspace `.git` stays writable so
-            // commits work, but the hooks directory and the config file of
-            // every existing repository (and, by the walk's reading of
-            // these names, every gitlink) are protected: they execute with
-            // the operator's authority on their next `git` command
-            // *outside* the jail (`hooks/*`, `core.hooksPath`,
-            // `core.fsmonitor`). Objects and refs stay writable. A run that
-            // redirects git instead (a planted `commondir`) is outside this
-            // protection (jail-v1 §9.1).
+            // Audit 2026-10-08 M5: `.git` stays writable so commits work,
+            // and the hooks and config that exist at launch are bound
+            // read-only wherever the walk finds them (nested repositories,
+            // a granted git directory, submodules' hooks): git runs what
+            // they name with the operator's authority on their next `git`
+            // command *outside* the jail. That stops edits in place, not a
+            // run set on redirecting git (a submodule's config, a planted
+            // `commondir`, an included file, among others: jail-v1 §9.1).
             protected_segments: vec![".git/hooks".to_owned(), ".git/config".to_owned()],
             protected_coverage: ProtectedCoverage::ExistingAndRoot,
             network_mode: NetworkMode::Proxy,
@@ -282,8 +281,8 @@ mod tests {
     }
 
     /// Audit 2026-10-08 M5: `agent` keeps Git metadata writable so commits
-    /// work, but protects the two persistence points that execute with the
-    /// operator's authority outside the jail.
+    /// work, and names the hooks and the config for the walk to protect
+    /// where they exist (jail-v1 §9.1 says what that leaves open).
     #[test]
     fn agent_protects_git_persistence_points_and_keeps_the_rest_writable() {
         let baseline = baseline(ProfileName::Agent, Os::Linux, &empty);
