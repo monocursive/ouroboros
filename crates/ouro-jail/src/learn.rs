@@ -243,32 +243,17 @@ fn exact_host_object(path: &Path) -> bool {
 }
 
 pub fn run(ctx: &Context, mut args: LearnArgs) -> Result<i32, String> {
-    // Parsed exactly as `run` parses them, so a spelling `run` would refuse
-    // is refused here too rather than replaced by the forced values below.
-    let observe = args
-        .policy
-        .observe
-        .as_deref()
-        .map(|text| crate::config::parse_observe("--observe", text))
-        .transpose()
-        .map_err(|e| e.message)?;
-    let evidence = args
-        .policy
-        .evidence
-        .as_deref()
-        .map(|text| crate::config::parse_evidence("--evidence", text))
-        .transpose()
-        .map_err(|e| e.message)?;
-    if observe == Some(ObserveMode::Off) || evidence == Some(EvidenceMode::BestEffort) {
+    if args.policy.observe == Some(crate::cli::Observe::Off)
+        || args.policy.evidence == Some(crate::cli::Evidence::BestEffort)
+    {
         return Err("learn requires --observe on and strict evidence".into());
     }
     if args.adopt && !std::io::stdin().is_terminal() {
         return Err("--adopt requires an interactive terminal".into());
     }
-    args.policy.learning = true;
-    args.policy.observe = Some("on".into());
-    args.policy.evidence = Some("strict".into());
-    let plan = supervisor::resolve_plan(ctx, &args.policy).map_err(|e| e.message)?;
+    args.policy.observe = Some(crate::cli::Observe::On);
+    args.policy.evidence = Some(crate::cli::Evidence::Strict);
+    let plan = supervisor::resolve_learning_plan(ctx, &args.policy).map_err(|e| e.message)?;
     let run = RunArgs {
         policy: args.policy,
         argv: args.argv,
@@ -279,7 +264,7 @@ pub fn run(ctx: &Context, mut args: LearnArgs) -> Result<i32, String> {
         attempt_id: None,
         label_only: false,
     };
-    let report = supervisor::run(ctx, &run);
+    let report = supervisor::run_learning(ctx, &run);
     let receipt_path = report
         .receipt_path
         .as_ref()

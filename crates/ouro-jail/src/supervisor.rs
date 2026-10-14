@@ -198,6 +198,21 @@ fn os_bytes(path: &Path) -> Vec<u8> {
 /// [`ErrorCode::PolicyWidening`] with the exact key path for a narrowing file
 /// that adds authority.
 pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError> {
+    resolve(ctx, args, false)
+}
+
+/// [`resolve_plan`] for `learn`: the same policy, with the observer also
+/// capturing read-only opens for the proposal. It needs a contained Linux
+/// run with observation on.
+///
+/// # Errors
+/// As [`resolve_plan`], and [`ErrorCode::InvalidConfig`] at key `learn`
+/// where learning cannot run.
+pub fn resolve_learning_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError> {
+    resolve(ctx, args, true)
+}
+
+fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, JailError> {
     let config_dir = state::config_dir(&ctx.env_settings, ctx.home.as_deref())?;
     let data_dir = state::data_dir(&ctx.env_settings, ctx.home.as_deref())?;
     // Security 2026-09-29 (audit 6 F1): a `--profile none` child sees the
@@ -399,14 +414,8 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         deny_read: args.deny_read.iter().map(|path| os_bytes(path)).collect(),
         network_allow: args.allow_host.clone(),
         limits: config::ceilings_from_cli(&args.limit)?,
-        observe: match &args.observe {
-            Some(text) => Some(config::parse_observe("--observe", text)?),
-            None => None,
-        },
-        evidence: match &args.evidence {
-            Some(text) => Some(config::parse_evidence("--evidence", text)?),
-            None => None,
-        },
+        observe: args.observe.map(Into::into),
+        evidence: args.evidence.map(Into::into),
         ..PolicyDelta::default()
     };
     let has_cli = !cli_delta.read_write.is_empty()
@@ -529,7 +538,7 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         resolved.snapshot.commands = operator_jail.commands.clone();
         resolved.digest = resolved.snapshot.digest()?;
     }
-    if args.learning {
+    if learning {
         if profile == ProfileName::None || resolved.snapshot.platform != crate::records::Os::Linux {
             return Err(usage(
                 "learn",
@@ -995,7 +1004,17 @@ fn first_unsatisfied(requirements: &[String], capabilities: &[Capability]) -> Op
 /// exit status; the caller prints diagnostics.
 #[must_use]
 pub fn run(ctx: &Context, args: &RunArgs) -> RunReport {
-    match run_inner(ctx, args) {
+    run_with(ctx, args, false)
+}
+
+/// [`run`] under [`resolve_learning_plan`]'s policy, for `learn`.
+#[must_use]
+pub fn run_learning(ctx: &Context, args: &RunArgs) -> RunReport {
+    run_with(ctx, args, true)
+}
+
+fn run_with(ctx: &Context, args: &RunArgs, learning: bool) -> RunReport {
+    match run_inner(ctx, args, learning) {
         Ok(report) => report,
         // Every early return of `run_inner` happens before the claim; after
         // it, every path builds its own report. J4-R, S5: so a persistence
@@ -1009,7 +1028,7 @@ pub fn run(ctx: &Context, args: &RunArgs) -> RunReport {
 }
 
 #[allow(clippy::too_many_lines)]
-fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
+fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport, JailError> {
     // §13.1: pin the shared monotonic base before anything writes a trace
     // event, so wrapper, audit and gap intervals all count from here.
     crate::platform::mark_supervisor_start();
@@ -1044,7 +1063,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // behind.
     let signals = signals::install();
 
-    let plan = resolve_plan(ctx, &args.policy)?;
+    let plan = resolve(ctx, &args.policy, learning)?;
     let request = plan_request(&plan);
     let argv: Vec<Vec<u8>> = args
         .argv

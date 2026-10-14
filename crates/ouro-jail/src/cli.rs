@@ -10,7 +10,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+use crate::records::{EvidenceMode, ObserveMode};
 
 /// `ouro-jail`: run one argv under one explicit policy and record what applied.
 #[derive(Debug, Parser)]
@@ -25,7 +27,8 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// The five verbs of §6.1.
+/// The verbs: §6.1's `run`, `explain`, `doctor`, `gc` and `version`, and
+/// jail-v2's `tail` and `learn`.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Prepare a boundary and run PROGRAM under it.
@@ -50,9 +53,6 @@ pub enum Command {
 /// (§6.1). `doctor` has the narrower grammar of [`DoctorArgs`].
 #[derive(Debug, Default, Args)]
 pub struct PolicyArgs {
-    /// Internal learn selection; not a separate run flag.
-    #[arg(skip)]
-    pub learning: bool,
     /// Built-in profile name or a policy file path.
     #[arg(long, value_name = "agent|tool|build|none|FILE")]
     pub profile: Option<String>,
@@ -81,11 +81,43 @@ pub struct PolicyArgs {
     #[arg(long = "limit", value_name = "KEY=VALUE")]
     pub limit: Vec<String>,
     /// Observation mode; the default is `on`.
-    #[arg(long, value_name = "on|off", value_parser = ["on", "off"])]
-    pub observe: Option<String>,
+    #[arg(long, value_name = "on|off", value_enum)]
+    pub observe: Option<Observe>,
     /// Evidence mode; the default is `strict`.
-    #[arg(long, value_name = "strict|best-effort", value_parser = ["strict", "best-effort"])]
-    pub evidence: Option<String>,
+    #[arg(long, value_name = "strict|best-effort", value_enum)]
+    pub evidence: Option<Evidence>,
+}
+
+/// `--observe`, spelled as the policy spells observation modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Observe {
+    On,
+    Off,
+}
+
+impl From<Observe> for ObserveMode {
+    fn from(observe: Observe) -> Self {
+        match observe {
+            Observe::On => ObserveMode::On,
+            Observe::Off => ObserveMode::Off,
+        }
+    }
+}
+
+/// `--evidence`, spelled as the policy spells evidence modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Evidence {
+    Strict,
+    BestEffort,
+}
+
+impl From<Evidence> for EvidenceMode {
+    fn from(evidence: Evidence) -> Self {
+        match evidence {
+            Evidence::Strict => EvidenceMode::Strict,
+            Evidence::BestEffort => EvidenceMode::BestEffort,
+        }
+    }
 }
 
 /// `ouro-jail run`.
@@ -186,6 +218,42 @@ pub struct VersionArgs {
     pub json: bool,
 }
 
+/// Read-only journal selection.
+#[derive(Debug, Args)]
+pub struct TailArgs {
+    /// Attempt ID; defaults to the most recently updated attempt directory.
+    #[arg(long)]
+    pub attempt: Option<String>,
+    /// Follow until the supervisor releases its attempt lock.
+    #[arg(long)]
+    pub follow: bool,
+    /// Write original NDJSON envelopes without re-encoding them.
+    #[arg(long)]
+    pub json: bool,
+    /// Include events at or after this UTC timestamp.
+    #[arg(long)]
+    pub since: Option<String>,
+}
+
+/// Candidate-policy generation. Proposals never load automatically.
+#[derive(Debug, Args)]
+pub struct LearnArgs {
+    #[command(flatten)]
+    pub policy: PolicyArgs,
+    /// Proposal TOML output; default is config/learned/ATTEMPT.toml.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Review and adopt the proposals through an interactive terminal.
+    #[arg(long)]
+    pub adopt: bool,
+    /// Minimum observations before proposing an exact path or destination.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    pub min_hits: u32,
+    /// Literal command and arguments.
+    #[arg(last = true, required = true, allow_hyphen_values = true)]
+    pub argv: Vec<OsString>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +340,38 @@ mod tests {
         assert_eq!(args.policy.profile, None);
     }
 
+    /// `--observe` and `--evidence` parse to the policy's own modes, with
+    /// the spellings the configuration files use.
+    #[test]
+    fn the_mode_flags_parse_to_the_policy_modes() {
+        let cli = Cli::try_parse_from([
+            "ouro-jail",
+            "explain",
+            "--observe",
+            "off",
+            "--evidence",
+            "best-effort",
+        ])
+        .expect("parses");
+        let Command::Explain(args) = cli.command else {
+            panic!("expected explain")
+        };
+        assert_eq!(
+            args.policy.observe.map(ObserveMode::from),
+            Some(ObserveMode::Off)
+        );
+        assert_eq!(
+            args.policy.evidence.map(EvidenceMode::from),
+            Some(EvidenceMode::BestEffort)
+        );
+        for (flag, value) in [("--observe", "on"), ("--evidence", "strict")] {
+            Cli::try_parse_from(["ouro-jail", "explain", flag, value]).expect(value);
+        }
+        let error = Cli::try_parse_from(["ouro-jail", "explain", "--evidence", "best_effort"])
+            .expect_err("only the documented spelling");
+        assert_eq!(error.exit_code(), 2);
+    }
+
     #[test]
     fn an_unknown_observation_mode_is_a_usage_error() {
         let error =
@@ -279,40 +379,4 @@ mod tests {
                 .expect_err("a usage error");
         assert_eq!(error.exit_code(), 2);
     }
-}
-
-/// Read-only journal selection.
-#[derive(Debug, Args)]
-pub struct TailArgs {
-    /// Attempt ID; defaults to the most recently updated attempt directory.
-    #[arg(long)]
-    pub attempt: Option<String>,
-    /// Follow until the supervisor releases its attempt lock.
-    #[arg(long)]
-    pub follow: bool,
-    /// Write original NDJSON envelopes without re-encoding them.
-    #[arg(long)]
-    pub json: bool,
-    /// Include events at or after this UTC timestamp.
-    #[arg(long)]
-    pub since: Option<String>,
-}
-
-/// Candidate-policy generation. Proposals never load automatically.
-#[derive(Debug, Args)]
-pub struct LearnArgs {
-    #[command(flatten)]
-    pub policy: PolicyArgs,
-    /// Proposal TOML output; default is config/learned/ATTEMPT.toml.
-    #[arg(long)]
-    pub out: Option<PathBuf>,
-    /// Review and adopt the proposals through an interactive terminal.
-    #[arg(long)]
-    pub adopt: bool,
-    /// Minimum observations before proposing an exact path or destination.
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
-    pub min_hits: u32,
-    /// Literal command and arguments.
-    #[arg(last = true, required = true, allow_hyphen_values = true)]
-    pub argv: Vec<OsString>,
 }
