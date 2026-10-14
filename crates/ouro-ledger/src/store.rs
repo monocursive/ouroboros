@@ -147,6 +147,10 @@ pub struct Store {
     index: Option<crate::projection::Projection>,
     index_error: Option<String>,
     index_pending: BTreeMap<String, RunRecord>,
+    /// Pending journals whose background reconciliation failed, as last seen.
+    /// They are retried only once the journal changes.
+    #[cfg(target_os = "linux")]
+    pending_failures: BTreeMap<String, Option<pending_recovery::JournalSeen>>,
     segment_limit: u64,
     #[cfg(test)]
     fault: Option<Fault>,
@@ -412,6 +416,8 @@ impl Store {
             index: None,
             index_error: None,
             index_pending: BTreeMap::new(),
+            #[cfg(target_os = "linux")]
+            pending_failures: BTreeMap::new(),
             segment_limit: SEGMENT_BYTES,
             #[cfg(test)]
             fault: None,
@@ -1048,11 +1054,15 @@ impl Store {
         let mut reconciled = Vec::new();
         for id in orphans {
             if self.pending_exists(&id) {
-                // Corrupt or incomplete local evidence must never imply settlement.
-                let _ = self.reconcile_pending(&id, peer, &alive);
-                if self.stream(&id)?.run.state != "admitted"
-                    && self.stream(&id)?.run.state != "prepared"
-                {
+                // Corrupt or incomplete local evidence must never imply
+                // settlement; its refusal is recorded with the unknown outcome.
+                let result = self.reconcile_pending(&id, peer, &alive);
+                if !["prepared", "admitted"].contains(&self.stream(&id)?.run.state.as_str()) {
+                    reconciled.push(self.show(&id)?);
+                    continue;
+                }
+                if let Err(problem) = result {
+                    self.record_invalid_pending(&id, peer, &problem)?;
                     reconciled.push(self.show(&id)?);
                     continue;
                 }
@@ -2020,6 +2030,109 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn orphan_settlement_records_why_pending_evidence_was_refused() {
+        use crate::pending::{Journal, STATE};
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let mut plan = payload();
+        plan["evidence"] = "best-effort".into();
+        let run = store.prepare("pending-refused", &plan, &peer()).unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        store
+            .append_owner(
+                &run.run_id,
+                "admission",
+                "admitted",
+                None,
+                &json!({"receipt":prepared(&run)}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        let run = store.show(&run.run_id).unwrap();
+        let directory = store.root.join(&run.run_id);
+        Journal::open(&directory)
+            .unwrap()
+            .create(&run, &peer())
+            .unwrap();
+        fs::write(directory.join(STATE), b"{\"damaged\":true}").unwrap();
+        let settled = store.settle_orphans(&peer(), |_| false).unwrap();
+        assert_eq!(settled[0].state, "outcome_unknown");
+        assert_eq!(
+            settled[0].outcome.as_ref().unwrap()["unknown_reason"],
+            "pending evidence could not be reconciled"
+        );
+        let stream = fs::read(directory.join(STREAM)).unwrap();
+        let last: Value = serde_json::from_slice(
+            stream[..stream.len() - 1]
+                .rsplit(|b| *b == b'\n')
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(last["request_id"], "reconcile:pending-invalid");
+        assert!(
+            last["body"]["problem"]
+                .as_str()
+                .is_some_and(|problem| !problem.is_empty()),
+            "{last}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreconcilable_pending_evidence_is_recorded_once_and_retried_only_after_a_change() {
+        use crate::pending::{Journal, STATE};
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let mut plan = payload();
+        plan["evidence"] = "best-effort".into();
+        let run = store.prepare("pending-invalid", &plan, &peer()).unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        store
+            .append_owner(
+                &run.run_id,
+                "admission",
+                "admitted",
+                None,
+                &json!({"receipt":prepared(&run)}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        let run = store.show(&run.run_id).unwrap();
+        let journal = store.root.join(&run.run_id).join(STATE);
+        Journal::open(&store.root.join(&run.run_id))
+            .unwrap()
+            .create(&run, &peer())
+            .unwrap();
+        fs::write(&journal, b"{\"damaged\":true}").unwrap();
+        // The fixture owner's birth identity is not this process's: it is dead.
+        store.recover_pending_orphans(&peer());
+        let recorded = store.show(&run.run_id).unwrap();
+        assert_eq!(recorded.state, "outcome_unknown");
+        assert_eq!(
+            recorded.outcome.unwrap()["unknown_reason"],
+            "pending evidence could not be reconciled"
+        );
+        assert!(journal.exists(), "the refused journal stays for inspection");
+        // Reconciliation opens (and recreates) the journal's lock file, so its
+        // absence shows an unchanged journal was not retried.
+        let lock = store.root.join(&run.run_id).join("owner-pending.lock");
+        fs::remove_file(&lock).unwrap();
+        store.recover_pending_orphans(&peer());
+        assert!(!lock.exists(), "an unchanged failed journal was retried");
+        fs::write(&journal, b"{\"damaged\":\"again\"}").unwrap();
+        store.recover_pending_orphans(&peer());
+        assert!(lock.exists(), "a changed journal must be retried");
+        assert_eq!(
+            store.show(&run.run_id).unwrap().chain,
+            recorded.chain,
+            "a terminal run gains no second unknown outcome"
+        );
+    }
+
     fn create() -> (tempfile::TempDir, Store, RunRecord) {
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(&temp.path().join("data")).unwrap();

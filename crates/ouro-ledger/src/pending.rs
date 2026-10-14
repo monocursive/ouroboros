@@ -19,7 +19,7 @@ pub(crate) const QUEUE_BYTES: usize = 256 * 1024;
 pub(crate) const QUEUE_EVENTS: usize = 32;
 // Prefix, three source tails, first transport-loss note, terminal record and header.
 const JOURNAL_BYTES: usize = QUEUE_BYTES + 5 * MAX_FRAME_BYTES + 16 * 1024;
-const STATE: &str = "owner-pending.json";
+pub(crate) const STATE: &str = "owner-pending.json";
 const NEXT: &str = "owner-pending.next";
 const LOCK: &str = "owner-pending.lock";
 
