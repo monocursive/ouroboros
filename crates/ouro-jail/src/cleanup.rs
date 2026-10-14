@@ -61,6 +61,7 @@
 use std::io;
 use std::path::Path;
 
+use crate::lifecycle::TreeEnd;
 use crate::records::{ErrorCode, ErrorStage, JailError, Phase, Receipt, Remediation, StateCleanup};
 use crate::state::anchored::{Dir, Kind, Name, Stat};
 use crate::state::{self, AttemptDir, VENDOR_STATE_NAME};
@@ -592,14 +593,25 @@ pub fn permitted(receipt: Option<&Receipt>, gc_verified_leaf: bool) -> Result<()
 /// # Errors
 /// Returns the safe reason cleanup must wait.
 pub fn permitted_by(receipt: &Receipt) -> Result<(), &'static str> {
-    if receipt.lifetime.integrity == "lost" {
-        return Err(REASON_INTEGRITY_LOST);
+    match wait_reason(receipt.phase, TreeEnd::of(&receipt.lifetime)) {
+        None => Ok(()),
+        Some(reason) => Err(reason),
     }
-    let verified_empty = receipt.lifetime.tree_empty == Some(true);
-    match receipt.phase {
-        Phase::Settled if verified_empty => Ok(()),
-        Phase::Refused if verified_empty || receipt.lifetime.boundary == "pending" => Ok(()),
-        _ => Err(REASON_TREE_UNVERIFIED),
+}
+
+/// The rule of [`permitted_by`] over a lifecycle phase and the lifetime
+/// facts it was recorded with, wherever they were read: `None` when they
+/// prove no tree of the attempt can still use what it left, or the safe
+/// reason cleanup must wait.
+#[must_use]
+pub fn wait_reason(phase: Phase, tree: TreeEnd) -> Option<&'static str> {
+    if tree.integrity_lost {
+        return Some(REASON_INTEGRITY_LOST);
+    }
+    match phase {
+        Phase::Settled if tree.verified_empty => None,
+        Phase::Refused if tree.verified_empty || tree.no_boundary => None,
+        _ => Some(REASON_TREE_UNVERIFIED),
     }
 }
 
@@ -933,6 +945,7 @@ pub fn absent(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle::{BOUNDARY_PENDING, Integrity};
 
     /// A 0700 temporary directory whatever the umask: a state root under a
     /// group-writable one is refused, rightly.
@@ -1411,16 +1424,16 @@ mod tests {
         let mut receipt = sample_receipt();
         receipt.phase = Phase::Settled;
         receipt.lifetime.tree_empty = Some(true);
-        receipt.lifetime.integrity = "verified".into();
+        receipt.lifetime.integrity = Integrity::Verified.as_str().into();
         assert_eq!(permitted_by(&receipt), Ok(()));
-        receipt.lifetime.integrity = "lost".into();
+        receipt.lifetime.integrity = Integrity::Lost.as_str().into();
         assert_eq!(permitted_by(&receipt), Err(REASON_INTEGRITY_LOST));
-        receipt.lifetime.integrity = "verified".into();
+        receipt.lifetime.integrity = Integrity::Verified.as_str().into();
         receipt.lifetime.tree_empty = None;
         assert_eq!(permitted_by(&receipt), Err(REASON_TREE_UNVERIFIED));
         receipt.phase = Phase::Refused;
         assert_eq!(permitted_by(&receipt), Err(REASON_TREE_UNVERIFIED));
-        receipt.lifetime.boundary = "pending".into();
+        receipt.lifetime.boundary = BOUNDARY_PENDING.into();
         assert_eq!(permitted_by(&receipt), Ok(()), "no boundary ever existed");
         receipt.phase = Phase::Enforced;
         assert_eq!(permitted_by(&receipt), Err(REASON_TREE_UNVERIFIED));
@@ -1433,7 +1446,7 @@ mod tests {
         let mut receipt = sample_receipt();
         receipt.phase = Phase::Enforced;
         receipt.lifetime.tree_empty = None;
-        receipt.lifetime.integrity = "verified".into();
+        receipt.lifetime.integrity = Integrity::Verified.as_str().into();
         assert_eq!(
             permitted(Some(&receipt), false),
             Err(REASON_TREE_UNVERIFIED)
@@ -1441,7 +1454,7 @@ mod tests {
         assert_eq!(permitted(Some(&receipt), true), Ok(()));
         assert_eq!(permitted(None, false), Err(REASON_NO_TERMINAL_RECEIPT));
         assert_eq!(permitted(None, true), Ok(()));
-        receipt.lifetime.integrity = "lost".into();
+        receipt.lifetime.integrity = Integrity::Lost.as_str().into();
         assert_eq!(permitted(Some(&receipt), true), Err(REASON_INTEGRITY_LOST));
     }
 

@@ -29,6 +29,7 @@ use crate::cleanup;
 use crate::cli::{DoctorArgs, ExplainArgs, PolicyArgs, RunArgs};
 use crate::config::{self, EnvSettings};
 use crate::launch_profile;
+use crate::lifecycle::{BOUNDARY_PENDING, Integrity, TreeEnd};
 use crate::network::NetworkMode;
 use crate::platform::{
     BoundaryIdentity, ContinuousDeadline, PlanRequest, Platform, StopReason, Teardown,
@@ -1490,7 +1491,7 @@ fn apply_boundary(record: &mut AttemptRecord, boundary: &BoundaryIdentity, profi
         tree_empty: None,
         verified_at: None,
         verification_scope: Some(boundary.verification_scope.clone()),
-        integrity: "verified".to_owned(),
+        integrity: Integrity::Verified.as_str().to_owned(),
     };
     record.process = boundary.process.clone();
     // §13.2 wants the backend that made the boundary and its version; only
@@ -2023,8 +2024,8 @@ fn record_teardown(record: &mut AttemptRecord, teardown: &Result<Teardown, JailE
             record.errors.push(error.to_object());
             record.lifetime.tree_empty = None;
             record.lifetime.verified_at = None;
-            if record.lifetime.boundary != "pending" {
-                record.lifetime.integrity = "lost".to_owned();
+            if record.lifetime.boundary != BOUNDARY_PENDING {
+                record.lifetime.integrity = Integrity::Lost.as_str().to_owned();
             }
         }
     }
@@ -2399,26 +2400,16 @@ fn record_tree(record: &mut AttemptRecord, tree: &crate::platform::TreeObservati
     record.lifetime.integrity.clone_from(&tree.integrity);
 }
 
-/// Whether the receipt's lifetime facts permit removing vendor state (§12):
-/// no boundary was ever created, or its teardown verified the tree empty.
-/// Lost integrity never permits it.
-fn cleanup_reason_to_wait(record: &AttemptRecord) -> Option<&'static str> {
-    if record.lifetime.integrity == "lost" {
-        return Some(cleanup::REASON_INTEGRITY_LOST);
-    }
-    if record.lifetime.boundary == "pending" || record.lifetime.tree_empty == Some(true) {
-        return None;
-    }
-    Some(cleanup::REASON_TREE_UNVERIFIED)
-}
-
-/// Retains registered vendor state, recording why (§12: "Attempts with
-/// unproved live trees retain state").
+/// Retains registered vendor state, recording `reason`, why it waits (§12:
+/// "Attempts with unproved live trees retain state").
 ///
-/// J4-R: a failed record of it is returned, not dropped: it is persistence
-/// like any other.
-fn retain_vendor_state(attempt_dir: &AttemptDir, record: &mut AttemptRecord) -> Option<JailError> {
-    let reason = cleanup_reason_to_wait(record).unwrap_or(cleanup::REASON_TREE_UNVERIFIED);
+/// A failed record of it is returned, not dropped: it is persistence like
+/// any other.
+fn retain_vendor_state(
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    reason: &'static str,
+) -> Option<JailError> {
     record.state_cleanup = StateCleanup::Pending;
     record.cleanup_error = Some(reason.to_owned());
     state::record_cleanup(attempt_dir, StateCleanup::Pending, Some(reason)).err()
@@ -2445,8 +2436,8 @@ fn refuse_vendor_state(
             return;
         }
     }
-    if cleanup_reason_to_wait(record).is_some() {
-        if let Some(error) = retain_vendor_state(attempt_dir, record) {
+    if let Some(reason) = cleanup::wait_reason(Phase::Refused, TreeEnd::of(&record.lifetime)) {
+        if let Some(error) = retain_vendor_state(attempt_dir, record, reason) {
             record.errors.push(error.to_object());
         }
         return;

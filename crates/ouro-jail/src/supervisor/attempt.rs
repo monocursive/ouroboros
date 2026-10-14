@@ -28,6 +28,7 @@ use super::{
 };
 use crate::cleanup;
 use crate::cli::RunArgs;
+use crate::lifecycle::{Integrity, TreeEnd};
 use crate::observer::CoverageSummary;
 use crate::platform::{
     Deadline, PlanRequest, PreparedExecution, PreparedPlan, ProxyDirHandoff, ReleaseFailure,
@@ -545,8 +546,8 @@ impl<'a> Attempt<'a> {
         }
         // A detected integrity loss reaches the receipt now, not only at the
         // end.
-        if self.record.lifetime.integrity != "lost" && running.integrity_lost() {
-            self.record.lifetime.integrity = "lost".to_owned();
+        if !Integrity::Lost.is(&self.record.lifetime.integrity) && running.integrity_lost() {
+            self.record.lifetime.integrity = Integrity::Lost.as_str().to_owned();
             self.record.lifetime.tree_empty = None;
             self.record.lifetime.verified_at = None;
             let phase = if self.record.exec_observed {
@@ -813,7 +814,8 @@ impl<'a> Attempt<'a> {
         // (§8.1).
         let prepared_integrity = self.record.lifetime.integrity.clone();
         record_tree(&mut self.record, &tree);
-        let settled = tree.tree_empty == Some(true) && self.record.lifetime.integrity == "verified";
+        let settled = tree.tree_empty == Some(true)
+            && Integrity::Verified.is(&self.record.lifetime.integrity);
         // §13.2: "If tree death itself is unknown, retain the last nonsettled
         // phase and update its outcome/coverage/error as unknown." `enforced`
         // is the phase after a confirmed target exec (§8.1).
@@ -826,7 +828,7 @@ impl<'a> Attempt<'a> {
             // `prepared`. Its integrity stays the prepared one unless a loss
             // was detected: an unknown tree end does not unmake the verified
             // boundary.
-            if self.record.lifetime.integrity == "pending" {
+            if Integrity::Pending.is(&self.record.lifetime.integrity) {
                 self.record.lifetime.integrity = prepared_integrity;
             }
             Phase::Prepared
@@ -978,7 +980,9 @@ impl<'a> Attempt<'a> {
             return;
         }
         if !settled {
-            if let Some(error) = retain_vendor_state(&self.attempt_dir, &mut self.record) {
+            let reason = cleanup::wait_reason(phase, TreeEnd::of(&self.record.lifetime))
+                .unwrap_or(cleanup::REASON_TREE_UNVERIFIED);
+            if let Some(error) = retain_vendor_state(&self.attempt_dir, &mut self.record, reason) {
                 persistence_failed_after(
                     &mut self.record,
                     outcome_error,
@@ -1162,7 +1166,7 @@ fn first_record(
 /// The error an unverified tree end records (§9.3): a detected integrity
 /// loss is not a budget overrun.
 fn tree_unknown(record: &AttemptRecord) -> JailError {
-    let message = if record.lifetime.integrity == "lost" {
+    let message = if Integrity::Lost.is(&record.lifetime.integrity) {
         "the lifetime boundary's integrity was lost (a membership escape, a replaced \
          identity or a failed verification was detected), so tree death is unknown"
     } else {
