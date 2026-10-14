@@ -18,7 +18,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Serialize, de::DeserializeOwned};
@@ -32,16 +32,19 @@ use crate::{
         MAX_FRAME_BYTES, OperatorIntent, PROTOCOL_VERSION, Peer, ReadPage, ReadRequest, Request,
         Response, Result, RunRecord, StoreStatus, TailPage, TailRequest, VerifyPage, VerifyReport,
     },
-    store::Store,
+    store::{Store, VerifyPlan},
 };
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
 const ACCEPT_BACKOFF_LIMIT: Duration = Duration::from_secs(1);
 const GC_TIMEOUT: Duration = Duration::from_secs(300);
-/// One verify page re-reads a bounded amount of history, but a single large
-/// run still takes longer than an ordinary request.
-const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+/// A verify page is re-read by its connection, never by the writer thread,
+/// so waiting on one large run delays only the client that asked for it.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
+/// The connection stops re-reading here and reports what it did not check,
+/// leaving room to ask the writer about GC and to send the page in time.
+const VERIFY_WORK: Duration = VERIFY_TIMEOUT.saturating_sub(Duration::from_secs(20));
 
 fn response_timeout(request: &Request) -> Duration {
     match request {
@@ -407,44 +410,127 @@ fn accept_connections(listener: UnixListener, sender: mpsc::SyncSender<Message>)
         let sender = sender.clone();
         let count = count.clone();
         thread::spawn(move || {
-            let _ = socket.set_read_timeout(Some(TIMEOUT));
-            let _ = socket.set_write_timeout(Some(TIMEOUT));
-            loop {
-                let request = match next_request(&mut socket) {
-                    Ok(request) => request,
-                    Err(refusal) => {
-                        if let Some(message) = refusal {
-                            let _ = write_frame(&mut socket, &Response::Error { message });
-                        }
-                        break;
-                    }
-                };
-                let timeout = response_timeout(&request);
-                let (reply, response) = mpsc::sync_channel(1);
-                let message = Message {
-                    request,
-                    peer: peer.clone(),
-                    reply,
-                };
-                if sender.try_send(message).is_err() {
-                    let _ = write_frame(
-                        &mut socket,
-                        &Response::Error {
-                            message: "bounded daemon queue is full".into(),
-                        },
-                    );
-                    break;
-                }
-                let Ok(value) = response.recv_timeout(timeout) else {
-                    break;
-                };
-                if write_frame(&mut socket, &value).is_err() {
-                    break;
-                }
-            }
+            serve_connection(socket, &peer, &sender);
             count.fetch_sub(1, Ordering::AcqRel);
         });
     }
+}
+
+/// Why a connection gets no answer from the writer thread.
+#[derive(Clone, Copy)]
+enum Unanswered {
+    /// The bounded queue is full, or the writer is gone; the client is told.
+    QueueFull,
+    /// The writer did not answer in time; the connection closes.
+    Lost,
+}
+
+fn ask<T>(
+    sender: &mpsc::SyncSender<Message>,
+    peer: &Peer,
+    timeout: Duration,
+    work: impl FnOnce(mpsc::SyncSender<T>) -> Work,
+) -> std::result::Result<T, Unanswered> {
+    let (reply, response) = mpsc::sync_channel(1);
+    let message = Message {
+        work: work(reply),
+        peer: peer.clone(),
+    };
+    sender
+        .try_send(message)
+        .map_err(|_| Unanswered::QueueFull)?;
+    response.recv_timeout(timeout).map_err(|_| Unanswered::Lost)
+}
+
+fn serve_connection(mut socket: UnixStream, peer: &Peer, sender: &mpsc::SyncSender<Message>) {
+    let _ = socket.set_read_timeout(Some(TIMEOUT));
+    let _ = socket.set_write_timeout(Some(TIMEOUT));
+    loop {
+        let request = match next_request(&mut socket) {
+            Ok(request) => request,
+            Err(refusal) => {
+                if let Some(message) = refusal {
+                    let _ = write_frame(&mut socket, &Response::Error { message });
+                }
+                return;
+            }
+        };
+        let response = match request {
+            Request::Verify {
+                run_id,
+                after,
+                limit,
+            } => verify(sender, peer, run_id.as_deref(), after.as_deref(), limit),
+            request => ask(sender, peer, response_timeout(&request), |reply| {
+                Work::Request(request, reply)
+            }),
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(Unanswered::QueueFull) => {
+                let _ = write_frame(
+                    &mut socket,
+                    &Response::Error {
+                        message: "bounded daemon queue is full".into(),
+                    },
+                );
+                return;
+            }
+            Err(Unanswered::Lost) => return,
+        };
+        if write_frame(&mut socket, &response).is_err() {
+            return;
+        }
+    }
+}
+
+/// One fresh verification page. The writer only plans it and says whether a
+/// GC ran; the canonical history is re-read here, on this connection's
+/// thread, so owners keep their writer while a large run is verified.
+fn verify(
+    sender: &mpsc::SyncSender<Message>,
+    peer: &Peer,
+    run_id: Option<&str>,
+    after: Option<&str>,
+    limit: u32,
+) -> std::result::Result<Response, Unanswered> {
+    let deadline = Instant::now() + VERIFY_WORK;
+    // Asking the writer stays possible past the deadline, so a stopped
+    // re-read is still reported rather than dropped.
+    let wait = || {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .max(TIMEOUT)
+    };
+    let unanswered = std::cell::Cell::new(None);
+    let lost = |problem| {
+        unanswered.set(Some(problem));
+        LedgerError("the writer did not answer".into())
+    };
+    let page = crate::store::verify_page(
+        &mut |run_id, after, limit| {
+            ask(sender, peer, wait(), |reply| Work::PlanVerify {
+                run_id: run_id.map(str::to_owned),
+                after: after.map(str::to_owned),
+                limit,
+                reply,
+            })
+            .map_err(lost)?
+        },
+        &mut || ask(sender, peer, wait(), Work::GcGeneration).map_err(lost),
+        &mut || Instant::now() < deadline,
+        run_id,
+        after,
+        limit,
+    );
+    if let Some(problem) = unanswered.get() {
+        return Err(problem);
+    }
+    let response = match page.and_then(|page| Ok(serde_json::to_value(page)?)) {
+        Ok(value) => Response::Ok { value },
+        Err(error) => Response::Error { message: error.0 },
+    };
+    Ok(response)
 }
 
 #[derive(Clone)]
@@ -455,10 +541,22 @@ struct Capability {
     token_id: String,
 }
 
+/// What a connection asks of the single writer thread, each with its reply.
+enum Work {
+    Request(Request, mpsc::SyncSender<Response>),
+    /// The writer's cheap half of a fresh verification page.
+    PlanVerify {
+        run_id: Option<String>,
+        after: Option<String>,
+        limit: u32,
+        reply: mpsc::SyncSender<Result<VerifyPlan>>,
+    },
+    GcGeneration(mpsc::SyncSender<u64>),
+}
+
 struct Message {
-    request: Request,
+    work: Work,
     peer: Peer,
-    reply: mpsc::SyncSender<Response>,
 }
 
 pub fn serve(data: &Path) -> Result<()> {
@@ -495,24 +593,35 @@ pub fn serve(data: &Path) -> Result<()> {
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        #[cfg(test)]
-        let _fault_scope = crate::faults::scope(crate::faults::request_kind(&message.request));
-        let result = dispatch(
-            &mut store,
-            &mut capabilities,
-            message.request,
-            &message.peer,
-        );
-        let response = match result {
-            Ok(value) => Response::Ok { value },
-            Err(error) => Response::Error { message: error.0 },
-        };
-        #[cfg(test)]
-        if matches!(response, Response::Ok { .. }) {
-            crate::faults::hit("reply.before_send")?;
+        match message.work {
+            Work::Request(request, reply) => {
+                #[cfg(test)]
+                let _fault_scope = crate::faults::scope(crate::faults::request_kind(&request));
+                let response = match dispatch(&mut store, &mut capabilities, request, &message.peer)
+                {
+                    Ok(value) => Response::Ok { value },
+                    Err(error) => Response::Error { message: error.0 },
+                };
+                #[cfg(test)]
+                if matches!(response, Response::Ok { .. }) {
+                    crate::faults::hit("reply.before_send")?;
+                }
+                // A dropped reply never rolls back a persisted request or its receipt.
+                let _ = reply.try_send(response);
+            }
+            Work::PlanVerify {
+                run_id,
+                after,
+                limit,
+                reply,
+            } => {
+                let _ =
+                    reply.try_send(store.plan_verify(run_id.as_deref(), after.as_deref(), limit));
+            }
+            Work::GcGeneration(reply) => {
+                let _ = reply.try_send(store.gc_generation());
+            }
         }
-        // A dropped reply never rolls back a persisted request or its receipt.
-        let _ = message.reply.try_send(response);
         store.flush_index();
     }
     let problem = acceptor
@@ -613,15 +722,10 @@ fn dispatch(
         Request::ShowWithTranscript { run_id } => store.show_with_transcript(&run_id),
         Request::Catalog { request } => Ok(serde_json::to_value(store.catalog(&request)?)?),
         Request::Discover { request } => Ok(serde_json::to_value(store.discover(&request)?)?),
-        Request::Verify {
-            run_id,
-            after,
-            limit,
-        } => Ok(serde_json::to_value(store.verify_page(
-            run_id.as_deref(),
-            after.as_deref(),
-            limit,
-        )?)?),
+        // Connections re-read history themselves; see `verify`.
+        Request::Verify { .. } => Err(LedgerError(
+            "fresh verification is never run on the writer thread".into(),
+        )),
         Request::Status => Ok(serde_json::to_value(store.status())?),
         Request::Read { request } => Ok(serde_json::to_value(store.read(&request)?)?),
         Request::Ping => Ok(
@@ -790,6 +894,100 @@ mod tests {
             birth: "fixture".into(),
             boot_id: "fixture".into(),
         }
+    }
+
+    /// A writer process kept on a leash: killed when the test ends.
+    struct Worker(std::process::Child);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    const SLOW_VERIFY_WORKER: &str = "OURO_LEDGER_SLOW_VERIFY_WORKER";
+    const FRAME_DELAY: Duration = Duration::from_millis(50);
+
+    fn request_payload() -> Value {
+        let receipt: Value = serde_json::from_str(include_str!(
+            "../../../docs/specs/jail-v1/examples/receipt-prepared.json"
+        ))
+        .unwrap();
+        json!({"schema":"ouro.ledger.request/1","profile":"tool","argv_digest":receipt["argv_digest"],
+            "policy_digest":receipt["policy"]["digest"],"requirements":receipt["policy"]["requirements"],
+            "jail_image_digest":receipt["argv_digest"],"io":{"mode":"batch","pty":false},
+            "capture":{"streams":[],"limit_bytes":1_048_576},"evidence":"strict"})
+    }
+
+    /// Re-reading one run takes several times the 2 s request timeout here,
+    /// yet the writer keeps answering status, ping and appends meanwhile.
+    #[test]
+    fn a_slow_fresh_verification_never_holds_the_writer_from_other_clients() {
+        if let Some(data) = std::env::var_os(SLOW_VERIFY_WORKER) {
+            crate::faults::slow_verification(FRAME_DELAY);
+            serve(Path::new(&data)).unwrap();
+            unreachable!("the writer serves until it is killed");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let frames = 80;
+        let run_id = {
+            let mut store = Store::open(&data).unwrap();
+            let run = store
+                .prepare("slow-verify", &request_payload(), &fixture_peer())
+                .unwrap();
+            for n in 1..frames {
+                store
+                    .hold(&run.run_id, &format!("hold-{n}"), &fixture_peer())
+                    .unwrap();
+            }
+            run.run_id
+        };
+        let log = fs::File::create(temp.path().join("writer.log")).unwrap();
+        let _writer = Worker(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::tests::a_slow_fresh_verification_never_holds_the_writer_from_other_clients",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(SLOW_VERIFY_WORKER, &data)
+                .env("OURO_CONFIG_DIR", temp.path().join("config"))
+                .stdin(std::process::Stdio::null())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Client::connect(&data).is_err() {
+            assert!(Instant::now() < deadline, "the writer never became ready");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let verifier = {
+            let (data, run_id) = (data.clone(), run_id.clone());
+            thread::spawn(move || {
+                let started = Instant::now();
+                let reports = Client::connect(&data).unwrap().verify(Some(&run_id));
+                (started.elapsed(), reports)
+            })
+        };
+        thread::sleep(Duration::from_millis(300));
+        let mut client = Client::connect(&data).unwrap();
+        for _ in 0..3 {
+            // Each call fails on its own 2 s timeout if the writer is held.
+            assert_eq!(client.status().unwrap().runs, 1);
+            assert_eq!(client.ping().unwrap()["protocol"], PROTOCOL_VERSION);
+            thread::sleep(Duration::from_millis(500));
+        }
+        client.hold(&run_id, "during-verify").unwrap();
+        let (elapsed, reports) = verifier.join().unwrap();
+        let report = &reports.unwrap()[0];
+        assert!(elapsed >= FRAME_DELAY * frames, "{elapsed:?}");
+        // The re-read covers what was accepted when the page was planned.
+        assert!(report.local_consistency, "{report:?}");
+        assert_eq!(report.events, u64::from(frames));
     }
 
     #[test]

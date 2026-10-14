@@ -480,6 +480,7 @@ impl Store {
         peer: &Peer,
         now: SystemTime,
     ) -> Result<GcResult> {
+        self.gc_generation += 1;
         let retain_days = policy.retain_days;
         // Full verification and fsync must not stall a live launch's strict channel.
         if self.streams.values().any(|s| {
@@ -737,44 +738,48 @@ impl Store {
             ..Stream::empty(id)
         })
     }
+}
 
-    pub(super) fn verify_pruned(&self, id: &str) -> Result<VerifyReport> {
-        let stream = self.stream(id)?;
-        let retained = stream.pruned.as_ref().expect("retained run");
-        let checked = (|| -> Result<()> {
-            let root = self.root.join(id);
-            let current =
-                read(&root, id)?.ok_or_else(|| LedgerError("GC authority is missing".into()))?;
-            if current.digest()? != retained.digest()? {
-                return Err(LedgerError("GC authority changed".into()));
-            }
-            let complete = retained.complete(&root)?;
-            retained.check_remaining(&root, complete)?;
-            if !complete {
-                return Err(LedgerError(
-                    "GC deletion is incomplete; retry GC or restart the writer".into(),
-                ));
-            }
-            if read_json(&root.join("run.json"), crate::projection::MAX_RUN_BYTES)?
-                != serde_json::to_value(&stream.run)?
-            {
-                return Err(LedgerError(
-                    "pruned run projection differs from retained authority".into(),
-                ));
-            }
-            Ok(())
-        })();
-        Ok(VerifyReport {
-            run_id: id.into(),
-            local_consistency: checked.is_ok(),
-            child_protection: stream.run.child_protection.clone(),
-            coverage: crate::reader::coverage_summary(&stream.run.coverage),
-            events: 0,
-            problems: checked
-                .err()
-                .map(|e| vec![e.to_string()])
-                .unwrap_or_default(),
-            history: stream.run.history.clone(),
-        })
+/// A pruned run re-checked against the retained authority and projection
+/// the writer held when it planned this verification.
+pub(super) fn verify_pruned(
+    root: &Path,
+    id: &str,
+    retained: &Retained,
+    run: &RunRecord,
+) -> VerifyReport {
+    let checked = (|| -> Result<()> {
+        let current =
+            read(root, id)?.ok_or_else(|| LedgerError("GC authority is missing".into()))?;
+        if current.digest()? != retained.digest()? {
+            return Err(LedgerError("GC authority changed".into()));
+        }
+        let complete = retained.complete(root)?;
+        retained.check_remaining(root, complete)?;
+        if !complete {
+            return Err(LedgerError(
+                "GC deletion is incomplete; retry GC or restart the writer".into(),
+            ));
+        }
+        if read_json(&root.join("run.json"), crate::projection::MAX_RUN_BYTES)?
+            != serde_json::to_value(run)?
+        {
+            return Err(LedgerError(
+                "pruned run projection differs from retained authority".into(),
+            ));
+        }
+        Ok(())
+    })();
+    VerifyReport {
+        run_id: id.into(),
+        local_consistency: checked.is_ok(),
+        child_protection: run.child_protection.clone(),
+        coverage: crate::reader::coverage_summary(&run.coverage),
+        events: 0,
+        problems: checked
+            .err()
+            .map(|e| vec![e.to_string()])
+            .unwrap_or_default(),
+        history: run.history.clone(),
     }
 }

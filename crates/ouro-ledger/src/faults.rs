@@ -69,6 +69,23 @@ pub(crate) fn hit(point: &str) -> std::io::Result<()> {
     }
 }
 
+/// A delay before each canonical frame a fresh verification re-reads. It is
+/// process-wide, so only a dedicated worker process sets it.
+static VERIFY_FRAME_DELAY_MICROS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) fn slow_verification(delay: std::time::Duration) {
+    VERIFY_FRAME_DELAY_MICROS.store(
+        delay.as_micros() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+pub(crate) fn verify_frame() {
+    let micros = VERIFY_FRAME_DELAY_MICROS.load(std::sync::atomic::Ordering::Relaxed);
+    if micros > 0 {
+        std::thread::sleep(std::time::Duration::from_micros(micros));
+    }
+}
+
 pub(crate) fn request_kind(request: &crate::protocol::Request) -> &str {
     use crate::protocol::Request;
     match request {

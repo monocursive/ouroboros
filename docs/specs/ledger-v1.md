@@ -461,9 +461,18 @@ A recovery sync failure refuses startup; no recovered retry can be acknowledged 
 A valid chain is local consistency only: deleting both history and its same-user
 manifest anchor has no external witness in this slice.
 Source gaps remain explicit even when the hash chain is consistent.
-Whole-store `verify` re-reads history one page per writer request: at most 25
-runs, stopping before 8 MiB of canonical bytes unless a single run is larger, so
-live owners' requests interleave with it. Its `coverage` is the bounded summary
+`verify` never re-reads history on the writer thread. For each page the writer
+only plans: it selects at most 25 runs, stopping before 8 MiB of canonical bytes
+unless a single run is larger, and for each run lists its segments, notes the
+last segment's length and reads its manifest and `run.json`. The connection
+that asked then re-reads and re-hashes those segments up to the noted lengths,
+so live owners keep the writer while one large run is verified, and records
+appended meanwhile are neither read nor reported. A clean re-read must match
+the published projection and end at the head the writer had accepted. A run
+whose re-read found problems is planned and re-read once more if a GC ran in
+between; if one ran again, the report says so. A page waits up to 300 s; the
+connection stops re-reading after 280 s and reports, as not consistent, how many
+canonical bytes it checked. Its `coverage` is the bounded summary
 (status, per-class status, sources and gap counts); `show` has the full record.
 `doctor` reports only the writer's accepted state (run count, ambiguous streams,
 unfinished deletions, blocked preparation and the index) without re-reading
