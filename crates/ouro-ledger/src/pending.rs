@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
-    ffi::CString,
+    ffi::CStr,
     fs::File,
     io::{Read, Write},
     os::{
@@ -19,9 +19,22 @@ pub(crate) const QUEUE_BYTES: usize = 256 * 1024;
 pub(crate) const QUEUE_EVENTS: usize = 32;
 // Prefix, three source tails, first transport-loss note, terminal record and header.
 const JOURNAL_BYTES: usize = QUEUE_BYTES + 5 * MAX_FRAME_BYTES + 16 * 1024;
-pub(crate) const STATE: &str = "owner-pending.json";
-const NEXT: &str = "owner-pending.next";
-const LOCK: &str = "owner-pending.lock";
+// Members of a run directory, named as the descriptor-relative calls take them.
+const STATE_NAME: &CStr = c"owner-pending.json";
+const NEXT_NAME: &CStr = c"owner-pending.next";
+const LOCK_NAME: &CStr = c"owner-pending.lock";
+pub(crate) const STATE: &str = text(STATE_NAME);
+#[cfg(test)]
+const NEXT: &str = text(NEXT_NAME);
+#[cfg(test)]
+const LOCK: &str = text(LOCK_NAME);
+
+const fn text(name: &'static CStr) -> &'static str {
+    match name.to_str() {
+        Ok(text) => text,
+        Err(_) => panic!("member names are ASCII"),
+    }
+}
 
 #[cfg(test)]
 mod crash_tests;
@@ -65,7 +78,19 @@ fn invalid(message: &str) -> LedgerError {
 /// is a hard owner failure, including a writer stalled while holding this lock.
 pub(crate) struct Journal {
     dir: File,
-    _lock: File,
+    lock: File,
+}
+
+impl Drop for Journal {
+    /// A child forked elsewhere in this process holds every inherited
+    /// descriptor until it execs; unlocking the shared open file releases
+    /// the lock for it too.
+    fn drop(&mut self) {
+        // SAFETY: flock takes the still-open descriptor and flags by value.
+        unsafe {
+            libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 impl Journal {
     pub fn open(run_dir: &Path) -> Result<Self> {
@@ -75,17 +100,19 @@ impl Journal {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(run_dir)?;
         let meta = dir.metadata()?;
-        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+        if meta.uid() != crate::os::euid() || meta.mode() & 0o077 != 0 {
             return Err(invalid("run directory is not owned and private"));
         }
-        let lock = Self::file(&dir, LOCK, libc::O_RDWR | libc::O_CREAT)?;
+        let lock = Self::file(&dir, LOCK_NAME, libc::O_RDWR | libc::O_CREAT)?;
+        // SAFETY: flock takes the open descriptor and flags by value.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        Ok(Self { dir, _lock: lock })
+        Ok(Self { dir, lock })
     }
-    fn file(dir: &File, name: &str, flags: i32) -> Result<File> {
-        let name = CString::new(name).map_err(|_| invalid("invalid member name"))?;
+    fn file(dir: &File, name: &CStr, flags: i32) -> Result<File> {
+        // SAFETY: the directory descriptor and the NUL-terminated name stay
+        // live through the call; the mode applies only with O_CREAT.
         let fd = unsafe {
             libc::openat(
                 dir.as_raw_fd(),
@@ -97,11 +124,12 @@ impl Journal {
         if fd < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
+        // SAFETY: a successful openat returned a new descriptor owned only here.
         let file = unsafe { File::from_raw_fd(fd) };
         let meta = file.metadata()?;
         if !meta.is_file()
             || meta.nlink() != 1
-            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.uid() != crate::os::euid()
             || meta.mode() & 0o077 != 0
         {
             return Err(invalid(
@@ -117,7 +145,7 @@ impl Journal {
         // Creation must never overwrite pending evidence from an earlier owner.
         let _initial = Self::file(
             &self.dir,
-            STATE,
+            STATE_NAME,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         )?;
         self.replace(&State {
@@ -138,7 +166,7 @@ impl Journal {
     pub fn read(&self, run: &RunRecord) -> Result<State> {
         #[cfg(test)]
         let _scope = crate::faults::scope("pending.read");
-        let mut file = Self::file(&self.dir, STATE, libc::O_RDONLY)?;
+        let mut file = Self::file(&self.dir, STATE_NAME, libc::O_RDONLY)?;
         if file.metadata()?.len() > JOURNAL_BYTES as u64 {
             return Err(invalid("size limit exceeded"));
         }
@@ -201,12 +229,12 @@ impl Journal {
         // A stale replacement from an interrupted write has no authority.
         #[cfg(test)]
         crate::faults::hit("snapshot.before_temp_unlink")?;
-        self.unlink(NEXT)?;
+        self.unlink(NEXT_NAME)?;
         #[cfg(test)]
         crate::faults::hit("snapshot.before_open")?;
         let mut next = Self::file(
             &self.dir,
-            NEXT,
+            NEXT_NAME,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         )?;
         #[cfg(test)]
@@ -224,14 +252,14 @@ impl Journal {
         next.sync_all()?;
         #[cfg(test)]
         crate::faults::hit("snapshot.before_rename")?;
-        let from = CString::new(NEXT).unwrap();
-        let to = CString::new(STATE).unwrap();
+        // SAFETY: both names are static NUL-terminated members of the one
+        // directory descriptor, which stays open through the call.
         if unsafe {
             libc::renameat(
                 self.dir.as_raw_fd(),
-                from.as_ptr(),
+                NEXT_NAME.as_ptr(),
                 self.dir.as_raw_fd(),
-                to.as_ptr(),
+                STATE_NAME.as_ptr(),
             )
         } != 0
         {
@@ -244,8 +272,9 @@ impl Journal {
         crate::faults::hit("snapshot.after_directory_sync")?;
         Ok(())
     }
-    fn unlink(&self, name: &str) -> Result<()> {
-        let name = CString::new(name).unwrap();
+    fn unlink(&self, name: &CStr) -> Result<()> {
+        // SAFETY: the directory descriptor and the NUL-terminated name stay
+        // live through the call.
         if unsafe { libc::unlinkat(self.dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
             let e = std::io::Error::last_os_error();
             if e.kind() != std::io::ErrorKind::NotFound {
@@ -259,10 +288,10 @@ impl Journal {
         let _scope = crate::faults::scope("pending.remove");
         #[cfg(test)]
         crate::faults::hit("cleanup.before_temp_unlink")?;
-        self.unlink(NEXT)?;
+        self.unlink(NEXT_NAME)?;
         #[cfg(test)]
         crate::faults::hit("cleanup.before_state_unlink")?;
-        self.unlink(STATE)?;
+        self.unlink(STATE_NAME)?;
         // Keep the mutex inode for the lifetime of the run directory. Unlinking
         // a held flock lets another opener lock a different inode concurrently.
         #[cfg(test)]
@@ -401,7 +430,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(&temp.path().join("data")).unwrap();
         let owner = Peer {
-            uid: unsafe { libc::geteuid() },
+            uid: crate::os::euid(),
             pid: std::process::id(),
             birth: "pending-fixture".into(),
             boot_id: "pending-boot".into(),

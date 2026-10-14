@@ -586,9 +586,12 @@ fn output_pipe() -> Result<(File, File)> {
     }
     // SAFETY: the successful pipe2 returned distinct descriptors exclusively owned here.
     let parent = unsafe { File::from_raw_fd(fds[0]) };
+    // SAFETY: as above, for the write end.
     let child = unsafe { File::from_raw_fd(fds[1]) };
+    // SAFETY: scalar fcntl calls on the read end `parent` owns.
     let flags = unsafe { libc::fcntl(parent.as_raw_fd(), libc::F_GETFL) };
     if flags < 0
+        // SAFETY: as above.
         || unsafe { libc::fcntl(parent.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
     {
         return Err(std::io::Error::last_os_error().into());
@@ -669,6 +672,7 @@ fn terminate(child: &mut Child) {
         return;
     }
     // The jail handles TERM and proves its own tree death. A forced exit cannot establish it.
+    // SAFETY: kill takes scalars; the child is unreaped, so its pid is still ours.
     unsafe {
         libc::kill(child.id() as i32, libc::SIGTERM);
     }
@@ -1011,7 +1015,8 @@ fn run_owned(
                     pipe.shutdown(std::net::Shutdown::Write)?;
                 }
                 if child.0.try_wait()?.is_none() {
-                    // The direct child is unreaped, so its pid cannot be reused.
+                    // SAFETY: kill takes scalars; the direct child is unreaped,
+                    // so its pid cannot have been reused.
                     unsafe {
                         libc::kill(child.0.id() as i32, libc::SIGTERM);
                     }

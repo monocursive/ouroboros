@@ -344,7 +344,7 @@ mod tests {
 
     fn peer() -> Peer {
         Peer {
-            uid: unsafe { libc::geteuid() },
+            uid: crate::os::euid(),
             pid: std::process::id(),
             birth: "catalog-fixture".into(),
             boot_id: "fixture".into(),

@@ -68,14 +68,14 @@ impl Client {
     pub(crate) fn open(data: &Path) -> Result<Self> {
         let path = data.join("ledger/serve.sock");
         let meta = fs::symlink_metadata(&path)?;
-        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+        if meta.uid() != crate::os::euid() || meta.mode() & 0o077 != 0 {
             return Err(LedgerError("daemon socket is not owned and private".into()));
         }
         let stream = UnixStream::connect(path)?;
         stream.set_read_timeout(Some(TIMEOUT))?;
         stream.set_write_timeout(Some(TIMEOUT))?;
         let server = peer_credentials(&stream)?;
-        if server.uid != unsafe { libc::geteuid() } {
+        if server.uid != crate::os::euid() {
             return Err(LedgerError(
                 "daemon peer uid is not the current user".into(),
             ));
@@ -386,7 +386,7 @@ fn accept_connections(listener: UnixListener, sender: mpsc::SyncSender<Message>)
         let Ok(peer) = peer_credentials(&socket) else {
             continue;
         };
-        if peer.uid != unsafe { libc::geteuid() } {
+        if peer.uid != crate::os::euid() {
             continue;
         }
         if count.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
@@ -468,7 +468,7 @@ pub fn serve(data: &Path) -> Result<()> {
     let path = store.root().join("serve.sock");
     if let Ok(meta) = fs::symlink_metadata(&path) {
         use std::os::unix::fs::FileTypeExt as _;
-        if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } {
+        if !meta.file_type().is_socket() || meta.uid() != crate::os::euid() {
             return Err(LedgerError("refusing unsafe existing daemon socket".into()));
         }
         fs::remove_file(&path)?;
@@ -480,7 +480,7 @@ pub fn serve(data: &Path) -> Result<()> {
     let acceptor = thread::spawn(move || accept_connections(listener, sender));
     let mut capabilities = BTreeMap::new();
     #[cfg(target_os = "linux")]
-    let recovery_peer = peer_identity(unsafe { libc::geteuid() }, std::process::id())?;
+    let recovery_peer = peer_identity(crate::os::euid(), std::process::id())?;
     let mut last_recovery = std::time::Instant::now() - Duration::from_secs(1);
     // A writer that can no longer accept connections cannot serve owners; it
     // exits with the acceptor's error rather than as a clean shutdown.
@@ -696,6 +696,8 @@ pub fn peer_credentials(socket: &UnixStream) -> Result<Peer> {
         gid: 0,
     };
     let mut size = std::mem::size_of_val(&credential) as libc::socklen_t;
+    // SAFETY: the socket is open for this call, and the output pointer and
+    // its length describe the one live ucred the kernel fills.
     if unsafe {
         libc::getsockopt(
             socket.as_raw_fd(),
@@ -737,11 +739,14 @@ pub(crate) fn peer_identity(uid: u32, pid: u32) -> Result<Peer> {
 pub fn peer_credentials(socket: &UnixStream) -> Result<Peer> {
     let mut uid = 0;
     let mut gid = 0;
+    // SAFETY: the socket is open for this call; both outputs are live locals.
     if unsafe { libc::getpeereid(socket.as_raw_fd(), &mut uid, &mut gid) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
     let mut pid: libc::pid_t = 0;
     let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
+    // SAFETY: the socket is open for this call, and the output pointer and
+    // its length describe the one live pid_t the kernel fills.
     if unsafe {
         libc::getsockopt(
             socket.as_raw_fd(),
@@ -780,7 +785,7 @@ mod tests {
 
     fn fixture_peer() -> Peer {
         Peer {
-            uid: unsafe { libc::geteuid() },
+            uid: crate::os::euid(),
             pid: std::process::id(),
             birth: "fixture".into(),
             boot_id: "fixture".into(),

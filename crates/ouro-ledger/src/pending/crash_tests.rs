@@ -231,7 +231,7 @@ fn cleanup_keeps_the_same_mutex_inode_for_future_openers() {
     let reopened = Journal::open(&dir).unwrap();
     assert_eq!(
         old_lock.metadata().unwrap().ino(),
-        reopened._lock.metadata().unwrap().ino()
+        reopened.lock.metadata().unwrap().ino()
     );
     assert!(Journal::open(&dir).is_err());
     assert!(!dir.join(STATE).exists());

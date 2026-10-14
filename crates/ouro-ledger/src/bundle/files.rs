@@ -47,7 +47,7 @@ pub(crate) fn child_dir(parent: &File, leaf: &str) -> Result<File> {
 
 pub(crate) fn private(file: &File) -> Result<()> {
     let m = file.metadata()?;
-    if m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 {
+    if m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 {
         return Err(LedgerError(
             "sensitive source must be owned and private".into(),
         ));
@@ -82,12 +82,11 @@ pub(crate) fn member(parent: &File, leaf: &str, create: bool) -> Result<File> {
 
 pub(super) fn names(parent: &File) -> Result<BTreeSet<String>> {
     // Open a new directory description: dup would share the enumeration offset.
-    let dot = CString::new(".").expect("literal");
-    // SAFETY: valid live descriptor and C string.
+    // SAFETY: valid live descriptor and static C string.
     let fd = unsafe {
         libc::openat(
             parent.as_raw_fd(),
-            dot.as_ptr(),
+            c".".as_ptr(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
         )
     };
@@ -98,6 +97,7 @@ pub(super) fn names(parent: &File) -> Result<BTreeSet<String>> {
     let dir = unsafe { libc::fdopendir(fd) };
     if dir.is_null() {
         let error = std::io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so the descriptor is still ours to close.
         unsafe {
             libc::close(fd);
         }
@@ -106,6 +106,7 @@ pub(super) fn names(parent: &File) -> Result<BTreeSet<String>> {
     struct Directory(*mut libc::DIR);
     impl Drop for Directory {
         fn drop(&mut self) {
+            // SAFETY: the stream is non-null, owned only here and closed once.
             unsafe {
                 libc::closedir(self.0);
             }
@@ -115,10 +116,12 @@ pub(super) fn names(parent: &File) -> Result<BTreeSet<String>> {
     let mut result = BTreeSet::new();
     loop {
         // POSIX distinguishes EOF from a directory read failure through errno.
+        // SAFETY: the location is this thread's errno, valid for the thread.
         #[cfg(target_os = "linux")]
         unsafe {
             *libc::__errno_location() = 0;
         }
+        // SAFETY: as above.
         #[cfg(target_os = "macos")]
         unsafe {
             *libc::__error() = 0;
@@ -132,6 +135,8 @@ pub(super) fn names(parent: &File) -> Result<BTreeSet<String>> {
             }
             break;
         }
+        // SAFETY: a non-null entry from readdir holds a NUL-terminated name
+        // that stays valid until the next readdir on this stream.
         let leaf = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }
             .to_str()
             .map_err(|_| LedgerError("non-UTF8 bundle member".into()))?;
@@ -203,6 +208,7 @@ impl Staging {
                 libc::RENAME_NOREPLACE,
             )
         };
+        // SAFETY: as above.
         #[cfg(target_os = "macos")]
         let result = unsafe {
             libc::renameatx_np(
@@ -234,22 +240,23 @@ impl Drop for Staging {
             return;
         }
         for leaf in [
-            "bundle.json",
-            "events.ndjson",
-            "receipts.json",
-            "stdout.bin",
-            "stderr.bin",
-            "argv.bin",
-            "signature.json",
-            "private-key.pk8",
-            "public-key.json",
+            c"bundle.json",
+            c"events.ndjson",
+            c"receipts.json",
+            c"stdout.bin",
+            c"stderr.bin",
+            c"argv.bin",
+            c"signature.json",
+            c"private-key.pk8",
+            c"public-key.json",
         ] {
-            let leaf = CString::new(leaf).expect("literal");
             // SAFETY: only fixed members of our pinned temporary directory are removed.
             unsafe {
                 libc::unlinkat(self.dir.as_raw_fd(), leaf.as_ptr(), 0);
             }
         }
+        // SAFETY: removes only the now empty temporary directory this staging
+        // created, by its NUL-terminated name in the pinned parent.
         unsafe {
             libc::unlinkat(
                 self.parent.as_raw_fd(),

@@ -142,7 +142,7 @@ struct Stream {
 pub struct Store {
     pub(crate) retention: ouro_records::retention::LedgerRetention,
     root: PathBuf,
-    _lock: File,
+    lock: File,
     streams: BTreeMap<String, Stream>,
     preparations: BTreeMap<String, (String, String)>,
     recovery_ambiguous: bool,
@@ -196,7 +196,7 @@ pub fn private_directory(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != crate::os::euid()
         || metadata.mode() & 0o077 != 0
     {
         return Err(LedgerError(format!(
@@ -219,7 +219,7 @@ fn private_file(path: &Path, create: bool, append: bool) -> Result<File> {
     let file = options.open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != crate::os::euid()
         || metadata.mode() & 0o077 != 0
         || metadata.nlink() != 1
     {
@@ -391,6 +391,18 @@ fn initial_run(run_id: &str, request_id: &str, attempt_id: &str, payload: Value)
     }
 }
 
+impl Drop for Store {
+    /// A child forked elsewhere in this process holds every inherited
+    /// descriptor until it execs; unlocking the shared open file releases
+    /// the writer lock for it too, so a successor never sees a phantom writer.
+    fn drop(&mut self) {
+        // SAFETY: flock takes the still-open descriptor and flags by value.
+        unsafe {
+            libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 impl Store {
     pub fn open(data: &Path) -> Result<Self> {
         Self::open_with_recovery_sync(data, File::sync_all)
@@ -404,15 +416,22 @@ impl Store {
         let root = data.join("ledger");
         private_directory(&root)?;
         let lock = private_file(&root.join("writer.lock"), true, false)?;
+        // SAFETY: flock takes the open descriptor and flags by value.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(LedgerError(
-                "another ledger writer holds the process-lifetime lock".into(),
-            ));
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Err(LedgerError(
+                    "another ledger writer holds the process-lifetime lock".into(),
+                ));
+            }
+            return Err(LedgerError(format!(
+                "cannot take the ledger writer lock: {error}"
+            )));
         }
         let mut store = Self {
             retention: Default::default(),
             root,
-            _lock: lock,
+            lock,
             streams: BTreeMap::new(),
             preparations: BTreeMap::new(),
             recovery_ambiguous: false,
@@ -1986,7 +2005,7 @@ mod tests {
 
     pub(super) fn peer() -> Peer {
         Peer {
-            uid: unsafe { libc::geteuid() },
+            uid: crate::os::euid(),
             pid: std::process::id(),
             birth: "fixture-birth".into(),
             boot_id: "fixture-boot".into(),
@@ -3774,6 +3793,20 @@ mod tests {
         assert!(
             matches!(Store::open(&temp.path().join("data")), Err(error) if error.0.contains("writer"))
         );
+    }
+
+    #[test]
+    fn a_closed_writer_releases_its_lock_even_while_a_copy_of_its_descriptor_lives() {
+        let (temp, store, _) = create();
+        // A child forked by another thread holds a copy until it execs.
+        // SAFETY: dup takes the open descriptor by value; the copy is owned below.
+        let copy = unsafe { libc::dup(store.lock.as_raw_fd()) };
+        assert!(copy >= 0);
+        // SAFETY: dup returned a new descriptor owned only here.
+        let copy = unsafe { <File as std::os::fd::FromRawFd>::from_raw_fd(copy) };
+        drop(store);
+        Store::open(&temp.path().join("data")).unwrap();
+        drop(copy);
     }
 
     #[test]

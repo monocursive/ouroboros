@@ -137,10 +137,7 @@ fn private_directory(path: &Path) -> Result<File> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
         .open(path)?;
     let metadata = directory.metadata()?;
-    if !metadata.is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
+    if !metadata.is_dir() || metadata.uid() != crate::os::euid() || metadata.mode() & 0o077 != 0 {
         return Err(LedgerError("reader checkpoint directory is unsafe".into()));
     }
     Ok(directory)
@@ -172,7 +169,7 @@ fn checkpoint_file(path: &Path) -> Result<File> {
         .open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != crate::os::euid()
         || metadata.mode() & 0o077 != 0
         || metadata.nlink() != 1
         || metadata.len() > MAX_CHECKPOINT_BYTES

@@ -59,6 +59,7 @@ pub(crate) fn hit(point: &str) -> std::io::Result<()> {
         )),
         "kill" => {
             // Signal this process only: no cached or reusable external pid.
+            // SAFETY: raise takes a signal number by value.
             unsafe {
                 libc::raise(libc::SIGKILL);
             }

@@ -63,7 +63,7 @@ fn sqlite<T>(result: rusqlite::Result<T>) -> Result<T> {
 }
 
 fn private_metadata(metadata: &fs::Metadata, directory: bool) -> Result<()> {
-    if metadata.uid() != unsafe { libc::geteuid() }
+    if metadata.uid() != crate::os::euid()
         || metadata.mode() & 0o077 != 0
         || if directory {
             !metadata.is_dir()

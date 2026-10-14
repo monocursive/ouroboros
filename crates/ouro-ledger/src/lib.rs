@@ -7,6 +7,7 @@ pub mod discovery;
 #[cfg(test)]
 mod faults;
 mod manifest;
+mod os;
 mod pending;
 mod projection;
 pub mod protocol;

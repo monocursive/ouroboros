@@ -59,7 +59,7 @@ pub(super) fn directory(path: &Path) -> Result<File> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
         .open(path)?;
     let m = file.metadata()?;
-    if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 {
+    if !m.is_dir() || m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 {
         return Err(LedgerError("GC requires owned private directories".into()));
     }
     Ok(file)
@@ -75,11 +75,7 @@ pub(super) fn safe_file(path: &Path) -> Result<File> {
 }
 
 fn safe_metadata(m: &fs::Metadata) -> Result<()> {
-    if !m.is_file()
-        || m.uid() != unsafe { libc::geteuid() }
-        || m.mode() & 0o077 != 0
-        || m.nlink() != 1
-    {
+    if !m.is_file() || m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 || m.nlink() != 1 {
         return Err(LedgerError("GC refuses unsafe or linked files".into()));
     }
     Ok(())
@@ -165,6 +161,7 @@ pub(super) fn check_member(root: &Path, entry: &RemovedFile) -> Result<(File, CS
         ));
     }
     // Check the namespace again after hashing, before unlinking through the same parent.
+    // SAFETY: libc::stat is plain integer fields, for which all-zero is valid.
     let mut current: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: pointers reference a live name and writable stat buffer.
     if unsafe {

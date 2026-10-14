@@ -157,7 +157,7 @@ mod linux {
     }
 
     fn ready() -> Result<()> {
-        let uid = unsafe { libc::geteuid() }.to_string();
+        let uid = crate::os::euid().to_string();
         if command_output(Command::new("/usr/bin/loginctl").args([
             "show-user",
             &uid,
@@ -274,7 +274,7 @@ mod linux {
         loop {
             if let Ok(stream) = UnixStream::connect(data.join("ledger/serve.sock")) {
                 let peer = peer_credentials(&stream)?;
-                if peer.uid != unsafe { libc::geteuid() }
+                if peer.uid != crate::os::euid()
                     || peer.pid != main_pid(&unit)?
                     || !peer_alive(&peer)
                 {
@@ -357,10 +357,7 @@ mod linux {
         stream.set_read_timeout(Some(START_TIMEOUT))?;
         stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
         let peer = peer_credentials(&stream)?;
-        if peer.uid != unsafe { libc::geteuid() }
-            || peer.pid != main_pid(&unit)?
-            || !peer_alive(&peer)
-        {
+        if peer.uid != crate::os::euid() || peer.pid != main_pid(&unit)? || !peer_alive(&peer) {
             return Err(LedgerError(
                 "bootstrap peer is not the independent service owner".into(),
             ));
@@ -393,7 +390,7 @@ mod linux {
         stream.set_read_timeout(Some(COMMAND_TIMEOUT))?;
         stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
         let peer = peer_credentials(&stream)?;
-        if peer.uid != unsafe { libc::geteuid() } {
+        if peer.uid != crate::os::euid() {
             return Err(LedgerError("bootstrap peer uid mismatch".into()));
         }
         // Remove the rendezvous before receiving secrets; a killed caller leaves
@@ -471,16 +468,20 @@ mod linux {
             .owner
             .ok_or_else(|| LedgerError("attempt has no launch owner".into()))?;
         // Open first, then validate birth. Signal the pinned task, never a reused pid.
+        // SAFETY: pidfd_open takes a pid and flags by value and reads no memory.
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, peer.pid as libc::pid_t, 0) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
+        // SAFETY: a successful pidfd_open returned a new descriptor owned only here.
         let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-        if peer.uid != unsafe { libc::geteuid() } || !peer_alive(&peer) {
+        if peer.uid != crate::os::euid() || !peer_alive(&peer) {
             return Err(LedgerError(
                 "launch owner is gone; reconcile before reporting an outcome".into(),
             ));
         }
+        // SAFETY: the pidfd stays open through the call; a null siginfo asks the
+        // kernel for the default kill(2)-style information and is never read.
         if unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,

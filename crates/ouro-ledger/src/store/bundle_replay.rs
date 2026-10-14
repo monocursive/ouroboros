@@ -49,7 +49,7 @@ mod tests {
             .flat_map(|n| fs::read(directory.join(n)).unwrap())
             .collect();
         let peer = Peer {
-            uid: unsafe { libc::geteuid() },
+            uid: crate::os::euid(),
             pid: std::process::id(),
             birth: "bundle-gc".into(),
             boot_id: "bundle-gc".into(),
