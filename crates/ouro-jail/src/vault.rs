@@ -325,7 +325,7 @@ impl Vault {
             let colon = line
                 .iter()
                 .position(|b| *b == b':')
-                .ok_or(Reason::OriginUnverified)?;
+                .ok_or(Reason::CredentialPlacementDenied)?;
             let name = &line[..colon];
             let value = line[colon + 1..].trim_ascii();
             let mut matched: Option<(&std::sync::Arc<Secret>, Vec<u8>)> = None;
@@ -354,14 +354,16 @@ impl Vault {
                 }
             }
             let Some((secret, emitted_name)) = matched else {
-                return Err(Reason::OriginUnverified);
+                return Err(Reason::CredentialPlacementDenied);
             };
             if !secret.policy.permits(scheme, &request.destination) {
                 return Err(Reason::OriginMismatch);
             }
             if !secret.policy.paths.is_empty() {
-                let path = request.path().ok_or(Reason::OriginUnverified)?;
-                validate_path(path).map_err(|_| Reason::OriginUnverified)?;
+                // A path the binding grammar cannot express is one no
+                // binding grants.
+                let path = request.path().ok_or(Reason::CredentialPathDenied)?;
+                validate_path(path).map_err(|_| Reason::CredentialPathDenied)?;
                 if !secret.policy.paths.iter().any(|allowed| {
                     path == allowed || allowed.ends_with('/') && path.starts_with(allowed)
                 }) {
@@ -643,14 +645,15 @@ mod tests {
         );
         assert!(!upstream.windows(6).any(|s| s == b"vault:"));
         assert!(response.ends_with(b"OK"));
-        for case in [
-            (false, true, true),
-            (true, false, true),
-            (true, true, false),
+        for (case, reason) in [
+            // An untrusted upstream certificate fails the handshake.
+            ((false, true, true), Reason::UpstreamProtocol),
+            ((true, false, true), Reason::OriginMismatch),
+            ((true, true, false), Reason::OriginMismatch),
         ] {
             let (event, upstream, _) =
                 run_tls(case.0, case.1, case.2, authorized_get(case.1), b"", false);
-            assert_ne!(event.reason, Reason::Relayed);
+            assert_eq!(event.reason, reason, "{case:?}");
             assert!(
                 upstream.is_empty(),
                 "no HTTP credential bytes may reach an unverified destination"
@@ -848,7 +851,7 @@ mod tests {
         let error = vault
             .inject("http", &mut request)
             .expect_err("a marker outside Authorization must refuse");
-        assert_eq!(error, Reason::OriginUnverified);
+        assert_eq!(error, Reason::CredentialPlacementDenied);
         assert!(
             !request
                 .forward_head
@@ -864,6 +867,40 @@ mod tests {
             "the secret must not be rewritten into Authorization: {:?}",
             String::from_utf8_lossy(&request.forward_head)
         );
+    }
+    #[test]
+    fn a_misplaced_placeholder_or_an_unbindable_path_is_named_for_what_it_is() {
+        let placed = |paths: Vec<String>, text: &[u8]| {
+            let secret = Secret::new(
+                "api".into(),
+                Policy {
+                    hosts: vec!["http://fixture.test".into()],
+                    allow_plaintext: true,
+                    paths,
+                    ..Policy::default()
+                },
+                b"fixture-secret".to_vec(),
+            )
+            .unwrap();
+            let vault = Vault::new("test-attempt", vec![Arc::new(secret)]).unwrap();
+            let mut request = proxy::http::parse_request(text).unwrap();
+            vault.inject("http", &mut request).map(|_| ())
+        };
+        // A placeholder in the request line is no declared placement.
+        assert_eq!(
+            placed(
+                Vec::new(),
+                b"GET http://fixture.test/vault:test-attempt:api HTTP/1.1\r\nHost: fixture.test\r\n\r\n"
+            ),
+            Err(Reason::CredentialPlacementDenied)
+        );
+        // A path the binding grammar cannot express is not granted.
+        let request = b"GET http://fixture.test/v1/%2e%2e/admin HTTP/1.1\r\nHost: fixture.test\r\nAuthorization: vault:test-attempt:api\r\n\r\n";
+        assert_eq!(
+            placed(vec!["/v1/".into()], request),
+            Err(Reason::CredentialPathDenied)
+        );
+        assert_eq!(placed(Vec::new(), request), Ok(()));
     }
     /// The TLS lane's post-decryption refusals (audit survivors, tls.rs):
     /// the 32 KiB decrypted-header bound, the chunked refusal and the

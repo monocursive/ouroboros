@@ -116,7 +116,7 @@ fn relay_inner(
         let mut byte = [0];
         incoming
             .read_exact(&mut byte)
-            .map_err(|_| Reason::OriginUnverified)?;
+            .map_err(|error| client_head_failure(&error))?;
         head.push(byte[0]);
     }
     let mut request = origin::http_request(&head, target, 443)?;
@@ -151,7 +151,7 @@ fn relay_inner(
         outgoing
             .conn
             .complete_io(&mut outgoing.sock)
-            .map_err(|_| Reason::OriginUnverified)?;
+            .map_err(|_| Reason::UpstreamProtocol)?;
     }
     let websocket_key = request.websocket_key().map(|key| key.to_vec());
     let lease = vault.inject_bound("https", &mut request, initiator)?;
@@ -200,7 +200,8 @@ fn relay_inner(
     }
     let switched = response.starts_with(b"HTTP/1.1 101 ");
     if switched {
-        let key = websocket_key.as_deref().ok_or(Reason::UnsupportedRequest)?;
+        // A switch nobody asked for is the upstream's protocol error.
+        let key = websocket_key.as_deref().ok_or(Reason::UpstreamProtocol)?;
         verify_websocket(&response, key)?;
     }
     incoming
@@ -261,26 +262,28 @@ fn relay_inner(
     Ok(())
 }
 
+/// Checks the upstream's `101` against RFC 6455 and the client's nonce.
+/// Every failure is the upstream's: `upstream_protocol`.
 fn verify_websocket(head: &[u8], key: &[u8]) -> Result<(), Reason> {
     use base64::Engine as _;
     use sha1::{Digest as _, Sha1};
-    let text = std::str::from_utf8(head).map_err(|_| Reason::MalformedRequest)?;
+    let text = std::str::from_utf8(head).map_err(|_| Reason::UpstreamProtocol)?;
     let mut fields = std::collections::HashMap::new();
     for line in text.split("\r\n").skip(1).filter(|l| !l.is_empty()) {
-        let (name, value) = line.split_once(':').ok_or(Reason::MalformedRequest)?;
+        let (name, value) = line.split_once(':').ok_or(Reason::UpstreamProtocol)?;
         if name.is_empty()
             || !name
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
             || value.bytes().any(|b| b < 0x20 && b != b'\t')
         {
-            return Err(Reason::MalformedRequest);
+            return Err(Reason::UpstreamProtocol);
         }
         if fields
             .insert(name.to_ascii_lowercase(), value.trim())
             .is_some()
         {
-            return Err(Reason::MalformedRequest);
+            return Err(Reason::UpstreamProtocol);
         }
     }
     let mut digest = Sha1::new();
@@ -298,9 +301,18 @@ fn verify_websocket(head: &[u8], key: &[u8]) -> Result<(), Reason> {
         || fields.contains_key("content-length")
         || fields.contains_key("transfer-encoding")
     {
-        return Err(Reason::OriginUnverified);
+        return Err(Reason::UpstreamProtocol);
     }
     Ok(())
+}
+
+/// Why reading the decrypted request head failed: the client's deadline,
+/// or the client closing or failing its side of TLS.
+fn client_head_failure(error: &io::Error) -> Reason {
+    match error.kind() {
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Reason::HeaderTimeout,
+        _ => Reason::ClientClosed,
+    }
 }
 
 /// What one side of the pump waits for: room to write its pending records,
@@ -497,9 +509,13 @@ fn pump(
                 match result {
                     Ok(0) => *eof = true,
                     Ok(_) => {
-                        let _state = conn
-                            .process_new_packets()
-                            .map_err(|_| Reason::OriginUnverified)?;
+                        let _state = conn.process_new_packets().map_err(|_| {
+                            if index == 0 {
+                                Reason::ClientClosed
+                            } else {
+                                Reason::UpstreamProtocol
+                            }
+                        })?;
                     }
                     Err(e)
                         if e.kind() == io::ErrorKind::WouldBlock
@@ -523,7 +539,10 @@ mod websocket_tests {
         let key = b"dGhlIHNhbXBsZSBub25jZQ==";
         let valid=b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
         assert!(verify_websocket(valid, key).is_ok());
-        assert!(verify_websocket(valid, b"wrong").is_err());
+        assert_eq!(
+            verify_websocket(valid, b"wrong"),
+            Err(Reason::UpstreamProtocol)
+        );
         for extra in [
             "Content-Length: 0\r\n",
             "Transfer-Encoding: chunked\r\n",
@@ -532,7 +551,20 @@ mod websocket_tests {
             let mut bad = valid[..valid.len() - 2].to_vec();
             bad.extend_from_slice(extra.as_bytes());
             bad.extend_from_slice(b"\r\n");
-            assert!(verify_websocket(&bad, key).is_err());
+            assert_eq!(verify_websocket(&bad, key), Err(Reason::UpstreamProtocol));
+        }
+    }
+
+    #[test]
+    fn a_failed_client_head_blames_the_deadline_or_the_client() {
+        for (kind, reason) in [
+            (io::ErrorKind::TimedOut, Reason::HeaderTimeout),
+            (io::ErrorKind::WouldBlock, Reason::HeaderTimeout),
+            (io::ErrorKind::UnexpectedEof, Reason::ClientClosed),
+            (io::ErrorKind::ConnectionReset, Reason::ClientClosed),
+            (io::ErrorKind::InvalidData, Reason::ClientClosed),
+        ] {
+            assert_eq!(client_head_failure(&kind.into()), reason, "{kind:?}");
         }
     }
 }

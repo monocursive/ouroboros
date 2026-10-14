@@ -179,6 +179,9 @@ pub enum ProxyDecision {
 pub enum Reason {
     /// Credential path was not granted.
     CredentialPathDenied,
+    /// A vault placeholder appeared outside the placement its credential
+    /// declares (another header, the request line, an unknown credential).
+    CredentialPlacementDenied,
     /// The connection's initiating process is not one the credential is
     /// bound to.
     CredentialProcessDenied,
@@ -202,6 +205,9 @@ pub enum Reason {
     ConnectFailed,
     /// Allowed, but connecting exceeded the deadline.
     ConnectTimeout,
+    /// Allowed and connected, but the upstream failed the TLS handshake
+    /// (certificate validation included) or answered outside the protocol.
+    UpstreamProtocol,
     /// No host rule permits the destination.
     HostNotAllowed,
     /// Every answer is forbidden or unusable.
@@ -247,6 +253,7 @@ impl Reason {
     pub fn as_str(self) -> &'static str {
         match self {
             Reason::CredentialPathDenied => "credential_path_denied",
+            Reason::CredentialPlacementDenied => "credential_placement_denied",
             Reason::CredentialProcessDenied => "credential_process_denied",
             Reason::CredentialProcessUnverified => "credential_process_unverified",
             Reason::CredentialRevoked => "credential_revoked",
@@ -257,6 +264,7 @@ impl Reason {
             Reason::Relayed => "relayed",
             Reason::ConnectFailed => "connect_failed",
             Reason::ConnectTimeout => "connect_timeout",
+            Reason::UpstreamProtocol => "upstream_protocol",
             Reason::HostNotAllowed => "host_not_allowed",
             Reason::ForbiddenAddress => "forbidden_address",
             Reason::MixedAnswers => "mixed_answers",
@@ -281,6 +289,7 @@ impl Reason {
     fn status(self) -> (u16, &'static str) {
         match self {
             Reason::CredentialPathDenied
+            | Reason::CredentialPlacementDenied
             | Reason::CredentialProcessDenied
             | Reason::CredentialProcessUnverified
             | Reason::CredentialRevoked
@@ -291,9 +300,10 @@ impl Reason {
             | Reason::HostNotAllowed
             | Reason::ForbiddenAddress
             | Reason::MixedAnswers => (403, "Forbidden"),
-            Reason::ResolveEmpty | Reason::ResolveFailed | Reason::ConnectFailed => {
-                (502, "Bad Gateway")
-            }
+            Reason::ResolveEmpty
+            | Reason::ResolveFailed
+            | Reason::ConnectFailed
+            | Reason::UpstreamProtocol => (502, "Bad Gateway"),
             Reason::ResolveTimeout | Reason::ConnectTimeout => (504, "Gateway Timeout"),
             Reason::HeaderTooLarge => (431, "Request Header Fields Too Large"),
             Reason::HeaderTimeout => (408, "Request Timeout"),
