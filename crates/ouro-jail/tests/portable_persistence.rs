@@ -1285,6 +1285,13 @@ impl ouro_jail::gc::Host for SimHost {
             other => Err(format!("{other:?}")),
         }
     }
+    // The simulated supervisor registers its leaf with its identity.
+    fn probe_named_leaf(&self, _: &Path) -> ouro_jail::gc::LeafProbe {
+        ouro_jail::gc::LeafProbe::Unverifiable("no leaf is registered by name only".into())
+    }
+    fn remove_named_leaf(&self, _: &Path, _: &mut usize) -> Result<(u64, u64), String> {
+        Err("no leaf is registered by name only".into())
+    }
 }
 
 /// Fails one step (`fault`) of the gc record that first adds `action` to

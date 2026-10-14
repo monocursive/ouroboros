@@ -45,7 +45,7 @@ use crate::cli::GcArgs;
 use crate::records::{
     ErrorCode, ErrorStage, JailError, Os, Remediation, SCHEMA_RECEIPT, rfc3339_utc,
 };
-use crate::state::{self, AttemptDir, AttemptId};
+use crate::state::{self, AttemptDir, AttemptId, anchored};
 use crate::supervisor::Context;
 
 /// The test seam that shrinks the per-invocation entry bound (S9).
@@ -190,26 +190,18 @@ pub trait Host {
     /// # Errors
     /// Why the leaf was not identified, not empty or not removed.
     fn remove_leaf(&self, leaf: &LeafRecord, entries: &mut usize) -> Result<(), String>;
-    // N7
     /// What is at a leaf jail state registers by name only (a supervisor
     /// that died between the name and the identity, N7). `Identified` means
     /// only a cgroup v2 directory with an execution leaf's name directly
     /// under this user's delegated subtree; nothing recorded proves more.
-    /// The default knows no mechanism and verifies nothing.
-    fn probe_named_leaf(&self, path: &Path) -> LeafProbe {
-        let _ = path;
-        LeafProbe::Unverifiable("this host cannot probe an execution leaf".to_owned())
-    }
+    fn probe_named_leaf(&self, path: &Path) -> LeafProbe;
     /// Removes a leaf registered by name only, when it is empty (the kernel
     /// refuses to remove a populated cgroup). Never kills. Returns the
     /// identity of what it removed.
     ///
     /// # Errors
     /// Why the leaf was not found, not empty or not removed.
-    fn remove_named_leaf(&self, path: &Path, entries: &mut usize) -> Result<(u64, u64), String> {
-        let _ = (path, entries);
-        Err("this host cannot remove an execution leaf".to_owned())
-    }
+    fn remove_named_leaf(&self, path: &Path, entries: &mut usize) -> Result<(u64, u64), String>;
 }
 
 /// The host `gc` runs on: the platform's identity, and on Linux the
@@ -231,85 +223,71 @@ impl NativeHost {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-const NO_MECHANISM: &str = "this platform has no execution cgroup mechanism";
-
+/// On Linux: the identity-checked mechanisms of `platform::linux::reconcile`.
+#[cfg(target_os = "linux")]
 impl Host for NativeHost {
     fn identity(&self) -> HostIdentity {
         self.identity.clone()
     }
 
     fn owner(&self, owner: &OwnerRecord) -> Liveness {
-        #[cfg(target_os = "linux")]
-        {
-            crate::platform::linux::reconcile::owner_liveness(owner)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = owner;
-            Liveness::Unknown("this platform reads no process birth identity".to_owned())
-        }
+        crate::platform::linux::reconcile::owner_liveness(owner)
     }
 
     fn probe_leaf(&self, leaf: &LeafRecord) -> LeafProbe {
-        #[cfg(target_os = "linux")]
-        {
-            crate::platform::linux::reconcile::probe_leaf(leaf)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = leaf;
-            LeafProbe::Unverifiable(NO_MECHANISM.to_owned())
-        }
+        crate::platform::linux::reconcile::probe_leaf(leaf)
     }
 
     fn terminate_leaf(&self, leaf: &LeafRecord, budget: Duration) -> Result<(), String> {
-        #[cfg(target_os = "linux")]
-        {
-            crate::platform::linux::reconcile::terminate_leaf(leaf, budget)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (leaf, budget);
-            Err(NO_MECHANISM.to_owned())
-        }
+        crate::platform::linux::reconcile::terminate_leaf(leaf, budget)
     }
 
     fn remove_leaf(&self, leaf: &LeafRecord, entries: &mut usize) -> Result<(), String> {
-        #[cfg(target_os = "linux")]
-        {
-            crate::platform::linux::reconcile::remove_leaf(leaf, entries)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (leaf, entries);
-            Err(NO_MECHANISM.to_owned())
-        }
+        crate::platform::linux::reconcile::remove_leaf(leaf, entries)
     }
 
-    // N7
     fn probe_named_leaf(&self, path: &Path) -> LeafProbe {
-        #[cfg(target_os = "linux")]
-        {
-            crate::platform::linux::reconcile::probe_named_leaf(path)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = path;
-            LeafProbe::Unverifiable(NO_MECHANISM.to_owned())
-        }
+        crate::platform::linux::reconcile::probe_named_leaf(path)
     }
 
     fn remove_named_leaf(&self, path: &Path, entries: &mut usize) -> Result<(u64, u64), String> {
-        #[cfg(target_os = "linux")]
-        {
-            crate::platform::linux::reconcile::remove_named_leaf(path, entries)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (path, entries);
-            Err(NO_MECHANISM.to_owned())
-        }
+        crate::platform::linux::reconcile::remove_named_leaf(path, entries)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+const NO_MECHANISM: &str = "this platform has no execution cgroup mechanism";
+
+/// Elsewhere: no process birth identity and no execution cgroup, so nothing
+/// is verified and nothing is acted on.
+#[cfg(not(target_os = "linux"))]
+impl Host for NativeHost {
+    fn identity(&self) -> HostIdentity {
+        self.identity.clone()
+    }
+
+    fn owner(&self, _: &OwnerRecord) -> Liveness {
+        Liveness::Unknown("this platform reads no process birth identity".to_owned())
+    }
+
+    fn probe_leaf(&self, _: &LeafRecord) -> LeafProbe {
+        LeafProbe::Unverifiable(NO_MECHANISM.to_owned())
+    }
+
+    fn terminate_leaf(&self, _: &LeafRecord, _: Duration) -> Result<(), String> {
+        Err(NO_MECHANISM.to_owned())
+    }
+
+    fn remove_leaf(&self, _: &LeafRecord, _: &mut usize) -> Result<(), String> {
+        Err(NO_MECHANISM.to_owned())
+    }
+
+    fn probe_named_leaf(&self, _: &Path) -> LeafProbe {
+        LeafProbe::Unverifiable(NO_MECHANISM.to_owned())
+    }
+
+    fn remove_named_leaf(&self, _: &Path, _: &mut usize) -> Result<(u64, u64), String> {
+        Err(NO_MECHANISM.to_owned())
     }
 }
 
@@ -399,10 +377,10 @@ pub struct StateView {
     pub gc_removed: Vec<LeafRecord>,
     /// Leaves an earlier pass verified empty: terminated and seen empty
     /// (`gc_terminated_orphan`), about to be removed after it was seen empty
-    /// (`gc_removing_cgroup`, J4 wave 3: its device and inode are 0 for a
-    /// leaf registered by name only), or removed (`gc_removed_cgroup`, which
-    /// gc records only after the kernel removed an empty cgroup).
-    pub gc_verified: Vec<LeafRecord>,
+    /// (`gc_removing_cgroup`, J4 wave 3: by its path only for a leaf
+    /// registered by name only), or removed (`gc_removed_cgroup`, which gc
+    /// records only after the kernel removed an empty cgroup).
+    pub gc_verified: Vec<VerifiedLeaf>,
     /// Whether an earlier pass removed managed scratch (`gc_removed_scratch`).
     pub gc_removed_scratch: bool,
     /// When an earlier pass found nothing left to do (`gc_finished`).
@@ -421,6 +399,33 @@ pub enum RegisteredLeaf {
     Identified(LeafRecord),
 }
 
+/// A leaf an earlier pass verified empty, as gc recorded it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct VerifiedLeaf {
+    /// The leaf's path.
+    pub path: std::path::PathBuf,
+    /// Its `(device, inode)`; `None` for a leaf registered by name only,
+    /// whose identity gc never knew when it saw it empty.
+    pub identity: Option<(u64, u64)>,
+}
+
+impl VerifiedLeaf {
+    /// Whether this is gc's record of the identified leaf `leaf`.
+    #[must_use]
+    pub fn is_of(&self, leaf: &LeafRecord) -> bool {
+        self.path == leaf.path && self.identity == Some((leaf.device, leaf.inode))
+    }
+}
+
+impl From<LeafRecord> for VerifiedLeaf {
+    fn from(leaf: LeafRecord) -> VerifiedLeaf {
+        VerifiedLeaf {
+            identity: Some((leaf.device, leaf.inode)),
+            path: leaf.path,
+        }
+    }
+}
+
 impl RegisteredLeaf {
     /// The registered path.
     #[must_use]
@@ -431,12 +436,23 @@ impl RegisteredLeaf {
         }
     }
 
-    /// Whether gc's record `leaf` is of this registration.
+    /// Whether the identified leaf `leaf` (a receipt's) is this
+    /// registration's.
     #[must_use]
     pub fn is(&self, leaf: &LeafRecord) -> bool {
         match self {
             RegisteredLeaf::Named(path) => leaf.path == *path,
             RegisteredLeaf::Identified(registered) => registered == leaf,
+        }
+    }
+
+    /// Whether gc's record `verified` is of this registration: by its path
+    /// for a leaf registered by name only, by its identity otherwise.
+    #[must_use]
+    pub fn verified_by(&self, verified: &VerifiedLeaf) -> bool {
+        match self {
+            RegisteredLeaf::Named(path) => verified.path == *path,
+            RegisteredLeaf::Identified(registered) => verified.is_of(registered),
         }
     }
 }
@@ -558,23 +574,22 @@ pub fn parse_state(bytes: &[u8], id: &str) -> Result<StateView, String> {
         match action.action.as_str() {
             "gc_removed_cgroup" => {
                 if let Some(leaf) = leaf.and_then(identified) {
-                    gc_verified.push(leaf.clone());
+                    gc_verified.push(leaf.clone().into());
                     gc_removed.push(leaf);
                 }
             }
             "gc_terminated_orphan" if verified_empty => {
-                gc_verified.extend(leaf.and_then(identified));
+                gc_verified.extend(leaf.and_then(identified).map(VerifiedLeaf::from));
             }
             // J4 wave 3 (G3): the intent, recorded after the leaf was seen
             // empty and before its `rmdir`; by name only (no device and
             // inode) for a leaf registered by name only.
             "gc_removing_cgroup" if verified_empty => {
                 gc_verified.extend(leaf.and_then(|leaf| {
-                    identified(leaf).or_else(|| {
-                        leaf.is_name_only().then(|| LeafRecord {
+                    identified(leaf).map(VerifiedLeaf::from).or_else(|| {
+                        leaf.is_name_only().then(|| VerifiedLeaf {
                             path: leaf.path.clone(),
-                            device: 0,
-                            inode: 0,
+                            identity: None,
                         })
                     })
                 }));
@@ -1128,11 +1143,18 @@ pub fn decide(facts: &Facts) -> Next {
         // J4 wave 3 (G3): an earlier pass saw this leaf empty and began to
         // remove it (or killed its tree and saw it empty), and it is gone: a
         // crash or a failed record after its `rmdir` finishes here.
-        LeafProbe::Absent if state.gc_verified.contains(&leaf) => decided(
-            owner_text,
-            CgroupStep::Settled(GONE_AFTER_GC.to_owned()),
-            scratch.or(ScratchStep::Now(GONE_AFTER_GC.to_owned())),
-        ),
+        LeafProbe::Absent
+            if state
+                .gc_verified
+                .iter()
+                .any(|verified| verified.is_of(&leaf)) =>
+        {
+            decided(
+                owner_text,
+                CgroupStep::Settled(GONE_AFTER_GC.to_owned()),
+                scratch.or(ScratchStep::Now(GONE_AFTER_GC.to_owned())),
+            )
+        }
         LeafProbe::Absent => decided(
             owner_text,
             if tree_verified {
@@ -1314,19 +1336,23 @@ fn state_access(path: &Path, detail: impl std::fmt::Display) -> JailError {
 }
 
 /// `gc` on this host: the native host, [`Options::DEFAULT`] and the S9 seam.
+/// Every `OURO_JAIL_TEST_*` variable in force is recorded in the report
+/// (S9), its own and the persistence seam's included.
 ///
 /// # Errors
 /// As [`gc_with`].
 pub fn gc(ctx: &Context, args: &GcArgs) -> Result<Report, JailError> {
     let mut options = Options::DEFAULT;
-    let mut seams = BTreeMap::new();
     if let Some(value) = std::env::var_os(SEAM_MAX_ENTRIES) {
-        let value = value.to_string_lossy().into_owned();
-        options.max_entries = seam_max_entries(&value, options.max_entries);
-        seams.insert(SEAM_MAX_ENTRIES.to_owned(), value);
+        options.max_entries = seam_max_entries(&value.to_string_lossy(), options.max_entries);
     }
     let mut report = gc_with(ctx, args, &NativeHost::new(ctx), options)?;
-    report.test_seams = seams;
+    report.test_seams = state::test_seams()
+        .and_then(|seams| seams.as_object().cloned())
+        .into_iter()
+        .flatten()
+        .map(|(name, value)| (name, value.as_str().unwrap_or_default().to_owned()))
+        .collect();
     Ok(report)
 }
 
@@ -1578,10 +1604,15 @@ fn visit(
         incomplete.push(format!("{display} ({failure})"));
     }
     // J4 W2-S: gc's own verification of the registered leaf (this pass's or
-    // an earlier one's) proves the tree dead for the vendor-state cleanup.
+    // an earlier one's) proves the tree dead for the vendor-state cleanup;
+    // so does a tree that never existed (audit 2026-09-25-2, S4): no leaf
+    // means no cgroup was ever created, so nothing was ever charged to a
+    // tree and nothing outside the state dir can be using the vendor state,
+    // which unblocks the cleanup a supervisor SIGKILL between staging and
+    // preparation would otherwise retain forever.
     let gc_verified = match done.action {
         Some("would_terminate_orphan" | "would_remove_cgroup") if dry_run => true,
-        _ => verified_by_gc(&dir) || never_charged_tree(&decision),
+        _ => verified_by_gc(&dir) || decision.tree_never_existed,
     };
     // J3: the dead supervisor's proxy directory, then vendor state.
     let (action, reason, visited, resumed_settled) = proxy_then_resume(
@@ -2155,20 +2186,8 @@ fn verified_by_gc(dir: &AttemptDir) -> bool {
         state
             .gc_verified
             .iter()
-            .any(|verified| registered.is(verified))
+            .any(|verified| registered.verified_by(verified))
     })
-}
-
-/// Audit 2026-09-25-2, S4: an attempt whose owner [`decide`] established
-/// dead and whose jail state never registered an execution leaf
-/// (`CgroupStep::Settled` with a `not_recorded` reason). No leaf means no
-/// cgroup was ever created for it, so nothing was ever charged to a tree and
-/// nothing outside the state dir can be using its vendor state — the same
-/// proof a gc-verified empty leaf gives, which unblocks the cleanup a
-/// supervisor SIGKILL between staging and preparation would otherwise
-/// retain forever.
-fn never_charged_tree(decision: &Decision) -> bool {
-    decision.tree_never_existed
 }
 
 /// Whether the owner text is one `decide` established dead.
@@ -2223,15 +2242,29 @@ fn leftovers(
         entry.temp_files = Some("would_remove".to_owned());
         return None;
     }
+    let attempt = match state::open_attempt_dir(dir) {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            entry.temp_files = Some(format!("failed: {}", error.message));
+            return Some(format!(
+                "temporary files: the attempt root cannot be opened: {}",
+                error.message
+            ));
+        }
+    };
     let mut removed = Vec::new();
     for name in ours {
-        let path = dir.root().join(name);
+        let Ok(component) = anchored::Name::new(name.as_bytes()) else {
+            continue;
+        };
         // Only a regular file: a link of that name is not what a crash left.
-        let regular = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_file());
+        let regular = attempt
+            .stat_at(&component)
+            .is_ok_and(|stat| stat.kind == anchored::Kind::Regular);
         if !regular {
             continue;
         }
-        if let Err(error) = std::fs::remove_file(&path) {
+        if let Err(error) = attempt.unlink_at(&component) {
             entry.temp_files = Some(format!("failed: {name}: {error}"));
             return Some(format!("temporary files: {name}: {error}"));
         }
@@ -2276,41 +2309,30 @@ fn combine(action: String, reason: String, done: &Done) -> (String, String) {
 mod tests {
     use super::*;
 
-    /// Audit 2026-09-25-2, S4: an owner established dead with no leaf ever
-    /// registered proves nothing was ever charged to a tree, which permits
-    /// the vendor-state cleanup exactly like a verified-empty leaf; any
-    /// other combination does not.
+    /// Audit 2026-09-25-2, S4: only an owner established dead with no leaf
+    /// ever registered and no receipt ever written proves nothing was ever
+    /// charged to a tree; a leaf, a live or unknown owner, or another boot's
+    /// claim each withdraw the proof.
     #[test]
-    fn a_dead_owner_with_no_leaf_ever_registered_never_charged_a_tree() {
-        let base = Decision {
-            retain: None,
-            owner: Some("dead: no process has its pid".to_owned()),
-            owner_dead: true,
-            cgroup: CgroupStep::Settled(
-                "not_recorded: jail state registers no execution cgroup".to_owned(),
-            ),
-            scratch: ScratchStep::Keep("kept".to_owned()),
-            tree_never_existed: true,
-        };
-        assert!(never_charged_tree(&base));
-        let mut alive = base.clone();
-        alive.tree_never_existed = false;
-        assert!(
-            !never_charged_tree(&alive),
-            "a receipt, or a leaf, or a live owner each withdraw the proof"
-        );
-        let mut other_step = base.clone();
-        other_step.cgroup = CgroupStep::Settled("removed by gc earlier".to_owned());
-        assert!(
-            never_charged_tree(&other_step),
-            "the flag is decide's to set, not the cgroup step's"
-        );
-        let mut with_receipt = base.clone();
-        with_receipt.tree_never_existed = false;
-        assert!(
-            !never_charged_tree(&with_receipt),
-            "a receipt, or a leaf, withdraws the proof"
-        );
+    fn only_a_dead_owner_with_no_leaf_and_no_receipt_never_charged_a_tree() {
+        let mut no_leaf = state();
+        no_leaf.leaf = None;
+        let mut never = facts(no_leaf.clone(), receipt(None));
+        never.receipt = Ok(None);
+        assert!(decision(decide(&never)).tree_never_existed);
+        let mut with_leaf = never.clone();
+        with_leaf.state = Ok(state());
+        with_leaf.leaf = Some(LeafProbe::Absent);
+        assert!(!decision(decide(&with_leaf)).tree_never_existed);
+        let mut unknown = never.clone();
+        unknown.owner = Some(Liveness::Unknown("x".to_owned()));
+        assert!(!decision(decide(&unknown)).tree_never_existed);
+        let mut alive = never.clone();
+        alive.owner = Some(Liveness::Alive);
+        assert!(!decision(decide(&alive)).tree_never_existed);
+        let mut other_boot = never;
+        other_boot.host.boot_id = Some("boot-b".to_owned());
+        assert!(!decision(decide(&other_boot)).tree_never_existed);
     }
 
     const BOOT: &str = "boot-a";
@@ -2682,14 +2704,13 @@ mod tests {
     #[test]
     fn a_leaf_gone_after_gc_saw_it_empty_verifies_the_tree() {
         for verified in [
-            leaf(),
-            LeafRecord {
-                device: 0,
-                inode: 0,
-                ..leaf()
+            VerifiedLeaf::from(leaf()),
+            VerifiedLeaf {
+                path: leaf().path,
+                identity: None,
             },
         ] {
-            let named = verified.inode == 0;
+            let named = verified.identity.is_none();
             let mut facts = facts(
                 StateView {
                     leaf: Some(if named {
@@ -2873,7 +2894,8 @@ mod tests {
     #[test]
     fn a_symlink_or_fifo_named_like_a_temp_file_is_never_unlinked() {
         use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
+        // A private attempt root, as gc only ever reaches one.
+        let dir = state::testing::private_tempdir();
         let attempt = AttemptDir::from_root(dir.path().to_path_buf());
         let target = dir.path().join("operator-file");
         std::fs::write(&target, b"mine").unwrap();

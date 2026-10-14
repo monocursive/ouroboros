@@ -829,6 +829,31 @@ fn j4_c03_the_listing_counts_against_the_per_invocation_bound() {
     );
 }
 
+/// S9: every `OURO_JAIL_TEST_*` variable in force is recorded in gc's
+/// report, not only gc's own: the report says what the environment asked
+/// for, whichever consumer reads it.
+#[test]
+fn every_test_seam_in_force_is_recorded_in_the_report() {
+    let fixture = Fixture::new();
+    let output = fixture.binary(
+        &["gc", "--json", "--dry-run"],
+        &[
+            ("OURO_JAIL_TEST_ABORT_AT", "gc_record:renamed:9999"),
+            ("OURO_JAIL_TEST_GC_MAX_ENTRIES", "50"),
+        ],
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{report:#}");
+    assert_eq!(
+        report["test_seams"],
+        json!({
+            "OURO_JAIL_TEST_ABORT_AT": "gc_record:renamed:9999",
+            "OURO_JAIL_TEST_GC_MAX_ENTRIES": "50",
+        }),
+        "{report:#}"
+    );
+}
+
 // ===========================================================================
 // Decisions that depend on the host: a scripted host records every call
 // ===========================================================================
