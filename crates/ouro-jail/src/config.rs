@@ -278,11 +278,90 @@ pub fn parse_policy_file(text: &str) -> Result<PolicyFile, JailError> {
     Ok(file)
 }
 
+/// Which file a `[jail]` table was read from: the table is shared, and so
+/// are the keys some of them may not carry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JailTable {
+    /// The operator's `config.toml`, a defaults file.
+    OperatorConfig,
+    /// A workspace-root `ouro.toml`, which may only narrow.
+    ProjectFile,
+}
+
+/// A `[jail]` key one file may not carry, and its refusal.
+struct ForbiddenKey {
+    /// The file it is refused in.
+    table: JailTable,
+    /// The key under `jail.`.
+    key: &'static str,
+    /// Whether the table carries it.
+    present: fn(&JailSection) -> bool,
+    /// The refusal's code.
+    code: ErrorCode,
+    /// The refusal's message.
+    message: &'static str,
+}
+
+/// Every `[jail]` key a file may not carry, refused where the file is read
+/// with its exact key path, in this order. `config.toml` is a defaults
+/// file, and only a profile file names the built-in profile it extends. A
+/// project file can only narrow: `profile` and `extends` would choose the
+/// base authority, which §6.3 refuses as widening, and command rules are
+/// the operator's.
+const FORBIDDEN_KEYS: [ForbiddenKey; 4] = [
+    ForbiddenKey {
+        table: JailTable::OperatorConfig,
+        key: "extends",
+        present: |jail| jail.extends.is_some(),
+        code: ErrorCode::InvalidConfig,
+        message: "`extends` belongs in a profile file, not in config.toml",
+    },
+    ForbiddenKey {
+        table: JailTable::ProjectFile,
+        key: "profile",
+        present: |jail| jail.profile.is_some(),
+        code: ErrorCode::PolicyWidening,
+        message: "`profile` may not appear in the project file, which can only narrow the \
+                  operator's policy",
+    },
+    ForbiddenKey {
+        table: JailTable::ProjectFile,
+        key: "extends",
+        present: |jail| jail.extends.is_some(),
+        code: ErrorCode::PolicyWidening,
+        message: "`extends` may not appear in the project file, which can only narrow the \
+                  operator's policy",
+    },
+    ForbiddenKey {
+        table: JailTable::ProjectFile,
+        key: "commands",
+        present: |jail| !jail.commands.is_empty(),
+        code: ErrorCode::InvalidConfig,
+        message: "command rules are operator-only",
+    },
+];
+
+/// Refuses the first key in `jail` that `table`'s file may not carry.
+fn refuse_forbidden_keys(table: JailTable, jail: &JailSection) -> Result<(), JailError> {
+    match FORBIDDEN_KEYS
+        .iter()
+        .find(|forbidden| forbidden.table == table && (forbidden.present)(jail))
+    {
+        Some(forbidden) => Err(JailError::new(
+            forbidden.code,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            forbidden.message.to_owned(),
+        )
+        .with_key_path(format!("jail.{}", forbidden.key))),
+        None => Ok(()),
+    }
+}
+
 /// Parses the operator's `config.toml`.
 ///
-/// `jail.extends` is refused here, where the file is read: `config.toml` is
-/// a defaults file, and only a profile file names the built-in profile it
-/// extends.
+/// The keys it may not carry ([`FORBIDDEN_KEYS`]) are refused here, where
+/// the file is read.
 ///
 /// # Errors
 /// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key, a
@@ -292,12 +371,7 @@ pub fn parse_operator_config(text: &str) -> Result<OperatorConfig, JailError> {
         toml::from_str(text).map_err(|error| invalid("config", toml_error(text, &error)))?;
     if let Some(jail) = &config.jail {
         check_schema("jail.schema", jail.schema.as_deref())?;
-        if jail.extends.is_some() {
-            return Err(invalid(
-                "jail.extends",
-                "`extends` belongs in a profile file, not in config.toml",
-            ));
-        }
+        refuse_forbidden_keys(JailTable::OperatorConfig, jail)?;
     }
     Ok(config)
 }
@@ -305,10 +379,9 @@ pub fn parse_operator_config(text: &str) -> Result<OperatorConfig, JailError> {
 /// Parses a project `ouro.toml`.
 ///
 /// The `[jail]` table is shared with `config.toml`, so the keys a project
-/// file may not carry are refused here, where the file is read, each with
-/// its exact key path: `jail.profile` and `jail.extends` would choose the
-/// base authority, which §6.3 refuses as widening, and `jail.commands` is
-/// operator-only.
+/// file may not carry ([`FORBIDDEN_KEYS`]) are refused here, where the file
+/// is read, each with its exact key path. (`[jail_host]` is not part of a
+/// project file's grammar at all.)
 ///
 /// # Errors
 /// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key, a
@@ -318,26 +391,7 @@ pub fn parse_project_config(text: &str) -> Result<ProjectConfig, JailError> {
     let project: ProjectConfig =
         toml::from_str(text).map_err(|error| invalid("jail", toml_error(text, &error)))?;
     if let Some(jail) = &project.jail {
-        for (key, present) in [
-            ("profile", jail.profile.is_some()),
-            ("extends", jail.extends.is_some()),
-        ] {
-            if present {
-                return Err(JailError::new(
-                    ErrorCode::PolicyWidening,
-                    ErrorStage::Resolving,
-                    Remediation::Configuration,
-                    format!(
-                        "`{key}` may not appear in the project file, which can only narrow \
-                         the operator's policy"
-                    ),
-                )
-                .with_key_path(format!("jail.{key}")));
-            }
-        }
-        if !jail.commands.is_empty() {
-            return Err(invalid("jail.commands", "command rules are operator-only"));
-        }
+        refuse_forbidden_keys(JailTable::ProjectFile, jail)?;
     }
     Ok(project)
 }
@@ -743,6 +797,42 @@ mod tests {
 
     /// `config.toml` names no base profile to extend, and its `[jail]` table
     /// carries this build's schema or none; the parser refuses both by key.
+    /// Each forbidden key is refused in its own file, with its code and key
+    /// path, and only there: `config.toml` may select a profile and carry
+    /// command rules.
+    #[test]
+    fn each_forbidden_key_is_refused_in_its_file_alone() {
+        for (text, key, code) in [
+            (
+                "[jail]\nprofile = \"tool\"\n",
+                "jail.profile",
+                ErrorCode::PolicyWidening,
+            ),
+            (
+                "[jail]\nextends = \"tool\"\n",
+                "jail.extends",
+                ErrorCode::PolicyWidening,
+            ),
+            (
+                "[jail.commands]\ndeny = [\"git push --force\"]\n",
+                "jail.commands",
+                ErrorCode::InvalidConfig,
+            ),
+        ] {
+            let error = parse_project_config(text).expect_err(key);
+            assert_eq!((error.code, error.key_path.as_deref()), (code, Some(key)));
+        }
+        let error = parse_operator_config("[jail]\nextends = \"tool\"\n").expect_err("extends");
+        assert_eq!(
+            (error.code, error.key_path.as_deref()),
+            (ErrorCode::InvalidConfig, Some("jail.extends"))
+        );
+        parse_operator_config(
+            "[jail]\nprofile = \"build\"\n[jail.commands]\ndeny = [\"git push --force\"]\n",
+        )
+        .expect("config.toml may select a profile and carry command rules");
+    }
+
     #[test]
     fn the_operator_config_refuses_extends_and_a_foreign_schema() {
         let error = parse_operator_config("[jail]\nextends = \"tool\"\n")
