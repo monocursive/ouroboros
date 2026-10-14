@@ -40,7 +40,7 @@ pub const SUBCOMMAND: &str = "__launch";
 
 /// The launcher's options, by the one spelling [`parse`] reads and
 /// [`LaunchArgs::to_argv`] writes.
-pub mod flag {
+pub(crate) mod flag {
     /// `--release-fd N`.
     pub const RELEASE_FD: &str = "--release-fd";
     /// `--error-fd N`.

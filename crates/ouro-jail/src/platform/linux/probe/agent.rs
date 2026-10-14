@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixListener;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -711,12 +711,6 @@ fn inner_seccomp() -> String {
 
 /// The inner sandbox's only writable grant, inside the attempt's scratch.
 const INNER_GRANT: &str = "/tmp/.ouro-inner-grant";
-
-/// Where the protected fixture of a probe workspace is, for tests.
-#[must_use]
-pub fn protected_path(workspace: &Path) -> PathBuf {
-    workspace.join(PROTECTED_NAME)
-}
 
 #[cfg(test)]
 mod tests {

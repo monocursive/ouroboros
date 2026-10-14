@@ -1538,7 +1538,7 @@ mod tests {
             token_url: "https://issuer.example.com/token".to_owned(),
             client_id: "fixture".to_owned(),
             refresh_before_seconds: 0,
-            encoding: crate::vault::TokenEncoding::Form,
+            encoding: crate::vault::lifecycle::TokenEncoding::Form,
         };
         let declaration = |id: &str, source: NativeString, refreshes: bool| CredentialDecl {
             vault: Some(crate::vault::Policy {

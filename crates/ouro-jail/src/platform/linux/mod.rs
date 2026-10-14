@@ -7,7 +7,7 @@
 //! and test on every host; everything below them is gated.
 
 pub mod abi;
-pub mod bpf;
+pub(crate) mod bpf;
 // The loopback bridge is a portable byte relay; only its
 // hidden subcommand and its place in the sandbox are Linux's
 pub mod bridge;
@@ -23,7 +23,7 @@ pub mod seccomp;
 
 // The `agent` profile's proxy, mediator and bridge wiring
 #[cfg(target_os = "linux")]
-pub mod agent;
+pub(crate) mod agent;
 #[cfg(target_os = "linux")]
 pub mod audit;
 #[cfg(target_os = "linux")]
@@ -48,7 +48,7 @@ pub mod launch;
 mod mounts;
 // Observer event consumption shared by both boundaries
 #[cfg(target_os = "linux")]
-pub mod observed;
+pub(crate) mod observed;
 #[cfg(target_os = "linux")]
 pub mod platform;
 #[cfg(target_os = "linux")]

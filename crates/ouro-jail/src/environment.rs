@@ -19,7 +19,7 @@
 //! neither leak into an uncontained child nor be written into a contained
 //! one.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt as _;
 
 /// The prefix every reserved name starts with.
@@ -38,9 +38,11 @@ pub fn is_reserved(name: &OsStr) -> bool {
 /// names only, never a value (I09), sorted and without duplicates. A removed
 /// name that is not UTF-8 is rendered lossily: the receipt's name lists are
 /// JSON strings, which is how `environment_names` renders such a name too.
+/// Only the `none` boundary, which inherits the host environment, strips it.
+#[cfg(any(target_os = "linux", test))]
 pub fn strip_reserved(
-    env: impl IntoIterator<Item = (OsString, OsString)>,
-) -> (Vec<(OsString, OsString)>, Vec<String>) {
+    env: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> (Vec<(std::ffi::OsString, std::ffi::OsString)>, Vec<String>) {
     let mut kept = Vec::new();
     let mut removed = Vec::new();
     for (name, value) in env {
@@ -58,6 +60,7 @@ pub fn strip_reserved(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt as _;
 
     fn os(text: &str) -> OsString {

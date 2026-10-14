@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use crate::observer::CoverageClass;
 use crate::records::{ErrorCode, ErrorStage, JailError, Remediation};
 
-pub mod readback;
+pub(crate) mod readback;
 pub use readback::{Readback, TraceState, read_frames};
 
 /// Initial local trace cap (§13.3).

@@ -6,7 +6,7 @@ use zeroize::Zeroizing;
 
 pub(crate) mod lifecycle;
 pub(crate) mod origin;
-pub use lifecycle::{RefreshPolicy, TokenEncoding};
+pub use lifecycle::RefreshPolicy;
 
 #[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -19,7 +19,8 @@ use crate::policy::PolicySnapshot;
 use crate::records::{JailError, NativeLifetime, Os, ProcessRecord};
 use crate::trace::SharedTrace;
 
-pub mod macos;
+#[cfg(target_os = "macos")]
+mod macos;
 
 /// Nanoseconds since this supervisor started, on the §6.4 continuous clock.
 ///

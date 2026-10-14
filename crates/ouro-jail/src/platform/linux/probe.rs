@@ -28,7 +28,7 @@ use super::identity::{self, NsIds, ns_ids};
 use super::seccomp;
 use super::sys::{errno_name, last_errno, nap};
 
-pub mod agent;
+pub(crate) mod agent;
 
 /// The hidden subcommand the probes run inside the sandbox.
 pub const INSIDE_SUBCOMMAND: &str = "__probe-inside";

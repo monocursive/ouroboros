@@ -82,7 +82,7 @@ pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 pub const EXIT_BIND_FAILED: i32 = 126;
 /// The report pair's protocol: one byte per `SOCK_SEQPACKET` datagram, so
 /// one datagram is one message whatever is queued behind it.
-pub mod report {
+pub(crate) mod report {
     /// Supervisor to bridge: sealed; relay without an origin preamble.
     pub const SEAL: u8 = b's';
     /// Supervisor to bridge: sealed for a vault; prefix each relayed

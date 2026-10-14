@@ -16,17 +16,18 @@ use std::path::Path;
 
 use crate::records::{ErrorCode, ErrorStage, JailError, Remediation};
 
-pub mod accounts;
+pub(crate) mod accounts;
 pub mod anchored;
 mod durable;
 mod layout;
 mod lease;
 pub mod mount_alias;
-pub mod mountinfo;
+#[cfg(target_os = "linux")]
+pub(crate) mod mountinfo;
 // The persistence seam (§7, §13.2, §13.3; R02)
-pub mod persist;
-pub mod proxy_dir;
-pub mod record;
+pub(crate) mod persist;
+pub(crate) mod proxy_dir;
+pub(crate) mod record;
 mod registration;
 mod safety;
 mod uncontained;

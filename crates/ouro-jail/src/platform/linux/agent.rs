@@ -34,11 +34,10 @@
 //! audit-source results through the attempt's single [`AuditWriter`];
 //! helper facts are wrapper notes.
 
-use std::collections::VecDeque;
 use std::io;
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -95,8 +94,6 @@ pub fn record_queue_capacity(seam: Option<&str>) -> usize {
         .filter(|capacity| (1..=RECORD_QUEUE).contains(capacity))
         .unwrap_or(RECORD_QUEUE)
 }
-/// How many recent proxy results are kept for diagnostics (doctor).
-const RECENT_RESULTS: usize = 16;
 /// The proxy's resolver concurrency.
 const RESOLVER_IN_FLIGHT: usize = 16;
 
@@ -113,17 +110,6 @@ fn refusal(what: &str, detail: impl std::fmt::Display) -> JailError {
 // Sinks
 // ---------------------------------------------------------------------------
 
-/// What one proxy result said, kept for diagnostics.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RecentResult {
-    /// The destination, as the proxy normalized it.
-    pub destination: Option<String>,
-    /// Allowed or denied.
-    pub allowed: bool,
-    /// The proxy's safe reason code.
-    pub reason: &'static str,
-}
-
 #[derive(Default)]
 struct ProxyTally {
     seq: u64,
@@ -131,7 +117,6 @@ struct ProxyTally {
     lost: u64,
     /// Denials that were resolver capacity, not policy (issue draft 04).
     resolver_refused: u64,
-    recent: VecDeque<RecentResult>,
 }
 
 /// Writes each proxy result as a proxy-source `net.connect` event on the
@@ -172,14 +157,6 @@ impl ProxySink for ProxyTraceSink {
         {
             tally.resolver_refused += 1;
         }
-        if tally.recent.len() == RECENT_RESULTS {
-            tally.recent.pop_front();
-        }
-        tally.recent.push_back(RecentResult {
-            destination: result.destination.as_ref().map(ToString::to_string),
-            allowed: result.decision == ProxyDecision::Allow,
-            reason: result.reason.as_str(),
-        });
     }
 }
 
@@ -259,7 +236,6 @@ pub struct AgentNet {
     rules: Rules,
     /// The registered proxy directory, bound read-only by descriptor.
     dir: Arc<OwnedFd>,
-    dir_path: PathBuf,
     /// Until [`AgentNet::start_proxy`].
     listener: Option<UnixListener>,
     /// The proxy socket node, pinned for the whole run: its inode cannot be
@@ -365,7 +341,6 @@ impl AgentNet {
             tls_only: snapshot.network.tls_only.clone(),
             rules,
             dir,
-            dir_path: handoff.host_path.clone(),
             listener: Some(listener),
             _socket_pin: pin,
             socket_identity,
@@ -401,12 +376,6 @@ impl AgentNet {
     #[must_use]
     pub fn variant(&self) -> AgentVariant {
         self.variant
-    }
-
-    /// The host directory, for the plan's mount table.
-    #[must_use]
-    pub fn dir_path(&self) -> &Path {
-        &self.dir_path
     }
 
     /// A duplicate of the proxy directory descriptor, for bubblewrap.
@@ -829,29 +798,10 @@ impl AgentNet {
         summary.classes.insert(CoverageClass::ProxyNet, class);
     }
 
-    /// The most recent proxy results, oldest first.
-    #[must_use]
-    pub fn recent_results(&self) -> Vec<RecentResult> {
-        self.proxy_sink
-            .tally
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .recent
-            .iter()
-            .cloned()
-            .collect()
-    }
-
     /// The bridge's host pid, once discovered.
     #[must_use]
     pub fn bridge_pid(&self) -> Option<libc::pid_t> {
         self.bridge.as_ref().map(|bridge| bridge.pid)
-    }
-
-    /// Mediated connects that were the bridge's own, not the target's.
-    #[must_use]
-    pub fn helper_connects(&self) -> u64 {
-        self.helper_connects
     }
 
     /// What the receipt's native details say about `agent` (§9.2: "Record
@@ -1518,9 +1468,6 @@ mod tests {
         assert_eq!(class.status, SourceStatus::Degraded);
         assert_eq!(class.gaps[0].reason, "proxy_result_undelivered");
         assert_eq!(class.gaps[0].lost_count, Some(2));
-        // The results are still kept for diagnostics: the loss is in the
-        // trace, not in what the supervisor knows.
-        assert_eq!(refusing.tally.lock().unwrap().recent.len(), 2);
 
         let frames = Arc::new(Mutex::new(Vec::new()));
         let keeping = sink_over(crate::trace::shared(Keeping(frames.clone())));
