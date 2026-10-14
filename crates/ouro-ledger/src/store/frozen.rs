@@ -1,5 +1,10 @@
 //! Validation against the frozen jail and ledger schemas.
-use super::*;
+use std::{collections::BTreeMap, sync::OnceLock};
+
+use ouro_records::records;
+use serde_json::Value;
+
+use crate::protocol::{LedgerError, Result};
 
 pub(super) fn validate_frozen(name: &str, value: &Value) -> Result<()> {
     static VALIDATORS: OnceLock<BTreeMap<&'static str, jsonschema::Validator>> = OnceLock::new();

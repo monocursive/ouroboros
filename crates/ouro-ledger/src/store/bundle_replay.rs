@@ -1,5 +1,13 @@
 //! Read-only replay of a bounded, reassembled canonical snapshot.
-use super::*;
+use std::io::{BufRead as _, BufReader};
+
+use serde_json::{Value, json};
+
+use super::{
+    check_run_id,
+    stream::{Stream, rules::UNRESOLVED},
+};
+use crate::protocol::{LedgerError, MAX_FRAME_BYTES, Result, RunRecord};
 
 /// A replayed snapshot. An unresolved run also carries the outcome run
 /// projection rule 1 gave it, so a bundle exported under that rule still
@@ -67,7 +75,9 @@ pub(crate) fn replay(reader: impl std::io::Read, run_id: &str) -> Result<Replaye
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::fs;
+
+    use crate::{manifest, protocol::Peer};
 
     #[test]
     fn rotated_records_bundle_after_capture_expiry_but_pruned_history_refuses() {

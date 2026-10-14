@@ -1,6 +1,7 @@
 use super::*;
 use crate::faults::{Plan, Point, Replaced, Scope, Step};
-use std::os::unix::fs::PermissionsExt as _;
+use crate::protocol::MAX_VERIFY_LIMIT;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 mod redaction;
 
 /// The call failed with the refusal named by `expected`, not with some

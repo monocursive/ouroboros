@@ -1,14 +1,17 @@
 //! Stateless discovery over accepted canonical projections. Positions bind a
 //! matching catalog fingerprint and scope, never caller-supplied display labels.
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest as _, Sha256};
 
-use super::*;
+use super::{Store, canonical, check_run_id, digest, stream::Stream};
 use crate::{
     discovery::{MAX_CATALOG_LIMIT, MAX_CATALOG_RUNS, MAX_POSITION_BYTES, validate_filter},
     protocol::{
-        CatalogPage, CatalogRequest, DiscoveryPage, DiscoveryRequest, READ_OUTPUT_BYTES,
-        ReadFilter, ReadSelector, RunFilter, RunSummary,
+        CatalogPage, CatalogRequest, DiscoveryPage, DiscoveryRequest, LedgerError,
+        READ_OUTPUT_BYTES, ReadFilter, ReadRequest, ReadSelector, Result, RunFilter, RunSummary,
     },
+    schemas,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -340,6 +343,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     use crate::test_support::{TOKEN, peer};
 

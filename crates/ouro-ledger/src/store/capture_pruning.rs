@@ -1,10 +1,20 @@
 //! Capture-only expiry retains canonical events. An exact durable inventory
 //! authorizes deletion, and the terminal chain anchors it to canonical history.
-use super::gc::{self, Authority, RemovedFile, check_member, directory, file_hash, member};
-use super::*;
-use crate::faults::{self, Point};
-use crate::protocol::{CaptureGcReceipt, PrunedHistory};
+use std::{os::unix::fs::MetadataExt as _, path::Path};
+
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use super::{
+    Store,
+    gc::{self, Authority, RemovedFile, check_member, directory, file_hash, member},
+    stream::{PoisonKind, Stream},
+};
+use crate::{
+    faults::{self, Point},
+    protocol::{CaptureGcReceipt, Chain, LedgerError, Peer, PrunedHistory, Result, RunRecord},
+    schemas,
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

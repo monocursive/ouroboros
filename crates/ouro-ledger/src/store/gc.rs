@@ -1,13 +1,24 @@
 //! What both GC paths share: an exact inventory of the files a durable
 //! anchor authorizes deleting, and the checks that open, hash and publish
 //! only private members relative to pinned directories.
-use std::{ffi::CString, io::Read};
+use std::{
+    ffi::CString,
+    fs::{self, File},
+    io::Read,
+    os::{fd::AsRawFd as _, unix::fs::MetadataExt as _},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 
-use super::*;
-use crate::faults::{self, Point, Replaced};
-use crate::fsx;
+use super::{Store, canonical, digest, stream::Stream};
+use crate::{
+    faults::{self, Point, Replaced},
+    fsx, manifest,
+    protocol::{LedgerError, Result},
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

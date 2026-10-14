@@ -5,7 +5,23 @@
 //! copied). A verifier then re-reads and re-hashes the canonical bytes off
 //! the writer thread, never past the layout the plan saw, so one large run
 //! never stalls the owners and producers waiting on the writer.
-use super::*;
+use std::{fs::OpenOptions, path::PathBuf};
+
+use serde_json::Value;
+
+use super::{
+    Store, check_run_id,
+    frozen::validate_frozen,
+    pruning,
+    stream::{
+        load::{Layout, load_stream},
+        poison_details,
+    },
+    writer::private_file,
+};
+use crate::protocol::{
+    Chain, LedgerError, MAX_VERIFY_LIMIT, Result, RunRecord, VerifyPage, VerifyReport,
+};
 
 /// One page of fresh verification, as the writer planned it.
 pub(crate) struct VerifyPlan {
@@ -319,8 +335,11 @@ pub(crate) fn verify_page(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::super::tests::{gc_fixture, gc_future, payload, peer};
     use super::*;
+    use crate::manifest::{self, STREAM};
 
     #[test]
     fn bytes_after_a_live_streams_accepted_prefix_are_foreign_not_an_interrupted_write() {

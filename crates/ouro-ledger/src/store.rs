@@ -4,9 +4,8 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
-    os::{fd::AsRawFd, unix::fs::MetadataExt},
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
-    sync::OnceLock,
     time::SystemTime,
 };
 
@@ -19,8 +18,8 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::protocol::{
-    AppendReceipt, Chain, LedgerError, MAX_FRAME_BYTES, MAX_VERIFY_LIMIT, Peer, ReadPage,
-    ReadRequest, Result, RunRecord, StoreStatus, VerifyPage, VerifyReport,
+    AppendReceipt, Chain, LedgerError, MAX_FRAME_BYTES, Peer, ReadPage, ReadRequest, Result,
+    RunRecord, StoreStatus,
 };
 
 use crate::discovery::valid_name;

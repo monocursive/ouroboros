@@ -1,11 +1,27 @@
 //! Whole-run pruning. A synchronized retention anchor authorizes only an exact
 //! inventory; recovery never guesses which missing files or replay ids existed.
-use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap, fs, os::unix::fs::MetadataExt as _, path::Path, time::SystemTime,
+};
 
-use super::gc::{self, Authority, RemovedFile, check_member, read_json, safe_file};
-use super::*;
-use crate::faults::{self, Point};
-use crate::protocol::{GcFailure, GcReceipt, GcResult, PrunedHistory};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use super::{
+    Store, capture_pruning, digest,
+    frozen::validate_frozen,
+    gc::{self, Authority, RemovedFile, check_member, read_json, safe_file},
+    stream::{PoisonKind, Replay, Stream},
+};
+use crate::{
+    faults::{self, Point},
+    manifest,
+    protocol::{
+        GcFailure, GcReceipt, GcResult, LedgerError, Peer, PrunedHistory, Result, RunRecord,
+        VerifyReport,
+    },
+    schemas,
+};
 
 const MAX_REPLAYS: usize = 65_536;
 
