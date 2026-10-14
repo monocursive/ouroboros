@@ -6,8 +6,10 @@
 //! select `none`, and carries no command, no include and no interpolation.
 //! This module turns one file into semantic policy and is the only place the
 //! launch grammar is known; no agent is named anywhere in it (I02). The
-//! bundled examples under `crates/ouro-jail/profiles/launch/` are data an
-//! operator copies by hand; the runtime never discovers them.
+//! starter profiles under `crates/ouro-jail/profiles/launch/` are data: most
+//! are embedded, and `--launch NAME` uses the embedded one only when no
+//! operator file of that name exists ([`LaunchSource::Bundled`]); the
+//! `*-vault` starters are not embedded, and an operator copies them by hand.
 //!
 //! What a launch profile contributes, and where:
 //!
@@ -643,7 +645,7 @@ pub fn parse(
             {
                 return Err(invalid(
                     &key,
-                    "hosts/allow_plaintext/header require vault mode",
+                    "hosts, allow_plaintext, header, paths, binaries and refresh require vault mode",
                 ));
             }
             None
@@ -1176,13 +1178,36 @@ refresh={token_url="https://issuer.example.com/token",client_id="public-client"}
         let policy = profile.credentials[0].vault.as_ref().unwrap();
         assert_eq!(policy.paths, ["/v1/"]);
         assert_eq!(policy.refresh.as_ref().unwrap().refresh_before_seconds, 300);
-        for bad in [
-            valid.replace("/v1/", "/v1/../other"),
-            valid.replace("/usr/bin/curl", "curl"),
-            valid.replace("https://issuer", "http://issuer"),
-            valid.replace("mode=\"vault\"", "mode=\"copy_rw\"\ndest=\"token\""),
+        for (bad, reason) in [
+            (
+                valid.replace("/v1/", "/v1/../other"),
+                "without dot segments",
+            ),
+            (
+                valid.replace("/usr/bin/curl", "curl"),
+                "binaries must be absolute",
+            ),
+            (
+                valid.replace("https://issuer", "http://issuer"),
+                "refresh requires HTTPS",
+            ),
+            (
+                valid.replace("mode=\"vault\"", "mode=\"copy_rw\"\ndest=\"token\""),
+                "require vault mode",
+            ),
         ] {
-            let _ = parse_err(&bad);
+            let error = parse_err(&bad);
+            assert_eq!(error.code, ErrorCode::InvalidConfig, "{reason}");
+            assert_eq!(
+                error.key_path.as_deref(),
+                Some("launch.credentials.api"),
+                "{reason}"
+            );
+            assert!(
+                error.message.contains(reason),
+                "{reason}: {}",
+                error.message
+            );
         }
     }
     #[test]
@@ -1530,23 +1555,49 @@ allow = ["api.example.com:443"]
 
     #[test]
     fn the_grammar_refuses_argv_none_unknown_keys_and_commands() {
-        for text in [
-            "name = \"demo\"\njail = \"none\"\n",
-            "name = \"other\"\njail = \"tool\"\n",
-            "name = \"demo\"\njail = \"tool\"\nargv = [\"x\"]\n",
-            "name = \"demo\"\njail = \"tool\"\ncommand = \"x\"\n",
-            "name = \"demo\"\njail = \"tool\"\n[environment]\nA = [\"sh\", \"-c\"]\n",
-            "name = \"demo\"\njail = \"tool\"\n[environment]\nA = { run = \"x\" }\n",
-            "name = \"demo\"\njail = \"tool\"\n[environment]\nA = 1\n",
-            "name = \"demo\"\njail = \"tool\"\nname = \"demo\"\n",
-            "name = \"demo\"\njail = \"custom.toml\"\n",
+        let grammar = (ErrorCode::InvalidConfig, "launch");
+        for (text, (code, key)) in [
+            (
+                "name = \"demo\"\njail = \"none\"\n",
+                (ErrorCode::PolicyWidening, "launch.jail"),
+            ),
+            (
+                "name = \"other\"\njail = \"tool\"\n",
+                (ErrorCode::InvalidConfig, "launch.name"),
+            ),
+            (
+                "name = \"demo\"\njail = \"tool\"\nargv = [\"x\"]\n",
+                grammar,
+            ),
+            (
+                "name = \"demo\"\njail = \"tool\"\ncommand = \"x\"\n",
+                grammar,
+            ),
+            (
+                "name = \"demo\"\njail = \"tool\"\n[environment]\nA = [\"sh\", \"-c\"]\n",
+                grammar,
+            ),
+            (
+                "name = \"demo\"\njail = \"tool\"\n[environment]\nA = { run = \"x\" }\n",
+                grammar,
+            ),
+            (
+                "name = \"demo\"\njail = \"tool\"\n[environment]\nA = 1\n",
+                grammar,
+            ),
+            (
+                "name = \"demo\"\njail = \"tool\"\nname = \"demo\"\n",
+                grammar,
+            ),
+            (
+                "name = \"demo\"\njail = \"custom.toml\"\n",
+                (ErrorCode::InvalidConfig, "launch.jail"),
+            ),
         ] {
             let error = parse_err(text);
-            assert!(
-                matches!(
-                    error.code,
-                    ErrorCode::InvalidConfig | ErrorCode::PolicyWidening
-                ),
+            assert_eq!(
+                (error.code, error.key_path.as_deref()),
+                (code, Some(key)),
                 "{text}: {error:?}"
             );
         }

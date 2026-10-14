@@ -305,8 +305,8 @@ pub fn parse_project_config(text: &str) -> Result<ProjectConfig, JailError> {
 ///
 /// `prefix` is the key-path prefix used when reporting an exact key path, so a
 /// project file reports `jail.limits.wall` and a profile file `limits.wall`.
-/// `explicit_required` marks every ceiling this layer sets as required (§6.4:
-/// "Every explicit limit from CLI, operator or project config is required").
+/// Every ceiling a file sets is required (§6.4: "Every explicit limit from
+/// CLI, operator or project config is required").
 ///
 /// # Errors
 /// Returns [`ErrorCode::InvalidConfig`] for an unparsable value.

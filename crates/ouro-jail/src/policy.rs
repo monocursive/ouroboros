@@ -345,9 +345,10 @@ pub struct CredentialDecl {
     pub id: String,
     /// Absolute native source path.
     pub source: NativeString,
-    /// Relative native destination under vendor state.
+    /// Relative native destination under vendor state (`.vault-<id>` for
+    /// `vault`, which stages no file there).
     pub dest: NativeString,
-    /// `copy_rw` or `bind_ro`.
+    /// `copy_rw`, `bind_ro` or `vault`.
     pub mode: String,
 }
 
@@ -997,10 +998,6 @@ impl Authority {
 }
 
 // ---------------------------------------------------------------------------
-// Resolution
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Filesystem identity for untrusted paths (§6.3)
 // ---------------------------------------------------------------------------
 
@@ -1237,6 +1234,10 @@ fn native(bytes: Vec<u8>, key: &str) -> Result<NativeString, JailError> {
 fn relative_suffix(root: &[u8], absolute: &[u8]) -> Option<Vec<u8>> {
     path::strip_ancestor(root, absolute).map(|rest| path::join(&rest))
 }
+
+// ---------------------------------------------------------------------------
+// Resolution
+// ---------------------------------------------------------------------------
 
 /// Resolves configuration into an immutable snapshot with its digest,
 /// provenance and requirements (§6.2, §6.3).

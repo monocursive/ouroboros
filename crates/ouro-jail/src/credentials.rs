@@ -1381,15 +1381,44 @@ mod tests {
             check_mode(&linked).unwrap_err().reason,
             "source_multiply_linked"
         );
-        // Security 2026-09-25 (audit F5): the rule holds for both modes. A
-        // second name is another writer into what is being copied or pinned;
-        // `copy_rw` no longer relies on the child not seeing the source.
-        let mut copy_rw = stat(1, 1);
-        copy_rw.nlink = 2;
-        assert_eq!(
-            check_mode(&copy_rw).unwrap_err().reason,
-            "source_multiply_linked"
-        );
+    }
+
+    /// Security 2026-09-25 (audit F5): the one-link rule holds for every
+    /// mode. A second name is another writer into what is being copied or
+    /// pinned; `copy_rw` does not rely on the child not seeing the source.
+    #[test]
+    fn every_mode_refuses_a_multiply_linked_source() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_dir, path, _handle) = directory();
+        std::fs::write(path.join("token"), b"t").unwrap();
+        std::fs::set_permissions(path.join("token"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        std::fs::hard_link(path.join("token"), path.join("alias")).unwrap();
+        let source =
+            NativeString::from_bytes(path.join("token").as_os_str().as_encoded_bytes().to_vec())
+                .unwrap();
+        let launch = LaunchSnapshot {
+            state_var: None,
+            home_is_state: false,
+            state_subdirs: Vec::new(),
+            credentials: [MODE_COPY_RW, MODE_BIND_RO, MODE_VAULT]
+                .iter()
+                .map(|mode| CredentialDecl {
+                    vault: None,
+                    id: (*mode).to_owned(),
+                    source: source.clone(),
+                    dest: NativeString::Text((*mode).to_owned()),
+                    mode: (*mode).to_owned(),
+                })
+                .collect(),
+        };
+        for check in inspect(&launch, &[]) {
+            assert_eq!(
+                check.reason_code, "source_multiply_linked",
+                "{}",
+                check.mode
+            );
+        }
     }
 
     fn directory() -> (tempfile::TempDir, std::path::PathBuf, Dir) {
