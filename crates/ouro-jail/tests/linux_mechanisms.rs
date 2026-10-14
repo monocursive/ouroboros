@@ -17,9 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use ouro_jail::platform::linux::bwrap::{
-    self, BwrapPlan, Placeholder, PlaceholderOutcome, inner_launch_command,
-};
+use ouro_jail::platform::linux::bwrap::{self, BwrapPlan, Placeholder, PlaceholderOutcome};
 use ouro_jail::platform::linux::cgroup;
 use ouro_jail::platform::linux::clock::{Deadline, boottime_ns};
 use ouro_jail::platform::linux::exec::{self, FdMap};
@@ -1223,7 +1221,20 @@ fn run_tool_profile(long_options: bool, narrow: bool) -> ToolRun {
         OsString::from(probe::INSIDE_SUBCOMMAND),
     ];
     target.extend(checks.iter().map(OsString::from));
-    plan.set_command(inner_launch_command(RELEASE_FD, ERROR_FD, narrow, &target));
+    plan.set_command(
+        launch::LaunchArgs {
+            release_fd: RELEASE_FD,
+            error_fd: ERROR_FD,
+            narrow,
+            read_open_fast_path: false,
+            trace_data_fd: None,
+            mediate: None,
+            bridge: None,
+            sigmask: None,
+            argv: target,
+        }
+        .command_line(OsStr::new(bwrap::JAIL_INSIDE_PATH)),
+    );
     if long_options {
         // Options this long go through `--args` (each variable stays under
         // the kernel's per-string limit).

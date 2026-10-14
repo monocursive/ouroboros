@@ -1439,64 +1439,6 @@ impl BwrapPlan {
     }
 }
 
-/// Build the inner command line: the jail's own binary, re-executed inside.
-#[must_use]
-pub fn inner_launch_command(
-    release_fd: RawFd,
-    error_fd: RawFd,
-    narrow: bool,
-    target: &[OsString],
-) -> Vec<OsString> {
-    inner_launch_command_with(release_fd, error_fd, narrow, None, None, None, target)
-}
-
-// The agent launcher's mediation and bridge options
-/// [`inner_launch_command`], plus, for `agent`, the descriptor numbers the
-/// launcher places its mediation listener, sock_diag socket and the bridge's
-/// report pipe at (jail-v1 §10), and the signal mask the launcher restores
-/// before exec (bubblewrap unblocks SIGCHLD in its child).
-#[must_use]
-pub fn inner_launch_command_with(
-    release_fd: RawFd,
-    error_fd: RawFd,
-    narrow: bool,
-    agent: Option<(RawFd, RawFd, RawFd)>,
-    sigmask: Option<u64>,
-    trace_data_fd: Option<RawFd>,
-    target: &[OsString],
-) -> Vec<OsString> {
-    let mut out = vec![
-        OsString::from(JAIL_INSIDE_PATH),
-        OsString::from(super::launch::SUBCOMMAND),
-        OsString::from("--release-fd"),
-        OsString::from(release_fd.to_string()),
-        OsString::from("--error-fd"),
-        OsString::from(error_fd.to_string()),
-    ];
-    if narrow {
-        out.push(OsString::from("--narrow"));
-        // Audit 2026-09-25-2, S14: the descriptor the attempt's narrowing
-        // data arrives through — a number only, never the value.
-        if let Some(fd) = trace_data_fd {
-            out.push(OsString::from("--trace-data-fd"));
-            out.push(OsString::from(fd.to_string()));
-        }
-    }
-    if let Some((listener, sockdiag, report)) = agent {
-        out.push(OsString::from("--mediate"));
-        out.push(OsString::from(format!("{listener},{sockdiag}")));
-        out.push(OsString::from("--bridge"));
-        out.push(OsString::from(report.to_string()));
-    }
-    if let Some(mask) = sigmask {
-        out.push(OsString::from("--sigmask"));
-        out.push(OsString::from(format!("{mask:x}")));
-    }
-    out.push(OsString::from("--"));
-    out.extend(target.iter().cloned());
-    out
-}
-
 /// One document bubblewrap writes to `--json-status-fd`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BwrapStatus {
@@ -1702,7 +1644,18 @@ mod tests {
         }];
         plan.seccomp_fd = Some(10);
         plan.json_status_fd = Some(11);
-        plan.inner = inner_launch_command(12, 13, true, &[OsString::from("/bin/true")]);
+        plan.inner = super::super::launch::LaunchArgs {
+            release_fd: 12,
+            error_fd: 13,
+            narrow: true,
+            read_open_fast_path: false,
+            trace_data_fd: None,
+            mediate: None,
+            bridge: None,
+            sigmask: None,
+            argv: vec![OsString::from("/bin/true")],
+        }
+        .command_line(OsStr::new(JAIL_INSIDE_PATH));
         plan
     }
 
@@ -2193,30 +2146,5 @@ mod tests {
         let proxy_at = text.find(PROXY_INSIDE_PATH).unwrap();
         let jail_at = text.find(JAIL_INSIDE_PATH).unwrap();
         assert!(proxy_at < jail_at, "after every grant, before the binary");
-        let inner = inner_launch_command_with(
-            12,
-            13,
-            true,
-            Some((18, 19, 20)),
-            Some(0x201),
-            None,
-            &[OsString::from("x")],
-        );
-        let joined: Vec<String> = inner
-            .iter()
-            .map(|part| part.to_string_lossy().into_owned())
-            .collect();
-        let sep = joined.iter().position(|part| part == "--").unwrap();
-        assert!(
-            joined[..sep]
-                .windows(2)
-                .any(|w| w == ["--mediate", "18,19"])
-        );
-        assert!(joined[..sep].windows(2).any(|w| w == ["--bridge", "20"]));
-        assert!(joined[..sep].windows(2).any(|w| w == ["--sigmask", "201"]));
-        assert_eq!(
-            inner_launch_command(12, 13, false, &[OsString::from("x")]),
-            inner_launch_command_with(12, 13, false, None, None, None, &[OsString::from("x")])
-        );
     }
 }

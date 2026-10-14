@@ -1163,26 +1163,22 @@ impl Boundary {
         } else {
             None
         };
-        bplan.inner = bwrap::inner_launch_command_with(
-            RELEASE_FD,
-            ERROR_FD,
-            observe_on,
-            agent.is_some().then_some((
-                super::agent::LISTENER_FD,
-                super::agent::SOCKDIAG_FD,
-                super::agent::BRIDGE_REPORT_FD,
-            )),
+        bplan.inner = super::launch::LaunchArgs {
+            release_fd: RELEASE_FD,
+            error_fd: ERROR_FD,
+            narrow: observe_on,
+            read_open_fast_path: observe_on && !snapshot.observation.learning,
+            trace_data_fd: trace_data.map(|_| TRACE_DATA_FD),
+            mediate: agent
+                .is_some()
+                .then_some((super::agent::LISTENER_FD, super::agent::SOCKDIAG_FD)),
+            bridge: agent.is_some().then_some(super::agent::BRIDGE_REPORT_FD),
             // bubblewrap unblocks SIGCHLD in its child: the launcher puts
             // back the mask this supervisor inherited.
-            Some(super::launch::blocked_mask()),
-            trace_data.map(|_| TRACE_DATA_FD),
-            &target,
-        );
-        if observe_on && !snapshot.observation.learning {
-            bplan
-                .inner
-                .insert(2, OsString::from("--read-open-fast-path"));
+            sigmask: Some(super::launch::blocked_mask()),
+            argv: target.clone(),
         }
+        .command_line(OsStr::new(bwrap::JAIL_INSIDE_PATH));
         bplan.seccomp_fd = Some(SECCOMP_FD);
         bplan.json_status_fd = Some(STATUS_FD);
         bplan.args_fd = Some(ARGS_FD);

@@ -1458,20 +1458,25 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
         let mut fds = FdMap::new();
         fds.add(release_r, 12)?;
         fds.add(error_w, 13)?;
+        let launch = super::launch::LaunchArgs {
+            release_fd: 12,
+            error_fd: 13,
+            narrow: true,
+            read_open_fast_path: false,
+            trace_data_fd: None,
+            mediate: None,
+            bridge: None,
+            sigmask: None,
+            argv: vec![
+                jail_exe.into(),
+                INSIDE_SUBCOMMAND.into(),
+                format!("create=write:{}", target.display()).into(),
+            ],
+        };
         let mut command = Command::new(jail_exe);
         command
-            .args([
-                super::launch::SUBCOMMAND,
-                "--release-fd",
-                "12",
-                "--error-fd",
-                "13",
-                "--narrow",
-                "--",
-            ])
-            .arg(jail_exe)
-            .arg(INSIDE_SUBCOMMAND)
-            .arg(format!("create=write:{}", target.display()))
+            .arg(super::launch::SUBCOMMAND)
+            .args(launch.to_argv())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
