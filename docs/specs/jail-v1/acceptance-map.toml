@@ -2410,7 +2410,7 @@ tests = [
   "ouro-jail/tests/j4_trace_linux.rs::j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full",
   "ouro-jail/tests/j5_boundary_linux.rs::r03_a_wall_fires_on_time_under_a_saturated_trace",
 ]
-note = "A 2s wall fires on time (wall_expiry, hit, elapsed < 9s) while a Never trace consumer fills the pipe and the 4 MiB external queue behind it (the boundary frame is written in part; the excess is lost). Enforcement: the nonblocking external trace fd (trace.rs FdSink::from_raw_fd set_nonblocking); a blocking fd hangs the supervision loop on the full pipe and the wall never fires (harness timeout) — verified RED on the host. Complements j4_trace_linux's saturation tests with a best-effort + recognisable-prefix assertion. A guaranteed-torn partial write to the output pipe needs a smaller pipe (harness-owned) or a larger-than-pipe event / FdSink seam (trace.rs, J5-C-owned); see B2/requests.md."
+note = "A 2s wall fires on time (wall_expiry, hit, elapsed < 9s) while a Never trace consumer fills the pipe and the 4 MiB external queue behind it (the boundary frame is written in part; the excess is lost). Enforcement: the nonblocking external trace fd (trace.rs FdSink::new, through FrameQueue::new, sets O_NONBLOCK); a blocking fd hangs the supervision loop on the full pipe and the wall never fires (harness timeout) — verified RED on the host. Complements j4_trace_linux's saturation tests with a best-effort + recognisable-prefix assertion. A guaranteed-torn partial write to the output pipe needs a smaller pipe (harness-owned) or a larger-than-pipe event / FdSink seam (trace.rs, J5-C-owned); see B2/requests.md."
 
 [[clause]]
 id = "R03.7"
