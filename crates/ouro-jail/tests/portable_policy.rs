@@ -1076,6 +1076,66 @@ fn a_cli_tilde_path_is_cwd_relative_not_home_relative() {
     );
 }
 
+/// §6.2: a launch profile is an operator file, so a leading `~/` in its
+/// `[filesystem]` grants names the operator home, exactly as its credential
+/// sources do, never `<config-dir>/launch/~/...`. And an operator file's
+/// `~/` with no known home refuses rather than becoming a literal `~`
+/// directory beneath the file's own directory.
+#[test]
+fn an_operator_file_tilde_path_is_the_home_or_refuses() {
+    let resolve = |layer: Layer, home: Option<&[u8]>| {
+        let inputs = ResolveInputs {
+            platform: Os::Linux,
+            base_profile: ProfileName::Agent,
+            policy_name: "agent".to_owned(),
+            baseline: profiles::baseline(ProfileName::Agent, Os::Linux, &|_| None),
+            workspace: b"/work".to_vec(),
+            scratch: ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: home.map(<[u8]>::to_vec),
+            translation_prefixes: Vec::new(),
+            layers: vec![layer],
+        };
+        ouro_jail::policy::resolve(&inputs)
+    };
+    let profile = ouro_jail::launch_profile::parse(
+        "name = \"demo\"\njail = \"agent\"\n[filesystem]\nread_only = [\"~/tools\"]\n",
+        "demo",
+        b"/operator/config/launch",
+        Some(b"/home/op"),
+    )
+    .expect("parses");
+    let layer = ouro_jail::launch_profile::network_layer(&profile).expect("a grant layer");
+    let resolved = resolve(layer.clone(), Some(b"/home/op")).expect("resolves");
+    assert!(
+        resolved
+            .snapshot
+            .filesystem
+            .read_only
+            .contains(&PathRef::host(NativeString::Text(
+                "/home/op/tools".to_owned()
+            ))),
+        "{:?}",
+        resolved.snapshot.filesystem.read_only
+    );
+    let error = resolve(layer, None).expect_err("no home, no expansion");
+    assert_eq!(error.code, ErrorCode::InvalidConfig);
+    assert_eq!(
+        error.key_path.as_deref(),
+        Some("launch.filesystem.read_only")
+    );
+
+    let config = Layer {
+        origin: LayerOrigin::OperatorConfig("config.toml".to_owned()),
+        base_dir: Some(b"/operator/config".to_vec()),
+        key_prefix: "jail.".to_owned(),
+        narrowing: false,
+        delta: read_only(&["~/tools"]),
+    };
+    let error = resolve(config, None).expect_err("no home, no expansion");
+    assert_eq!(error.key_path.as_deref(), Some("jail.filesystem.read_only"));
+}
+
 #[test]
 fn p02_the_workspace_root_itself_is_a_real_directory() {
     // A guard for the harness: if the workspace stopped existing, every test

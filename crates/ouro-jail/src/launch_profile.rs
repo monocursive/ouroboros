@@ -268,37 +268,38 @@ fn native(bytes: Vec<u8>, key: &str) -> Result<NativeString, JailError> {
     NativeString::from_bytes(bytes).map_err(|error| invalid(key, error.to_string()))
 }
 
-/// Lexically normalizes an absolute path: `.` dropped, `..` pops, and a `..`
-/// above the root refuses. A symlink component is refused later by the
-/// no-follow walk, so lexical and physical resolution cannot disagree.
-fn normalize_absolute(bytes: &[u8], key: &str) -> Result<Vec<u8>, JailError> {
-    if !bytes.starts_with(b"/") {
-        return Err(invalid(key, "the path is not absolute"));
-    }
-    if bytes.contains(&0) {
-        return Err(invalid(key, "the path contains NUL"));
-    }
-    let mut parts: Vec<&[u8]> = Vec::new();
-    for part in bytes.split(|byte| *byte == b'/') {
-        match part {
-            b"" | b"." => {}
-            b".." => {
-                if parts.pop().is_none() {
-                    return Err(invalid(key, "the path escapes `/` with `..`"));
-                }
-            }
-            other => parts.push(other),
-        }
-    }
-    if parts.is_empty() {
+/// The absolute source a credential's `source` names: `~/` expanded against
+/// the operator home, a relative path resolved against the launch file's
+/// directory, then lexically normalized ([`crate::policy::path`]). A symlink
+/// component is refused later by the no-follow walk, so lexical and physical
+/// resolution cannot disagree.
+fn credential_source(
+    raw: &str,
+    base_dir: &[u8],
+    home: Option<&[u8]>,
+    key: &str,
+) -> Result<Vec<u8>, JailError> {
+    use crate::policy::path::{self, Refusal};
+    let normalized = path::expand_home(raw.as_bytes(), home)
+        .and_then(|expanded| path::normalize(Some(base_dir), &expanded))
+        .map_err(|refusal| {
+            invalid(
+                key,
+                match refusal {
+                    Refusal::Empty => "the source is empty",
+                    Refusal::Nul => "the path contains NUL",
+                    Refusal::Relative => "the path is not absolute",
+                    Refusal::EscapesRoot => "the path escapes `/` with `..`",
+                    Refusal::HomeUnavailable => {
+                        "a `~/` source needs the operator home, which is unavailable"
+                    }
+                },
+            )
+        })?;
+    if normalized == b"/" {
         return Err(invalid(key, "the path names the filesystem root"));
     }
-    let mut out = Vec::with_capacity(bytes.len());
-    for part in parts {
-        out.push(b'/');
-        out.extend_from_slice(part);
-    }
-    Ok(out)
+    Ok(normalized)
 }
 
 fn relative_components(
@@ -607,27 +608,7 @@ pub fn parse(
         destinations.push((id.clone(), dest));
 
         let source_key = format!("{key}.source");
-        let raw = entry.source.as_bytes();
-        let expanded: Vec<u8> = if let Some(rest) = raw.strip_prefix(b"~/") {
-            let Some(home) = home else {
-                return Err(invalid(
-                    &source_key,
-                    "a `~/` source needs the operator home, which is unavailable",
-                ));
-            };
-            let mut out = home.to_vec();
-            out.push(b'/');
-            out.extend_from_slice(rest);
-            out
-        } else if raw.starts_with(b"/") {
-            raw.to_vec()
-        } else {
-            let mut out = base_dir.to_vec();
-            out.push(b'/');
-            out.extend_from_slice(raw);
-            out
-        };
-        let source = normalize_absolute(&expanded, &source_key)?;
+        let source = credential_source(&entry.source, base_dir, home, &source_key)?;
         credentials.push(CredentialDecl {
             id: id.clone(),
             source: native(source, &source_key)?,

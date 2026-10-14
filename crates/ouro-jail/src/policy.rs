@@ -22,6 +22,8 @@ use crate::records::{
     SCHEMA_NETWORK, SCHEMA_POLICY_SNAPSHOT,
 };
 
+pub(crate) mod path;
+
 /// The built-in profile a policy is based on (§6.3, north star §4.2).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -106,23 +108,15 @@ impl PathRef {
     /// The path's components, with empty segments dropped.
     #[must_use]
     pub fn components(&self) -> Vec<&[u8]> {
-        self.path
-            .as_bytes()
-            .split(|byte| *byte == b'/')
-            .filter(|part| !part.is_empty())
-            .collect()
+        path::components(self.path.as_bytes()).collect()
     }
 
     /// Whether `self` is `other` or one of its ancestors, compared component by
     /// component so that `/work/a` is not an ancestor of `/work/ab`.
     #[must_use]
     pub fn contains(&self, other: &PathRef) -> bool {
-        if self.root != other.root {
-            return false;
-        }
-        let mine = self.components();
-        let theirs = other.components();
-        mine.len() <= theirs.len() && theirs[..mine.len()] == mine[..]
+        self.root == other.root
+            && path::strip_ancestor(self.path.as_bytes(), other.path.as_bytes()).is_some()
     }
 
     /// A lossy rendering for diagnostics only.
@@ -710,6 +704,24 @@ impl LayerOrigin {
         )
     }
 
+    /// Whether a leading `~/` in this layer's paths names the operator home.
+    ///
+    /// §6.2: "Only operator files expand a leading `~/` against the operator
+    /// home." The operator's profile file, `config.toml` and launch profiles
+    /// are operator files. CLI paths are relative to the invocation cwd (the
+    /// shell already expanded any `~` it meant) and a project file's paths
+    /// are the contained party's own text, so there `~/x` names the literal
+    /// directory `~/x` beneath the base, never the home.
+    #[must_use]
+    pub fn expands_home(&self) -> bool {
+        matches!(
+            self,
+            LayerOrigin::OperatorProfileFile(_)
+                | LayerOrigin::OperatorConfig(_)
+                | LayerOrigin::LaunchProfile(_)
+        )
+    }
+
     /// Whether the paths in this layer are written by an untrusted party.
     ///
     /// §2: "The child, its descendants, its workspace and project
@@ -986,10 +998,7 @@ fn untrusted_identities(
         )
     };
 
-    let components: Vec<&[u8]> = absolute
-        .split(|byte| *byte == b'/')
-        .filter(|part| !part.is_empty())
-        .collect();
+    let components: Vec<&[u8]> = path::components(absolute).collect();
     let mut chain = Vec::with_capacity(components.len() + 1);
     let mut walked: Vec<u8> = Vec::with_capacity(absolute.len());
 
@@ -1078,78 +1087,26 @@ fn masks_boundary_plumbing(absolute: &[u8]) -> bool {
 }
 
 /// Lexically normalizes `raw` against `base_dir` without touching the
-/// filesystem.
+/// filesystem ([`path::normalize`]).
 ///
 /// Portable code does not resolve symlinks: §9.1 pins source identity with
 /// directory handles at preparation, which is the Linux slice's job. A `..`
 /// that would escape the root refuses instead of clamping.
 fn normalize_path(base_dir: Option<&[u8]>, raw: &[u8], key: &str) -> Result<Vec<u8>, JailError> {
-    if raw.is_empty() {
-        return Err(refuse(
-            ErrorCode::InvalidConfig,
-            key,
-            "a filesystem path may not be empty".to_owned(),
-        ));
-    }
-    if raw.contains(&0) {
-        return Err(refuse(
-            ErrorCode::InvalidConfig,
-            key,
-            "a filesystem path may not contain NUL".to_owned(),
-        ));
-    }
-    let mut joined: Vec<u8> = Vec::new();
-    if raw.starts_with(b"/") {
-        joined.extend_from_slice(raw);
-    } else {
-        let Some(base) = base_dir else {
-            return Err(refuse(
-                ErrorCode::InvalidConfig,
-                key,
-                "a relative path has no directory to resolve against".to_owned(),
-            ));
-        };
-        joined.extend_from_slice(base);
-        joined.push(b'/');
-        joined.extend_from_slice(raw);
-    }
-    let mut components: Vec<&[u8]> = Vec::new();
-    for part in joined.split(|byte| *byte == b'/') {
-        match part {
-            b"" | b"." => {}
-            b".." => {
-                if components.pop().is_none() {
-                    return Err(refuse(
-                        ErrorCode::InvalidConfig,
-                        key,
-                        "a path escapes the filesystem root with `..`".to_owned(),
-                    ));
-                }
-            }
-            other => components.push(other),
-        }
-    }
-    let mut out = Vec::new();
-    for component in components {
-        out.push(b'/');
-        out.extend_from_slice(component);
-    }
-    if out.is_empty() {
-        out.push(b'/');
-    }
-    Ok(out)
+    path::normalize(base_dir, raw).map_err(|refusal| path_refusal(refusal, key))
 }
 
-fn expand_home(raw: &[u8], home: Option<&[u8]>) -> Vec<u8> {
-    if let Some(rest) = raw.strip_prefix(b"~/")
-        && let Some(home) = home
-    {
-        let mut out = home.to_vec();
-        out.push(b'/');
-        out.extend_from_slice(rest);
-        return out;
-    }
-    raw.to_vec()
+fn path_refusal(refusal: path::Refusal, key: &str) -> JailError {
+    let message = match refusal {
+        path::Refusal::Empty => "a filesystem path may not be empty",
+        path::Refusal::Nul => "a filesystem path may not contain NUL",
+        path::Refusal::Relative => "a relative path has no directory to resolve against",
+        path::Refusal::EscapesRoot => "a path escapes the filesystem root with `..`",
+        path::Refusal::HomeUnavailable => {
+            "a `~/` path needs the operator home, which is unavailable"
+        }
+    };
+    refuse(ErrorCode::InvalidConfig, key, message.to_owned())
 }
 
 struct Tokenizer {
@@ -1213,27 +1170,7 @@ fn native(bytes: Vec<u8>, key: &str) -> Result<NativeString, JailError> {
 }
 
 fn relative_suffix(root: &[u8], absolute: &[u8]) -> Option<Vec<u8>> {
-    let root_components: Vec<&[u8]> = root
-        .split(|byte| *byte == b'/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    let path_components: Vec<&[u8]> = absolute
-        .split(|byte| *byte == b'/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    if path_components.len() < root_components.len()
-        || path_components[..root_components.len()] != root_components[..]
-    {
-        return None;
-    }
-    let mut out = Vec::new();
-    for (index, component) in path_components[root_components.len()..].iter().enumerate() {
-        if index > 0 {
-            out.push(b'/');
-        }
-        out.extend_from_slice(component);
-    }
-    Some(out)
+    path::strip_ancestor(root, absolute).map(|rest| path::join(&rest))
 }
 
 /// Resolves configuration into an immutable snapshot with its digest,
@@ -1328,15 +1265,13 @@ fn apply_layer(
     // Narrowing decisions compare against the authority as it was before this
     // layer, so one layer cannot bootstrap itself into wider authority.
     let base = authority.clone();
-    // §6.2: "Only operator files expand a leading `~/` against the operator
-    // home." CLI paths are relative to the invocation cwd and a project file's
-    // paths are the contained party's own text, so `~/x` on the command line
-    // names the literal directory `~/x` under the cwd, never the home.
-    let expand = |raw: &[u8]| match layer.origin {
-        LayerOrigin::OperatorProfileFile(_) | LayerOrigin::OperatorConfig(_) => {
-            expand_home(raw, inputs.operator_home.as_deref())
+    let expand = |raw: &[u8], key: &str| {
+        if layer.origin.expands_home() {
+            path::expand_home(raw, inputs.operator_home.as_deref())
+                .map_err(|refusal| path_refusal(refusal, key))
+        } else {
+            Ok(raw.to_vec())
         }
-        _ => raw.to_vec(),
     };
 
     for (kind, entries) in [
@@ -1347,7 +1282,7 @@ fn apply_layer(
         let key = format!("{prefix}filesystem.{kind}");
         let grant = kind != "deny_read";
         for raw in entries {
-            let absolute = normalize_path(layer.base_dir.as_deref(), &expand(raw), &key)?;
+            let absolute = normalize_path(layer.base_dir.as_deref(), &expand(raw, &key)?, &key)?;
             if kind == "deny_read" && masks_boundary_plumbing(&absolute) {
                 // Audit 2026-09-25-2, S3: a denial is always admitted as
                 // narrowing — except one whose mask would cover the
@@ -1824,19 +1759,5 @@ mod tests {
             authority.mode_at(&reference(RootToken::Host, "/etc")),
             AccessMode::Absent
         );
-    }
-
-    #[test]
-    fn normalize_refuses_an_escape_and_resolves_dot_segments() {
-        assert_eq!(
-            normalize_path(Some(b"/srv/demo"), b"./fixtures", "k").expect("normalizes"),
-            b"/srv/demo/fixtures".to_vec()
-        );
-        assert_eq!(
-            normalize_path(Some(b"/srv/demo"), b"a/../b", "k").expect("normalizes"),
-            b"/srv/demo/b".to_vec()
-        );
-        assert!(normalize_path(None, b"../../..", "k").is_err());
-        assert!(normalize_path(Some(b"/srv"), b"", "k").is_err());
     }
 }
