@@ -309,8 +309,8 @@ fn many_nested_repositories_refuse_before_any_pin() {
 
 /// Attempted, live: an `agent` run over 450 nested repositories (900
 /// protected segments) from a session whose soft descriptor limit is 1024.
-/// Verdict: the pins fit once the supervisor raises its soft limit, and the
-/// run settles.
+/// Verdict: the pins fit once the supervisor raises its soft limit, the run
+/// settles, and its mount table binds every one of them read-only.
 #[test]
 fn nested_repositories_within_the_bound_fit_a_1024_soft_descriptor_limit() {
     if !common::live() {
@@ -323,4 +323,16 @@ fn nested_repositories_within_the_bound_fit_a_1024_soft_descriptor_limit() {
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
     let receipt = common::settled(&run);
     assert_eq!(receipt["errors"], serde_json::json!([]), "{receipt:#}");
+    let protected = receipt["applied"]["filesystem"]["mounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| {
+            row["mode"] == "ro"
+                && row["path"].as_str().is_some_and(|path| {
+                    path.ends_with("/.git/hooks") || path.ends_with("/.git/config")
+                })
+        })
+        .count();
+    assert_eq!(protected, 900, "{receipt:#}");
 }
