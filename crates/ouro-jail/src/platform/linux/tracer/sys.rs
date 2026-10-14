@@ -561,14 +561,14 @@ pub fn wait_any(flags: c_int) -> Wait {
     }
 }
 
-/// This thread's kernel task id. `TracerPid` in `/proc/<pid>/status` names
-/// the tracer *thread*, so confirming a seize needs this and not `getpid`.
 /// This process's id, for the `/proc` walks that need it.
 pub fn getpid() -> pid_t {
     // SAFETY: `getpid` takes no arguments and cannot fail.
     unsafe { libc::getpid() }
 }
 
+/// This thread's kernel task id. `TracerPid` in `/proc/<pid>/status` names
+/// the tracer *thread*, so confirming a seize needs this and not `getpid`.
 pub fn gettid() -> pid_t {
     // SAFETY: `gettid` takes no arguments and cannot fail.
     unsafe { libc::gettid() }

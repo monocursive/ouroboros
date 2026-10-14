@@ -324,7 +324,7 @@ pub struct Args {
     pub dirfd: Option<i32>,
     pub dirfd2: Option<i32>,
     /// The stopped thread's own working directory, read from
-    /// `/proc/<tid>/cwd` at the syscall stop (issue draft 12). The argument
+    /// `/proc/<tid>/cwd` at the syscall stop (§11.3). The argument
     /// snapshot stays the raw bytes; classification resolves a relative path
     /// against this, and the exit-side stability check keeps comparing the
     /// raw bytes.

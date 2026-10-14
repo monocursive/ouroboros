@@ -281,7 +281,7 @@ impl Site {
 ///   handler's entry, after it has settled the call and written the frame:
 ///   `EINTR` or restarted, from the restart code and, for `ERESTARTSYS`
 ///   (whose outcome depends on `SA_RESTART`, which a tracer cannot read),
-///   from the `rax` and `rip` the kernel saved in that frame;
+///   from the result register and PC the kernel saved in that frame;
 /// * a death, or the thread's destruction by another's `execve`: the call
 ///   did nothing and nothing was returned — neither a result nor a loss;
 /// * anything else — a step trap in user space (the continuation ran through
@@ -581,7 +581,7 @@ struct CoalescedGap {
     count: Option<u64>,
 }
 
-// J5-B2 O03 seams (tracer gaps) begin.
+// O03 test seams: tracer gaps manufactured on a marked path.
 /// `OURO_JAIL_TEST_TRACER_TRUNCATE_PATH=<substring>`: every covered non-exec
 /// call whose path contains `<substring>` reports "the kernel accepted the
 /// call but the tracer could not read the path" — the truncation case O03
@@ -785,7 +785,7 @@ struct Session {
     scratch: Vec<u8>,
     /// Where task identity comes from: `/proc`, or a test's script.
     procfs: Box<dyn ProcView>,
-    // J5-B2 O03 seams: the path substrings that mark a covered call whose path
+    // O03 seams: the path substrings that mark a covered call whose path
     // read is forced unreadable, or whose entry is dropped so its exit is
     // unmatched. `None` in the release binary unless the seam is set.
     force_truncate_marker: Option<Vec<u8>>,
@@ -2160,7 +2160,7 @@ impl Session {
             return;
         }
         let op = pending.entry.op;
-        // J5-B2 O03 seam: when this covered call's path matches the seam
+        // O03 seam: when this covered call's path matches the seam
         // marker, treat its exit as unmatched — the entry might never have been
         // seen — so it becomes an `unmatched_exit` gap, never a result. The
         // in-flight slot is already released above, so this matches a genuinely
@@ -2773,7 +2773,7 @@ impl Session {
             args.path = snapshot;
             path_unreadable = unreadable;
         }
-        // J5-B2 O03 seam: force this covered call's path to be
+        // O03 seam: force this covered call's path to be
         // kernel-accepted-but-unreadable — the truncation case O03 names —
         // when its path matches the seam marker. Gated to a non-exec op (an
         // exec never returns to the normal exit path where a `path_unreadable`
@@ -2800,7 +2800,7 @@ impl Session {
         if let Some(index) = entry.dirfd2 {
             args.dirfd2 = Some(raw[index as usize] as i32);
         }
-        // Issue draft 12: a relative pathname the kernel resolves against
+        // §11.3: a relative pathname the kernel resolves against
         // the thread's own cwd is resolved against that cwd at
         // classification; the snapshot itself stays the raw argument, so the
         // exit-side stability check compares what the tracee still holds.
@@ -2826,7 +2826,7 @@ impl Session {
 
     /// The stopped thread's working directory, read from `/proc/<tid>/cwd`,
     /// when one of the call's path arguments is a complete relative pathname
-    /// the kernel resolves against it (issue draft 12). The true dirfd cases
+    /// the kernel resolves against it (§11.3). The true dirfd cases
     /// resolve against their descriptor instead and read nothing.
     fn observed_cwd(
         tid: pid_t,
