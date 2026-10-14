@@ -695,33 +695,10 @@ impl AgentNet {
         loss
     }
 
-    /// Counts the rejections the bridge reported since the last drain: one
-    /// [`bridge::report::REJECTED`] datagram each, read without blocking
-    /// whatever flags the descriptor carries.
+    /// Counts the rejections the bridge reported since the last drain.
     fn drain_bridge_report(&mut self) {
-        let Some(report) = &self.bridge_report else {
-            return;
-        };
-        let mut datagram = [0u8; 16];
-        for _ in 0..256 {
-            // SAFETY: `report` is a live socket descriptor this process owns;
-            // `datagram` is writable for its whole length.
-            let received = unsafe {
-                libc::recv(
-                    report.as_raw_fd(),
-                    datagram.as_mut_ptr().cast(),
-                    datagram.len(),
-                    libc::MSG_DONTWAIT,
-                )
-            };
-            // An error (`EAGAIN` included) or the bridge's end closing ends
-            // the drain.
-            if received <= 0 {
-                return;
-            }
-            if datagram[0] == bridge::report::REJECTED {
-                self.bridge_rejected += 1;
-            }
+        if let Some(report) = &self.bridge_report {
+            self.bridge_rejected += drain_rejections(report.as_fd());
         }
     }
 
@@ -1220,8 +1197,96 @@ pub fn verify_filter_count(observed: &str, expected: u32) -> Result<u32, JailErr
     }
 }
 
+/// The bridge's rejections waiting on `report`, at most 256 per call: one
+/// per datagram whose first byte is [`bridge::report::REJECTED`], any other
+/// datagram ignored. Read without blocking whatever flags the descriptor
+/// carries; an error (`EAGAIN` included) or the bridge's end closing ends
+/// the drain.
+fn drain_rejections(report: BorrowedFd<'_>) -> u64 {
+    let mut rejected = 0;
+    let mut datagram = [0u8; 16];
+    for _ in 0..256 {
+        // SAFETY: `report` is a live socket descriptor; `datagram` is
+        // writable for its whole length.
+        let received = unsafe {
+            libc::recv(
+                report.as_raw_fd(),
+                datagram.as_mut_ptr().cast(),
+                datagram.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if received <= 0 {
+            break;
+        }
+        if datagram[0] == bridge::report::REJECTED {
+            rejected += 1;
+        }
+    }
+    rejected
+}
+
 #[cfg(test)]
 mod tests {
+    fn seqpacket_pair() -> (OwnedFd, OwnedFd) {
+        use std::os::fd::FromRawFd as _;
+        let mut fds = [-1; 2];
+        // SAFETY: `fds` is writable storage for the two descriptors.
+        let rc = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+                0,
+                fds.as_mut_ptr(),
+            )
+        };
+        assert_eq!(rc, 0);
+        // SAFETY: both descriptors were just created and are owned here.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    fn send(socket: &OwnedFd, bytes: &[u8]) -> bool {
+        // SAFETY: a live socket and a readable buffer of the length passed.
+        let sent = unsafe {
+            libc::send(
+                socket.as_raw_fd(),
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        usize::try_from(sent).is_ok_and(|sent| sent == bytes.len())
+    }
+
+    /// One rejection per datagram the bridge marked as one, nothing for any
+    /// other datagram, never a block on a blocking descriptor, and nothing
+    /// queued is lost across drains bounded at 256.
+    #[test]
+    fn the_bridge_report_counts_rejected_datagrams_only_and_never_blocks() {
+        let (ours, bridge_end) = seqpacket_pair();
+        assert_eq!(
+            drain_rejections(ours.as_fd()),
+            0,
+            "an empty blocking socket"
+        );
+        let rejected = bridge::report::REJECTED;
+        assert!(send(&bridge_end, &[rejected]));
+        assert!(send(&bridge_end, &[rejected]));
+        assert!(send(&bridge_end, b"x"));
+        assert!(send(&bridge_end, &[rejected, rejected]));
+        assert_eq!(
+            drain_rejections(ours.as_fd()),
+            3,
+            "one per rejected datagram"
+        );
+        assert_eq!(drain_rejections(ours.as_fd()), 0, "nothing left");
+        let queued = (0..300).filter(|_| send(&bridge_end, &[rejected])).count();
+        let first = drain_rejections(ours.as_fd());
+        let second = drain_rejections(ours.as_fd());
+        assert!(first <= 256, "{first}");
+        assert_eq!(first + second, u64::try_from(queued).unwrap());
+    }
+
     use super::*;
 
     #[test]
