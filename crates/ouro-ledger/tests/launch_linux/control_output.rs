@@ -117,10 +117,9 @@ fn real_control_disconnect_and_backpressure_do_not_rewrite_outcome_or_repeat_exe
             let (reader, mut sender) = pipe();
             if fault != "disconnect" {
                 // SAFETY: an open descriptor `sender` owns; no pointers.
-                assert_eq!(
-                    unsafe { libc::fcntl(sender.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
-                    0
-                );
+                let set =
+                    unsafe { libc::fcntl(sender.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+                assert_eq!(set, 0);
                 loop {
                     match sender.write(&[0; 8192]) {
                         Ok(_) => {}
@@ -130,10 +129,8 @@ fn real_control_disconnect_and_backpressure_do_not_rewrite_outcome_or_repeat_exe
                 }
                 if fault == "stalled" {
                     // SAFETY: as above.
-                    assert_eq!(
-                        unsafe { libc::fcntl(sender.as_raw_fd(), libc::F_SETFL, 0) },
-                        0
-                    );
+                    let cleared = unsafe { libc::fcntl(sender.as_raw_fd(), libc::F_SETFL, 0) };
+                    assert_eq!(cleared, 0);
                 }
             }
             let make = |fd| {

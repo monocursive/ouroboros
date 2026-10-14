@@ -736,9 +736,13 @@ unsafe fn limit_file_size(bytes: u64) -> io::Result<()> {
 }
 
 fn nonblocking(fd: RawFd) -> io::Result<()> {
-    // SAFETY: reads/updates flags on an owned descriptor; no pointers.
+    // SAFETY: reads the flags of an owned descriptor; no pointers.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: updates the flags of the same owned descriptor; no pointers.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())

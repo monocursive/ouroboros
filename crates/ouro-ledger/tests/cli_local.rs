@@ -979,20 +979,17 @@ fn writer_keeps_accepting_after_descriptor_exhaustion() {
         rlim_max: 0,
     };
     // SAFETY: both pointers reference live, correctly typed rlimit values.
-    assert_eq!(
-        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, std::ptr::null(), &mut original) },
-        0
-    );
+    let read = unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, std::ptr::null(), &mut original) };
+    assert_eq!(read, 0);
     // Descriptors already open stay usable; every new one fails with EMFILE.
     let exhausted = libc::rlimit {
         rlim_cur: 0,
         rlim_max: original.rlim_max,
     };
     // SAFETY: as above; this lowers only the writer's soft descriptor limit.
-    assert_eq!(
-        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &exhausted, std::ptr::null_mut()) },
-        0
-    );
+    let lowered =
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &exhausted, std::ptr::null_mut()) };
+    assert_eq!(lowered, 0);
     // The writer cannot take a descriptor for this connection: accept fails.
     let mut queued = UnixStream::connect(cli.data.join("ledger/serve.sock")).unwrap();
     thread::sleep(Duration::from_millis(300));
@@ -1001,10 +998,9 @@ fn writer_keeps_accepting_after_descriptor_exhaustion() {
         "the writer exited after a transient accept failure"
     );
     // SAFETY: as above; this restores the writer's original limits.
-    assert_eq!(
-        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &original, std::ptr::null_mut()) },
-        0
-    );
+    let restored =
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &original, std::ptr::null_mut()) };
+    assert_eq!(restored, 0);
     queued.set_read_timeout(Some(REPLY_LIMIT)).unwrap();
     write_frame(&mut queued, &Request::Ping).unwrap();
     assert!(matches!(

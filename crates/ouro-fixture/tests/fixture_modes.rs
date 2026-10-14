@@ -865,10 +865,8 @@ fn fds_sees_a_descriptor_far_above_any_probe_bound() {
     // SAFETY: `rl` is a live rlimit struct, which is what `getrlimit` writes.
     let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
     // SAFETY: as above.
-    assert_eq!(
-        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rl) },
-        0
-    );
+    let read = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rl) };
+    assert_eq!(read, 0);
     if rl.rlim_max < (HIGH as u64 + 1) as _ {
         ouro_fixture::harness::skip_or_fail("the hard descriptor limit is below 5001");
         return;
@@ -879,10 +877,8 @@ fn fds_sees_a_descriptor_far_above_any_probe_bound() {
         rlim_max: rl.rlim_max,
     };
     // SAFETY: raising this process's own soft limit, never above the hard one.
-    assert_eq!(
-        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const raised) },
-        0
-    );
+    let set = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const raised) };
+    assert_eq!(set, 0);
 
     let file = std::fs::File::open("/dev/null").unwrap();
     // SAFETY: `dup2` onto a number this test owns from here on; the copy is

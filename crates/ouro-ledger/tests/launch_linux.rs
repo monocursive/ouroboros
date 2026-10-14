@@ -677,9 +677,10 @@ fn invalid_inherited_stdout_is_denied_before_admission_and_never_executes() {
     let mut command = fixture.command("invalid-inherited-output", false);
     command.args(["--", "/bin/sh", "-c", "touch must-not-execute"]);
     use std::os::fd::FromRawFd as _;
-    // SAFETY: wrap the newly created eventfd once; the child owns it as stdout.
+    // SAFETY: eventfd takes no pointers and returns a new descriptor or -1.
     let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
     assert!(fd >= 0);
+    // SAFETY: wrap the newly created eventfd once; the child owns it as stdout.
     let invalid = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
     command
         .stdin(Stdio::null())
@@ -1167,17 +1168,15 @@ fn best_effort_local_exit_file_limit_never_fabricates_settlement() {
     };
     // SAFETY: `limit` is a live rlimit and the old-limit pointer is null;
     // the pid is this test's own unreaped (stopped) child.
-    assert_eq!(
-        unsafe {
-            libc::prlimit(
-                owner.child.id() as libc::pid_t,
-                libc::RLIMIT_FSIZE,
-                &limit,
-                std::ptr::null_mut(),
-            )
-        },
-        0
-    );
+    let limited = unsafe {
+        libc::prlimit(
+            owner.child.id() as libc::pid_t,
+            libc::RLIMIT_FSIZE,
+            &limit,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(limited, 0);
     // SAFETY: as for the SIGSTOP above.
     assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
     let output = owner.finish(COMMAND_LIMIT);

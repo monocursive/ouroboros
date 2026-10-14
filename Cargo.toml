@@ -35,7 +35,7 @@ ouro-records = { path = "crates/ouro-records" }
 all = { level = "deny", priority = -1 }
 # Every `unsafe` block states why it is sound. `warn` until the ledger and
 # fixture blocks still without a SAFETY comment have one; then `deny`.
-undocumented_unsafe_blocks = "warn"
+undocumented_unsafe_blocks = "deny"
 
 [profile.release]
 opt-level = 3

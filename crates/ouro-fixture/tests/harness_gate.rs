@@ -344,10 +344,8 @@ fn a_descriptor_inherited_from_the_environment_does_not_reach_the_target() {
     assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), SPARE) }, SPARE);
     drop(file);
     // SAFETY: reading the flags of the descriptor just created.
-    assert_eq!(
-        unsafe { libc::fcntl(SPARE, libc::F_GETFD) } & libc::FD_CLOEXEC,
-        0
-    );
+    let flags = unsafe { libc::fcntl(SPARE, libc::F_GETFD) };
+    assert_eq!(flags & libc::FD_CLOEXEC, 0);
 
     let (fds, targets) = target_descriptors(Some(SPARE));
     // SAFETY: closing the descriptor this test created, once, before any

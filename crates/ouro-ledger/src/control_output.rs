@@ -46,9 +46,13 @@ fn connected_local_stream(fd: RawFd) -> Result<()> {
     let mut address = std::mem::MaybeUninit::<libc::sockaddr_storage>::zeroed();
     let mut length = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
     // SAFETY: the zeroed output buffer is large enough for a socket address.
-    if unsafe { libc::getpeername(fd, address.as_mut_ptr().cast(), &mut length) } < 0
-        || unsafe { address.assume_init() }.ss_family as libc::c_int != libc::AF_UNIX
-    {
+    if unsafe { libc::getpeername(fd, address.as_mut_ptr().cast(), &mut length) } < 0 {
+        return Err(error("socket must be a connected Unix stream"));
+    }
+    // SAFETY: the buffer was zeroed, a valid `sockaddr_storage`, and
+    // `getpeername` wrote at most its size into it.
+    let family = unsafe { address.assume_init() }.ss_family;
+    if libc::c_int::from(family) != libc::AF_UNIX {
         return Err(error("socket must be a connected Unix stream"));
     }
     Ok(())
