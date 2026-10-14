@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use crate::policy::LimitKey;
+
 use super::bwrap::{self, BwrapPlan};
 use super::cgroup;
 use super::clock::Deadline;
@@ -219,10 +221,10 @@ impl Probe {
             Probe::ObserverClosedSet => probe_observer(jail_exe),
             Probe::SupervisorScope => probe_supervisor_scope(),
             Probe::CgroupDelegatedLeaf => probe_cgroup_leaf(self, None),
-            Probe::CgroupPids => probe_cgroup_leaf(self, Some("pids")),
-            Probe::CgroupMemory => probe_cgroup_leaf(self, Some("mem")),
-            Probe::CgroupSwap => probe_cgroup_leaf(self, Some("swap")),
-            Probe::CgroupCpu => probe_cgroup_leaf(self, Some("cpu")),
+            Probe::CgroupPids => probe_cgroup_leaf(self, Some((LimitKey::Pids, "16"))),
+            Probe::CgroupMemory => probe_cgroup_leaf(self, Some((LimitKey::Mem, "67108864"))),
+            Probe::CgroupSwap => probe_cgroup_leaf(self, Some((LimitKey::Swap, "0"))),
+            Probe::CgroupCpu => probe_cgroup_leaf(self, Some((LimitKey::Cpu, "100"))),
             Probe::StorageCeiling => probe_storage_ceiling(),
             Probe::ApparmorUsernsRestriction => probe_apparmor(),
             Probe::NestedUserNamespace => probe_nested_userns(jail_exe, bwrap),
@@ -1298,29 +1300,16 @@ fn probe_supervisor_scope() -> ProbeResult {
     ProbeResult::new(NAME, status, MECHANISM, reason_code, outcome.summary())
 }
 
-fn probe_cgroup_leaf(probe: Probe, controller: Option<&str>) -> ProbeResult {
+/// Creates a delegated leaf with `sample`'s ceiling, if any, required, and
+/// proves placement, `cgroup.kill` and removal on a paused fixture.
+fn probe_cgroup_leaf(probe: Probe, sample: Option<(LimitKey, &str)>) -> ProbeResult {
     let (name, mechanism) = (probe.name(), probe.mechanism());
-    let mut limits = crate::policy::LimitsSnapshot {
-        wall: None,
-        pids: None,
-        mem: None,
-        swap: None,
-        storage: None,
-        inodes: None,
-        cpu: None,
-    };
-    let ceiling = |value: &str| {
-        Some(crate::policy::LimitCeiling {
+    let mut limits = crate::policy::LimitsSnapshot::default();
+    if let Some((key, value)) = sample {
+        *limits.get_mut(key) = Some(crate::policy::LimitCeiling {
             value: value.to_owned(),
             required: true,
-        })
-    };
-    match controller {
-        Some("pids") => limits.pids = ceiling("16"),
-        Some("mem") => limits.mem = ceiling("67108864"),
-        Some("swap") => limits.swap = ceiling("0"),
-        Some("cpu") => limits.cpu = ceiling("100"),
-        _ => {}
+        });
     }
     let mut leaf = match cgroup::ExecutionCgroup::create(&limits) {
         Ok(leaf) => leaf,
