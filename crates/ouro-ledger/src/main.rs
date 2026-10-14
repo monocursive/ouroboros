@@ -24,7 +24,9 @@ use serde_json::{Value, json};
     about = "Durable admission and evidence around ouro-jail"
 )]
 struct Cli {
-    /// Private node data directory, shared with the jail (also OURO_DATA_DIR).
+    /// Private node data directory (also OURO_DATA_DIR; default
+    /// $XDG_DATA_HOME/ouro, else ~/.local/share/ouro). Jails this ledger
+    /// launches receive it; a jail run on its own ignores XDG_DATA_HOME.
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
