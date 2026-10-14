@@ -771,6 +771,7 @@ impl Store {
             })
             .collect();
         let mut reconciled = Vec::new();
+        let mut unreconciled: Vec<LedgerError> = Vec::new();
         for id in orphans {
             if self.pending_exists(&id) {
                 // Corrupt or incomplete local evidence must never imply
@@ -788,18 +789,33 @@ impl Store {
                         continue;
                     }
                     // Not the journal's doing: nothing is recorded for this
-                    // run, and a later settlement can retry it.
+                    // run, a later settlement can retry it, and the other
+                    // orphans are settled meanwhile.
                     Err(pending_recovery::PendingFailure::Other(problem)) => {
                         let message = format!(
                             "{id}: pending evidence could not be reconciled now: {problem}"
                         );
-                        return Err(problem.with_message(message));
+                        unreconciled.push(problem.with_message(message));
+                        continue;
                     }
                 }
             }
             let owner = self.stream(&id)?.run().owner.clone();
             self.append(&id, json!({"kind":"outcome_unknown","request_id":"reconcile:owner-dead","body":{"owner":owner,"outcome":{"kind":"unknown","unknown":true,"unknown_reason":"owner birth identity is no longer live; tree termination and unrecorded effects are not inferred"},"coverage":{"status":"degraded","gaps":[{"reason":"owner_lost"}]}}}), "operator", peer, None)?;
             reconciled.push(self.show(&id)?);
+        }
+        // Each run left unsettled is named; those settled stay durable.
+        if let Some(first) = unreconciled.first() {
+            let mut message = unreconciled
+                .iter()
+                .map(LedgerError::message)
+                .collect::<Vec<_>>()
+                .join("; ");
+            message.push_str(&format!(
+                "; {} other orphans were settled",
+                reconciled.len()
+            ));
+            return Err(LedgerError::new(first.kind(), message));
         }
         Ok(reconciled)
     }

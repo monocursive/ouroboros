@@ -161,3 +161,44 @@ fn a_failure_that_is_not_the_journals_backs_off_and_is_logged_once() {
     assert_eq!(failed(&mut store).1, MAX_RETRY_WAIT);
     assert_eq!(store.show(&run.run_id).unwrap().state, "outcome_unknown");
 }
+
+#[test]
+fn settling_orphans_skips_a_run_it_cannot_reconcile_now_and_settles_the_rest() {
+    // A dead owner's journal the kernel will not open (EISDIR on its lock).
+    let (_temp, mut store, stuck) = admitted_with_journal("pending-stuck");
+    let lock = store.run_dir(&stuck.run_id).join("owner-pending.lock");
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    // Dead owners without journals, at least one after it in settlement order.
+    let mut settled = Vec::new();
+    while !settled.iter().any(|id: &String| *id > stuck.run_id) {
+        let run = store
+            .prepare(&format!("orphan-{}", settled.len()), &request(), &peer())
+            .unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        settled.push(run.run_id);
+        assert!(settled.len() < 64);
+    }
+    let refusal = store.settle_orphans(&peer(), |_| false).unwrap_err();
+    assert!(matches!(refusal.kind(), crate::protocol::ErrorKind::Io(_)));
+    assert!(
+        refusal.message().starts_with(&format!(
+            "{}: pending evidence could not be reconciled now: ",
+            stuck.run_id
+        )),
+        "{refusal}"
+    );
+    assert!(
+        refusal
+            .message()
+            .ends_with(&format!("; {} other orphans were settled", settled.len())),
+        "{refusal}"
+    );
+    // Nothing is recorded for the run that could not be reconciled now.
+    let unchanged = store.show(&stuck.run_id).unwrap();
+    assert_eq!(unchanged.state, "admitted");
+    assert_eq!(unchanged.chain, stuck.chain);
+    for id in settled {
+        assert_eq!(store.show(&id).unwrap().state, "outcome_unknown");
+    }
+}
