@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use super::{OwnedTempDir, ProbeResult, ProbeStatus};
+use super::{OwnedTempDir, Probe, ProbeResult, ProbeStatus};
 use crate::platform::linux::clock::Deadline;
 use crate::platform::linux::sys::errno_name;
 
@@ -275,8 +275,8 @@ fn proxy_results(data: &Path) -> Vec<(String, String)> {
 /// `agent_proxy_bridge`.
 #[must_use]
 pub fn proxy_bridge(jail_exe: &Path) -> ProbeResult {
-    const NAME: &str = "agent_proxy_bridge";
-    const MECHANISM: &str = "outside-http-proxy+loopback-bridge";
+    const NAME: &str = Probe::AgentProxyBridge.name();
+    const MECHANISM: &str = Probe::AgentProxyBridge.mechanism();
     let probe = agent_probe(jail_exe);
     if let Some(failure) = &probe.failure {
         return ProbeResult::error(NAME, MECHANISM, failure.clone());
@@ -321,8 +321,8 @@ pub fn proxy_bridge(jail_exe: &Path) -> ProbeResult {
 /// `agent_unix_peer_mediation`.
 #[must_use]
 pub fn unix_peer(jail_exe: &Path) -> ProbeResult {
-    const NAME: &str = "agent_unix_peer_mediation";
-    const MECHANISM: &str = "seccomp-user-notification";
+    const NAME: &str = Probe::AgentUnixPeerMediation.name();
+    const MECHANISM: &str = Probe::AgentUnixPeerMediation.mechanism();
     let probe = agent_probe(jail_exe);
     if let Some(failure) = &probe.failure {
         return ProbeResult::error(NAME, MECHANISM, failure.clone());
@@ -364,8 +364,8 @@ pub const INNER_EXPECTED: [(&str, &str); 10] = [
 /// `agent_inner_sandbox`.
 #[must_use]
 pub fn inner_sandbox(jail_exe: &Path) -> ProbeResult {
-    const NAME: &str = "agent_inner_sandbox";
-    const MECHANISM: &str = "landlock+seccomp";
+    const NAME: &str = Probe::AgentInnerSandbox.name();
+    const MECHANISM: &str = Probe::AgentInnerSandbox.mechanism();
     let probe = agent_probe(jail_exe);
     if let Some(failure) = &probe.failure {
         return ProbeResult::error(NAME, MECHANISM, failure.clone());

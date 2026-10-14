@@ -15,6 +15,7 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
+use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -23,50 +24,228 @@ use super::bwrap::{self, BwrapPlan};
 use super::cgroup;
 use super::clock::Deadline;
 use super::exec::{self, Captured, FdMap};
-use super::identity::{self, ns_ids};
+use super::identity::{self, NsIds, ns_ids};
 use super::seccomp;
-use super::sys::{empty_stat, errno_name};
+use super::sys::{empty_stat, errno_name, last_errno};
 
 pub mod agent;
 
 /// The hidden subcommand the probes run inside the sandbox.
 pub const INSIDE_SUBCOMMAND: &str = "__probe-inside";
 
-/// Every probe this implementation knows, in report order.
-pub const PROBE_NAMES: [&str; 23] = [
-    "bwrap_present",
-    "user_namespace",
-    "pid_namespace",
-    "network_namespace",
-    "mount_readonly_bind",
-    "seccomp_filter_load",
-    "ptrace_seize_descendant",
-    "observer_closed_set",
-    // J4 autoscope: what this process's own scope step did (§9.3), before
-    // the leaf probes that depend on it
-    "supervisor_scope",
-    "cgroup_delegated_leaf",
-    "cgroup_pids",
-    "cgroup_memory",
-    "cgroup_swap",
-    "cgroup_cpu",
-    // The §6.4 storage ceilings: the host prerequisite a `--limit
-    // storage`/`--limit inodes` run refuses without, measured the way
-    // admission measures a writable mount.
-    "storage_ceiling",
-    "apparmor_userns_restriction",
-    "nested_user_namespace",
-    // The unix-peer mediation's kernel mechanism (§10), and
-    // the three `agent` rows of §14.1, read from one real agent run
-    "seccomp_user_notification",
-    "unix_socket_diagnostics",
-    "agent_proxy_bridge",
-    "agent_unix_peer_mediation",
-    "agent_inner_sandbox",
-    // Issue draft 15: whether a GPU can be passed through to a contained
-    // profile (informational; no requirement demands it)
-    "gpu_passthrough",
-];
+/// One doctor probe (jail-v1 §14.1). Its name, the mechanism it exercises,
+/// whether it executes bubblewrap and whether it rests on a native syscall
+/// table are all here, so a probe cannot be listed in one place and missing
+/// from another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Probe {
+    BwrapPresent,
+    UserNamespace,
+    PidNamespace,
+    NetworkNamespace,
+    MountReadonlyBind,
+    SeccompFilterLoad,
+    PtraceSeizeDescendant,
+    ObserverClosedSet,
+    /// What this process's own scope step did (§9.3), before the leaf probes
+    /// that depend on it.
+    SupervisorScope,
+    CgroupDelegatedLeaf,
+    CgroupPids,
+    CgroupMemory,
+    CgroupSwap,
+    CgroupCpu,
+    /// The §6.4 storage ceilings: the host prerequisite a `--limit
+    /// storage`/`--limit inodes` run refuses without, measured the way
+    /// admission measures a writable mount.
+    StorageCeiling,
+    ApparmorUsernsRestriction,
+    NestedUserNamespace,
+    /// The unix-peer mediation's kernel mechanism (§10).
+    SeccompUserNotification,
+    UnixSocketDiagnostics,
+    /// The three `agent` rows of §14.1, read from one real agent run.
+    AgentProxyBridge,
+    AgentUnixPeerMediation,
+    AgentInnerSandbox,
+    /// Issue draft 15: whether a GPU can be passed through to a contained
+    /// profile (informational; no requirement demands it).
+    GpuPassthrough,
+}
+
+impl Probe {
+    /// Every probe, in report order.
+    pub const ALL: [Probe; 23] = [
+        Probe::BwrapPresent,
+        Probe::UserNamespace,
+        Probe::PidNamespace,
+        Probe::NetworkNamespace,
+        Probe::MountReadonlyBind,
+        Probe::SeccompFilterLoad,
+        Probe::PtraceSeizeDescendant,
+        Probe::ObserverClosedSet,
+        Probe::SupervisorScope,
+        Probe::CgroupDelegatedLeaf,
+        Probe::CgroupPids,
+        Probe::CgroupMemory,
+        Probe::CgroupSwap,
+        Probe::CgroupCpu,
+        Probe::StorageCeiling,
+        Probe::ApparmorUsernsRestriction,
+        Probe::NestedUserNamespace,
+        Probe::SeccompUserNotification,
+        Probe::UnixSocketDiagnostics,
+        Probe::AgentProxyBridge,
+        Probe::AgentUnixPeerMediation,
+        Probe::AgentInnerSandbox,
+        Probe::GpuPassthrough,
+    ];
+
+    /// The probe's name in reports.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Probe::BwrapPresent => "bwrap_present",
+            Probe::UserNamespace => "user_namespace",
+            Probe::PidNamespace => "pid_namespace",
+            Probe::NetworkNamespace => "network_namespace",
+            Probe::MountReadonlyBind => "mount_readonly_bind",
+            Probe::SeccompFilterLoad => "seccomp_filter_load",
+            Probe::PtraceSeizeDescendant => "ptrace_seize_descendant",
+            Probe::ObserverClosedSet => "observer_closed_set",
+            Probe::SupervisorScope => "supervisor_scope",
+            Probe::CgroupDelegatedLeaf => "cgroup_delegated_leaf",
+            Probe::CgroupPids => "cgroup_pids",
+            Probe::CgroupMemory => "cgroup_memory",
+            Probe::CgroupSwap => "cgroup_swap",
+            Probe::CgroupCpu => "cgroup_cpu",
+            Probe::StorageCeiling => "storage_ceiling",
+            Probe::ApparmorUsernsRestriction => "apparmor_userns_restriction",
+            Probe::NestedUserNamespace => "nested_user_namespace",
+            Probe::SeccompUserNotification => "seccomp_user_notification",
+            Probe::UnixSocketDiagnostics => "unix_socket_diagnostics",
+            Probe::AgentProxyBridge => "agent_proxy_bridge",
+            Probe::AgentUnixPeerMediation => "agent_unix_peer_mediation",
+            Probe::AgentInnerSandbox => "agent_inner_sandbox",
+            Probe::GpuPassthrough => "gpu_passthrough",
+        }
+    }
+
+    /// The mechanism the probe exercises, as every result of it names it.
+    #[must_use]
+    pub const fn mechanism(self) -> &'static str {
+        match self {
+            Probe::BwrapPresent => "bubblewrap",
+            Probe::UserNamespace => "user-namespace",
+            Probe::PidNamespace => "pid-namespace",
+            Probe::NetworkNamespace => "network-namespace",
+            Probe::MountReadonlyBind => "bubblewrap-binds",
+            Probe::SeccompFilterLoad => "seccomp-bpf",
+            Probe::PtraceSeizeDescendant => "ptrace",
+            Probe::ObserverClosedSet => "ptrace-seccomp",
+            Probe::SupervisorScope => "systemd-user-transient-scope",
+            Probe::CgroupDelegatedLeaf
+            | Probe::CgroupPids
+            | Probe::CgroupMemory
+            | Probe::CgroupSwap
+            | Probe::CgroupCpu => "cgroup-v2-delegated",
+            Probe::StorageCeiling => "bounded-tmpfs-or-user-quota",
+            Probe::ApparmorUsernsRestriction => "apparmor",
+            Probe::NestedUserNamespace => "nested-bubblewrap",
+            Probe::SeccompUserNotification | Probe::AgentUnixPeerMediation => {
+                "seccomp-user-notification"
+            }
+            Probe::UnixSocketDiagnostics => "netlink-sock-diag",
+            Probe::AgentProxyBridge => "outside-http-proxy+loopback-bridge",
+            Probe::AgentInnerSandbox => "landlock+seccomp",
+            Probe::GpuPassthrough => "devices",
+        }
+    }
+
+    /// Whether the probe executes bubblewrap (review F1). With no resolved
+    /// backend it reports `unavailable` with `backend_unavailable` and
+    /// executes nothing: a bare name would be looked up again, and an empty
+    /// `PATH` entry would find whatever `bwrap` the working directory holds.
+    #[must_use]
+    pub const fn needs_backend(self) -> bool {
+        matches!(
+            self,
+            Probe::BwrapPresent
+                | Probe::UserNamespace
+                | Probe::PidNamespace
+                | Probe::NetworkNamespace
+                | Probe::MountReadonlyBind
+                | Probe::SeccompFilterLoad
+                | Probe::NestedUserNamespace
+                | Probe::AgentProxyBridge
+                | Probe::AgentUnixPeerMediation
+                | Probe::AgentInnerSandbox
+        )
+    }
+
+    /// Whether the probe's mechanism is one of this implementation's native
+    /// syscall tables (§3.2): the `tool` and `agent` filters, the observer's
+    /// closed set and narrowing filter, and the unix-peer mediation filter
+    /// the `agent` rows run under.
+    #[must_use]
+    pub const fn table_bound(self) -> bool {
+        matches!(
+            self,
+            Probe::SeccompFilterLoad
+                | Probe::ObserverClosedSet
+                | Probe::SeccompUserNotification
+                | Probe::AgentProxyBridge
+                | Probe::AgentUnixPeerMediation
+                | Probe::AgentInnerSandbox
+        )
+    }
+
+    /// The probe named `name`, if this implementation has one.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Probe> {
+        Probe::ALL.into_iter().find(|probe| probe.name() == name)
+    }
+
+    /// Runs the probe. `bwrap` is the resolved backend; only the probes that
+    /// [need one](Probe::needs_backend) read it.
+    fn run(self, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
+        match self {
+            Probe::BwrapPresent => probe_bwrap_present(bwrap),
+            Probe::UserNamespace | Probe::PidNamespace => probe_namespace(self, jail_exe, bwrap),
+            Probe::NetworkNamespace => probe_network_namespace(jail_exe, bwrap),
+            Probe::MountReadonlyBind => probe_readonly_bind(jail_exe, bwrap),
+            Probe::SeccompFilterLoad => probe_seccomp(jail_exe, bwrap),
+            Probe::PtraceSeizeDescendant => probe_ptrace_seize(),
+            Probe::ObserverClosedSet => probe_observer(jail_exe),
+            Probe::SupervisorScope => probe_supervisor_scope(),
+            Probe::CgroupDelegatedLeaf => probe_cgroup_leaf(self, None),
+            Probe::CgroupPids => probe_cgroup_leaf(self, Some("pids")),
+            Probe::CgroupMemory => probe_cgroup_leaf(self, Some("mem")),
+            Probe::CgroupSwap => probe_cgroup_leaf(self, Some("swap")),
+            Probe::CgroupCpu => probe_cgroup_leaf(self, Some("cpu")),
+            Probe::StorageCeiling => probe_storage_ceiling(),
+            Probe::ApparmorUsernsRestriction => probe_apparmor(),
+            Probe::NestedUserNamespace => probe_nested_userns(jail_exe, bwrap),
+            Probe::SeccompUserNotification => probe_user_notification(),
+            Probe::UnixSocketDiagnostics => probe_unix_socket_diagnostics(),
+            Probe::AgentProxyBridge => agent::proxy_bridge(jail_exe),
+            Probe::AgentUnixPeerMediation => agent::unix_peer(jail_exe),
+            Probe::AgentInnerSandbox => agent::inner_sandbox(jail_exe),
+            Probe::GpuPassthrough => probe_gpu_passthrough(),
+        }
+    }
+}
+
+/// Every probe's name, in report order.
+pub const PROBE_NAMES: [&str; Probe::ALL.len()] = {
+    let mut names = [""; Probe::ALL.len()];
+    let mut i = 0;
+    while i < names.len() {
+        names[i] = Probe::ALL[i].name();
+        i += 1;
+    }
+    names
+};
 
 /// Per-probe deadline (jail-v1 §14.1).
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(5);
@@ -187,8 +366,13 @@ pub fn run_one_backend(name: &str, jail_exe: &Path, bwrap: Backend<'_>) -> Probe
 pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<ProbeResult> {
     let shared_check = |name: &str| {
         matches!(
-            name,
-            "user_namespace" | "pid_namespace" | "network_namespace" | "mount_readonly_bind"
+            Probe::from_name(name),
+            Some(
+                Probe::UserNamespace
+                    | Probe::PidNamespace
+                    | Probe::NetworkNamespace
+                    | Probe::MountReadonlyBind
+            )
         )
     };
     // A working baseline filter leaves each namespace and EROFS check intact.
@@ -210,14 +394,13 @@ pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<
                         .ok()?;
                 let results: Vec<_> = names
                     .iter()
-                    .filter_map(|name| match *name {
-                        "user_namespace" => {
-                            Some(namespace_result(name, outside.user, &run.captured))
-                        }
-                        "pid_namespace" => Some(namespace_result(name, outside.pid, &run.captured)),
-                        "network_namespace" => Some(network_namespace_result(&run.captured)),
-                        "mount_readonly_bind" => Some(readonly_bind_result(&run.captured)),
-                        "seccomp_filter_load" => Some(seccomp_result(&run.captured)),
+                    .filter_map(|name| match Probe::from_name(name)? {
+                        probe @ (Probe::UserNamespace | Probe::PidNamespace) => Some(
+                            namespace_result(probe, namespace_id(probe, &outside), &run.captured),
+                        ),
+                        Probe::NetworkNamespace => Some(network_namespace_result(&run.captured)),
+                        Probe::MountReadonlyBind => Some(readonly_bind_result(&run.captured)),
+                        Probe::SeccompFilterLoad => Some(seccomp_result(&run.captured)),
                         _ => None,
                     })
                     .collect();
@@ -234,8 +417,8 @@ pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<
     // read-only and filter probes retain their individual setup paths.
     let namespace = |name: &str| {
         matches!(
-            name,
-            "user_namespace" | "pid_namespace" | "network_namespace"
+            Probe::from_name(name),
+            Some(Probe::UserNamespace | Probe::PidNamespace | Probe::NetworkNamespace)
         )
     };
     let shared = if filtered.is_none() && names.iter().filter(|name| namespace(name)).count() > 1 {
@@ -258,40 +441,24 @@ pub fn run_selected(names: &[&str], jail_exe: &Path, bwrap: Backend<'_>) -> Vec<
             {
                 return result.clone();
             }
-            if let Some((outside, run)) = &shared {
-                let result = match *name {
-                    "user_namespace" | "pid_namespace" => Some(match run {
-                        Ok(run) => namespace_result(
-                            name,
-                            if *name == "user_namespace" {
-                                outside.user
-                            } else {
-                                outside.pid
-                            },
-                            &run.captured,
-                        ),
-                        Err(error) => ProbeResult::error(
-                            if *name == "user_namespace" {
-                                "user_namespace"
-                            } else {
-                                "pid_namespace"
-                            },
-                            if *name == "user_namespace" {
-                                "user-namespace"
-                            } else {
-                                "pid-namespace"
-                            },
-                            error.to_string(),
-                        ),
-                    }),
-                    "network_namespace" => Some(match run {
-                        Ok(run) => network_namespace_result(&run.captured),
-                        Err(error) => ProbeResult::error(
-                            "network_namespace",
-                            "network-namespace",
-                            error.to_string(),
-                        ),
-                    }),
+            if let Some((outside, run)) = &shared
+                && let Some(probe) = Probe::from_name(name)
+            {
+                let result = match (probe, run) {
+                    (Probe::UserNamespace | Probe::PidNamespace, Ok(run)) => Some(
+                        namespace_result(probe, namespace_id(probe, outside), &run.captured),
+                    ),
+                    (Probe::NetworkNamespace, Ok(run)) => {
+                        Some(network_namespace_result(&run.captured))
+                    }
+                    (
+                        Probe::UserNamespace | Probe::PidNamespace | Probe::NetworkNamespace,
+                        Err(error),
+                    ) => Some(ProbeResult::error(
+                        probe.name(),
+                        probe.mechanism(),
+                        error.to_string(),
+                    )),
                     _ => None,
                 };
                 if let Some(result) = result {
@@ -324,33 +491,35 @@ fn run_status_checks(
     run_inside(jail_exe, bwrap, &checks, binds, with_seccomp)
 }
 
-// Probes that execute bubblewrap (review F1)
-/// The probes that execute bubblewrap, with the mechanism each names. With
-/// no resolved backend they report `unavailable` with `backend_unavailable`
-/// and execute nothing: a bare name would be looked up again, and an empty
-/// `PATH` entry would find whatever `bwrap` the working directory holds.
-pub const BACKEND_PROBES: [(&str, &str); 10] = [
-    ("bwrap_present", "bubblewrap"),
-    ("user_namespace", "user-namespace"),
-    ("pid_namespace", "pid-namespace"),
-    ("network_namespace", "network-namespace"),
-    ("mount_readonly_bind", "bubblewrap-binds"),
-    ("seccomp_filter_load", "seccomp-bpf"),
-    ("nested_user_namespace", "nested-bubblewrap"),
-    ("agent_proxy_bridge", "outside-http-proxy+loopback-bridge"),
-    ("agent_unix_peer_mediation", "seccomp-user-notification"),
-    ("agent_inner_sandbox", "landlock+seccomp"),
-];
+/// The probes that [execute bubblewrap](Probe::needs_backend), with the
+/// mechanism each names.
+pub const BACKEND_PROBES: [(&str, &str); 10] = {
+    let mut probes = [("", ""); 10];
+    let (mut i, mut n) = (0, 0);
+    while i < Probe::ALL.len() {
+        let probe = Probe::ALL[i];
+        if probe.needs_backend() {
+            probes[n] = (probe.name(), probe.mechanism());
+            n += 1;
+        }
+        i += 1;
+    }
+    assert!(
+        n == probes.len(),
+        "BACKEND_PROBES' length is the backend probe count"
+    );
+    probes
+};
 
 /// The result of a backend probe when no backend was resolved.
 #[must_use]
 pub fn backend_refusal(name: &str, bwrap: Backend<'_>) -> Option<ProbeResult> {
     let reason = bwrap.err()?;
-    let (name, mechanism) = BACKEND_PROBES.iter().find(|(probe, _)| *probe == name)?;
+    let probe = Probe::from_name(name).filter(|probe| probe.needs_backend())?;
     Some(ProbeResult::new(
-        name,
+        probe.name(),
         ProbeStatus::Unavailable,
-        mechanism,
+        probe.mechanism(),
         "backend_unavailable",
         format!("bubblewrap is not available: {reason}"),
     ))
@@ -376,35 +545,19 @@ fn seam_refusal_for(name: &str, seam: Option<&str>) -> Option<ProbeResult> {
     Some(refusal)
 }
 
-// The architecture refusal (§3.2)
-/// The probes whose mechanism is one of this implementation's native
-/// syscall tables, with the mechanism each one names: the `tool` and `agent`
-/// filters, the observer's closed set and narrowing filter, and the
-/// unix-peer mediation filter the `agent` rows run under.
-pub const TABLE_BOUND_PROBES: [(&str, &str); 6] = [
-    ("seccomp_filter_load", "seccomp-bpf"),
-    ("observer_closed_set", "ptrace-seccomp"),
-    ("seccomp_user_notification", "seccomp-user-notification"),
-    ("agent_proxy_bridge", "outside-http-proxy+loopback-bridge"),
-    ("agent_unix_peer_mediation", "seccomp-user-notification"),
-    ("agent_inner_sandbox", "landlock+seccomp"),
-];
-
-/// The result a table-bound probe has on an architecture the tables do not
-/// cover: `unsupported` (the implementation lacks it, §3.1), measured by
-/// nothing. `None` when the probe runs as usual.
+/// The result a [table-bound](Probe::table_bound) probe has on an
+/// architecture the tables do not cover: `unsupported` (the implementation
+/// lacks it, §3.1), measured by nothing. `None` when the probe runs as usual.
 #[must_use]
 pub fn architecture_refusal(name: &str, arch: &str) -> Option<ProbeResult> {
     if seccomp::tables_cover(arch) {
         return None;
     }
-    let (name, mechanism) = TABLE_BOUND_PROBES
-        .iter()
-        .find(|(bound, _)| *bound == name)?;
+    let probe = Probe::from_name(name).filter(|probe| probe.table_bound())?;
     Some(ProbeResult::new(
-        name,
+        probe.name(),
         ProbeStatus::Unsupported,
-        mechanism,
+        probe.mechanism(),
         seccomp::REASON_UNSUPPORTED_ARCHITECTURE,
         format!(
             "this build is for {arch}; this mechanism implements Linux x86_64 and aarch64 \
@@ -423,41 +576,21 @@ pub fn run_one_for(name: &str, arch: &str, jail_exe: &Path, bwrap: Backend<'_>) 
     if let Some(refusal) = backend_refusal(name, bwrap) {
         return refusal;
     }
-    // Every probe that uses `bwrap` is in BACKEND_PROBES, so from here on it
-    // is the resolved path whenever one of them reads it.
-    let bwrap = bwrap.unwrap_or(Path::new("/nonexistent/unresolved-bwrap"));
-    match name {
-        "bwrap_present" => probe_bwrap_present(bwrap),
-        "user_namespace" => probe_namespace("user_namespace", jail_exe, bwrap),
-        "pid_namespace" => probe_namespace("pid_namespace", jail_exe, bwrap),
-        "network_namespace" => probe_network_namespace(jail_exe, bwrap),
-        "mount_readonly_bind" => probe_readonly_bind(jail_exe, bwrap),
-        "seccomp_filter_load" => probe_seccomp(jail_exe, bwrap),
-        "ptrace_seize_descendant" => probe_ptrace_seize(),
-        "observer_closed_set" => probe_observer(jail_exe),
-        "supervisor_scope" => probe_supervisor_scope(),
-        "cgroup_delegated_leaf" => probe_cgroup_leaf("cgroup_delegated_leaf", None),
-        "cgroup_pids" => probe_cgroup_leaf("cgroup_pids", Some("pids")),
-        "cgroup_memory" => probe_cgroup_leaf("cgroup_memory", Some("mem")),
-        "cgroup_swap" => probe_cgroup_leaf("cgroup_swap", Some("swap")),
-        "cgroup_cpu" => probe_cgroup_leaf("cgroup_cpu", Some("cpu")),
-        "storage_ceiling" => probe_storage_ceiling(),
-        "apparmor_userns_restriction" => probe_apparmor(),
-        "nested_user_namespace" => probe_nested_userns(jail_exe, bwrap),
-        "seccomp_user_notification" => probe_user_notification(),
-        "unix_socket_diagnostics" => probe_unix_socket_diagnostics(),
-        "agent_proxy_bridge" => agent::proxy_bridge(jail_exe),
-        "agent_unix_peer_mediation" => agent::unix_peer(jail_exe),
-        "agent_inner_sandbox" => agent::inner_sandbox(jail_exe),
-        "gpu_passthrough" => probe_gpu_passthrough(),
-        _ => ProbeResult::new(
+    let Some(probe) = Probe::from_name(name) else {
+        return ProbeResult::new(
             "unknown",
             ProbeStatus::Skipped,
             "none",
             "unknown_probe",
             format!("no probe named {name}"),
-        ),
-    }
+        );
+    };
+    // Every probe that reads `bwrap` needs a backend, so from here on it is
+    // the resolved path whenever one of them reads it.
+    probe.run(
+        jail_exe,
+        bwrap.unwrap_or(Path::new("/nonexistent/unresolved-bwrap")),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -471,8 +604,7 @@ struct OwnedTempDir {
 
 impl OwnedTempDir {
     fn new(tag: &str) -> io::Result<Self> {
-        // SAFETY: getpid and gettid take no arguments and cannot fail.
-        let pid = unsafe { libc::getpid() };
+        let pid = own_pid();
         let nanos = super::clock::boottime_ns();
         let path = std::env::temp_dir().join(format!("ouro-{tag}-{pid}-{nanos}"));
         // Explicit mode: `create_dir` applies the umask, and on a host with
@@ -548,18 +680,16 @@ fn run_inside_raw(
 }
 
 fn probe_bwrap_present(bwrap: &Path) -> ProbeResult {
+    const NAME: &str = Probe::BwrapPresent.name();
+    const MECHANISM: &str = Probe::BwrapPresent.mechanism();
     match bwrap::bwrap_version(bwrap) {
-        Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => ProbeResult::new(
-            "bwrap_present",
-            ProbeStatus::Available,
-            "bubblewrap",
-            "ok",
-            version.raw,
-        ),
+        Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => {
+            ProbeResult::new(NAME, ProbeStatus::Available, MECHANISM, "ok", version.raw)
+        }
         Ok(version) => ProbeResult::new(
-            "bwrap_present",
+            NAME,
             ProbeStatus::Unavailable,
-            "bubblewrap",
+            MECHANISM,
             "bwrap_too_old",
             format!(
                 "{} reports {}; fd binds need >= 0.10.0",
@@ -568,9 +698,9 @@ fn probe_bwrap_present(bwrap: &Path) -> ProbeResult {
             ),
         ),
         Err(e) => ProbeResult::new(
-            "bwrap_present",
+            NAME,
             ProbeStatus::Unavailable,
-            "bubblewrap",
+            MECHANISM,
             "backend_unavailable",
             format!("{}: {e}", bwrap.display()),
         ),
@@ -582,15 +712,17 @@ fn probe_bwrap_present(bwrap: &Path) -> ProbeResult {
 /// never affects readiness; a grant of a missing node still refuses at the
 /// mount itself, naming the node.
 fn probe_gpu_passthrough() -> ProbeResult {
+    const NAME: &str = Probe::GpuPassthrough.name();
+    const MECHANISM: &str = Probe::GpuPassthrough.mechanism();
     let present: Vec<&'static str> = ["/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia0"]
         .into_iter()
         .filter(|node| std::path::Path::new(node).exists())
         .collect();
     if present.is_empty() {
         ProbeResult::new(
-            "gpu_passthrough",
+            NAME,
             ProbeStatus::Unavailable,
-            "devices",
+            MECHANISM,
             "no_nvidia_devices",
             "no NVIDIA device nodes under /dev; a GPU grant (--rw /dev/nvidia*) \
              needs the driver's nodes"
@@ -598,45 +730,49 @@ fn probe_gpu_passthrough() -> ProbeResult {
         )
     } else {
         ProbeResult::new(
-            "gpu_passthrough",
+            NAME,
             ProbeStatus::Available,
-            "devices",
+            MECHANISM,
             "ok",
             format!("NVIDIA nodes present: {}", present.join(", ")),
         )
     }
 }
 
-fn probe_namespace(name: &'static str, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
-    let kind = if name == "user_namespace" {
+/// The namespace a [`Probe::UserNamespace`] or [`Probe::PidNamespace`] row
+/// measures, as `status` names it (`ns_<kind>`).
+fn namespace_kind(probe: Probe) -> &'static str {
+    if probe == Probe::UserNamespace {
         "user"
     } else {
         "pid"
-    };
-    let mechanism = if kind == "user" {
-        "user-namespace"
-    } else {
-        "pid-namespace"
-    };
-    let outside = ns_ids(own_pid());
-    let outside_id = if kind == "user" {
+    }
+}
+
+/// This process's own id of the namespace `probe` measures.
+fn namespace_id(probe: Probe, outside: &NsIds) -> Option<u64> {
+    if probe == Probe::UserNamespace {
         outside.user
     } else {
         outside.pid
-    };
-    let run = match run_inside(jail_exe, bwrap, &["status"], Vec::new(), false) {
-        Ok(run) => run,
-        Err(e) => return ProbeResult::error(name, mechanism, e.to_string()),
-    };
-    namespace_result(name, outside_id, &run.captured)
+    }
 }
 
-fn namespace_result(name: &str, outside_id: Option<u64>, captured: &exec::Captured) -> ProbeResult {
-    let (name, kind, mechanism) = if name == "user_namespace" {
-        ("user_namespace", "user", "user-namespace")
-    } else {
-        ("pid_namespace", "pid", "pid-namespace")
+fn probe_namespace(probe: Probe, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
+    let outside = ns_ids(own_pid());
+    let run = match run_inside(jail_exe, bwrap, &["status"], Vec::new(), false) {
+        Ok(run) => run,
+        Err(e) => return ProbeResult::error(probe.name(), probe.mechanism(), e.to_string()),
     };
+    namespace_result(probe, namespace_id(probe, &outside), &run.captured)
+}
+
+fn namespace_result(
+    probe: Probe,
+    outside_id: Option<u64>,
+    captured: &exec::Captured,
+) -> ProbeResult {
+    let (name, kind, mechanism) = (probe.name(), namespace_kind(probe), probe.mechanism());
     if captured.timed_out {
         return ProbeResult::error(name, mechanism, "probe exceeded its 5 second deadline");
     }
@@ -675,8 +811,8 @@ fn namespace_result(name: &str, outside_id: Option<u64>, captured: &exec::Captur
 }
 
 fn probe_network_namespace(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
-    const NAME: &str = "network_namespace";
-    const MECHANISM: &str = "network-namespace";
+    const NAME: &str = Probe::NetworkNamespace.name();
+    const MECHANISM: &str = Probe::NetworkNamespace.mechanism();
     let run = match run_inside(jail_exe, bwrap, &["status"], Vec::new(), false) {
         Ok(run) => run,
         Err(e) => return ProbeResult::error(NAME, MECHANISM, e.to_string()),
@@ -685,8 +821,8 @@ fn probe_network_namespace(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
 }
 
 fn network_namespace_result(captured: &exec::Captured) -> ProbeResult {
-    const NAME: &str = "network_namespace";
-    const MECHANISM: &str = "network-namespace";
+    const NAME: &str = Probe::NetworkNamespace.name();
+    const MECHANISM: &str = Probe::NetworkNamespace.mechanism();
     if captured.timed_out {
         return ProbeResult::error(NAME, MECHANISM, "probe exceeded its 5 second deadline");
     }
@@ -717,8 +853,8 @@ fn network_namespace_result(captured: &exec::Captured) -> ProbeResult {
 }
 
 fn probe_readonly_bind(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
-    const NAME: &str = "mount_readonly_bind";
-    const MECHANISM: &str = "bubblewrap-binds";
+    const NAME: &str = Probe::MountReadonlyBind.name();
+    const MECHANISM: &str = Probe::MountReadonlyBind.mechanism();
     let source = match OwnedTempDir::new("probe-ro") {
         Ok(dir) => dir,
         Err(e) => return ProbeResult::error(NAME, MECHANISM, e.to_string()),
@@ -738,8 +874,8 @@ fn probe_readonly_bind(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
 }
 
 fn readonly_bind_result(captured: &exec::Captured) -> ProbeResult {
-    const NAME: &str = "mount_readonly_bind";
-    const MECHANISM: &str = "bubblewrap-binds";
+    const NAME: &str = Probe::MountReadonlyBind.name();
+    const MECHANISM: &str = Probe::MountReadonlyBind.mechanism();
     if captured.timed_out {
         return ProbeResult::error(NAME, MECHANISM, "probe exceeded its 5 second deadline");
     }
@@ -767,8 +903,8 @@ fn readonly_bind_result(captured: &exec::Captured) -> ProbeResult {
 }
 
 fn probe_seccomp(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
-    const NAME: &str = "seccomp_filter_load";
-    const MECHANISM: &str = "seccomp-bpf";
+    const NAME: &str = Probe::SeccompFilterLoad.name();
+    const MECHANISM: &str = Probe::SeccompFilterLoad.mechanism();
     let run = match run_inside(
         jail_exe,
         bwrap,
@@ -787,8 +923,8 @@ fn probe_seccomp(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
 }
 
 fn seccomp_result(captured: &exec::Captured) -> ProbeResult {
-    const NAME: &str = "seccomp_filter_load";
-    const MECHANISM: &str = "seccomp-bpf";
+    const NAME: &str = Probe::SeccompFilterLoad.name();
+    const MECHANISM: &str = Probe::SeccompFilterLoad.mechanism();
     if captured.timed_out {
         return ProbeResult::error(NAME, MECHANISM, "probe exceeded its 5 second deadline");
     }
@@ -859,8 +995,8 @@ fn nested_bwrap_argv(bwrap: &Path) -> Vec<OsString> {
 }
 
 fn probe_nested_userns(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
-    const NAME: &str = "nested_user_namespace";
-    const MECHANISM: &str = "nested-bubblewrap";
+    const NAME: &str = Probe::NestedUserNamespace.name();
+    const MECHANISM: &str = Probe::NestedUserNamespace.mechanism();
     // Deliberately without the baseline filter: the filter denies `unshare`
     // itself, and this probe must measure the host's policy, not our own.
     let bare = match run_inside(
@@ -922,8 +1058,8 @@ fn probe_nested_userns(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
 /// CONFIG_UNIX_DIAG. The mediator needs an actual AF_UNIX dump to prove that
 /// a pathname listener belongs to the attempt's network namespace.
 fn probe_unix_socket_diagnostics() -> ProbeResult {
-    const NAME: &str = "unix_socket_diagnostics";
-    const MECHANISM: &str = "netlink-sock-diag";
+    const NAME: &str = Probe::UnixSocketDiagnostics.name();
+    const MECHANISM: &str = Probe::UnixSocketDiagnostics.mechanism();
     let result = super::sockdiag::SockDiag::open().and_then(|mut socket| {
         // No stop channel: the dump's own deadline and datagram bound apply.
         socket.dump(super::sockdiag::UDIAG_SHOW_VFS, None)
@@ -954,15 +1090,16 @@ fn probe_unix_socket_diagnostics() -> ProbeResult {
 /// `agent` launcher and supervisor perform (§10). Whether a connect is then
 /// mediated is the agent probes' and the conformance suite's question.
 fn probe_user_notification() -> ProbeResult {
-    const NAME: &str = "seccomp_user_notification";
-    const MECHANISM: &str = "seccomp-user-notification";
+    const NAME: &str = Probe::SeccompUserNotification.name();
+    const MECHANISM: &str = Probe::SeccompUserNotification.mechanism();
     // Built before the fork: the child only makes syscalls.
     let program = super::unixpeer::mediation_program();
-    let mut pipe = [0i32; 2];
-    // SAFETY: `pipe` is a two-element array; pipe2 writes two fds or fails.
-    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return ProbeResult::error(NAME, MECHANISM, format!("pipe2: {}", errno_name(last())));
-    }
+    let (report_r, report_w) = match exec::pipe() {
+        Ok(pipe) => pipe,
+        Err(error) => return ProbeResult::error(NAME, MECHANISM, format!("pipe2: {error}")),
+    };
+    // Plain numbers for the child, which must not run destructors.
+    let (read_fd, write_fd) = (report_r.as_raw_fd(), report_w.as_raw_fd());
     let parent = own_pid();
     // SAFETY: fork; the child calls only async-signal-safe functions
     // (prctl, getppid, seccomp, write, pause, _exit) over data built before
@@ -972,30 +1109,32 @@ fn probe_user_notification() -> ProbeResult {
         // SAFETY: as above; `program` is live and never freed in the child.
         unsafe {
             exec::die_with_parent_after_fork(parent);
-            libc::close(pipe[0]);
+            libc::close(read_fd);
             let listener =
                 super::unixpeer::install_program(&program, super::unixpeer::FLAG_NEW_LISTENER)
                     .map_or(-1, std::os::fd::IntoRawFd::into_raw_fd);
             let report = listener.to_le_bytes();
-            libc::write(pipe[1], report.as_ptr().cast(), report.len());
+            libc::write(write_fd, report.as_ptr().cast(), report.len());
             loop {
                 libc::pause();
             }
         }
     }
-    // SAFETY: closing this process's copy of the write end.
-    unsafe { libc::close(pipe[1]) };
+    // This process's copy of the write end: the child holds its own.
+    drop(report_w);
     if pid < 0 {
-        // SAFETY: the read end is still owned here.
-        unsafe { libc::close(pipe[0]) };
-        return ProbeResult::error(NAME, MECHANISM, format!("fork: {}", errno_name(last())));
+        return ProbeResult::error(
+            NAME,
+            MECHANISM,
+            format!("fork: {}", errno_name(last_errno())),
+        );
     }
     let mut report = [0u8; 4];
     let mut got = 0usize;
     let deadline = Deadline::after(PROBE_DEADLINE);
     while got < report.len() && !deadline.expired() {
         let mut pfd = libc::pollfd {
-            fd: pipe[0],
+            fd: read_fd,
             events: libc::POLLIN,
             revents: 0,
         };
@@ -1006,7 +1145,7 @@ fn probe_user_notification() -> ProbeResult {
         // SAFETY: the buffer is live and the length matches.
         let n = unsafe {
             libc::read(
-                pipe[0],
+                read_fd,
                 report[got..].as_mut_ptr().cast(),
                 report.len() - got,
             )
@@ -1024,13 +1163,13 @@ fn probe_user_notification() -> ProbeResult {
         (Some(_), _) | (None, _) => Err(io::Error::from_raw_os_error(libc::ENOSYS)),
     };
     // SAFETY: `pid` is this process's own child; killing and reaping it is
-    // the cleanup this probe owes, and the read end is closed once.
+    // the cleanup this probe owes.
     unsafe {
         libc::kill(pid, libc::SIGKILL);
         let mut status = 0;
         libc::waitpid(pid, &raw mut status, 0);
-        libc::close(pipe[0]);
     }
+    drop(report_r);
     match (listener, taken) {
         (Some(fd), Ok(_)) if fd >= 0 => ProbeResult::new(
             NAME,
@@ -1067,8 +1206,8 @@ fn own_pid() -> libc::pid_t {
 }
 
 fn probe_ptrace_seize() -> ProbeResult {
-    const NAME: &str = "ptrace_seize_descendant";
-    const MECHANISM: &str = "ptrace";
+    const NAME: &str = Probe::PtraceSeizeDescendant.name();
+    const MECHANISM: &str = Probe::PtraceSeizeDescendant.mechanism();
     let parent = own_pid();
     // SAFETY: fork in a process that may be multithreaded; the child below
     // calls only prctl, getppid and `pause`, which are async-signal-safe, and
@@ -1084,7 +1223,11 @@ fn probe_ptrace_seize() -> ProbeResult {
         }
     }
     if pid < 0 {
-        return ProbeResult::error(NAME, MECHANISM, format!("fork: {}", errno_name(last())));
+        return ProbeResult::error(
+            NAME,
+            MECHANISM,
+            format!("fork: {}", errno_name(last_errno())),
+        );
     }
 
     let result = seize_and_release(pid);
@@ -1108,16 +1251,14 @@ fn probe_ptrace_seize() -> ProbeResult {
 }
 
 fn seize_and_release(pid: libc::pid_t) -> Result<String, String> {
-    const PTRACE_SEIZE: libc::c_uint = 0x4206;
-    const PTRACE_INTERRUPT: libc::c_uint = 0x4207;
     // SAFETY: ptrace with PTRACE_SEIZE takes a pid and two scalars; no
     // pointer is dereferenced.
-    if unsafe { libc::ptrace(PTRACE_SEIZE, pid, 0, 0) } < 0 {
-        return Err(format!("PTRACE_SEIZE: {}", errno_name(last())));
+    if unsafe { libc::ptrace(libc::PTRACE_SEIZE, pid, 0, 0) } < 0 {
+        return Err(format!("PTRACE_SEIZE: {}", errno_name(last_errno())));
     }
     // SAFETY: as above.
-    if unsafe { libc::ptrace(PTRACE_INTERRUPT, pid, 0, 0) } < 0 {
-        return Err(format!("PTRACE_INTERRUPT: {}", errno_name(last())));
+    if unsafe { libc::ptrace(libc::PTRACE_INTERRUPT, pid, 0, 0) } < 0 {
+        return Err(format!("PTRACE_INTERRUPT: {}", errno_name(last_errno())));
     }
     let deadline = Deadline::after(PROBE_DEADLINE);
     let mut status: libc::c_int = 0;
@@ -1151,17 +1292,13 @@ fn nap() {
     unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
 }
 
-fn last() -> i32 {
-    super::sys::last_errno()
-}
-
 /// The supervisor scope step's record (§9.3), as a row: `available` when
 /// this process is inside the delegated subtree (`already_delegated` or
 /// `entered`), `unavailable` with the step's reason otherwise. It runs
 /// nothing: the step ran once, before anything else, and this reports it.
 fn probe_supervisor_scope() -> ProbeResult {
-    const NAME: &str = "supervisor_scope";
-    const MECHANISM: &str = "systemd-user-transient-scope";
+    const NAME: &str = Probe::SupervisorScope.name();
+    const MECHANISM: &str = Probe::SupervisorScope.mechanism();
     let outcome = super::scope::current();
     let (status, reason_code) = match (outcome.state, outcome.reason) {
         (super::scope::State::Unavailable, reason) => (
@@ -1173,8 +1310,8 @@ fn probe_supervisor_scope() -> ProbeResult {
     ProbeResult::new(NAME, status, MECHANISM, reason_code, outcome.summary())
 }
 
-fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResult {
-    const MECHANISM: &str = "cgroup-v2-delegated";
+fn probe_cgroup_leaf(probe: Probe, controller: Option<&str>) -> ProbeResult {
+    let (name, mechanism) = (probe.name(), probe.mechanism());
     let mut limits = crate::policy::LimitsSnapshot {
         wall: None,
         pids: None,
@@ -1203,7 +1340,7 @@ fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResul
             return ProbeResult::new(
                 name,
                 ProbeStatus::Unavailable,
-                MECHANISM,
+                mechanism,
                 "cgroup_unavailable",
                 err.to_string(),
             );
@@ -1226,7 +1363,11 @@ fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResul
         }
     }
     if pid < 0 {
-        return ProbeResult::error(name, MECHANISM, format!("fork: {}", errno_name(last())));
+        return ProbeResult::error(
+            name,
+            mechanism,
+            format!("fork: {}", errno_name(last_errno())),
+        );
     }
 
     let deadline = Deadline::after(PROBE_DEADLINE);
@@ -1244,17 +1385,20 @@ fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResul
         }
         Ok(())
     })();
+    // SAFETY: `pid` is this process's own unreaped child; killing it is the
+    // cleanup this probe owes.
     unsafe {
         libc::kill(pid, libc::SIGKILL);
     }
     loop {
         let mut status = 0;
+        // SAFETY: `status` is a live writable int; WNOHANG never waits.
         let rc = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
         if rc == pid || rc < 0 {
             break;
         }
         if deadline.expired() {
-            return ProbeResult::error(name, MECHANISM, "probe child could not be reaped");
+            return ProbeResult::error(name, mechanism, "probe child could not be reaped");
         }
         nap();
     }
@@ -1262,14 +1406,14 @@ fn probe_cgroup_leaf(name: &'static str, controller: Option<&str>) -> ProbeResul
         Ok(()) => ProbeResult::new(
             name,
             ProbeStatus::Available,
-            MECHANISM,
+            mechanism,
             "ok",
             leaf_evidence(&applied),
         ),
         Err(err) => ProbeResult::new(
             name,
             ProbeStatus::Unavailable,
-            MECHANISM,
+            mechanism,
             "cgroup_probe_failed",
             err.to_string(),
         ),
@@ -1303,7 +1447,8 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
     use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::process::Stdio;
-    const NAME: &str = "observer_closed_set";
+    const NAME: &str = Probe::ObserverClosedSet.name();
+    const MECHANISM: &str = Probe::ObserverClosedSet.mechanism();
     let deadline = Deadline::after(PROBE_DEADLINE);
     let measured = (|| -> io::Result<()> {
         let temp = OwnedTempDir::new("observer-probe")?;
@@ -1316,7 +1461,7 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
         let mut command = Command::new(jail_exe);
         command
             .args([
-                "__launch",
+                super::launch::SUBCOMMAND,
                 "--release-fd",
                 "12",
                 "--error-fd",
@@ -1398,14 +1543,14 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
         Ok(()) => ProbeResult::new(
             NAME,
             ProbeStatus::Available,
-            "ptrace-seccomp",
+            MECHANISM,
             "ok",
             "attached blocked launcher; one successful create matched the fixture, final exit observed, zero loss",
         ),
         Err(err) => ProbeResult::new(
             NAME,
             ProbeStatus::Unavailable,
-            "ptrace-seccomp",
+            MECHANISM,
             "observer_probe_failed",
             err.to_string(),
         ),
@@ -1416,8 +1561,8 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
 pub const APPARMOR_USERNS_SYSCTL: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
 
 fn probe_apparmor() -> ProbeResult {
-    const NAME: &str = "apparmor_userns_restriction";
-    const MECHANISM: &str = "apparmor";
+    const NAME: &str = Probe::ApparmorUsernsRestriction.name();
+    const MECHANISM: &str = Probe::ApparmorUsernsRestriction.mechanism();
     match std::fs::read_to_string(APPARMOR_USERNS_SYSCTL) {
         Ok(raw) => {
             let value = raw.trim().to_owned();
@@ -1456,8 +1601,8 @@ fn probe_apparmor() -> ProbeResult {
 /// a scratch directory this process owns, the way admission samples a
 /// run's writable mounts.
 fn probe_storage_ceiling() -> ProbeResult {
-    const NAME: &str = "storage_ceiling";
-    const MECHANISM: &str = "bounded-tmpfs-or-user-quota";
+    const NAME: &str = Probe::StorageCeiling.name();
+    const MECHANISM: &str = Probe::StorageCeiling.mechanism();
     let temp = match OwnedTempDir::new("storage-ceiling-probe") {
         Ok(temp) => temp,
         Err(err) => return ProbeResult::error(NAME, MECHANISM, format!("temp dir: {err}")),
@@ -1595,7 +1740,7 @@ fn outcome(rc: i64) -> String {
     if rc >= 0 {
         "ok".to_owned()
     } else {
-        errno_name(last()).into_owned()
+        errno_name(last_errno()).into_owned()
     }
 }
 
@@ -1617,7 +1762,7 @@ fn check_write(path: &str) -> String {
         unsafe { libc::close(fd) };
         return "ok".to_owned();
     }
-    errno_name(last()).into_owned()
+    errno_name(last_errno()).into_owned()
 }
 
 fn check_mkdir(path: &str) -> String {
@@ -1667,7 +1812,7 @@ fn check_socket_afunix() -> String {
         unsafe { libc::close(fd) };
         return "ok".to_owned();
     }
-    errno_name(last()).into_owned()
+    errno_name(last_errno()).into_owned()
 }
 
 #[cfg(test)]
@@ -1684,11 +1829,11 @@ mod tests {
             timed_out: false,
         };
         assert_eq!(
-            namespace_result("user_namespace", Some(10), &captured).status,
+            namespace_result(Probe::UserNamespace, Some(10), &captured).status,
             ProbeStatus::Available
         );
         assert_eq!(
-            namespace_result("pid_namespace", Some(22), &captured).status,
+            namespace_result(Probe::PidNamespace, Some(22), &captured).status,
             ProbeStatus::Unavailable
         );
         assert_eq!(
@@ -1706,7 +1851,7 @@ mod tests {
         );
         captured.timed_out = true;
         assert_eq!(
-            namespace_result("user_namespace", Some(10), &captured).status,
+            namespace_result(Probe::UserNamespace, Some(10), &captured).status,
             ProbeStatus::Error
         );
         assert_eq!(
@@ -1717,7 +1862,7 @@ mod tests {
         captured.timed_out = false;
         captured.stdout.clear();
         assert_eq!(
-            namespace_result("user_namespace", Some(10), &captured).status,
+            namespace_result(Probe::UserNamespace, Some(10), &captured).status,
             ProbeStatus::Error
         );
         assert_eq!(
@@ -1834,11 +1979,21 @@ mod tests {
     }
 
     #[test]
-    fn every_name_has_a_probe() {
-        for name in PROBE_NAMES {
-            let result = run_one(name, Path::new("/nonexistent"), Path::new("/nonexistent"));
-            assert_eq!(result.name, name, "{name} fell through to the unknown arm");
+    fn every_name_is_one_probe_and_the_derived_lists_agree() {
+        for (index, probe) in Probe::ALL.into_iter().enumerate() {
+            assert_eq!(PROBE_NAMES[index], probe.name());
+            assert_eq!(Probe::from_name(probe.name()), Some(probe));
+            assert_eq!(
+                BACKEND_PROBES.contains(&(probe.name(), probe.mechanism())),
+                probe.needs_backend(),
+                "{probe:?}"
+            );
         }
+        let mut names = PROBE_NAMES.to_vec();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), PROBE_NAMES.len(), "a name is listed twice");
+        assert_eq!(Probe::from_name("no_such_probe"), None);
     }
 
     /// A leaf probe's evidence names a ceiling only when creation configured
@@ -1922,7 +2077,7 @@ mod tests {
     }
 
     // The architecture refusal (§3.2; gap analysis §2.3b)
-    /// The rows whose mechanism is one of this implementation's x86_64
+    /// The rows whose mechanism is one of this implementation's native
     /// syscall tables. Written out, so a probe that drops out of the refusal
     /// is a failing test, not a silent change.
     const TABLE_BOUND: [&str; 6] = [
@@ -1972,7 +2127,11 @@ mod tests {
 
     #[test]
     fn the_arch_seam_only_adds_a_refusal_and_names_itself() {
-        for (name, _) in TABLE_BOUND_PROBES {
+        for name in Probe::ALL
+            .into_iter()
+            .filter(|probe| probe.table_bound())
+            .map(Probe::name)
+        {
             for seam in [None, Some(""), Some("x86_64")] {
                 assert_eq!(seam_refusal_for(name, seam), None, "{name} {seam:?}");
             }
