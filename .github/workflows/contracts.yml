@@ -32,6 +32,7 @@ jobs:
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_agent_matrix.py
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_observer_pair.py
       - run: python3 -m unittest discover -s docs/benchmarks/jail -p test_preview_evidence.py
+      - run: python3 -m unittest discover -s docs/benchmarks/sandboxes -p test_summarize.py
       - run: python3 -m unittest discover -s docs/benchmarks -p test_retired_archives.py
       - name: Evidence store size and bundle guard
         run: |
