@@ -199,6 +199,22 @@ pub struct DoctorArgs {
     pub json: bool,
 }
 
+impl DoctorArgs {
+    /// The plan this doctor call checks: the policy `run` would resolve from
+    /// the same selection flags and roots, with no override (§6.1's doctor
+    /// grammar has none).
+    #[must_use]
+    pub fn policy(&self) -> PolicyArgs {
+        PolicyArgs {
+            profile: self.profile.clone(),
+            launch: self.launch.clone(),
+            workspace: self.workspace.clone(),
+            scratch: self.scratch.clone(),
+            ..PolicyArgs::default()
+        }
+    }
+}
+
 /// `ouro-jail gc`.
 #[derive(Debug, Args)]
 pub struct GcArgs {
@@ -279,6 +295,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `doctor` checks the plan `run` resolves from the same selection
+    /// flags and roots.
+    #[test]
+    fn doctor_checks_the_policy_run_would_resolve() {
+        let selection = [
+            "--profile",
+            "build",
+            "--launch",
+            "codex",
+            "--workspace",
+            "/w",
+            "--scratch",
+            "/s",
+        ];
+        let parse = |verb: &str, rest: &[&str]| {
+            let mut arguments = vec!["ouro-jail", verb];
+            arguments.extend(selection);
+            arguments.extend(rest);
+            Cli::try_parse_from(arguments).expect("parses").command
+        };
+        let Command::Doctor(doctor) = parse("doctor", &[]) else {
+            panic!("not doctor");
+        };
+        let Command::Run(run) = parse("run", &["--", "/bin/true"]) else {
+            panic!("not run");
+        };
+        assert_eq!(
+            format!("{:?}", doctor.policy()),
+            format!("{:?}", run.policy)
+        );
     }
 
     #[test]

@@ -1026,16 +1026,7 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
     // §6.1's grammar carries the selection flags; the workspace and scratch
     // roots are the same ones `run` accepts, so a doctor call can name the
     // plan it is checking instead of inheriting the invocation directory.
-    let plan = resolve_plan(
-        ctx,
-        &PolicyArgs {
-            profile: args.profile.clone(),
-            launch: args.launch.clone(),
-            workspace: args.workspace.clone(),
-            scratch: args.scratch.clone(),
-            ..PolicyArgs::default()
-        },
-    )?;
+    let plan = resolve_plan(ctx, &args.policy())?;
     let request = plan_request(&plan);
     let capabilities = ctx.platform.probe_all(&request);
     let ready = plan
