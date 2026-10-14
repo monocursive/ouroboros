@@ -561,17 +561,13 @@ fn j4_fsize_helper() {
         rlim_max: 0,
     };
     // SAFETY: `limit` is a live rlimit for both calls.
-    assert_eq!(
-        unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &raw mut limit) },
-        0
-    );
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &raw mut limit) };
+    assert_eq!(rc, 0);
     let hard = limit.rlim_max;
     limit.rlim_cur = 1000;
     // SAFETY: as above.
-    assert_eq!(
-        unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &raw const limit) },
-        0
-    );
+    let rc = unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &raw const limit) };
+    assert_eq!(rc, 0);
 
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -590,10 +586,8 @@ fn j4_fsize_helper() {
     if raise {
         limit.rlim_cur = hard;
         // SAFETY: as above; the soft limit goes back up to the hard one.
-        assert_eq!(
-            unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &raw const limit) },
-            0
-        );
+        let rc = unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &raw const limit) };
+        assert_eq!(rc, 0);
     }
     let later_normal = sink
         .write_frame(&sized_frame(100, 150), Priority::Normal)

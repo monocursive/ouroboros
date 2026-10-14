@@ -291,10 +291,8 @@ mod tests {
         }
         let mapping = Mapping(memory);
         // SAFETY: the second page is inside the mapping and has no Rust refs.
-        assert_eq!(
-            unsafe { libc::mprotect(memory.add(4096), 4096, libc::PROT_NONE) },
-            0
-        );
+        let protected = unsafe { libc::mprotect(memory.add(4096), 4096, libc::PROT_NONE) };
+        assert_eq!(protected, 0);
         // SAFETY: the first page remains writable and is exclusively owned.
         let page = unsafe { std::slice::from_raw_parts_mut(mapping.0.cast::<u8>(), 4096) };
         for length in [0, 1, 255, 256, 257, 1024, 4095] {

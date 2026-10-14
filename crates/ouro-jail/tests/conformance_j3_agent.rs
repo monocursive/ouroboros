@@ -2534,10 +2534,8 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
         rlim_max: 0,
     };
     // SAFETY: getrlimit writes into a live rlimit.
-    assert_eq!(
-        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) },
-        0
-    );
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) };
+    assert_eq!(rc, 0);
     assert_eq!(
         ops(&lines, "fds")[0]["args"]["soft_limit"],
         limit.rlim_cur,

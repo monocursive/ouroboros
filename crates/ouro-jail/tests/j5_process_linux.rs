@@ -1563,18 +1563,16 @@ fn p04_socket_backpressure_does_not_delay_wall_expiry() {
     use std::os::fd::AsRawFd as _;
     let size: libc::c_int = 4096;
     // SAFETY: a live socket and the complete initialized option value.
-    assert_eq!(
-        unsafe {
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                (&raw const size).cast(),
-                std::mem::size_of_val(&size) as libc::socklen_t,
-            )
-        },
-        0
-    );
+    let rc = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            (&raw const size).cast(),
+            std::mem::size_of_val(&size) as libc::socklen_t,
+        )
+    };
+    assert_eq!(rc, 0);
     let receipt_path = c.jail.root().join("backpressure-receipt.json");
     let mut child = std::process::Command::new(harness::jail_path())
         .args(["run", "--profile", "tool", "--workspace"])

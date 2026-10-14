@@ -57,10 +57,8 @@ impl SoftNofile {
         // SAFETY: an all-zero rlimit is a valid value the call overwrites.
         let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
         // SAFETY: `limit` is writable storage of the type getrlimit fills.
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) },
-            0
-        );
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) };
+        assert_eq!(rc, 0);
         limit
     }
 
@@ -74,10 +72,8 @@ impl SoftNofile {
         };
         // SAFETY: a valid rlimit that outlives the call; lowering the soft
         // limit within the hard one needs no privilege.
-        assert_eq!(
-            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lowered) },
-            0
-        );
+        let rc = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lowered) };
+        assert_eq!(rc, 0);
         SoftNofile(old)
     }
 }

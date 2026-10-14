@@ -898,9 +898,10 @@ fn c02_a_refusal_before_any_boundary_cleans_vendor_state() {
     let workspace = jail.root().join("workspace");
     private_dir(&workspace);
     use std::os::fd::FromRawFd as _;
-    // SAFETY: eventfd creates a new owned descriptor; wrap it exactly once.
+    // SAFETY: eventfd takes two scalars and returns a new descriptor or -1.
     let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
     assert!(fd >= 0);
+    // SAFETY: `fd` was just created and is wrapped exactly once.
     let invalid = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
     let output = Command::new(harness::jail_path())
         .args(["run", "--launch", "fixture", "--workspace"])

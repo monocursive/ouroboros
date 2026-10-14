@@ -539,10 +539,8 @@ fn startup_supervisor_helper() {
     if released {
         // SAFETY: an open pipe end `start_w` owns, and a one-byte buffer that
         // outlives the call.
-        assert_eq!(
-            unsafe { libc::write(start_w.as_raw_fd(), [1u8].as_ptr().cast(), 1) },
-            1
-        );
+        let rc = unsafe { libc::write(start_w.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
+        assert_eq!(rc, 1);
     }
     std::fs::write(root.join("ready"), "ready").unwrap();
     backend.wait().unwrap();

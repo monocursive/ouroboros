@@ -1149,10 +1149,8 @@ struct Subreaper {
 impl Subreaper {
     fn start() -> Subreaper {
         // SAFETY: prctl with integer arguments only.
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
-            0
-        );
+        let rc = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+        assert_eq!(rc, 0);
         Subreaper {
             before: Subreaper::children(),
         }

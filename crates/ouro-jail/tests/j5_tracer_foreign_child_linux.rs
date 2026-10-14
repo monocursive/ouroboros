@@ -117,11 +117,8 @@ impl Bystander {
 
     fn signal(&self, signal: libc::c_int) {
         // SAFETY: a child this test spawned and has not reaped.
-        assert_eq!(
-            unsafe { libc::kill(self.pid, signal) },
-            0,
-            "signal {signal}"
-        );
+        let rc = unsafe { libc::kill(self.pid, signal) };
+        assert_eq!(rc, 0, "signal {signal}");
     }
 }
 
@@ -690,10 +687,8 @@ fn j5t_orphans_adopted_while_traced_are_reaped_before_finished() {
     let me = libc::pid_t::try_from(std::process::id()).expect("a pid");
     let bystander = Bystander::start();
     // SAFETY: prctl with integer arguments only; undone below.
-    assert_eq!(
-        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
-        0
-    );
+    let rc = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+    assert_eq!(rc, 0);
     let n = N.to_string();
     let target: Vec<&OsStr> = ["/usr/bin/python3", "-c", ORPHANS, n.as_str()]
         .into_iter()

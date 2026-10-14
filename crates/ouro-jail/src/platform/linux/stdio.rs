@@ -500,18 +500,16 @@ mod tests {
         let (socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let size: libc::c_int = 4096;
         // SAFETY: a live socket and a correctly sized, initialized option.
-        assert_eq!(
-            unsafe {
-                libc::setsockopt(
-                    socket.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_SNDBUF,
-                    (&raw const size).cast(),
-                    std::mem::size_of_val(&size) as libc::socklen_t,
-                )
-            },
-            0
-        );
+        let set = unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&raw const size).cast(),
+                std::mem::size_of_val(&size) as libc::socklen_t,
+            )
+        };
+        assert_eq!(set, 0);
         let (mut relay, writer) = output_relay(std::fs::File::from(OwnedFd::from(socket)));
         relay.origin_socket = true;
         relay.buffer = vec![b'x'; super::RELAY_BUFFER];

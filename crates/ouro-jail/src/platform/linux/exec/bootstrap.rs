@@ -331,9 +331,10 @@ pub(crate) fn spawn_bootstrap(
             Err(error)
         };
     }
-    // SAFETY: successful CLONE_PIDFD writes a new owned descriptor in parent.
     let mut child = BootstrapChild::Direct {
         pid: pid as libc::pid_t,
+        // SAFETY: a successful CLONE_PIDFD wrote a new descriptor, owned
+        // here, into `pidfd` in the parent.
         pidfd: unsafe { OwnedFd::from_raw_fd(pidfd) },
         status: None,
     };

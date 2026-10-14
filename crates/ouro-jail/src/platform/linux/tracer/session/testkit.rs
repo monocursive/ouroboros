@@ -324,10 +324,8 @@ impl Mkdirer {
     /// Release the child and return the status of its first stop.
     pub(super) fn release(&self) -> libc::c_int {
         // SAFETY: one byte from a live buffer to a descriptor we own.
-        assert_eq!(
-            unsafe { libc::write(self.go, b"g".as_ptr().cast::<libc::c_void>(), 1) },
-            1
-        );
+        let written = unsafe { libc::write(self.go, b"g".as_ptr().cast::<libc::c_void>(), 1) };
+        assert_eq!(written, 1);
         self.wait()
     }
 

@@ -128,10 +128,8 @@ impl Stand {
     fn release(&mut self) {
         let fd = self.release.take().expect("not yet released");
         // SAFETY: a one-byte write from a live byte to an owned pipe.
-        assert_eq!(
-            unsafe { libc::write(fd.as_raw_fd(), [1u8].as_ptr().cast(), 1) },
-            1
-        );
+        let rc = unsafe { libc::write(fd.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
+        assert_eq!(rc, 1);
     }
 
     /// (backend ended, stranded ended, watcher ended), then cleanup.

@@ -1168,7 +1168,9 @@ mod tests {
         symlink(&target, &linked).unwrap();
         let fifo = dir.path().join(format!(".policy.json.{id}.tmp"));
         let fifo_name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+        // SAFETY: `fifo_name` is a NUL-terminated path that outlives the call.
+        let made = unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) };
+        assert_eq!(made, 0);
         let mut meter = Meter {
             max: 1000,
             charged: 0,

@@ -409,10 +409,8 @@ fn r06_a_target_that_leaves_the_leaf_while_live_is_never_settled() {
         assert_eq!(running["lifetime"]["tree_empty"], Value::Null);
         assert_eq!(running["outcome"]["kind"], "pending");
         // SAFETY: the harness's own unreaped child.
-        assert_eq!(
-            unsafe { libc::kill(spawned.pid() as i32, libc::SIGTERM) },
-            0
-        );
+        let rc = unsafe { libc::kill(spawned.pid() as i32, libc::SIGTERM) };
+        assert_eq!(rc, 0);
         let run = spawned.wait().expect("the jail ends");
         common::assert_run_records(&run);
         assert_eq!(run.code(), Some(1), "{observe}: {}", run.stderr_text());
@@ -620,10 +618,8 @@ fn r06_a_replaced_leaf_loses_integrity_and_is_never_touched() {
     let running = receipt_in_integrity(&spawned, "lost");
     assert_eq!(running["phase"], "enforced");
     // SAFETY: the harness's own unreaped child.
-    assert_eq!(
-        unsafe { libc::kill(spawned.pid() as i32, libc::SIGTERM) },
-        0
-    );
+    let rc = unsafe { libc::kill(spawned.pid() as i32, libc::SIGTERM) };
+    assert_eq!(rc, 0);
     let run = spawned.wait().expect("the jail ends");
     common::assert_run_records(&run);
     assert_eq!(run.code(), Some(1), "{}", run.stderr_text());

@@ -296,8 +296,8 @@ mod live {
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
-            // SAFETY: `fd` was just created and is owned here.
             Ok(Self {
+                // SAFETY: `fd` was just created and is owned here.
                 fd: unsafe { OwnedFd::from_raw_fd(fd) },
                 seq: 0,
             })
