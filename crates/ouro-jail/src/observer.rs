@@ -49,16 +49,6 @@ impl ClosedOperation {
         ClosedOperation::NetConnect,
     ];
 
-    /// The operation an event envelope names, or `None` for a name outside
-    /// the closed set. The inverse of [`ClosedOperation::as_str`], derived
-    /// from it, so the two cannot disagree; there is no fallback operation.
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<ClosedOperation> {
-        ClosedOperation::ALL
-            .into_iter()
-            .find(|operation| operation.as_str() == name)
-    }
-
     /// The operation name used in the event envelope.
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -319,19 +309,17 @@ mod tests {
     }
 
     #[test]
-    fn every_operation_name_reads_back_and_no_other_name_does() {
+    fn every_operation_has_its_own_name_and_an_audit_class() {
+        let names: std::collections::BTreeSet<&str> = ClosedOperation::ALL
+            .into_iter()
+            .map(ClosedOperation::as_str)
+            .collect();
+        assert_eq!(names.len(), ClosedOperation::ALL.len());
         for operation in ClosedOperation::ALL {
-            assert_eq!(
-                ClosedOperation::from_name(operation.as_str()),
-                Some(operation)
-            );
             assert!(
                 CoverageClass::AUDIT.contains(&operation.coverage_class()),
                 "{operation:?} is counted outside the audit classes"
             );
-        }
-        for name in ["", "fs", "fs.read", "FS.WRITE", "net.connect ", "proc"] {
-            assert_eq!(ClosedOperation::from_name(name), None, "{name:?}");
         }
     }
 
