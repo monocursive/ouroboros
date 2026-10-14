@@ -305,7 +305,9 @@ fn real_owner_journal_crashes_never_bypass_admission_or_repeat_execution() {
                 executions,
                 "{case}"
             );
-            let runs = client.runs().unwrap();
+            // A replay can outlast the writer's idle timeout for the
+            // connection opened before it; ask on a fresh one.
+            let runs = Client::connect(&root.join("data")).unwrap().runs().unwrap();
             assert_eq!(runs.len(), 1);
             assert_eq!(runs[0].attempt_id, run.attempt_id);
             assert_eq!(runs[0].run_id, run.run_id);

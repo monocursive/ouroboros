@@ -206,7 +206,9 @@ fn real_launch_gate_survives_admission_settlement_and_lost_reply_crashes() {
                 },
                 "replay executed another child: {case}"
             );
-            let runs = client.runs().unwrap();
+            // A replay that launches can outlast the writer's idle timeout
+            // for the connection opened before it; ask on a fresh one.
+            let runs = Client::connect(&data).unwrap().runs().unwrap();
             assert_eq!(runs.len(), 1, "{case}");
             assert_eq!(runs[0].run_id, run.run_id, "{case}");
             assert_eq!(runs[0].attempt_id, run.attempt_id, "{case}");
