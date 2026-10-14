@@ -606,8 +606,10 @@ pub fn permitted_by(receipt: &Receipt) -> Result<(), &'static str> {
 /// What `gc` did with one attempt's pending cleanup.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Resume {
-    /// No vendor state was ever registered, or its cleanup is recorded
-    /// complete in both jail state and the receipt.
+    /// Nothing is left for the resumption: no vendor state was ever
+    /// registered and the receipt records no cleanup it may complete yet,
+    /// or the cleanup is recorded complete in both jail state and the
+    /// receipt.
     NothingPending,
     /// Cleanup is not permitted yet; the reason says why.
     Retained(String),
@@ -622,6 +624,14 @@ pub enum Resume {
     },
     /// This pass ran and stopped again; the reason says why.
     StillPending(String),
+    /// No vendor state was registered, and the receipt, which itself permits
+    /// the cleanup ([`permitted_by`]), still recorded it pending: a
+    /// settlement whose managed-scratch removal stopped. No managed scratch
+    /// is left (`gc` removes it first), so this pass recorded `complete` in
+    /// the receipt at its next revision.
+    ReceiptCompleted,
+    /// A dry run of [`Resume::ReceiptCompleted`].
+    WouldCompleteReceipt,
 }
 
 /// Largest receipt (or `policy.json`) this tool reads back: whoever reads
@@ -722,6 +732,11 @@ fn present_managed_dirs(attempt_dir: &AttemptDir) -> Scratch {
 
 /// Resumes an interrupted vendor-state cleanup from jail state (§12, §14.2).
 ///
+/// With no vendor state registered, a receipt that permits the cleanup and
+/// still records it pending (a settlement whose managed-scratch removal
+/// stopped) is completed once no managed scratch is left
+/// ([`Resume::ReceiptCompleted`]); removing that scratch is `gc`'s own step.
+///
 /// The caller holds the attempt's lease, so no live supervisor owns it. The
 /// records must prove cleanup is permitted ([`permitted`]); the removal is
 /// the same anchored, idempotent traversal the supervisor uses. On success a
@@ -783,7 +798,7 @@ fn resume_within(
     visited: &mut usize,
 ) -> Result<Resume, JailError> {
     let Some(registration) = state::vendor_registration(attempt_dir)? else {
-        return Ok(Resume::NothingPending);
+        return complete_receipt_without_vendor_state(attempt_dir, dry_run);
     };
     let mut receipt = read_receipt(attempt_dir)?;
     // J4 wave 3 (G1): only a receipt that itself permits the cleanup ever
@@ -852,19 +867,7 @@ fn resume_within(
     if let Some(receipt) = receipt.as_mut().filter(|_| receipt_records)
         && receipt.state_cleanup != StateCleanup::Complete
     {
-        receipt.state_cleanup = StateCleanup::Complete;
-        receipt.cleanup_error = None;
-        receipt.revision += 1;
-        receipt.updated_at = crate::records::rfc3339_utc(std::time::SystemTime::now());
-        let bytes = serde_json::to_vec_pretty(&*receipt).map_err(|error| {
-            JailError::new(
-                ErrorCode::InternalError,
-                ErrorStage::Reconciling,
-                Remediation::InspectState,
-                format!("the receipt could not be serialized: {error}"),
-            )
-        })?;
-        state::replace_atomically_at(state::Site::GcResume, &attempt_dir.receipt_path(), &bytes)?;
+        complete_receipt(attempt_dir, receipt)?;
     }
     state::record_cleanup_at(
         state::Site::GcResume,
@@ -875,6 +878,50 @@ fn resume_within(
     Ok(Resume::Completed {
         receipt_updated: receipt_records,
     })
+}
+
+/// The resumption of an attempt that registered no vendor state: the only
+/// cleanup its receipt can record pending is its managed scratch, which
+/// `gc` removes before it resumes anything (its scratch step). Once none is
+/// left, a receipt that itself permits the cleanup is completed as the
+/// supervisor would have completed it; anything else is not this
+/// resumption's to record.
+fn complete_receipt_without_vendor_state(
+    attempt_dir: &AttemptDir,
+    dry_run: bool,
+) -> Result<Resume, JailError> {
+    let Some(mut receipt) = read_receipt(attempt_dir)? else {
+        return Ok(Resume::NothingPending);
+    };
+    if receipt.state_cleanup != StateCleanup::Pending
+        || permitted_by(&receipt).is_err()
+        || !managed_scratch(attempt_dir).is_gone()
+    {
+        return Ok(Resume::NothingPending);
+    }
+    if dry_run {
+        return Ok(Resume::WouldCompleteReceipt);
+    }
+    complete_receipt(attempt_dir, &mut receipt)?;
+    Ok(Resume::ReceiptCompleted)
+}
+
+/// Records `state_cleanup = complete` in a receipt that permits the cleanup,
+/// at its next revision (P12).
+fn complete_receipt(attempt_dir: &AttemptDir, receipt: &mut Receipt) -> Result<(), JailError> {
+    receipt.state_cleanup = StateCleanup::Complete;
+    receipt.cleanup_error = None;
+    receipt.revision += 1;
+    receipt.updated_at = crate::records::rfc3339_utc(std::time::SystemTime::now());
+    let bytes = serde_json::to_vec_pretty(&*receipt).map_err(|error| {
+        JailError::new(
+            ErrorCode::InternalError,
+            ErrorStage::Reconciling,
+            Remediation::InspectState,
+            format!("the receipt could not be serialized: {error}"),
+        )
+    })?;
+    state::replace_atomically_at(state::Site::GcResume, &attempt_dir.receipt_path(), &bytes)
 }
 
 /// Whether `path` names nothing (used by tests and diagnostics only).

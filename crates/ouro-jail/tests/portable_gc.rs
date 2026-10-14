@@ -1469,6 +1469,182 @@ mod scripted {
         assert!(scratches.iter().all(|scratch| !scratch.exists()));
     }
 
+    /// A settled attempt with managed scratch the supervisor could not
+    /// finish removing, and no vendor state.
+    fn settled_with_scratch_left(fixture: &Fixture, files: usize) -> (String, AttemptDir, Value) {
+        let id = fresh_id();
+        let dir = fixture.root_of(&id);
+        free_lock(&dir);
+        claim_dead_owner(&dir, HOST_BOOT);
+        let mut receipt = settled_receipt(&dir, HOST_BOOT);
+        receipt["cleanup_error"] = json!("scratch_removal_failed: cleanup_budget_exhausted");
+        json_file(&dir.receipt_path(), &receipt);
+        common::check_receipt(&receipt).expect("the receipt the supervisor writes");
+        managed_scratch(&dir, files);
+        (id, dir, receipt)
+    }
+
+    /// Settlement removes managed scratch with the bounded traversal, so a
+    /// scratch tree past its bound (a `cargo install`, a clone) stops it and
+    /// the settled receipt records `state_cleanup: pending` with
+    /// `scratch_removal_failed`. With no vendor state registered, nothing
+    /// finished it: gc left it and recorded the attempt finished. gc now
+    /// removes it on the receipt's proof of the tree's end, records
+    /// `gc_removed_scratch`, completes the receipt's cleanup at its next
+    /// revision, and only then finishes the attempt. A dry run changes
+    /// nothing.
+    #[test]
+    fn scratch_a_settlement_left_is_removed_without_vendor_state() {
+        let fixture = Fixture::new();
+        let (id, dir, receipt) = settled_with_scratch_left(&fixture, 3);
+        let before = picture(&fixture.data);
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        let report = run(&fixture, &host, true);
+        assert_eq!(picture(&fixture.data), before, "a dry run changes nothing");
+        assert_eq!(
+            only(&report, &id).scratch.as_deref(),
+            Some("would_remove"),
+            "{:?}",
+            only(&report, &id)
+        );
+
+        let report = run(&fixture, &host, false);
+        let entry = only(&report, &id);
+        assert!(!dir.scratch_path().exists(), "{entry:?}");
+        assert_eq!(entry.scratch.as_deref(), Some("removed"), "{entry:?}");
+        assert_eq!(entry.action, "completed_cleanup", "{entry:?}");
+        assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
+        let after = read_json(&dir.receipt_path());
+        assert_eq!(after["state_cleanup"], "complete", "{after:#}");
+        assert_eq!(after["cleanup_error"], Value::Null, "{after:#}");
+        assert_eq!(
+            after["revision"].as_u64(),
+            receipt["revision"].as_u64().map(|revision| revision + 1)
+        );
+        common::check_receipt(&after).expect("the completed receipt is valid");
+        let actions: Vec<Value> = read_json(&dir.state_path())["gc_actions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| action["action"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["gc_removed_scratch", "gc_finished"],
+            "{actions:#?}"
+        );
+        // Later passes spend only the name on it.
+        for _ in 0..2 {
+            let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+            let report = run(&fixture, &host, false);
+            assert!(
+                only(&report, &id).reason.starts_with("finished"),
+                "{:?}",
+                only(&report, &id)
+            );
+            assert_eq!(host.calls(), Vec::<String>::new());
+        }
+    }
+
+    /// The same removal under a bound smaller than the tree: each pass
+    /// removes what the bound allows and reports the rest pending (§6.4:
+    /// exit 1), the next pass goes on from there, and the receipt records
+    /// `complete` only once nothing is left.
+    #[test]
+    fn scratch_a_settlement_left_is_removed_over_bounded_passes() {
+        let fixture = Fixture::new();
+        let (id, dir, _) = settled_with_scratch_left(&fixture, 30);
+        let mut passes = 0;
+        while dir.scratch_path().exists() {
+            passes += 1;
+            assert!(passes <= 10, "the scratch was never finished");
+            let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+            let report = gc::gc_with(
+                &fixture.context(),
+                &gc_args(false),
+                &host,
+                Options {
+                    max_entries: 12,
+                    ..Options::DEFAULT
+                },
+            )
+            .unwrap();
+            if dir.scratch_path().exists() {
+                assert!(
+                    report.incomplete.iter().any(|item| item.contains(&id)),
+                    "pass {passes} left scratch and reported a complete pass: {:?}",
+                    only(&report, &id)
+                );
+                assert_eq!(
+                    read_json(&dir.receipt_path())["state_cleanup"],
+                    "pending",
+                    "pass {passes}"
+                );
+            }
+        }
+        assert!(
+            passes > 1,
+            "one pass under a bound of 12 removed 31 entries"
+        );
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        run(&fixture, &host, false);
+        assert_eq!(read_json(&dir.receipt_path())["state_cleanup"], "complete");
+        assert!(
+            read_json(&dir.state_path())["gc_actions"]
+                .as_array()
+                .is_some_and(|actions| actions
+                    .iter()
+                    .any(|action| action["action"] == "gc_finished")),
+            "nothing is left, so the attempt is finished"
+        );
+    }
+
+    /// A refusal that proves no tree can be running (after a verified
+    /// teardown, or before any boundary existed) leaves the managed scratch
+    /// Linux preparation made, and records no pending cleanup since no
+    /// vendor state was registered. gc removes the scratch on that proof and
+    /// leaves the receipt as written.
+    #[test]
+    fn scratch_a_proven_refusal_left_is_removed() {
+        for example_name in ["receipt-exec-refused.json", "receipt-none-refused.json"] {
+            let fixture = Fixture::new();
+            let id = fresh_id();
+            let dir = fixture.root_of(&id);
+            free_lock(&dir);
+            claim_dead_owner(&dir, HOST_BOOT);
+            let mut receipt = example(example_name);
+            receipt["attempt_id"] = json!(id);
+            if receipt["process"].is_object() {
+                receipt["process"]["identity"]["value"]["boot_id"] = json!(HOST_BOOT);
+            }
+            json_file(&dir.receipt_path(), &receipt);
+            let written = std::fs::read(dir.receipt_path()).unwrap();
+            let scratch = managed_scratch(&dir, 2);
+            let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+            let report = run(&fixture, &host, false);
+            let entry = only(&report, &id);
+            assert!(!scratch.exists(), "{example_name}: {entry:?}");
+            assert!(report.incomplete.is_empty(), "{:?}", report.incomplete);
+            assert_eq!(
+                std::fs::read(dir.receipt_path()).unwrap(),
+                written,
+                "{example_name}: a receipt with no pending cleanup is never rewritten"
+            );
+            let actions = read_json(&dir.state_path())["gc_actions"].clone();
+            assert_eq!(
+                actions
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|action| action["action"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["gc_removed_scratch", "gc_finished"],
+                "{example_name}: {actions:#}"
+            );
+        }
+    }
+
     /// A `policy.json` gc cannot read leaves unknown whether the attempt's
     /// scratch is managed. gc removes nothing on it, never records the
     /// attempt finished (a later pass may find managed scratch there), says

@@ -466,10 +466,29 @@ pub struct ReceiptView {
     pub tree_empty: Option<bool>,
     /// `lifetime.integrity`.
     pub integrity: String,
+    /// `lifetime.boundary`: `pending` when no boundary ever existed.
+    pub boundary: String,
     /// The boot the recorded process identity names, when it names one.
     pub boot_id: Option<String>,
     /// The execution leaf from `lifetime.native.details.execution_cgroup`.
     pub leaf: LeafSource,
+}
+
+impl ReceiptView {
+    /// Whether the receipt itself proves that no tree of the attempt can
+    /// still use what it left: the proof the vendor-state cleanup accepts
+    /// (`cleanup::permitted_by`), a settlement or a refusal after a verified
+    /// tree end, or a refusal before any boundary existed, never after lost
+    /// integrity.
+    #[must_use]
+    pub fn proves_tree_end(&self) -> bool {
+        self.integrity != "lost"
+            && match self.phase.as_str() {
+                "settled" => self.tree_empty == Some(true),
+                "refused" => self.tree_empty == Some(true) || self.boundary == "pending",
+                _ => false,
+            }
+    }
 }
 
 fn leaf_from(value: &Value) -> Option<LeafRecord> {
@@ -660,6 +679,11 @@ pub fn parse_receipt(bytes: &[u8], id: &str) -> Result<ReceiptView, String> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned(),
+        boundary: lifetime
+            .get("boundary")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
         boot_id: receipt
             .pointer("/process/identity/value/boot_id")
             .and_then(Value::as_str)
@@ -783,8 +807,7 @@ pub enum CgroupStep {
 /// What may be done with managed scratch.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ScratchStep {
-    /// Not gc's to decide: the supervisor verified the tree and owns its
-    /// cleanup (the J3 resumption finishes it), or gc already removed it.
+    /// Nothing to do: gc already removed it.
     NotApplicable,
     /// Kept; why.
     Keep(String),
@@ -835,6 +858,45 @@ fn retained(reason: String, failed_access: bool, owner: Option<String>) -> Next 
 /// The owner text of every owner [`decide`] established dead starts so.
 const OWNER_DEAD: &str = "dead: ";
 
+/// The basis of a scratch removal the receipt itself permits.
+const RECEIPT_PROVES_END: &str = "the receipt proves the tree's end";
+
+/// What may be done with managed scratch whatever the cgroup step allows.
+#[derive(Clone, Copy)]
+struct ScratchRule {
+    /// The receipt records lost boundary integrity.
+    integrity_lost: bool,
+    /// An earlier pass removed the scratch (`gc_removed_scratch`).
+    removed: bool,
+    /// The receipt proves the tree's end ([`ReceiptView::proves_tree_end`]).
+    proven: bool,
+}
+
+impl ScratchRule {
+    /// The scratch step, given what the cgroup step alone would allow. Lost
+    /// integrity keeps the scratch for explicit recovery in every boot (J4
+    /// wave 3, G6); scratch gc already removed needs nothing; and a receipt
+    /// that proves the tree's end lets gc remove it now, whether or not
+    /// vendor state was registered: the supervisor's own removal may have
+    /// stopped at its bound, and nothing else would ever finish it.
+    fn or(self, unproven: ScratchStep) -> ScratchStep {
+        if self.integrity_lost {
+            ScratchStep::Keep("boundary integrity was lost".to_owned())
+        } else if self.removed {
+            ScratchStep::NotApplicable
+        } else if self.proven {
+            ScratchStep::Now(RECEIPT_PROVES_END.to_owned())
+        } else {
+            unproven
+        }
+    }
+
+    /// Keeps the scratch for `reason`, unless [`ScratchRule::or`] decides.
+    fn keep(self, reason: &str) -> ScratchStep {
+        self.or(ScratchStep::Keep(reason.to_owned()))
+    }
+}
+
 fn decided(owner: Option<String>, cgroup: CgroupStep, scratch: ScratchStep) -> Next {
     decided_with(owner, cgroup, scratch, false)
 }
@@ -880,6 +942,12 @@ fn decided_with(
 ///    remove; empty, remove. Absent after an earlier pass verified it empty:
 ///    done, the tree's end is verified (J4 wave 3, G3). Otherwise absent,
 ///    replaced or unverifiable: keep.
+///
+/// Managed scratch follows the cgroup step, except under rules 3 to 8 when
+/// the receipt itself proves the tree's end ([`ReceiptView::proves_tree_end`]):
+/// gc then removes it whatever the cgroup step, with or without vendor state
+/// (the supervisor's own bounded removal may have stopped), and lost
+/// integrity keeps it in every rule.
 #[must_use]
 pub fn decide(facts: &Facts) -> Next {
     let state = match &facts.state {
@@ -922,20 +990,22 @@ pub fn decide(facts: &Facts) -> Next {
             );
         }
     };
-    // The supervisor verified the tree's end: it owns the cleanup (J3).
+    // The supervisor verified the tree's end: no orphan is left to end.
     let tree_verified = receipt.is_some_and(|receipt| receipt.tree_empty == Some(true));
     // Audit 2026-09-25-2, S4: no receipt was ever written.
     let receipt_is_none = receipt.is_none();
     let source = recorded_leaf(state, receipt);
     let recorded = matches!(source, LeafSource::Recorded(_) | LeafSource::NamedOnly(_));
-    // An unverified end keeps whatever scratch exists; a reason is reported.
-    let keep_scratch = |reason: &str| {
-        if tree_verified {
-            ScratchStep::NotApplicable
-        } else {
-            ScratchStep::Keep(reason.to_owned())
-        }
+    // J4 wave 3 (G6): lost integrity keeps the leaf and the scratch for
+    // explicit recovery in every boot, so it is read before the boot rule.
+    let integrity_lost = receipt.is_some_and(|receipt| receipt.integrity == "lost");
+    let scratch = ScratchRule {
+        integrity_lost,
+        removed: state.gc_removed_scratch,
+        proven: receipt.is_some_and(ReceiptView::proves_tree_end),
     };
+    // An unverified end keeps whatever scratch exists; a reason is reported.
+    let keep_scratch = |reason: &str| scratch.keep(reason);
     let keep_leaf = |reason: String| {
         if recorded {
             CgroupStep::Report(format!("retained: {reason}"))
@@ -943,10 +1013,6 @@ pub fn decide(facts: &Facts) -> Next {
             CgroupStep::Nothing
         }
     };
-
-    // J4 wave 3 (G6): lost integrity keeps the leaf and the scratch for
-    // explicit recovery in every boot, so it is read before the boot rule.
-    let integrity_lost = receipt.is_some_and(|receipt| receipt.integrity == "lost");
     let Some(owner) = &state.owner else {
         return decided(
             Some("unknown: jail state records no owner birth identity".to_owned()),
@@ -974,13 +1040,9 @@ pub fn decide(facts: &Facts) -> Next {
         // §14.2: "After host reboot, the old processes cannot be alive, but
         // any reused cgroup path must not be treated as the original
         // resource." Nothing is asked about the leaf or the owner's pid.
-        let scratch = if tree_verified || state.gc_removed_scratch {
-            ScratchStep::NotApplicable
-        } else if integrity_lost {
-            ScratchStep::Keep("boundary integrity was lost".to_owned())
-        } else {
-            ScratchStep::Now("the tree ended with the boot it ran in".to_owned())
-        };
+        let scratch = scratch.or(ScratchStep::Now(
+            "the tree ended with the boot it ran in".to_owned(),
+        ));
         let text = "recorded in another boot: a cgroup at that path now is not the original \
                     resource and is never touched";
         let cgroup = match (recorded, integrity_lost) {
@@ -1057,7 +1119,7 @@ pub fn decide(facts: &Facts) -> Next {
         }
         // J4 W2-S: N7
         LeafSource::NamedOnly(path) => {
-            return decide_named(facts, receipt, state, path, owner_text, tree_verified);
+            return decide_named(facts, state, path, owner_text, tree_verified, scratch);
         }
     };
     if integrity_lost {
@@ -1072,15 +1134,12 @@ pub fn decide(facts: &Facts) -> Next {
         );
     }
     if state.gc_removed.contains(&leaf) {
-        let scratch = if tree_verified || state.gc_removed_scratch {
-            ScratchStep::NotApplicable
-        } else {
-            ScratchStep::Now("an earlier gc verified the leaf empty and removed it".to_owned())
-        };
         return decided(
             owner_text,
             CgroupStep::Settled("removed by gc earlier".to_owned()),
-            scratch,
+            scratch.or(ScratchStep::Now(
+                "an earlier gc verified the leaf empty and removed it".to_owned(),
+            )),
         );
     }
     let Some(probe) = &facts.leaf else {
@@ -1093,11 +1152,7 @@ pub fn decide(facts: &Facts) -> Next {
         LeafProbe::Absent if state.gc_verified.contains(&leaf) => decided(
             owner_text,
             CgroupStep::Settled(GONE_AFTER_GC.to_owned()),
-            if tree_verified || state.gc_removed_scratch {
-                ScratchStep::NotApplicable
-            } else {
-                ScratchStep::Now(GONE_AFTER_GC.to_owned())
-            },
+            scratch.or(ScratchStep::Now(GONE_AFTER_GC.to_owned())),
         ),
         LeafProbe::Absent => decided(
             owner_text,
@@ -1132,7 +1187,7 @@ pub fn decide(facts: &Facts) -> Next {
                  it is not this attempt's orphan"
                     .to_owned(),
             ),
-            ScratchStep::NotApplicable,
+            keep_scratch("the recorded leaf is populated by something else"),
         ),
         LeafProbe::Identified { populated: true } => decided(
             owner_text,
@@ -1142,11 +1197,7 @@ pub fn decide(facts: &Facts) -> Next {
         LeafProbe::Identified { populated: false } => decided(
             owner_text,
             CgroupStep::Remove(leaf),
-            if tree_verified {
-                ScratchStep::NotApplicable
-            } else {
-                ScratchStep::AfterCgroup
-            },
+            scratch.or(ScratchStep::AfterCgroup),
         ),
     }
 }
@@ -1164,20 +1215,14 @@ const GONE_AFTER_GC: &str = "removed: gone after an earlier gc verified it empty
 /// this attempt never put there) is retained and reported.
 fn decide_named(
     facts: &Facts,
-    receipt: Option<&ReceiptView>,
     state: &StateView,
     path: std::path::PathBuf,
     owner_text: Option<String>,
     tree_verified: bool,
+    scratch: ScratchRule,
 ) -> Next {
-    let keep_scratch = |reason: &str| {
-        if tree_verified {
-            ScratchStep::NotApplicable
-        } else {
-            ScratchStep::Keep(reason.to_owned())
-        }
-    };
-    if receipt.is_some_and(|receipt| receipt.integrity == "lost") {
+    let keep_scratch = |reason: &str| scratch.keep(reason);
+    if scratch.integrity_lost {
         return decided(
             owner_text,
             CgroupStep::Report(
@@ -1192,13 +1237,9 @@ fn decide_named(
         return decided(
             owner_text,
             CgroupStep::Settled("removed by gc earlier".to_owned()),
-            if tree_verified || state.gc_removed_scratch {
-                ScratchStep::NotApplicable
-            } else {
-                ScratchStep::Now(
-                    "an earlier gc removed the leaf registered by name only, empty".to_owned(),
-                )
-            },
+            scratch.or(ScratchStep::Now(
+                "an earlier gc removed the leaf registered by name only, empty".to_owned(),
+            )),
         );
     }
     let Some(probe) = &facts.leaf else {
@@ -1209,11 +1250,7 @@ fn decide_named(
         LeafProbe::Absent if state.gc_verified.iter().any(|leaf| leaf.path == path) => decided(
             owner_text,
             CgroupStep::Settled(GONE_AFTER_GC.to_owned()),
-            if tree_verified || state.gc_removed_scratch {
-                ScratchStep::NotApplicable
-            } else {
-                ScratchStep::Now(GONE_AFTER_GC.to_owned())
-            },
+            scratch.or(ScratchStep::Now(GONE_AFTER_GC.to_owned())),
         ),
         LeafProbe::Absent => decided(
             owner_text,
@@ -1252,11 +1289,7 @@ fn decide_named(
         LeafProbe::Identified { populated: false } => decided(
             owner_text,
             CgroupStep::RemoveNamed(path),
-            if tree_verified {
-                ScratchStep::NotApplicable
-            } else {
-                ScratchStep::AfterCgroup
-            },
+            scratch.or(ScratchStep::AfterCgroup),
         ),
     }
 }
@@ -2083,7 +2116,9 @@ fn proxy_then_resume(
         };
     settled &= matches!(
         outcome,
-        Ok(cleanup::Resume::NothingPending | cleanup::Resume::Completed { .. })
+        Ok(cleanup::Resume::NothingPending
+            | cleanup::Resume::Completed { .. }
+            | cleanup::Resume::ReceiptCompleted)
     );
     let (action, reason) = match outcome {
         Ok(cleanup::Resume::NothingPending) => (
@@ -2112,6 +2147,18 @@ fn proxy_then_resume(
         Ok(cleanup::Resume::WouldRemove) => (
             "would_remove_vendor_state".to_owned(),
             "the records permit the pending vendor-state cleanup".to_owned(),
+        ),
+        Ok(cleanup::Resume::ReceiptCompleted) => (
+            "completed_cleanup".to_owned(),
+            "no vendor state was registered and no managed scratch is left, so the receipt's \
+             pending cleanup is complete and the receipt records it"
+                .to_owned(),
+        ),
+        Ok(cleanup::Resume::WouldCompleteReceipt) => (
+            "would_complete_cleanup".to_owned(),
+            "no vendor state was registered and no managed scratch is left, so the receipt's \
+             pending cleanup would be recorded complete"
+                .to_owned(),
         ),
         Ok(cleanup::Resume::Retained(reason)) => (
             "retained".to_owned(),
@@ -2356,6 +2403,7 @@ mod tests {
             phase: "enforced".to_owned(),
             tree_empty,
             integrity: "verified".to_owned(),
+            boundary: "pid_namespace".to_owned(),
             boot_id: Some(BOOT.to_owned()),
             leaf: LeafSource::Recorded(leaf()),
         }

@@ -2131,8 +2131,10 @@ fn degrade_trace_coverage(record: &mut AttemptRecord, journal: &Journal) {
 ///
 /// `Ok(complete)` once both are gone, `Ok(not_needed)` when neither existed
 /// (the `none` profile makes no managed scratch), and `Err` with the safe
-/// reason when a removal stopped: the scratch is retained and a later `gc`
-/// resumes it.
+/// reason when a removal stopped (a tree larger than the entry bound
+/// included): the scratch is retained, the receipt records the cleanup
+/// `pending`, and `gc` removes the rest on that receipt's proof of the
+/// tree's end, then records the receipt's cleanup `complete`.
 fn remove_managed_scratch(
     attempt_dir: &AttemptDir,
     plan: &Plan,
