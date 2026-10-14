@@ -582,14 +582,11 @@ pub(crate) fn preamble(client: &TcpStream) -> io::Result<[u8; PREAMBLE_LEN]> {
         client.local_addr()?.port(),
     )))
 }
-/// A preamble as the bridge writes it for a client on the IPv4 loopback,
-/// for tests that stand in for the bridge in front of a vault proxy.
+/// The preamble the bridge writes for a `client` it accepted on
+/// `bridge_port`, for tests on either side of it.
 #[cfg(test)]
-pub(super) fn preamble_for(client_port: u16, bridge_port: u16) -> [u8; PREAMBLE_LEN] {
-    encode(Key::new(
-        SocketAddr::from(([127, 0, 0, 1], client_port)),
-        bridge_port,
-    ))
+pub(crate) fn preamble_for(client: SocketAddr, bridge_port: u16) -> [u8; PREAMBLE_LEN] {
+    encode(Key::new(client, bridge_port))
 }
 
 #[cfg(test)]

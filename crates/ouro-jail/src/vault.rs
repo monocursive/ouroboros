@@ -586,7 +586,7 @@ mod tests {
         // This test stands in for the sealed bridge, which writes the
         // connection's origin preamble first.
         socket
-            .write_all(&origin::preamble_for(40000, 3128))
+            .write_all(&origin::preamble_for(([127, 0, 0, 1], 40000).into(), 3128))
             .unwrap();
         write!(
             socket,
@@ -808,7 +808,7 @@ mod tests {
         // result; once neither is active both have settled.
         let mut refused = UnixStream::connect(&path).unwrap();
         refused
-            .write_all(&origin::preamble_for(40000, 3128))
+            .write_all(&origin::preamble_for(([127, 0, 0, 1], 40000).into(), 3128))
             .unwrap();
         refused
             .write_all(b"CONNECT other.test:443 HTTP/1.1\r\nHost: other.test:443\r\n\r\n")

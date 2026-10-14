@@ -427,6 +427,21 @@ fn accept_all(
             let _ = client.shutdown(Shutdown::Both);
             continue;
         }
+        // The preamble is read from the client's own addresses before
+        // anything is opened for it: a client already gone (reset before
+        // this accept) is closed, neither counted as turned away at capacity
+        // nor handed to the proxy as a request.
+        let prefix = if credential_origin {
+            match crate::vault::origin::preamble(&client) {
+                Ok(prefix) => Some(prefix),
+                Err(_) => {
+                    let _ = client.shutdown(Shutdown::Both);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         // A proxy that cannot be reached (dead, replaced, refused by the
         // mediator) closes this client and nothing else: fail closed.
         let Ok(upstream) = connect() else {
@@ -437,11 +452,7 @@ fn accept_all(
             continue;
         }
         let mut up = Pipe::new();
-        if credential_origin {
-            let Ok(prefix) = crate::vault::origin::preamble(&client) else {
-                rejected();
-                continue;
-            };
+        if let Some(prefix) = prefix {
             up.buffer[..prefix.len()].copy_from_slice(&prefix);
             up.end = prefix.len();
         }
@@ -481,6 +492,96 @@ mod tests {
             });
         });
         (address, rejected)
+    }
+
+    /// Serves `listener` as a bridge sealed for a vault, which writes the
+    /// credential-origin preamble ahead of each client; with the counts of
+    /// proxy connections it opened and clients it turned away.
+    fn vault_bridge(
+        listener: TcpListener,
+        path: std::path::PathBuf,
+    ) -> (
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        listener.set_nonblocking(true).unwrap();
+        let (connects, rejected) = (
+            std::sync::Arc::new(AtomicUsize::new(0)),
+            std::sync::Arc::new(AtomicUsize::new(0)),
+        );
+        let (opened, turned_away) = (connects.clone(), rejected.clone());
+        std::thread::spawn(move || {
+            serve_many(
+                &[&listener],
+                &|| {
+                    opened.fetch_add(1, Ordering::SeqCst);
+                    UnixStream::connect(&path)
+                },
+                &|| {
+                    turned_away.fetch_add(1, Ordering::SeqCst);
+                },
+                true,
+            );
+        });
+        (connects, rejected)
+    }
+
+    #[test]
+    fn a_vault_bridge_writes_the_origin_preamble_before_the_client_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.sock");
+        let upstream = UnixListener::bind(&path).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let _ = vault_bridge(listener, path);
+        let mut client = TcpStream::connect(address).unwrap();
+        client.write_all(b"hello").unwrap();
+        let (mut stream, _) = upstream.accept().unwrap();
+        let expected =
+            crate::vault::origin::preamble_for(client.local_addr().unwrap(), address.port());
+        let mut received = vec![0u8; expected.len() + 5];
+        stream.read_exact(&mut received).unwrap();
+        assert_eq!(&received[..expected.len()], &expected);
+        assert_eq!(&received[expected.len()..], b"hello");
+    }
+
+    #[test]
+    fn a_client_gone_before_its_preamble_opens_nothing_and_is_not_a_capacity_rejection() {
+        use std::os::fd::AsRawFd as _;
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.sock");
+        let upstream = UnixListener::bind(&path).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // Queued, then reset, before the bridge accepts it.
+        let gone = TcpStream::connect(address).unwrap();
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        // SAFETY: `linger` is a valid `linger` of the size passed, and the
+        // descriptor belongs to `gone`, open for the call.
+        let rc = unsafe {
+            libc::setsockopt(
+                gone.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const linger).cast(),
+                libc::socklen_t::try_from(std::mem::size_of::<libc::linger>()).unwrap(),
+            )
+        };
+        assert_eq!(rc, 0);
+        drop(gone);
+        let (connects, rejected) = vault_bridge(listener, path);
+        // A live client after it: once its relay reaches the proxy, the
+        // bridge has dealt with the one before it.
+        let mut live = TcpStream::connect(address).unwrap();
+        live.write_all(b"x").unwrap();
+        let (_stream, _) = upstream.accept().unwrap();
+        assert_eq!(connects.load(Ordering::SeqCst), 1, "only the live client");
+        assert_eq!(rejected.load(Ordering::SeqCst), 0, "not turned away");
     }
 
     #[test]
