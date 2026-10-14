@@ -6,15 +6,15 @@
 //! identity" (§9.3). Nothing here signals a pid at all. The owner's pid is
 //! only read (`/proc/<pid>/stat`), and compared by birth time; the only kill
 //! is a write of `cgroup.kill` opened relative to a descriptor of the leaf
-//! directory whose `(device, inode)` jail state registered (J4 wave 2, N7;
-//! a leaf registered by name only is never killed, see [`probe_named_leaf`]).
+//! directory whose `(device, inode)` jail state registered (a leaf
+//! registered by name only is never killed, see [`probe_named_leaf`]).
 //!
 //! How a recorded leaf is pinned ([`pin`]):
 //! 1. The path must be a direct child of this user's delegated subtree
 //!    (`user@<uid>.service`) and have an execution leaf's name
 //!    (`ouro-<attempt id>.leaf`): gc never follows a registration anywhere
-//!    else in cgroupfs. (J4 wave 3, G2: `gc::decide` has already refused a
-//!    registration whose leaf is not its own attempt's.)
+//!    else in cgroupfs. (`gc::decide` has already refused a registration
+//!    whose leaf is not its own attempt's.)
 //! 2. The parent is opened `O_DIRECTORY | O_NOFOLLOW` and must be cgroup v2.
 //! 3. The name is looked up in that parent (`fstatat`, no follow) and must be
 //!    a directory with the recorded `(device, inode)`; it is then opened
@@ -31,7 +31,9 @@
 //! so a same-uid swap between the check and the `unlinkat` can at most remove
 //! an empty cgroup of the same user in the same delegated subtree.
 
+use std::borrow::Cow;
 use std::ffi::{CStr, CString};
+use std::fmt;
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
 use std::mem::MaybeUninit;
@@ -51,6 +53,48 @@ const MAX_CHILD_DEPTH: usize = 64;
 /// How often a killed leaf's population is re-read.
 const POLL: Duration = Duration::from_millis(10);
 
+/// Why a step on a recorded leaf failed: what was being done, and the OS
+/// error, errno included, when there was one. gc's seam takes the text
+/// ([`fmt::Display`]); inside this module the error stays typed.
+#[derive(Debug)]
+struct Failure {
+    step: Cow<'static, str>,
+    source: Option<io::Error>,
+}
+
+impl Failure {
+    /// `step` failed with the OS error `source`.
+    fn os(step: &'static str, source: io::Error) -> Failure {
+        Failure {
+            step: Cow::Borrowed(step),
+            source: Some(source),
+        }
+    }
+
+    /// `step` failed for a reason no syscall reported.
+    fn new(step: impl Into<Cow<'static, str>>) -> Failure {
+        Failure {
+            step: step.into(),
+            source: None,
+        }
+    }
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.source {
+            Some(source) => write!(f, "{}: {source}", self.step),
+            None => f.write_str(&self.step),
+        }
+    }
+}
+
+impl From<Failure> for String {
+    fn from(failure: Failure) -> String {
+        failure.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The owner
 // ---------------------------------------------------------------------------
@@ -60,8 +104,8 @@ const POLL: Duration = Duration::from_millis(10);
 /// Reads `/proc/<pid>/stat` once and compares the birth time: a different
 /// one means the kernel reused the pid for another process. A zombie is the
 /// leader of a thread group; it is dead only when no other thread of the
-/// group lives (J4 wave 3, P1 (c): a thread in a D-state `fsync` or `rename`
-/// keeps the leader `Z` while its write may still land). Signals nothing.
+/// group lives (a thread in a D-state `fsync` or `rename` keeps the leader
+/// `Z` while its write may still land). Signals nothing.
 #[must_use]
 pub fn owner_liveness(owner: &OwnerRecord) -> Liveness {
     let Ok(pid) = libc::pid_t::try_from(owner.pid) else {
@@ -205,12 +249,12 @@ fn rmdir_at(dir: RawFd, name: &CStr) -> io::Result<()> {
 }
 
 /// The child directories of `dir`, charging every entry read to `entries`.
-fn child_dirs(dir: &File, entries: &mut usize) -> Result<Vec<CString>, String> {
+fn child_dirs(dir: &File, entries: &mut usize) -> Result<Vec<CString>, Failure> {
     // SAFETY: duplicating an open descriptor; F_DUPFD_CLOEXEC dereferences
     // nothing.
     let fd = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if fd < 0 {
-        return Err(format!("dup: {}", io::Error::last_os_error()));
+        return Err(Failure::os("dup", io::Error::last_os_error()));
     }
     // SAFETY: `fd` is a fresh duplicate this function owns; fdopendir takes
     // it over on success.
@@ -219,7 +263,7 @@ fn child_dirs(dir: &File, entries: &mut usize) -> Result<Vec<CString>, String> {
         let error = io::Error::last_os_error();
         // SAFETY: fdopendir failed, so `fd` is still this function's alone.
         unsafe { libc::close(fd) };
-        return Err(format!("fdopendir: {error}"));
+        return Err(Failure::os("fdopendir", error));
     }
     // SAFETY: `stream` is a valid directory stream; a duplicate shares the
     // file offset, so start from the beginning whatever read it before.
@@ -235,11 +279,11 @@ fn child_dirs(dir: &File, entries: &mut usize) -> Result<Vec<CString>, String> {
             let error = io::Error::last_os_error();
             break match error.raw_os_error() {
                 Some(0) | None => Ok(()),
-                Some(_) => Err(format!("readdir: {error}")),
+                Some(_) => Err(Failure::os("readdir", error)),
             };
         }
         if *entries == 0 {
-            break Err("the per-invocation entry bound is reached".to_owned());
+            break Err(Failure::new("the per-invocation entry bound is reached"));
         }
         *entries -= 1;
         // SAFETY: readdir returned a valid entry whose `d_name` is a
@@ -283,7 +327,6 @@ fn pin_under(root: &Path, leaf: &LeafRecord) -> Result<Pinned, LeafProbe> {
     pin_as(root, &leaf.path, Some((leaf.device, leaf.inode)))
 }
 
-// N7
 /// Pins a leaf jail state registers by name only: every check of [`pin`]
 /// but the recorded identity, which does not exist; the identity pinned is
 /// the one the directory has when it is opened.
@@ -301,22 +344,13 @@ fn pin_named(path: &Path) -> Result<Pinned, LeafProbe> {
 /// Pins `path` under `root`, as the recorded `identity` when there is one.
 fn pin_as(root: &Path, path: &Path, recorded: Option<(u64, u64)>) -> Result<Pinned, LeafProbe> {
     let unverifiable = |why: String| LeafProbe::Unverifiable(why);
-    let leaf = LeafRecord {
-        path: path.to_path_buf(),
-        device: recorded.map_or(0, |(device, _)| device),
-        inode: recorded.map_or(0, |(_, inode)| inode),
-    };
-    if leaf.path.parent() != Some(root) {
+    if path.parent() != Some(root) {
         return Err(unverifiable(
             "the recorded leaf is not a direct child of this user's delegated cgroup subtree"
                 .to_owned(),
         ));
     }
-    let Some(name) = leaf
-        .path
-        .file_name()
-        .filter(|name| cgroup::is_leaf_name(name))
-    else {
+    let Some(name) = path.file_name().filter(|name| cgroup::is_leaf_name(name)) else {
         return Err(unverifiable(
             "the recorded name is not an execution leaf's name".to_owned(),
         ));
@@ -348,7 +382,7 @@ fn pin_as(root: &Path, path: &Path, recorded: Option<(u64, u64)>) -> Result<Pinn
         }
         Ok((device, inode, true)) => (device, inode),
     };
-    // J4 W2-S: N7 — a name-only registration pins what the lookup found.
+    // A name-only registration pins what the lookup found.
     let identity = recorded.unwrap_or(looked_up);
     let dir = match open_at(
         parent.as_raw_fd(),
@@ -399,36 +433,38 @@ impl Pinned {
         )
     }
 
-    fn populated(&self) -> Result<bool, String> {
+    fn populated(&self) -> Result<bool, Failure> {
         let mut text = String::new();
         self.control(c"cgroup.events", false)
             .and_then(|file| file.take(16384).read_to_string(&mut text))
             .and_then(|_| cgroup::parse_populated(&text))
-            .map_err(|error| format!("cgroup.events: {error}"))
+            .map_err(|error| Failure::os("cgroup.events", error))
     }
 
-    fn kill(&self) -> Result<(), String> {
+    fn kill(&self) -> Result<(), Failure> {
         self.control(c"cgroup.kill", true)
             .and_then(|mut file| file.write_all(b"1"))
-            .map_err(|error| format!("cgroup.kill: {error}"))
+            .map_err(|error| Failure::os("cgroup.kill", error))
     }
 
     /// Removes the leaf by name in the pinned parent, while the name still
     /// is the pinned leaf, after removing the (empty) child cgroups a child
     /// made inside it.
-    fn remove(&self, entries: &mut usize) -> Result<(), String> {
+    fn remove(&self, entries: &mut usize) -> Result<(), Failure> {
         match self.unlink() {
             Ok(()) => return Ok(()),
             Err(error)
                 if error.raw_os_error() == Some(libc::EBUSY)
                     || error.raw_os_error() == Some(libc::ENOTEMPTY) => {}
-            Err(error) => return Err(format!("rmdir: {error}")),
+            Err(error) => return Err(Failure::os("rmdir", error)),
         }
         remove_children(&self.dir, 0, entries)?;
         if self.populated()? {
-            return Err("populated again; an occupied cgroup is never removed".to_owned());
+            return Err(Failure::new(
+                "populated again; an occupied cgroup is never removed",
+            ));
         }
-        self.unlink().map_err(|error| format!("rmdir: {error}"))
+        self.unlink().map_err(|error| Failure::os("rmdir", error))
     }
 
     fn unlink(&self) -> io::Result<()> {
@@ -442,30 +478,29 @@ impl Pinned {
 
 /// Removes the empty child cgroups of `dir`, depth first, bounded in depth
 /// and by `entries`.
-fn remove_children(dir: &File, depth: usize, entries: &mut usize) -> Result<(), String> {
+fn remove_children(dir: &File, depth: usize, entries: &mut usize) -> Result<(), Failure> {
     if depth >= MAX_CHILD_DEPTH {
-        return Err(format!(
+        return Err(Failure::new(format!(
             "the leaf holds child cgroups deeper than {MAX_CHILD_DEPTH} levels"
-        ));
+        )));
     }
     for name in child_dirs(dir, entries)? {
         let child = open_at(dir.as_raw_fd(), &name, libc::O_RDONLY | libc::O_DIRECTORY)
-            .map_err(|error| format!("a child cgroup: {error}"))?;
+            .map_err(|error| Failure::os("a child cgroup", error))?;
         remove_children(&child, depth + 1, entries)?;
         drop(child);
-        rmdir_at(dir.as_raw_fd(), &name).map_err(|error| format!("a child cgroup: {error}"))?;
+        rmdir_at(dir.as_raw_fd(), &name).map_err(|error| Failure::os("a child cgroup", error))?;
     }
     Ok(())
 }
 
-/// Whether this process itself runs inside the recorded leaf: gc never ends
-/// its own cgroup.
-fn holds_this_process(leaf: &LeafRecord) -> Result<bool, String> {
-    let own = cgroup::own_cgroup().map_err(|error| format!("/proc/self/cgroup: {error}"))?;
-    let relative = leaf
-        .path
+/// Whether this process itself runs inside the leaf at `path`: gc never
+/// ends its own cgroup.
+fn holds_this_process(path: &Path) -> Result<bool, Failure> {
+    let own = cgroup::own_cgroup().map_err(|error| Failure::os("/proc/self/cgroup", error))?;
+    let relative = path
         .strip_prefix(cgroup::CGROUP_ROOT)
-        .map_err(|_| "the recorded leaf is outside the cgroup v2 mount".to_owned())?;
+        .map_err(|_| Failure::new("the recorded leaf is outside the cgroup v2 mount"))?;
     Ok(cgroup::within(&own, &format!("/{}", relative.display())))
 }
 
@@ -485,22 +520,28 @@ fn describe(probe: &LeafProbe) -> String {
 /// What is at the recorded leaf's path.
 #[must_use]
 pub fn probe_leaf(leaf: &LeafRecord) -> LeafProbe {
-    let pinned = match pin(leaf) {
-        Ok(pinned) => pinned,
-        Err(probe) => return probe,
-    };
-    match holds_this_process(leaf) {
+    match pin(leaf) {
+        Ok(pinned) => probe_pinned(&pinned, &leaf.path, "recorded"),
+        Err(probe) => probe,
+    }
+}
+
+/// What a pinned leaf at `path` is: never this process's own cgroup, and
+/// identified with its population. `registration` says how gc knows the
+/// leaf ("recorded", "registered").
+fn probe_pinned(pinned: &Pinned, path: &Path, registration: &str) -> LeafProbe {
+    match holds_this_process(path) {
         Ok(false) => {}
         Ok(true) => {
-            return LeafProbe::Unverifiable(
-                "this gc process runs inside the recorded leaf".to_owned(),
-            );
+            return LeafProbe::Unverifiable(format!(
+                "this gc process runs inside the {registration} leaf"
+            ));
         }
-        Err(error) => return LeafProbe::Unverifiable(error),
+        Err(error) => return LeafProbe::Unverifiable(error.into()),
     }
     match pinned.populated() {
         Ok(populated) => LeafProbe::Identified { populated },
-        Err(error) => LeafProbe::Unverifiable(error),
+        Err(error) => LeafProbe::Unverifiable(error.into()),
     }
 }
 
@@ -511,7 +552,7 @@ pub fn probe_leaf(leaf: &LeafRecord) -> LeafProbe {
 /// Why the leaf was not identified, killed or seen empty in time.
 pub fn terminate_leaf(leaf: &LeafRecord, budget: Duration) -> Result<(), String> {
     let pinned = pin(leaf).map_err(|probe| describe(&probe))?;
-    if holds_this_process(leaf)? {
+    if holds_this_process(&leaf.path)? {
         return Err("this gc process runs inside the recorded leaf".to_owned());
     }
     pinned.kill()?;
@@ -530,33 +571,14 @@ pub fn terminate_leaf(leaf: &LeafRecord, budget: Duration) -> Result<(), String>
     }
 }
 
-// N7
 /// What is at a leaf registered by name only: `Identified` when a cgroup v2
 /// directory with the leaf's name stands directly under this user's
 /// delegated subtree (the recorded name is the only identity there is).
 #[must_use]
 pub fn probe_named_leaf(path: &Path) -> LeafProbe {
-    let pinned = match pin_named(path) {
-        Ok(pinned) => pinned,
-        Err(probe) => return probe,
-    };
-    let leaf = LeafRecord {
-        path: path.to_path_buf(),
-        device: pinned.identity.0,
-        inode: pinned.identity.1,
-    };
-    match holds_this_process(&leaf) {
-        Ok(false) => {}
-        Ok(true) => {
-            return LeafProbe::Unverifiable(
-                "this gc process runs inside the registered leaf".to_owned(),
-            );
-        }
-        Err(error) => return LeafProbe::Unverifiable(error),
-    }
-    match pinned.populated() {
-        Ok(populated) => LeafProbe::Identified { populated },
-        Err(error) => LeafProbe::Unverifiable(error),
+    match pin_named(path) {
+        Ok(pinned) => probe_pinned(&pinned, path, "registered"),
+        Err(probe) => probe,
     }
 }
 
@@ -587,7 +609,7 @@ pub fn remove_leaf(leaf: &LeafRecord, entries: &mut usize) -> Result<(), String>
     if pinned.populated()? {
         return Err("populated; an occupied cgroup is never removed".to_owned());
     }
-    pinned.remove(entries)
+    Ok(pinned.remove(entries)?)
 }
 
 #[cfg(test)]
@@ -694,6 +716,23 @@ mod tests {
             Err(other) => panic!("{other:?}"),
             Ok(_) => panic!("a tmpfs directory was pinned as a cgroup"),
         }
+    }
+
+    /// A failure keeps the OS error, errno included, and gc's seam reads the
+    /// same text it always did.
+    #[test]
+    fn a_failure_keeps_its_errno_and_its_text() {
+        let denied = || io::Error::from_raw_os_error(libc::EACCES);
+        let failure = Failure::os("cgroup.kill", denied());
+        assert_eq!(
+            failure.source.as_ref().and_then(io::Error::raw_os_error),
+            Some(libc::EACCES)
+        );
+        assert_eq!(String::from(failure), format!("cgroup.kill: {}", denied()));
+        assert_eq!(
+            String::from(Failure::new("the per-invocation entry bound is reached")),
+            "the per-invocation entry bound is reached"
+        );
     }
 
     #[test]
