@@ -413,6 +413,9 @@ impl PolicySnapshot {
                 format!("the policy snapshot could not be serialized: {error}"),
             )
         })?;
+        // Every path is checked against the serialized shape: a renamed or
+        // missing field is an internal error, never a silently unsorted array
+        // and so a second digest for the same policy.
         for path in [
             &["filesystem", "read_write"][..],
             &["filesystem", "read_only"][..],
@@ -420,10 +423,15 @@ impl PolicySnapshot {
             &["filesystem", "protected_segments"][..],
             &["network", "allow"][..],
             &["network", "translation_prefixes"][..],
-            &["launch", "state_subdirs"][..],
         ] {
-            sort_set_at(&mut value, path)?;
+            sort_at(&mut value, path, Absent::Never, Order::Set)?;
         }
+        sort_at(
+            &mut value,
+            &["launch", "state_subdirs"],
+            Absent::UnderNull,
+            Order::Set,
+        )?;
         if let Some(credentials) = value
             .pointer_mut("/launch/credentials")
             .and_then(serde_json::Value::as_array_mut)
@@ -431,18 +439,24 @@ impl PolicySnapshot {
             for credential in credentials {
                 if let Some(vault) = credential.get_mut("vault") {
                     for field in ["paths", "binaries"] {
-                        sort_set_at(vault, &[field])?;
+                        sort_at(vault, &[field], Absent::WhenEmpty, Order::Set)?;
                     }
                 }
             }
         }
         // Keyed collections follow the same byte order
-        for path in [
-            &["environment", "bindings"][..],
-            &["launch", "credentials"][..],
-        ] {
-            sort_keyed_at(&mut value, path)?;
-        }
+        sort_at(
+            &mut value,
+            &["environment", "bindings"],
+            Absent::Never,
+            Order::Keyed,
+        )?;
+        sort_at(
+            &mut value,
+            &["launch", "credentials"],
+            Absent::UnderNull,
+            Order::Keyed,
+        )?;
         Ok(value)
     }
 
@@ -465,28 +479,56 @@ impl PolicySnapshot {
     }
 }
 
-fn sort_set_at(value: &mut serde_json::Value, path: &[&str]) -> Result<(), JailError> {
-    sort_by_canonical_bytes_at(value, path, true)
+/// When a sorted array may legitimately be missing from the serialized
+/// snapshot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Absent {
+    /// Always serialized.
+    Never,
+    /// Beneath a field group that serializes as `null` when absent
+    /// (`launch`).
+    UnderNull,
+    /// Skipped from serialization when empty.
+    WhenEmpty,
 }
 
-fn sort_keyed_at(value: &mut serde_json::Value, path: &[&str]) -> Result<(), JailError> {
-    sort_by_canonical_bytes_at(value, path, false)
+/// How an array is ordered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Order {
+    /// A set: sorted and deduplicated by canonical bytes.
+    Set,
+    /// A keyed collection: sorted by canonical bytes, never deduplicated.
+    Keyed,
 }
 
-fn sort_by_canonical_bytes_at(
+fn sort_at(
     value: &mut serde_json::Value,
     path: &[&str],
-    dedup: bool,
+    absent: Absent,
+    order: Order,
 ) -> Result<(), JailError> {
+    let missing = |what: &str| {
+        JailError::new(
+            ErrorCode::InternalError,
+            ErrorStage::Resolving,
+            Remediation::InspectState,
+            format!(
+                "the serialized policy snapshot {what} at `{}`",
+                path.join(".")
+            ),
+        )
+    };
     let mut node = value;
     for key in path {
         node = match node.get_mut(key) {
-            Some(serde_json::Value::Null) | None => return Ok(()),
+            Some(serde_json::Value::Null) if absent == Absent::UnderNull => return Ok(()),
+            None if absent == Absent::WhenEmpty => return Ok(()),
             Some(next) => next,
+            None => return Err(missing("has no field")),
         };
     }
     let Some(items) = node.as_array_mut() else {
-        return Ok(());
+        return Err(missing("has no array"));
     };
     let mut encoded: Vec<(Vec<u8>, serde_json::Value)> = Vec::with_capacity(items.len());
     for item in items.iter() {
@@ -496,7 +538,7 @@ fn sort_by_canonical_bytes_at(
         ));
     }
     encoded.sort_by(|left, right| left.0.cmp(&right.0));
-    if dedup {
+    if order == Order::Set {
         encoded.dedup_by(|left, right| left.0 == right.0);
     }
     *items = encoded.into_iter().map(|(_, item)| item).collect();
@@ -1726,6 +1768,52 @@ mod tests {
             root,
             path: NativeString::Text(path.to_owned()),
         }
+    }
+
+    /// A sort path that the serialized snapshot does not have is an internal
+    /// error, not a silently unsorted array; only the declared absences pass.
+    #[test]
+    fn a_missing_sort_path_is_an_internal_error() {
+        let mut value = serde_json::json!({
+            "filesystem": {"read_write": ["b", "a", "a"]},
+            "launch": null,
+            "vault": {},
+        });
+        sort_at(
+            &mut value,
+            &["filesystem", "read_write"],
+            Absent::Never,
+            Order::Set,
+        )
+        .expect("present");
+        assert_eq!(
+            value["filesystem"]["read_write"],
+            serde_json::json!(["a", "b"])
+        );
+        for (path, absent) in [
+            (&["filesystem", "read_only"][..], Absent::Never),
+            (&["network", "allow"][..], Absent::Never),
+            (&["launch", "state_subdirs"][..], Absent::Never),
+            (&["vault", "paths"][..], Absent::UnderNull),
+        ] {
+            let error =
+                sort_at(&mut value, path, absent, Order::Set).expect_err("a missing path refuses");
+            assert_eq!(error.code, ErrorCode::InternalError, "{path:?}");
+        }
+        sort_at(
+            &mut value,
+            &["launch", "state_subdirs"],
+            Absent::UnderNull,
+            Order::Set,
+        )
+        .expect("launch is null");
+        sort_at(
+            &mut value,
+            &["vault", "paths"],
+            Absent::WhenEmpty,
+            Order::Set,
+        )
+        .expect("an empty vault list is skipped");
     }
 
     /// What each §6.2 layer may do follows from where it came from: only the
