@@ -631,15 +631,7 @@ pub(super) fn create(
 ) -> Result<Run<Boundary>, JailError> {
     let snapshot = plan.request.snapshot.clone();
     refuse_privileged_supervisor()?;
-    if !snapshot.profile.is_contained() {
-        // `prepare` hands `none` to its own boundary before this point.
-        return Err(error(
-            ErrorCode::InternalError,
-            ErrorStage::Preparing,
-            Remediation::InspectState,
-            "the contained boundary was asked to run the uncontained `none` profile".to_owned(),
-        ));
-    }
+    refuse_uncontained(&snapshot)?;
     let observe_on = snapshot.observation.mode == ObserveMode::On;
     let exe = std::env::current_exe().map_err(|err| {
         preparing(
@@ -648,30 +640,10 @@ pub(super) fn create(
         )
     })?;
     let nofile_soft = exec::operator_nofile_soft();
-
-    // `<data>/attempts/<id>` is the attempt; the state root is two levels
-    // up, and everything under it is supervisor state (§7).
-    let state_root = plan
-        .attempt_dir
-        .parent()
-        .and_then(Path::parent)
-        .unwrap_or(plan.attempt_dir.as_path());
-    let stdio_plans = validate_stdio(state_root, &plan.config_dir)?;
+    let stdio_plans = validate_stdio(state_root(&plan.attempt_dir), &plan.config_dir)?;
     let scratch = scratch_directory(&snapshot, &plan.attempt_dir)?;
     let (cgroup, cgroup_unavailable) = execution_cgroup(&snapshot, &plan.attempt_dir)?;
-
-    // north-star §4.4 / jail-v1 §9.1: Linux cannot enforce all_descendants;
-    // a profile that requires it refuses (125) rather than underclaim.
-    if snapshot.filesystem.protected_coverage == ProtectedCoverage::AllDescendants {
-        return Err(error(
-            ErrorCode::MissingCapability,
-            ErrorStage::Preparing,
-            Remediation::Unsupported,
-            "the all_descendants protected-path coverage cannot be enforced on Linux; it refuses \
-             rather than underclaim (north-star §4.4)"
-                .to_owned(),
-        ));
-    }
+    refuse_all_descendants(&snapshot)?;
 
     let mut planned = Planned::new(
         &snapshot,
@@ -705,24 +677,6 @@ pub(super) fn create(
     )
     .with_learning(snapshot.observation.learning)
     .with_roots(audit_named_roots(&planned.bplan));
-    // The proxy starts only now that the backend exists, so the descriptor
-    // limit it raises never reaches the child.
-    if let Some(agent) = started.agent.as_mut()
-        && let Err(err) = agent.start_proxy()
-    {
-        return Err(started.refuse(err, None, &mut audit, observe_on));
-    }
-    if let Some(reason) = started.cgroup_unavailable.clone() {
-        for key in LimitKey::ALL
-            .into_iter()
-            .filter(|key| cgroup::enforces(*key))
-        {
-            if snapshot.limits.get(key).is_some() {
-                audit.record_limit_unapplied(key.as_str(), &reason);
-            }
-        }
-    }
-
     let inputs = DiscoveryInputs {
         bwrap_path,
         deadline,
@@ -733,8 +687,21 @@ pub(super) fn create(
         scan: &planned.scan,
         observe_on,
     };
-    let discovered = match discover(&mut started, &mut launcher_error, &inputs) {
-        Ok(discovered) => discovered,
+    let brought_up = bring_up(
+        &mut started,
+        &mut launcher_error,
+        &mut audit,
+        &inputs,
+        planned.trace_data,
+        &planned.target_images,
+    );
+    let BroughtUp {
+        discovered,
+        observer_plan,
+        trace_data,
+        tracer,
+    } = match brought_up {
+        Ok(brought_up) => brought_up,
         Err(Refused { error, init }) => {
             return Err(started.refuse(error, init.as_ref(), &mut audit, observe_on));
         }
@@ -749,50 +716,6 @@ pub(super) fn create(
         storage,
         applied,
     } = discovered;
-    // Audit 2026-10-08 M2: storage and inode ceilings expose occupancy, not
-    // refusal counters — their hit evidence is positive-only saturation
-    // sampling (§11.4), so the `limits` class starts degraded with a null
-    // count and names its gap.
-    if storage
-        .as_ref()
-        .is_some_and(|storage| storage.limits().iter().any(|limit| limit.hit.is_none()))
-    {
-        audit.record_limit_evidence_missing("storage_hit_evidence_positive_only");
-    }
-    if let Some(leaf) = started.cgroup.as_mut()
-        && let Err(err) = leaf
-            .verify_member(launcher.pid)
-            .and_then(|()| leaf.verify_member(started.bwrap_pid))
-            .and_then(|()| leaf.verify_member(init.pid))
-            .and_then(|()| leaf.arm())
-    {
-        // Placement can have succeeded before read-back failed. Never
-        // discard that leaf and claim the target has no resource boundary.
-        let refusal = preparing(
-            ErrorCode::MissingCapability,
-            format!("target cgroup placement failed: {err}"),
-        );
-        return Err(started.refuse(refusal, Some(&init), &mut audit, observe_on));
-    }
-    let trace_data = planned
-        .trace_data
-        .unwrap_or(super::tracer::filter::NARROWING_TRACE_DATA);
-    let observer_plan = observe_on.then(super::observed::ObserverPlan::from_env);
-    let tracer = match observer_plan.as_ref() {
-        Some(observer) => match attach_observer(
-            observer,
-            &snapshot,
-            trace_data,
-            launcher.pid,
-            &planned.target_images,
-        ) {
-            Ok(tracer) => Some(tracer),
-            Err(refusal) => {
-                return Err(started.refuse(refusal, Some(&init), &mut audit, observe_on));
-            }
-        },
-        None => None,
-    };
     let state = RunState::new(Launched {
         launcher,
         target_images: std::mem::take(&mut planned.target_images),
@@ -819,6 +742,146 @@ pub(super) fn create(
         bwrap_status: None,
     };
     Ok(Run::new(state, boundary))
+}
+
+/// Refuses the uncontained `none` profile, which `prepare` hands to its own
+/// boundary before this one is asked.
+fn refuse_uncontained(snapshot: &PolicySnapshot) -> Result<(), JailError> {
+    if snapshot.profile.is_contained() {
+        return Ok(());
+    }
+    Err(error(
+        ErrorCode::InternalError,
+        ErrorStage::Preparing,
+        Remediation::InspectState,
+        "the contained boundary was asked to run the uncontained `none` profile".to_owned(),
+    ))
+}
+
+/// The state root of the attempt directory `<data>/attempts/<id>`: two
+/// levels up, and everything under it is supervisor state (§7).
+fn state_root(attempt_dir: &Path) -> &Path {
+    attempt_dir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(attempt_dir)
+}
+
+/// north-star §4.4 / jail-v1 §9.1: Linux cannot enforce `all_descendants`;
+/// a profile that requires it refuses (125) rather than underclaim.
+fn refuse_all_descendants(snapshot: &PolicySnapshot) -> Result<(), JailError> {
+    if snapshot.filesystem.protected_coverage != ProtectedCoverage::AllDescendants {
+        return Ok(());
+    }
+    Err(error(
+        ErrorCode::MissingCapability,
+        ErrorStage::Preparing,
+        Remediation::Unsupported,
+        "the all_descendants protected-path coverage cannot be enforced on Linux; it refuses \
+         rather than underclaim (north-star §4.4)"
+            .to_owned(),
+    ))
+}
+
+/// What the steps between the spawn and the release found and attached.
+struct BroughtUp {
+    discovered: Discovered,
+    observer_plan: Option<super::observed::ObserverPlan>,
+    /// The narrowing filter's `SECCOMP_RET_DATA` the tracer expects.
+    trace_data: u16,
+    tracer: Option<Tracer>,
+}
+
+/// The steps between the spawn and the release, any of which refuses the
+/// run: the `agent` proxy starts, the ceilings left unenforced without a
+/// leaf are recorded, the init and the blocked launcher are found and the
+/// boundary read back, the leaf is shown to hold the tree and armed, and,
+/// with observation on, the observer attaches. A refusal carries the init
+/// once one is known, for the teardown; what is recorded in `audit` before
+/// it stays recorded.
+fn bring_up(
+    started: &mut Started,
+    launcher_error: &mut ErrorPipe,
+    audit: &mut AuditWriter,
+    inputs: &DiscoveryInputs<'_>,
+    trace_data: Option<u16>,
+    target_images: &[Vec<u8>],
+) -> Result<BroughtUp, Refused> {
+    let snapshot = inputs.snapshot;
+    // The proxy starts only now that the backend exists, so the descriptor
+    // limit it raises never reaches the child.
+    if let Some(agent) = started.agent.as_mut()
+        && let Err(error) = agent.start_proxy()
+    {
+        return Err(Refused { error, init: None });
+    }
+    if let Some(reason) = started.cgroup_unavailable.clone() {
+        for key in LimitKey::ALL
+            .into_iter()
+            .filter(|key| cgroup::enforces(*key))
+        {
+            if snapshot.limits.get(key).is_some() {
+                audit.record_limit_unapplied(key.as_str(), &reason);
+            }
+        }
+    }
+    let discovered = discover(started, launcher_error, inputs)?;
+    // Audit 2026-10-08 M2: storage and inode ceilings expose occupancy, not
+    // refusal counters — their hit evidence is positive-only saturation
+    // sampling (§11.4), so the `limits` class starts degraded with a null
+    // count and names its gap.
+    if discovered
+        .storage
+        .as_ref()
+        .is_some_and(|storage| storage.limits().iter().any(|limit| limit.hit.is_none()))
+    {
+        audit.record_limit_evidence_missing("storage_hit_evidence_positive_only");
+    }
+    if let Some(leaf) = started.cgroup.as_mut()
+        && let Err(err) = leaf
+            .verify_member(discovered.launcher.pid)
+            .and_then(|()| leaf.verify_member(started.bwrap_pid))
+            .and_then(|()| leaf.verify_member(discovered.init.pid))
+            .and_then(|()| leaf.arm())
+    {
+        // Placement can have succeeded before read-back failed. Never
+        // discard that leaf and claim the target has no resource boundary.
+        return Err(Refused {
+            error: preparing(
+                ErrorCode::MissingCapability,
+                format!("target cgroup placement failed: {err}"),
+            ),
+            init: Some(discovered.init),
+        });
+    }
+    let trace_data = trace_data.unwrap_or(super::tracer::filter::NARROWING_TRACE_DATA);
+    let observer_plan = inputs
+        .observe_on
+        .then(super::observed::ObserverPlan::from_env);
+    let tracer = match observer_plan.as_ref() {
+        Some(observer) => match attach_observer(
+            observer,
+            snapshot,
+            trace_data,
+            discovered.launcher.pid,
+            target_images,
+        ) {
+            Ok(tracer) => Some(tracer),
+            Err(error) => {
+                return Err(Refused {
+                    error,
+                    init: Some(discovered.init),
+                });
+            }
+        },
+        None => None,
+    };
+    Ok(BroughtUp {
+        discovered,
+        observer_plan,
+        trace_data,
+        tracer,
+    })
 }
 
 /// The scratch directory the child sees as /tmp. A managed one is
@@ -920,71 +983,23 @@ impl Planned {
         launcher: Launcher<'_>,
         scratch: &Path,
     ) -> Result<Planned, JailError> {
-        let Launcher {
-            bwrap_path,
-            exe,
-            observe_on,
-            nofile_soft,
-        } = launcher;
-        // Protected segments. A bound reached is a refusal, never a shorter
-        // answer (§9.1). The walk's names are the snapshot's own segments:
-        // every contained baseline carries exactly its literals (`tool` the
-        // built-in `.git`/`.ouroboros`, `agent` — audit 2026-10-08 M5 — only
-        // `.git/hooks` and `.git/config`, which the walk matches at any
-        // depth, so the rest of Git metadata stays writable), so merging the
-        // built-ins in again here would protect more than the profile asked
-        // for.
-        let mut names: Vec<String> = snapshot.filesystem.protected_segments.clone();
-        names.sort_unstable();
-        names.dedup();
+        let names = protected_names(snapshot);
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut bplan = plan_for(
             snapshot,
             &PlanPaths {
-                bwrap: bwrap_path,
+                bwrap: launcher.bwrap_path,
                 workspace: &plan.workspace,
                 scratch,
-                jail_exe: exe,
+                jail_exe: launcher.exe,
                 proxy_dir: plan
                     .proxy
                     .as_ref()
                     .map(|handoff| handoff.host_path.as_path()),
             },
         )?;
-        let mut agent = agent_network(snapshot, plan, sinks, exe, bwrap_path)?;
-        let mut vault_ca = None;
-        if let Some(handoff) = &plan.launch
-            && !handoff.vault.is_empty()
-        {
-            let agent = agent.as_mut().ok_or_else(|| {
-                preparing(ErrorCode::InvalidConfig, "vault requires agent network")
-            })?;
-            let (ca, vault) =
-                stage_vault(&mut bplan, &plan.attempt_id, &plan.attempt_dir, handoff)?;
-            agent.configure_vault(vault);
-            vault_ca = Some(ca);
-        }
-        // The staged vendor state and bind_ro sources, bound by the
-        // descriptors staging examined (§9.1, §12).
-        let staged = staged_mounts(snapshot, plan.launch.as_ref())?;
-        if staged.vendor.is_some() {
-            bplan.vendor_state = plan
-                .launch
-                .as_ref()
-                .and_then(|handoff| handoff.vendor_state.as_ref())
-                .map(|vendor| bwrap::Staged {
-                    host: vendor.host_path.clone(),
-                    fd: VENDOR_STATE_FD,
-                });
-        }
-        bplan.credential_binds = staged
-            .credentials
-            .iter()
-            .map(|(_, destination)| bwrap::CredentialBind {
-                fd: None,
-                destination: destination.clone(),
-            })
-            .collect();
+        let (agent, vault_ca) = agent_and_vault(&mut bplan, snapshot, plan, sinks, &launcher)?;
+        let staged = bind_staged(&mut bplan, snapshot, plan)?;
         bind_grants(&mut bplan, snapshot, &plan.workspace, scratch)?;
 
         // A sanitized resolver view (audit F5): the host's
@@ -1012,55 +1027,16 @@ impl Planned {
 
         let (filter, hard_links_denied) = installed_filter(&bplan, agent.as_ref())?;
         let filter_digest = filter.digest();
-        let target: Vec<OsString> = plan
-            .argv
-            .iter()
-            .map(|bytes| OsString::from_vec(bytes.clone()))
-            .collect();
-        let trace_data = observe_on.then(random_trace_data);
-        // The agent launcher mediates and starts the bridge.
-        bplan.inner = super::launch::LaunchArgs {
-            release_fd: RELEASE_FD,
-            error_fd: ERROR_FD,
-            narrow: observe_on,
-            read_open_fast_path: observe_on && !snapshot.observation.learning,
-            trace_data_fd: trace_data.map(|_| TRACE_DATA_FD),
-            mediate: agent
-                .is_some()
-                .then_some((super::agent::LISTENER_FD, super::agent::SOCKDIAG_FD)),
-            bridge: agent.is_some().then_some(super::agent::BRIDGE_REPORT_FD),
-            // bubblewrap unblocks SIGCHLD in its child: the launcher puts
-            // back the mask this supervisor inherited.
-            sigmask: Some(super::launch::blocked_mask()),
-            nofile_soft,
-            argv: target.clone(),
-        }
-        .command_line(OsStr::new(bwrap::JAIL_INSIDE_PATH));
-        bplan.seccomp_fd = Some(SECCOMP_FD);
-        bplan.json_status_fd = Some(STATUS_FD);
-        bplan.args_fd = Some(ARGS_FD);
-        let launcher_argv: Vec<Vec<u8>> = bplan
-            .inner
-            .iter()
-            .map(|part| part.as_bytes().to_vec())
-            .collect();
-        let child_path = bplan
-            .env
-            .iter()
-            .find(|(name, _)| name == "PATH")
-            .map(|(_, value)| value.clone());
-        let target_images = super::launch::exec_candidate_bytes(
-            target.first().map_or(OsStr::new(""), OsString::as_os_str),
-            child_path.as_deref(),
-        )
-        .map_err(|err| {
-            error(
-                ErrorCode::InvalidConfig,
-                ErrorStage::Preparing,
-                Remediation::Configuration,
-                err.to_string(),
-            )
-        })?;
+        let trace_data = launcher.observe_on.then(random_trace_data);
+        let launcher_argv = set_launcher(
+            &mut bplan,
+            snapshot,
+            plan,
+            &launcher,
+            agent.is_some(),
+            trace_data,
+        );
+        let target_images = target_images(&bplan, plan)?;
 
         // A guard: `prepare_mounts` refused before pinning anything a plan
         // whose binds no receipt can record, and nothing since adds a bind.
@@ -1128,6 +1104,153 @@ impl Planned {
         }
         Ok(())
     }
+}
+
+/// The protected segment names the walk matches, sorted and unique.
+///
+/// A bound reached is a refusal, never a shorter answer (§9.1). The walk's
+/// names are the snapshot's own segments: every contained baseline carries
+/// exactly its literals (`tool` the built-in `.git`/`.ouroboros`, `agent` —
+/// audit 2026-10-08 M5 — only `.git/hooks` and `.git/config`, which the walk
+/// matches at any depth, so the rest of Git metadata stays writable), so
+/// merging the built-ins in again here would protect more than the profile
+/// asked for.
+fn protected_names(snapshot: &PolicySnapshot) -> Vec<String> {
+    let mut names: Vec<String> = snapshot.filesystem.protected_segments.clone();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The `agent` network, with the vault configured into it when the launch
+/// hand-off declares vault credentials, and the vault CA's bind for the
+/// mount preparation to add.
+///
+/// # Errors
+/// The network's refusal, a vault without the `agent` network, or a vault
+/// that cannot be staged.
+fn agent_and_vault(
+    bplan: &mut BwrapPlan,
+    snapshot: &PolicySnapshot,
+    plan: &PreparedPlan,
+    sinks: &Sinks,
+    launcher: &Launcher<'_>,
+) -> Result<(Option<AgentNet>, Option<PinnedBind>), JailError> {
+    let mut agent = agent_network(snapshot, plan, sinks, launcher.exe, launcher.bwrap_path)?;
+    let mut vault_ca = None;
+    if let Some(handoff) = &plan.launch
+        && !handoff.vault.is_empty()
+    {
+        let agent = agent
+            .as_mut()
+            .ok_or_else(|| preparing(ErrorCode::InvalidConfig, "vault requires agent network"))?;
+        let (ca, vault) = stage_vault(bplan, &plan.attempt_id, &plan.attempt_dir, handoff)?;
+        agent.configure_vault(vault);
+        vault_ca = Some(ca);
+    }
+    Ok((agent, vault_ca))
+}
+
+/// The staged vendor state and `bind_ro` sources, bound by the descriptors
+/// staging examined (§9.1, §12): the plan names the vendor state and one
+/// credential view per source, whose descriptor numbers are assigned once
+/// the pins have theirs.
+///
+/// # Errors
+/// Staged descriptors that do not match the policy's declarations.
+fn bind_staged(
+    bplan: &mut BwrapPlan,
+    snapshot: &PolicySnapshot,
+    plan: &PreparedPlan,
+) -> Result<StagedMounts, JailError> {
+    let staged = staged_mounts(snapshot, plan.launch.as_ref())?;
+    if staged.vendor.is_some() {
+        bplan.vendor_state = plan
+            .launch
+            .as_ref()
+            .and_then(|handoff| handoff.vendor_state.as_ref())
+            .map(|vendor| bwrap::Staged {
+                host: vendor.host_path.clone(),
+                fd: VENDOR_STATE_FD,
+            });
+    }
+    bplan.credential_binds = staged
+        .credentials
+        .iter()
+        .map(|(_, destination)| bwrap::CredentialBind {
+            fd: None,
+            destination: destination.clone(),
+        })
+        .collect();
+    Ok(staged)
+}
+
+/// Sets the launcher's command line and the descriptors bubblewrap reads,
+/// and returns the launcher's argv, by which discovery finds it.
+fn set_launcher(
+    bplan: &mut BwrapPlan,
+    snapshot: &PolicySnapshot,
+    plan: &PreparedPlan,
+    launcher: &Launcher<'_>,
+    agent: bool,
+    trace_data: Option<u16>,
+) -> Vec<Vec<u8>> {
+    let observe_on = launcher.observe_on;
+    // The agent launcher mediates and starts the bridge.
+    bplan.inner = super::launch::LaunchArgs {
+        release_fd: RELEASE_FD,
+        error_fd: ERROR_FD,
+        narrow: observe_on,
+        read_open_fast_path: observe_on && !snapshot.observation.learning,
+        trace_data_fd: trace_data.map(|_| TRACE_DATA_FD),
+        mediate: agent.then_some((super::agent::LISTENER_FD, super::agent::SOCKDIAG_FD)),
+        bridge: agent.then_some(super::agent::BRIDGE_REPORT_FD),
+        // bubblewrap unblocks SIGCHLD in its child: the launcher puts
+        // back the mask this supervisor inherited.
+        sigmask: Some(super::launch::blocked_mask()),
+        nofile_soft: launcher.nofile_soft,
+        argv: plan
+            .argv
+            .iter()
+            .map(|bytes| OsString::from_vec(bytes.clone()))
+            .collect(),
+    }
+    .command_line(OsStr::new(bwrap::JAIL_INSIDE_PATH));
+    bplan.seccomp_fd = Some(SECCOMP_FD);
+    bplan.json_status_fd = Some(STATUS_FD);
+    bplan.args_fd = Some(ARGS_FD);
+    bplan
+        .inner
+        .iter()
+        .map(|part| part.as_bytes().to_vec())
+        .collect()
+}
+
+/// The paths the launcher will try to `execve`, derived from the same
+/// program name and `PATH` the launcher itself uses.
+///
+/// # Errors
+/// A target whose exec candidates cannot be derived.
+fn target_images(bplan: &BwrapPlan, plan: &PreparedPlan) -> Result<Vec<Vec<u8>>, JailError> {
+    let child_path = bplan
+        .env
+        .iter()
+        .find(|(name, _)| name == "PATH")
+        .map(|(_, value)| value.clone());
+    super::launch::exec_candidate_bytes(
+        plan.argv
+            .first()
+            .map_or(OsStr::new(""), |program| OsStr::from_bytes(program)),
+        child_path.as_deref(),
+    )
+    .map_err(|err| {
+        error(
+            ErrorCode::InvalidConfig,
+            ErrorStage::Preparing,
+            Remediation::Configuration,
+            err.to_string(),
+        )
+    })
 }
 
 /// The `agent` network, prepared from the attempt's proxy directory; `None`
