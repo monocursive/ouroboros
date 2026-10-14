@@ -14,6 +14,9 @@ import subprocess
 import sys
 import time
 
+# guest.py repeats these limits (it is installed alone in the guest);
+# test_vm.py checks that both ends agree. MAX_LINE bounds one protocol line.
+MAX_LINE = 2 * 1024 * 1024
 MAX_BYTES = 32 * 1024 * 1024
 MAX_FILE = 512 * 1024
 MAX_FILES = 5000
@@ -321,7 +324,7 @@ def execute(args):
                         stopped = not message['error']
                     elif kind == 'data':
                         guest_buffer += base64.b64decode(message['data'], validate=True)
-                        if len(guest_buffer) > 2 * 1024 * 1024:
+                        if len(guest_buffer) > MAX_LINE:
                             raise ValueError('oversized guest message')
                         while b'\n' in guest_buffer:
                             line, guest_buffer = guest_buffer.split(b'\n', 1)

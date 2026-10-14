@@ -5,8 +5,18 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import run
 import cli
+import guest
+import run
+
+# Both ends must agree on every name. Accepted names keep every component as
+# written (a file system may still refuse one at open, like the 4096-byte
+# component); rejected names are empty, absolute or contain NUL, or have
+# components that PurePosixPath would drop or that climb out of the root.
+ACCEPTED_PATHS = ['file', 'file with spaces', 'dir/file', 'a/b/c', '.hidden', '..hidden', 'a..b', '...', ' ',
+                  'a\\b', '\\', '\u00e9/\u00fc', 'a\nb', 'x' * 4096, '/'.join(['d'] * 1000)]
+REJECTED_PATHS = ['', '.', '..', '/', '/absolute', '//a', 'a//b', 'a/', 'a/b/', './a', 'a/.', 'a/./b',
+                  '../escape', 'a/../b', 'a/..', 'a\0b', '\0']
 
 
 class WorkspaceBoundaryTests(unittest.TestCase):
@@ -156,6 +166,50 @@ class ProtocolMessageTests(unittest.TestCase):
                         {'event': 'owner', 'pid': 1, 'audit_token': {}}, {'event': 'error'}]:
             with self.subTest(message=message), self.assertRaises(ValueError):
                 run.parse_helper_message(json.dumps(message).encode())
+
+
+class TransportAgreementTests(unittest.TestCase):
+    """guest.py runs alone in the guest image, so it repeats the host's limits and path rule."""
+
+    def test_host_and_guest_limits_agree(self):
+        for name in ('MAX_LINE', 'MAX_BYTES', 'MAX_FILE', 'MAX_FILES'):
+            with self.subTest(limit=name):
+                self.assertEqual(getattr(run, name), getattr(guest, name))
+
+    def test_host_and_guest_path_verdicts_agree(self):
+        root = Path('/staging')
+
+        def verdicts(name):
+            try:
+                host = run.output_path(root, 'workspace', name).relative_to(root / 'workspace').parts
+            except ValueError:
+                host = None
+            try:
+                inside = guest.relative(name)
+            except ValueError:
+                inside = None
+            return host, inside
+
+        for name in ACCEPTED_PATHS:
+            with self.subTest(name=name):
+                host, inside = verdicts(name)
+                self.assertIsNotNone(host)
+                self.assertEqual(host, inside)
+                self.assertEqual('/'.join(host), name)
+        for name in REJECTED_PATHS:
+            with self.subTest(name=name):
+                self.assertEqual(verdicts(name), (None, None))
+
+    def test_snapshot_paths_are_accepted_by_both_ends(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'dir' / 'nested').mkdir(parents=True)
+            for name in ('top', 'dir/a b', 'dir/nested/..x', 'dir/nested/a\\b'):
+                (root / name).write_text(name)
+            for entry in run.snapshot(root):
+                with self.subTest(path=entry['path']):
+                    self.assertEqual(guest.relative(entry['path']), tuple(entry['path'].split('/')))
+                    run.output_path(root, 'workspace', entry['path'])
 
 
 class PackageTests(unittest.TestCase):

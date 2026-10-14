@@ -13,8 +13,11 @@ import time
 
 PORT = 1024
 LEASE = 2.0
+# This file is installed alone in the guest, so the transport limits are
+# repeated from run.py; test_vm.py checks that both ends agree.
 MAX_LINE = 2 * 1024 * 1024
 MAX_BYTES = 32 * 1024 * 1024
+MAX_FILE = 512 * 1024
 MAX_FILES = 5000
 WORKSPACE = Path('/home/ouro/workspace')
 EVIDENCE = Path('/home/ouro/evidence')
@@ -65,8 +68,10 @@ def poweroff(reason):
 
 
 def relative(name):
+    # Same verdict as run.output_path: PurePosixPath would silently collapse
+    # empty components ('a//b', 'a/'), so the raw components are checked.
     parts = PurePosixPath(name).parts
-    if not parts or name.startswith('/') or any(p in ('..', '.') for p in name.split('/')) or '\0' in name:
+    if not parts or name.startswith('/') or '\0' in name or any(p in ('', '..', '.') for p in name.split('/')):
         raise ValueError('invalid relative path')
     return parts
 
@@ -214,9 +219,9 @@ def main():
                                 raise ValueError('nonregular output')
                             count += 1
                             total += info.st_size
-                            if count > MAX_FILES or total > MAX_BYTES or info.st_size > 512 * 1024:
+                            if count > MAX_FILES or total > MAX_BYTES or info.st_size > MAX_FILE:
                                 raise ValueError('export_limit')
-                            payload = source.read(512 * 1024 + 1)
+                            payload = source.read(MAX_FILE + 1)
                         send({'event': 'file', 'group': label, 'path': str(path.relative_to(root)),
                               'executable': bool(info.st_mode & 0o111), 'data': base64.b64encode(payload).decode()})
             send({'event': 'done', 'exit_code': process.returncode})
