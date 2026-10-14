@@ -10,7 +10,8 @@
 //!
 //! 1. installs the narrowing filter, when observation is on;
 //! 2. blocks reading one byte from the release pipe;
-//! 3. `execvp`s the target.
+//! 3. `execve`s the target, searching `PATH` itself
+//!    ([`exec_candidates`]).
 //!
 //! The blocking read is the gate: until the supervisor writes that byte, no
 //! user code has run, and if the supervisor dies instead the read returns EOF
@@ -42,7 +43,7 @@ pub const EXIT_USAGE: i32 = 125;
 /// The launcher failed before exec for a reason of its own (filter install,
 /// read error). Fail-closed: the target did not run.
 pub const EXIT_INTERNAL: i32 = 126;
-/// `execvp` failed; the errno is on the error pipe.
+/// `execve` failed for every candidate path; the errno is on the error pipe.
 pub const EXIT_EXEC_FAILED: i32 = 127;
 // The agent launcher's own setup failures
 /// The unix-peer mediation (filter with its own listener, sock_diag socket)
@@ -96,6 +97,8 @@ pub enum LaunchUsage {
     MissingValue(&'static str),
     /// A descriptor number did not parse or was negative.
     BadFd(&'static str),
+    /// A signal mask was not a hexadecimal number.
+    BadMask(&'static str),
     /// An option the launcher does not know.
     UnknownOption(String),
     /// No `--` separator.
@@ -115,6 +118,7 @@ impl fmt::Display for LaunchUsage {
         match self {
             Self::MissingValue(o) => write!(f, "{o} needs a value"),
             Self::BadFd(o) => write!(f, "{o} needs a non-negative descriptor number"),
+            Self::BadMask(o) => write!(f, "{o} needs a hexadecimal signal mask"),
             Self::UnknownOption(o) => write!(f, "unknown option {o}"),
             Self::MissingSeparator => write!(f, "expected `--` before the program"),
             Self::EmptyArgv => write!(f, "no program after `--`"),
@@ -193,9 +197,9 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
                 let raw = args
                     .get(index + 1)
                     .ok_or(LaunchUsage::MissingValue("--sigmask"))?;
-                let text = raw.to_str().ok_or(LaunchUsage::BadFd("--sigmask"))?;
+                let text = raw.to_str().ok_or(LaunchUsage::BadMask("--sigmask"))?;
                 sigmask = Some(
-                    u64::from_str_radix(text, 16).map_err(|_| LaunchUsage::BadFd("--sigmask"))?,
+                    u64::from_str_radix(text, 16).map_err(|_| LaunchUsage::BadMask("--sigmask"))?,
                 );
                 index += 2;
             }
@@ -267,8 +271,9 @@ fn fd_value(raw: Option<&OsString>, option: &'static str) -> Result<RawFd, Launc
 /// Run the inside launcher. Never returns.
 ///
 /// Everything that allocates happens before the filter is installed. After
-/// that point the only calls are `fcntl`, `read`, `close`, `write`, `execvp`
-/// and `_exit`.
+/// that point the only calls are `read`, `close`, `sigaction` and
+/// `sigprocmask` (with `sigemptyset` and `sigaddset` on stack data),
+/// `execve`, `faccessat`, `write` and `_exit`.
 pub fn launch_main(args: &[OsString]) -> ! {
     let parsed = match parse(args) {
         Ok(parsed) => parsed,
@@ -865,7 +870,7 @@ fn write_fully(fd: RawFd, bytes: &[u8]) {
             )
         };
         if n <= 0 {
-            if n < 0 && errno_raw() == libc::EINTR {
+            if n < 0 && errno() == libc::EINTR {
                 continue;
             }
             break;
@@ -875,10 +880,6 @@ fn write_fully(fd: RawFd, bytes: &[u8]) {
 }
 
 fn errno() -> i32 {
-    errno_raw()
-}
-
-fn errno_raw() -> i32 {
     // SAFETY: __errno_location returns a pointer to this thread's errno, valid
     // for the thread's lifetime.
     unsafe { *libc::__errno_location() }
@@ -994,7 +995,7 @@ mod tests {
                 "--",
                 "x"
             ])),
-            Err(LaunchUsage::BadFd("--sigmask"))
+            Err(LaunchUsage::BadMask("--sigmask"))
         );
         let plain = parse(&osv(&["--release-fd", "3", "--error-fd", "4", "--", "x"])).unwrap();
         assert_eq!(plain.mediate, None);

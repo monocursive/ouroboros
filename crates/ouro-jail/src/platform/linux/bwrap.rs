@@ -524,6 +524,8 @@ fn open_entry(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<OwnedFd, i32> {
 /// recorded as evidence beside the handle rather than relied on: a check that
 /// silently passes wherever the fact is absent is not a check.
 fn birth_time(handle: &OwnedFd) -> Option<(i64, u32)> {
+    // SAFETY: `statx` is a plain C struct of integers, for which all-zero is
+    // a valid value; the call below overwrites it.
     let mut buffer: libc::statx = unsafe { std::mem::zeroed() };
     let empty = c"";
     // SAFETY: `handle` is live, `empty` is a NUL-terminated empty string and

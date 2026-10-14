@@ -2,8 +2,9 @@
 //!
 //! jail-v1 §8.3: everything but validated stdio closes before exec, and the
 //! descriptors that must survive get fixed numbers the inside launcher is told
-//! about by number. The work after `fork` is three `dup2` calls, which are
-//! async-signal-safe; nothing else runs in that window.
+//! about by number. The work after `fork` is `prctl`, `getppid`,
+//! `close_range` and one `dup2` per mapped descriptor, all async-signal-safe;
+//! nothing else runs in that window.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -174,8 +175,8 @@ impl FdMap {
             .iter()
             .map(|(fd, target)| (fd.as_raw_fd(), *target))
             .collect();
-        // SAFETY: getppid cannot fail and is async-signal-safe; the value is
-        // read before the fork so the child can compare against it.
+        // SAFETY: getpid takes no arguments and cannot fail; the value is
+        // read before the fork so the child can compare its getppid with it.
         let supervisor = unsafe { libc::getpid() };
         // SAFETY: the closure performs only async-signal-safe calls over a
         // `Vec` of plain integers built before the fork, and constructs an

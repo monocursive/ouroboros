@@ -367,8 +367,9 @@ unsafe fn report_failure_and_exit(descriptor: RawFd, errno: i32) -> ! {
             break;
         }
     }
-    // SAFETY: do not run Rust destructors in the forked child on any failure.
-    unsafe { libc::_exit(126) }
+    // SAFETY: _exit takes a scalar and never returns; it runs no Rust
+    // destructor in the forked child.
+    unsafe { libc::_exit(crate::platform::linux::launch::EXIT_INTERNAL) }
 }
 
 fn exec_handshake(descriptor: RawFd, deadline: Deadline) -> io::Result<()> {

@@ -124,7 +124,7 @@ const LIMIT_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 /// The Linux platform.
 #[derive(Clone, Debug)]
 pub struct LinuxPlatform {
-    // J5-D: the resolved backend, or why none was (review F1/F2)
+    /// The resolved backend, or why none was.
     bwrap: Result<PathBuf, String>,
     backend_pin: Result<std::sync::Arc<jfs::PinnedPath>, String>,
 }
@@ -151,13 +151,6 @@ impl LinuxPlatform {
                 .map(Path::to_path_buf)
                 .map_err(str::to_owned),
         }
-    }
-
-    /// The bubblewrap binary this platform executes: an absolute, canonical
-    /// path, or `None` when the operator's `PATH` provides none.
-    #[must_use]
-    pub fn bwrap(&self) -> Option<&Path> {
-        self.bwrap.as_deref().ok()
     }
 
     /// The backend as the probes take it: the path, or why there is none.
@@ -997,8 +990,10 @@ impl Boundary {
         // Operator grants are enforced, not merely recorded (I02, north-star
         // §4.2): read-only grants become additional ro-binds at their
         // resolved paths, host-rooted writable grants become binds, and
-        // denied paths are masked with a sealed directory or file. Grants under
-        // the workspace or scratch are covered by the base binds and layered
+        // denied paths are masked with a sealed directory or file. A writable
+        // grant inside the writable workspace or the scratch is covered by
+        // their base binds already; a read-only grant there is layered over
+        // them.
         for reference in &snapshot.filesystem.read_write {
             if let Ok(host) = host_path_of(reference, &plan.workspace, &scratch) {
                 // Issue draft 15: an allowlisted device node (the NVIDIA
@@ -1085,12 +1080,6 @@ impl Boundary {
             bplan.masked.push(mask);
         }
 
-        // J5-B1-w3: §9.1 — an operator grant may not expose host /proc, /sys
-        // or cgroupfs. Checked here, before any mount, on the resolved source
-        // by filesystem type and mount topology (never by spelling), so it
-        // refuses before exec. The baseline runtime roots are on the root
-        // filesystem and pass; the child's private /proc and /dev are made by
-        // bubblewrap, not bound from these sources.
         // Security 2026-09-25 (audit F5): bind a sanitized resolver view.
         // The host's `/etc/resolv.conf` can carry the operator's search
         // domains — host facts the child has no grant for. The child's
@@ -1099,6 +1088,12 @@ impl Boundary {
         let (resolv_source, resolv_sanitization) = stage_sanitized_resolv_conf(&plan.attempt_dir)?;
         bplan.resolv_source = Some(resolv_source);
 
+        // §9.1: an operator grant may not expose host /proc, /sys or
+        // cgroupfs. Checked here, before any mount, on the resolved source by
+        // filesystem type and mount topology (never by spelling), so it
+        // refuses before exec. The baseline runtime roots are on the root
+        // filesystem and pass; the child's private /proc and /dev are made by
+        // bubblewrap, not bound from these sources.
         refuse_pseudo_fs_grants(
             &[(plan.workspace.clone(), plan.workspace.clone())],
             "workspace",
@@ -2486,11 +2481,11 @@ fn ensure_dir(path: &Path) -> Result<(), JailError> {
         })
 }
 
-/// §8.3 and §9.2: reject socket, directory and anonymous-inode stdio, and
+/// §8.3 and §9.2: reject directory and anonymous-inode stdio, and
 /// regular-file stdio that resolves into protected supervisor state or the
 /// operator's trusted config directory (audit 2026-10-08 H1). Every other
-/// regular file is relayed through a supervisor-owned pipe; everything else
-/// passes through untouched.
+/// regular file, and every socket, is relayed through a supervisor-owned
+/// pipe; everything else passes through untouched.
 ///
 /// `state_root` is the whole runtime state directory, not just this attempt's
 /// own: a redirect into a sibling attempt's receipts is the same disclosure.
@@ -3330,7 +3325,6 @@ fn source_on_pseudo_fs(resolved: &Path) -> bool {
     if unsafe { libc::fstatfs(fd.as_raw_fd(), buf.as_mut_ptr()) } < 0 {
         return false;
     }
-    // SAFETY: fstatfs returned 0, so the struct is initialised.
     // SAFETY: fstatfs returned 0, so the struct is initialised.
     let f_type = unsafe { buf.assume_init() }.f_type;
     crate::policy::is_pseudo_fs_magic(f_type)
