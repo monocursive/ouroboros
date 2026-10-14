@@ -385,6 +385,8 @@ pub trait Host {
     /// # Errors
     /// Why the call did not succeed.
     fn request(&mut self, busctl: &Path, unit: &str, bus: Bus) -> Result<(), CallFailure>;
+    /// The step's whole budget, which [`Host::expired`] measures.
+    fn budget(&self) -> std::time::Duration;
     /// Whether the step's budget is spent.
     fn expired(&self) -> bool;
     /// Wait a little before looking again.
@@ -495,6 +497,16 @@ fn leaf_of(cgroup: &str) -> Option<&str> {
     cgroup.trim_end_matches('/').rsplit('/').next()
 }
 
+/// `budget` as a record states it: whole seconds as `N s`, anything finer in
+/// milliseconds.
+fn spelled(budget: std::time::Duration) -> String {
+    if budget.subsec_nanos() == 0 {
+        format!("{} s", budget.as_secs())
+    } else {
+        format!("{} ms", budget.as_millis())
+    }
+}
+
 /// Decide and, when outside, act: the step, over any [`Host`].
 ///
 /// Returns what happened; never an error, because nothing here may fail the
@@ -589,8 +601,8 @@ pub fn decide<H: Host>(host: &mut H, seam: SeamSetting, unit: &str) -> Outcome {
                 Reason::MoveNotObserved,
                 format!(
                     "the scope was requested but this process was not seen in it, inside the \
-                     delegated subtree, within {} s",
-                    BUDGET.as_secs()
+                     delegated subtree, within {}",
+                    spelled(host.budget())
                 ),
                 Some(unit),
                 now.cgroup(),
@@ -832,6 +844,10 @@ mod linux {
                     one_line(&captured.stderr)
                 ),
             })
+        }
+
+        fn budget(&self) -> std::time::Duration {
+            self.budget
         }
 
         fn expired(&self) -> bool {
@@ -1084,6 +1100,7 @@ mod tests {
         polls: usize,
         paused: usize,
         linger: Linger,
+        budget: std::time::Duration,
     }
 
     impl Fake {
@@ -1097,6 +1114,7 @@ mod tests {
                 polls: 3,
                 paused: 0,
                 linger: Linger::Yes,
+                budget: BUDGET,
             }
         }
     }
@@ -1117,6 +1135,9 @@ mod tests {
             self.requests
                 .push((busctl.to_owned(), unit.to_owned(), bus));
             self.call.clone()
+        }
+        fn budget(&self) -> std::time::Duration {
+            self.budget
         }
         fn expired(&self) -> bool {
             self.paused >= self.polls
@@ -1229,6 +1250,26 @@ mod tests {
         assert_eq!(outcome.unit.as_deref(), Some(UNIT));
         assert_eq!(host.requests.len(), 1, "the seam takes the outside branch");
         assert_eq!(host.paused, host.polls, "the whole budget was waited");
+    }
+
+    /// A move not seen within the budget names the host's own budget, not
+    /// the step's default.
+    #[test]
+    fn a_move_not_seen_names_the_budget_it_was_given() {
+        for (budget, spelled) in [
+            (BUDGET, format!("within {} s", BUDGET.as_secs())),
+            (
+                std::time::Duration::from_millis(750),
+                "within 750 ms".to_owned(),
+            ),
+        ] {
+            let mut host = Fake::new(vec![outside()]);
+            host.budget = budget;
+            let outcome = decide(&mut host, SeamSetting::Unset, UNIT);
+            assert_eq!(outcome.reason, Some(Reason::MoveNotObserved));
+            let detail = outcome.detail.as_deref().unwrap_or_default();
+            assert!(detail.ends_with(&spelled), "{detail}");
+        }
     }
 
     #[test]
