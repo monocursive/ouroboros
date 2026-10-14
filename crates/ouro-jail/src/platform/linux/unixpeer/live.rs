@@ -531,6 +531,33 @@ fn service_one(w: &Workers) -> io::Result<()> {
     Ok(())
 }
 
+/// Which §3.4 branch a duplicated socket takes, by its own `SO_DOMAIN`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    /// An AF_UNIX socket: the address is classified.
+    Unix,
+    /// Any other family: the mediator connects the duplicate.
+    NonUnix,
+    /// Refused before any connect: the child's errno and the reason.
+    Refuse(i32, &'static str),
+}
+
+/// The branch for a socket whose `SO_DOMAIN` read gave `domain`. Only a
+/// domain the kernel reported may lead to the mediator's own connect: one
+/// that could not be read refuses like every other uncertain branch.
+fn route(domain: io::Result<libc::c_int>) -> Route {
+    match domain {
+        Ok(libc::AF_UNIX) => Route::Unix,
+        Ok(_) => Route::NonUnix,
+        // The kernel's own answer to a connect on a descriptor that is not a
+        // socket.
+        Err(error) if error.raw_os_error() == Some(libc::ENOTSOCK) => {
+            Route::Refuse(libc::ENOTSOCK, "fd_not_a_socket")
+        }
+        Err(_) => Route::Refuse(libc::EACCES, "domain_unreadable"),
+    }
+}
+
 /// The §3.4 decision on a duplicated socket and the address the child named.
 /// `Ok(())` means "connected"; `Err(errno)` means "denied/failed with errno".
 fn decide(
@@ -540,14 +567,18 @@ fn decide(
     sockaddr: &[u8],
     ualen: usize,
 ) -> (Result<(), i32>, &'static str) {
-    let domain = getsockopt_domain(dup.as_raw_fd()).unwrap_or(-1);
-    if domain != libc::AF_UNIX {
-        // Non-AF_UNIX: the mediator performs the connect on the duplicate. The
-        // socket keeps the child's netns, so this cannot escape it; it does run
-        // in the mediator's LSM context (see NON_UNIX_NOTE).
-        let _ = NON_UNIX_NOTE;
-        let result = bounded_connect(dup.as_raw_fd(), sockaddr, ualen, w.stop_r);
-        return (result, "non_unix");
+    match route(getsockopt_domain(dup.as_raw_fd())) {
+        Route::Unix => {}
+        Route::NonUnix => {
+            // Non-AF_UNIX: the mediator performs the connect on the
+            // duplicate. The socket keeps the child's netns, so this cannot
+            // escape it; it does run in the mediator's LSM context (see
+            // NON_UNIX_NOTE).
+            let _ = NON_UNIX_NOTE;
+            let result = bounded_connect(dup.as_raw_fd(), sockaddr, ualen, w.stop_r);
+            return (result, "non_unix");
+        }
+        Route::Refuse(errno, reason) => return (Err(errno), reason),
     }
     // Security 2026-09-27 (audit 4 B9): an address longer than the
     // `sockaddr_un` layout is one the kernel itself would refuse at
@@ -1099,5 +1130,25 @@ mod tests {
         let records = sink.drain();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].verdict, Verdict::Undelivered);
+    }
+
+    /// Only a domain the kernel reported may reach the mediator's own
+    /// connect; an unreadable one is refused like any uncertain branch.
+    #[test]
+    fn an_unreadable_socket_domain_refuses_and_never_connects() {
+        assert_eq!(route(Ok(libc::AF_UNIX)), Route::Unix);
+        assert_eq!(route(Ok(libc::AF_INET)), Route::NonUnix);
+        assert_eq!(route(Ok(libc::AF_INET6)), Route::NonUnix);
+        assert_eq!(
+            route(Err(io::Error::from_raw_os_error(libc::ENOTSOCK))),
+            Route::Refuse(libc::ENOTSOCK, "fd_not_a_socket")
+        );
+        for errno in [libc::EBADF, libc::ENOPROTOOPT, libc::EINVAL] {
+            assert_eq!(
+                route(Err(io::Error::from_raw_os_error(errno))),
+                Route::Refuse(libc::EACCES, "domain_unreadable"),
+                "errno {errno}"
+            );
+        }
     }
 }

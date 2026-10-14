@@ -313,7 +313,8 @@ int main(int argc, char **argv) {
             dprintf(coord,"done %d", done); continue;
         }
         /* "C <t> <arg>" : p stream / s seqpacket / a abstract / d dgram / r raw
-           / t tcp(port) / b bind-nolisten / w cwd-relative / x x32 / i i386 */
+           / t tcp(port) / b bind-nolisten / w cwd-relative / x x32 / i i386
+           / n connect on a descriptor that is not a socket */
         char t=buf[2];
         char *path = buf+4;
         int e;
@@ -330,6 +331,9 @@ int main(int argc, char **argv) {
             int r=connect(s,(void*)&d,sizeof d); e=r==0?0:errno; close(s); }
         else if (t=='b') { int s=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0); struct sockaddr_un a; socklen_t len=fill_un(&a,path); unlink(path); e=bind(s,(void*)&a,len)?errno:0; /* keep fd open, no listen */ }
         else if (t=='x') e=x32_connect(path);
+        else if (t=='n') { int f=open("/attempt", O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+            struct sockaddr_un na; socklen_t len=fill_un(&na,path);
+            int r=connect(f,(void*)&na,len); e=r==0?0:errno; close(f); }
         else if (t=='i') {
             if (!ia32_ok) { e=-1; }
             else { int s=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);
@@ -428,6 +432,19 @@ impl Rig {
 
     fn verdicts(&self) -> Vec<Verdict> {
         self.sink.drain().into_iter().map(|r| r.verdict).collect()
+    }
+
+    /// The next `count` records. A worker records after the kernel took its
+    /// response, so the child can report its result first: wait a bounded
+    /// time for the record to land.
+    fn records(&self, count: usize) -> Vec<ouro_jail::platform::linux::unixpeer::MediationRecord> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut records = Vec::new();
+        while records.len() < count && Instant::now() < deadline {
+            records.extend(self.sink.drain());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        records
     }
 }
 
@@ -1037,6 +1054,28 @@ fn non_native_abi_connects_are_refused() {
         "0",
         "native still works"
     );
+}
+
+/// A connect on a descriptor that is not a socket: its `SO_DOMAIN` cannot be
+/// read, which says nothing about the family, so the mediator refuses with
+/// the kernel's own answer and a named reason instead of performing a
+/// connect of its own on the duplicate (the branch an unknown domain used to
+/// take).
+#[test]
+fn a_connect_on_a_non_socket_is_refused_before_any_mediated_connect() {
+    if !common::live() {
+        return;
+    }
+    let rig = start_rig().expect("rig");
+    let _ = rig.sink.drain();
+    assert_eq!(
+        rig.run('n', "/attempt/attempt.sock"),
+        libc::ENOTSOCK.to_string()
+    );
+    let records = rig.records(1);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].reason, "fd_not_a_socket");
+    assert_eq!(records[0].verdict, Verdict::Denied(libc::ENOTSOCK));
 }
 
 /// Review fix 3, mutation M9 (domain check): a TCP connect is decided by the
