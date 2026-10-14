@@ -541,7 +541,7 @@ pub fn parse(
             ));
         }
         let vault = if entry.mode == "vault" {
-            if !vault_names.insert(id.to_ascii_uppercase().replace(['.', '-'], "_")) {
+            if !vault_names.insert(crate::vault::env_name(id)) {
                 return Err(invalid(
                     &key,
                     "vault ids collide as environment variable names",

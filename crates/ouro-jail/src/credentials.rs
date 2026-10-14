@@ -1,6 +1,7 @@
 //! Credential staging into vendor state (jail-v1 §12).
 //!
-//! Two modes, exactly as §12 defines them:
+//! Two staging modes, exactly as §12 defines them, and `vault`, which stages
+//! nothing (below):
 //!
 //! - `copy_rw` takes a point-in-time private copy into vendor state and never
 //!   writes anything back. The source is reached through a no-follow walk
@@ -22,6 +23,10 @@
 //!   with the reason `source_mutable`: a read-only *mount* of a writable
 //!   filesystem does not qualify, because the same inode stays writable
 //!   through any other mount.
+//! - `vault` puts no file in vendor state. The source passes the same walk
+//!   and file checks, and the supervisor then reads it live, owner-only and
+//!   bounded by [`crate::vault::SOURCE_MAX`], for the egress proxy to place
+//!   (`crate::vault`).
 //!
 //! No source may lie inside a child-writable grant: every directory on the
 //! no-follow walk and the file itself are compared by identity with the
@@ -40,7 +45,8 @@ use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
@@ -60,6 +66,18 @@ pub const DIGEST_BUDGET: u64 = 16 * 1024 * 1024;
 pub const MODE_COPY_RW: &str = "copy_rw";
 /// `bind_ro`.
 pub const MODE_BIND_RO: &str = "bind_ro";
+/// `vault`.
+pub const MODE_VAULT: &str = "vault";
+
+/// `doctor`'s reason for a `vault` credential that passes every check staging
+/// makes before it reads the secret. `doctor` reads no credential, so the
+/// value (or refresh document) and the bound executables are checked only
+/// when staging reads them.
+pub const REASON_VALUE_UNREAD: &str = "value_unread";
+
+/// The read buffer for one source; credential bytes pass through it, so it
+/// is zeroized when dropped.
+const READ_CHUNK: usize = 64 * 1024;
 
 /// The bound source can change during the attempt: it is not on a filesystem
 /// without a write path, so no digest describes what the child will read.
@@ -151,7 +169,13 @@ pub fn stage(
     vendor_state: BorrowedFd<'_>,
     forbidden: &[(u64, u64)],
 ) -> Result<Vec<StagedCredential>, StagingRefusal> {
-    stage_reporting(launch, vendor_state, forbidden, &|_| {})
+    stage_reporting(
+        launch,
+        vendor_state,
+        forbidden,
+        &|_| {},
+        &AtomicBool::new(false),
+    )
 }
 
 /// The longest single wait for the staging worker between two reads of the
@@ -163,14 +187,21 @@ const STAGING_WAIT_STEP: Duration = Duration::from_millis(250);
 /// clock, `CLOCK_BOOTTIME` on Linux).
 ///
 /// A source on a hung filesystem (FUSE, NFS) can block `read(2)`
-/// indefinitely. The worker is left behind on expiry: it holds only its own
-/// descriptors, and it ends with the process. The refusal then carries the
-/// credentials the worker reported staged before the deadline, without their
-/// bind descriptors (nothing is bound after a refusal).
+/// indefinitely. The worker is left behind on expiry, holding only its own
+/// descriptors until it ends with the process. It is told it was abandoned
+/// and starts no further credential or state directory after that, and the
+/// refusal carries exactly the credentials it reported staged before then,
+/// without their bind descriptors (nothing is bound after a refusal). A
+/// credential it was reading at expiry may still finish writing its copy;
+/// that copy is not reported staged, and it lies in vendor state, which the
+/// refusal's cleanup removes (or leaves `pending` while the worker still
+/// writes there, for `gc` to finish).
 ///
 /// # Errors
 /// As [`stage`], plus [`ErrorCode::CredentialUnavailable`] with remediation
-/// `retry` when the deadline passes first.
+/// `retry` when the deadline passes first or the worker thread cannot be
+/// started, and [`ErrorCode::InternalError`] when the worker ends without a
+/// result.
 pub fn stage_within(
     launch: &LaunchSnapshot,
     vendor_state: BorrowedFd<'_>,
@@ -183,43 +214,77 @@ pub fn stage_within(
     let launch = launch.clone();
     let forbidden = forbidden.to_vec();
     let progress: Arc<Mutex<Vec<(CredentialRecord, SourceIdentity)>>> = Arc::default();
+    let abandoned = Arc::new(AtomicBool::new(false));
     let report = Arc::clone(&progress);
+    let stop = Arc::clone(&abandoned);
     let result = within(remaining, move || {
-        stage_reporting(&launch, vendor.as_fd(), &forbidden, &|credential| {
-            if let Ok(mut staged) = report.lock() {
-                staged.push((credential.record.clone(), credential.source));
-            }
-        })
+        stage_reporting(
+            &launch,
+            vendor.as_fd(),
+            &forbidden,
+            &|credential| {
+                // Checked under the lock the refusal reads the list under, so
+                // a credential is either in the refusal or never reported.
+                let mut staged = report.lock().unwrap_or_else(PoisonError::into_inner);
+                if !stop.load(Ordering::SeqCst) {
+                    staged.push((credential.record.clone(), credential.source));
+                }
+            },
+            &stop,
+        )
     });
-    match result {
-        Some(result) => result,
-        None => {
-            let staged = progress
-                .lock()
-                .map(|staged| staged.clone())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(record, source)| StagedCredential {
-                    vault: None,
-                    record,
-                    bind: None,
-                    source,
-                })
-                .collect();
-            Err(StagingRefusal {
-                error: JailError::new(
-                    ErrorCode::CredentialUnavailable,
-                    ErrorStage::Preparing,
-                    Remediation::Retry,
-                    "credential staging did not finish within the preparation budget; a \
-                     source may be on a filesystem that does not answer"
-                        .to_owned(),
-                )
-                .with_key_path("launch.credentials"),
-                staged,
-            })
-        }
+    let error = match result {
+        Ok(result) => return result,
+        Err(Abandoned::Deadline) => JailError::new(
+            ErrorCode::CredentialUnavailable,
+            ErrorStage::Preparing,
+            Remediation::Retry,
+            "credential staging did not finish within the preparation budget; a source may be \
+             on a filesystem that does not answer"
+                .to_owned(),
+        ),
+        Err(Abandoned::Spawn(error)) => JailError::new(
+            ErrorCode::CredentialUnavailable,
+            ErrorStage::Preparing,
+            Remediation::Retry,
+            format!("credential staging could not start its worker thread: {error}"),
+        ),
+        Err(Abandoned::Lost) => JailError::new(
+            ErrorCode::InternalError,
+            ErrorStage::Preparing,
+            Remediation::InspectState,
+            "the credential staging worker ended without a result".to_owned(),
+        ),
     }
+    .with_key_path("launch.credentials");
+    let staged = {
+        let staged = progress.lock().unwrap_or_else(PoisonError::into_inner);
+        abandoned.store(true, Ordering::SeqCst);
+        staged.clone()
+    };
+    Err(StagingRefusal {
+        error,
+        staged: staged
+            .into_iter()
+            .map(|(record, source)| StagedCredential {
+                vault: None,
+                record,
+                bind: None,
+                source,
+            })
+            .collect(),
+    })
+}
+
+/// Why [`within`] has no result.
+#[derive(Debug)]
+enum Abandoned {
+    /// The worker thread could not be started, so nothing ran.
+    Spawn(std::io::Error),
+    /// The deadline came first; the worker runs on, detached.
+    Deadline,
+    /// The worker ended without sending a result: it panicked.
+    Lost,
 }
 
 /// Runs `work` on a worker thread and waits for it until `remaining` reports
@@ -228,39 +293,54 @@ pub fn stage_within(
 /// `remaining` is read again at least every [`STAGING_WAIT_STEP`]: a
 /// `recv_timeout` runs on `CLOCK_MONOTONIC`, which stops during suspend, so a
 /// single wait for the whole budget would hold an expired continuous-clock
-/// deadline until its own timeout (§6.4). `None` means the deadline came
-/// first; the worker keeps running detached and its result is dropped
-/// whenever it arrives.
-pub fn within<T: Send + 'static>(
+/// deadline until its own timeout (§6.4). After [`Abandoned::Deadline`] the
+/// worker keeps running detached and its result is dropped whenever it
+/// arrives.
+fn within<T: Send + 'static>(
     remaining: &dyn Fn() -> Duration,
     work: impl FnOnce() -> T + Send + 'static,
-) -> Option<T> {
+) -> Result<T, Abandoned> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    let spawned = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("ouro-jail-staging".to_owned())
         .spawn(move || {
             let _ = sender.send(work());
-        });
-    if spawned.is_err() {
-        return None;
-    }
+        })
+        .map_err(Abandoned::Spawn)?;
     loop {
         let left = remaining();
         match receiver.recv_timeout(left.min(STAGING_WAIT_STEP)) {
-            Ok(value) => return Some(value),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if left.is_zero() => return None,
+            Ok(value) => return Ok(value),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(Abandoned::Lost),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if left.is_zero() => {
+                return Err(Abandoned::Deadline);
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
 }
 
+/// Stages `launch` in id order, reporting each credential once it is staged,
+/// and stops before the next state directory or credential once `abandoned`
+/// is set (by [`stage_within`] at its deadline).
 fn stage_reporting(
     launch: &LaunchSnapshot,
     vendor_state: BorrowedFd<'_>,
     forbidden: &[(u64, u64)],
     staged_one: &dyn Fn(&StagedCredential),
+    abandoned: &AtomicBool,
 ) -> Result<Vec<StagedCredential>, StagingRefusal> {
+    let abandoned_refusal = || {
+        StagingRefusal::bare(
+            JailError::new(
+                ErrorCode::CredentialUnavailable,
+                ErrorStage::Preparing,
+                Remediation::Retry,
+                "credential staging was abandoned at its deadline".to_owned(),
+            )
+            .with_key_path("launch.credentials"),
+        )
+    };
     let vendor = vendor_state
         .try_clone_to_owned()
         .map(Dir::from_owned)
@@ -269,6 +349,9 @@ fn stage_reporting(
     let mut subdirs: Vec<&NativeString> = launch.state_subdirs.iter().collect();
     subdirs.sort();
     for subdir in subdirs {
+        if abandoned.load(Ordering::SeqCst) {
+            return Err(abandoned_refusal());
+        }
         let components = anchored::split_relative(subdir.as_bytes()).map_err(|error| {
             StagingRefusal::bare(
                 JailError::new(
@@ -290,6 +373,12 @@ fn stage_reporting(
     let mut staged: Vec<StagedCredential> = Vec::new();
     let mut copied: u64 = 0;
     for declaration in declarations {
+        if abandoned.load(Ordering::SeqCst) {
+            return Err(StagingRefusal {
+                staged,
+                ..abandoned_refusal()
+            });
+        }
         match stage_one(&vendor, declaration, forbidden, &mut copied) {
             Ok(credential) => {
                 staged_one(&credential);
@@ -347,7 +436,7 @@ fn stage_one(
 ) -> Result<StagedCredential, JailError> {
     let id = declaration.id.as_str();
     let mode = declaration.mode.as_str();
-    if mode != MODE_COPY_RW && mode != MODE_BIND_RO && mode != "vault" {
+    if mode != MODE_COPY_RW && mode != MODE_BIND_RO && mode != MODE_VAULT {
         return Err(refusal(
             id,
             Remediation::Configuration,
@@ -378,7 +467,7 @@ fn stage_one(
         size: source.stat.size,
     };
 
-    if mode == "vault" {
+    if mode == MODE_VAULT {
         let policy = declaration
             .vault
             .clone()
@@ -395,7 +484,7 @@ fn stage_one(
             record: CredentialRecord {
                 never_staged: true,
                 id: id.into(),
-                mode: "vault".into(),
+                mode: MODE_VAULT.into(),
                 digest: None,
                 digest_unavailable_reason: Some("never_staged".into()),
             },
@@ -482,23 +571,36 @@ pub(crate) fn read_vault_source_version(
 ) -> Result<(zeroize::Zeroizing<Vec<u8>>, Stat), &'static str> {
     let source = open_source(path, forbidden).map_err(|_| "source_unavailable")?;
     check_mode(&source.stat).map_err(|_| "source_unsafe")?;
-    if source.stat.mode & 0o077 != 0 {
+    vault_precheck(&source.stat, max)?;
+    // `max + 1` holds whatever a stable read can return (`size <= max`, plus
+    // the one byte that shows growth), so the vector never reallocates and
+    // leaves no unzeroized copy of the secret behind.
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(max + 1));
+    let after = read_stable(&source, &mut |chunk| {
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    })
+    .map_err(|failure| match failure {
+        ReadFailure::Changed => "source_changed",
+        ReadFailure::Read(_) | ReadFailure::Sink(_) | ReadFailure::Inspect(_) => {
+            "source_unavailable"
+        }
+    })?;
+    Ok((bytes, after))
+}
+
+/// The checks a `vault` source must pass before any byte of it is read: no
+/// group or other permission at all, and at most `max` bytes. One function
+/// for staging (through [`read_vault_source_version`]) and for `doctor`
+/// ([`inspect`]), so the two cannot disagree.
+fn vault_precheck(stat: &Stat, max: usize) -> Result<(), &'static str> {
+    if stat.mode & 0o077 != 0 {
         return Err("source_not_private");
     }
-    if source.stat.size > max as u64 {
+    if stat.size > max as u64 {
         return Err("source_oversized");
     }
-    let mut reader = source.reader().map_err(|_| "source_unavailable")?;
-    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(max + 1));
-    (&mut reader)
-        .take((max + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "source_unavailable")?;
-    let after = anchored::fstat(reader.as_fd()).map_err(|_| "source_unavailable")?;
-    if !read_was_stable(source.stat.size, bytes.len() as u64, &source.stat, &after) {
-        return Err("source_changed");
-    }
-    Ok((bytes, after))
+    Ok(())
 }
 
 /// Serialize a private source update across attempts, without recreating a
@@ -534,12 +636,13 @@ pub(crate) fn update_vault_source(
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err("refresh_busy");
     }
-    let mut current = zeroize::Zeroizing::new(Vec::with_capacity(65537));
+    let max = crate::vault::SOURCE_MAX;
+    let mut current = zeroize::Zeroizing::new(Vec::with_capacity(max + 1));
     (&mut file)
-        .take(65537)
+        .take(max as u64 + 1)
         .read_to_end(&mut current)
         .map_err(|_| "source_unavailable")?;
-    if current.as_slice() != expected || replacement.len() > 65536 {
+    if current.as_slice() != expected || replacement.len() > max {
         return Err("source_changed");
     }
     let now = walked
@@ -893,21 +996,31 @@ fn check_file(stat: &Stat) -> Result<(), SourceRefusal> {
 pub struct CredentialCheck {
     /// The logical id.
     pub id: String,
-    /// `copy_rw` or `bind_ro`.
+    /// `copy_rw`, `bind_ro` or `vault`.
     pub mode: String,
     /// The destination beneath vendor state, as the profile names it.
     pub dest: NativeString,
-    /// Whether staging would accept this source now.
+    /// Whether every check [`inspect`] makes passed. For `copy_rw` and
+    /// `bind_ro` those are all the checks staging makes before it reads; see
+    /// `reason_code` for `vault`.
     pub available: bool,
-    /// `ok` or the stable reason code of the refusal staging would make.
+    /// `ok`; [`REASON_VALUE_UNREAD`] for a `vault` source that passed every
+    /// check before its value is read; or the stable reason code of the
+    /// refusal staging would make.
     pub reason_code: &'static str,
 }
 
 /// Checks each credential's existence, type, ownership, mode, link count,
-/// grant containment and the copy budget exactly as [`stage`] would, without
-/// reading content and without writing anything (§14.1). The walk is the
-/// same no-follow walk; on Linux the final open is `O_PATH`, so even a special
-/// file is never opened for I/O.
+/// grant containment and the copy budget as [`stage`] does, and for `vault`
+/// the owner-only mode and size bound staging checks before it reads the
+/// secret ([`vault_precheck`], shared), without reading content and without
+/// writing anything (§14.1). The walk is the same no-follow walk; on Linux the
+/// final open is `O_PATH`, so even a special file is never opened for I/O.
+///
+/// What only a read can establish is not claimed: a copy that changes while
+/// it is copied, and for `vault` the value itself, its refresh document and
+/// the pins of its bound executables, which is why a `vault` source that
+/// passes reports [`REASON_VALUE_UNREAD`] rather than `ok`.
 #[must_use]
 pub fn inspect(launch: &LaunchSnapshot, forbidden: &[(u64, u64)]) -> Vec<CredentialCheck> {
     let mut declarations: Vec<&CredentialDecl> = launch.credentials.iter().collect();
@@ -920,6 +1033,12 @@ pub fn inspect(launch: &LaunchSnapshot, forbidden: &[(u64, u64)]) -> Vec<Credent
                 .and_then(|source| check_mode(&source.stat).map(|()| source));
             let reason = match opened {
                 Err(refused) => refused.reason,
+                Ok(source) if declaration.mode == MODE_VAULT => {
+                    match vault_precheck(&source.stat, crate::vault::SOURCE_MAX) {
+                        Ok(()) => REASON_VALUE_UNREAD,
+                        Err(reason) => reason,
+                    }
+                }
                 Ok(source)
                     if declaration.mode == MODE_COPY_RW
                         && !fits_copy_budget(copied, source.stat.size) =>
@@ -937,79 +1056,100 @@ pub fn inspect(launch: &LaunchSnapshot, forbidden: &[(u64, u64)]) -> Vec<Credent
                 id: declaration.id.clone(),
                 mode: declaration.mode.clone(),
                 dest: declaration.dest.clone(),
-                available: reason == "ok",
+                available: reason == "ok" || reason == REASON_VALUE_UNREAD,
                 reason_code: reason,
             }
         })
         .collect()
 }
 
-fn hex(bytes: &[u8]) -> String {
+/// `sha256:` and the lowercase hex of a finished SHA-256: the spelling of
+/// [`crate::canonical::sha256_prefixed`], which hashes a whole buffer where
+/// the copy here hashes a stream.
+fn prefixed_hex(digest: &[u8]) -> String {
     use std::fmt::Write as _;
-    let mut out = String::with_capacity(7 + bytes.len() * 2);
+    let mut out = String::with_capacity(7 + digest.len() * 2);
     out.push_str("sha256:");
-    for byte in bytes {
+    for byte in digest {
         let _ = write!(out, "{byte:02x}");
     }
     out
 }
 
-/// Copies the source into `target`, hashing exactly the bytes written.
+/// Why one bounded read of a source failed.
+enum ReadFailure {
+    /// The source could not be opened for reading or read.
+    Read(std::io::Error),
+    /// The sink refused a chunk.
+    Sink(std::io::Error),
+    /// The source could not be inspected after the read.
+    Inspect(std::io::Error),
+    /// The bytes read are not the stable content `fstat` described.
+    Changed,
+}
+
+/// Reads a source's content once, handing every chunk to `sink`.
 ///
 /// The read is bounded by one byte more than the size `fstat` reported, which
-/// the caller has already checked against the budget; a source that yields
-/// more or fewer bytes than that size, or whose size, times or identity
-/// differ afterwards, changed during the copy and refuses. What a refused
-/// copy wrote stays in vendor state, which the refusal removes.
-fn copy_exactly(id: &str, source: &Source, target: &mut File) -> Result<String, JailError> {
-    let expected = source.stat.size;
-    let reader = source.reader().map_err(|error| {
-        refusal(
-            id,
-            Remediation::Retry,
-            format!("the source cannot be read: {error}"),
-        )
-    })?;
-    let mut hasher = Sha256::new();
+/// the caller has already checked against its budget; a source that yields
+/// more or fewer bytes than that size, or whose size, times or identity differ
+/// afterwards, changed during the read ([`read_was_stable`]). Returns the
+/// source's `fstat` after the read. One implementation for the `copy_rw`
+/// copy, the `bind_ro` digest and the live `vault` read.
+fn read_stable(
+    source: &Source,
+    sink: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+) -> Result<Stat, ReadFailure> {
+    let reader = source.reader().map_err(ReadFailure::Read)?;
+    let mut limited = reader.take(source.stat.size.saturating_add(1));
+    let mut buffer = zeroize::Zeroizing::new(vec![0u8; READ_CHUNK]);
     let mut total: u64 = 0;
-    let mut limited = reader.take(expected.saturating_add(1));
-    let mut buffer = vec![0u8; 64 * 1024];
     loop {
         let read = match limited.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => read,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => {
-                return Err(refusal(
-                    id,
-                    Remediation::Retry,
-                    format!("the source cannot be read: {error}"),
-                ));
-            }
+            Err(error) => return Err(ReadFailure::Read(error)),
         };
         total += read as u64;
-        let chunk = &buffer[..read];
-        hasher.update(chunk);
-        target
-            .write_all(chunk)
-            .map_err(|error| state_failure(id, "write copy", &error))?;
+        sink(&buffer[..read]).map_err(ReadFailure::Sink)?;
     }
-    let after = anchored::fstat(limited.get_ref().as_fd()).map_err(|error| {
-        refusal(
+    let after = anchored::fstat(limited.get_ref().as_fd()).map_err(ReadFailure::Inspect)?;
+    if !read_was_stable(source.stat.size, total, &source.stat, &after) {
+        return Err(ReadFailure::Changed);
+    }
+    Ok(after)
+}
+
+/// Copies the source into `target`, hashing exactly the bytes written
+/// ([`read_stable`]). What a refused copy wrote stays in vendor state, which
+/// the refusal removes.
+fn copy_exactly(id: &str, source: &Source, target: &mut File) -> Result<String, JailError> {
+    let mut hasher = Sha256::new();
+    read_stable(source, &mut |chunk| {
+        hasher.update(chunk);
+        target.write_all(chunk)
+    })
+    .map_err(|failure| match failure {
+        ReadFailure::Read(error) => refusal(
+            id,
+            Remediation::Retry,
+            format!("the source cannot be read: {error}"),
+        ),
+        ReadFailure::Sink(error) => state_failure(id, "write copy", &error),
+        ReadFailure::Inspect(error) => refusal(
             id,
             Remediation::Retry,
             format!("the source cannot be inspected: {error}"),
-        )
-    })?;
-    if !read_was_stable(expected, total, &source.stat, &after) {
-        return Err(refusal(
+        ),
+        ReadFailure::Changed => refusal(
             id,
             Remediation::Retry,
             "the source changed while it was being copied; a point-in-time copy was not \
              established",
-        ));
-    }
-    Ok(hex(&hasher.finalize()))
+        ),
+    })?;
+    Ok(prefixed_hex(&hasher.finalize()))
 }
 
 /// Whether one read of a source was a read of stable content: exactly the
@@ -1040,30 +1180,14 @@ fn bind_digest(source: &Source) -> (Option<String>, Option<&'static str>) {
     if let Err(reason) = digest_precondition(immutable, source.stat.size) {
         return (None, Some(reason));
     }
-    let Ok(reader) = source.reader() else {
-        return (None, Some(REASON_SOURCE_CHANGED));
-    };
     let mut hasher = Sha256::new();
-    let mut total: u64 = 0;
-    let mut limited = reader.take(source.stat.size.saturating_add(1));
-    let mut buffer = vec![0u8; 64 * 1024];
-    loop {
-        match limited.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => {
-                total += read as u64;
-                hasher.update(&buffer[..read]);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return (None, Some(REASON_SOURCE_CHANGED)),
-        }
+    match read_stable(source, &mut |chunk| {
+        hasher.update(chunk);
+        Ok(())
+    }) {
+        Ok(_) => (Some(prefixed_hex(&hasher.finalize())), None),
+        Err(_) => (None, Some(REASON_SOURCE_CHANGED)),
     }
-    let stable = anchored::fstat(limited.get_ref().as_fd())
-        .is_ok_and(|after| read_was_stable(source.stat.size, total, &source.stat, &after));
-    if !stable {
-        return (None, Some(REASON_SOURCE_CHANGED));
-    }
-    (Some(hex(&hasher.finalize())), None)
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,11 +1315,12 @@ mod tests {
 
     #[test]
     fn a_digest_is_the_prefixed_lowercase_hex_the_receipt_schema_requires() {
-        let digest = hex(&Sha256::digest(b"abc"));
+        let digest = prefixed_hex(&Sha256::digest(b"abc"));
         assert_eq!(
             digest,
             "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+        assert_eq!(digest, crate::canonical::sha256_prefixed(b"abc"));
     }
 
     fn stat(size: u64, mtime: i64) -> Stat {
@@ -1322,6 +1447,105 @@ mod tests {
         assert!(open_checked(&handle, &name, &now).is_ok());
     }
 
+    /// `doctor` runs the same pre-read checks staging runs for a `vault`
+    /// source, so a source staging would refuse as group-readable or
+    /// oversized is not reported available; one that passes them says its
+    /// value was not read rather than `ok`.
+    #[test]
+    fn doctor_applies_the_vault_precheck_staging_applies() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_dir, path, _handle) = directory();
+        let write = |name: &str, bytes: &[u8], mode: u32| {
+            std::fs::write(path.join(name), bytes).unwrap();
+            std::fs::set_permissions(path.join(name), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+            NativeString::from_bytes(path.join(name).as_os_str().as_encoded_bytes().to_vec())
+                .unwrap()
+        };
+        let declaration = |id: &str, source: NativeString| CredentialDecl {
+            vault: Some(crate::vault::Policy {
+                hosts: vec!["https://api.example.com".to_owned()],
+                ..crate::vault::Policy::default()
+            }),
+            id: id.to_owned(),
+            source,
+            dest: NativeString::Text(format!(".vault-{id}")),
+            mode: MODE_VAULT.to_owned(),
+        };
+        let cases = [
+            ("group", write("group", b"key", 0o640), "source_not_private"),
+            (
+                "large",
+                write("large", &vec![b'k'; crate::vault::SOURCE_MAX + 1], 0o600),
+                "source_oversized",
+            ),
+            (
+                "private",
+                write("private", b"key", 0o600),
+                REASON_VALUE_UNREAD,
+            ),
+        ];
+        let launch = LaunchSnapshot {
+            state_var: None,
+            home_is_state: false,
+            state_subdirs: Vec::new(),
+            credentials: cases
+                .iter()
+                .map(|(id, source, _)| declaration(id, source.clone()))
+                .collect(),
+        };
+        let checks = inspect(&launch, &[]);
+        for ((id, source, reason), check) in cases.iter().zip(&checks) {
+            assert_eq!((check.id.as_str(), check.reason_code), (*id, *reason));
+            assert_eq!(check.available, *reason == REASON_VALUE_UNREAD, "{id}");
+            let staged =
+                read_vault_source_version(source.as_bytes(), &[], crate::vault::SOURCE_MAX);
+            match staged {
+                Ok(_) => assert_eq!(*reason, REASON_VALUE_UNREAD, "{id}"),
+                Err(refused) => assert_eq!(refused, *reason, "{id}: staging agrees"),
+            }
+        }
+    }
+
+    /// Once `stage_within` has given up on its worker, the worker starts no
+    /// further state directory or credential, so nothing is staged that the
+    /// refusal does not list.
+    #[test]
+    fn an_abandoned_worker_stages_nothing_further() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_dir, path, handle) = directory();
+        std::fs::write(path.join("a"), b"a").unwrap();
+        std::fs::set_permissions(path.join("a"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        let vendor = handle.mkdir_at(&Name::new(b"vs").unwrap(), 0o700).unwrap();
+        let launch = LaunchSnapshot {
+            state_var: None,
+            home_is_state: false,
+            state_subdirs: vec![NativeString::Text("cache".to_owned())],
+            credentials: vec![CredentialDecl {
+                vault: None,
+                id: "a".to_owned(),
+                source: NativeString::from_bytes(
+                    path.join("a").as_os_str().as_encoded_bytes().to_vec(),
+                )
+                .unwrap(),
+                dest: NativeString::Text("a".to_owned()),
+                mode: MODE_COPY_RW.to_owned(),
+            }],
+        };
+        let reported = Mutex::new(0usize);
+        let refused = stage_reporting(
+            &launch,
+            vendor.as_fd(),
+            &[],
+            &|_| *reported.lock().unwrap() += 1,
+            &AtomicBool::new(true),
+        )
+        .expect_err("an abandoned worker stops");
+        assert!(refused.staged.is_empty());
+        assert_eq!(*reported.lock().unwrap(), 0);
+        assert!(std::fs::read_dir(path.join("vs")).unwrap().next().is_none());
+    }
+
     /// A deadline on the monotonic clock, as the time left on it.
     fn until(deadline: Instant) -> impl Fn() -> Duration {
         move || deadline.saturating_duration_since(Instant::now())
@@ -1346,7 +1570,7 @@ mod tests {
         let started = Instant::now();
         let result = within(&remaining, move || blocked.recv().is_ok());
         let waited = started.elapsed();
-        assert_eq!(result, None);
+        assert!(matches!(result, Err(Abandoned::Deadline)), "{result:?}");
         assert!(
             waited < Duration::from_secs(5),
             "the wait held a deadline the continuous clock had passed: {waited:?}"
@@ -1369,7 +1593,7 @@ mod tests {
                 "staged"
             },
         );
-        assert_eq!(result, None);
+        assert!(matches!(result, Err(Abandoned::Deadline)), "{result:?}");
         let waited = started.elapsed();
         assert!(
             waited >= std::time::Duration::from_millis(150),
@@ -1380,13 +1604,25 @@ mod tests {
         finished
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the abandoned worker still finishes");
-        assert_eq!(
+        assert!(matches!(
             within(
                 &until(Instant::now() + std::time::Duration::from_secs(5)),
                 || 7
             ),
-            Some(7)
+            Ok(7)
+        ));
+    }
+
+    /// A worker that ends without a result is not a deadline: reporting it
+    /// as "did not finish within the preparation budget" with `retry` would
+    /// misstate both the cause and the remedy.
+    #[test]
+    fn a_worker_that_dies_is_lost_not_late() {
+        let result = within(
+            &until(Instant::now() + std::time::Duration::from_secs(30)),
+            || -> u8 { panic!("the staging worker fails") },
         );
+        assert!(matches!(result, Err(Abandoned::Lost)), "{result:?}");
     }
 
     #[test]

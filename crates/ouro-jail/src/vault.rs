@@ -136,6 +136,19 @@ fn origin(value: &str) -> Result<(&str, Destination), String> {
     ))
 }
 
+/// The largest vault source read: a raw key or a refresh token document.
+pub(crate) const SOURCE_MAX: usize = 64 * 1024;
+
+/// The variable that carries a vault credential's placeholder into the
+/// child: `OURO_VAULT_` and the id in upper case with `.` and `-` as `_`.
+/// Launch-profile validation refuses two ids that map to one name.
+pub(crate) fn env_name(id: &str) -> String {
+    format!(
+        "OURO_VAULT_{}",
+        id.to_ascii_uppercase().replace(['.', '-'], "_")
+    )
+}
+
 pub struct Secret {
     pub id: String,
     pub policy: Policy,
@@ -274,15 +287,7 @@ impl Vault {
     pub fn environment(&self) -> Vec<(String, String)> {
         self.secrets
             .iter()
-            .map(|s| {
-                (
-                    format!(
-                        "OURO_VAULT_{}",
-                        s.id.to_ascii_uppercase().replace(['.', '-'], "_")
-                    ),
-                    self.placeholder(s),
-                )
-            })
+            .map(|s| (env_name(&s.id), self.placeholder(s)))
             .collect()
     }
     fn placeholder(&self, secret: &Secret) -> String {
