@@ -227,10 +227,27 @@ pub enum StopReason {
     WallExpiry,
     /// Evidence was lost under strict mode.
     EvidenceLoss,
+    /// A receipt after release failed to persist or stalled past its
+    /// progress budget (§13.3).
+    StateWriteFailed,
     /// A supervisor-owned stdio relay failed.
     StdioFailure,
-    /// The target exited and descendants remain.
-    TargetExit,
+}
+
+impl StopReason {
+    /// The `outcome.cause` this stop records when it is the first one the
+    /// supervisor acted on (§6.4).
+    #[must_use]
+    pub fn cause(self) -> &'static str {
+        match self {
+            StopReason::CommandForbidden => "command_forbidden",
+            StopReason::OperatorSignal => "operator_signal",
+            StopReason::WallExpiry => "wall_expiry",
+            StopReason::EvidenceLoss => "evidence_loss",
+            StopReason::StateWriteFailed => "state_write_failed",
+            StopReason::StdioFailure => "stdio_failure",
+        }
+    }
 }
 
 /// One thing that happened while the target was running.

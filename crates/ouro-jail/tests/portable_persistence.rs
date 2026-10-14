@@ -1713,7 +1713,7 @@ fn j4_r02_persistence_that_cannot_finish_in_5s_stops_the_child_unacknowledged() 
         .first()
         .expect("persistence that cannot finish stops the child");
     let after = at.duration_since(released);
-    assert_eq!(reason, StopReason::EvidenceLoss, "{:?}", log.stops);
+    assert_eq!(reason, StopReason::StateWriteFailed, "{:?}", log.stops);
     assert!(
         after >= Duration::from_millis(4500) && after < Duration::from_millis(7000),
         "§13.3: the stop comes when the 5 s progress budget runs out, not {after:?} after release"

@@ -1527,8 +1527,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             &record,
             &mut journal,
         ) {
-            persistence_failed(&mut record, &mut outcome_error, error);
-            running.request_stop(StopReason::EvidenceLoss);
+            persistence_failed(running.as_mut(), &mut record, &mut outcome_error, error);
         }
         // §13.3 + I07: a trace-sink failure — budget exhausted, external
         // consumer stalled past its deadline — is evidence loss, and under
@@ -1538,20 +1537,12 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         if let Some(error) = journal.take_new_loss() {
             record.errors.push(error.to_object());
             if plan.resolved.snapshot.observation.evidence == crate::records::EvidenceMode::Strict {
-                record
-                    .outcome
-                    .cause
-                    .get_or_insert("evidence_loss".to_owned());
-                running.request_stop(StopReason::EvidenceLoss);
+                stop(running.as_mut(), &mut record, StopReason::EvidenceLoss);
             }
             outcome_error.get_or_insert(error);
         }
         if signals.as_ref().is_some_and(signals::SignalPipe::triggered) {
-            record
-                .outcome
-                .cause
-                .get_or_insert("operator_signal".to_owned());
-            running.request_stop(StopReason::OperatorSignal);
+            stop(running.as_mut(), &mut record, StopReason::OperatorSignal);
         }
         // A detected integrity loss reaches the receipt now, not only at the end
         if record.lifetime.integrity != "lost" && running.integrity_lost() {
@@ -1576,8 +1567,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             ) {
                 Ok(write) => in_flight.push_back(write),
                 Err(error) => {
-                    persistence_failed(&mut record, &mut outcome_error, error);
-                    running.request_stop(StopReason::EvidenceLoss);
+                    persistence_failed(running.as_mut(), &mut record, &mut outcome_error, error);
                 }
             }
         }
@@ -1595,11 +1585,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 );
                 record.errors.push(error.to_object());
                 if !after_target_end {
-                    record
-                        .outcome
-                        .cause
-                        .get_or_insert("stdio_failure".to_owned());
-                    running.request_stop(StopReason::StdioFailure);
+                    stop(running.as_mut(), &mut record, StopReason::StdioFailure);
                 }
                 outcome_error.get_or_insert(error);
             }
@@ -1632,8 +1618,12 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                         in_flight.push_back(write);
                     }
                     Err(error) => {
-                        persistence_failed(&mut record, &mut outcome_error, error);
-                        running.request_stop(StopReason::EvidenceLoss);
+                        persistence_failed(
+                            running.as_mut(),
+                            &mut record,
+                            &mut outcome_error,
+                            error,
+                        );
                     }
                 }
             }
@@ -1713,18 +1703,13 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     format!("command matched forbidden pattern: {pattern}"),
                 );
                 record.errors.push(error.to_object());
-                record
-                    .outcome
-                    .cause
-                    .get_or_insert("command_forbidden".into());
                 outcome_error.get_or_insert(error);
-                running.request_stop(StopReason::CommandForbidden);
+                stop(running.as_mut(), &mut record, StopReason::CommandForbidden);
             }
             RunEvent::WallExpired => {
-                // J4-D5: the first stop wins, as it does in the platform's
-                // `request_stop`; an expiry during another stop's grace is
-                // recorded as the limit's hit, not as the cause.
-                record.outcome.cause.get_or_insert("wall_expiry".to_owned());
+                // J4-D5: the first stop wins (see `stop`); an expiry during
+                // another stop's grace is recorded as the limit's hit, not
+                // as the cause.
                 // §13.2: "Limits report hits in `applied.limits[].hit` with
                 // `outcome.cause`". The expiry is the platform's report of
                 // the wall it enforces (on Linux its own boot-clock deadline,
@@ -1737,7 +1722,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 {
                     wall.hit = Some(true);
                 }
-                running.request_stop(StopReason::WallExpiry);
+                stop(running.as_mut(), &mut record, StopReason::WallExpiry);
             }
             RunEvent::EvidenceLost {
                 reason,
@@ -1759,12 +1744,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                     == crate::records::EvidenceMode::Strict
                     && !after_target_end
                 {
-                    // J4-D5: the first stop wins (see `WallExpired`).
-                    record
-                        .outcome
-                        .cause
-                        .get_or_insert("evidence_loss".to_owned());
-                    running.request_stop(StopReason::EvidenceLoss);
+                    stop(running.as_mut(), &mut record, StopReason::EvidenceLoss);
                 }
                 // J4-D5 remainder: the first error is the reported one.
                 outcome_error.get_or_insert(error);
@@ -2955,18 +2935,32 @@ fn storage_loss_error(reason: String) -> JailError {
     )
 }
 
-/// Records a persistence failure after release that stops the tree (§7):
-/// in `errors[]`, as the stop cause unless one came first (D5), and as the
-/// reported error unless one came first.
-fn persistence_failed(
+/// Asks the platform to stop for `reason` and records it as
+/// `outcome.cause` unless an earlier stop already is (J4-D5: the first stop
+/// wins, as it does in the platform's `request_stop`). The one place a stop
+/// is requested, so the cause recorded and the reason sent cannot disagree.
+fn stop(
+    running: &mut dyn crate::platform::RunningExecution,
     record: &mut AttemptRecord,
-    outcome_error: &mut Option<JailError>,
-    error: JailError,
+    reason: StopReason,
 ) {
     record
         .outcome
         .cause
-        .get_or_insert("state_write_failed".to_owned());
+        .get_or_insert_with(|| reason.cause().to_owned());
+    running.request_stop(reason);
+}
+
+/// Records a persistence failure after release and stops the tree for it
+/// (§7, §13.3): in `errors[]`, as the stop cause unless one came first
+/// (D5), and as the reported error unless one came first.
+fn persistence_failed(
+    running: &mut dyn crate::platform::RunningExecution,
+    record: &mut AttemptRecord,
+    outcome_error: &mut Option<JailError>,
+    error: JailError,
+) {
+    stop(running, record, StopReason::StateWriteFailed);
     persistence_failed_after(record, outcome_error, error);
 }
 
@@ -4756,6 +4750,57 @@ mod tests {
             updated_at: now,
             errors: Vec::new(),
             credentials: Vec::new(),
+        }
+    }
+
+    /// SUP-10: a stop records the cause of the very reason it sends, a
+    /// persistence failure stops for `state_write_failed`, and the first
+    /// stop's cause is the one that stays (J4-D5).
+    #[test]
+    fn a_stop_records_the_cause_of_the_reason_it_sends_and_the_first_wins() {
+        struct Stops(Vec<StopReason>);
+        impl crate::platform::RunningExecution for Stops {
+            fn wait(&mut self, _: crate::platform::Deadline) -> RunEvent {
+                RunEvent::Poll
+            }
+            fn request_stop(&mut self, reason: StopReason) {
+                self.0.push(reason);
+            }
+            fn wait_tree(&mut self, _: Duration) -> crate::platform::TreeObservation {
+                unreachable!("no tree is waited for")
+            }
+            fn observer_summary(&mut self) -> Option<CoverageSummary> {
+                None
+            }
+        }
+        let mut running = Stops(Vec::new());
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        let mut outcome_error = None;
+        let failure = JailError::new(
+            ErrorCode::StateWriteFailed,
+            ErrorStage::Running,
+            Remediation::InspectState,
+            "stalled".to_owned(),
+        );
+        persistence_failed(&mut running, &mut record, &mut outcome_error, failure);
+        stop(&mut running, &mut record, StopReason::WallExpiry);
+        assert_eq!(
+            running.0,
+            [StopReason::StateWriteFailed, StopReason::WallExpiry]
+        );
+        assert_eq!(record.outcome.cause.as_deref(), Some("state_write_failed"));
+        assert_eq!(record.errors.len(), 1);
+        for (reason, cause) in [
+            (StopReason::CommandForbidden, "command_forbidden"),
+            (StopReason::OperatorSignal, "operator_signal"),
+            (StopReason::WallExpiry, "wall_expiry"),
+            (StopReason::EvidenceLoss, "evidence_loss"),
+            (StopReason::StateWriteFailed, "state_write_failed"),
+            (StopReason::StdioFailure, "stdio_failure"),
+        ] {
+            let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+            stop(&mut running, &mut record, reason);
+            assert_eq!(record.outcome.cause.as_deref(), Some(cause), "{reason:?}");
         }
     }
 
