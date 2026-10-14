@@ -46,19 +46,7 @@ pub fn baselines() -> Result<Vec<Baseline>, crate::records::JailError> {
     PROFILES
         .iter()
         .map(|profile| {
-            let inputs = ResolveInputs {
-                platform: Os::Linux,
-                base_profile: *profile,
-                policy_name: profile.as_str().to_owned(),
-                baseline: crate::profiles::baseline(*profile, Os::Linux, &|_| None),
-                workspace: b"/work".to_vec(),
-                scratch: ScratchRoot::Managed,
-                vendor_state: None,
-                operator_home: None,
-                translation_prefixes: Vec::new(),
-                layers: Vec::new(),
-            };
-            let resolved = crate::policy::resolve(&inputs)?;
+            let resolved = resolve_baseline(*profile)?;
             Ok(Baseline {
                 profile: *profile,
                 digest: resolved.digest,
@@ -67,6 +55,28 @@ pub fn baselines() -> Result<Vec<Baseline>, crate::records::JailError> {
         })
         .collect()
 }
+
+/// `profile`'s built-in baseline resolved with the fixed inputs
+/// [`baselines`] documents.
+fn resolve_baseline(
+    profile: ProfileName,
+) -> Result<crate::policy::Resolved, crate::records::JailError> {
+    crate::policy::resolve(&ResolveInputs {
+        platform: Os::Linux,
+        base_profile: profile,
+        policy_name: profile.as_str().to_owned(),
+        baseline: crate::profiles::baseline(profile, Os::Linux, &|_| None),
+        workspace: FROZEN_WORKSPACE.as_bytes().to_vec(),
+        scratch: ScratchRoot::Managed,
+        vendor_state: None,
+        operator_home: None,
+        translation_prefixes: Vec::new(),
+        layers: Vec::new(),
+    })
+}
+
+/// The workspace every frozen baseline is resolved over.
+const FROZEN_WORKSPACE: &str = "/work";
 
 /// `value` as JSON with every object's keys sorted, whatever map type
 /// serde_json was built with; `pretty` puts one member per line.
@@ -127,68 +137,67 @@ pub use self::linux::backend_plans;
 mod linux {
     use std::path::{Path, PathBuf};
 
-    use super::super::bwrap::{BwrapPlan, ETC_PATHS, RUNTIME_ROOTS, Staged, WorkspaceAccess};
+    use super::super::bwrap::{ETC_PATHS, RUNTIME_ROOTS};
     use super::super::fs::RootSpec;
+    use super::super::platform::{PlanPaths, plan_for};
+    use super::{FROZEN_WORKSPACE, PROFILES, resolve_baseline};
+    use crate::records::JailError;
 
-    /// The bubblewrap invocation each contained profile's plan renders to,
-    /// argv after the backend's own path: `BwrapPlan::tool`'s namespaces,
-    /// mounts, flags and environment, with the declared runtime roots and
-    /// `/etc` grants as binds (not this host's resolution of them, so the
-    /// rendering is the same on every host), fixed placeholder paths, and
-    /// each profile's workspace access (tool and agent writable, build
-    /// read-only), with the descriptors preparation hands it (filter,
-    /// status, arguments); the agent plan also binds a proxy directory and
-    /// vendor state by descriptor. Preparation adds attempt-specific binds
-    /// (protected paths, credentials) from the snapshot, which the baselines
-    /// pin.
+    /// The bubblewrap invocation each contained built-in profile's baseline
+    /// renders to, argv after the backend's own path: the plan
+    /// preparation builds from the baseline's snapshot
+    /// ([`plan_for`](super::super::platform::plan_for): namespaces, the
+    /// workspace's access, the environment, the proxy directory of `agent`),
+    /// with fixed paths, the declared runtime roots and `/etc` grants as
+    /// binds (not this host's resolution of them, so the rendering is the
+    /// same on every host), a fixed target and the descriptors preparation
+    /// hands bubblewrap (filter, status, arguments). What preparation adds
+    /// from the host and the attempt (operator grants, masks, staged vendor
+    /// state and credentials, protected-segment pins) is not here; the
+    /// baselines pin the snapshot those come from.
     ///
     /// # Errors
-    /// A plan that does not render.
-    pub fn backend_plans() -> Result<Vec<(&'static str, Vec<String>)>, String> {
-        ["tool", "build", "agent"]
+    /// A baseline that does not resolve or a plan that does not render.
+    pub fn backend_plans() -> Result<Vec<(&'static str, Vec<String>)>, JailError> {
+        PROFILES
             .into_iter()
+            .filter(|profile| profile.is_contained())
             .map(|profile| {
-                let mut plan = BwrapPlan::tool(
-                    Path::new("/freeze/workspace"),
-                    Path::new("/freeze/scratch"),
-                    Path::new("/freeze/ouro-jail"),
-                );
-                plan.bwrap = PathBuf::from("/freeze/bwrap");
+                let snapshot = resolve_baseline(profile)?.snapshot;
+                let mut plan = plan_for(
+                    &snapshot,
+                    &PlanPaths {
+                        bwrap: Path::new("/freeze/bwrap"),
+                        workspace: Path::new(FROZEN_WORKSPACE),
+                        scratch: Path::new("/freeze/scratch"),
+                        jail_exe: Path::new("/freeze/ouro-jail"),
+                        proxy_dir: Some(Path::new("/freeze/proxy")),
+                    },
+                )?;
                 plan.roots = RUNTIME_ROOTS
                     .iter()
                     .map(|root| RootSpec::RoBind(PathBuf::from(root)))
                     .collect();
                 plan.etc_paths = ETC_PATHS.iter().map(PathBuf::from).collect();
                 plan.inner = vec!["/freeze/target".into()];
-                plan.workspace_access = if profile == "build" {
-                    WorkspaceAccess::ReadOnly
-                } else {
-                    WorkspaceAccess::Writable
-                };
-                // The descriptors preparation hands bubblewrap.
                 plan.seccomp_fd = Some(super::super::platform::SECCOMP_FD);
                 plan.json_status_fd = Some(super::super::platform::STATUS_FD);
                 plan.args_fd = Some(super::super::platform::ARGS_FD);
-                if profile == "agent" {
-                    plan.proxy_dir = Some(Staged {
-                        host: PathBuf::from("/freeze/proxy"),
-                        fd: super::super::agent::PROXY_DIR_FD,
-                    });
-                    plan.vendor_state = Some(Staged {
-                        host: PathBuf::from("/freeze/vendor"),
-                        fd: super::super::platform::VENDOR_STATE_FD,
-                    });
-                }
-                let rendered = plan
-                    .render()
-                    .map_err(|error| format!("{profile}: {error}"))?;
+                let rendered = plan.render().map_err(|error| {
+                    JailError::new(
+                        crate::records::ErrorCode::InternalError,
+                        crate::records::ErrorStage::Preparing,
+                        crate::records::Remediation::InspectState,
+                        format!("{}: {error}", profile.as_str()),
+                    )
+                })?;
                 let argv = rendered
                     .argv
                     .iter()
                     .skip(1)
                     .map(|arg| arg.to_string_lossy().into_owned())
                     .collect();
-                Ok((profile, argv))
+                Ok((profile.as_str(), argv))
             })
             .collect()
     }

@@ -889,25 +889,19 @@ impl Boundary {
         names.sort_unstable();
         names.dedup();
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut bplan = BwrapPlan::tool(&plan.workspace, &scratch, &exe);
-        bplan.bounded_storage = super::storage::requested(&snapshot.limits);
-        bplan.workspace_access = bwrap::WorkspaceAccess::Hidden;
-        if snapshot.filesystem.read_write.iter().any(|reference| {
-            host_path_of(reference, &plan.workspace, &scratch)
-                .is_ok_and(|path| path == plan.workspace)
-        }) {
-            bplan.workspace_access = bwrap::WorkspaceAccess::Writable;
-        }
-        if snapshot.filesystem.read_only.iter().any(|reference| {
-            host_path_of(reference, &plan.workspace, &scratch)
-                .is_ok_and(|path| path == plan.workspace)
-        }) {
-            bplan.workspace_access = bwrap::WorkspaceAccess::ReadOnly;
-        }
-        bplan.bwrap = bwrap_path.to_path_buf();
-        bplan.env = environment_for(&snapshot, &plan.workspace)?;
-        // §10 — the proxy socket in its registered directory,
-        // bound read-only by descriptor, and the proxy variables.
+        let mut bplan = plan_for(
+            &snapshot,
+            &PlanPaths {
+                bwrap: bwrap_path,
+                workspace: &plan.workspace,
+                scratch: &scratch,
+                jail_exe: &exe,
+                proxy_dir: plan
+                    .proxy
+                    .as_ref()
+                    .map(|handoff| handoff.host_path.as_path()),
+            },
+        )?;
         let mut agent = if snapshot.profile == ProfileName::Agent {
             let Some(handoff) = plan.proxy.as_ref() else {
                 return Err(preparing(
@@ -923,15 +917,6 @@ impl Boundary {
                 &exe,
                 bwrap_path,
             )?;
-            bplan.proxy_dir = Some(bwrap::Staged {
-                host: agent.dir_path().to_path_buf(),
-                fd: super::agent::PROXY_DIR_FD,
-            });
-            for (name, value) in super::bridge::proxy_environment() {
-                bplan
-                    .env
-                    .push((OsString::from(name), OsString::from(value)));
-            }
             Some(agent)
         } else {
             None
@@ -3309,6 +3294,74 @@ fn read_environment_names(pid: libc::pid_t) -> std::io::Result<Vec<String>> {
     names.sort();
     names.dedup();
     Ok(names)
+}
+
+/// Where a contained plan's paths are: what it binds that the snapshot does
+/// not name.
+pub(crate) struct PlanPaths<'a> {
+    /// The backend binary.
+    pub(crate) bwrap: &'a Path,
+    /// The workspace, on the host and inside alike.
+    pub(crate) workspace: &'a Path,
+    /// The scratch directory the child sees at `/tmp`.
+    pub(crate) scratch: &'a Path,
+    /// The jail binary bound at [`bwrap::JAIL_INSIDE_PATH`].
+    pub(crate) jail_exe: &'a Path,
+    /// The attempt's proxy directory, which `agent` binds.
+    pub(crate) proxy_dir: Option<&'a Path>,
+}
+
+/// The plan a contained snapshot starts from: [`BwrapPlan::tool`] with what
+/// the snapshot alone decides — the storage seal, the workspace's access,
+/// the environment and, for `agent`, the proxy directory by descriptor and
+/// the proxy variables. Preparation adds what needs the host and the
+/// attempt (grants, masks, staged state, pins); the freeze renders the
+/// built-in baselines through this same function.
+///
+/// # Errors
+/// An environment binding that does not resolve, or `agent` without a
+/// proxy directory.
+pub(crate) fn plan_for(
+    snapshot: &PolicySnapshot,
+    paths: &PlanPaths,
+) -> Result<BwrapPlan, JailError> {
+    let mut bplan = BwrapPlan::tool(paths.workspace, paths.scratch, paths.jail_exe);
+    bplan.bounded_storage = super::storage::requested(&snapshot.limits);
+    let names_workspace = |references: &[PathRef]| {
+        references.iter().any(|reference| {
+            host_path_of(reference, paths.workspace, paths.scratch)
+                .is_ok_and(|path| path == paths.workspace)
+        })
+    };
+    bplan.workspace_access = if names_workspace(&snapshot.filesystem.read_only) {
+        bwrap::WorkspaceAccess::ReadOnly
+    } else if names_workspace(&snapshot.filesystem.read_write) {
+        bwrap::WorkspaceAccess::Writable
+    } else {
+        bwrap::WorkspaceAccess::Hidden
+    };
+    bplan.bwrap = paths.bwrap.to_path_buf();
+    bplan.env = environment_for(snapshot, paths.workspace)?;
+    // §10 — the proxy socket in its registered directory, bound read-only
+    // by descriptor, and the proxy variables.
+    if snapshot.profile == ProfileName::Agent {
+        let Some(proxy_dir) = paths.proxy_dir else {
+            return Err(preparing(
+                ErrorCode::MissingCapability,
+                "the `agent` proxy could not be established: no proxy directory was prepared",
+            ));
+        };
+        bplan.proxy_dir = Some(bwrap::Staged {
+            host: proxy_dir.to_path_buf(),
+            fd: super::agent::PROXY_DIR_FD,
+        });
+        for (name, value) in super::bridge::proxy_environment() {
+            bplan
+                .env
+                .push((OsString::from(name), OsString::from(value)));
+        }
+    }
+    Ok(bplan)
 }
 
 /// The environment bindings of the snapshot, resolved to the paths the child
