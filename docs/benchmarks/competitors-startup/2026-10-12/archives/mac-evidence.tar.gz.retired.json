@@ -1,0 +1,24 @@
+{
+  "schema": "ouro.evidence.retired-archive/1",
+  "archive": "docs/benchmarks/competitors-startup/2026-10-12/archives/mac-evidence.tar.gz",
+  "parts": [
+    {
+      "path": "docs/benchmarks/competitors-startup/2026-10-12/archives/mac-evidence.tar.gz",
+      "bytes": 836438,
+      "sha256": "d6b353d83db7ae36d83a4c66297a69063d760f74468dba640a675d03e4025509",
+      "git_blob": "d4323e303711551739c921f8ec07c58124a449e4"
+    }
+  ],
+  "bytes": 836438,
+  "sha256": "d6b353d83db7ae36d83a4c66297a69063d760f74468dba640a675d03e4025509",
+  "members": {
+    "file": 1468
+  },
+  "duplicate_of": "docs/benchmarks/competitors-startup/2026-10-12/results/mac/",
+  "members_identical": 1468,
+  "members_differing": [],
+  "members_without_tracked_file": [],
+  "member_listing_sha256": "dad758ebe64fe2994f029e1558b69b9979d9c8b59f41ff0e71e34b488b5113bc",
+  "added_in": "cf98e6a12f49f069aaf68c16faf89064b8bca153",
+  "proved_at": "35869fe866f848834396faf22d0bb9da9eee5fd5"
+}

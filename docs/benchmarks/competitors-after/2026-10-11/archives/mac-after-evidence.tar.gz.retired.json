@@ -1,0 +1,24 @@
+{
+  "schema": "ouro.evidence.retired-archive/1",
+  "archive": "docs/benchmarks/competitors-after/2026-10-11/archives/mac-after-evidence.tar.gz",
+  "parts": [
+    {
+      "path": "docs/benchmarks/competitors-after/2026-10-11/archives/mac-after-evidence.tar.gz",
+      "bytes": 783391,
+      "sha256": "1ab2c613d60ffd2de1de002de6ee15b1328efd9c7854f0704e1cf6466b3f5f7c",
+      "git_blob": "e671d9d32a314ca8e50c234c8077902b5c5a51dc"
+    }
+  ],
+  "bytes": 783391,
+  "sha256": "1ab2c613d60ffd2de1de002de6ee15b1328efd9c7854f0704e1cf6466b3f5f7c",
+  "members": {
+    "file": 1435
+  },
+  "duplicate_of": "docs/benchmarks/competitors-after/2026-10-11/results/mac/",
+  "members_identical": 1435,
+  "members_differing": [],
+  "members_without_tracked_file": [],
+  "member_listing_sha256": "63473e8fc8a4cb0b38169650c5707b2ede6dc53da0e56bd0f18854380b68aab6",
+  "added_in": "ac1263a0961d5e676c2a03e516848a9fd00dde9b",
+  "proved_at": "35869fe866f848834396faf22d0bb9da9eee5fd5"
+}

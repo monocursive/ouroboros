@@ -1,0 +1,36 @@
+{
+  "schema": "ouro.evidence.retired-archive/1",
+  "archive": "docs/benchmarks/competitors-startup/2026-10-12-evidence.tar.gz",
+  "parts": [
+    {
+      "path": "docs/benchmarks/competitors-startup/2026-10-12-evidence.tar.gz.part00",
+      "bytes": 51380224,
+      "sha256": "0857c0187badfc68a75b47d2a13316470244dab2771bff0e203a1dd37d8c3714",
+      "git_blob": "56346954d442115d724180793a3ce704a737a8ca"
+    },
+    {
+      "path": "docs/benchmarks/competitors-startup/2026-10-12-evidence.tar.gz.part01",
+      "bytes": 51380224,
+      "sha256": "3a9aed0bef43d8748766c1dd0daeb7ebad292eff275061b60a04644a0e6f5cb5",
+      "git_blob": "6d123679c51493c0c7868b5527f1ccf767631060"
+    },
+    {
+      "path": "docs/benchmarks/competitors-startup/2026-10-12-evidence.tar.gz.part02",
+      "bytes": 44822402,
+      "sha256": "8ba30838cfd710f9dc4f36394dcf6b9b5aacdd861228037333162938f698a265",
+      "git_blob": "8a221111cb750fcab1e664577c34978109f96c67"
+    }
+  ],
+  "bytes": 147582850,
+  "sha256": "9cbe8bb69cd7d345b398be9f462d2a12ad2a24275e998bbdfe5274d6fdac6152",
+  "members": {
+    "file": 23758
+  },
+  "duplicate_of": "docs/benchmarks/competitors-startup/",
+  "members_identical": 23758,
+  "members_differing": [],
+  "members_without_tracked_file": [],
+  "member_listing_sha256": "d609ffb8f0c6b1b5ad471b3dc0eba5ee2727ede24cc1abf5f4bc6b4e4b9b7a5a",
+  "added_in": "cf98e6a12f49f069aaf68c16faf89064b8bca153",
+  "proved_at": "35869fe866f848834396faf22d0bb9da9eee5fd5"
+}

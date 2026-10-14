@@ -1,0 +1,24 @@
+{
+  "schema": "ouro.evidence.retired-archive/1",
+  "archive": "docs/benchmarks/competitors/results/2026-10-11/evidence-archives/pi-final-evidence.tar.gz",
+  "parts": [
+    {
+      "path": "docs/benchmarks/competitors/results/2026-10-11/evidence-archives/pi-final-evidence.tar.gz",
+      "bytes": 3524970,
+      "sha256": "bb3c0901c418e0a7c8c3204f987e897ff54e61a24f67af7af461b5556cf4b1dd",
+      "git_blob": "a6ccabf19c3c780a1a78c41fc4297c478ea39061"
+    }
+  ],
+  "bytes": 3524970,
+  "sha256": "bb3c0901c418e0a7c8c3204f987e897ff54e61a24f67af7af461b5556cf4b1dd",
+  "members": {
+    "file": 3195
+  },
+  "duplicate_of": "docs/benchmarks/competitors/results/2026-10-11/pi-final/",
+  "members_identical": 3195,
+  "members_differing": [],
+  "members_without_tracked_file": [],
+  "member_listing_sha256": "47024e24b1ef36d7a1472d3b4f162c04272bf2b1b640b91c1d7383b2266622d4",
+  "added_in": "ac1263a0961d5e676c2a03e516848a9fd00dde9b",
+  "proved_at": "35869fe866f848834396faf22d0bb9da9eee5fd5"
+}

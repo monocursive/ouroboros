@@ -1,0 +1,24 @@
+{
+  "schema": "ouro.evidence.retired-archive/1",
+  "archive": "docs/benchmarks/competitors-startup/2026-10-12/archives/pi-lifetime-diagnostic-evidence.tar.gz",
+  "parts": [
+    {
+      "path": "docs/benchmarks/competitors-startup/2026-10-12/archives/pi-lifetime-diagnostic-evidence.tar.gz",
+      "bytes": 163385,
+      "sha256": "19a3a3ff80f9697729b28394ed1defc2c92a5a379ee9013a9c2031ebcf4ee6f2",
+      "git_blob": "ea3db7135257adcac7d82408edc3ba0e5fd5b948"
+    }
+  ],
+  "bytes": 163385,
+  "sha256": "19a3a3ff80f9697729b28394ed1defc2c92a5a379ee9013a9c2031ebcf4ee6f2",
+  "members": {
+    "file": 184
+  },
+  "duplicate_of": "docs/benchmarks/competitors-startup/2026-10-12/results/pi-lifetime-diagnostic/",
+  "members_identical": 184,
+  "members_differing": [],
+  "members_without_tracked_file": [],
+  "member_listing_sha256": "0a16e04fe1350fbf2baf6da00638d1d08967fad743e98d2cf30b6ecf16a7770e",
+  "added_in": "cf98e6a12f49f069aaf68c16faf89064b8bca153",
+  "proved_at": "35869fe866f848834396faf22d0bb9da9eee5fd5"
+}

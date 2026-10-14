@@ -1,0 +1,24 @@
+{
+  "schema": "ouro.evidence.retired-archive/1",
+  "archive": "docs/benchmarks/competitors-startup/2026-10-12/archives/vps-candidate-v4-evidence.tar.gz",
+  "parts": [
+    {
+      "path": "docs/benchmarks/competitors-startup/2026-10-12/archives/vps-candidate-v4-evidence.tar.gz",
+      "bytes": 3316302,
+      "sha256": "4eadf4223296429fe1adcbca5e98c686a106b9e3bc7c078966909d811a869da9",
+      "git_blob": "baaea68a752fc884196c7c82d6457e54dac07e53"
+    }
+  ],
+  "bytes": 3316302,
+  "sha256": "4eadf4223296429fe1adcbca5e98c686a106b9e3bc7c078966909d811a869da9",
+  "members": {
+    "file": 2570
+  },
+  "duplicate_of": "docs/benchmarks/competitors-startup/2026-10-12/candidates/v4/results/vps/",
+  "members_identical": 2570,
+  "members_differing": [],
+  "members_without_tracked_file": [],
+  "member_listing_sha256": "b4d3796dd03d473c2c225a5cbdb1f96d671ef23f4da7727b3734ec334525d418",
+  "added_in": "cf98e6a12f49f069aaf68c16faf89064b8bca153",
+  "proved_at": "35869fe866f848834396faf22d0bb9da9eee5fd5"
+}

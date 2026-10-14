@@ -1,0 +1,24 @@
+{
+  "schema": "ouro.evidence.retired-archive/1",
+  "archive": "docs/benchmarks/competitors-startup/2026-10-12/archives/pi-candidate-v4-evidence.tar.gz",
+  "parts": [
+    {
+      "path": "docs/benchmarks/competitors-startup/2026-10-12/archives/pi-candidate-v4-evidence.tar.gz",
+      "bytes": 2958719,
+      "sha256": "3e5981742bc6b07dac51cfdd5f2682c4e9d26d2b4a68859e0d5f164f241d90df",
+      "git_blob": "2fa6d06b9eb2072d9df62f1aa14dadcc67eea47a"
+    }
+  ],
+  "bytes": 2958719,
+  "sha256": "3e5981742bc6b07dac51cfdd5f2682c4e9d26d2b4a68859e0d5f164f241d90df",
+  "members": {
+    "file": 2268
+  },
+  "duplicate_of": "docs/benchmarks/competitors-startup/2026-10-12/candidates/v4/results/pi/",
+  "members_identical": 2268,
+  "members_differing": [],
+  "members_without_tracked_file": [],
+  "member_listing_sha256": "3ab20174c2fdabec7b51a9d24a6815e2584684c38210eaf4406e66bf6295ba98",
+  "added_in": "cf98e6a12f49f069aaf68c16faf89064b8bca153",
+  "proved_at": "35869fe866f848834396faf22d0bb9da9eee5fd5"
+}

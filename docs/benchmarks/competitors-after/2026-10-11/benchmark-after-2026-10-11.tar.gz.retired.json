@@ -1,0 +1,24 @@
+{
+  "schema": "ouro.evidence.retired-archive/1",
+  "archive": "docs/benchmarks/competitors-after/2026-10-11/benchmark-after-2026-10-11.tar.gz",
+  "parts": [
+    {
+      "path": "docs/benchmarks/competitors-after/2026-10-11/benchmark-after-2026-10-11.tar.gz",
+      "bytes": 65670157,
+      "sha256": "d9a9c94e18f7f725160892fe513aa7a527fbf8acfaf5310f0754d0455e2b21b3",
+      "git_blob": "48b8f16adfd65e92f1cbb3efb01e0ecae5456c3f"
+    }
+  ],
+  "bytes": 65670157,
+  "sha256": "d9a9c94e18f7f725160892fe513aa7a527fbf8acfaf5310f0754d0455e2b21b3",
+  "members": {
+    "file": 7123
+  },
+  "duplicate_of": "docs/benchmarks/competitors-after/2026-10-11/",
+  "members_identical": 7123,
+  "members_differing": [],
+  "members_without_tracked_file": [],
+  "member_listing_sha256": "21fff20f78de934e3cbe3574f4bf1c50a28510112940bfd10886d45bf3f63e72",
+  "added_in": "ac1263a0961d5e676c2a03e516848a9fd00dde9b",
+  "proved_at": "35869fe866f848834396faf22d0bb9da9eee5fd5"
+}
