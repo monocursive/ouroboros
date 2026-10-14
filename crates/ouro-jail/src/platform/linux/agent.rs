@@ -537,12 +537,16 @@ impl AgentNet {
                 "it is not in the attempt's network, mount and pid namespaces",
             ));
         }
-        let status = |key: &str| identity::status_field(pid, key).unwrap_or_default();
-        if status("NoNewPrivs") != "1" || !status("CapEff").chars().all(|c| c == '0') {
+        let privilege = identity::Privilege::read(pid)
+            .map_err(|error| refusal("bridge", format!("its status cannot be read: {error}")))?;
+        if !privilege.unprivileged() {
             return Err(refusal("bridge", "it holds privilege"));
         }
-        let filters = verify_filter_count(&status("Seccomp_filters"), EXPECTED_BRIDGE_FILTERS)
-            .map_err(|error| refusal("bridge", error.message))?;
+        let filters = verify_filter_count(
+            privilege.seccomp_filters.as_deref().unwrap_or_default(),
+            EXPECTED_BRIDGE_FILTERS,
+        )
+        .map_err(|error| refusal("bridge", error.message))?;
         // Listening is read back from the attempt's own network namespace,
         // through the bridge's /proc view, and tied to a descriptor it holds.
         loop {

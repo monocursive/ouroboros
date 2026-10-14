@@ -14,7 +14,7 @@
 use std::fs;
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Path of the kernel's boot id.
 pub const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
@@ -298,7 +298,7 @@ pub struct NsIds {
     pub cgroup: Option<u64>,
 }
 
-/// Read the four namespace ids this project cares about.
+/// Read the five namespace ids this project cares about.
 ///
 /// A namespace whose link cannot be read is `None`, never zero: an unreadable
 /// namespace is unknown, not "the same as ours".
@@ -347,17 +347,104 @@ pub fn status_field(pid: libc::pid_t, key: &str) -> io::Result<String> {
     ))
 }
 
-/// Whether a path is a directory owned by this process's uid.
-#[must_use]
-pub fn is_own_directory(path: &Path) -> bool {
-    match fs::metadata(path) {
-        Ok(meta) => {
-            use std::os::unix::fs::MetadataExt as _;
-            // SAFETY: getuid takes no arguments and cannot fail.
-            meta.is_dir() && meta.uid() == unsafe { libc::getuid() }
-        }
-        Err(_) => false,
+/// What one `/proc/<pid>/status` snapshot says about a process's privilege
+/// and its syscall filters.
+///
+/// One read, so every fact is of the same moment. A line the privilege
+/// checks rest on that is missing, empty or malformed is an error, never a
+/// default: `"".chars().all(|c| c == '0')` is true, and "the capability set
+/// could not be read" must not pass for "it holds none".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Privilege {
+    /// `NoNewPrivs` is `1`.
+    pub no_new_privs: bool,
+    /// `CapEff`, the effective capability set.
+    pub cap_eff: u64,
+    /// `Seccomp`, the seccomp mode as the kernel writes it (`0`, `1`, `2`),
+    /// or `None` when the kernel has no such line.
+    pub seccomp: Option<String>,
+    /// `Seccomp_filters`, the number of filters in force as the kernel writes
+    /// it, or `None` when the kernel has no such line.
+    pub seccomp_filters: Option<String>,
+}
+
+impl Privilege {
+    /// Read `/proc/<pid>/status` once and parse it.
+    ///
+    /// # Errors
+    /// Any failure reading the file, or [`io::ErrorKind::InvalidData`] as
+    /// [`Privilege::parse`] returns it.
+    pub fn read(pid: libc::pid_t) -> io::Result<Self> {
+        Self::parse(&fs::read_to_string(format!("/proc/{pid}/status"))?)
     }
+
+    /// Parse the contents of a `/proc/<pid>/status` file.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::InvalidData`] when `NoNewPrivs` is missing or neither
+    /// `0` nor `1`, or `CapEff` is missing or not a hexadecimal mask.
+    pub fn parse(status: &str) -> io::Result<Self> {
+        let field = |key: &str| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
+                .map(str::trim)
+        };
+        let invalid = |what: String| io::Error::new(io::ErrorKind::InvalidData, what);
+        let no_new_privs = match field("NoNewPrivs") {
+            Some("1") => true,
+            Some("0") => false,
+            other => return Err(invalid(format!("NoNewPrivs is {other:?}"))),
+        };
+        let cap_eff = field("CapEff")
+            .filter(|mask| !mask.is_empty())
+            .and_then(|mask| u64::from_str_radix(mask, 16).ok())
+            .ok_or_else(|| invalid(format!("CapEff is {:?}", field("CapEff"))))?;
+        Ok(Self {
+            no_new_privs,
+            cap_eff,
+            seccomp: field("Seccomp").map(str::to_owned),
+            seccomp_filters: field("Seccomp_filters").map(str::to_owned),
+        })
+    }
+
+    /// No new privileges can be gained and no capability is in effect.
+    #[must_use]
+    pub fn unprivileged(&self) -> bool {
+        self.no_new_privs && self.cap_eff == 0
+    }
+}
+
+/// Whether `pid` is blocked in `read(2)` on descriptor `fd`, from
+/// `/proc/<pid>/syscall`.
+///
+/// The descriptor is part of the answer: a launcher reads other descriptors
+/// before it blocks on its release pipe (the narrowing trace data, for one),
+/// and a gate that took any `read` for the release would pass early.
+///
+/// # Errors
+/// Any failure reading the file.
+pub fn blocked_in_read(pid: libc::pid_t, fd: RawFd) -> io::Result<bool> {
+    Ok(parse_blocked_in_read(
+        &fs::read_to_string(format!("/proc/{pid}/syscall"))?,
+        fd,
+    ))
+}
+
+/// Whether a `/proc/<pid>/syscall` line (the number, then the arguments in
+/// hexadecimal) is a `read(2)` on `fd`.
+#[must_use]
+pub fn parse_blocked_in_read(raw: &str, fd: RawFd) -> bool {
+    let mut fields = raw.split_whitespace();
+    fields
+        .next()
+        .and_then(|number| number.parse::<libc::c_long>().ok())
+        == Some(libc::SYS_read)
+        && fields
+            .next()
+            .and_then(|arg| arg.strip_prefix("0x"))
+            .and_then(|hex| i64::from_str_radix(hex, 16).ok())
+            == Some(i64::from(fd))
 }
 
 #[cfg(test)]
@@ -409,6 +496,75 @@ mod tests {
     fn a_short_stat_line_is_invalid_data() {
         let err = parse_start_time_ticks("1 (x) S 4 5 6").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    fn status(no_new_privs: Option<&str>, cap_eff: Option<&str>) -> String {
+        let mut text = String::from("Name:\tlauncher\nUmask:\t0022\n");
+        if let Some(value) = cap_eff {
+            text.push_str(&format!("CapEff:\t{value}\n"));
+        }
+        if let Some(value) = no_new_privs {
+            text.push_str(&format!("NoNewPrivs:\t{value}\n"));
+        }
+        text.push_str("Seccomp:\t2\nSeccomp_filters:\t3\n");
+        text
+    }
+
+    #[test]
+    fn privilege_is_read_from_one_status_and_an_unreadable_line_refuses() {
+        let clean = Privilege::parse(&status(Some("1"), Some("0000000000000000"))).unwrap();
+        assert!(clean.unprivileged());
+        assert_eq!(clean.seccomp.as_deref(), Some("2"));
+        assert_eq!(clean.seccomp_filters.as_deref(), Some("3"));
+
+        let capable = Privilege::parse(&status(Some("1"), Some("0000000000200000"))).unwrap();
+        assert_eq!(capable.cap_eff, 0x20_0000);
+        assert!(!capable.unprivileged());
+        assert!(
+            !Privilege::parse(&status(Some("0"), Some("0")))
+                .unwrap()
+                .unprivileged()
+        );
+
+        // Missing, empty or malformed: an error, never "no capabilities".
+        for (no_new_privs, cap_eff) in [
+            (Some("1"), None),
+            (Some("1"), Some("")),
+            (Some("1"), Some("zz")),
+            (None, Some("0")),
+            (Some(""), Some("0")),
+            (Some("yes"), Some("0")),
+        ] {
+            let error = Privilege::parse(&status(no_new_privs, cap_eff)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        let own = Privilege::read(std::process::id().cast_signed()).unwrap();
+        assert!(own.seccomp.is_some(), "{own:?}");
+    }
+
+    #[test]
+    fn only_a_read_on_the_named_descriptor_is_blocked_in_read() {
+        let read = libc::SYS_read;
+        assert!(parse_blocked_in_read(
+            &format!("{read} 0x3 0x7ffd 0x1 0x0 0x0 0x0 0x7ffd 0x7f"),
+            3
+        ));
+        assert!(parse_blocked_in_read(&format!("{read} 0xc 0x7ffd 0x1"), 12));
+        // The launcher's read of its trace-data descriptor is not the gate.
+        assert!(!parse_blocked_in_read(
+            &format!("{read} 0x9 0x7ffd 0x2"),
+            12
+        ));
+        assert!(!parse_blocked_in_read(
+            &format!("{read} 0x5 0x7ffd 0x1 0x0"),
+            3
+        ));
+        assert!(!parse_blocked_in_read("running", 3));
+        assert!(!parse_blocked_in_read(
+            &format!("{} 0x3", libc::SYS_write),
+            3
+        ));
+        assert!(!parse_blocked_in_read("", 3));
     }
 
     #[test]

@@ -731,7 +731,7 @@ impl Uncontained {
         // observer's attach contract requires and what makes the release the
         // only way forward.
         loop {
-            if blocked_on_release(pid) {
+            if matches!(identity::blocked_in_read(pid, RELEASE_FD), Ok(true)) {
                 break;
             }
             if watch::readable(self.launcher_fd.as_raw_fd()) {
@@ -1473,28 +1473,6 @@ fn classify(
     }
 }
 
-/// Whether `pid` is blocked in `read(2)` on the release descriptor, from
-/// `/proc/<pid>/syscall` (the number, then the arguments in hex). Checking
-/// the descriptor too means a transient read elsewhere during the launcher's
-/// startup cannot pass for the gate.
-fn blocked_on_release(pid: libc::pid_t) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/syscall"))
-        .is_ok_and(|raw| parse_blocked_on(&raw, RELEASE_FD))
-}
-
-fn parse_blocked_on(raw: &str, fd: RawFd) -> bool {
-    let mut fields = raw.split_whitespace();
-    fields
-        .next()
-        .and_then(|number| number.parse::<libc::c_long>().ok())
-        == Some(libc::SYS_read)
-        && fields
-            .next()
-            .and_then(|arg| arg.strip_prefix("0x"))
-            .and_then(|hex| i64::from_str_radix(hex, 16).ok())
-            == Some(i64::from(fd))
-}
-
 // ---------------------------------------------------------------------------
 // The platform traits
 // ---------------------------------------------------------------------------
@@ -1954,19 +1932,6 @@ mod tests {
             assert_eq!(observed.verified_at, None, "{why}");
             assert_eq!(observed.integrity, "pending", "{why}");
         }
-    }
-
-    #[test]
-    fn only_a_read_on_the_release_descriptor_is_the_gate() {
-        let read = libc::SYS_read;
-        assert!(parse_blocked_on(
-            &format!("{read} 0x3 0x7ffd 0x1 0x0 0x0 0x0 0x7ffd 0x7f"),
-            3
-        ));
-        assert!(!parse_blocked_on(&format!("{read} 0x5 0x7ffd 0x1 0x0"), 3));
-        assert!(!parse_blocked_on("running", 3));
-        assert!(!parse_blocked_on(&format!("{} 0x3", libc::SYS_write), 3));
-        assert!(!parse_blocked_on("", 3));
     }
 
     #[test]

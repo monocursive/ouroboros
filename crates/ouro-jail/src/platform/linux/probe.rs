@@ -1320,13 +1320,8 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
         };
         let measured = (|| -> io::Result<()> {
             loop {
-                let syscall = std::fs::read_to_string(format!("/proc/{pid}/syscall"))?;
-                if syscall
-                    .split_whitespace()
-                    .next()
-                    .and_then(|s| s.parse::<i64>().ok())
-                    == Some(libc::SYS_read)
-                {
+                // Blocked on the `--release-fd` above, not on an earlier read.
+                if identity::blocked_in_read(pid, 12)? {
                     break;
                 }
                 if deadline.expired() {

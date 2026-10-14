@@ -1654,13 +1654,14 @@ impl Boundary {
             nap();
         };
 
-        // Wait until it is actually blocked in read(2), which is what the
-        // observer's attach contract requires. `/proc/<pid>/syscall` names the
-        // call it is in, so this is a read-back and not an assumption. The
-        // agent launcher's only other wait before release (for its bridge's
-        // intermediate child) is `wait4`, never a read.
+        // Wait until it is blocked in read(2) on its release descriptor,
+        // which is what the observer's attach contract requires.
+        // `/proc/<pid>/syscall` names the call and its first argument, so
+        // this is a read-back and not an assumption. The descriptor is part
+        // of the check: the launcher reads its trace-data descriptor before
+        // it installs the narrowing filter, and that read is not the gate.
         loop {
-            if current_syscall(launcher) == Some(libc::SYS_read) {
+            if matches!(identity::blocked_in_read(launcher, RELEASE_FD), Ok(true)) {
                 break;
             }
             if deadline.expired() {
@@ -1732,34 +1733,34 @@ impl Boundary {
         // Read back the boundary rather than trusting the flags we passed.
         // The launcher is blocked: these facts come from one kernel status
         // snapshot rather than reopening the same file for every field.
-        let launcher_status =
-            std::fs::read_to_string(format!("/proc/{launcher}/status")).unwrap_or_default();
-        let status_field = |key: &str| {
-            launcher_status
-                .lines()
-                .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
-                .unwrap_or("")
-                .trim()
-        };
-        let no_new_privs = status_field("NoNewPrivs");
-        let cap_eff = status_field("CapEff");
-        let seccomp_mode = status_field("Seccomp");
-        if no_new_privs != "1" {
+        let privilege = identity::Privilege::read(launcher).map_err(|err| {
+            preparing(
+                ErrorCode::BackendUnavailable,
+                format!("the launcher's privilege cannot be read back: {err}"),
+            )
+        })?;
+        if !privilege.no_new_privs {
             return Err(preparing(
                 ErrorCode::BackendUnavailable,
-                format!("no_new_privs is {no_new_privs:?} inside the boundary, not 1"),
+                "no_new_privs is not set inside the boundary",
             ));
         }
-        if cap_eff.is_empty() || !cap_eff.chars().all(|character| character == '0') {
+        if privilege.cap_eff != 0 {
             return Err(preparing(
                 ErrorCode::BackendUnavailable,
-                format!("the boundary retains capabilities: CapEff {cap_eff}"),
+                format!(
+                    "the boundary retains capabilities: CapEff {:016x}",
+                    privilege.cap_eff
+                ),
             ));
         }
-        if seccomp_mode != "2" {
+        if privilege.seccomp.as_deref() != Some("2") {
             return Err(preparing(
                 ErrorCode::BackendUnavailable,
-                format!("the syscall filter is not in force: Seccomp {seccomp_mode}"),
+                format!(
+                    "the syscall filter is not in force: Seccomp {:?}",
+                    privilege.seccomp
+                ),
             ));
         }
         // The J2 gap — `Seccomp: 2` says a filter is in
@@ -1769,12 +1770,14 @@ impl Boundary {
         let expected =
             super::agent::expected_launcher_filters(self.agent.is_some(), self.observe_on);
         self.seccomp_filters = Some(
-            super::agent::verify_filter_count(status_field("Seccomp_filters"), expected).map_err(
-                |mut error| {
-                    error.message = format!("the launcher: {}", error.message);
-                    error
-                },
-            )?,
+            super::agent::verify_filter_count(
+                privilege.seccomp_filters.as_deref().unwrap_or_default(),
+                expected,
+            )
+            .map_err(|mut error| {
+                error.message = format!("the launcher: {}", error.message);
+                error
+            })?,
         );
         let nspid = super::tracer::nspid(launcher).unwrap_or_default();
         if nspid.len() < 2 {
@@ -2436,11 +2439,6 @@ fn launcher_failure(exit_code: Option<i32>, errno_bytes: &[u8], diagnostic: &str
             format!("bubblewrap exited before the launcher blocked: {diagnostic}"),
         ),
     }
-}
-
-fn current_syscall(pid: libc::pid_t) -> Option<libc::c_long> {
-    let raw = std::fs::read_to_string(format!("/proc/{pid}/syscall")).ok()?;
-    raw.split_whitespace().next()?.parse().ok()
 }
 
 fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
