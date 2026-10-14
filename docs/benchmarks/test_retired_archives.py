@@ -104,6 +104,22 @@ class RetiredArchives(unittest.TestCase):
         self.assertEqual(record['bytes'], len(whole))
         self.assertEqual(record['members_identical'], 2)
 
+    def test_a_bundle_still_verifies_after_its_nested_archive_is_retired(self):
+        run = self.repo / RUN
+        bundle = f'{RUN}-evidence.tar.gz'
+        with tarfile.open(self.repo / bundle, 'w:gz') as output:
+            for path in sorted(p for p in run.rglob('*') if p.is_file() and 'stale' not in p.name):
+                output.add(path, arcname=str(path.relative_to(run)))
+        git(self.repo, 'rm', '-q', f'{RUN}/archives/stale.tar.gz')
+        self.commit()
+        _, out = self.run_quietly(retired_archives.prove, 'HEAD', [bundle, f'{RUN}/archives/host.tar.gz'])
+        self.assertEqual(out.count('DUPLICATE'), 2, out)
+        git(self.repo, 'rm', '-q', bundle, f'{RUN}/archives/host.tar.gz')
+        self.commit()
+        code, out = self.run_quietly(retired_archives.verify, 'HEAD')
+        self.assertEqual(code, 0, out)
+        self.assertIn('1 held by a retired archive with the same blob', out)
+
     def test_link_checker_accepts_only_a_matching_record(self):
         target = (self.repo / RUN / 'archives/gone.tar.gz').resolve()
         original = validate_links.ROOT

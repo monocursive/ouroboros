@@ -142,19 +142,35 @@ def choose_root(listing, files, home):
     return max(candidates, key=score) if candidates else None
 
 
+def retired_blobs(repo, files, path):
+    """Blob ids of the archive retired from path, if its record is tracked."""
+    record = files.get(path + '.retired.json')
+    if record is None:
+        return None
+    data = json.loads(git(repo, 'cat-file', 'blob', record[1]))
+    return [part['git_blob'] for part in data['parts']] if data.get('archive') == path else None
+
+
 def compare(repo, listing, files, root):
+    """(identical, differing, untracked, retired): a member whose tracked file
+    is itself an archive retired with the same single blob is still held."""
     paths = {name: posixpath.join(root, name) for name, *_ in listing}
     digests = blob_sha256(repo, sorted({files[p][1] for p in paths.values() if p in files}))
-    identical, differing, untracked = 0, [], []
+    identical, differing, untracked, retired = 0, [], [], 0
     for name, kind, oid, sha in listing:
         entry = files.get(paths[name])
-        if kind == 'other' or entry is None:
+        if kind == 'other':
             untracked.append(name)
+        elif entry is None:
+            if kind == 'file' and retired_blobs(repo, files, paths[name]) == [oid]:
+                retired += 1
+            else:
+                untracked.append(name)
         elif (entry[0] == '120000') != (kind == 'symlink') or entry[1] != oid or digests[entry[1]] != sha:
             differing.append(name)
         else:
             identical += 1
-    return identical, sorted(differing), sorted(untracked)
+    return identical, sorted(differing), sorted(untracked), retired
 
 
 def read_archive(repo, commit, parts):
@@ -183,8 +199,9 @@ def proof(repo, commit, parts, identity, listing, root=None):
         root = choose_root(listing, files, posixpath.dirname(parts[0]))
     if root is None:
         raise SystemExit(f'{parts[0]}: no member matches a tracked path under {corpus}')
-    identical, differing, untracked = compare(repo, listing, files, root)
+    identical, differing, untracked, retired = compare(repo, listing, files, root)
     kinds = collections.Counter(kind for _, kind, *_ in listing)
+    held_by_retired = {'members_held_by_retired_archives': retired} if retired else {}
     return {
         'schema': SCHEMA,
         **identity,
@@ -193,6 +210,7 @@ def proof(repo, commit, parts, identity, listing, root=None):
         'members_identical': identical,
         'members_differing': differing,
         'members_without_tracked_file': untracked,
+        **held_by_retired,
         'member_listing_sha256': hashlib.sha256(''.join(
             f'{sha or "-"}  {name}\n' for name, _, _, sha in sorted(listing)).encode()).hexdigest(),
     }
@@ -207,7 +225,8 @@ def prove(repo, commit, specs):
         parts = spec.split('+')
         result = proof(repo, commit, parts, *read_archive(repo, commit, parts))
         complete = (not result['members_differing'] and not result['members_without_tracked_file']
-                    and result['members_identical'] == sum(result['members'].values()))
+                    and result['members_identical'] + result.get('members_held_by_retired_archives', 0)
+                    == sum(result['members'].values()))
         if not complete:
             print(f'NOT A DUPLICATE {result["archive"]}: {len(result["members_differing"])} differing, '
                   f'{len(result["members_without_tracked_file"])} without a tracked file; no record written')
@@ -247,7 +266,9 @@ def verify(repo, commit):
                   f'{len(current["members_without_tracked_file"])} missing)')
             problems += 1
         else:
-            print(f'OK {name}: {recorded["members_identical"]} members still identical in {recorded["duplicate_of"]}')
+            held = current.get('members_held_by_retired_archives', 0)
+            print(f'OK {name}: {current["members_identical"]} members still identical in {recorded["duplicate_of"]}'
+                  + (f', {held} held by a retired archive with the same blob' if held else ''))
     print(f'{problems} problem(s).')
     return 1 if problems else 0
 
