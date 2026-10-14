@@ -16,7 +16,7 @@ impl Evidence {
     pub fn new(options: &RunOptions, run: &RunRecord, claim: &ClaimedOwner) -> Result<Self> {
         let mut run = run.clone();
         run.owner = Some(crate::daemon::peer_identity(
-            crate::os::euid(),
+            crate::fsx::euid(),
             std::process::id(),
         )?);
         Ok(Self {

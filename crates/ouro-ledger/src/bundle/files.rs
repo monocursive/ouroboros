@@ -58,14 +58,22 @@ pub(crate) fn child_dir(parent: &File, leaf: &str) -> Result<File> {
     })
 }
 
-pub(crate) fn private(file: &File) -> Result<()> {
-    let m = file.metadata()?;
-    if m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 {
-        return Err(LedgerError(
-            "sensitive source must be owned and private".into(),
-        ));
-    }
-    Ok(())
+/// Store members a bundle copies, and secret keys, are private (see `fsx`).
+pub(crate) const SENSITIVE: &str = "sensitive source must be owned and private";
+
+/// The private store directory at `path`.
+pub(crate) fn private_dir(path: &Path) -> Result<File> {
+    crate::fsx::open_dir(path, SENSITIVE)
+}
+
+/// The private store subdirectory `leaf` of the pinned `parent`.
+pub(crate) fn private_child(parent: &File, leaf: &str) -> Result<File> {
+    crate::fsx::open_dir_at(parent, &name(leaf)?, SENSITIVE)
+}
+
+/// The private store file `leaf` of the pinned `parent`, for reading.
+pub(crate) fn private_member(parent: &File, leaf: &str) -> Result<File> {
+    crate::fsx::open_file_at(parent, &name(leaf)?, libc::O_RDONLY, SENSITIVE)
 }
 
 pub(crate) fn member(parent: &File, leaf: &str, create: bool) -> Result<File> {

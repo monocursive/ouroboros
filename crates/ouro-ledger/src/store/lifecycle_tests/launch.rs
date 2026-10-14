@@ -1,6 +1,7 @@
 //! Production owner and jail, with only the writer running in the test harness.
 use super::*;
 use crate::daemon::Client;
+use std::os::unix::fs::PermissionsExt as _;
 
 fn binary(name: &str, variable: &str) -> PathBuf {
     std::env::var_os(variable)

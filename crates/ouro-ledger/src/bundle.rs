@@ -317,19 +317,14 @@ fn assemble(
         write_json(&stage.dir, "receipts.json", &run.receipts)?,
     ];
     if !selected.is_empty() {
-        let root = files::directory(data)?;
-        files::private(&root)?;
-        let ledger = files::child_dir(&root, "ledger")?;
-        files::private(&ledger)?;
-        let source = files::child_dir(&ledger, &run.run_id)?;
-        files::private(&source)?;
-        let artifacts = files::child_dir(&source, "artifacts")?;
-        files::private(&artifacts)?;
+        let root = files::private_dir(data)?;
+        let ledger = files::private_child(&root, "ledger")?;
+        let source = files::private_child(&ledger, &run.run_id)?;
+        let artifacts = files::private_child(&source, "artifacts")?;
         for name in selected {
             let expected = capture_bytes(&run, name)?;
             let leaf = format!("{name}.bin");
-            let input = files::member(&artifacts, &leaf, false)?;
-            files::private(&input)?;
+            let input = files::private_member(&artifacts, &leaf)?;
             let mut output = files::member(&stage.dir, &leaf, true)?;
             let member = copy_hash(input, &mut output, &leaf, MAX_CAPTURE_BYTES, start)?;
             if member.bytes != expected {

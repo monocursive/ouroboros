@@ -1,11 +1,12 @@
 //! Whole-run pruning. A synchronized retention anchor authorizes only an exact
 //! inventory; recovery never guesses which missing files or replay ids existed.
-use std::{ffi::CString, io::Read, os::fd::FromRawFd};
+use std::{ffi::CString, io::Read};
 
 use serde::{Deserialize, Serialize};
 
 use super::*;
-use crate::faults::{self, Point};
+use crate::faults::{self, Point, Replaced};
+use crate::fsx;
 use crate::protocol::{GcFailure, GcReceipt, GcResult, PrunedHistory};
 
 const ANCHOR: &str = "gc.json";
@@ -46,32 +47,16 @@ struct Envelope {
     retained: Retained,
 }
 
+/// GC only ever reads, publishes or unlinks private members.
+const UNSAFE_DIRECTORY: &str = "GC requires owned private directories";
+const UNSAFE_FILE: &str = "GC refuses unsafe or linked files";
+
 pub(super) fn directory(path: &Path) -> Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
-        .open(path)?;
-    let m = file.metadata()?;
-    if !m.is_dir() || m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 {
-        return Err(LedgerError("GC requires owned private directories".into()));
-    }
-    Ok(file)
+    fsx::open_dir(path, UNSAFE_DIRECTORY)
 }
 
 pub(super) fn safe_file(path: &Path) -> Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path)?;
-    safe_metadata(&file.metadata()?)?;
-    Ok(file)
-}
-
-fn safe_metadata(m: &fs::Metadata) -> Result<()> {
-    if !m.is_file() || m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 || m.nlink() != 1 {
-        return Err(LedgerError("GC refuses unsafe or linked files".into()));
-    }
-    Ok(())
+    fsx::read_file(path, UNSAFE_FILE)
 }
 
 pub(super) fn file_hash(file: &mut File, bytes: u64) -> Result<String> {
@@ -117,25 +102,8 @@ pub(super) fn member(root: &Path, name: &str) -> Result<(File, CString, Option<F
     directory(root)?;
     let parent = directory(&parent)?;
     let leaf = CString::new(leaf).map_err(|_| LedgerError("unsafe GC filename".into()))?;
-    // SAFETY: parent and the NUL-terminated filename remain live for openat.
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            leaf.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-        )
-    };
-    if fd < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::NotFound {
-            return Ok((parent, leaf, None));
-        }
-        return Err(error.into());
-    }
-    // SAFETY: openat returned one owned descriptor.
-    let file = unsafe { File::from_raw_fd(fd) };
-    safe_metadata(&file.metadata()?)?;
-    Ok((parent, leaf, Some(file)))
+    let file = fsx::find_file_at(&parent, &leaf, UNSAFE_FILE)?;
+    Ok((parent, leaf, file))
 }
 
 pub(super) fn check_member(root: &Path, entry: &RemovedFile) -> Result<(File, CString, bool)> {
@@ -192,7 +160,7 @@ pub(super) fn read_json(path: &Path, max: usize) -> Result<Value> {
 }
 
 pub(super) fn publish(root: &Path, name: &str, value: &Value, max: usize) -> Result<()> {
-    let bytes = canonical(value)?;
+    let mut bytes = canonical(value)?;
     if bytes.len() + 1 > max {
         return Err(LedgerError(
             "GC retained metadata exceeds its bounded size; no files removed".into(),
@@ -207,27 +175,17 @@ pub(super) fn publish(root: &Path, name: &str, value: &Value, max: usize) -> Res
         directory(root)?.sync_all()?;
         return Ok(());
     }
-    let temp = root.join(format!(".gc-{}.tmp", Uuid::new_v4().simple()));
-    let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&temp)?;
-        file.write_all(&bytes)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        // The process-lifetime writer lock serializes publication. A temp file
-        // never becomes authority until this atomic rename is visible.
-        fs::rename(&temp, root.join(name))?;
-        directory(root)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
+    // The process-lifetime writer lock serializes publication. A temporary
+    // file never becomes authority until its atomic rename is visible.
+    bytes.push(b'\n');
+    let name = CString::new(name).map_err(|_| LedgerError("unsafe GC filename".into()))?;
+    fsx::replace(
+        &directory(root)?,
+        &fsx::temporary("gc"),
+        &name,
+        &bytes,
+        Replaced::GcRecord,
+    )
 }
 
 impl Retained {

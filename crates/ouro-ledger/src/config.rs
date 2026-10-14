@@ -41,7 +41,7 @@ pub fn load_path(path: &Path) -> Result<LedgerRetention> {
     let metadata = file.metadata()?;
     if !metadata.is_file()
         || metadata.nlink() != 1
-        || metadata.uid() != crate::os::euid()
+        || metadata.uid() != crate::fsx::euid()
         || metadata.mode() & 0o022 != 0
     {
         return Err(LedgerError(

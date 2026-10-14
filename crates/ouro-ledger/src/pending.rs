@@ -1,22 +1,13 @@
 //! Bounded owner journal. This is pending evidence, never a second canonical writer.
 use crate::{
-    faults::{self, Point, Replaced, Scope, Step},
+    faults::{self, Point, Replaced, Scope},
+    fsx,
     protocol::{LedgerError, MAX_FRAME_BYTES, Peer, Result, RunRecord, read_bounded},
 };
 use ouro_records::canonical::{sha256_prefixed, to_jcs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{
-    collections::BTreeMap,
-    ffi::CStr,
-    fs::File,
-    io::Write,
-    os::{
-        fd::{AsRawFd, FromRawFd},
-        unix::fs::MetadataExt,
-    },
-    path::Path,
-};
+use std::{collections::BTreeMap, ffi::CStr, fs::File, os::fd::AsRawFd, path::Path};
 
 pub(crate) const QUEUE_BYTES: usize = 256 * 1024;
 pub(crate) const QUEUE_EVENTS: usize = 32;
@@ -26,23 +17,11 @@ const JOURNAL_BYTES: usize = QUEUE_BYTES + 5 * MAX_FRAME_BYTES + 16 * 1024;
 const STATE_NAME: &CStr = c"owner-pending.json";
 const NEXT_NAME: &CStr = c"owner-pending.next";
 const LOCK_NAME: &CStr = c"owner-pending.lock";
-pub(crate) const STATE: &str = text(STATE_NAME);
+pub(crate) const STATE: &str = fsx::text(STATE_NAME);
 #[cfg(test)]
-const NEXT: &str = text(NEXT_NAME);
+const NEXT: &str = fsx::text(NEXT_NAME);
 #[cfg(test)]
-const LOCK: &str = text(LOCK_NAME);
-
-/// A step of replacing the journal snapshot.
-const fn snapshot(step: Step) -> Point {
-    Point::Replace(Replaced::Journal, step)
-}
-
-const fn text(name: &'static CStr) -> &'static str {
-    match name.to_str() {
-        Ok(text) => text,
-        Err(_) => panic!("member names are ASCII"),
-    }
-}
+const LOCK: &str = fsx::text(LOCK_NAME);
 
 #[cfg(test)]
 mod crash_tests;
@@ -108,15 +87,10 @@ impl Journal {
     }
     /// The journal, or `None` while another open description holds its lock.
     pub fn try_open(run_dir: &Path) -> Result<Option<Self>> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let dir = File::options()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(run_dir)?;
-        let meta = dir.metadata()?;
-        if meta.uid() != crate::os::euid() || meta.mode() & 0o077 != 0 {
-            return Err(invalid("run directory is not owned and private"));
-        }
+        let dir = fsx::open_dir(
+            run_dir,
+            "owner pending journal: run directory is not owned and private",
+        )?;
         let lock = Self::file(&dir, LOCK_NAME, libc::O_RDWR | libc::O_CREAT)?;
         // SAFETY: flock takes the open descriptor and flags by value.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -129,32 +103,12 @@ impl Journal {
         Ok(Some(Self { dir, lock }))
     }
     fn file(dir: &File, name: &CStr, flags: i32) -> Result<File> {
-        // SAFETY: the directory descriptor and the NUL-terminated name stay
-        // live through the call; the mode applies only with O_CREAT.
-        let fd = unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-                0o600,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        // SAFETY: a successful openat returned a new descriptor owned only here.
-        let file = unsafe { File::from_raw_fd(fd) };
-        let meta = file.metadata()?;
-        if !meta.is_file()
-            || meta.nlink() != 1
-            || meta.uid() != crate::os::euid()
-            || meta.mode() & 0o077 != 0
-        {
-            return Err(invalid(
-                "member is not a private owned single-link regular file",
-            ));
-        }
-        Ok(file)
+        fsx::open_file_at(
+            dir,
+            name,
+            flags,
+            "owner pending journal: member is not a private owned single-link regular file",
+        )
     }
     #[cfg(any(target_os = "linux", test))]
     pub fn create(&self, run: &RunRecord, owner: &Peer) -> Result<()> {
@@ -240,48 +194,10 @@ impl Journal {
             return Err(invalid("size limit exceeded"));
         }
         // A stale replacement from an interrupted write has no authority.
-        faults::hit(snapshot(Step::BeforeTempUnlink))?;
-        self.unlink(NEXT_NAME)?;
-        faults::hit(snapshot(Step::BeforeOpen))?;
-        let mut next = Self::file(
-            &self.dir,
-            NEXT_NAME,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-        )?;
-        faults::hit(snapshot(Step::BeforeWrite))?;
-        faults::partial_write(snapshot(Step::PartialWrite), &mut next, &bytes)?;
-        next.write_all(&bytes)?;
-        faults::hit(snapshot(Step::BeforeSync))?;
-        next.sync_all()?;
-        faults::hit(snapshot(Step::BeforeRename))?;
-        // SAFETY: both names are static NUL-terminated members of the one
-        // directory descriptor, which stays open through the call.
-        if unsafe {
-            libc::renameat(
-                self.dir.as_raw_fd(),
-                NEXT_NAME.as_ptr(),
-                self.dir.as_raw_fd(),
-                STATE_NAME.as_ptr(),
-            )
-        } != 0
-        {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        faults::hit(snapshot(Step::BeforeDirectorySync))?;
-        self.dir.sync_all()?;
-        faults::hit(snapshot(Step::AfterDirectorySync))?;
-        Ok(())
+        fsx::replace(&self.dir, NEXT_NAME, STATE_NAME, &bytes, Replaced::Journal)
     }
     fn unlink(&self, name: &CStr) -> Result<()> {
-        // SAFETY: the directory descriptor and the NUL-terminated name stay
-        // live through the call.
-        if unsafe { libc::unlinkat(self.dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-            let e = std::io::Error::last_os_error();
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(e.into());
-            }
-        }
-        Ok(())
+        fsx::unlink_at(&self.dir, name).map(drop)
     }
     pub fn remove(self) -> Result<()> {
         let _scope = faults::enter(|| Some(Scope::PendingRemove));
@@ -425,7 +341,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(&temp.path().join("data")).unwrap();
         let owner = Peer {
-            uid: crate::os::euid(),
+            uid: crate::fsx::euid(),
             pid: std::process::id(),
             birth: "pending-fixture".into(),
             boot_id: "pending-boot".into(),

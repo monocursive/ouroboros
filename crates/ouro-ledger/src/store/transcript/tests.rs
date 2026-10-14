@@ -1,5 +1,6 @@
 use super::*;
 use crate::store::tests::{gc_fixture, gc_fixture_captures, gc_future, peer};
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::fs::symlink;
 
 fn stream(store: &Store, run: &RunRecord) -> Value {

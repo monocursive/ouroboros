@@ -2,23 +2,23 @@
 //! A manifest can lag an unacknowledged append; its committed prefix cannot change.
 
 use std::{
-    fs::{self, File, OpenOptions},
-    io::Write,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    ffi::CStr,
+    fs::{self, File},
     path::Path,
 };
 
 use ouro_records::canonical::to_jcs;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::{
-    faults::{self, Point, Replaced, Step},
+    faults::Replaced,
+    fsx,
     protocol::{LedgerError, Result, read_bounded, sha256_digest},
     schemas,
 };
 
-pub(crate) const NAME: &str = "segments.json";
+const MEMBER: &CStr = c"segments.json";
+pub(crate) const NAME: &str = fsx::text(MEMBER);
 pub(crate) const STREAM: &str = "events-0001.ndjson";
 pub(crate) const MAX_SEGMENTS: usize = 4096;
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -89,17 +89,8 @@ enum Wire {
     Legacy(Legacy),
 }
 
-fn safe_file(path: &Path) -> Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path)?;
-    let m = file.metadata()?;
-    if !m.is_file() || m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 || m.nlink() != 1 {
-        return Err(LedgerError("unsafe segment manifest".into()));
-    }
-    Ok(file)
-}
+/// Refused for any manifest that is not a private file.
+const UNSAFE: &str = "unsafe segment manifest";
 
 pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
     let path = directory.join(NAME);
@@ -109,7 +100,7 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
         Ok(_) => {}
     }
     const REFUSAL: &str = "oversized or interrupted segment manifest";
-    let mut bytes = read_bounded(safe_file(&path)?, MAX_BYTES, REFUSAL)?;
+    let mut bytes = read_bounded(fsx::read_file(&path, UNSAFE)?, MAX_BYTES, REFUSAL)?;
     if bytes.last() != Some(&b'\n') {
         return Err(LedgerError(
             "oversized or interrupted segment manifest".into(),
@@ -165,39 +156,16 @@ pub(crate) fn encode(manifest: &Manifest) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(crate) fn write(directory: &Path, manifest: &Manifest) -> Result<()> {
-    let target = directory.join(NAME);
-    match fs::symlink_metadata(&target) {
-        Ok(_) => {
-            safe_file(&target)?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
-    let bytes = encode(manifest)?;
-    let temp = directory.join(format!(".segments-{}.tmp", Uuid::new_v4().simple()));
-    let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&temp)?;
-        faults::hit(Point::Replace(Replaced::Manifest, Step::BeforeWrite))?;
-        file.write_all(&bytes)?;
-        faults::hit(Point::Replace(Replaced::Manifest, Step::BeforeSync))?;
-        file.sync_all()?;
-        faults::hit(Point::Replace(Replaced::Manifest, Step::BeforeRename))?;
-        fs::rename(&temp, &target)?;
-        faults::hit(Point::Replace(
-            Replaced::Manifest,
-            Step::BeforeDirectorySync,
-        ))?;
-        File::open(directory)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temp);
-    }
-    result
+/// Durably replace the manifest in the pinned run directory `dir`. An
+/// existing manifest is an anchor: it is replaced only while it is a private
+/// file.
+pub(crate) fn write(dir: &File, manifest: &Manifest) -> Result<()> {
+    fsx::find_file_at(dir, MEMBER, UNSAFE)?;
+    fsx::replace(
+        dir,
+        &fsx::temporary("segments"),
+        MEMBER,
+        &encode(manifest)?,
+        Replaced::Manifest,
+    )
 }

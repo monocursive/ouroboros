@@ -7,7 +7,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -17,7 +17,10 @@ use std::os::fd::AsRawFd;
 
 use rusqlite::{Connection, OpenFlags, config::DbConfig, limits::Limit, params};
 
-use crate::protocol::{LedgerError, MAX_FRAME_BYTES, Result, RunRecord};
+use crate::{
+    fsx,
+    protocol::{LedgerError, MAX_FRAME_BYTES, Result, RunRecord},
+};
 
 const INDEX: &str = "index.sqlite";
 const SIDECARS: [&str; 3] = [
@@ -63,18 +66,19 @@ fn sqlite<T>(result: rusqlite::Result<T>) -> Result<T> {
     result.map_err(|error| LedgerError(format!("SQLite projection: {error}")))
 }
 
+const UNSAFE: &str = "unsafe SQLite projection path";
+
 fn private_metadata(metadata: &fs::Metadata, directory: bool) -> Result<()> {
-    if metadata.uid() != crate::os::euid()
-        || metadata.mode() & 0o077 != 0
-        || if directory {
-            !metadata.is_dir()
-        } else {
-            !metadata.is_file() || metadata.nlink() != 1
-        }
-    {
-        return Err(LedgerError("unsafe SQLite projection path".into()));
+    let private = if directory {
+        fsx::is_private_dir(metadata)
+    } else {
+        fsx::is_private_file(metadata)
+    };
+    if private {
+        Ok(())
+    } else {
+        Err(LedgerError(UNSAFE.into()))
     }
-    Ok(())
 }
 
 fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
@@ -82,15 +86,11 @@ fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 }
 
 fn private_file(path: &Path, create: bool) -> Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(create)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path)?;
-    private_metadata(&file.metadata()?, false)?;
-    Ok(file)
+    fsx::open_file(
+        path,
+        OpenOptions::new().read(true).write(true).create_new(create),
+        UNSAFE,
+    )
 }
 
 fn sidecars(root: &Path) -> Result<()> {
@@ -164,11 +164,7 @@ fn valid_database(connection: &Connection) -> bool {
 
 impl Projection {
     pub fn open(root: &Path) -> Result<Self> {
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(root)?;
-        private_metadata(&directory.metadata()?, true)?;
+        let directory = fsx::open_dir(root, UNSAFE)?;
         // Linux opens remain relative to the pinned directory even if an
         // ancestor is renamed. macOS checks the original directory identity.
         #[cfg(target_os = "linux")]

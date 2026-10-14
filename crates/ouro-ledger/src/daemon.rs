@@ -72,14 +72,14 @@ impl Client {
     pub fn open(data: &Path) -> Result<Self> {
         let path = data.join("ledger/serve.sock");
         let meta = fs::symlink_metadata(&path)?;
-        if meta.uid() != crate::os::euid() || meta.mode() & 0o077 != 0 {
+        if meta.uid() != crate::fsx::euid() || meta.mode() & 0o077 != 0 {
             return Err(LedgerError("daemon socket is not owned and private".into()));
         }
         let stream = UnixStream::connect(path)?;
         stream.set_read_timeout(Some(TIMEOUT))?;
         stream.set_write_timeout(Some(TIMEOUT))?;
         let server = peer_credentials(&stream)?;
-        if server.uid != crate::os::euid() {
+        if server.uid != crate::fsx::euid() {
             return Err(LedgerError(
                 "daemon peer uid is not the current user".into(),
             ));
@@ -435,7 +435,7 @@ fn accept_connections(
         let Ok(peer) = peer_credentials(&socket) else {
             continue;
         };
-        if peer.uid != crate::os::euid() {
+        if peer.uid != crate::fsx::euid() {
             continue;
         }
         if count.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
@@ -616,7 +616,7 @@ pub fn serve(data: &Path) -> Result<()> {
     let path = store.root().join("serve.sock");
     if let Ok(meta) = fs::symlink_metadata(&path) {
         use std::os::unix::fs::FileTypeExt as _;
-        if !meta.file_type().is_socket() || meta.uid() != crate::os::euid() {
+        if !meta.file_type().is_socket() || meta.uid() != crate::fsx::euid() {
             return Err(LedgerError("refusing unsafe existing daemon socket".into()));
         }
         fs::remove_file(&path)?;
@@ -628,7 +628,7 @@ pub fn serve(data: &Path) -> Result<()> {
     let acceptor = thread::spawn(move || accept_connections(listener, sender, spawn_thread));
     let mut capabilities = BTreeMap::new();
     #[cfg(target_os = "linux")]
-    let recovery_peer = peer_identity(crate::os::euid(), std::process::id())?;
+    let recovery_peer = peer_identity(crate::fsx::euid(), std::process::id())?;
     let mut last_recovery = std::time::Instant::now() - Duration::from_secs(1);
     // A writer that can no longer accept connections cannot serve owners; it
     // exits with the acceptor's error rather than as a clean shutdown.
@@ -937,7 +937,7 @@ mod tests {
 
     fn fixture_peer() -> Peer {
         Peer {
-            uid: crate::os::euid(),
+            uid: crate::fsx::euid(),
             pid: std::process::id(),
             birth: "fixture".into(),
             boot_id: "fixture".into(),
@@ -1041,7 +1041,7 @@ mod tests {
     /// A private data directory with a listening writer socket.
     fn listening(temp: &Path) -> (std::path::PathBuf, UnixListener) {
         let data = temp.join("data");
-        crate::store::private_directory(&data.join("ledger")).unwrap();
+        crate::fsx::create_dir_all(&data.join("ledger")).unwrap();
         let path = data.join("ledger/serve.sock");
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();

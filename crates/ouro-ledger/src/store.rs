@@ -4,10 +4,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    },
+    os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
     sync::OnceLock,
     time::SystemTime,
@@ -27,7 +24,8 @@ use crate::protocol::{
 };
 
 use crate::discovery::valid_name;
-use crate::faults::{self, Point, Replaced, Step};
+use crate::faults::{self, Point, Replaced};
+use crate::fsx;
 use crate::manifest::{self, STREAM};
 use crate::schemas;
 
@@ -166,56 +164,17 @@ pub struct Store {
     gc_generation: u64,
 }
 
-pub fn private_directory(path: &Path) -> Result<()> {
-    if !path.exists() {
-        let parent = path
-            .parent()
-            .ok_or_else(|| LedgerError("directory has no parent".into()))?;
-        if !parent.exists() {
-            private_directory(parent)?;
-        }
-        // Created owner-only, so it is never wider than 0700 under any umask;
-        // the explicit mode then also corrects a narrower umask.
-        fs::DirBuilder::new().mode(0o700).create(path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-        File::open(parent)?.sync_all()?;
-    }
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != crate::os::euid()
-        || metadata.mode() & 0o077 != 0
-    {
-        return Err(LedgerError(format!(
-            "{} must be an owned private directory (0700)",
-            path.display()
-        )));
-    }
-    Ok(())
-}
+/// A run directory, like every store member, is private (see `fsx`).
+const RUN_DIRECTORY: &str = "run directory is not an owned private directory";
 
-fn private_file(path: &Path, create: bool, append: bool) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .create(create)
-        .append(append)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
-    let file = options.open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file()
-        || metadata.uid() != crate::os::euid()
-        || metadata.mode() & 0o077 != 0
-        || metadata.nlink() != 1
-    {
-        return Err(LedgerError(format!(
-            "unsafe private file {}",
-            path.display()
-        )));
-    }
-    Ok(file)
+/// The private store file at `path`, opened for reading and writing and as
+/// `options` add.
+fn private_file(path: &Path, options: &mut OpenOptions) -> Result<File> {
+    fsx::open_file(
+        path,
+        options.read(true).write(true),
+        &format!("unsafe private file {}", path.display()),
+    )
 }
 
 /// The exact projection bytes: canonical JSON and one LF, never published
@@ -228,11 +187,23 @@ fn projection_bytes(run: &RunRecord) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Durably replace the run's `run.json` in its pinned directory `dir`.
+fn publish_projection(dir: &File, run: &RunRecord) -> Result<()> {
+    let bytes = projection_bytes(run)?;
+    fsx::replace(
+        dir,
+        &fsx::temporary("run"),
+        c"run.json",
+        &bytes,
+        Replaced::Projection,
+    )
+}
+
 /// Whether `path` is a private file holding exactly `expected`, synchronized
 /// now. Any doubt answers false, so the caller republishes it.
 fn synced_unchanged(path: &Path, expected: &[u8]) -> bool {
     use std::io::Read as _;
-    let Ok(file) = private_file(path, false, false) else {
+    let Ok(file) = private_file(path, &mut OpenOptions::new()) else {
         return false;
     };
     let mut bytes = Vec::new();
@@ -424,10 +395,10 @@ impl Store {
         data: &Path,
         recovery_sync: impl Fn(&File) -> std::io::Result<()>,
     ) -> Result<Self> {
-        private_directory(data)?;
+        fsx::create_dir_all(data)?;
         let root = data.join("ledger");
-        private_directory(&root)?;
-        let lock = private_file(&root.join("writer.lock"), true, false)?;
+        fsx::create_dir_all(&root)?;
+        let lock = private_file(&root.join("writer.lock"), OpenOptions::new().create(true))?;
         // SAFETY: flock takes the open descriptor and flags by value.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = std::io::Error::last_os_error();
@@ -467,7 +438,7 @@ impl Store {
                 continue;
             }
             check_run_id(&name)?;
-            private_directory(&entry.path())?;
+            let directory = fsx::create_dir_all(&entry.path())?;
             let mut stream = if let Some(retained) = pruning::read(&store.root.join(&name), &name)?
             {
                 store.restore_pruned(&name, retained)?
@@ -499,24 +470,22 @@ impl Store {
                 // writer may have crashed between their rename and its
                 // directory sync, but rewriting them would cost every run
                 // several writes and syncs at every start.
-                let directory = store.root.join(&name);
+                let path = entry.path();
                 let mut published = false;
-                if !synced_unchanged(&directory.join("run.json"), &projection_bytes(&stream.run)?) {
-                    store.write_projection(&stream.run)?;
+                if !synced_unchanged(&path.join("run.json"), &projection_bytes(&stream.run)?) {
+                    publish_projection(&directory, &stream.run)?;
                     published = true;
                 }
                 if stream.pruned.is_none() {
                     let manifest = stream.manifest();
-                    if !synced_unchanged(
-                        &directory.join(manifest::NAME),
-                        &manifest::encode(&manifest)?,
-                    ) {
+                    if !synced_unchanged(&path.join(manifest::NAME), &manifest::encode(&manifest)?)
+                    {
                         manifest::write(&directory, &manifest)?;
                         published = true;
                     }
                 }
                 if !published {
-                    File::open(&directory)?.sync_all()?;
+                    directory.sync_all()?;
                 }
             }
             store.streams.insert(name, stream);
@@ -562,9 +531,9 @@ impl Store {
         let run_id = format!("run_{}", Uuid::new_v4().simple());
         let attempt_id = format!("att_{}", Uuid::new_v4());
         let directory = self.root.join(&run_id);
-        private_directory(&directory)?;
-        private_directory(&directory.join("receipts"))?;
-        private_directory(&directory.join("artifacts"))?;
+        fsx::create_dir_all(&directory)?;
+        fsx::create_dir_all(&directory.join("receipts"))?;
+        fsx::create_dir_all(&directory.join("artifacts"))?;
         let run = initial_run(&run_id, request_id, &attempt_id, payload.clone());
         self.streams.insert(
             run_id.clone(),
@@ -846,6 +815,7 @@ impl Store {
     ) -> Result<()> {
         let _scope = faults::enter(|| faults::Scope::of_record(record["kind"].as_str()?));
         let directory = self.root.join(run_id);
+        let dir = fsx::open_dir(&directory, RUN_DIRECTORY)?;
         let stream = loaded(&mut self.streams, run_id);
         let rotate = stream.segment_bytes > 0
             && stream.segment_bytes.saturating_add(bytes.len() as u64 + 1) > self.segment_limit;
@@ -857,24 +827,22 @@ impl Store {
             }
             let next = stream.active_segment + 1;
             // Exclusive creation never appends over an unexpected successor.
-            let file = OpenOptions::new()
-                .read(true)
-                .append(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(directory.join(manifest::name(next)))?;
+            let file = private_file(
+                &directory.join(manifest::name(next)),
+                OpenOptions::new().append(true).create_new(true),
+            )?;
             faults::hit(Point::RotationCreated)?;
             file.sync_all()?;
-            File::open(&directory)?.sync_all()?;
+            dir.sync_all()?;
             faults::hit(Point::RotationSynced)?;
             stream.begin_segment(next);
             file
         } else {
             private_file(
                 &directory.join(manifest::name(stream.active_segment)),
-                stream.active_segment == 1 && stream.segment_bytes == 0,
-                true,
+                OpenOptions::new()
+                    .append(true)
+                    .create(stream.active_segment == 1 && stream.segment_bytes == 0),
             )?
         };
         if file.metadata()?.len() != stream.segment_bytes {
@@ -900,10 +868,10 @@ impl Store {
         stream.hash_record(bytes, record, receipt, payload_digest)?;
         let run = stream.run.clone();
         let manifest = stream.manifest();
-        self.write_projection(&run)?;
-        crate::manifest::write(&self.root.join(run_id), &manifest)?;
+        publish_projection(&dir, &run)?;
+        manifest::write(&dir, &manifest)?;
         faults::hit(Point::AppendBeforeDirectorySync)?;
-        File::open(self.root.join(run_id))?.sync_all()?;
+        dir.sync_all()?;
         faults::hit(Point::AppendAfterDirectorySync)?;
         if self.index.is_some() {
             self.index_pending.insert(run_id.into(), run);
@@ -912,35 +880,8 @@ impl Store {
     }
 
     fn write_projection(&self, run: &RunRecord) -> Result<()> {
-        let bytes = projection_bytes(run)?;
-        let dir = self.root.join(&run.run_id);
-        let temp = dir.join(format!(".run-{}.tmp", Uuid::new_v4().simple()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&temp)?;
-        let result = (|| -> Result<()> {
-            faults::hit(Point::Replace(Replaced::Projection, Step::BeforeWrite))?;
-            file.write_all(&bytes)?;
-            faults::hit(Point::Replace(Replaced::Projection, Step::BeforeSync))?;
-            file.sync_all()?;
-            faults::hit(Point::Replace(Replaced::Projection, Step::BeforeRename))?;
-            fs::rename(&temp, dir.join("run.json"))?;
-            Ok(())
-        })();
-        if result.is_err() {
-            // An unpublished temporary projection has no authority; never leak it.
-            let _ = fs::remove_file(&temp);
-        }
-        result?;
-        faults::hit(Point::Replace(
-            Replaced::Projection,
-            Step::BeforeDirectorySync,
-        ))?;
-        File::open(dir)?.sync_all()?;
-        Ok(())
+        let dir = fsx::open_dir(&self.root.join(&run.run_id), RUN_DIRECTORY)?;
+        publish_projection(&dir, run)
     }
 
     pub fn show(&self, run_id: &str) -> Result<RunRecord> {
@@ -1214,7 +1155,7 @@ fn load_stream(
         stream.begin_segment(index + 1);
         let anchor = manifest.as_ref().and_then(|m| m.segments.get(index));
         let mut anchored = anchor.is_none();
-        let file = match private_file(&directory.join(name), false, false) {
+        let file = match private_file(&directory.join(name), &mut OpenOptions::new()) {
             Ok(file) => file,
             Err(error) => {
                 stream.poisoned.push(Poison::new(

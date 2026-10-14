@@ -101,7 +101,7 @@ impl Store {
             },
             None => TargetKind::Stream {
                 layout: Layout::read(&directory, id),
-                projection: private_file(&directory.join("run.json"), false, false)
+                projection: private_file(&directory.join("run.json"), &mut OpenOptions::new())
                     .and_then(|file| {
                         crate::protocol::read_bounded(
                             file,

@@ -7,7 +7,10 @@ use ouro_records::records;
 use serde_json::json;
 use std::{
     fs,
-    os::unix::process::ExitStatusExt,
+    os::{
+        fd::FromRawFd,
+        unix::{fs::MetadataExt, process::ExitStatusExt},
+    },
     path::PathBuf,
     process::{Child, Command, ExitStatus, Stdio},
     thread,

@@ -2,9 +2,10 @@
 //! stay stable when the writer adds a segment. One stream fd is retained between
 //! reads; validation and restoration use transient descriptors.
 use std::{
-    fs::{self, File, OpenOptions},
+    ffi::CString,
+    fs::File,
     io::{self, Read, Seek, SeekFrom},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -12,7 +13,7 @@ use ouro_records::canonical::{sha256_prefixed, to_jcs};
 use serde::Serialize;
 
 use crate::{
-    manifest,
+    fsx, manifest,
     protocol::{LedgerError, Result},
 };
 
@@ -34,30 +35,27 @@ pub(crate) struct Snapshot {
     current: Option<(usize, File)>,
 }
 
+/// A canonical segment, read through its pinned run directory once that
+/// directory and the ledger root above it are checked private.
 fn open(path: &Path) -> Result<File> {
-    for directory in path
+    const UNSAFE_DIRECTORY: &str = "reader directory is unsafe";
+    let run = path
         .parent()
-        .into_iter()
-        .chain(path.parent().and_then(Path::parent))
-    {
-        let metadata = fs::symlink_metadata(directory)?;
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
-            || metadata.uid() != crate::os::euid()
-            || metadata.mode() & 0o077 != 0
-        {
-            return Err(LedgerError("reader directory is unsafe".into()));
-        }
+        .ok_or_else(|| LedgerError("missing run directory".into()))?;
+    if let Some(root) = run.parent() {
+        fsx::open_dir(root, UNSAFE_DIRECTORY)?;
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path)?;
-    let m = file.metadata()?;
-    if !m.is_file() || m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 || m.nlink() != 1 {
-        return Err(LedgerError("reader canonical file is unsafe".into()));
-    }
-    Ok(file)
+    let run = fsx::open_dir(run, UNSAFE_DIRECTORY)?;
+    let name = path
+        .file_name()
+        .and_then(|name| CString::new(name.as_encoded_bytes()).ok())
+        .ok_or_else(|| LedgerError("reader canonical file is unsafe".into()))?;
+    fsx::open_file_at(
+        &run,
+        &name,
+        libc::O_RDONLY,
+        "reader canonical file is unsafe",
+    )
 }
 
 impl Snapshot {

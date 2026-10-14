@@ -343,7 +343,7 @@ mod tests {
 
     fn peer() -> Peer {
         Peer {
-            uid: crate::os::euid(),
+            uid: crate::fsx::euid(),
             pid: std::process::id(),
             birth: "catalog-fixture".into(),
             boot_id: "fixture".into(),

@@ -37,10 +37,8 @@ fn write_prefix(
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(super) fn save(root: &Path, argv: &[OsString], limit: u64, metadata: &mut Value) -> Result<()> {
     let observed = observed_bytes(argv)?;
-    let root = files::directory(root)?;
-    files::private(&root)?;
-    let artifacts = files::child_dir(&root, "artifacts")?;
-    files::private(&artifacts)?;
+    let root = files::private_dir(root)?;
+    let artifacts = files::private_child(&root, "artifacts")?;
     let mut file = files::member(&artifacts, "argv.bin", true)?;
     *metadata = json!({"state":"incomplete", "encoding":"nul_delimited", "argument_count":argv.len(),
         "limit_bytes":limit, "observed_bytes":observed, "stored_bytes":0,

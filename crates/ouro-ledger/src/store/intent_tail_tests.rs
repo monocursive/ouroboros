@@ -4,7 +4,7 @@ use crate::protocol::{OperatorIntent, READ_CHUNK_BYTES, TailRequest};
 
 fn peer() -> Peer {
     Peer {
-        uid: crate::os::euid(),
+        uid: crate::fsx::euid(),
         pid: std::process::id(),
         birth: "test-birth".into(),
         boot_id: "test-boot".into(),

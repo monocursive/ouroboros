@@ -93,11 +93,11 @@ fn open_key(path: &Path, secret: bool) -> Result<File> {
         .ok_or_else(|| error("key path needs a UTF-8 filename"))?;
     let dir = files::directory(parent)?;
     if secret {
-        files::private(&dir)?;
+        crate::fsx::ensure_dir(&dir, files::SENSITIVE)?;
     }
     let file = files::member(&dir, leaf, false)?;
     if secret {
-        files::private(&file)?;
+        crate::fsx::ensure_file(&file, files::SENSITIVE)?;
     }
     if file.metadata()?.len() > MAX_KEY_BYTES {
         return Err(error("key file exceeds 4 KiB"));

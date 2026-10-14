@@ -91,14 +91,10 @@ impl Store {
 fn read_prefix(root: &Path, run: &str, name: &str, stored: u64) -> Result<Vec<u8>> {
     // Every component below the already configured ledger root is pinned and
     // opened without symlink traversal. Never use the recorded artifact path.
-    let ledger = files::directory(root)?;
-    files::private(&ledger)?;
-    let run = files::child_dir(&ledger, run)?;
-    files::private(&run)?;
-    let artifacts = files::child_dir(&run, "artifacts")?;
-    files::private(&artifacts)?;
-    let mut file = files::member(&artifacts, &format!("{name}.bin"), false)?;
-    files::private(&file)?;
+    let ledger = files::private_dir(root)?;
+    let run = files::private_child(&ledger, run)?;
+    let artifacts = files::private_child(&run, "artifacts")?;
+    let mut file = files::private_member(&artifacts, &format!("{name}.bin"))?;
     let before = file.metadata()?;
     if before.len() != stored {
         return Err(LedgerError("capture size differs from its record".into()));
@@ -116,7 +112,7 @@ fn read_prefix(root: &Path, run: &str, name: &str, stored: u64) -> Result<Vec<u8
     {
         return Err(LedgerError("capture changed while being read".into()));
     }
-    files::private(&file)?;
+    crate::fsx::ensure_file(&file, files::SENSITIVE)?;
     Ok(bytes)
 }
 

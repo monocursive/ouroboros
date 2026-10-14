@@ -156,7 +156,7 @@ mod linux {
     }
 
     fn ready() -> Result<()> {
-        let uid = crate::os::euid().to_string();
+        let uid = crate::fsx::euid().to_string();
         if command_output(Command::new("/usr/bin/loginctl").args([
             "show-user",
             &uid,
@@ -237,8 +237,8 @@ mod linux {
     }
 
     fn ensure_writer(data: &Path) -> Result<()> {
-        crate::store::private_directory(data)?;
-        crate::store::private_directory(&data.join("ledger"))?;
+        crate::fsx::create_dir_all(data)?;
+        crate::fsx::create_dir_all(&data.join("ledger"))?;
         let digest = ouro_records::canonical::sha256_prefixed(
             fs::canonicalize(data)?.as_os_str().as_bytes(),
         );
@@ -273,7 +273,7 @@ mod linux {
         loop {
             if let Ok(stream) = UnixStream::connect(data.join("ledger/serve.sock")) {
                 let peer = peer_credentials(&stream)?;
-                if peer.uid != crate::os::euid()
+                if peer.uid != crate::fsx::euid()
                     || peer.pid != main_pid(&unit)?
                     || !peer_alive(&peer)
                 {
@@ -344,7 +344,7 @@ mod linux {
         stream.set_read_timeout(Some(START_TIMEOUT))?;
         stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
         let peer = peer_credentials(&stream)?;
-        if peer.uid != crate::os::euid() || peer.pid != main_pid(&unit)? || !peer_alive(&peer) {
+        if peer.uid != crate::fsx::euid() || peer.pid != main_pid(&unit)? || !peer_alive(&peer) {
             return Err(LedgerError(
                 "bootstrap peer is not the independent service owner".into(),
             ));
@@ -399,7 +399,7 @@ mod linux {
         stream.set_read_timeout(Some(COMMAND_TIMEOUT))?;
         stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
         let peer = peer_credentials(&stream)?;
-        if peer.uid != crate::os::euid() {
+        if peer.uid != crate::fsx::euid() {
             return Err(LedgerError("bootstrap peer uid mismatch".into()));
         }
         // Remove the rendezvous before receiving secrets; a killed caller leaves
@@ -484,7 +484,7 @@ mod linux {
         }
         // SAFETY: a successful pidfd_open returned a new descriptor owned only here.
         let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-        if peer.uid != crate::os::euid() || !peer_alive(&peer) {
+        if peer.uid != crate::fsx::euid() || !peer_alive(&peer) {
             return Err(LedgerError(
                 "launch owner is gone; reconcile before reporting an outcome".into(),
             ));

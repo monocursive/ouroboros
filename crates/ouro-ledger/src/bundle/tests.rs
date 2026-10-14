@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     protocol::{OperatorIntent, Peer},
-    store::{Store, private_directory},
+    store::Store,
 };
 use std::{
     fs,
@@ -17,7 +17,7 @@ struct Fixture {
 }
 fn peer() -> Peer {
     Peer {
-        uid: crate::os::euid(),
+        uid: crate::fsx::euid(),
         pid: std::process::id(),
         birth: "bundle-test".into(),
         boot_id: "bundle-boot".into(),
@@ -40,7 +40,7 @@ impl Fixture {
         let run = store.prepare("bundle-test", &payload, &peer()).unwrap();
         store.claim_owner(&run.run_id, &peer()).unwrap();
         let artifacts = data.join("ledger").join(&run.run_id).join("artifacts");
-        private_directory(&artifacts).unwrap();
+        crate::fsx::create_dir_all(&artifacts).unwrap();
         let mut capture = json!({"stdout":{"state":"not_captured"},"stderr":{"state":"not_captured"},"argv":{"state":"not_captured"}});
         for name in names {
             let bytes: &[u8] = if *name == "argv" {
@@ -510,7 +510,7 @@ fn argv_is_exported_only_by_selection_and_all_three_signed_members_verify_offlin
 /// code path and frozen as a fixture.
 fn rule_one_bundle(parent: &Path) -> PathBuf {
     let path = parent.join(format!("rule-one-{}", uuid::Uuid::new_v4()));
-    private_directory(&path).unwrap();
+    crate::fsx::create_dir_all(&path).unwrap();
     let manifest = include_bytes!("../../../../docs/specs/ledger-v1/fixtures/bundle-rule-one.json");
     let receipts = serde_json::from_slice::<Value>(manifest).unwrap()["run"]["receipts"].clone();
     for (name, bytes) in [

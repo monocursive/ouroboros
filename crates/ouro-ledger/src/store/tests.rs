@@ -1,5 +1,6 @@
 use super::*;
 use crate::faults::{Plan, Point, Replaced, Scope, Step};
+use std::os::unix::fs::PermissionsExt as _;
 mod redaction;
 
 /// The call failed with the refusal named by `expected`, not with some
@@ -18,7 +19,7 @@ pub(super) fn assert_refused<T>(result: Result<T>, expected: &str) {
 
 pub(super) fn peer() -> Peer {
     Peer {
-        uid: crate::os::euid(),
+        uid: crate::fsx::euid(),
         pid: std::process::id(),
         birth: "fixture-birth".into(),
         boot_id: "fixture-boot".into(),
@@ -643,8 +644,11 @@ pub(super) fn gc_fixture_captures(
     let mut metadata = json!({"stdout":{"state":"not_captured"},"stderr":{"state":"not_captured"}});
     for (name, contents) in captures {
         let path = format!("artifacts/{name}.bin");
-        let mut file =
-            private_file(&store.root.join(&run.run_id).join(&path), true, false).unwrap();
+        let mut file = private_file(
+            &store.root.join(&run.run_id).join(&path),
+            OpenOptions::new().create(true),
+        )
+        .unwrap();
         file.write_all(contents).unwrap();
         file.sync_all().unwrap();
         metadata[name] = json!({"state":"captured","stored_bytes":contents.len(),"path":path});
@@ -850,7 +854,7 @@ fn capture_expiry_refuses_changed_reappearing_or_unanchored_files() {
                 store
                     .gc_policy_at(capture_policy(), None, 100, &peer(), gc_future())
                     .unwrap();
-                private_file(&path, true, false)
+                private_file(&path, OpenOptions::new().create(true))
                     .unwrap()
                     .write_all(b"private-capture")
                     .unwrap();
@@ -1112,7 +1116,7 @@ fn gc_revalidates_bytes_and_refuses_changed_files_or_symlinked_capture_directori
         let (temp, mut store, run) = gc_fixture();
         let directory = store.root.join(&run.run_id);
         let outside = temp.path().join("outside");
-        private_directory(&outside).unwrap();
+        fsx::create_dir_all(&outside).unwrap();
         fs::write(outside.join("stdout.bin"), b"must be kept").unwrap();
         if mode != "canonical" {
             faults::arm(Plan::fail(Point::GcBeforeUnlink));
@@ -1245,7 +1249,7 @@ fn gc_never_removes_files_reappearing_after_completion() {
             .len(),
         1
     );
-    private_file(&directory.join(STREAM), true, false)
+    private_file(&directory.join(STREAM), OpenOptions::new().create(true))
         .unwrap()
         .write_all(b"restored history")
         .unwrap();
@@ -1738,7 +1742,10 @@ fn durable_reader_sync_failure_refuses_retries_until_recovery_barrier_succeeds()
         .join(format!("{}.json", &cursor[..32]));
     let initial_checkpoint = fs::read(&checkpoint_path).unwrap();
 
-    faults::arm(Plan::fail(Point::ReaderDirectorySync));
+    faults::arm(Plan::fail(Point::Replace(
+        Replaced::ReaderCheckpoint,
+        Step::BeforeDirectorySync,
+    )));
     assert!(store.read(&request).is_err());
     let failed_checkpoint = fs::read(&checkpoint_path).unwrap();
     assert_ne!(failed_checkpoint, initial_checkpoint);
@@ -3430,8 +3437,16 @@ fn rotated_streams_refuse_missing_changed_reordered_and_unanchored_segments() {
             }
             "no-manifest" => fs::remove_file(directory.join(manifest::NAME)).unwrap(),
             "extra-empty" => {
-                private_file(&directory.join(manifest::name(4)), true, false).unwrap();
-                private_file(&directory.join(manifest::name(5)), true, false).unwrap();
+                private_file(
+                    &directory.join(manifest::name(4)),
+                    OpenOptions::new().create(true),
+                )
+                .unwrap();
+                private_file(
+                    &directory.join(manifest::name(5)),
+                    OpenOptions::new().create(true),
+                )
+                .unwrap();
             }
             "symlink" => {
                 fs::remove_file(&second).unwrap();
@@ -3527,7 +3542,7 @@ fn reader_cursor_refuses_replaced_later_segment_after_restart() {
     fs::rename(&path, path.with_extension("old")).unwrap();
     // Keep the old inode allocated but outside the canonical namespace.
     fs::rename(path.with_extension("old"), temp.path().join("old-segment")).unwrap();
-    private_file(&path, true, false)
+    private_file(&path, OpenOptions::new().create(true))
         .unwrap()
         .write_all(&bytes)
         .unwrap();

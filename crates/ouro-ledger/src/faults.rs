@@ -46,8 +46,6 @@ pub(crate) enum Point {
     GcCompletionSync,
     /// Publishing the pruned run projection.
     GcProjection,
-    /// Synchronizing a reader checkpoint's directory.
-    ReaderDirectorySync,
     /// The writer is about to send a successful reply.
     ReplyBeforeSend,
 }
@@ -62,6 +60,10 @@ pub(crate) enum Replaced {
     Manifest,
     /// The owner's pending journal snapshot.
     Journal,
+    /// A durable reader checkpoint.
+    ReaderCheckpoint,
+    /// A GC retention anchor or completion marker.
+    GcRecord,
 }
 
 /// The steps of one durable replacement, in the order it takes them.

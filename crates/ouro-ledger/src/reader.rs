@@ -6,9 +6,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    ffi::CString,
+    fs::{self, File},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -23,7 +24,7 @@ use crate::protocol::{
     READ_OUTPUT_BYTES, READ_SCAN_BYTES, READ_SCAN_FRAMES, ReadFilter, ReadPage, ReadRequest,
     ReadSelector, ReadStage, Result, RunRecord,
 };
-use crate::schemas;
+use crate::{faults, fsx, schemas};
 
 const MAX_SESSIONS: usize = 32;
 const TTL: Duration = Duration::from_secs(600);
@@ -157,35 +158,23 @@ fn durable_digest(value: &impl Serialize) -> Result<String> {
 }
 
 fn private_directory(path: &Path) -> Result<File> {
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
-        .open(path)?;
-    let metadata = directory.metadata()?;
-    if !metadata.is_dir() || metadata.uid() != crate::os::euid() || metadata.mode() & 0o077 != 0 {
-        return Err(LedgerError("reader checkpoint directory is unsafe".into()));
-    }
-    Ok(directory)
+    fsx::open_dir(path, "reader checkpoint directory is unsafe")
 }
 
 fn checkpoint_file(path: &Path) -> Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file()
-        || metadata.uid() != crate::os::euid()
-        || metadata.mode() & 0o077 != 0
-        || metadata.nlink() != 1
-        || metadata.len() > MAX_CHECKPOINT_BYTES
-    {
-        return Err(LedgerError(
-            "reader checkpoint file is unsafe or oversized".into(),
-        ));
+    const REFUSAL: &str = "reader checkpoint file is unsafe or oversized";
+    let file = fsx::read_file(path, REFUSAL)?;
+    if file.metadata()?.len() > MAX_CHECKPOINT_BYTES {
+        return Err(LedgerError(REFUSAL.into()));
     }
     Ok(file)
 }
+
+/// The barrier that makes a replaced checkpoint's directory entry durable.
+const CHECKPOINT_SYNCED: faults::Point = faults::Point::Replace(
+    faults::Replaced::ReaderCheckpoint,
+    faults::Step::BeforeDirectorySync,
+);
 
 fn load_checkpoint(directory: &Path, id: &str) -> Result<(Checkpoint, File)> {
     let mut file = checkpoint_file(&directory.join(format!("{id}.json")))?;
@@ -591,7 +580,7 @@ impl Readers {
     ) -> Result<ReadPage> {
         let (accepted, accepted_snapshot) = proofs;
         let sync_directory = |file: &File| {
-            crate::faults::hit(crate::faults::Point::ReaderDirectorySync)?;
+            faults::hit(CHECKPOINT_SYNCED)?;
             file.sync_all()
         };
         validate_request(request)?;
@@ -775,7 +764,7 @@ impl Readers {
         session.prior_position = Some(before);
         // Durable state precedes the socket response. A lost reply retries the
         // exact prior page after restart rather than silently skipping bytes.
-        if let Err(error) = session.persist(&directory, &id, sync_directory) {
+        if let Err(error) = session.persist(&directory, &id) {
             self.sessions.remove(&id);
             return Err(error);
         }
@@ -800,12 +789,7 @@ impl Session {
         }
     }
 
-    fn persist(
-        &self,
-        directory: &Path,
-        id: &str,
-        sync_directory: impl Fn(&File) -> std::io::Result<()>,
-    ) -> Result<()> {
+    fn persist(&self, directory: &Path, id: &str) -> Result<()> {
         let (token, page) = self
             .prior
             .as_ref()
@@ -843,28 +827,21 @@ impl Session {
             return Err(LedgerError("reader checkpoint exceeds bounded size".into()));
         }
         let parent = private_directory(directory)?;
-        let temporary = directory.join(format!("{id}.tmp"));
         let final_path = directory.join(format!("{id}.json"));
         if fs::symlink_metadata(&final_path).is_ok() {
             checkpoint_file(&final_path)?;
         }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&temporary)?;
-        let result = (|| {
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            fs::rename(&temporary, &final_path)?;
-            sync_directory(&parent)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result
+        let name = |suffix| {
+            CString::new(format!("{id}.{suffix}"))
+                .map_err(|_| LedgerError("reader checkpoint id is not a filename".into()))
+        };
+        fsx::replace(
+            &parent,
+            &name("tmp")?,
+            &name("json")?,
+            &bytes,
+            faults::Replaced::ReaderCheckpoint,
+        )
     }
 
     fn restore(

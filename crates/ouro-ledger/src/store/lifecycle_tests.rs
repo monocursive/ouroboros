@@ -37,7 +37,7 @@ const WORKER_ENV: &str = "OURO_LEDGER_TEST_WORKER";
 
 fn peer() -> Peer {
     Peer {
-        uid: crate::os::euid(),
+        uid: crate::fsx::euid(),
         pid: 424242,
         birth: "fixture-birth".into(),
         boot_id: "fixture-boot".into(),
