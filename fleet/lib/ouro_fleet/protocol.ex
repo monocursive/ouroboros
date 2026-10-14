@@ -5,7 +5,7 @@ defmodule OuroFleet.Protocol do
   A peer whose `:version` answer lacks either value speaks a different protocol,
   whatever else it carries.
   """
-  @version %{"schema" => "ouro.fleet.rpc/1", "run" => "ouro.ledger.run/1"}
+  @version %{"schema" => "ouro.fleet.rpc/2", "run" => "ouro.ledger.run/1"}
 
   @doc "This build's answer to `:version`."
   def version, do: @version

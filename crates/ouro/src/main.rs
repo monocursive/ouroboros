@@ -187,7 +187,7 @@ fn run(cli: Cli) -> Result<(Value, bool), String> {
     let fleet = match cli.command {
         Top::Version { json } => {
             return Ok((
-                json!({"component":"ouro","version":env!("CARGO_PKG_VERSION"),"fleet_rpc":"ouro.fleet.rpc/1","job":"ouro.fleet.job/1","attempt":"ouro.fleet.attempt/1","fleet_schema_frozen":false}),
+                json!({"component":"ouro","version":env!("CARGO_PKG_VERSION"),"fleet_rpc":"ouro.fleet.rpc/2","job":"ouro.fleet.job/1","attempt":"ouro.fleet.attempt/1","fleet_schema_frozen":false}),
                 json,
             ));
         }
