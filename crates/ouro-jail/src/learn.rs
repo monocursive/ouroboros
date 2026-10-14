@@ -17,9 +17,10 @@ use std::path::Path;
 /// a proposal's read grants come from.
 pub const LEARNING_READ: &str = "learning_read";
 
-/// The largest receipt read. Receipts are a few KiB; the bound only keeps a
-/// corrupt or hostile file from being read whole.
-const RECEIPT_MAX: u64 = 8 * 1024 * 1024;
+/// The largest receipt read: the bound every receipt reader holds to.
+/// Receipts are a few KiB; the bound only keeps a corrupt or hostile file
+/// from being read whole.
+const RECEIPT_MAX: u64 = crate::cleanup::RECEIPT_MAX;
 
 /// The longest trace line: one event, which the trace never writes above
 /// [`crate::trace::EVENT_MAX`] bytes, and its newline.
@@ -500,6 +501,30 @@ mod tests {
         )
         .unwrap();
         assert!(derive(&attempt, &attempt, 1).is_ok());
+    }
+
+    /// The receipt is held to the bound every other receipt reader uses, so
+    /// a receipt cleanup or `gc` would refuse as oversized is not evidence
+    /// here either.
+    #[test]
+    fn the_receipt_bound_is_every_readers_bound() {
+        let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let attempt = temp.path().canonicalize().unwrap();
+        std::fs::write(attempt.join("trace.ndjson"), b"").unwrap();
+        let max = usize::try_from(crate::cleanup::RECEIPT_MAX).unwrap();
+        let receipt = |size: usize| {
+            let mut bytes = br#"{"attempt_id":"fixture"}"#.to_vec();
+            bytes.resize(size, b' ');
+            bytes
+        };
+        std::fs::write(attempt.join("jail.json"), receipt(max)).unwrap();
+        assert!(derive(&attempt, &attempt, 1).is_ok());
+        std::fs::write(attempt.join("jail.json"), receipt(max + 1)).unwrap();
+        assert!(
+            derive(&attempt, &attempt, 1)
+                .unwrap_err()
+                .contains("exceeds size limit")
+        );
     }
 
     /// L1: the refusal list for learning roots (`/`, `/etc`, `/home`,
