@@ -1732,13 +1732,24 @@ fn run_suite(
         SUITE_PATIENCE,
         Some(&unit),
     );
-    let test_log = suite.log.as_ref().map(|log| {
+    if let Some(log) = &suite.log {
         print!("{log}");
         write_evidence(opts, "test.log", log, evidence_errors);
-        let mut parsed = gates::parse_log(log);
-        parsed.check_attribution(&opts.worktree);
-        parsed
-    });
+    }
+    // The host ran a copy of this worktree, so its binaries are held
+    // against the worktree.
+    suite_outcome(suite, &gates::SourceTree::worktree(&opts.worktree))
+}
+
+/// The suite's ending, and its log parsed once and held against `tree`.
+fn suite_outcome(
+    suite: Detached,
+    tree: &Result<gates::SourceTree, String>,
+) -> (Result<CommandResult, String>, Option<TestLog>) {
+    let test_log = suite
+        .log
+        .as_deref()
+        .map(|log| gates::parse_log_in(log, tree));
     let ended = suite.ended.map(|code| CommandResult {
         code: Some(code),
         stdout: suite.log.unwrap_or_default(),
@@ -3164,6 +3175,58 @@ smoke doctor 0
         let d = verdict(&o);
         assert_eq!(d.failures.len(), 1, "{:?}", d.failures);
         assert!(d.failures[0].contains("release build exited 101"));
+    }
+
+    /// The suite's log is held against the worktree the host ran a copy of:
+    /// a binary cargo's print order put in a package that has no such file
+    /// fails the run, and so does a worktree whose workspace cannot be read.
+    #[test]
+    fn the_suite_log_is_held_against_the_worktree() {
+        let tree = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = tree.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("Cargo.toml", "[workspace]\nmembers = [\"crates/alpha\"]\n");
+        write("crates/alpha/Cargo.toml", "[package]\nname = \"alpha\"\n");
+        write("crates/alpha/src/lib.rs", "");
+        let log = "\
+     Running unittests src/lib.rs (target/release/deps/alpha-0123456789abcdef)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/elsewhere.rs (target/release/deps/elsewhere-0123456789abcdef)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+        let suite = Detached {
+            ended: Ok(0),
+            log: Some(log.to_owned()),
+        };
+        let (ended, test_log) =
+            suite_outcome(suite.clone(), &gates::SourceTree::worktree(tree.path()));
+        assert!(ended.is_ok_and(|r| r.ok()));
+        let test_log = test_log.expect("a log");
+        assert_eq!(test_log.anomalies.len(), 1, "{:?}", test_log.anomalies);
+        assert_eq!(
+            test_log.anomalies[0].binary.as_deref(),
+            Some("alpha/tests/elsewhere.rs")
+        );
+
+        let mut o = a_clean_run();
+        tested(&mut o).test_log = Some(test_log);
+        let d = verdict(&o);
+        assert!(
+            d.failures
+                .iter()
+                .any(|f| f.contains("alpha/tests/elsewhere.rs")),
+            "{:?}",
+            d.failures
+        );
+
+        write("crates/alpha/tests/elsewhere.rs", "");
+        let (_, test_log) = suite_outcome(suite, &gates::SourceTree::worktree(tree.path()));
+        assert!(test_log.unwrap().anomalies.is_empty());
     }
 
     /// The types allow a step to be missing after the one it needs
