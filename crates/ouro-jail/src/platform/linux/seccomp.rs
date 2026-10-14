@@ -275,15 +275,23 @@ pub fn tool_baseline() -> Result<Program, BpfError> {
     tool_baseline_with_storage(false)
 }
 
+/// The calls a storage ceiling adds to a contained baseline's `EPERM` list:
+/// a new hard link could import a foreign-owned inode from a read-only grant
+/// into the writable tree and charge a different user's quota. aarch64 has
+/// `linkat` only.
+#[must_use]
+pub fn storage_link_denials() -> &'static [(&'static str, u32)] {
+    if abi::AARCH64 {
+        &[("linkat", 37)]
+    } else {
+        &[("link", 86), ("linkat", 265)]
+    }
+}
+
 pub(crate) fn tool_baseline_with_storage(storage: bool) -> Result<Program, BpfError> {
     let mut deny = DENY_EPERM.to_vec();
     if storage {
-        // A new hard link could import a foreign-owned inode from a read-only
-        // grant into the writable tree and charge a different user's quota.
-        if !abi::AARCH64 {
-            deny.push(("link", 86));
-        }
-        deny.push(("linkat", nr(265, 37)));
+        deny.extend_from_slice(storage_link_denials());
     }
     build(&Shape {
         deny,
@@ -495,10 +503,7 @@ pub(crate) fn agent_baseline_with_storage(
             .collect(),
     };
     if storage {
-        if !abi::AARCH64 {
-            deny.push(("link", 86));
-        }
-        deny.push(("linkat", nr(265, 37)));
+        deny.extend_from_slice(storage_link_denials());
     }
     build(&Shape {
         deny,
@@ -770,19 +775,18 @@ mod linux_only {
     /// Write `program`'s raw bytes into a pipe and return its read end, which
     /// is what `bwrap --seccomp FD` consumes.
     ///
-    /// The write end is closed before returning, so bubblewrap sees EOF. The
-    /// program is a few hundred bytes, far below the pipe buffer, so the
-    /// write cannot block.
+    /// The write end is closed before returning, so bubblewrap sees EOF.
+    /// Nothing reads the pipe until bubblewrap runs, so the whole program
+    /// must fit in the pipe's buffer: that capacity is read from the pipe
+    /// itself (a user over `pipe-user-pages-soft` gets one page), and a
+    /// program that does not fit is refused rather than left to block.
     ///
     /// # Errors
     ///
-    /// Any failure of `pipe2` or `write`.
+    /// Any failure of `pipe2`, `fcntl` or `write`, or a program larger than
+    /// the pipe's buffer.
     pub fn program_pipe(program: &Program) -> io::Result<OwnedFd> {
         let bytes = program.to_bytes();
-        assert!(
-            bytes.len() < 32 * 1024,
-            "filter must fit in a pipe buffer without a writer thread"
-        );
         let mut fds = [-1i32; 2];
         // SAFETY: `fds` is a two-element array of the right type; pipe2 writes
         // exactly two descriptors into it or returns -1.
@@ -794,6 +798,21 @@ mod linux_only {
         // here; wrapping them transfers that ownership.
         let (read_end, write_end) =
             unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        // SAFETY: F_GETPIPE_SZ takes no argument and only reads the pipe's
+        // capacity; the descriptor is live.
+        let capacity = unsafe {
+            libc::fcntl(
+                std::os::fd::AsRawFd::as_raw_fd(&write_end),
+                libc::F_GETPIPE_SZ,
+            )
+        };
+        let capacity = usize::try_from(capacity).map_err(|_| io::Error::last_os_error())?;
+        if bytes.len() > capacity {
+            return Err(io::Error::other(format!(
+                "the {}-byte filter does not fit the {capacity}-byte pipe buffer",
+                bytes.len()
+            )));
+        }
 
         let mut written = 0usize;
         while written < bytes.len() {
@@ -971,22 +990,29 @@ mod tests {
                 agent_baseline_with_storage(AgentVariant::UnprivilegedInner, true).unwrap(),
             ),
         ] {
-            for nr in if abi::AARCH64 {
-                vec![37]
-            } else {
-                vec![86, 265]
-            } {
-                assert_eq!(run(&plain, X86, nr, [0; 2]), SECCOMP_RET_ALLOW);
-                assert_eq!(run(&bounded, X86, nr, [0; 2]), EPERM);
-                assert_eq!(run(&bounded, X86, nr | X32_SYSCALL_BIT, [0; 2]), EPERM);
+            for &(_, nr) in storage_link_denials() {
+                assert_eq!(run(&plain, NATIVE, nr, [0; 2]), SECCOMP_RET_ALLOW);
+                assert_eq!(run(&bounded, NATIVE, nr, [0; 2]), EPERM);
+                assert_eq!(run(&bounded, NATIVE, nr | X32_SYSCALL_BIT, [0; 2]), EPERM);
                 for arch in FOREIGN {
                     assert_eq!(run(&bounded, arch, nr, [0; 2]), EPERM);
                 }
             }
             // Unrelated calls retain their verdicts, including write-open,
             // directory creation, rename and already-forbidden quota changes.
-            for nr in [1, 2, 82, 83, 179, 257, 443] {
-                assert_eq!(run(&bounded, X86, nr, [0; 2]), run(&plain, X86, nr, [0; 2]));
+            for (name, nr) in [
+                ("write", nr(1, 64)),
+                ("openat", nr(257, 56)),
+                ("mkdirat", nr(258, 34)),
+                ("renameat2", nr(316, 276)),
+                ("quotactl", nr(179, 60)),
+                ("quotactl_fd", 443),
+            ] {
+                assert_eq!(
+                    run(&bounded, NATIVE, nr, [0; 2]),
+                    run(&plain, NATIVE, nr, [0; 2]),
+                    "{name}"
+                );
             }
             assert_ne!(plain.digest(), bounded.digest());
         }
@@ -1143,7 +1169,8 @@ mod tests {
     /// AF_UNSPEC 0, one past the last (46) and a negative int.
     const OUTSIDE: [u32; 11] = [17, 38, 40, 42, 15, 7, 30, 44, 0, 46, 0xffff_ffff];
     const NETLINK_ROUTE: u32 = 0;
-    const X86: u32 = AUDIT_ARCH;
+    /// This build's own audit architecture.
+    const NATIVE: u32 = AUDIT_ARCH;
     /// Non-native ABIs the reference host accepts or could: i386, aarch64,
     /// 32-bit arm, garbage.
     const FOREIGN: [u32; 5] = [
@@ -1261,33 +1288,37 @@ mod tests {
         // Every syscall tool denies, agent denies the same way, except AF_UNIX
         // socket creation, which the mediation filter owns.
         for (name, nr) in DENY_EPERM {
-            assert_eq!(run(&agent, X86, *nr, [0, 0]), EPERM, "{name}");
-            assert_eq!(run(&tool, X86, *nr, [0, 0]), EPERM, "{name}");
+            assert_eq!(run(&agent, NATIVE, *nr, [0, 0]), EPERM, "{name}");
+            assert_eq!(run(&tool, NATIVE, *nr, [0, 0]), EPERM, "{name}");
         }
-        assert_eq!(run(&agent, X86, NR_CLONE3, [0, 0]), ENOSYS);
-        assert_eq!(run(&agent, X86, NR_CLONE, [CLONE_NEWUSER_BIT, 0]), EPERM);
+        assert_eq!(run(&agent, NATIVE, NR_CLONE3, [0, 0]), ENOSYS);
+        assert_eq!(run(&agent, NATIVE, NR_CLONE, [CLONE_NEWUSER_BIT, 0]), EPERM);
         assert_eq!(
-            run(&agent, X86, NR_CLONE, [0x0001_0f00, 0]),
+            run(&agent, NATIVE, NR_CLONE, [0x0001_0f00, 0]),
             SECCOMP_RET_ALLOW
         );
-        assert_eq!(run(&agent, X86, NR_IOCTL, [0, TIOCSTI]), EPERM);
-        assert_eq!(run(&tool, X86, NR_SOCKET, [AF_UNIX, SOCK_STREAM]), EPERM);
+        assert_eq!(run(&agent, NATIVE, NR_IOCTL, [0, TIOCSTI]), EPERM);
+        assert_eq!(run(&tool, NATIVE, NR_SOCKET, [AF_UNIX, SOCK_STREAM]), EPERM);
         assert_eq!(
-            run(&agent, X86, NR_SOCKET, [AF_UNIX, SOCK_STREAM]),
+            run(&agent, NATIVE, NR_SOCKET, [AF_UNIX, SOCK_STREAM]),
             SECCOMP_RET_ALLOW,
             "the agent baseline leaves AF_UNIX to the mediation filter"
         );
         // The unprivileged inner sandbox: no_new_privs (prctl 157), seccomp
         // (317) and the three Landlock calls (444-446) are allowed.
         for nr in [nr(157, 167), NR_SECCOMP, 444, 445, 446] {
-            assert_eq!(run(&agent, X86, nr, [0, 0]), SECCOMP_RET_ALLOW, "nr {nr}");
+            assert_eq!(
+                run(&agent, NATIVE, nr, [0, 0]),
+                SECCOMP_RET_ALLOW,
+                "nr {nr}"
+            );
         }
         for arch in FOREIGN {
             for nr in [NR_CONNECT, NR_SOCKET, 1, 11, 102] {
                 assert_eq!(run(&agent, arch, nr, [0, 0]), EPERM, "{arch:#x}/{nr}");
             }
         }
-        assert_eq!(run(&agent, X86, X32_SYSCALL_BIT | 59, [0, 0]), EPERM);
+        assert_eq!(run(&agent, NATIVE, X32_SYSCALL_BIT | 59, [0, 0]), EPERM);
     }
 
     const CLONE_NEWUSER_BIT: u32 = 0x1000_0000;
@@ -1296,25 +1327,25 @@ mod tests {
     fn the_namespace_variant_permits_only_the_namespace_setup() {
         let ns = agent_baseline(AgentVariant::NamespaceInner).unwrap();
         for (name, nr) in NAMESPACE_SETUP {
-            assert_eq!(run(&ns, X86, nr, [0, 0]), SECCOMP_RET_ALLOW, "{name}");
+            assert_eq!(run(&ns, NATIVE, nr, [0, 0]), SECCOMP_RET_ALLOW, "{name}");
         }
         assert_eq!(
-            run(&ns, X86, NR_CLONE, [CLONE_NS_MASK, 0]),
+            run(&ns, NATIVE, NR_CLONE, [CLONE_NS_MASK, 0]),
             SECCOMP_RET_ALLOW
         );
         for (name, nr) in DENY_EPERM {
             if NAMESPACE_SETUP.iter().any(|(setup, _)| setup == name) {
                 continue;
             }
-            assert_eq!(run(&ns, X86, *nr, [0, 0]), EPERM, "{name} stays denied");
+            assert_eq!(run(&ns, NATIVE, *nr, [0, 0]), EPERM, "{name} stays denied");
         }
         // setns, the new mount API and clone3 are never part of it.
         for nr in [nr(308, 268), 428, 429, 430, 431, 432, 433, 442] {
-            assert_eq!(run(&ns, X86, nr, [0, 0]), EPERM, "nr {nr}");
+            assert_eq!(run(&ns, NATIVE, nr, [0, 0]), EPERM, "nr {nr}");
         }
-        assert_eq!(run(&ns, X86, NR_CLONE3, [0, 0]), ENOSYS);
+        assert_eq!(run(&ns, NATIVE, NR_CLONE3, [0, 0]), ENOSYS);
         for arch in FOREIGN {
-            assert_eq!(run(&ns, arch, 165, [0, 0]), EPERM, "{arch:#x}");
+            assert_eq!(run(&ns, arch, nr(165, 40), [0, 0]), EPERM, "{arch:#x}");
         }
         assert_eq!(
             AgentVariant::for_nested_user_namespace(true),
@@ -1336,38 +1367,42 @@ mod tests {
     #[test]
     fn the_mediation_filter_notifies_connect_and_admits_only_stream_af_unix() {
         let m = mediation_filter().unwrap();
-        assert_eq!(run(&m, X86, NR_CONNECT, [0, 0]), SECCOMP_RET_USER_NOTIF);
+        assert_eq!(run(&m, NATIVE, NR_CONNECT, [0, 0]), SECCOMP_RET_USER_NOTIF);
         for ty in [2, 3, 2 | 0x80000, 3 | 0x800, 4, 6, 10] {
             assert_eq!(
-                run(&m, X86, NR_SOCKET, [AF_UNIX, ty]),
+                run(&m, NATIVE, NR_SOCKET, [AF_UNIX, ty]),
                 EPERM,
                 "type {ty:#x}"
             );
             assert_eq!(
-                run(&m, X86, NR_SOCKETPAIR, [AF_UNIX, ty]),
+                run(&m, NATIVE, NR_SOCKETPAIR, [AF_UNIX, ty]),
                 EPERM,
                 "type {ty:#x}"
             );
         }
         for ty in [SOCK_STREAM, SOCK_SEQPACKET, SOCK_STREAM | 0x80000 | 0x800] {
             assert_eq!(
-                run(&m, X86, NR_SOCKET, [AF_UNIX, ty]),
+                run(&m, NATIVE, NR_SOCKET, [AF_UNIX, ty]),
                 SECCOMP_RET_ALLOW,
                 "type {ty:#x}"
             );
         }
         assert_eq!(
-            run(&m, X86, NR_SOCKET, [2, 2]),
+            run(&m, NATIVE, NR_SOCKET, [2, 2]),
             SECCOMP_RET_ALLOW,
             "AF_INET dgram"
         );
-        assert_eq!(run(&m, X86, 1, [0, 0]), SECCOMP_RET_ALLOW);
+        assert_eq!(
+            run(&m, NATIVE, nr(1, 64), [0, 0]),
+            SECCOMP_RET_ALLOW,
+            "write"
+        );
         for arch in FOREIGN {
             for nr in [NR_CONNECT, NR_SOCKET, 102, 362] {
                 assert_eq!(run(&m, arch, nr, [AF_UNIX, 2]), EPERM, "{arch:#x}/{nr}");
             }
         }
-        assert_eq!(run(&m, X86, X32_SYSCALL_BIT | NR_CONNECT, [0, 0]), EPERM);
+        assert_eq!(run(&m, NATIVE, X32_SYSCALL_BIT | NR_CONNECT, [0, 0]), EPERM);
         assert!(
             m.disassemble()
                 .iter()
@@ -1406,13 +1441,13 @@ mod tests {
             for family in OUTSIDE {
                 for ty in [SOCK_STREAM, 2, 3, 5] {
                     assert_eq!(
-                        run3(&tool, X86, nr, [family, ty, 0]),
+                        run3(&tool, NATIVE, nr, [family, ty, 0]),
                         EAFNOSUPPORT,
                         "tool {nr}/{family:#x}/{ty}"
                     );
                     for agent in &agents {
                         assert_eq!(
-                            run3(agent, X86, nr, [family, ty, 0]),
+                            run3(agent, NATIVE, nr, [family, ty, 0]),
                             EAFNOSUPPORT,
                             "agent {nr}/{family:#x}/{ty}"
                         );
@@ -1421,19 +1456,19 @@ mod tests {
             }
             for family in [AF_INET, AF_INET6] {
                 for ty in [SOCK_STREAM, 2, 3] {
-                    assert_eq!(run3(&tool, X86, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
+                    assert_eq!(run3(&tool, NATIVE, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
                     for agent in &agents {
-                        assert_eq!(run3(agent, X86, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
+                        assert_eq!(run3(agent, NATIVE, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
                     }
-                    assert_eq!(run3(&m, X86, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
+                    assert_eq!(run3(&m, NATIVE, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
                 }
             }
             // AF_UNIX: tool refuses it (EPERM, as J2 verified); agent leaves
             // it to the mediation filter.
-            assert_eq!(run3(&tool, X86, nr, [AF_UNIX, SOCK_STREAM, 0]), EPERM);
+            assert_eq!(run3(&tool, NATIVE, nr, [AF_UNIX, SOCK_STREAM, 0]), EPERM);
             for agent in &agents {
                 assert_eq!(
-                    run3(agent, X86, nr, [AF_UNIX, SOCK_STREAM, 0]),
+                    run3(agent, NATIVE, nr, [AF_UNIX, SOCK_STREAM, 0]),
                     SECCOMP_RET_ALLOW
                 );
             }
@@ -1442,7 +1477,7 @@ mod tests {
             // installed after the launcher opened it, refuses every protocol.
             for protocol in [NETLINK_ROUTE, NETLINK_SOCK_DIAG, 9, 15, 0xffff_ffff] {
                 assert_eq!(
-                    run3(&tool, X86, nr, [AF_NETLINK, 3, protocol]),
+                    run3(&tool, NATIVE, nr, [AF_NETLINK, 3, protocol]),
                     EAFNOSUPPORT,
                     "tool netlink {protocol}"
                 );
@@ -1453,20 +1488,20 @@ mod tests {
                 };
                 for agent in &agents {
                     assert_eq!(
-                        run3(agent, X86, nr, [AF_NETLINK, 3, protocol]),
+                        run3(agent, NATIVE, nr, [AF_NETLINK, 3, protocol]),
                         expected,
                         "agent netlink {protocol}"
                     );
                 }
                 assert_eq!(
-                    run3(&m, X86, nr, [AF_NETLINK, 3, protocol]),
+                    run3(&m, NATIVE, nr, [AF_NETLINK, 3, protocol]),
                     EAFNOSUPPORT,
                     "mediation netlink {protocol}"
                 );
             }
             // The mediation filter leaves every other family to the baseline.
             for family in OUTSIDE {
-                assert_eq!(run3(&m, X86, nr, [family, 1, 0]), SECCOMP_RET_ALLOW);
+                assert_eq!(run3(&m, NATIVE, nr, [family, 1, 0]), SECCOMP_RET_ALLOW);
             }
         }
     }
@@ -1493,7 +1528,7 @@ mod tests {
             0xffff_ffff,
         ] {
             assert_eq!(
-                run3(&tool, X86, SECCOMP, [SET_MODE_FILTER, flags, 0]),
+                run3(&tool, NATIVE, SECCOMP, [SET_MODE_FILTER, flags, 0]),
                 EPERM,
                 "flags {flags:#x}"
             );
@@ -1507,7 +1542,7 @@ mod tests {
             (3, 0),
         ] {
             assert_eq!(
-                run3(&tool, X86, SECCOMP, [op, flags, 0]),
+                run3(&tool, NATIVE, SECCOMP, [op, flags, 0]),
                 SECCOMP_RET_ALLOW,
                 "op {op} flags {flags:#x}"
             );
@@ -1518,7 +1553,7 @@ mod tests {
         ] {
             let agent = agent_baseline(variant).unwrap();
             assert_eq!(
-                run3(&agent, X86, SECCOMP, [SET_MODE_FILTER, NEW_LISTENER, 0]),
+                run3(&agent, NATIVE, SECCOMP, [SET_MODE_FILTER, NEW_LISTENER, 0]),
                 SECCOMP_RET_ALLOW,
                 "the agent launcher installs the jail's own listener after its baseline"
             );
@@ -1563,33 +1598,33 @@ mod tests {
                 CLONE_UNTRACED | VFORK,
             ] {
                 assert_eq!(
-                    run(prog, X86, NR_CLONE, [flags, 0]),
+                    run(prog, NATIVE, NR_CLONE, [flags, 0]),
                     EPERM,
                     "{name}: clone {flags:#x}"
                 );
             }
             for flags in [SIGCHLD, THREAD, VFORK] {
                 assert_eq!(
-                    run(prog, X86, NR_CLONE, [flags, 0]),
+                    run(prog, NATIVE, NR_CLONE, [flags, 0]),
                     SECCOMP_RET_ALLOW,
                     "{name}: clone {flags:#x}"
                 );
             }
-            assert_eq!(run(prog, X86, NR_CLONE3, [0, 0]), ENOSYS, "{name}");
-            // The flag means nothing to another call.
+            assert_eq!(run(prog, NATIVE, NR_CLONE3, [0, 0]), ENOSYS, "{name}");
+            // The flag means nothing to another call (getpid).
             assert_eq!(
-                run(prog, X86, 57, [CLONE_UNTRACED, 0]),
+                run(prog, NATIVE, nr(39, 172), [CLONE_UNTRACED, 0]),
                 SECCOMP_RET_ALLOW,
                 "{name}"
             );
         }
         let ns = &baselines[2].1;
         assert_eq!(
-            run(ns, X86, NR_CLONE, [CLONE_NS_MASK, 0]),
+            run(ns, NATIVE, NR_CLONE, [CLONE_NS_MASK, 0]),
             SECCOMP_RET_ALLOW
         );
         assert_eq!(
-            run(ns, X86, NR_CLONE, [CLONE_NS_MASK | CLONE_UNTRACED, 0]),
+            run(ns, NATIVE, NR_CLONE, [CLONE_NS_MASK | CLONE_UNTRACED, 0]),
             EPERM
         );
         assert_eq!(CLONE_NS_MASK & CLONE_UNTRACED, 0);
@@ -1600,6 +1635,23 @@ mod tests {
         ] {
             assert!(table.contains("CLONE_UNTRACED"), "{table}");
         }
+    }
+
+    /// The assembler admits exactly `MAX_INSNS` instructions (32768 bytes);
+    /// a program at that limit is piped whole, not refused by a panic.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_program_at_the_instruction_limit_is_piped_whole() {
+        use std::io::Read as _;
+        let mut asm = Asm::new();
+        for _ in 0..super::super::bpf::MAX_INSNS {
+            asm.ret(SECCOMP_RET_ALLOW);
+        }
+        let program = asm.assemble().expect("the limit itself assembles");
+        let pipe = program_pipe(&program).expect("a default pipe holds 32 KiB");
+        let mut bytes = Vec::new();
+        std::fs::File::from(pipe).read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, program.to_bytes());
     }
 
     #[cfg(target_os = "linux")]
