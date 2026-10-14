@@ -1,0 +1,428 @@
+{
+  "schema": "ouro.jail.onboarding/1",
+  "status": "passed",
+  "expected_revision": "bca7585886e58ba84def5cc2639bb10fc58a3590",
+  "rows": [
+    {
+      "name": "host",
+      "argv": [
+        "sh",
+        "-c",
+        "uname -a; cat /etc/os-release; systemd-detect-virt; id; getconf GNU_LIBC_VERSION; bwrap --version; minisign -v; cat /proc/sys/kernel/yama/ptrace_scope; cat /proc/sys/user/max_user_namespaces; cat /proc/sys/kernel/unprivileged_userns_clone; cat /proc/self/cgroup; cat /etc/machine-id; cat /proc/sys/kernel/random/boot_id"
+      ],
+      "seconds": 0.3089632689999746,
+      "exit": 0
+    },
+    {
+      "name": "virtualization",
+      "argv": [
+        "systemd-detect-virt"
+      ],
+      "seconds": 0.020087367000002132,
+      "exit": 0
+    },
+    {
+      "name": "install",
+      "argv": [
+        "sh",
+        "install.sh",
+        "--from-dir",
+        "artifacts",
+        "--public-key",
+        "RWTicCFejTBDEbOpkFm5yUPMb30Vu3Ug9exKyXdlhQvjQd83z0eQvyKr",
+        "--yes"
+      ],
+      "seconds": 1.4752785379999978,
+      "exit": 0
+    },
+    {
+      "name": "version",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "version",
+        "--json"
+      ],
+      "seconds": 0.015411515000010922,
+      "exit": 0
+    },
+    {
+      "name": "git-init",
+      "argv": [
+        "git",
+        "init",
+        "-q",
+        "/home/ubuntu/onboarding-project"
+      ],
+      "seconds": 0.10115381399998569,
+      "exit": 0
+    },
+    {
+      "name": "true",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "run",
+        "--workspace",
+        "/home/ubuntu/onboarding-project",
+        "--",
+        "/usr/bin/true"
+      ],
+      "seconds": 0.35517081500000813,
+      "exit": 0
+    },
+    {
+      "name": "opencode-download",
+      "argv": [
+        "curl",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "https://github.com/anomalyco/opencode/releases/download/v1.18.32/opencode-linux-x64-baseline.tar.gz",
+        "-o",
+        "/home/ubuntu/opencode.tar.gz"
+      ],
+      "seconds": 1.8877905509999948,
+      "exit": 0
+    },
+    {
+      "name": "opencode-version",
+      "argv": [
+        "/home/ubuntu/.opencode/bin/opencode",
+        "--version"
+      ],
+      "seconds": 5.880859792999985,
+      "exit": 0
+    },
+    {
+      "name": "ripgrep-version",
+      "argv": [
+        "rg",
+        "--version"
+      ],
+      "seconds": 0.05103039299999068,
+      "exit": 0
+    },
+    {
+      "name": "opencode",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "run",
+        "--launch",
+        "opencode",
+        "--workspace",
+        "/home/ubuntu/onboarding-project",
+        "--ro",
+        "/home/ubuntu/.opencode/bin",
+        "--limit",
+        "wall=300s",
+        "--",
+        "/home/ubuntu/.opencode/bin/opencode",
+        "run",
+        "--model",
+        "opencode/big-pickle",
+        "Use your glob tool to find task.txt, read it, then create greeting.txt with exactly the same contents. Do not use the network yourself."
+      ],
+      "seconds": 44.659370771,
+      "exit": 0
+    },
+    {
+      "name": "opencode-learn",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "learn",
+        "--launch",
+        "opencode",
+        "--workspace",
+        "/home/ubuntu/onboarding-project",
+        "--ro",
+        "/home/ubuntu/.opencode/bin",
+        "--limit",
+        "wall=300s",
+        "--out",
+        "/home/ubuntu/onboarding-results/opencode-learned.toml",
+        "--",
+        "/home/ubuntu/.opencode/bin/opencode",
+        "run",
+        "--model",
+        "opencode/big-pickle",
+        "Use the bash tool once to run exactly `cat /home/ubuntu/learning-needed.txt; cp task.txt learned-greeting.txt`. The cat is expected to fail; still run cp after it. Do not retry, change permissions, or use the network yourself. Reply done only after the command completed."
+      ],
+      "seconds": 45.975581121999994,
+      "exit": 0
+    },
+    {
+      "name": "doctor-codex",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "codex",
+        "--json"
+      ],
+      "seconds": 1.0409100139999907,
+      "exit": 0
+    },
+    {
+      "name": "doctor-claude",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "claude",
+        "--json"
+      ],
+      "seconds": 0.8585255870000026,
+      "exit": 0
+    },
+    {
+      "name": "doctor-opencode",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "opencode",
+        "--json"
+      ],
+      "seconds": 0.9277099920000182,
+      "exit": 0
+    },
+    {
+      "name": "doctor-cursor",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "cursor",
+        "--json"
+      ],
+      "seconds": 0.9244010190000154,
+      "exit": 0
+    },
+    {
+      "name": "doctor-aider",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "aider",
+        "--json"
+      ],
+      "seconds": 0.8631355480000025,
+      "exit": 0
+    },
+    {
+      "name": "doctor-goose",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "goose",
+        "--json"
+      ],
+      "seconds": 1.0615098389999957,
+      "exit": 0
+    },
+    {
+      "name": "doctor-gemini",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "gemini",
+        "--json"
+      ],
+      "seconds": 0.8592625820000421,
+      "exit": 0
+    },
+    {
+      "name": "doctor-amp",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "amp",
+        "--json"
+      ],
+      "seconds": 0.8428287229999682,
+      "exit": 0
+    },
+    {
+      "name": "doctor-cline",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "cline",
+        "--json"
+      ],
+      "seconds": 0.8491386690000127,
+      "exit": 0
+    },
+    {
+      "name": "doctor-copilot",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "copilot",
+        "--json"
+      ],
+      "seconds": 0.868534502999978,
+      "exit": 0
+    },
+    {
+      "name": "doctor-kilo",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "kilo",
+        "--json"
+      ],
+      "seconds": 0.8377877660000195,
+      "exit": 0
+    },
+    {
+      "name": "doctor-auggie",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "auggie",
+        "--json"
+      ],
+      "seconds": 0.8812383920000002,
+      "exit": 0
+    },
+    {
+      "name": "doctor-droid",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "droid",
+        "--json"
+      ],
+      "seconds": 0.8650105309999958,
+      "exit": 0
+    },
+    {
+      "name": "doctor-pi",
+      "argv": [
+        "/home/ubuntu/.local/bin/ouro-jail",
+        "doctor",
+        "--launch",
+        "pi",
+        "--json"
+      ],
+      "seconds": 0.8748934459999873,
+      "exit": 0
+    },
+    {
+      "name": "corrupt-archive",
+      "argv": [
+        "sh",
+        "install.sh",
+        "--from-dir",
+        "/home/ubuntu/corrupt-artifacts",
+        "--public-key",
+        "RWTicCFejTBDEbOpkFm5yUPMb30Vu3Ug9exKyXdlhQvjQd83z0eQvyKr",
+        "--upgrade"
+      ],
+      "seconds": 0.2888045060000195,
+      "exit": 1
+    },
+    {
+      "name": "corrupt-signature",
+      "argv": [
+        "sh",
+        "install.sh",
+        "--from-dir",
+        "/home/ubuntu/corrupt-artifacts",
+        "--public-key",
+        "RWTicCFejTBDEbOpkFm5yUPMb30Vu3Ug9exKyXdlhQvjQd83z0eQvyKr",
+        "--upgrade"
+      ],
+      "seconds": 0.1003981339999882,
+      "exit": 1
+    },
+    {
+      "name": "upgrade",
+      "argv": [
+        "sh",
+        "install.sh",
+        "--from-dir",
+        "artifacts",
+        "--public-key",
+        "RWTicCFejTBDEbOpkFm5yUPMb30Vu3Ug9exKyXdlhQvjQd83z0eQvyKr",
+        "--upgrade"
+      ],
+      "seconds": 1.7648927640000238,
+      "exit": 0
+    }
+  ],
+  "expected_inputs": "sha256:bf40db551f4c3696406853e4acd0b892cd770296c175f6708c0835e83f14947b",
+  "timer_scope": "signed install through first sandboxed OpenCode result; includes agent download, excludes VM/dependency bootstrap",
+  "publication": "deferred",
+  "signing_identity": "ephemeral test key",
+  "rust_before": {
+    "cargo": null,
+    "rustc": null,
+    "rustup": null
+  },
+  "build": {
+    "build": {
+      "debug_assertions": false,
+      "dirty": false,
+      "inputs": "sha256:bf40db551f4c3696406853e4acd0b892cd770296c175f6708c0835e83f14947b",
+      "opt_level": "3",
+      "revision": "bca7585886e58ba84def5cc2639bb10fc58a3590",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "component": "ouro-jail",
+    "frozen": true,
+    "observation": {
+      "closed_set": "linux-closed-v1"
+    },
+    "platform": {
+      "arch": "x86_64",
+      "kernel": "Linux 7.0.0-34-generic",
+      "os": "linux"
+    },
+    "schemas": {
+      "control": "ouro.jail.control/1",
+      "doctor": "ouro.jail.doctor/1",
+      "event": "ouro.event/1",
+      "gate": "ouro.jail.gate/1",
+      "learned_policy": "ouro.jail.learned-policy/1",
+      "network": "ouro.jail.network/1",
+      "policy": "ouro.jail.policy/1",
+      "policy_file": "ouro.jail.policy-file/1",
+      "policy_snapshot": "ouro.jail.policy-snapshot/1",
+      "receipt": "ouro.jail.receipt/1"
+    },
+    "version": "0.1.0"
+  },
+  "binary_sha256": "75599b150f4f488ade97693240d8125b92248c9cc603b21a04997922cc8e7554",
+  "agent_artifact": {
+    "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.32/opencode-linux-x64-baseline.tar.gz",
+    "sha256": "763af386ef88a8cab18df00fcf055690e5a55e31a7088beabe02307142a6adce"
+  },
+  "vendor_version": "1.18.32",
+  "workflow_seconds": 61.621670403000024,
+  "main_workflow": "passed",
+  "learning_workflow": "passed",
+  "learning_fixture": "/home/ubuntu/learning-needed.txt",
+  "learning_fixture_proposed": false,
+  "distribution_checks": "passed",
+  "rust_after": {
+    "cargo": null,
+    "rustc": null,
+    "rustup": null
+  }
+}
