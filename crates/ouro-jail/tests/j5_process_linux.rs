@@ -923,11 +923,21 @@ fn x03_owner_run(mode: &str) -> (Value, bool, usize) {
         .find(|path| path.is_dir())
         .expect("one attempt");
     let receipt = common::read_receipt(&attempt_dir.join("jail.json"));
-    // The local trace of an attempt whose owner died: whole frames, held to
-    // what a prefix keeps, whether or not it ends on the final receipt.
-    let trace =
-        harness::read_frames(&std::fs::read(attempt_dir.join("trace.ndjson")).unwrap_or_default());
-    if let Err(error) = common::check_trace(&trace.frames, None) {
+    // The local trace (§13.3 keeps it always). The jail outlived its owner
+    // and finished on its own, so the trace is whole: every line a frame,
+    // ending on the final receipt's note. A missing file or a torn or
+    // corrupt line is a finding, never zero execs.
+    let path = attempt_dir.join("trace.ndjson");
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("{} cannot be read: {error}", path.display()));
+    let trace = harness::read_frames(&bytes);
+    assert_eq!(
+        trace.state,
+        harness::TraceState::Complete,
+        "the local trace is not whole at byte {:?}",
+        trace.bad_offset
+    );
+    if let Err(error) = common::check_trace(&trace.frames, Some(&receipt)) {
         panic!("the local trace fails its contract: {error}");
     }
     let execs = trace
