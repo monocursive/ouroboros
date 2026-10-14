@@ -142,8 +142,62 @@ fn spawn_worker(
     Ok((go, handle))
 }
 
-fn join(handle: thread::JoinHandle<Forwarded>) -> Forwarded {
-    handle.join().unwrap_or((0, 0))
+/// The request direction's work: given both sockets, the first-end record
+/// and the response direction's "finished" flag, forward and count.
+type Worker =
+    Box<dyn FnOnce(Arc<UnixStream>, Arc<TcpStream>, FirstEnd, Arc<AtomicBool>) -> Forwarded + Send>;
+
+/// Runs one relay: `prefix` (a rewritten head, or a tunnel's early bytes)
+/// goes to the destination first; then the request direction runs on a
+/// worker thread and the response direction on this one, until the
+/// connection ends.
+fn relay(
+    client: &Arc<UnixStream>,
+    upstream: &Arc<TcpStream>,
+    prefix: &[u8],
+    chunk: usize,
+    request: Worker,
+) -> Result<RelayOutcome, SetupFailed> {
+    let first = FirstEnd::default();
+    let finished = Arc::new(AtomicBool::new(false));
+    let (go, worker) = {
+        let (client, upstream, first, finished) = (
+            Arc::clone(client),
+            Arc::clone(upstream),
+            first.clone(),
+            Arc::clone(&finished),
+        );
+        spawn_worker(move || request(client, upstream, first, finished))?
+    };
+    if !prefix.is_empty() && (&**upstream).write_all(prefix).is_err() {
+        let _ = go.send(false);
+        close_both(client, upstream);
+        let _ = worker.join();
+        return Ok(RelayOutcome {
+            bytes_in: 0,
+            bytes_out: 0,
+            discarded: 0,
+            end: EndReason::UpstreamError,
+        });
+    }
+    // Only now may the worker read the client: the prefix is ahead of
+    // anything it forwards.
+    let _ = go.send(true);
+    let bytes_in = response_direction(client, upstream, chunk, &first, &finished);
+    let (end, (forwarded, discarded)) = match worker.join() {
+        Ok(counts) => (first.get().unwrap_or(EndReason::UpstreamClosed), counts),
+        // What a panicked worker forwarded is unknown: the counts are
+        // short, and the end says why.
+        Err(_) => (EndReason::InternalError, (0, 0)),
+    };
+    Ok(RelayOutcome {
+        bytes_in,
+        bytes_out: u64::try_from(prefix.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(forwarded),
+        discarded,
+        end,
+    })
 }
 
 /// A CONNECT tunnel: reply 200, forward `early` (bytes the client sent after
@@ -154,62 +208,27 @@ pub(super) fn tunnel(
     early: &[u8],
     chunk: usize,
 ) -> Result<RelayOutcome, SetupFailed> {
-    let first = FirstEnd::default();
-    let finished = Arc::new(AtomicBool::new(false));
-    let (go, request) = {
-        let (client, upstream, first, finished) = (
-            Arc::clone(client),
-            Arc::clone(upstream),
-            first.clone(),
-            Arc::clone(&finished),
-        );
-        spawn_worker(move || {
-            let mut buf = vec![0u8; chunk];
-            let mut count = 0u64;
-            match pump(&*client, &*upstream, &mut buf, &mut count) {
-                Pump::SourceEof => {
-                    first.set(EndReason::ClientClosed);
-                    let _ = upstream.shutdown(Shutdown::Write);
-                    after_client_eof(&client, &upstream, &finished);
-                }
-                Pump::SourceError => {
-                    first.set(EndReason::ClientError);
-                    close_both(&client, &upstream);
-                }
-                Pump::SinkError => {
-                    first.set(EndReason::UpstreamError);
-                    close_both(&client, &upstream);
-                }
+    let request: Worker = Box::new(move |client, upstream, first, finished| {
+        let mut buf = vec![0u8; chunk];
+        let mut count = 0u64;
+        match pump(&*client, &*upstream, &mut buf, &mut count) {
+            Pump::SourceEof => {
+                first.set(EndReason::ClientClosed);
+                let _ = upstream.shutdown(Shutdown::Write);
+                after_client_eof(&client, &upstream, &finished);
             }
-            (count, 0)
-        })?
-    };
-    let mut bytes_out = 0u64;
-    if !early.is_empty() {
-        if (&**upstream).write_all(early).is_err() {
-            let _ = go.send(false);
-            close_both(client, upstream);
-            join(request);
-            return Ok(RelayOutcome {
-                bytes_in: 0,
-                bytes_out: 0,
-                discarded: 0,
-                end: EndReason::UpstreamError,
-            });
+            Pump::SourceError => {
+                first.set(EndReason::ClientError);
+                close_both(&client, &upstream);
+            }
+            Pump::SinkError => {
+                first.set(EndReason::UpstreamError);
+                close_both(&client, &upstream);
+            }
         }
-        bytes_out = u64::try_from(early.len()).unwrap_or(u64::MAX);
-    }
-    // Only now may the worker read the client: the early bytes are ahead of
-    // anything it forwards.
-    let _ = go.send(true);
-    let bytes_in = response_direction(client, upstream, chunk, &first, &finished);
-    bytes_out += join(request).0;
-    Ok(RelayOutcome {
-        bytes_in,
-        bytes_out,
-        discarded: 0,
-        end: first.get().unwrap_or(EndReason::UpstreamClosed),
-    })
+        (count, 0)
+    });
+    relay(client, upstream, early, chunk, request)
 }
 
 /// Validates strict chunked framing (no extensions, no trailers) and says
@@ -416,68 +435,38 @@ pub(super) fn http(
     early: &[u8],
     chunk: usize,
 ) -> Result<RelayOutcome, SetupFailed> {
-    let first = FirstEnd::default();
-    let finished = Arc::new(AtomicBool::new(false));
-    let (go, request) = {
-        let (client, upstream, first, finished) = (
-            Arc::clone(client),
-            Arc::clone(upstream),
-            first.clone(),
-            Arc::clone(&finished),
+    let early = early.to_vec();
+    let request: Worker = Box::new(move |client, upstream, first, finished| {
+        let mut buf = vec![0u8; chunk];
+        let (mut count, mut discarded) = (0u64, 0u64);
+        let body = forward_body(
+            &client,
+            &upstream,
+            framing,
+            &early,
+            &mut buf,
+            &mut count,
+            &mut discarded,
         );
-        let early = early.to_vec();
-        spawn_worker(move || {
-            let mut buf = vec![0u8; chunk];
-            let (mut count, mut discarded) = (0u64, 0u64);
-            let body = forward_body(
-                &client,
-                &upstream,
-                framing,
-                &early,
-                &mut buf,
-                &mut count,
-                &mut discarded,
-            );
-            let end = match body {
-                Body::Done => None,
-                Body::ClientEof => Some(EndReason::ClientClosed),
-                Body::ClientError => Some(EndReason::ClientError),
-                Body::UpstreamError => Some(EndReason::UpstreamError),
-                Body::Framing => Some(EndReason::ClientFraming),
-            };
-            match end {
-                // An incomplete or invalid body: the upstream must not see
-                // anything after it, so the whole connection closes.
-                Some(end) => {
-                    first.set(end);
-                    close_both(&client, &upstream);
-                }
-                None => discard_rest(&client, &upstream, &mut buf, &mut discarded, &finished),
+        let end = match body {
+            Body::Done => None,
+            Body::ClientEof => Some(EndReason::ClientClosed),
+            Body::ClientError => Some(EndReason::ClientError),
+            Body::UpstreamError => Some(EndReason::UpstreamError),
+            Body::Framing => Some(EndReason::ClientFraming),
+        };
+        match end {
+            // An incomplete or invalid body: the upstream must not see
+            // anything after it, so the whole connection closes.
+            Some(end) => {
+                first.set(end);
+                close_both(&client, &upstream);
             }
-            (count, discarded)
-        })?
-    };
-    if (&**upstream).write_all(head).is_err() {
-        let _ = go.send(false);
-        close_both(client, upstream);
-        join(request);
-        return Ok(RelayOutcome {
-            bytes_in: 0,
-            bytes_out: 0,
-            discarded: 0,
-            end: EndReason::UpstreamError,
-        });
-    }
-    let head_bytes = u64::try_from(head.len()).unwrap_or(u64::MAX);
-    let _ = go.send(true);
-    let bytes_in = response_direction(client, upstream, chunk, &first, &finished);
-    let (body_bytes, discarded) = join(request);
-    Ok(RelayOutcome {
-        bytes_in,
-        bytes_out: head_bytes + body_bytes,
-        discarded,
-        end: first.get().unwrap_or(EndReason::UpstreamClosed),
-    })
+            None => discard_rest(&client, &upstream, &mut buf, &mut discarded, &finished),
+        }
+        (count, discarded)
+    });
+    relay(client, upstream, head, chunk, request)
 }
 
 #[cfg(test)]
@@ -491,6 +480,26 @@ mod tests {
         };
         let used = state.feed(input);
         (used, state)
+    }
+
+    #[test]
+    fn a_panicked_request_worker_is_recorded_not_hidden() {
+        let (client, _peer) = UnixStream::pair().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        // The destination closes at once, so the response direction ends.
+        drop(listener.accept().unwrap());
+        let outcome = relay(
+            &Arc::new(client),
+            &Arc::new(upstream),
+            b"",
+            64,
+            Box::new(|_, _, _, _| panic!("a relay worker bug")),
+        );
+        let Ok(outcome) = outcome else {
+            panic!("the relay started");
+        };
+        assert_eq!(outcome.end, EndReason::InternalError);
     }
 
     #[test]

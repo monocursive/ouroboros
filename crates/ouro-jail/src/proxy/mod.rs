@@ -343,6 +343,9 @@ pub enum EndReason {
     /// The proxy's own lifetime for the connection ran out (the TLS lane's
     /// client deadline).
     Deadline,
+    /// The relay failed inside the proxy (a worker panicked); the byte
+    /// counts may be short.
+    InternalError,
 }
 
 impl EndReason {
@@ -358,6 +361,7 @@ impl EndReason {
             EndReason::ClientFraming => "client_framing",
             EndReason::Stopped => "stopped",
             EndReason::Deadline => "deadline",
+            EndReason::InternalError => "internal_error",
         }
     }
 }
