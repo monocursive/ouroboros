@@ -637,14 +637,14 @@ fn run_in_tool_sandbox(inner: Vec<OsString>, with_filter: bool) -> SandboxOutcom
     let workspace = temp_dir("ws");
     let scratch = temp_dir("scratch");
     let mut plan = BwrapPlan::tool(workspace.path(), scratch.path(), &jail_exe());
-    plan.bwrap = bwrap_path();
-    plan.inner = inner;
+    plan.set_backend(&bwrap_path());
+    plan.set_command(inner);
 
     let mut fds = FdMap::new();
     if with_filter {
         let program = seccomp::tool_baseline().unwrap();
         let fd = seccomp::program_pipe(&program).unwrap();
-        plan.seccomp_fd = Some(SECCOMP_FD);
+        plan.set_seccomp_fd(SECCOMP_FD);
         fds.add(fd, SECCOMP_FD).unwrap();
     }
     let rendered = plan.render().unwrap();
@@ -1169,7 +1169,7 @@ struct ToolRun {
 /// Build the full `tool` plan over a scanned workspace, run the inside
 /// launcher and the inside probe helper through it, and clean the
 /// placeholders up afterwards.
-fn run_tool_profile(force_args_fd: bool, narrow: bool) -> ToolRun {
+fn run_tool_profile(long_options: bool, narrow: bool) -> ToolRun {
     let ws_dir = temp_dir("tool-ws");
     let scratch_dir = temp_dir("tool-scratch");
     let holder_dir = temp_dir("tool-holders");
@@ -1190,25 +1190,22 @@ fn run_tool_profile(force_args_fd: bool, narrow: bool) -> ToolRun {
     let before = jfs::listing(&workspace).unwrap();
 
     let mut plan = BwrapPlan::tool(&workspace, &scratch, &jail_exe());
-    plan.bwrap = bwrap_path();
-    plan.protected = scan
-        .segments
-        .iter()
-        .map(|s| bwrap::ProtectedBind {
-            source: s.path.clone(),
+    plan.set_backend(&bwrap_path());
+    for segment in &scan.segments {
+        plan.protect(bwrap::ProtectedBind {
+            source: segment.path.clone(),
             fd: None,
-        })
-        .collect();
+        });
+    }
     let mut placeholders = Vec::new();
     for (index, literal) in scan.absent_root_literals().iter().enumerate() {
         let source = holder_dir.path().join(format!("holder{index}"));
         placeholders
             .push(Placeholder::create(&source, &workspace.join(literal)).expect("placeholder"));
     }
-    plan.placeholders = placeholders
-        .iter()
-        .map(|placeholder| placeholder.mount().clone())
-        .collect();
+    for placeholder in &placeholders {
+        plan.add_placeholder(placeholder.mount().clone());
+    }
 
     let checks = [
         "status".to_owned(),
@@ -1226,14 +1223,20 @@ fn run_tool_profile(force_args_fd: bool, narrow: bool) -> ToolRun {
         OsString::from(probe::INSIDE_SUBCOMMAND),
     ];
     target.extend(checks.iter().map(OsString::from));
-    plan.inner = inner_launch_command(RELEASE_FD, ERROR_FD, narrow, &target);
-    plan.force_args_fd = force_args_fd;
+    plan.set_command(inner_launch_command(RELEASE_FD, ERROR_FD, narrow, &target));
+    if long_options {
+        // Options this long go through `--args` (each variable stays under
+        // the kernel's per-string limit).
+        for index in 0..3 {
+            plan.set_env(format!("OURO_PAD_{index}"), "x".repeat(50_000));
+        }
+    }
 
     let mut fds = FdMap::new();
     let program = seccomp::tool_baseline().unwrap();
     fds.add(seccomp::program_pipe(&program).unwrap(), SECCOMP_FD)
         .unwrap();
-    plan.seccomp_fd = Some(SECCOMP_FD);
+    plan.set_seccomp_fd(SECCOMP_FD);
 
     let (release_r, release_w) = exec::pipe().unwrap();
     let (error_r, error_w) = exec::pipe().unwrap();
@@ -1241,19 +1244,25 @@ fn run_tool_profile(force_args_fd: bool, narrow: bool) -> ToolRun {
     fds.add(error_w, ERROR_FD).unwrap();
 
     let (status_r, status_w) = exec::pipe().unwrap();
-    plan.json_status_fd = Some(11);
+    plan.set_json_status_fd(11);
     fds.add(status_w, 11).unwrap();
 
-    if force_args_fd {
-        plan.args_fd = Some(ARGS_FD);
-    }
+    plan.set_args_fd(ARGS_FD);
     let rendered = plan.render().unwrap();
-    if let Some(payload) = rendered.args_payload.as_ref() {
+    assert_eq!(
+        rendered.args_payload.is_some(),
+        long_options,
+        "the options go through --args exactly when they are long"
+    );
+    // The payload is larger than a pipe holds, so it is written while
+    // bubblewrap reads it.
+    let mut args_writer = None;
+    if let Some(payload) = rendered.args_payload.clone() {
         let (args_r, args_w) = exec::pipe().unwrap();
-        let mut file = std::fs::File::from(args_w);
-        file.write_all(payload).unwrap();
-        drop(file);
         fds.add(args_r, ARGS_FD).unwrap();
+        args_writer = Some(std::thread::spawn(move || {
+            std::fs::File::from(args_w).write_all(&payload)
+        }));
     }
 
     let mut command = Command::new(&rendered.argv[0]);
@@ -1262,6 +1271,12 @@ fn run_tool_profile(force_args_fd: bool, narrow: bool) -> ToolRun {
     fds.apply(&mut command);
     let child = command.spawn().unwrap();
     drop(fds);
+    if let Some(writer) = args_writer {
+        writer
+            .join()
+            .expect("the writer thread")
+            .expect("bubblewrap read the options");
+    }
 
     // Release, then read everything the run produced.
     let mut release = std::fs::File::from(release_w);
@@ -1478,9 +1493,9 @@ fn bubblewrap_creates_an_absent_bind_destination_and_leaves_it_behind() {
     assert!(!destination.exists());
 
     let mut plan = BwrapPlan::tool(workspace, scratch_dir.path(), &jail_exe());
-    plan.bwrap = bwrap_path();
-    plan.extra_ro_binds = vec![(empty_dir.path().to_path_buf(), destination.clone())];
-    plan.inner = vec![OsString::from("/usr/bin/true")];
+    plan.set_backend(&bwrap_path());
+    plan.bind_read_only(empty_dir.path().to_path_buf(), destination.clone());
+    plan.set_command(vec![OsString::from("/usr/bin/true")]);
     let rendered = plan.render().unwrap();
     let mut command = Command::new(&rendered.argv[0]);
     command.args(&rendered.argv[1..]);

@@ -531,17 +531,204 @@ fn birth_time(handle: &OwnedFd) -> Option<(i64, u32)> {
 // The plan
 // ---------------------------------------------------------------------------
 
-/// One row of the mount table the receipt records.
+/// What one mount-table row does. [`MountKind::as_str`] is the row's
+/// spelling; [`MountRow`]'s rendering is decided by this alone, so every
+/// kind is handled once, by an exhaustive match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MountKind {
+    /// A host path bound read-only over the destination.
+    RoBind,
+    /// A protected segment bound read-only by its pin's descriptor.
+    RoBindFd,
+    /// A host path bound writable.
+    Bind,
+    /// A recreated merged-`/usr` symlink; the source is its target.
+    Symlink,
+    /// The sandbox's own `/proc`.
+    Proc,
+    /// The sandbox's own minimal `/dev`.
+    Dev,
+    /// An allowlisted host device node, bound on its own.
+    DevBind,
+    /// The ungranted workspace: an empty tmpfs, sealed read-only once every
+    /// grant beneath it is mounted.
+    Cwd,
+    /// An empty directory bound read-only over an absent protected literal.
+    Placeholder,
+    /// Vendor state, writable, bound by descriptor only.
+    VendorState,
+    /// A `bind_ro` credential view, bound by descriptor only; its source is
+    /// private operational state and never appears in the row.
+    Credential,
+    /// The attempt's proxy directory, read-only, bound by descriptor only.
+    Proxy,
+    /// A denied directory: an empty tmpfs, read-only from the start.
+    TmpfsMask,
+    /// A denied file: an empty, mode-000 file read from a data descriptor.
+    FileMask,
+}
+
+/// What preparation gives a row before it can render.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MountPreparation {
+    /// Pin the source and hand bubblewrap its descriptor, so a path swap
+    /// between validation and mount cannot redirect the bind.
+    PinSource,
+    /// Hand bubblewrap an empty data descriptor to make the file from.
+    EmptyData,
+    /// Nothing: the row has no host source, or its descriptor is staged.
+    Nothing,
+}
+
+impl MountKind {
+    /// The row's spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RoBind => "ro-bind",
+            Self::RoBindFd => "ro-bind-fd",
+            Self::Bind => "bind",
+            Self::Symlink => "symlink",
+            Self::Proc => "proc",
+            Self::Dev => "dev",
+            Self::DevBind => "dev-bind",
+            Self::Cwd => "cwd",
+            Self::Placeholder => "placeholder",
+            Self::VendorState => "vendor-state",
+            Self::Credential => "credential",
+            Self::Proxy => "proxy",
+            Self::TmpfsMask => "tmpfs-mask",
+            Self::FileMask => "file-mask",
+        }
+    }
+
+    /// What preparation gives a row of this kind.
+    #[must_use]
+    pub fn preparation(self) -> MountPreparation {
+        match self {
+            Self::RoBind | Self::RoBindFd | Self::Bind | Self::Placeholder => {
+                MountPreparation::PinSource
+            }
+            Self::FileMask => MountPreparation::EmptyData,
+            Self::Symlink
+            | Self::Proc
+            | Self::Dev
+            | Self::DevBind
+            | Self::Cwd
+            | Self::VendorState
+            | Self::Credential
+            | Self::Proxy
+            | Self::TmpfsMask => MountPreparation::Nothing,
+        }
+    }
+}
+
+impl fmt::Display for MountKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One row of the mount table, in the order the mounts are applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MountRow {
-    /// `ro-bind`, `bind`, `symlink`, `proc`, `dev`, `cwd`, `tmpfs-mask` or
-    /// `file-mask` or `placeholder`.
-    pub kind: &'static str,
-    /// The host source, or the symlink target, or nothing for a mount with no
-    /// source (`proc`, `dev`, `cwd`, `tmpfs-mask`, `file-mask`).
+    /// What the row does.
+    pub kind: MountKind,
+    /// The host source, or the symlink target; nothing for a mount with no
+    /// host source (`proc`, `dev`, `cwd`, the masks) and for a credential
+    /// view, whose source is never recorded.
     pub source: Option<OsString>,
     /// The path inside the sandbox.
     pub destination: OsString,
+    /// The descriptor number, valid in the bubblewrap process, the mount is
+    /// made from: a staged object's, a pinned source's, or a file mask's
+    /// empty data. `None` binds `source` by path, or has nothing to bind.
+    pub fd: Option<RawFd>,
+}
+
+impl MountRow {
+    fn new(kind: MountKind, source: Option<&OsStr>, destination: &OsStr) -> Self {
+        Self {
+            kind,
+            source: source.map(OsStr::to_owned),
+            destination: destination.to_owned(),
+            fd: None,
+        }
+    }
+
+    /// The row with its descriptor.
+    fn with_fd(self, fd: Option<RawFd>) -> Self {
+        Self { fd, ..self }
+    }
+
+    /// Whether `other` is the same mount, whatever descriptors either has.
+    fn same_mount(&self, other: &Self) -> bool {
+        (self.kind, &self.source, &self.destination)
+            == (other.kind, &other.source, &other.destination)
+    }
+
+    /// The bubblewrap options this row renders to.
+    ///
+    /// # Errors
+    /// [`PlanError::StagedFdMissing`] for a row that is made only from a
+    /// descriptor and has none, or [`PlanError::IncompleteRow`] for a bind
+    /// with neither a descriptor nor a source.
+    fn emit(&self, out: &mut Vec<OsString>) -> Result<(), PlanError> {
+        let destination = self.destination.clone();
+        let fd = |what: &'static str| -> Result<OsString, PlanError> {
+            self.fd
+                .map(|fd| OsString::from(fd.to_string()))
+                .ok_or(PlanError::StagedFdMissing(what))
+        };
+        let source = || {
+            self.source
+                .clone()
+                .ok_or(PlanError::IncompleteRow(self.kind.as_str()))
+        };
+        let bind = |by_path: &str, by_fd: &str| -> Result<[OsString; 3], PlanError> {
+            Ok(match self.fd {
+                Some(fd) => [by_fd.into(), fd.to_string().into(), destination.clone()],
+                None => [by_path.into(), source()?, destination.clone()],
+            })
+        };
+        match self.kind {
+            MountKind::RoBind | MountKind::RoBindFd | MountKind::Placeholder => {
+                out.extend(bind("--ro-bind", "--ro-bind-fd")?);
+            }
+            MountKind::Bind => out.extend(bind("--bind", "--bind-fd")?),
+            MountKind::Symlink => out.extend(["--symlink".into(), source()?, destination]),
+            MountKind::Proc => out.extend(["--proc".into(), destination]),
+            MountKind::Dev => out.extend(["--dev".into(), destination]),
+            MountKind::DevBind => out.extend(["--dev-bind".into(), source()?, destination]),
+            MountKind::Cwd => out.extend(["--tmpfs".into(), destination]),
+            MountKind::VendorState => {
+                out.extend(["--bind-fd".into(), fd("vendor-state")?, destination]);
+            }
+            MountKind::Credential => {
+                out.extend(["--ro-bind-fd".into(), fd("credential")?, destination]);
+            }
+            MountKind::Proxy => {
+                out.extend(["--ro-bind-fd".into(), fd("proxy directory")?, destination]);
+            }
+            // A denied path is absent or masked, never writable scratch
+            // outside every quota view: the mask is sealed read-only the
+            // moment it exists.
+            MountKind::TmpfsMask => out.extend([
+                "--tmpfs".into(),
+                destination.clone(),
+                "--remount-ro".into(),
+                destination,
+            ]),
+            MountKind::FileMask => out.extend([
+                "--perms".into(),
+                "000".into(),
+                "--ro-bind-data".into(),
+                fd("file denial")?,
+                destination,
+            ]),
+        }
+        Ok(())
+    }
 }
 
 /// One protected segment in the plan: the source path to bind read-only over
@@ -581,88 +768,104 @@ impl From<&str> for Mask {
         Self::Directory(path.into())
     }
 }
+
+/// How the workspace appears inside the sandbox.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceAccess {
+    /// An empty working directory, sealed read-only: no undeclared input is
+    /// exposed.
+    Hidden,
+    /// Bound read-only; a writable grant inside it is layered over it.
+    ReadOnly,
+    /// Bound writable.
+    Writable,
+}
+
+/// A directory the supervisor staged, bound by the descriptor it holds and
+/// never by its path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Staged {
+    /// The host path, for the mount table and diagnostics only.
+    pub host: PathBuf,
+    /// Descriptor number, valid in the bubblewrap process, of the staged
+    /// directory.
+    pub fd: RawFd,
+}
+
 /// Everything needed to build a bubblewrap invocation.
+///
+/// The fields are the crate's; the platform fills them. Other users build a
+/// plan with [`BwrapPlan::tool`] and the setters below.
 #[derive(Clone, Debug)]
 pub struct BwrapPlan {
     /// Path to the `bwrap` binary.
-    pub bwrap: PathBuf,
+    pub(crate) bwrap: PathBuf,
     /// System roots, already classified into binds and merged-`/usr` symlinks.
-    pub roots: Vec<RootSpec>,
+    pub(crate) roots: Vec<RootSpec>,
     /// `/etc` grants that exist on this host.
-    pub etc_paths: Vec<PathBuf>,
-    /// The writable workspace, mounted at the same path inside.
-    pub workspace: PathBuf,
-    /// None exposes only an empty working directory, never undeclared inputs.
-    /// Some(true) is writable; Some(false) is read-only.
-    pub workspace_access: Option<bool>,
+    pub(crate) etc_paths: Vec<PathBuf>,
+    /// The workspace, mounted at the same path inside.
+    pub(crate) workspace: PathBuf,
+    /// How the workspace appears.
+    pub(crate) workspace_access: WorkspaceAccess,
     /// The scratch directory, mounted at `/tmp` inside.
-    pub scratch: PathBuf,
+    pub(crate) scratch: PathBuf,
     /// Seal /dev, including /dev/shm, against filesystem allocation.
-    pub bounded_storage: bool,
-    /// Source descriptors for each row of `mount_table`, populated by preparation.
-    /// Each mount owns a distinct descriptor: bubblewrap closes it after binding.
-    pub mount_fds: Vec<Option<RawFd>>,
+    pub(crate) bounded_storage: bool,
     /// Environment to set after `--clearenv`.
-    pub env: Vec<(OsString, OsString)>,
+    pub(crate) env: Vec<(OsString, OsString)>,
     /// Existing protected segments, each bound read-only over itself. A pin
     /// whose `O_PATH` handle was handed to the spawn map is bound by
     /// descriptor (`--ro-bind-fd`), which cannot be redirected by a path
     /// swap between validation and mount (§9.1); the rest are bound by path
     /// and re-verified at handoff.
-    pub protected: Vec<ProtectedBind>,
+    pub(crate) protected: Vec<ProtectedBind>,
     /// Extra read-only binds with a destination of their own, used by the
     /// doctor probes and by operator `--ro` grants (§6.1).
-    pub extra_ro_binds: Vec<(PathBuf, PathBuf)>,
+    pub(crate) extra_ro_binds: Vec<(PathBuf, PathBuf)>,
     /// Extra writable binds from operator `--rw` grants, applied after the
     /// workspace bind so a grant inside it stays writable (§6.1).
-    pub extra_rw_binds: Vec<(PathBuf, PathBuf)>,
-    /// Operator `--rw` grants of allowlisted device nodes (issue draft 15):
-    /// NVIDIA nodes, bound individually with `--dev-bind` so a contained
-    /// profile can use a GPU without ever seeing devtmpfs.
-    pub extra_dev_binds: Vec<(PathBuf, PathBuf)>,
+    pub(crate) extra_rw_binds: Vec<(PathBuf, PathBuf)>,
+    /// Operator `--rw` grants of allowlisted device nodes: NVIDIA nodes,
+    /// bound individually with `--dev-bind` so a contained profile can use a
+    /// GPU without ever seeing devtmpfs.
+    pub(crate) extra_dev_binds: Vec<(PathBuf, PathBuf)>,
     /// Denied paths, masked with a read-only directory tmpfs or an unreadable
     /// read-only file after every other mount (north-star §4.3).
-    pub masked: Vec<Mask>,
+    pub(crate) masked: Vec<Mask>,
     /// Placeholders for absent root-level literals.
-    pub placeholders: Vec<PlaceholderMount>,
+    pub(crate) placeholders: Vec<PlaceholderMount>,
     /// The jail binary to bind at [`JAIL_INSIDE_PATH`].
-    pub jail_exe: PathBuf,
+    pub(crate) jail_exe: PathBuf,
     /// Descriptor carrying the seccomp program.
-    pub seccomp_fd: Option<RawFd>,
+    pub(crate) seccomp_fd: Option<RawFd>,
     /// Descriptor bubblewrap writes its own JSON status to.
-    pub json_status_fd: Option<RawFd>,
-    /// Descriptor to read the argument list from, when the list is long.
-    pub args_fd: Option<RawFd>,
-    /// Force the `--args` path even for a short list, so tests can exercise it.
-    pub force_args_fd: bool,
+    pub(crate) json_status_fd: Option<RawFd>,
+    /// Descriptor to read the options from, when they are too many for the
+    /// command line ([`ARGS_FD_THRESHOLD`]).
+    pub(crate) args_fd: Option<RawFd>,
     /// The command inside the sandbox, normally
     /// `/run/ouro/jail __launch ... -- PROGRAM ARG...`.
-    pub inner: Vec<OsString>,
-    // Vendor state and bind_ro credentials, bound by
-    // descriptor only (§9.1, §12)
-    /// The host vendor-state directory, for the mount table and diagnostics.
-    /// It is never bound by this path: only by [`BwrapPlan::vendor_state_fd`].
-    pub vendor_state: Option<PathBuf>,
-    /// Descriptor number, valid in the bubblewrap process, of the
-    /// vendor-state directory the supervisor created (`--bind-fd`).
-    pub vendor_state_fd: Option<RawFd>,
+    pub(crate) inner: Vec<OsString>,
+    /// Vendor state, bound writable at [`VENDOR_STATE_INSIDE_PATH`] by
+    /// descriptor only (§9.1, §12).
+    pub(crate) vendor_state: Option<Staged>,
     /// `bind_ro` credential views: each exact source object's descriptor and
     /// its destination under [`VENDOR_STATE_INSIDE_PATH`] (`--ro-bind-fd`).
-    pub credential_binds: Vec<CredentialBind>,
-    // The proxy directory, bound by descriptor only (§10)
-    /// The host proxy directory, for the mount table and diagnostics. Never
-    /// bound by this path: only by [`BwrapPlan::proxy_dir_fd`].
-    pub proxy_dir: Option<PathBuf>,
-    /// Descriptor number, valid in the bubblewrap process, of the pinned
-    /// proxy directory (`--ro-bind-fd` at [`PROXY_INSIDE_PATH`]).
-    pub proxy_dir_fd: Option<RawFd>,
+    pub(crate) credential_binds: Vec<CredentialBind>,
+    /// The attempt's proxy directory, bound read-only at
+    /// [`PROXY_INSIDE_PATH`] by descriptor only (§10).
+    pub(crate) proxy_dir: Option<Staged>,
     /// When set, the file bound at `/etc/resolv.conf` is this sanitized
     /// per-attempt copy instead of the host's: the host file can carry the
     /// operator's search domains, which are host facts the child has no
     /// grant for. The child's resolver is unreachable in its network
     /// namespace either way; `etc_paths` still lists `/etc/resolv.conf`
     /// so operator-grant overlap checks keep their meaning.
-    pub resolv_source: Option<PathBuf>,
+    pub(crate) resolv_source: Option<PathBuf>,
+    /// The table preparation gave descriptors to ([`Self::set_mount_descriptors`]);
+    /// rendering refuses if the plan's table has changed since.
+    prepared: Option<Vec<MountRow>>,
 }
 
 /// One read-only credential view.
@@ -687,18 +890,20 @@ pub enum PlanError {
     ArgsFdMissing,
     /// There is no command to run.
     NoCommand,
-    // A staged object is bound by descriptor or not at all
-    /// A vendor-state or credential mount has no descriptor.
+    /// A mount made only from a descriptor has none; staged objects and
+    /// file denials are never bound by path.
     StagedFdMissing(&'static str),
+    /// A bind row has neither a descriptor nor a source.
+    IncompleteRow(&'static str),
+    /// The mount table is not the one preparation gave descriptors to.
+    MountsChanged,
     /// An argument contains NUL, which would split it into several options
     /// in the NUL-separated `--args` payload.
     ArgumentNul,
-    // Audit 2026-09-25-2, S3 begin
     /// A `deny_read` mask that would shadow the boundary's own plumbing
     /// (`/run`, `/run/ouro` or beneath it: the jail binary, the proxy
     /// directory and staged vendor state).
     MaskedBoundaryPlumbing(PathBuf),
-    // Audit 2026-09-25-2, S3 end
 }
 
 impl fmt::Display for PlanError {
@@ -716,18 +921,23 @@ impl fmt::Display for PlanError {
                     "the {what} mount has no descriptor; it is never bound by path"
                 )
             }
+            Self::IncompleteRow(kind) => {
+                write!(f, "a {kind} mount has neither a descriptor nor a source")
+            }
+            Self::MountsChanged => write!(
+                f,
+                "the mount table changed after preparation gave its rows their descriptors"
+            ),
             Self::ArgumentNul => write!(
                 f,
                 "an argument contains NUL, which would split it into bubblewrap options"
             ),
-            // Audit 2026-09-25-2, S3 begin
             Self::MaskedBoundaryPlumbing(path) => write!(
                 f,
                 "a deny_read mask at {} would shadow the boundary's own plumbing \
                  (/run/ouro: the jail binary, the proxy directory, staged state)",
                 path.display()
             ),
-            // Audit 2026-09-25-2, S3 end
         }
     }
 }
@@ -755,14 +965,30 @@ impl std::error::Error for PlanError {}
 pub struct Rendered {
     /// The argv to execute, including `bwrap` itself.
     pub argv: Vec<OsString>,
-    /// When present, the NUL-separated argument list to write to
-    /// [`BwrapPlan::args_fd`]; `argv` is then just `bwrap --args FD`.
+    /// When present, the NUL-separated options to write to the plan's
+    /// `--args` descriptor; `argv` is then `bwrap --args FD -- COMMAND...`.
     pub args_payload: Option<Vec<u8>>,
 }
 
+/// The namespace and lifetime options every contained plan starts with.
+const NAMESPACE_OPTIONS: [&str; 9] = [
+    "--unshare-user",
+    "--unshare-pid",
+    "--unshare-net",
+    "--unshare-ipc",
+    "--unshare-uts",
+    // §9.1: no host namespace handle reaches the child. Without this the
+    // child reads the supervisor's own cgroup path out of /proc/self/cgroup,
+    // which names the operator's session.
+    "--unshare-cgroup",
+    "--die-with-parent",
+    "--new-session",
+    "--clearenv",
+];
+
 impl BwrapPlan {
     /// A `tool` plan with this host's runtime roots and `/etc` grants filled
-    /// in, and the environment the profile allows.
+    /// in, a writable workspace, and a default `PATH` and `TMPDIR`.
     #[must_use]
     pub fn tool(workspace: &Path, scratch: &Path, jail_exe: &Path) -> Self {
         let roots = RUNTIME_ROOTS
@@ -780,10 +1006,9 @@ impl BwrapPlan {
             roots,
             etc_paths,
             workspace: workspace.to_owned(),
-            workspace_access: Some(true),
+            workspace_access: WorkspaceAccess::Writable,
             scratch: scratch.to_owned(),
             bounded_storage: false,
-            mount_fds: Vec::new(),
             env: vec![
                 (
                     OsString::from("PATH"),
@@ -804,184 +1029,301 @@ impl BwrapPlan {
             seccomp_fd: None,
             json_status_fd: None,
             args_fd: None,
-            force_args_fd: false,
             inner: Vec::new(),
             vendor_state: None,
-            vendor_state_fd: None,
             credential_binds: Vec::new(),
             proxy_dir: None,
-            proxy_dir_fd: None,
             resolv_source: None,
+            prepared: None,
         }
     }
 
-    /// The mount table, in the order the mounts are applied.
+    /// Run this `bwrap` binary.
+    pub fn set_backend(&mut self, bwrap: &Path) {
+        bwrap.clone_into(&mut self.bwrap);
+    }
+
+    /// The command to run inside the sandbox.
+    pub fn set_command(&mut self, inner: Vec<OsString>) {
+        self.inner = inner;
+    }
+
+    /// Set one environment variable for the command, replacing any earlier
+    /// value.
+    pub fn set_env(&mut self, name: impl Into<OsString>, value: impl Into<OsString>) {
+        let name = name.into();
+        self.env.retain(|(existing, _)| *existing != name);
+        self.env.push((name, value.into()));
+    }
+
+    /// Load the seccomp program from this descriptor (`--seccomp`).
+    pub fn set_seccomp_fd(&mut self, fd: RawFd) {
+        self.seccomp_fd = Some(fd);
+    }
+
+    /// Have bubblewrap write its JSON status here (`--json-status-fd`).
+    pub fn set_json_status_fd(&mut self, fd: RawFd) {
+        self.json_status_fd = Some(fd);
+    }
+
+    /// Where the options go when they are too many for the command line.
+    pub fn set_args_fd(&mut self, fd: RawFd) {
+        self.args_fd = Some(fd);
+    }
+
+    /// Bind `source` read-only at `destination`.
+    pub fn bind_read_only(&mut self, source: PathBuf, destination: PathBuf) {
+        self.extra_ro_binds.push((source, destination));
+    }
+
+    /// Bind a protected segment read-only over itself.
+    pub fn protect(&mut self, segment: ProtectedBind) {
+        self.protected.push(segment);
+    }
+
+    /// Mount a placeholder over an absent protected literal.
+    pub fn add_placeholder(&mut self, placeholder: PlaceholderMount) {
+        self.placeholders.push(placeholder);
+    }
+
+    /// Bind staged vendor state, by its descriptor.
+    pub fn stage_vendor_state(&mut self, vendor_state: Staged) {
+        self.vendor_state = Some(vendor_state);
+    }
+
+    /// Bind one credential view, by its descriptor.
+    pub fn add_credential_view(&mut self, view: CredentialBind) {
+        self.credential_binds.push(view);
+    }
+
+    /// The mount table, in the order the mounts are applied, with the
+    /// descriptors the plan itself holds (staged objects, protected pins).
     #[must_use]
     pub fn mount_table(&self) -> Vec<MountRow> {
-        let mut rows = Vec::new();
-        for root in &self.roots {
-            match root {
-                RootSpec::RoBind(p) => rows.push(MountRow {
-                    kind: "ro-bind",
-                    source: Some(p.as_os_str().to_owned()),
-                    destination: p.as_os_str().to_owned(),
-                }),
-                RootSpec::Symlink { path, target } => rows.push(MountRow {
-                    kind: "symlink",
-                    source: Some(target.as_os_str().to_owned()),
-                    destination: path.as_os_str().to_owned(),
-                }),
-            }
-        }
-        for etc in &self.etc_paths {
-            // Security 2026-09-25 (audit F5): `/etc/resolv.conf` binds the
-            // sanitized per-attempt copy when one was staged.
-            let source = if etc == Path::new("/etc/resolv.conf") {
-                self.resolv_source.clone().unwrap_or_else(|| etc.clone())
-            } else {
-                etc.clone()
-            };
-            rows.push(MountRow {
-                kind: "ro-bind",
-                source: Some(source.as_os_str().to_owned()),
-                destination: etc.as_os_str().to_owned(),
-            });
-        }
-        rows.push(MountRow {
-            kind: "proc",
-            source: None,
-            destination: OsString::from("/proc"),
-        });
-        rows.push(MountRow {
-            kind: "dev",
-            source: None,
-            destination: OsString::from("/dev"),
-        });
-        // The base roots, ancestors before descendants. The workspace is one
-        // of them in whichever mode the plan grants it: a read-only workspace
-        // sits under any writable grant inside it rather than covering it,
-        // and an ungranted one is an empty tmpfs mounted after a scratch at
-        // /tmp that would otherwise hide it, then sealed read-only by the
-        // argv once every grant beneath it is in place.
-        let mut base: Vec<(&'static str, Option<PathBuf>, PathBuf)> = self
-            .extra_rw_binds
-            .iter()
-            .map(|(source, destination)| ("bind", Some(source.clone()), destination.clone()))
-            .collect();
-        base.push((
-            "bind",
-            Some(self.scratch.clone()),
-            PathBuf::from(SCRATCH_INSIDE_PATH),
-        ));
-        base.push(match self.workspace_access {
-            Some(true) => ("bind", Some(self.workspace.clone()), self.workspace.clone()),
-            Some(false) => (
-                "ro-bind",
-                Some(self.workspace.clone()),
-                self.workspace.clone(),
-            ),
-            None => ("cwd", None, self.workspace.clone()),
-        });
-        base.sort_by_key(|(_, _, destination)| destination.components().count());
-        for (kind, source, destination) in base {
-            rows.push(MountRow {
-                kind,
-                source: source.map(PathBuf::into_os_string),
-                destination: destination.into_os_string(),
-            });
-        }
-        for (source, destination) in &self.extra_dev_binds {
-            rows.push(MountRow {
-                kind: "dev-bind",
-                source: Some(source.as_os_str().to_owned()),
-                destination: destination.as_os_str().to_owned(),
-            });
-        }
-        let mut readonly = self.extra_ro_binds.clone();
-        readonly.sort_by_key(|(_, destination)| destination.components().count());
-        for (source, destination) in readonly {
-            rows.push(MountRow {
-                kind: "ro-bind",
-                source: Some(source.into_os_string()),
-                destination: destination.into_os_string(),
-            });
-        }
-        for protected in &self.protected {
-            rows.push(MountRow {
-                kind: if protected.fd.is_some() {
-                    "ro-bind-fd"
-                } else {
-                    "ro-bind"
-                },
-                source: Some(protected.source.as_os_str().to_owned()),
-                destination: protected.source.as_os_str().to_owned(),
-            });
-        }
-        for placeholder in &self.placeholders {
-            rows.push(MountRow {
-                kind: "placeholder",
-                source: Some(placeholder.source.as_os_str().to_owned()),
-                destination: placeholder.destination.as_os_str().to_owned(),
-            });
-        }
-        // Vendor state, then the credential views inside it.
+        let mut rows = self.runtime_rows();
+        rows.extend(self.base_rows());
+        rows.extend(self.grant_rows());
         // After every operator grant, so no `--ro`/`--rw` of an ancestor of
         // `/run/ouro` can shadow them; before the masks, like the jail binary.
-        if let Some(host) = &self.vendor_state {
-            rows.push(MountRow {
-                kind: "vendor-state",
-                source: Some(host.as_os_str().to_owned()),
-                destination: OsString::from(VENDOR_STATE_INSIDE_PATH),
-            });
+        rows.extend(self.staged_rows());
+        rows.push(MountRow::new(
+            MountKind::RoBind,
+            Some(self.jail_exe.as_os_str()),
+            OsStr::new(JAIL_INSIDE_PATH),
+        ));
+        rows.extend(self.mask_rows());
+        rows
+    }
+
+    /// The system roots, the `/etc` grants, `/proc` and `/dev`.
+    fn runtime_rows(&self) -> Vec<MountRow> {
+        let mut rows: Vec<MountRow> = self
+            .roots
+            .iter()
+            .map(|root| match root {
+                RootSpec::RoBind(path) => {
+                    MountRow::new(MountKind::RoBind, Some(path.as_os_str()), path.as_os_str())
+                }
+                RootSpec::Symlink { path, target } => MountRow::new(
+                    MountKind::Symlink,
+                    Some(target.as_os_str()),
+                    path.as_os_str(),
+                ),
+            })
+            .collect();
+        for etc in &self.etc_paths {
+            // `/etc/resolv.conf` binds the sanitized per-attempt copy when
+            // one was staged.
+            let source = match &self.resolv_source {
+                Some(sanitized) if etc == Path::new("/etc/resolv.conf") => sanitized,
+                _ => etc,
+            };
+            rows.push(MountRow::new(
+                MountKind::RoBind,
+                Some(source.as_os_str()),
+                etc.as_os_str(),
+            ));
+        }
+        rows.push(MountRow::new(MountKind::Proc, None, OsStr::new("/proc")));
+        rows.push(MountRow::new(MountKind::Dev, None, OsStr::new("/dev")));
+        rows
+    }
+
+    /// The base roots, ancestors before descendants. The workspace is one of
+    /// them in whichever mode the plan grants it: a read-only workspace sits
+    /// under any writable grant inside it rather than covering it, and a
+    /// hidden one is an empty tmpfs mounted after a scratch at /tmp that
+    /// would otherwise hide it, then sealed read-only by the argv once every
+    /// grant beneath it is in place.
+    fn base_rows(&self) -> Vec<MountRow> {
+        let mut rows: Vec<MountRow> = self
+            .extra_rw_binds
+            .iter()
+            .map(|(source, destination)| {
+                MountRow::new(
+                    MountKind::Bind,
+                    Some(source.as_os_str()),
+                    destination.as_os_str(),
+                )
+            })
+            .collect();
+        rows.push(MountRow::new(
+            MountKind::Bind,
+            Some(self.scratch.as_os_str()),
+            OsStr::new(SCRATCH_INSIDE_PATH),
+        ));
+        let workspace = self.workspace.as_os_str();
+        rows.push(match self.workspace_access {
+            WorkspaceAccess::Writable => MountRow::new(MountKind::Bind, Some(workspace), workspace),
+            WorkspaceAccess::ReadOnly => {
+                MountRow::new(MountKind::RoBind, Some(workspace), workspace)
+            }
+            WorkspaceAccess::Hidden => MountRow::new(MountKind::Cwd, None, workspace),
+        });
+        rows.sort_by_key(|row| Path::new(&row.destination).components().count());
+        rows
+    }
+
+    /// Device nodes, read-only grants (ancestors first), protected segments
+    /// and placeholders.
+    fn grant_rows(&self) -> Vec<MountRow> {
+        let mut rows: Vec<MountRow> = self
+            .extra_dev_binds
+            .iter()
+            .map(|(source, destination)| {
+                MountRow::new(
+                    MountKind::DevBind,
+                    Some(source.as_os_str()),
+                    destination.as_os_str(),
+                )
+            })
+            .collect();
+        let mut readonly: Vec<&(PathBuf, PathBuf)> = self.extra_ro_binds.iter().collect();
+        readonly.sort_by_key(|(_, destination)| destination.components().count());
+        rows.extend(readonly.into_iter().map(|(source, destination)| {
+            MountRow::new(
+                MountKind::RoBind,
+                Some(source.as_os_str()),
+                destination.as_os_str(),
+            )
+        }));
+        rows.extend(self.protected.iter().map(|protected| {
+            let kind = if protected.fd.is_some() {
+                MountKind::RoBindFd
+            } else {
+                MountKind::RoBind
+            };
+            let path = protected.source.as_os_str();
+            MountRow::new(kind, Some(path), path).with_fd(protected.fd)
+        }));
+        rows.extend(self.placeholders.iter().map(|placeholder| {
+            MountRow::new(
+                MountKind::Placeholder,
+                Some(placeholder.source.as_os_str()),
+                placeholder.destination.as_os_str(),
+            )
+        }));
+        rows
+    }
+
+    /// Vendor state, the credential views inside it, then the proxy
+    /// directory: each bound by the descriptor staging holds.
+    fn staged_rows(&self) -> Vec<MountRow> {
+        let mut rows = Vec::new();
+        if let Some(vendor) = &self.vendor_state {
+            rows.push(
+                MountRow::new(
+                    MountKind::VendorState,
+                    Some(vendor.host.as_os_str()),
+                    OsStr::new(VENDOR_STATE_INSIDE_PATH),
+                )
+                .with_fd(Some(vendor.fd)),
+            );
         }
         let mut views: Vec<&CredentialBind> = self.credential_binds.iter().collect();
         views.sort_by_key(|view| view.destination.components().count());
-        for view in views {
-            rows.push(MountRow {
-                kind: "credential",
-                // Never the source path: it is private operational state.
-                source: None,
-                destination: view.destination.as_os_str().to_owned(),
-            });
+        rows.extend(views.into_iter().map(|view| {
+            MountRow::new(MountKind::Credential, None, view.destination.as_os_str())
+                .with_fd(view.fd)
+        }));
+        if let Some(proxy) = &self.proxy_dir {
+            rows.push(
+                MountRow::new(
+                    MountKind::Proxy,
+                    Some(proxy.host.as_os_str()),
+                    OsStr::new(PROXY_INSIDE_PATH),
+                )
+                .with_fd(Some(proxy.fd)),
+            );
         }
-        // The proxy directory, read-only, after every grant
-        if let Some(host) = &self.proxy_dir {
-            rows.push(MountRow {
-                kind: "proxy",
-                source: Some(host.as_os_str().to_owned()),
-                destination: OsString::from(PROXY_INSIDE_PATH),
-            });
-        }
-        rows.push(MountRow {
-            kind: "ro-bind",
-            source: Some(self.jail_exe.as_os_str().to_owned()),
-            destination: OsString::from(JAIL_INSIDE_PATH),
-        });
-        let mut masks = self.masked.clone();
+        rows
+    }
+
+    /// The denials, ancestors first. An ancestor denial already hides
+    /// everything beneath it, so a nested mask inside it is not rendered.
+    fn mask_rows(&self) -> Vec<MountRow> {
+        let mut masks: Vec<&Mask> = self.masked.iter().collect();
         masks.sort_by_key(|mask| mask.path().components().count());
-        // An ancestor denial already hides everything beneath it. Rendering a
-        // nested file mask into that sealed empty directory is unnecessary.
-        let mut rendered_masks: Vec<PathBuf> = Vec::new();
+        let mut rows: Vec<MountRow> = Vec::new();
         for mask in masks {
             let path = mask.path();
-            if rendered_masks
+            if rows
                 .iter()
-                .any(|ancestor| path.starts_with(ancestor))
+                .any(|ancestor| path.starts_with(&ancestor.destination))
             {
                 continue;
             }
-            rows.push(MountRow {
-                kind: if matches!(mask, Mask::File(_)) {
-                    "file-mask"
-                } else {
-                    "tmpfs-mask"
-                },
-                source: None,
-                destination: path.as_os_str().to_owned(),
-            });
-            rendered_masks.push(path.to_owned());
+            let kind = match mask {
+                Mask::File(_) => MountKind::FileMask,
+                Mask::Directory(_) => MountKind::TmpfsMask,
+            };
+            rows.push(MountRow::new(kind, None, path.as_os_str()));
         }
         rows
+    }
+
+    /// Record the descriptors preparation gave the rows of
+    /// [`Self::mount_table`]: `rows` is that table with each [`MountRow::fd`]
+    /// preparation set. The descriptors travel with their rows, and
+    /// rendering refuses a plan whose table has changed since.
+    ///
+    /// # Errors
+    /// [`PlanError::MountsChanged`] when `rows` is not this plan's table.
+    pub(crate) fn set_mount_descriptors(&mut self, rows: Vec<MountRow>) -> Result<(), PlanError> {
+        let table = self.mount_table();
+        if rows.len() != table.len() || !rows.iter().zip(&table).all(|(a, b)| a.same_mount(b)) {
+            return Err(PlanError::MountsChanged);
+        }
+        self.prepared = Some(rows);
+        Ok(())
+    }
+
+    /// The table to render: [`Self::mount_table`], each row with the
+    /// descriptor preparation gave it, or its own.
+    ///
+    /// # Errors
+    /// [`PlanError::MountsChanged`] when the table is not the one
+    /// preparation gave descriptors to.
+    pub(crate) fn mount_rows(&self) -> Result<Vec<MountRow>, PlanError> {
+        let table = self.mount_table();
+        let Some(prepared) = &self.prepared else {
+            return Ok(table);
+        };
+        if prepared.len() != table.len() {
+            return Err(PlanError::MountsChanged);
+        }
+        table
+            .into_iter()
+            .zip(prepared)
+            .map(|(row, prepared)| {
+                if row.same_mount(prepared) {
+                    let fd = prepared.fd.or(row.fd);
+                    Ok(row.with_fd(fd))
+                } else {
+                    Err(PlanError::MountsChanged)
+                }
+            })
+            .collect()
     }
 
     /// Render the invocation.
@@ -989,8 +1331,24 @@ impl BwrapPlan {
     /// # Errors
     ///
     /// [`PlanError`] for a relative path, an unusable path, a missing command,
-    /// or a long list with no `--args` descriptor.
+    /// a staged mount or file denial with no descriptor, a mask over the
+    /// boundary's plumbing, a table changed since preparation, an argument
+    /// carrying NUL, or a long list with no `--args` descriptor.
     pub fn render(&self) -> Result<Rendered, PlanError> {
+        self.validate()?;
+        let mut options: Vec<OsString> = NAMESPACE_OPTIONS.iter().map(OsString::from).collect();
+        for (key, value) in &self.env {
+            options.extend(["--setenv".into(), key.clone(), value.clone()]);
+        }
+        for row in self.mount_rows()? {
+            row.emit(&mut options)?;
+        }
+        self.seal(&mut options);
+        self.pack(options)
+    }
+
+    /// The refusals that depend on the plan alone, before anything renders.
+    fn validate(&self) -> Result<(), PlanError> {
         if self.inner.is_empty() {
             return Err(PlanError::NoCommand);
         }
@@ -1004,193 +1362,79 @@ impl BwrapPlan {
             }
             cstring_from_os(path.as_os_str()).map_err(|e| PlanError::Path(what, e))?;
         }
-
-        // Every staged mount has its descriptor
-        if self.vendor_state.is_some() && self.vendor_state_fd.is_none() {
-            return Err(PlanError::StagedFdMissing("vendor-state"));
-        }
         if self.credential_binds.iter().any(|view| view.fd.is_none()) {
             return Err(PlanError::StagedFdMissing("credential"));
         }
-        if self.proxy_dir.is_some() && self.proxy_dir_fd.is_none() {
-            return Err(PlanError::StagedFdMissing("proxy directory"));
-        }
-        // Audit 2026-09-25-2, S3: a mask is rendered last, over every other
-        // row, so one over the plumbing would unmount the jail's own binary,
-        // proxy socket or staged state for the whole attempt.
-        for mask in &self.masked {
-            let path = mask.path();
-            if shadows_plumbing(path) {
-                return Err(PlanError::MaskedBoundaryPlumbing(path.to_owned()));
-            }
-        }
-        let mut tail: Vec<OsString> = Vec::new();
-        // Scoped so the closure's borrow of `tail` ends before the length of
-        // the rendered list is measured.
-        {
-            let mut push = |parts: &[&OsStr]| {
-                for part in parts {
-                    tail.push((*part).to_owned());
-                }
-            };
-
-            for flag in [
-                "--unshare-user",
-                "--unshare-pid",
-                "--unshare-net",
-                "--unshare-ipc",
-                "--unshare-uts",
-                // §9.1: no host namespace handle reaches the child. Without
-                // this the child reads the supervisor's own cgroup path out
-                // of /proc/self/cgroup, which names the operator's session.
-                "--unshare-cgroup",
-                "--die-with-parent",
-                "--new-session",
-                "--clearenv",
-            ] {
-                push(&[OsStr::new(flag)]);
-            }
-            for (key, value) in &self.env {
-                push(&[OsStr::new("--setenv"), key, value]);
-            }
-            for (index, row) in self.mount_table().iter().enumerate() {
-                if row.kind == "file-mask" {
-                    let fd = self
-                        .mount_fds
-                        .get(index)
-                        .copied()
-                        .flatten()
-                        .ok_or(PlanError::StagedFdMissing("file denial"))?;
-                    push(&[
-                        OsStr::new("--perms"),
-                        OsStr::new("000"),
-                        OsStr::new("--ro-bind-data"),
-                        OsStr::new(&fd.to_string()),
-                        &row.destination,
-                    ]);
-                    continue;
-                }
-                if row.kind == "tmpfs-mask" {
-                    // Audit 2026-09-25-2, S12: a denied path is absent or
-                    // masked, never writable scratch outside every quota
-                    // view; the mask is sealed read-only the moment it
-                    // exists.
-                    push(&[OsStr::new("--tmpfs"), &row.destination]);
-                    push(&[OsStr::new("--remount-ro"), &row.destination]);
-                    continue;
-                }
-                let fd = self.mount_fds.get(index).copied().flatten().or_else(|| {
-                    self.protected
-                        .iter()
-                        .find(|p| p.source.as_os_str() == row.destination)
-                        .and_then(|p| p.fd)
-                });
-                // Staged objects carry their own descriptor
-                let fd = match row.kind {
-                    "vendor-state" => self.vendor_state_fd,
-                    "credential" => self
-                        .credential_binds
-                        .iter()
-                        .find(|view| view.destination.as_os_str() == row.destination)
-                        .and_then(|view| view.fd),
-                    "proxy" => self.proxy_dir_fd,
-                    _ => fd,
-                };
-                let flag = match row.kind {
-                    "bind" if fd.is_some() => "--bind-fd",
-                    "ro-bind" | "ro-bind-fd" | "placeholder" if fd.is_some() => "--ro-bind-fd",
-                    "bind" => "--bind",
-                    "ro-bind" | "ro-bind-fd" | "placeholder" => "--ro-bind",
-                    "symlink" => "--symlink",
-                    "tmpfs-mask" => "--tmpfs",
-                    "proc" => "--proc",
-                    "dev" => "--dev",
-                    "dev-bind" => "--dev-bind",
-                    "cwd" => "--tmpfs",
-                    // Checked above to have a descriptor
-                    "vendor-state" => "--bind-fd",
-                    "credential" => "--ro-bind-fd",
-                    "proxy" => "--ro-bind-fd",
-                    _ => unreachable!("mount table kind"),
-                };
-                if let Some(fd) = fd {
-                    push(&[
-                        OsStr::new(flag),
-                        OsStr::new(&fd.to_string()),
-                        &row.destination,
-                    ]);
-                } else if let Some(source) = &row.source {
-                    push(&[OsStr::new(flag), source, &row.destination]);
-                } else {
-                    push(&[OsStr::new(flag), &row.destination]);
-                }
-            }
-            if self.workspace_access.is_none() {
-                // Every grant inside the empty working directory is mounted
-                // by now; seal it before the root.
-                push(&[OsStr::new("--remount-ro"), self.workspace.as_os_str()]);
-            }
-            push(&[OsStr::new("--remount-ro"), OsStr::new("/")]);
-            if self.bounded_storage {
-                push(&[OsStr::new("--remount-ro"), OsStr::new("/dev")]);
-            }
-            push(&[OsStr::new("--chdir"), self.workspace.as_os_str()]);
-            if let Some(fd) = self.seccomp_fd {
-                push(&[OsStr::new("--seccomp"), OsStr::new(&fd.to_string())]);
-            }
-            if let Some(fd) = self.json_status_fd {
-                push(&[OsStr::new("--json-status-fd"), OsStr::new(&fd.to_string())]);
-            }
-        }
-        // No argument may carry a NUL (J3 review M4). The
-        // `--args` payload separates options with NUL, so one embedded in an
-        // environment name or value would become further bubblewrap options;
-        // the launch grammar refuses NUL, and this refuses it again here.
-        if tail
+        // A mask is rendered last, over every other row, so one over the
+        // plumbing would unmount the jail's own binary, proxy socket or
+        // staged state for the whole attempt.
+        if let Some(mask) = self
+            .masked
             .iter()
-            .chain(self.inner.iter())
-            .any(|part| part.as_bytes().contains(&0))
+            .find(|mask| shadows_plumbing(mask.path()))
         {
+            return Err(PlanError::MaskedBoundaryPlumbing(mask.path().to_owned()));
+        }
+        Ok(())
+    }
+
+    /// The options after the mounts: the seals, the working directory and
+    /// the descriptors bubblewrap reads or writes.
+    fn seal(&self, options: &mut Vec<OsString>) {
+        if self.workspace_access == WorkspaceAccess::Hidden {
+            // Every grant inside the empty working directory is mounted by
+            // now; seal it before the root.
+            options.extend(["--remount-ro".into(), self.workspace.clone().into()]);
+        }
+        options.extend(["--remount-ro".into(), "/".into()]);
+        if self.bounded_storage {
+            options.extend(["--remount-ro".into(), "/dev".into()]);
+        }
+        options.extend(["--chdir".into(), self.workspace.clone().into()]);
+        if let Some(fd) = self.seccomp_fd {
+            options.extend(["--seccomp".into(), fd.to_string().into()]);
+        }
+        if let Some(fd) = self.json_status_fd {
+            options.extend(["--json-status-fd".into(), fd.to_string().into()]);
+        }
+    }
+
+    /// The argv: the options on the command line, or in the `--args`
+    /// payload once they pass [`ARGS_FD_THRESHOLD`]; the command after `--`
+    /// either way.
+    fn pack(&self, options: Vec<OsString>) -> Result<Rendered, PlanError> {
+        // No argument may carry a NUL. The `--args` payload separates options
+        // with NUL, so one embedded in an environment name or value would
+        // become further bubblewrap options; the launch grammar refuses NUL,
+        // and this refuses it again here.
+        let all = || options.iter().chain(self.inner.iter());
+        if all().any(|part| part.as_bytes().contains(&0)) {
             return Err(PlanError::ArgumentNul);
         }
-        let size: usize = tail
-            .iter()
-            .chain(self.inner.iter())
-            .map(|part| part.as_bytes().len() + 1)
-            .sum();
-
-        if self.force_args_fd || size > ARGS_FD_THRESHOLD {
+        let size: usize = all().map(|part| part.as_bytes().len() + 1).sum();
+        let mut argv = vec![self.bwrap.as_os_str().to_owned()];
+        let payload = if size > ARGS_FD_THRESHOLD {
             let fd = self.args_fd.ok_or(PlanError::ArgsFdMissing)?;
             // Measured on bubblewrap 0.11.1: `--args FD` supplies options
             // only. A command inside the file leaves bubblewrap with nothing
-            // to run and it exits with its usage message. The command stays on
-            // the command line, after the `--` separator.
+            // to run and it exits with its usage message. The command stays
+            // on the command line, after the `--` separator.
             let mut payload = Vec::with_capacity(size);
-            for part in &tail {
+            for part in &options {
                 payload.extend_from_slice(part.as_bytes());
                 payload.push(0);
             }
-            let mut argv = vec![
-                self.bwrap.as_os_str().to_owned(),
-                OsString::from("--args"),
-                OsString::from(fd.to_string()),
-                OsString::from("--"),
-            ];
-            argv.extend(self.inner.iter().cloned());
-            return Ok(Rendered {
-                argv,
-                args_payload: Some(payload),
-            });
-        }
-
-        tail.push(OsString::from("--"));
-        let mut argv = Vec::with_capacity(tail.len() + self.inner.len() + 1);
-        argv.push(self.bwrap.as_os_str().to_owned());
-        argv.extend(tail);
+            argv.extend(["--args".into(), fd.to_string().into()]);
+            Some(payload)
+        } else {
+            argv.extend(options);
+            None
+        };
+        argv.push("--".into());
         argv.extend(self.inner.iter().cloned());
         Ok(Rendered {
             argv,
-            args_payload: None,
+            args_payload: payload,
         })
     }
 }
@@ -1598,8 +1842,11 @@ mod tests {
             plan.render(),
             Err(PlanError::StagedFdMissing("file denial"))
         ));
-        plan.mount_fds = vec![None; plan.mount_table().len()];
-        *plan.mount_fds.last_mut().unwrap() = Some(42);
+        let mut rows = plan.mount_table();
+        let mask = rows.last_mut().unwrap();
+        assert_eq!(mask.kind, MountKind::FileMask);
+        mask.fd = Some(42);
+        plan.set_mount_descriptors(rows).unwrap();
         let text = argv_text(&plan);
         assert!(text.contains("--perms 000 --ro-bind-data 42 /private/secret"));
         assert!(
@@ -1610,10 +1857,67 @@ mod tests {
         assert_eq!(
             plan.mount_table()
                 .iter()
-                .filter(|row| row.kind == "file-mask")
+                .filter(|row| row.kind == MountKind::FileMask)
                 .count(),
             1
         );
+    }
+
+    /// The descriptors travel with the rows preparation gave them to: a plan
+    /// whose table changed afterwards refuses to render rather than hand a
+    /// descriptor to whichever row now sits at its position.
+    #[test]
+    fn descriptors_belong_to_their_rows_not_to_positions() {
+        let mut plan = sample_plan();
+        let mut rows = plan.mount_table();
+        for (index, row) in rows.iter_mut().enumerate() {
+            if row.kind.preparation() == MountPreparation::PinSource {
+                row.fd = Some(100 + RawFd::try_from(index).unwrap());
+            }
+        }
+        plan.set_mount_descriptors(rows.clone()).unwrap();
+        assert_eq!(plan.mount_rows().unwrap(), rows);
+        let text = argv_text(&plan);
+        let git = rows
+            .iter()
+            .find(|row| row.destination == "/work/space/.git")
+            .unwrap();
+        assert!(
+            text.contains(&format!(
+                "--ro-bind-fd {} /work/space/.git ",
+                git.fd.unwrap()
+            )),
+            "{text}"
+        );
+        // A row added in front of the pinned ones shifts every position.
+        plan.extra_ro_binds.push(("/early".into(), "/early".into()));
+        assert!(matches!(plan.render(), Err(PlanError::MountsChanged)));
+        // And a table preparation never saw is refused outright.
+        let mut other = sample_plan();
+        other.extra_ro_binds.push(("/x".into(), "/x".into()));
+        assert!(matches!(
+            other.set_mount_descriptors(rows),
+            Err(PlanError::MountsChanged)
+        ));
+        // Every kind has one spelling and one preparation.
+        for (kind, spelling) in [
+            (MountKind::RoBind, "ro-bind"),
+            (MountKind::RoBindFd, "ro-bind-fd"),
+            (MountKind::Bind, "bind"),
+            (MountKind::Symlink, "symlink"),
+            (MountKind::Proc, "proc"),
+            (MountKind::Dev, "dev"),
+            (MountKind::DevBind, "dev-bind"),
+            (MountKind::Cwd, "cwd"),
+            (MountKind::Placeholder, "placeholder"),
+            (MountKind::VendorState, "vendor-state"),
+            (MountKind::Credential, "credential"),
+            (MountKind::Proxy, "proxy"),
+            (MountKind::TmpfsMask, "tmpfs-mask"),
+            (MountKind::FileMask, "file-mask"),
+        ] {
+            assert_eq!(kind.as_str(), spelling);
+        }
     }
 
     fn argv_text(plan: &BwrapPlan) -> String {
@@ -1645,7 +1949,7 @@ mod tests {
     fn an_ungranted_workspace_is_a_sealed_empty_tmpfs_above_scratch() {
         let mut plan = sample_plan();
         plan.workspace = PathBuf::from("/tmp/work/space");
-        plan.workspace_access = None;
+        plan.workspace_access = WorkspaceAccess::Hidden;
         plan.protected.clear();
         plan.extra_ro_binds.push((
             PathBuf::from("/tmp/work/space/input"),
@@ -1655,7 +1959,7 @@ mod tests {
         let index = |path: &str| rows.iter().position(|row| row.destination == path).unwrap();
         assert!(index("/tmp") < index("/tmp/work/space"));
         assert!(index("/tmp/work/space") < index("/tmp/work/space/input"));
-        assert_eq!(rows[index("/tmp/work/space")].kind, "cwd");
+        assert_eq!(rows[index("/tmp/work/space")].kind, MountKind::Cwd);
         assert_eq!(rows[index("/tmp/work/space")].source, None);
         let text = argv_text(&plan);
         let at = |needle: &str| {
@@ -1674,7 +1978,7 @@ mod tests {
     #[test]
     fn a_read_only_workspace_sits_under_writable_grants_inside_it() {
         let mut plan = sample_plan();
-        plan.workspace_access = Some(false);
+        plan.workspace_access = WorkspaceAccess::ReadOnly;
         plan.protected.clear();
         plan.extra_rw_binds.push((
             PathBuf::from("/work/space/out"),
@@ -1682,8 +1986,8 @@ mod tests {
         ));
         let rows = plan.mount_table();
         let index = |path: &str| rows.iter().position(|row| row.destination == path).unwrap();
-        assert_eq!(rows[index("/work/space")].kind, "ro-bind");
-        assert_eq!(rows[index("/work/space/out")].kind, "bind");
+        assert_eq!(rows[index("/work/space")].kind, MountKind::RoBind);
+        assert_eq!(rows[index("/work/space/out")].kind, MountKind::Bind);
         assert!(index("/work/space") < index("/work/space/out"));
         let text = argv_text(&plan);
         let at = |needle: &str| {
@@ -1697,11 +2001,19 @@ mod tests {
         assert!(!text.contains("--remount-ro /work/space "));
     }
 
+    /// A plan whose options pass [`ARGS_FD_THRESHOLD`].
+    fn long_plan() -> BwrapPlan {
+        let mut plan = sample_plan();
+        for index in 0..3 {
+            plan.set_env(format!("PAD{index}"), "x".repeat(50_000));
+        }
+        plan
+    }
+
     #[test]
     fn a_long_list_moves_to_the_args_descriptor() {
-        let mut plan = sample_plan();
-        plan.args_fd = Some(14);
-        plan.force_args_fd = true;
+        let mut plan = long_plan();
+        plan.set_args_fd(14);
         let rendered = plan.render().unwrap();
         // The command stays on the command line: bubblewrap 0.11.1 takes only
         // options from the descriptor.
@@ -1725,13 +2037,18 @@ mod tests {
         assert_eq!(parts[parts.len() - 2], b"11");
         // Splitting on NUL leaves one empty tail after the final terminator.
         assert_eq!(parts.last().unwrap(), b"");
+        // A short list stays on the command line, descriptor or not.
+        let mut plan = sample_plan();
+        plan.set_args_fd(14);
+        assert!(plan.render().unwrap().args_payload.is_none());
     }
 
     #[test]
     fn a_long_list_without_a_descriptor_refuses() {
-        let mut plan = sample_plan();
-        plan.force_args_fd = true;
-        assert!(matches!(plan.render(), Err(PlanError::ArgsFdMissing)));
+        assert!(matches!(
+            long_plan().render(),
+            Err(PlanError::ArgsFdMissing)
+        ));
     }
 
     #[test]
@@ -1773,7 +2090,7 @@ mod tests {
                 "/run/ouro/jail",
             ]
         );
-        assert_eq!(rows[1].kind, "symlink");
+        assert_eq!(rows[1].kind, MountKind::Symlink);
         assert_eq!(rows[1].source.as_deref(), Some(OsStr::new("usr/bin")));
     }
 
@@ -1787,13 +2104,14 @@ mod tests {
             Err(PlanError::Path("workspace", _))
         ));
     }
-    // Staged mounts render by descriptor or not at all
     #[test]
     fn staged_vendor_state_and_views_render_by_descriptor_after_every_grant() {
         let mut plan = sample_plan();
         plan.extra_ro_binds = vec![(PathBuf::from("/run"), PathBuf::from("/run"))];
-        plan.vendor_state = Some(PathBuf::from("/data/attempts/a/vendor-state"));
-        plan.vendor_state_fd = Some(16);
+        plan.stage_vendor_state(Staged {
+            host: PathBuf::from("/data/attempts/a/vendor-state"),
+            fd: 16,
+        });
         plan.credential_binds = vec![CredentialBind {
             fd: Some(30),
             destination: PathBuf::from("/run/ouro/state/conf/c.toml"),
@@ -1825,12 +2143,10 @@ mod tests {
     #[test]
     fn a_staged_mount_without_a_descriptor_refuses_to_render() {
         let mut plan = sample_plan();
-        plan.vendor_state = Some(PathBuf::from("/data/attempts/a/vendor-state"));
-        assert!(matches!(
-            plan.render(),
-            Err(PlanError::StagedFdMissing("vendor-state"))
-        ));
-        plan.vendor_state_fd = Some(16);
+        plan.stage_vendor_state(Staged {
+            host: PathBuf::from("/data/attempts/a/vendor-state"),
+            fd: 16,
+        });
         plan.credential_binds = vec![CredentialBind {
             fd: None,
             destination: PathBuf::from("/run/ouro/state/c"),
@@ -1848,10 +2164,9 @@ mod tests {
             OsString::from("x\0--ro-bind\0/secret\0/run/leak"),
         ));
         assert!(matches!(plan.render(), Err(PlanError::ArgumentNul)));
-        let mut plan = sample_plan();
+        let mut plan = long_plan();
         plan.env
             .push((OsString::from("A\0--bind\0/\0/x"), OsString::from("v")));
-        plan.force_args_fd = true;
         plan.args_fd = Some(14);
         assert!(matches!(plan.render(), Err(PlanError::ArgumentNul)));
         let mut plan = sample_plan();
@@ -1859,16 +2174,13 @@ mod tests {
         assert!(matches!(plan.render(), Err(PlanError::ArgumentNul)));
     }
 
-    // The proxy directory renders by descriptor or not at all
     #[test]
     fn the_proxy_directory_is_bound_read_only_by_descriptor_after_every_grant() {
         let mut plan = sample_plan();
-        plan.proxy_dir = Some(PathBuf::from("/data/attempts/att_x/proxy"));
-        assert!(matches!(
-            plan.render(),
-            Err(PlanError::StagedFdMissing("proxy directory"))
-        ));
-        plan.proxy_dir_fd = Some(17);
+        plan.proxy_dir = Some(Staged {
+            host: PathBuf::from("/data/attempts/att_x/proxy"),
+            fd: 17,
+        });
         let text = argv_text(&plan);
         assert!(
             text.contains(&format!("--ro-bind-fd 17 {PROXY_INSIDE_PATH}")),

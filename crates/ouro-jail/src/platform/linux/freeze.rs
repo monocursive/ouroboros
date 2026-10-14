@@ -127,7 +127,7 @@ pub use self::linux::backend_plans;
 mod linux {
     use std::path::{Path, PathBuf};
 
-    use super::super::bwrap::{BwrapPlan, ETC_PATHS, RUNTIME_ROOTS};
+    use super::super::bwrap::{BwrapPlan, ETC_PATHS, RUNTIME_ROOTS, Staged, WorkspaceAccess};
     use super::super::fs::RootSpec;
 
     /// The bubblewrap invocation each contained profile's plan renders to,
@@ -160,16 +160,24 @@ mod linux {
                     .collect();
                 plan.etc_paths = ETC_PATHS.iter().map(PathBuf::from).collect();
                 plan.inner = vec!["/freeze/target".into()];
-                plan.workspace_access = Some(profile != "build");
+                plan.workspace_access = if profile == "build" {
+                    WorkspaceAccess::ReadOnly
+                } else {
+                    WorkspaceAccess::Writable
+                };
                 // The descriptors preparation hands bubblewrap.
                 plan.seccomp_fd = Some(super::super::platform::SECCOMP_FD);
                 plan.json_status_fd = Some(super::super::platform::STATUS_FD);
                 plan.args_fd = Some(super::super::platform::ARGS_FD);
                 if profile == "agent" {
-                    plan.proxy_dir = Some(PathBuf::from("/freeze/proxy"));
-                    plan.proxy_dir_fd = Some(super::super::agent::PROXY_DIR_FD);
-                    plan.vendor_state = Some(PathBuf::from("/freeze/vendor"));
-                    plan.vendor_state_fd = Some(super::super::platform::VENDOR_STATE_FD);
+                    plan.proxy_dir = Some(Staged {
+                        host: PathBuf::from("/freeze/proxy"),
+                        fd: super::super::agent::PROXY_DIR_FD,
+                    });
+                    plan.vendor_state = Some(Staged {
+                        host: PathBuf::from("/freeze/vendor"),
+                        fd: super::super::platform::VENDOR_STATE_FD,
+                    });
                 }
                 let rendered = plan
                     .render()

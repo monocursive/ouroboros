@@ -879,18 +879,18 @@ impl Boundary {
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut bplan = BwrapPlan::tool(&plan.workspace, &scratch, &exe);
         bplan.bounded_storage = super::storage::requested(&snapshot.limits);
-        bplan.workspace_access = None;
+        bplan.workspace_access = bwrap::WorkspaceAccess::Hidden;
         if snapshot.filesystem.read_write.iter().any(|reference| {
             host_path_of(reference, &plan.workspace, &scratch)
                 .is_ok_and(|path| path == plan.workspace)
         }) {
-            bplan.workspace_access = Some(true);
+            bplan.workspace_access = bwrap::WorkspaceAccess::Writable;
         }
         if snapshot.filesystem.read_only.iter().any(|reference| {
             host_path_of(reference, &plan.workspace, &scratch)
                 .is_ok_and(|path| path == plan.workspace)
         }) {
-            bplan.workspace_access = Some(false);
+            bplan.workspace_access = bwrap::WorkspaceAccess::ReadOnly;
         }
         bplan.bwrap = bwrap_path.to_path_buf();
         bplan.env = environment_for(&snapshot, &plan.workspace)?;
@@ -912,8 +912,10 @@ impl Boundary {
                 bwrap_path,
                 bplan.bounded_storage,
             )?;
-            bplan.proxy_dir = Some(agent.dir_path().to_path_buf());
-            bplan.proxy_dir_fd = Some(super::agent::PROXY_DIR_FD);
+            bplan.proxy_dir = Some(bwrap::Staged {
+                host: agent.dir_path().to_path_buf(),
+                fd: super::agent::PROXY_DIR_FD,
+            });
             for (name, value) in super::bridge::proxy_environment() {
                 bplan
                     .env
@@ -977,8 +979,10 @@ impl Boundary {
                 .launch
                 .as_ref()
                 .and_then(|handoff| handoff.vendor_state.as_ref())
-                .map(|vendor| vendor.host_path.clone());
-            bplan.vendor_state_fd = Some(VENDOR_STATE_FD);
+                .map(|vendor| bwrap::Staged {
+                    host: vendor.host_path.clone(),
+                    fd: VENDOR_STATE_FD,
+                });
         }
         bplan.credential_binds = staged
             .credentials
@@ -1008,7 +1012,8 @@ impl Boundary {
                         .push((host, PathBuf::from(destination)));
                     continue;
                 }
-                if (bplan.workspace_access == Some(true) && host.starts_with(&plan.workspace))
+                if (bplan.workspace_access == bwrap::WorkspaceAccess::Writable
+                    && host.starts_with(&plan.workspace))
                     || host.starts_with(&scratch)
                 {
                     // Inside a base writable bind already; layering an extra
@@ -3487,7 +3492,7 @@ fn prepare_mounts(
         .chain(plan.extra_dev_binds.iter())
         .cloned()
         .collect();
-    if plan.workspace_access == Some(true) {
+    if plan.workspace_access == bwrap::WorkspaceAccess::Writable {
         roots.push((plan.workspace.clone(), plan.workspace.clone()));
     }
     roots.push((
@@ -3629,22 +3634,30 @@ fn prepare_mounts(
     // Bind ancestors before descendants, and never expose a second writable
     // alias of a protected source after applying its protection.
     let mut fds = Vec::new();
-    for row in plan.mount_table() {
-        if row.kind == "file-mask" {
-            // EOF supplies an empty file to bubblewrap; no host content
-            // or writable source descriptor is exposed to the child.
-            let (reader, writer) = exec::pipe().map_err(failure)?;
-            drop(writer);
-            let target = PINNED_FD_BASE + fds.len() as RawFd;
-            fds.push((reader, target));
-            plan.mount_fds.push(Some(target));
-            continue;
-        }
-        if !matches!(row.kind, "bind" | "ro-bind" | "ro-bind-fd" | "placeholder") {
-            plan.mount_fds.push(None);
-            continue;
-        }
-        let source = PathBuf::from(row.source.expect("bind source"));
+    let mut rows = plan.mount_table();
+    for row in &mut rows {
+        let source = match row.kind.preparation() {
+            bwrap::MountPreparation::Nothing => continue,
+            bwrap::MountPreparation::EmptyData => {
+                // EOF supplies an empty file to bubblewrap; no host content
+                // or writable source descriptor is exposed to the child.
+                let (reader, writer) = exec::pipe().map_err(failure)?;
+                drop(writer);
+                let target = PINNED_FD_BASE + fds.len() as RawFd;
+                fds.push((reader, target));
+                row.fd = Some(target);
+                continue;
+            }
+            bwrap::MountPreparation::PinSource => match &row.source {
+                Some(source) => PathBuf::from(source),
+                None => {
+                    return Err(preparing(
+                        ErrorCode::InternalError,
+                        format!("a {} mount has no source to pin", row.kind),
+                    ));
+                }
+            },
+        };
         if !pins.contains_key(&source) {
             // Distribution-owned runtime aliases may be resolved here;
             // workspace/operator sources must never follow symlinks.
@@ -3666,8 +3679,10 @@ fn prepare_mounts(
         }
         let target = PINNED_FD_BASE + fds.len() as RawFd;
         fds.push((pins[&source].try_clone_fd().map_err(failure)?, target));
-        plan.mount_fds.push(Some(target));
+        row.fd = Some(target);
     }
+    plan.set_mount_descriptors(rows)
+        .map_err(|err| preparing(ErrorCode::InternalError, err.to_string()))?;
     Ok((aggregate, pins.into_values().collect(), fds, placeholders))
 }
 
@@ -5502,16 +5517,16 @@ mod tests {
         ] {
             assert!(
                 rows.iter()
-                    .any(|row| row.destination == dest && row.kind == "ro-bind")
+                    .any(|row| row.destination == dest && row.kind == bwrap::MountKind::RoBind)
             );
         }
         assert_eq!(
             fds.len(),
             rows.iter().filter(|row| row.source.is_some()).count()
         );
-        for (row, fd) in rows.iter().zip(&plan.mount_fds) {
-            if matches!(row.kind, "bind" | "ro-bind" | "placeholder") {
-                assert!(fd.is_some());
+        for row in plan.mount_rows().unwrap() {
+            if row.kind.preparation() == bwrap::MountPreparation::PinSource {
+                assert!(row.fd.is_some(), "{row:?}");
             }
         }
         drop(placeholders);
@@ -5541,7 +5556,8 @@ mod tests {
         let row = rows
             .iter()
             .find(|row| {
-                row.kind == "placeholder" && row.destination == root.join("workspace/.ouroboros")
+                row.kind == bwrap::MountKind::Placeholder
+                    && row.destination == root.join("workspace/.ouroboros")
             })
             .expect("a placeholder mount for the absent workspace literal");
         assert!(
