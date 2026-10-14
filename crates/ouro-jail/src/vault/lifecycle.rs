@@ -186,17 +186,23 @@ impl Runtime {
         self.deny_if(reason, None)
     }
     fn deny_if(&self, reason: Reason, generation: Option<u64>) -> Reason {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if generation.is_some_and(|generation| generation != state.generation) {
-            return reason;
-        }
-        if !state.denied {
-            state.pending = None;
-            state.value.zeroize();
-            state.value.clear();
-            state.generation = state.generation.saturating_add(1);
-            state.denied = true;
-            let _ = self.emit(state.generation, "revoked");
+        let revoked = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.denied || generation.is_some_and(|generation| generation != state.generation) {
+                None
+            } else {
+                state.pending = None;
+                state.value.zeroize();
+                state.value.clear();
+                state.generation = state.generation.saturating_add(1);
+                state.denied = true;
+                Some(state.generation)
+            }
+        };
+        // The revocation is in force before it is audited, and the audit
+        // callback (a trace write) never runs under the state lock.
+        if let Some(generation) = revoked {
+            let _ = self.emit(generation, "revoked");
         }
         reason
     }
@@ -258,10 +264,16 @@ impl Runtime {
             || state.value.as_slice() != value.as_slice()
             || state.epoch.is_some_and(|old| !old.unchanged_since(&epoch))
         {
-            state.generation = state.generation.saturating_add(1);
-            if !self.emit(state.generation, "loaded") {
+            // A load is audited before it is served. The state lock stays
+            // held across that audit so no reader serves the value and no
+            // other transition takes its generation first; nothing changes
+            // unless the audit succeeded, so a failed (or panicking) audit
+            // leaves the state exactly as it was.
+            let next = state.generation.saturating_add(1);
+            if !self.emit(next, "loaded") {
                 return Err(Reason::CredentialUnavailable);
             }
+            state.generation = next;
             state.value = value;
             state.denied = false;
         }
@@ -896,6 +908,51 @@ mod tests {
         );
         assert!(runtime.current().is_err());
     }
+    #[test]
+    fn a_revocation_is_audited_unlocked_and_a_failed_load_audit_changes_nothing() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, path) = file(b"first");
+        let source = std::ffi::OsStr::from_bytes(&path).to_owned();
+        let runtime = Arc::new(Runtime::source(path.clone(), vec![], None).unwrap());
+        let unlocked = Arc::new(AtomicBool::new(false));
+        let (seen, weak) = (Arc::clone(&unlocked), Arc::downgrade(&runtime));
+        *runtime.audit.lock().unwrap() = Some((
+            "api".into(),
+            Arc::new(move |_, _, transition| {
+                if transition == "revoked" {
+                    let free = weak.upgrade().is_some_and(|r| r.state.try_lock().is_ok());
+                    seen.store(free, Ordering::SeqCst);
+                }
+                assert_ne!(transition, "loaded", "the trace is unavailable");
+                true
+            }),
+        ));
+        fs::remove_file(&source).unwrap();
+        assert!(runtime.current().is_err());
+        assert!(
+            unlocked.load(Ordering::SeqCst),
+            "audited without the state lock"
+        );
+        let state = |runtime: &Runtime| {
+            let state = runtime.state.lock().unwrap_or_else(|e| e.into_inner());
+            (state.generation, state.denied, state.value.to_vec())
+        };
+        let revoked = state(&runtime);
+        assert!(revoked.1);
+        fs::write(&source, b"second").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        let loading = std::panic::AssertUnwindSafe(|| runtime.current());
+        assert!(std::panic::catch_unwind(loading).is_err());
+        assert_eq!(state(&runtime), revoked, "the failed audit changed nothing");
+        *runtime.audit.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(("api".into(), Arc::new(|_, _, _| true)));
+        let (value, generation) = runtime.current().unwrap();
+        assert_eq!(
+            (value.as_slice(), generation),
+            (&b"second"[..], revoked.0 + 1)
+        );
+    }
+
     #[test]
     fn a_ticker_ticks_until_its_tick_ends_or_it_is_dropped() {
         use std::sync::atomic::{AtomicUsize, Ordering};
