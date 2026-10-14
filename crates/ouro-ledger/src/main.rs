@@ -15,6 +15,7 @@ use ouro_ledger::{
     },
     runner, schemas, service,
 };
+use ouro_records::retention::MAX_RETAIN_DAYS;
 use serde_json::{Value, json};
 
 #[derive(Parser)]
@@ -165,10 +166,10 @@ enum Action {
         #[arg(long)]
         dry_run: bool,
         /// Override the writer's history retention for this invocation.
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=36500))]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_RETAIN_DAYS)))]
         retain_days: Option<u32>,
         /// Override capture retention; cannot exceed history retention.
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=36500))]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_RETAIN_DAYS)))]
         capture_retain_days: Option<u32>,
         /// Continue after the last run id returned by the previous page.
         #[arg(long)]

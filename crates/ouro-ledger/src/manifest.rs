@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    protocol::{LedgerError, Result},
+    protocol::{LedgerError, Result, sha256_digest},
     schemas,
 };
 
@@ -88,14 +88,6 @@ enum Wire {
     Legacy(Legacy),
 }
 
-fn digest(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..]
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-}
-
 fn safe_file(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -146,15 +138,15 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
                 && Some(s.first_seq) == next_seq
                 && s.last_seq >= s.first_seq
                 && s.bytes > 0
-                && digest(&s.digest)
-                && digest(&s.head_digest);
+                && sha256_digest(&s.digest)
+                && sha256_digest(&s.head_digest);
             next_seq = s.last_seq.checked_add(1);
             valid
         });
     if to_jcs(&value).map_err(|e| LedgerError(e.to_string()))? != bytes
         || manifest.run_id != run_id
         || !valid_segments
-        || !digest(&manifest.replay_digest)
+        || !sha256_digest(&manifest.replay_digest)
     {
         return Err(LedgerError(
             "segment manifest identity or canonical encoding mismatch".into(),

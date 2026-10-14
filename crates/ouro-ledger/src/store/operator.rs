@@ -17,7 +17,7 @@ pub(super) fn effect_key(record: &Value, effect: &str) -> String {
 fn validate_body(kind: &str, effect: Option<&str>, body: &Value) -> Result<()> {
     if !["admitted", "denied", "settled", "note"].contains(&kind)
         || !body.is_object()
-        || effect.is_some_and(|id| !valid_id(id))
+        || effect.is_some_and(|id| !valid_name(id))
         || (kind != "note" && effect.is_none())
     {
         return Err(LedgerError("operator intent needs a supported kind, object body and an effect id for lifecycle decisions".into()));
@@ -57,7 +57,7 @@ impl Store {
         intent: &OperatorIntent,
         peer: &Peer,
     ) -> Result<AppendReceipt> {
-        if !valid_id(&intent.request_id) {
+        if !valid_name(&intent.request_id) {
             return Err(LedgerError(
                 "operator intent needs a bounded request id".into(),
             ));

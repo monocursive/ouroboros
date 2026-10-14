@@ -123,8 +123,8 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
             .chain
             .head_digest
             .as_deref()
-            .is_some_and(pruning::digest_valid)
-        || !(1..=36_500).contains(&r.retain_days)
+            .is_some_and(crate::protocol::sha256_digest)
+        || !ouro_records::retention::RETAIN_DAYS.contains(&r.retain_days)
         || r.files.is_empty()
         || r.files.len() > 3
         || ![&r.last_activity_at, &r.cutoff, &r.collected_at]
@@ -142,8 +142,8 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
             "artifacts/argv.bin" => "argv",
             _ => return Err(LedgerError("unsafe capture GC inventory".into())),
         };
-        if f.bytes > 16 * 1024 * 1024
-            || !pruning::digest_valid(&f.digest)
+        if f.bytes > crate::protocol::MAX_CAPTURE_BYTES
+            || !crate::protocol::sha256_digest(&f.digest)
             || r.files[..i].iter().any(|other| other.path == f.path)
             || r.capture[name]["stored_bytes"].as_u64() != Some(f.bytes)
             || !matches!(
@@ -156,7 +156,7 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
             ));
         }
     }
-    for name in ["stdout", "stderr", "argv"] {
+    for name in crate::protocol::CAPTURE_STREAMS {
         if matches!(
             r.capture[name]["state"].as_str(),
             Some("captured" | "incomplete")
@@ -386,7 +386,7 @@ impl Store {
 pub(super) fn inventory(root: &Path, run: &RunRecord) -> Result<Vec<RemovedFile>> {
     directory(&root.join("artifacts"))?;
     let mut files = Vec::new();
-    for name in ["stdout", "stderr", "argv"] {
+    for name in crate::protocol::CAPTURE_STREAMS {
         let path = format!("artifacts/{name}.bin");
         let (_, _, file) = member(root, &path)?;
         let expected = run.capture[name]["stored_bytes"].as_u64().unwrap_or(0);
@@ -395,7 +395,7 @@ pub(super) fn inventory(root: &Path, run: &RunRecord) -> Result<Vec<RemovedFile>
             if !run.payload["capture"]["streams"]
                 .as_array()
                 .is_some_and(|s| s.contains(&json!(name)))
-                || m.len() > 16 * 1024 * 1024
+                || m.len() > crate::protocol::MAX_CAPTURE_BYTES
                 || m.len() != expected
                 || run.capture[name]["stored_bytes"].as_u64().is_none()
                 || !matches!(

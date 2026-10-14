@@ -26,6 +26,7 @@ use crate::protocol::{
     ReadRequest, Result, RunRecord, StoreStatus, VerifyPage, VerifyReport,
 };
 
+use crate::discovery::valid_name;
 use crate::manifest::{self, STREAM};
 use crate::schemas;
 
@@ -263,13 +264,6 @@ fn loaded<'a>(streams: &'a mut BTreeMap<String, Stream>, run_id: &str) -> &'a mu
     streams
         .get_mut(run_id)
         .expect("a looked-up run id names a loaded stream")
-}
-
-fn valid_id(id: &str) -> bool {
-    (1..=128).contains(&id.len())
-        && id
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"_-.:".contains(&c))
 }
 
 fn check_run_id(id: &str) -> Result<()> {
@@ -559,7 +553,7 @@ impl Store {
     }
 
     pub fn prepare(&mut self, request_id: &str, payload: &Value, peer: &Peer) -> Result<RunRecord> {
-        if !valid_id(request_id) {
+        if !valid_name(request_id) {
             return Err(LedgerError("prepare needs a bounded request id".into()));
         }
         validate_payload(payload)?;
@@ -644,8 +638,8 @@ impl Store {
         peer: &Peer,
         token_id: &str,
     ) -> Result<AppendReceipt> {
-        if !valid_id(request_id)
-            || effect_id.is_some_and(|id| !valid_id(id))
+        if !valid_name(request_id)
+            || effect_id.is_some_and(|id| !valid_name(id))
             || !body.is_object()
             || !["admitted", "denied", "settled", "note", "outcome_unknown"].contains(&kind)
         {
@@ -1258,9 +1252,9 @@ impl Store {
                 use std::io::Read as _;
                 let file = private_file(&self.root.join(id).join("run.json"), false, false)?;
                 let mut bytes = Vec::new();
-                file.take((4 * MAX_FRAME_BYTES + 1) as u64)
+                file.take((crate::projection::MAX_RUN_BYTES + 1) as u64)
                     .read_to_end(&mut bytes)?;
-                if bytes.len() > 4 * MAX_FRAME_BYTES {
+                if bytes.len() > crate::projection::MAX_RUN_BYTES {
                     return Err(LedgerError(
                         "run projection exceeds its bounded read limit".into(),
                     ));

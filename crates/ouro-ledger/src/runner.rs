@@ -36,12 +36,9 @@ use serde_json::json;
 use crate::daemon::Client;
 #[cfg(target_os = "linux")]
 use crate::protocol::ClaimedOwner;
+#[cfg(target_os = "linux")]
+use crate::protocol::{CAPTURE_STREAMS, MAX_CAPTURE_BYTES, MAX_FRAME_BYTES};
 use crate::protocol::{LedgerError, Result, RunRecord};
-
-#[cfg(target_os = "linux")]
-const FRAME_MAX: usize = 1_048_576;
-#[cfg(target_os = "linux")]
-const CAPTURE_MAX: u64 = 16 * 1_048_576;
 
 /// The operator's literal execution request. Raw argv is persisted only with
 /// explicit capture; detached submission uses a private socket either way.
@@ -108,13 +105,13 @@ fn resolve(options: &RunOptions) -> Result<Resolved> {
     if options.argv.is_empty() {
         return Err(error("run needs a program after --"));
     }
-    if options.capture_limit > CAPTURE_MAX {
+    if options.capture_limit > MAX_CAPTURE_BYTES {
         return Err(error("capture limit exceeds 16 MiB per stream"));
     }
     if options
         .captures
         .iter()
-        .any(|s| !["stdout", "stderr", "argv"].contains(&s.as_str()))
+        .any(|s| !CAPTURE_STREAMS.contains(&s.as_str()))
     {
         return Err(error("capture accepts stdout, stderr and argv only"));
     }
@@ -230,7 +227,7 @@ fn plan(options: &RunOptions, image: &File) -> Result<Value> {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),
         }
-        if bytes.len() > FRAME_MAX {
+        if bytes.len() > MAX_FRAME_BYTES {
             return Err(error("jail explain exceeded frame bound"));
         }
         if Instant::now() >= deadline {
@@ -411,13 +408,13 @@ impl Frames {
                 Err(e) => return Err(e.into()),
             }
             while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
-                if end + 1 > FRAME_MAX {
+                if end + 1 > MAX_FRAME_BYTES {
                     return Err(error("oversized jail event/control frame"));
                 }
                 result.push(serde_json::from_slice(&self.pending[..end])?);
                 self.pending.drain(..=end);
             }
-            if self.pending.len() > FRAME_MAX {
+            if self.pending.len() > MAX_FRAME_BYTES {
                 return Err(error("unterminated oversized jail frame"));
             }
         }
@@ -444,8 +441,9 @@ fn read_receipt(path: &Path, phase: &str) -> Result<Value> {
         return Err(error("receipt is not a regular file"));
     }
     let mut bytes = Vec::new();
-    file.take((FRAME_MAX + 1) as u64).read_to_end(&mut bytes)?;
-    if bytes.len() > FRAME_MAX {
+    file.take((MAX_FRAME_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_FRAME_BYTES {
         return Err(error("receipt exceeded frame bound"));
     }
     Ok(serde_json::from_slice(&bytes)?)
@@ -1353,7 +1351,10 @@ mod tests {
                 "client control descriptor",
             ),
             (|o| o.argv.clear(), "program after --"),
-            (|o| o.capture_limit = CAPTURE_MAX + 1, "16 MiB per stream"),
+            (
+                |o| o.capture_limit = MAX_CAPTURE_BYTES + 1,
+                "16 MiB per stream",
+            ),
             (
                 |o| o.captures = vec!["environment".into()],
                 "stdout, stderr and argv only",

@@ -156,15 +156,14 @@ impl Store {
     pub fn catalog(&self, request: &CatalogRequest) -> Result<CatalogPage> {
         validate_filter(&request.filter)?;
         if !(1..=MAX_CATALOG_LIMIT).contains(&request.limit) {
-            return Err(LedgerError(
-                "catalog limit must be between 1 and 100".into(),
-            ));
+            return Err(LedgerError(format!(
+                "catalog limit must be between 1 and {MAX_CATALOG_LIMIT}"
+            )));
         }
         if self.streams.len() > MAX_CATALOG_RUNS {
-            return Err(LedgerError(
-                "catalog exceeds 16384-run scan bound; explicit run readers remain available"
-                    .into(),
-            ));
+            return Err(LedgerError(format!(
+                "catalog exceeds {MAX_CATALOG_RUNS}-run scan bound; explicit run readers remain available"
+            )));
         }
         let mut filter = request.filter.clone();
         filter.tags.sort();

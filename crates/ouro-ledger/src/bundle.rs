@@ -1,7 +1,10 @@
 //! Bounded portable evidence bundles, independently replayable without a writer.
 use crate::{
     daemon::Client,
-    protocol::{LedgerError, ReadFilter, ReadPage, ReadRequest, ReadSelector, Result, RunRecord},
+    protocol::{
+        CAPTURE_STREAMS, LedgerError, MAX_CAPTURE_BYTES, ReadFilter, ReadPage, ReadRequest,
+        ReadSelector, Result, RunRecord,
+    },
     schemas, store,
 };
 use ouro_records::canonical::{sha256_prefixed, to_jcs};
@@ -20,7 +23,6 @@ pub(crate) mod files;
 mod signing;
 pub const MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RECORDS: u64 = 10_000;
-const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(300);
 
@@ -156,7 +158,7 @@ impl Read for CheckedReader {
 }
 
 fn capture_bytes(run: &RunRecord, name: &str) -> Result<u64> {
-    if !["stdout", "stderr", "argv"].contains(&name)
+    if !CAPTURE_STREAMS.contains(&name)
         || !["settled", "denied", "outcome_unknown"].contains(&run.state.as_str())
         || !run.payload["capture"]["streams"]
             .as_array()
@@ -229,11 +231,7 @@ fn assemble(
 ) -> Result<Value> {
     let start = Instant::now();
     let selected: BTreeSet<_> = captures.iter().map(String::as_str).collect();
-    if selected.len() != captures.len()
-        || selected
-            .iter()
-            .any(|s| !["stdout", "stderr", "argv"].contains(s))
-    {
+    if selected.len() != captures.len() || selected.iter().any(|s| !CAPTURE_STREAMS.contains(s)) {
         return Err(error("select stdout, stderr and/or argv once each"));
     }
     let stage = files::Staging::new(output)?;

@@ -6,7 +6,10 @@ use std::{
 
 use super::*;
 use crate::protocol::{GcCandidate, GcPlan};
-use ouro_records::retention::RetentionPolicy;
+use ouro_records::retention::{MAX_RETAIN_DAYS, RETAIN_DAYS, RetentionPolicy};
+
+/// The most runs one GC page plans or collects.
+pub const MAX_GC_LIMIT: u32 = 100;
 
 impl Store {
     pub fn hold(&mut self, run_id: &str, request_id: &str, peer: &Peer) -> Result<AppendReceipt> {
@@ -29,7 +32,7 @@ impl Store {
         kind: &str,
         peer: &Peer,
     ) -> Result<AppendReceipt> {
-        if !valid_id(request_id) {
+        if !valid_name(request_id) {
             return Err(LedgerError(
                 "retention intent needs a bounded request id".into(),
             ));
@@ -94,13 +97,13 @@ impl Store {
             capture_retain_days,
         } = policy;
         if capture_retain_days > retain_days
-            || !(1..=36_500).contains(&capture_retain_days)
-            || !(1..=36_500).contains(&retain_days)
-            || !(1..=100).contains(&limit)
+            || !RETAIN_DAYS.contains(&capture_retain_days)
+            || !RETAIN_DAYS.contains(&retain_days)
+            || !(1..=MAX_GC_LIMIT).contains(&limit)
         {
-            return Err(LedgerError(
-                "GC preview requires 1..36500 retention days and 1..100 runs per page".into(),
-            ));
+            return Err(LedgerError(format!(
+                "GC preview requires 1..{MAX_RETAIN_DAYS} retention days and 1..{MAX_GC_LIMIT} runs per page"
+            )));
         }
         if let Some(id) = after {
             check_run_id(id)?;
@@ -199,7 +202,7 @@ impl Store {
             }
             if stream.run.capture_history.is_some() {
                 capture_reasons.push("captures_pruned");
-            } else if !["stdout", "stderr", "argv"].iter().any(|name| {
+            } else if !crate::protocol::CAPTURE_STREAMS.iter().any(|name| {
                 matches!(
                     stream.run.capture[name]["state"].as_str(),
                     Some("captured" | "incomplete")

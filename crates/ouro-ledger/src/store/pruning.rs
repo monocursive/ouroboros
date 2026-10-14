@@ -45,14 +45,6 @@ struct Envelope {
     retained: Retained,
 }
 
-pub(super) fn digest_valid(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..]
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 pub(super) fn directory(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -308,7 +300,7 @@ impl Retained {
                     Some("exited" | "signaled" | "exec_error" | "refused")
                 ) || outcome["unknown"] == true
             })
-            || !(1..=36_500).contains(&self.retain_days)
+            || !ouro_records::retention::RETAIN_DAYS.contains(&self.retain_days)
             || ![&self.last_activity_at, &self.cutoff, &self.collected_at]
                 .into_iter()
                 .all(|s| crate::reader::utc_second(s))
@@ -337,7 +329,7 @@ impl Retained {
             ));
         }
         for (i, file) in self.files.iter().enumerate() {
-            if !digest_valid(&file.digest) || file.bytes > 1024 * 1024 * 1024 {
+            if !crate::protocol::sha256_digest(&file.digest) || file.bytes > 1024 * 1024 * 1024 {
                 return Err(LedgerError("invalid GC file anchor".into()));
             }
             if let Some(segment) = self.manifest.segments.get(i) {
@@ -355,7 +347,7 @@ impl Retained {
                 "artifacts/argv.bin",
             ]
             .contains(&file.path.as_str())
-                || file.bytes > 16 * 1024 * 1024
+                || file.bytes > crate::protocol::MAX_CAPTURE_BYTES
             {
                 return Err(LedgerError("invalid GC capture inventory".into()));
             }
@@ -366,8 +358,8 @@ impl Retained {
         for (key, replay) in &self.replay {
             if key.is_empty()
                 || key.len() > 256
-                || !digest_valid(&replay.digest)
-                || !digest_valid(&replay.receipt.digest)
+                || !crate::protocol::sha256_digest(&replay.digest)
+                || !crate::protocol::sha256_digest(&replay.receipt.digest)
                 || replay.receipt.seq == 0
                 || replay.receipt.seq > self.run.chain.head_seq
             {
@@ -765,7 +757,7 @@ impl Store {
                     "GC deletion is incomplete; retry GC or restart the writer".into(),
                 ));
             }
-            if read_json(&root.join("run.json"), 4 * MAX_FRAME_BYTES)?
+            if read_json(&root.join("run.json"), crate::projection::MAX_RUN_BYTES)?
                 != serde_json::to_value(&stream.run)?
             {
                 return Err(LedgerError(

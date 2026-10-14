@@ -27,7 +27,8 @@ const SIDECARS: [&str; 3] = [
 ];
 const APPLICATION_ID: i32 = 0x4f55_524f; // OURO
 const VERSION: i32 = 1;
-const MAX_RUN_BYTES: usize = 4 * MAX_FRAME_BYTES;
+/// The bound on one run projection, wherever it is read.
+pub(crate) const MAX_RUN_BYTES: usize = 4 * MAX_FRAME_BYTES;
 // Bound a disposable file before asking SQLite to parse it and bound growth.
 const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 const RUNS_SQL: &str = "CREATE TABLE runs (

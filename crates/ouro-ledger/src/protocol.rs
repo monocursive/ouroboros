@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
+/// The most bytes one selected capture stream may store.
+pub const MAX_CAPTURE_BYTES: u64 = 16 * 1_048_576;
+/// The streams a request may select for capture.
+pub const CAPTURE_STREAMS: [&str; 3] = ["stdout", "stderr", "argv"];
 pub const MAX_CONNECTIONS: usize = 32;
 /// The socket protocol this build speaks. The writer reports it in `ping`;
 /// clients refuse a writer that speaks another.
@@ -32,6 +36,16 @@ impl From<serde_json::Error> for LedgerError {
 }
 
 pub type Result<T> = std::result::Result<T, LedgerError>;
+
+/// A `sha256:` digest in lower-case hexadecimal, as every ledger record
+/// writes one.
+pub(crate) fn sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
