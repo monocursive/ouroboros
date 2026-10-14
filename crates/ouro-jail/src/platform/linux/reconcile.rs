@@ -248,54 +248,24 @@ fn rmdir_at(dir: RawFd, name: &CStr) -> io::Result<()> {
     Ok(())
 }
 
-/// The child directories of `dir`, charging every entry read to `entries`.
+/// The child directories of `dir`, charging every entry read (`.` and `..`
+/// aside) to `entries`.
 fn child_dirs(dir: &File, entries: &mut usize) -> Result<Vec<CString>, Failure> {
-    // SAFETY: duplicating an open descriptor; F_DUPFD_CLOEXEC dereferences
-    // nothing.
-    let fd = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-    if fd < 0 {
-        return Err(Failure::os("dup", io::Error::last_os_error()));
-    }
-    // SAFETY: `fd` is a fresh duplicate this function owns; fdopendir takes
-    // it over on success.
-    let stream = unsafe { libc::fdopendir(fd) };
-    if stream.is_null() {
-        let error = io::Error::last_os_error();
-        // SAFETY: fdopendir failed, so `fd` is still this function's alone.
-        unsafe { libc::close(fd) };
-        return Err(Failure::os("fdopendir", error));
-    }
-    // SAFETY: `stream` is a valid directory stream; a duplicate shares the
-    // file offset, so start from the beginning whatever read it before.
-    unsafe { libc::rewinddir(stream) };
-    let mut names = Vec::new();
-    let result = loop {
-        // SAFETY: errno is thread-local; clearing it tells end-of-stream
-        // (null, errno 0) from an error (null, errno set).
-        unsafe { *libc::__errno_location() = 0 };
-        // SAFETY: `stream` is a valid directory stream owned here.
-        let entry = unsafe { libc::readdir(stream) };
-        if entry.is_null() {
-            let error = io::Error::last_os_error();
-            break match error.raw_os_error() {
-                Some(0) | None => Ok(()),
-                Some(_) => Err(Failure::os("readdir", error)),
-            };
+    let copy = dir.try_clone().map_err(|error| Failure::os("dup", error))?;
+    let dir = crate::state::anchored::Dir::from_owned(copy.into());
+    let listed = super::fs::read_entries(&dir, *entries).map_err(|errno| {
+        if errno == libc::E2BIG {
+            Failure::new("the per-invocation entry bound is reached")
+        } else {
+            Failure::os("readdir", io::Error::from_raw_os_error(errno))
         }
-        if *entries == 0 {
-            break Err(Failure::new("the per-invocation entry bound is reached"));
-        }
-        *entries -= 1;
-        // SAFETY: readdir returned a valid entry whose `d_name` is a
-        // NUL-terminated array inside it, valid until the next readdir.
-        let (name, kind) = unsafe { (CStr::from_ptr((*entry).d_name.as_ptr()), (*entry).d_type) };
-        if kind == libc::DT_DIR && name.to_bytes() != b"." && name.to_bytes() != b".." {
-            names.push(name.to_owned());
-        }
-    };
-    // SAFETY: closes the stream, and with it the duplicate, exactly once.
-    unsafe { libc::closedir(stream) };
-    result.map(|()| names)
+    })?;
+    *entries -= listed.len();
+    Ok(listed
+        .into_iter()
+        .filter(|entry| entry.kind == libc::DT_DIR)
+        .map(|entry| entry.name)
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
