@@ -1964,8 +1964,9 @@ mod tests {
     #[test]
     fn an_open_ended_loss_merged_at_the_gap_bound_leaves_the_interval_open() {
         let mut writer = writer();
-        // Distinct (reason, classes) keys, so none of the 64 coalesces:
-        // every reason with an end, under each of three class sets.
+        // Distinct (reason, classes) keys, so none coalesces with another:
+        // every reason with an end, under each of three class sets, which
+        // is more than the bound holds.
         let ops = [
             OpSet::of(ClosedOp::Exec),
             OpSet::of(ClosedOp::Open),
@@ -1975,15 +1976,31 @@ mod tests {
             .into_iter()
             .filter(|reason| !reason.is_open_ended())
             .flat_map(|reason| ops.map(|ops| (reason, ops)))
-            .take(64)
             .collect();
-        assert_eq!(keys.len(), 64, "enough keys to reach the bound");
-        for (i, (reason, ops)) in keys.into_iter().enumerate() {
-            writer.record_gap(reason, ops, i as u64, i as u64 + 1, Some(1));
+        for reason in GapReason::ALL {
+            let driven = keys.iter().filter(|(key, _)| *key == reason).count();
+            let expected = if reason.is_open_ended() { 0 } else { ops.len() };
+            assert_eq!(driven, expected, "{reason:?}");
         }
-        assert_eq!(writer.gaps().len(), 64);
+        assert!(keys.len() > 64, "past the bound: {}", keys.len());
+        for (i, (reason, ops)) in keys.iter().enumerate() {
+            writer.record_gap(*reason, *ops, i as u64, i as u64 + 1, Some(1));
+        }
+        assert_eq!(writer.gaps().len(), 64, "the bound holds");
+        // The first 63 losses keep their own summaries; the 64th and every
+        // one past the bound share the last, closed through the last loss,
+        // with no count and every class they named.
         let bounded = writer.gaps().last().unwrap();
-        assert_eq!(bounded.end_ns.as_deref(), Some("64"));
+        assert_eq!(bounded.reason, "coalesced_losses");
+        assert_eq!(bounded.start_ns, "63");
+        assert_eq!(
+            bounded.end_ns.as_deref(),
+            Some(keys.len().to_string().as_str())
+        );
+        assert_eq!(bounded.lost_count, None);
+        for class in CoverageClass::AUDIT {
+            assert!(bounded.classes.iter().any(|name| name == class.as_str()));
+        }
         writer.record_gap(
             GapReason::ChildNotificationListener,
             OpSet::ALL,
