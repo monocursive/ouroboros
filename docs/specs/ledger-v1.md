@@ -209,8 +209,9 @@ removing it after its evidence became canonical failed, or an append failed
 and poisoned the stream. The background scan tries such a journal again after
 2 s, doubling the wait up to 5 min, and logs a failure again only when it
 changes; a refused journal is tried again only once it changes.
-`settle-orphans` skips such a run, settles the other orphans and then fails,
-naming each run it skipped.
+`settle-orphans` skips such a run, and one whose unknown outcome cannot be
+appended, settles the other orphans and then fails, naming each run it skipped
+and why.
 
 Reading a valid journal also synchronizes its pinned file and run directory
 before recovery imports or clears any pending evidence. Failure of either

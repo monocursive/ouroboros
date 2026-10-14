@@ -811,6 +811,11 @@ impl Store {
             .collect();
         let mut reconciled = Vec::new();
         let mut unreconciled: Vec<LedgerError> = Vec::new();
+        // The same failure, said of one run.
+        let about = |id: &str, what: &str, error: LedgerError| {
+            let message = format!("{id}: {what}: {error}");
+            error.with_message(message)
+        };
         for id in orphans {
             if self.pending_exists(&id) {
                 // Corrupt or incomplete local evidence must never imply
@@ -823,27 +828,40 @@ impl Store {
                 match result {
                     Ok(_) => {}
                     Err(pending_recovery::PendingFailure::Refused(refusal, _)) => {
-                        self.record_invalid_pending(&id, peer, refusal)?;
-                        reconciled.push(self.show(&id)?);
+                        match self.record_invalid_pending(&id, peer, refusal) {
+                            Ok(_) => reconciled.push(self.show(&id)?),
+                            Err(error) => unreconciled.push(about(
+                                &id,
+                                "recording why its pending evidence was refused failed",
+                                error,
+                            )),
+                        }
                         continue;
                     }
                     // Not the journal's doing: nothing is recorded for this
                     // run, a later settlement can retry it, and the other
                     // orphans are settled meanwhile.
                     Err(pending_recovery::PendingFailure::Other(problem)) => {
-                        let message = format!(
-                            "{id}: pending evidence could not be reconciled now: {problem}"
-                        );
-                        unreconciled.push(problem.with_message(message));
+                        unreconciled.push(about(
+                            &id,
+                            "pending evidence could not be reconciled now",
+                            problem,
+                        ));
                         continue;
                     }
                 }
             }
             let owner = self.stream(&id)?.run().owner.clone();
-            self.append(&id, json!({"kind":"outcome_unknown","request_id":"reconcile:owner-dead","body":{"owner":owner,"outcome":{"kind":"unknown","unknown":true,"unknown_reason":"owner birth identity is no longer live; tree termination and unrecorded effects are not inferred"},"coverage":{"status":"degraded","gaps":[{"reason":"owner_lost"}]}}}), "operator", peer, None)?;
-            reconciled.push(self.show(&id)?);
+            match self.append(&id, json!({"kind":"outcome_unknown","request_id":"reconcile:owner-dead","body":{"owner":owner,"outcome":{"kind":"unknown","unknown":true,"unknown_reason":"owner birth identity is no longer live; tree termination and unrecorded effects are not inferred"},"coverage":{"status":"degraded","gaps":[{"reason":"owner_lost"}]}}}), "operator", peer, None) {
+                Ok(_) => reconciled.push(self.show(&id)?),
+                Err(error) => {
+                    unreconciled.push(about(&id, "recording its lost owner failed", error))
+                }
+            }
         }
-        // Each run left unsettled is named; those settled stay durable.
+        // Each run left unsettled is named, whether its evidence could not be
+        // reconciled now or its record could not be appended; those settled
+        // stay durable.
         if let Some(first) = unreconciled.first() {
             let mut message = unreconciled
                 .iter()

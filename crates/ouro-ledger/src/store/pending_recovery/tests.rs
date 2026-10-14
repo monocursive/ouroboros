@@ -13,6 +13,12 @@ use crate::{
 fn admitted_with_journal(name: &str) -> (tempfile::TempDir, Store, RunRecord) {
     let temp = tempfile::tempdir().unwrap();
     let mut store = Store::open(&temp.path().join("data")).unwrap();
+    let run = admit_with_journal(&mut store, name);
+    (temp, store, run)
+}
+
+/// Such a run, in `store`.
+fn admit_with_journal(store: &mut Store, name: &str) -> RunRecord {
     let mut plan = request();
     plan["evidence"] = json!("best-effort");
     let run = store.prepare(name, &plan, &peer()).unwrap();
@@ -35,7 +41,7 @@ fn admitted_with_journal(name: &str) -> (tempfile::TempDir, Store, RunRecord) {
         .unwrap()
         .create(&run, &peer())
         .unwrap();
-    (temp, store, run)
+    run
 }
 
 #[test]
@@ -292,6 +298,65 @@ fn settling_orphans_skips_a_run_it_cannot_reconcile_now_and_settles_the_rest() {
     let unchanged = store.show(&stuck.run_id).unwrap();
     assert_eq!(unchanged.state, "admitted");
     assert_eq!(unchanged.chain, stuck.chain);
+    for id in settled {
+        assert_eq!(store.show(&id).unwrap().state, "outcome_unknown");
+    }
+}
+
+#[test]
+fn settling_orphans_records_every_other_run_when_recording_one_fails() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if crate::fsx::euid() == 0 {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&temp.path().join("data")).unwrap();
+    // Two orphans whose records cannot be published: a refused journal's
+    // unknown outcome, and a lost owner's. Their run directories accept no
+    // new entry, so each append fails after its record reaches the segment.
+    let refused = admit_with_journal(&mut store, "refused");
+    let journal = store.run_dir(&refused.run_id).join(crate::pending::STATE);
+    fs::write(journal, b"{\"damaged\":true}").unwrap();
+    let lost = store.prepare("lost", &request(), &peer()).unwrap();
+    store.claim_owner(&lost.run_id, &peer()).unwrap();
+    let failing = [refused.run_id.clone(), lost.run_id.clone()];
+    for id in &failing {
+        fs::set_permissions(store.run_dir(id), fs::Permissions::from_mode(0o500)).unwrap();
+    }
+    // Orphans that can be settled, at least one after a failing run.
+    let first = failing.iter().min().unwrap().clone();
+    let mut settled = Vec::new();
+    while !settled.iter().any(|id: &String| *id > first) {
+        let run = store
+            .prepare(&format!("orphan-{}", settled.len()), &request(), &peer())
+            .unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        settled.push(run.run_id);
+        assert!(settled.len() < 64);
+    }
+    let failure = store.settle_orphans(&peer(), |_| false).unwrap_err();
+    for id in &failing {
+        fs::set_permissions(store.run_dir(id), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let message = failure.message();
+    assert!(
+        message.contains(&format!(
+            "{}: recording why its pending evidence was refused failed: ",
+            refused.run_id
+        )),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!(
+            "{}: recording its lost owner failed: ",
+            lost.run_id
+        )),
+        "{message}"
+    );
+    assert!(
+        message.ends_with(&format!("; {} other orphans were settled", settled.len())),
+        "{message}"
+    );
     for id in settled {
         assert_eq!(store.show(&id).unwrap().state, "outcome_unknown");
     }
