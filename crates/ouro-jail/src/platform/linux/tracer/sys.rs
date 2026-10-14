@@ -383,12 +383,17 @@ pub fn siginfo(pid: pid_t) -> io::Result<(c_int, c_int)> {
 
 /// Locate the signal frame the kernel has just built for a single-stepped
 /// handler. Called only after checking the kernel's handler-entry siginfo.
+///
+/// `restart_ip` is the address of the interrupted syscall instruction, where
+/// the kernel rewinds the PC to restart it, and `continue_ip` the address
+/// just past it. x86_64 does not need them: its test is on registers
+/// `setup_rt_frame` writes and a delivery stop does not show.
 #[cfg(target_arch = "x86_64")]
 pub fn handler_ucontext(
     pid: pid_t,
     delivered: u64,
-    _site_ip: u64,
-    _next_ip: u64,
+    _restart_ip: u64,
+    _continue_ip: u64,
 ) -> io::Result<Option<u64>> {
     // SAFETY: integer register buffer of the kernel's documented size.
     let mut regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
@@ -432,33 +437,56 @@ fn arm64_regset<T>(pid: pid_t, request: c_uint, note: u64, value: &mut T) -> io:
 pub fn handler_ucontext(
     pid: pid_t,
     delivered: u64,
-    site_ip: u64,
-    next_ip: u64,
+    restart_ip: u64,
+    continue_ip: u64,
 ) -> io::Result<Option<u64>> {
     let mut regs = Arm64Regs::default();
     arm64_regset(pid, libc::PTRACE_GETREGSET, 1, &mut regs)?;
-    // rt_sigframe is siginfo (128 bytes), then ucontext. The kernel only
-    // supplies x2 with SA_SIGINFO, so derive the frame from sp for ordinary
-    // handlers too. setup_return always sets x0 to the delivered signal.
-    // `do_signal` restores x0 before `get_signal`, so a forged SIGTRAP could
-    // satisfy the x0 test at the restart site; require the pc to be neither
-    // the interrupted `svc` nor the instruction after it, which only the
-    // kernel's handler-entry notification can produce.
-    Ok(
-        if regs.x[0] == delivered && regs.sp & 15 == 0 && regs.pc != site_ip && regs.pc != next_ip {
-            regs.sp.checked_add(128)
-        } else {
-            None
-        },
-    )
+    Ok(arm64_handler_frame(
+        &regs,
+        delivered,
+        restart_ip,
+        continue_ip,
+    ))
+}
+
+/// The `ucontext` address of the frame a handler's entry shows in `regs`,
+/// or `None` when they are not a handler's entry for `delivered`.
+///
+/// rt_sigframe is siginfo (128 bytes), then ucontext. The kernel only
+/// supplies x2 with SA_SIGINFO, so the frame is derived from sp for ordinary
+/// handlers too; `setup_return` always sets x0 to the delivered signal and
+/// the PC to the handler. Audit 2026-10-08 L18: `do_signal` rewinds a
+/// restartable call before `get_signal` — x0 back to the original argument,
+/// the PC back onto the `svc` (`restart_ip`) — so a signal the program sent
+/// itself, stopping there with that signal's number as its first argument,
+/// satisfies the x0 and sp tests. The PC decides: at a handler's entry it is
+/// the handler, never the `svc` the kernel rewound to nor the instruction
+/// after it (`continue_ip`, where an `EINTR` decision leaves it).
+#[cfg(target_arch = "aarch64")]
+fn arm64_handler_frame(
+    regs: &Arm64Regs,
+    delivered: u64,
+    restart_ip: u64,
+    continue_ip: u64,
+) -> Option<u64> {
+    if regs.x[0] == delivered
+        && regs.sp & 15 == 0
+        && regs.pc != restart_ip
+        && regs.pc != continue_ip
+    {
+        regs.sp.checked_add(128)
+    } else {
+        None
+    }
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub fn handler_ucontext(
     _pid: pid_t,
     _delivered: u64,
-    _site_ip: u64,
-    _next_ip: u64,
+    _restart_ip: u64,
+    _continue_ip: u64,
 ) -> io::Result<Option<u64>> {
     Err(io::Error::from_raw_os_error(libc::ENOSYS))
 }
@@ -648,6 +676,43 @@ mod tests {
         assert_eq!(std::mem::offset_of!(Arm64Regs, sp), 31 * 8);
         assert_eq!(std::mem::offset_of!(Arm64Regs, pc), 32 * 8);
         assert_eq!(std::mem::size_of::<libc::siginfo_t>(), 128);
+    }
+
+    /// Audit 2026-10-08 L18: the arm64 handler-entry predicate, on the
+    /// registers each stop shows. `continue_ip` is the address just past the
+    /// `svc` (what `PTRACE_GET_SYSCALL_INFO` reports as the call's
+    /// instruction pointer), `restart_ip` the `svc` itself.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn arm64_handler_entry_is_never_the_rewound_or_continued_call() {
+        const SIGUSR1: u64 = libc::SIGUSR1 as u64;
+        let continue_ip = 0x40_1004;
+        let restart_ip = continue_ip - 4;
+        let regs = |x0: u64, sp: u64, pc: u64| {
+            let mut regs = Arm64Regs::default();
+            regs.x[0] = x0;
+            regs.sp = sp;
+            regs.pc = pc;
+            regs
+        };
+        let frame = |regs: &Arm64Regs| arm64_handler_frame(regs, SIGUSR1, restart_ip, continue_ip);
+        // The kernel's handler entry: x0 is the signal, pc the handler.
+        assert_eq!(frame(&regs(SIGUSR1, 0x7ff0, 0x40_2000)), Some(0x7ff0 + 128));
+        // A stop with the call rewound for restart: x0 is the original
+        // argument (here equal to the signal), pc is back on the `svc`.
+        assert_eq!(frame(&regs(SIGUSR1, 0x7ff0, restart_ip)), None);
+        // An EINTR decision leaves the pc past the `svc`.
+        assert_eq!(frame(&regs(SIGUSR1, 0x7ff0, continue_ip)), None);
+        // The instruction after that is an ordinary address: nothing about
+        // it says "not a handler".
+        assert_eq!(
+            frame(&regs(SIGUSR1, 0x7ff0, continue_ip + 4)),
+            Some(0x7ff0 + 128)
+        );
+        // Another signal's number, or a misaligned stack, is not this entry.
+        assert_eq!(frame(&regs(SIGUSR1 + 1, 0x7ff0, 0x40_2000)), None);
+        assert_eq!(frame(&regs(SIGUSR1, 0x7ff8, 0x40_2000)), None);
+        assert_eq!(frame(&regs(SIGUSR1, u64::MAX - 15, 0x40_2000)), None);
     }
 
     /// `PTRACE_GET_SYSCALL_INFO` is deliberately absent: it is not in every

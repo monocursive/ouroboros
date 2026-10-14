@@ -253,6 +253,21 @@ struct Site {
     arg0: u64,
 }
 
+impl Site {
+    /// The address of the syscall instruction itself, where the kernel
+    /// rewinds the PC to restart the call: `ip` is just past it, and the
+    /// instruction is four bytes on arm64 (`svc #0`) and two on x86_64
+    /// (`syscall`).
+    fn restart_ip(self) -> u64 {
+        let width = if self.arch == abi::AUDIT_ARCH_AARCH64 {
+            4
+        } else {
+            2
+        };
+        self.ip.wrapping_sub(width)
+    }
+}
+
 /// A call whose syscall exit carried a kernel restart code (J4 O-2).
 ///
 /// The code is not the call's result. When the thread next heads for user
@@ -362,14 +377,7 @@ fn verdict_at_handler(code: i64, frame: Option<(u64, u64)>, site: Site) -> Verdi
                     } else {
                         site.nr
                     }
-                    && ip
-                        == site
-                            .ip
-                            .wrapping_sub(if site.arch == abi::AUDIT_ARCH_AARCH64 {
-                                4
-                            } else {
-                                2
-                            }) =>
+                    && ip == site.restart_ip() =>
             {
                 Verdict::Restarted
             }
@@ -2380,9 +2388,7 @@ impl Session {
             sys::PTRACE_EVENT_STOP | sys::PTRACE_EVENT_EXIT | sys::PTRACE_EVENT_EXEC => None,
             0 if signal != sys::SYSCALL_STOP_SIG => {
                 if signal == libc::SIGTRAP {
-                    if let Some(uc) =
-                        delivered.and_then(|sig| self.handler_entry(tid, sig, site.ip, site.ip + 4))
-                    {
+                    if let Some(uc) = delivered.and_then(|sig| self.handler_entry(tid, sig, site)) {
                         // The kernel has set up a handler and settled the
                         // call. This notification is not a signal: nothing
                         // is delivered for it.
@@ -2432,18 +2438,20 @@ impl Session {
     /// tracee: `si_code` is the notification's own, then the native register
     /// reader verifies the delivered signal and locates the kernel frame.
     /// An ordinary signal-delivery stop is not this handler-entry stop.
-    fn handler_entry(
-        &mut self,
-        tid: pid_t,
-        delivered: libc::c_int,
-        site_ip: u64,
-        next_ip: u64,
-    ) -> Option<u64> {
+    fn handler_entry(&mut self, tid: pid_t, delivered: libc::c_int, site: Site) -> Option<u64> {
         let (signo, code) = sys::siginfo(tid).ok()?;
         if signo != libc::SIGTRAP || code != sys::SI_CODE_HANDLER_ENTRY {
             return None;
         }
-        sys::handler_ucontext(tid, u64::try_from(delivered).ok()?, site_ip, next_ip).ok()?
+        // The PC of a handler's entry is neither the call's own instruction,
+        // where the kernel rewinds it to restart, nor the one after it.
+        sys::handler_ucontext(
+            tid,
+            u64::try_from(delivered).ok()?,
+            site.restart_ip(),
+            site.ip,
+        )
+        .ok()?
     }
 
     /// The interrupted result register and PC the kernel saved in the frame
@@ -3664,6 +3672,28 @@ mod tests {
             verdict_at_handler(515, interrupted, site),
             Verdict::Unknown,
             "515 is not a restart code"
+        );
+    }
+
+    /// Audit 2026-10-08 L18: the restart address is the syscall instruction
+    /// itself, one instruction before the `ip` the entry stop reports.
+    #[test]
+    fn the_restart_address_is_the_syscall_instruction_before_the_reported_ip() {
+        let at = |arch| Site {
+            arch,
+            nr: 0,
+            ip: 0x40_1004,
+            arg0: 0,
+        };
+        assert_eq!(
+            at(abi::AUDIT_ARCH_AARCH64).restart_ip(),
+            0x40_1000,
+            "svc #0"
+        );
+        assert_eq!(
+            at(abi::AUDIT_ARCH_X86_64).restart_ip(),
+            0x40_1002,
+            "syscall"
         );
     }
 
