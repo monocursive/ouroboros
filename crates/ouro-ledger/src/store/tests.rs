@@ -255,7 +255,7 @@ fn unreconcilable_pending_evidence_is_recorded_once_and_retried_only_after_a_cha
 
 #[cfg(target_os = "linux")]
 #[test]
-fn a_reconciliation_the_journal_did_not_refuse_is_neither_recorded_nor_cached() {
+fn a_reconciliation_the_journal_did_not_refuse_is_not_recorded_and_is_retried() {
     use crate::pending::Journal;
     let temp = tempfile::tempdir().unwrap();
     let mut store = Store::open(&temp.path().join("data")).unwrap();
@@ -278,11 +278,13 @@ fn a_reconciliation_the_journal_did_not_refuse_is_neither_recorded_nor_cached() 
     let journal = Journal::open(&store.root().join(&run.run_id)).unwrap();
     journal.create(&run, &peer()).unwrap();
     // While another holder keeps the journal locked, nothing is decided.
-    store.recover_pending_orphans(&peer());
+    let now = std::time::Instant::now();
+    store.recover_pending_orphans_at(&peer(), now);
     assert_eq!(store.show(&run.run_id).unwrap().state, "admitted");
     drop(journal);
-    // The unchanged journal is tried again and reconciled.
-    store.recover_pending_orphans(&peer());
+    // Once its retry is due, the unchanged journal is tried again and
+    // reconciled.
+    store.recover_pending_orphans_at(&peer(), now + std::time::Duration::from_secs(3));
     let reconciled = store.show(&run.run_id).unwrap();
     assert_eq!(reconciled.state, "outcome_unknown");
     assert_eq!(

@@ -17,10 +17,10 @@ pub struct Store {
     index: Option<crate::projection::Projection>,
     index_error: Option<String>,
     index_pending: BTreeMap<String, RunRecord>,
-    /// Pending journals whose background reconciliation failed, as last seen.
-    /// They are retried only once the journal changes.
+    /// Pending journals whose background reconciliation failed, and when
+    /// each may be tried again.
     #[cfg(target_os = "linux")]
-    pending_failures: BTreeMap<String, Option<pending_recovery::JournalSeen>>,
+    pending_failures: BTreeMap<String, pending_recovery::Failed>,
     segment_limit: u64,
     verify_page_bytes: u64,
     /// Advances whenever a GC may remove or rewrite run files, so a verifier
@@ -260,9 +260,7 @@ impl Store {
 
     /// Pending journals whose reconciliation failed, as last seen.
     #[cfg(target_os = "linux")]
-    pub(super) fn failed_journals(
-        &mut self,
-    ) -> &mut BTreeMap<String, Option<pending_recovery::JournalSeen>> {
+    pub(super) fn failed_journals(&mut self) -> &mut BTreeMap<String, pending_recovery::Failed> {
         &mut self.pending_failures
     }
 

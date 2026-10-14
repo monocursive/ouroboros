@@ -12,6 +12,31 @@ pub(super) struct JournalSeen {
     changed: (i64, i64),
 }
 
+/// What the writer remembers of a pending journal whose background
+/// reconciliation failed.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Failed {
+    /// The journal was refused as it was then: retrying it unchanged cannot
+    /// succeed, so it is tried again only once it changes.
+    Refused(Option<JournalSeen>),
+    /// Something else failed. It is tried again no sooner than `retry_at`,
+    /// each failure doubling `wait` up to [`MAX_RETRY_WAIT`]; `logged` is
+    /// the failure the operator was last told of.
+    Other {
+        retry_at: std::time::Instant,
+        wait: std::time::Duration,
+        logged: String,
+    },
+}
+
+/// The wait after a first failure that was not the journal's doing.
+#[cfg(target_os = "linux")]
+const FIRST_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// The longest wait between two attempts on a journal that keeps failing.
+#[cfg(target_os = "linux")]
+const MAX_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Why a dead owner's pending evidence was refused. Canonical history keeps
 /// only this class, never the refusal's text, which can quote journal values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,6 +245,19 @@ impl Store {
 
     #[cfg(target_os = "linux")]
     pub(crate) fn recover_pending_orphans(&mut self, peer: &Peer) {
+        for line in self.recover_pending_orphans_at(peer, std::time::Instant::now()) {
+            eprintln!("{line}");
+        }
+    }
+
+    /// Reconcile the journals of dead best-effort owners that are due at
+    /// `now`, and say what the operator should be told.
+    #[cfg(target_os = "linux")]
+    pub(super) fn recover_pending_orphans_at(
+        &mut self,
+        peer: &Peer,
+        now: std::time::Instant,
+    ) -> Vec<String> {
         let ids: Vec<_> = self
             .streams()
             .iter()
@@ -235,33 +273,49 @@ impl Store {
             })
             .map(|(id, _)| id.clone())
             .collect();
+        let mut log = Vec::new();
         for id in ids {
             let seen = self.journal_seen(&id);
-            if self.failed_journals().get(&id) == Some(&seen) {
-                continue;
-            }
+            let (wait, logged) = match self.failed_journals().get(&id) {
+                Some(Failed::Refused(last)) if *last == seen => continue,
+                Some(Failed::Other { retry_at, .. }) if now < *retry_at => continue,
+                Some(Failed::Other { wait, logged, .. }) => {
+                    ((*wait * 2).min(MAX_RETRY_WAIT), Some(logged.clone()))
+                }
+                _ => (FIRST_RETRY_WAIT, None),
+            };
             let (refusal, problem) = match self.reconcile(&id, peer, &crate::daemon::peer_alive) {
                 Ok(_) => {
                     self.failed_journals().remove(&id);
                     continue;
                 }
                 Err(PendingFailure::Other(problem)) => {
-                    // Not the journal's doing: the next attempt may succeed.
-                    eprintln!(
-                        "{}",
-                        log_line(
+                    // Not the journal's doing: the next attempt may succeed,
+                    // but retrying every pass would repeat its syncs and
+                    // its log line forever.
+                    let message = problem.message().to_owned();
+                    if logged.as_deref() != Some(&message) {
+                        log.push(log_line(
                             format_args!("pending recovery for {id} will be retried"),
-                            &problem
-                        )
+                            &problem,
+                        ));
+                    }
+                    self.failed_journals().insert(
+                        id,
+                        Failed::Other {
+                            retry_at: now + wait,
+                            wait,
+                            logged: message,
+                        },
                     );
                     continue;
                 }
                 Err(PendingFailure::Refused(refusal, problem)) => (refusal, problem),
             };
-            eprintln!(
-                "{}",
-                log_line(format_args!("pending recovery for {id}"), &problem)
-            );
+            log.push(log_line(
+                format_args!("pending recovery for {id}"),
+                &problem,
+            ));
             // Retain the failed journal for inspection. A bad local file is
             // never sufficient evidence for a successful terminal outcome.
             if self
@@ -269,14 +323,15 @@ impl Store {
                 .is_ok_and(|s| ["prepared", "admitted"].contains(&s.run().state.as_str()))
                 && let Err(error) = self.record_invalid_pending(&id, peer, refusal)
             {
-                eprintln!(
-                    "{}",
-                    log_line(format_args!("recording unknown outcome for {id}"), &error)
-                );
+                log.push(log_line(
+                    format_args!("recording unknown outcome for {id}"),
+                    &error,
+                ));
             }
             // Retrying an unchanged journal every second cannot succeed.
-            self.failed_journals().insert(id, seen);
+            self.failed_journals().insert(id, Failed::Refused(seen));
         }
+        log
     }
 }
 

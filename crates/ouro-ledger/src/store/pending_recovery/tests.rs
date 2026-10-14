@@ -113,3 +113,51 @@ fn journal_text_reaches_the_operator_log_with_control_characters_spelled_out() {
         "{line}"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failure_that_is_not_the_journals_backs_off_and_is_logged_once() {
+    use std::time::Duration;
+    let (_temp, mut store, run) = admitted_with_journal("pending-stuck");
+    // The fixture owner is not this process: it is dead. Its journal's
+    // temporary name is a directory, so removing the journal fails (EISDIR)
+    // on every attempt, after its evidence is recorded.
+    fs::create_dir(store.run_dir(&run.run_id).join("owner-pending.next")).unwrap();
+    let start = std::time::Instant::now();
+    let first = store.recover_pending_orphans_at(&peer(), start);
+    assert_eq!(first.len(), 1, "{first:?}");
+    let failed = |store: &mut Store| match store.failed_journals().get(&run.run_id) {
+        Some(Failed::Other { retry_at, wait, .. }) => (*retry_at, *wait),
+        other => panic!("not backing off: {other:?}"),
+    };
+    assert_eq!(
+        failed(&mut store),
+        (start + FIRST_RETRY_WAIT, FIRST_RETRY_WAIT)
+    );
+    // Not due yet: nothing is attempted.
+    assert!(
+        store
+            .recover_pending_orphans_at(&peer(), start + Duration::from_secs(1))
+            .is_empty()
+    );
+    assert_eq!(
+        failed(&mut store),
+        (start + FIRST_RETRY_WAIT, FIRST_RETRY_WAIT)
+    );
+    // Due: attempted again, the wait doubles, and the unchanged failure is
+    // not logged a second time.
+    let later = start + FIRST_RETRY_WAIT;
+    assert!(store.recover_pending_orphans_at(&peer(), later).is_empty());
+    assert_eq!(
+        failed(&mut store),
+        (later + 2 * FIRST_RETRY_WAIT, 2 * FIRST_RETRY_WAIT)
+    );
+    // The wait never exceeds its bound.
+    let mut now = later;
+    for _ in 0..16 {
+        now += MAX_RETRY_WAIT;
+        store.recover_pending_orphans_at(&peer(), now);
+    }
+    assert_eq!(failed(&mut store).1, MAX_RETRY_WAIT);
+    assert_eq!(store.show(&run.run_id).unwrap().state, "outcome_unknown");
+}
