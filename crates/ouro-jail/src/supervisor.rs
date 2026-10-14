@@ -109,11 +109,13 @@ pub struct RunReport {
     pub trace_error: Option<JailError>,
     /// Control messages the consumer never took. Reported, never waited on.
     pub control_dropped: u64,
-    /// J4 W3, P5: errors this attempt raised that no durable receipt carries
-    /// and that `error` and `trace_error` do not name (a terminal receipt
-    /// that failed to persist, and whatever it would have recorded), in the
-    /// order they were raised. The caller prints each one on stderr: an
-    /// error that cannot reach the receipt still reaches the operator.
+    /// J4 W3, P5: errors this attempt raised that the receipt on disk does
+    /// not hold as they were raised and that `error` and `trace_error` do
+    /// not name (a terminal receipt that failed to persist, and whatever it
+    /// would have recorded; an error a refused receipt holds cut or omitted
+    /// to fit the reader bound), in the order they were raised. The caller
+    /// prints each one on stderr whole: an error that cannot reach the
+    /// receipt still reaches the operator.
     pub unrecorded: Vec<crate::records::ErrorObject>,
 }
 
