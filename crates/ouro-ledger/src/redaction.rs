@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-const SCHEMA: &str = "ouro.ledger.redaction/1";
+const SCHEMA: &str = crate::schemas::REDACTION;
 const REASON: &str = "ledger_redacted";
 
 #[derive(Deserialize, Serialize)]

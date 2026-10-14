@@ -13,7 +13,7 @@ use ouro_ledger::{
         CatalogRequest, DiscoveryRequest, LedgerError, OperatorIntent, ReadFilter, ReadRequest,
         ReadSelector, ReadStage, Result, RunFilter, TailRequest,
     },
-    runner, service,
+    runner, schemas, service,
 };
 use serde_json::{Value, json};
 
@@ -607,7 +607,7 @@ fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
             }
         }
         output(
-            &json!({"schema":"ouro.ledger.query/1","snapshot_scope":"independent_per_run",
+            &json!({"schema":schemas::QUERY,"snapshot_scope":"independent_per_run",
             "pages":pages,"problems":problems}),
             args.json,
         )?;
@@ -682,7 +682,7 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
         bytes_written += page.ndjson.len() as u64;
         if page.done {
             let status = json!({
-                "schema": "ouro.ledger.export/1",
+                "schema": schemas::EXPORT,
                 "event": "finished",
                 "run_id": page.run_id,
                 "snapshot": page.snapshot,
@@ -725,7 +725,7 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
             serde_json::to_writer(
                 &mut stderr,
                 &json!({
-                    "schema": "ouro.ledger.export/1",
+                    "schema": schemas::EXPORT,
                     "event": "checkpoint",
                     "run_id": request.run_id,
                     "snapshot": page.snapshot,
@@ -754,7 +754,28 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
     }
 }
 
+/// Identifiers with a contract file are frozen; the rest may change with the
+/// ledger version, and the announcement says which is which.
+fn version() -> Value {
+    let schemas: serde_json::Map<_, _> = schemas::ANNOUNCED
+        .iter()
+        .map(|entry| (entry.key.to_owned(), json!(entry.id)))
+        .collect();
+    let frozen: Vec<_> = schemas::ANNOUNCED
+        .iter()
+        .filter(|entry| entry.contract.is_some())
+        .map(|entry| entry.key)
+        .collect();
+    json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":schemas,
+        "frozen_schemas":frozen,"execution_platform":"linux"})
+}
+
 fn execute(cli: Cli) -> Result<i32> {
+    // Announcing the build needs no data directory, HOME or writer.
+    if let Action::Version { json } = &cli.command {
+        output(&version(), *json)?;
+        return Ok(0);
+    }
     if let Action::VerifyBundle {
         path,
         trusted_key,
@@ -786,13 +807,6 @@ fn execute(cli: Cli) -> Result<i32> {
     };
     let data = data_dir(cli.data_dir)?;
     match cli.command {
-        Action::Version { json } => {
-            output(
-                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1","catalog":"ouro.ledger.catalog/1","discovery":"ouro.ledger.discovery/1","bundle":"ouro.ledger.bundle/1","bundle_verification":"ouro.ledger.bundle-verification/1","signed_bundle":"ouro.ledger.bundle/2","signed_bundle_verification":"ouro.ledger.bundle-verification/2","bundle_signature":"ouro.ledger.bundle-signature/1","signer":"ouro.ledger.signer/1"},"schema_frozen":true,"execution_platform":"linux"}),
-                json,
-            )?;
-            Ok(0)
-        }
         Action::Serve { detach } => {
             if detach {
                 service::start_writer(&data)?;

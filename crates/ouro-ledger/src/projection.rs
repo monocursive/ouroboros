@@ -348,7 +348,7 @@ mod tests {
             holds: vec![],
             history: None,
             capture_history: None,
-            schema: "ouro.ledger.run/1".into(),
+            schema: crate::schemas::RUN.into(),
             run_id: id.into(),
             attempt_id: format!("attempt_{id}"),
             request_id: format!("request_{id}"),

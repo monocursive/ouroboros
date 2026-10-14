@@ -121,7 +121,7 @@ impl Journal {
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         )?;
         self.replace(&State {
-            schema: "ouro.ledger.pending/1".into(),
+            schema: crate::schemas::PENDING.into(),
             run_id: run.run_id.clone(),
             attempt_id: run.attempt_id.clone(),
             payload_digest: digest(&run.payload)?,
@@ -158,7 +158,7 @@ impl Journal {
         let envelope: Envelope = serde_json::from_slice(&bytes)?;
         let s = envelope.state;
         if digest(&s)? != envelope.digest
-            || s.schema != "ouro.ledger.pending/1"
+            || s.schema != crate::schemas::PENDING
             || s.run_id != run.run_id
             || s.attempt_id != run.attempt_id
             || s.payload_digest != digest(&run.payload)?

@@ -61,7 +61,7 @@ impl Retained {
         value
     }
     fn completion(&self) -> Result<Value> {
-        Ok(json!({"schema":"ouro.ledger.capture-gc-complete/1","anchor_digest":self.digest()?}))
+        Ok(json!({"schema":schemas::CAPTURE_GC_COMPLETE,"anchor_digest":self.digest()?}))
     }
     fn complete(&self, root: &Path) -> Result<bool> {
         match fs::symlink_metadata(root.join(DONE)) {
@@ -116,7 +116,7 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
     let r = &envelope.retained;
     if envelope.digest != r.digest()?
         || serde_json::to_value(&envelope)? != value
-        || r.schema != "ouro.ledger.capture-gc-anchor/1"
+        || r.schema != schemas::CAPTURE_GC_ANCHOR
         || r.run_id != id
         || r.chain.head_seq == 0
         || !r
@@ -276,7 +276,7 @@ impl Store {
                     return Err(LedgerError("no captures available for expiry".into()));
                 }
                 let r = Retained {
-                    schema: "ouro.ledger.capture-gc-anchor/1".into(),
+                    schema: schemas::CAPTURE_GC_ANCHOR.into(),
                     run_id: id.into(),
                     attempt_id: verified.run.attempt_id.clone(),
                     chain: verified.run.chain.clone(),

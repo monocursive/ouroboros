@@ -68,7 +68,7 @@ fn unhex<const N: usize>(value: &str) -> Result<[u8; N]> {
 impl PublicKey {
     fn from_bytes(bytes: &[u8]) -> Self {
         Self {
-            schema: "ouro.ledger.signer/1".into(),
+            schema: crate::schemas::SIGNER.into(),
             algorithm: "ed25519".into(),
             key_id: sha256_prefixed(bytes),
             public_key: hex(bytes),
@@ -76,7 +76,7 @@ impl PublicKey {
     }
     fn bytes(&self) -> Result<[u8; 32]> {
         let bytes = unhex(&self.public_key)?;
-        if self.schema != "ouro.ledger.signer/1"
+        if self.schema != crate::schemas::SIGNER
             || self.algorithm != "ed25519"
             || self.key_id != sha256_prefixed(&bytes)
         {
@@ -142,7 +142,7 @@ impl Signer {
     pub(super) fn sign(&self, manifest: &[u8]) -> Value {
         let public = self.public();
         let message = [DOMAIN, manifest].concat();
-        json!({"schema":"ouro.ledger.bundle-signature/1", "algorithm":"ed25519",
+        json!({"schema":crate::schemas::BUNDLE_SIGNATURE, "algorithm":"ed25519",
             "key_id":public.key_id, "public_key":public.public_key,
             "manifest_digest":sha256_prefixed(manifest), "signature":hex(self.0.sign(&message).as_ref())})
     }
@@ -151,13 +151,13 @@ impl Signer {
 pub(super) fn verify(value: Value, manifest: &[u8], trusted: Option<&PublicKey>) -> Result<Value> {
     let envelope: Envelope = serde_json::from_value(value)?;
     let public = PublicKey {
-        schema: "ouro.ledger.signer/1".into(),
+        schema: crate::schemas::SIGNER.into(),
         algorithm: envelope.algorithm.clone(),
         key_id: envelope.key_id,
         public_key: envelope.public_key,
     };
     let public_bytes = public.bytes()?;
-    if envelope.schema != "ouro.ledger.bundle-signature/1"
+    if envelope.schema != crate::schemas::BUNDLE_SIGNATURE
         || envelope.manifest_digest != sha256_prefixed(manifest)
     {
         return Err(error("bundle signature does not bind this manifest"));

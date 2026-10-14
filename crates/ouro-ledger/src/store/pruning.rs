@@ -281,7 +281,7 @@ impl Retained {
         Ok(run)
     }
     fn completion(&self) -> Result<Value> {
-        Ok(json!({"schema":"ouro.ledger.gc-complete/1","anchor_digest":self.digest()?}))
+        Ok(json!({"schema":schemas::GC_COMPLETE,"anchor_digest":self.digest()?}))
     }
     fn complete(&self, root: &Path) -> Result<bool> {
         match fs::symlink_metadata(root.join(DONE)) {
@@ -299,7 +299,7 @@ impl Retained {
     }
     fn validate(&self, root: &Path, id: &str) -> Result<()> {
         validate_frozen("run", &serde_json::to_value(&self.run)?)?;
-        if self.schema != "ouro.ledger.gc-anchor/1"
+        if self.schema != schemas::GC_ANCHOR
             || self.run.run_id != id
             || self.run.history.is_some()
             || !self.run.holds.is_empty()
@@ -504,7 +504,7 @@ impl Store {
         }
         let plan = self.gc_plan_policy_at(policy, after, limit, now)?;
         let mut result = GcResult {
-            schema: "ouro.ledger.gc-result/1".into(),
+            schema: schemas::GC_RESULT.into(),
             retain_days,
             capture_retain_days: policy.capture_retain_days,
             pruned: vec![],
@@ -637,7 +637,7 @@ impl Store {
         }
         files.extend(capture_pruning::inventory(&root, &verified.run)?);
         let retained = Retained {
-            schema: "ouro.ledger.gc-anchor/1".into(),
+            schema: schemas::GC_ANCHOR.into(),
             run: verified.run.clone(),
             manifest: verified.manifest(),
             replay: verified.replay.clone(),

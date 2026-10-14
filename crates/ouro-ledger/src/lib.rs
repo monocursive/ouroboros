@@ -13,6 +13,7 @@ pub mod protocol;
 mod reader;
 mod redaction;
 pub mod runner;
+pub mod schemas;
 mod segments;
 pub mod service;
 pub mod store;

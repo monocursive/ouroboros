@@ -27,6 +27,7 @@ use crate::protocol::{
 };
 
 use crate::manifest::{self, STREAM};
+use crate::schemas;
 
 mod bundle_replay;
 mod capture_pruning;
@@ -367,7 +368,7 @@ pub(crate) fn validate_payload(payload: &Value) -> Result<()> {
 
 fn initial_run(run_id: &str, request_id: &str, attempt_id: &str, payload: Value) -> RunRecord {
     RunRecord {
-        schema: "ouro.ledger.run/1".into(),
+        schema: schemas::RUN.into(),
         run_id: run_id.into(),
         request_id: request_id.into(),
         attempt_id: attempt_id.into(),
@@ -750,7 +751,7 @@ impl Store {
             .head_seq
             .checked_add(1)
             .ok_or_else(|| LedgerError("sequence exhausted".into()))?;
-        record["schema"] = json!("ouro.ledger.event/1");
+        record["schema"] = json!(schemas::RECORD);
         record["run_id"] = json!(run_id);
         record["attempt_id"] = json!(stream.run.attempt_id);
         record["seq"] = json!(seq);
@@ -1415,7 +1416,7 @@ impl Stream {
         let expected_schema = if decoded["kind"] == "source" {
             records::SCHEMA_EVENT
         } else {
-            "ouro.ledger.event/1"
+            schemas::RECORD
         };
         if decoded["schema"] != expected_schema
             || decoded["run_id"] != run_id
@@ -1559,7 +1560,7 @@ impl Stream {
     fn manifest(&self) -> crate::manifest::Manifest {
         let hash = |h: &Sha256| -> String { format!("sha256:{:x}", h.clone().finalize()) };
         crate::manifest::Manifest {
-            schema: "ouro.ledger.segments/2".into(),
+            schema: schemas::SEGMENTS.into(),
             run_id: self.run.run_id.clone(),
             attempt_id: self.run.attempt_id.clone(),
             segments: self.segments.clone(),

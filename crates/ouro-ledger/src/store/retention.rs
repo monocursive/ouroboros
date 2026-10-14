@@ -219,7 +219,7 @@ impl Store {
             None
         };
         Ok(GcPlan {
-            schema: "ouro.ledger.gc-plan/1".into(),
+            schema: schemas::GC_PLAN.into(),
             dry_run: true,
             deletion_supported: true,
             verification_required: true,

@@ -23,6 +23,7 @@ use crate::protocol::{
     READ_OUTPUT_BYTES, READ_SCAN_BYTES, READ_SCAN_FRAMES, ReadFilter, ReadPage, ReadRequest,
     ReadSelector, ReadStage, Result, RunRecord,
 };
+use crate::schemas;
 
 const MAX_SESSIONS: usize = 32;
 const TTL: Duration = Duration::from_secs(600);
@@ -198,18 +199,17 @@ fn load_checkpoint(directory: &Path, id: &str) -> Result<(Checkpoint, File)> {
     if envelope.digest != durable_digest(&checkpoint)?
         || !matches!(
             checkpoint.schema.as_str(),
-            "ouro.ledger.reader-checkpoint/1" | "ouro.ledger.reader-checkpoint/2"
+            schemas::READER_CHECKPOINT_V1 | schemas::READER_CHECKPOINT
         )
-        || (checkpoint.schema == "ouro.ledger.reader-checkpoint/2"
-            && checkpoint.segments_digest.is_none())
-        || (checkpoint.schema == "ouro.ledger.reader-checkpoint/1"
+        || (checkpoint.schema == schemas::READER_CHECKPOINT && checkpoint.segments_digest.is_none())
+        || (checkpoint.schema == schemas::READER_CHECKPOINT_V1
             && checkpoint.segments_digest.is_some())
         || checkpoint.id != id
         || !token_valid(&checkpoint.current)
         || !token_valid(&checkpoint.prior.token)
         || checkpoint.request.cursor.is_some()
         || checkpoint.template.run_id != checkpoint.request.run_id
-        || checkpoint.template.schema != "ouro.ledger.read/1"
+        || checkpoint.template.schema != schemas::READ
         || !checkpoint.template.records.is_empty()
         || !checkpoint.template.ndjson.is_empty()
         || checkpoint.template.next_cursor.is_some()
@@ -658,7 +658,7 @@ impl Readers {
             let mut coverage = coverage_summary(&run.coverage);
             coverage["selection_status"] = json!(selection_status(&request.filter, &coverage));
             let template = ReadPage {
-                schema: "ouro.ledger.read/1".into(),
+                schema: schemas::READ.into(),
                 run_id: run.run_id.clone(),
                 snapshot: run.chain.clone(),
                 state: if poisoned.is_empty() {
@@ -783,7 +783,7 @@ impl Session {
         let mut request = self.request.clone();
         request.cursor = None;
         let checkpoint = Checkpoint {
-            schema: "ouro.ledger.reader-checkpoint/2".into(),
+            schema: schemas::READER_CHECKPOINT.into(),
             id: id.into(),
             created: self.created,
             request,

@@ -627,7 +627,7 @@ fn dispatch(
         Request::Status => Ok(serde_json::to_value(store.status())?),
         Request::Read { request } => Ok(serde_json::to_value(store.read(&request)?)?),
         Request::Ping => Ok(
-            json!({"schema":"ouro.ledger.doctor/1","protocol":PROTOCOL_VERSION,"writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status(),"retention":{"retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.retain_days,"capture_retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.capture_retain_days}}),
+            json!({"schema":crate::schemas::DOCTOR,"protocol":PROTOCOL_VERSION,"writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status(),"retention":{"retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.retain_days,"capture_retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.capture_retain_days}}),
         ),
         Request::ReconcilePending { run_id } => Ok(serde_json::to_value(
             store.reconcile_pending(&run_id, peer, &peer_alive)?,

@@ -18,13 +18,13 @@ impl Store {
             streams.insert(name.into(), self.transcript_stream(&run, name));
         }
         let transcript = json!({
-            "schema":"ouro.ledger.transcript/1",
+            "schema":schemas::TRANSCRIPT,
             "limit_bytes_per_stream":DISPLAY_BYTES,
             "encoding":"escaped_bytes",
             "integrity":"unverified_local_artifact",
             "streams":streams,
         });
-        Ok(json!({"schema":"ouro.ledger.show/1", "run":run, "transcript":transcript}))
+        Ok(json!({"schema":schemas::SHOW, "run":run, "transcript":transcript}))
     }
 
     fn transcript_stream(&self, run: &RunRecord, name: &str) -> Value {

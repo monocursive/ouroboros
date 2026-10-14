@@ -280,7 +280,7 @@ fn payload(options: &RunOptions, plan: &Value, image_digest: &str) -> Result<Val
         .iter()
         .map(|r| r["name"].clone())
         .collect();
-    let mut request = json!({"schema":"ouro.ledger.request/1", "argv_digest":canonical::argv_digest(&argv),
+    let mut request = json!({"schema":crate::schemas::REQUEST, "argv_digest":canonical::argv_digest(&argv),
         "policy_digest":plan["policy"]["digest"], "requirements":requirements,
         "profile":plan["policy"]["name"], "jail_image_digest":image_digest,
         "io":{"mode":if options.batch {"batch"} else {"foreground"},"pty":false},

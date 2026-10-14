@@ -2,7 +2,7 @@
 use crate::{
     daemon::Client,
     protocol::{LedgerError, ReadFilter, ReadPage, ReadRequest, ReadSelector, Result, RunRecord},
-    store,
+    schemas, store,
 };
 use ouro_records::canonical::{sha256_prefixed, to_jcs};
 use serde::{Deserialize, Serialize};
@@ -370,9 +370,9 @@ fn assemble(
     }
     let manifest = Manifest {
         schema: if signer.is_some() {
-            "ouro.ledger.bundle/2"
+            schemas::SIGNED_BUNDLE
         } else {
-            "ouro.ledger.bundle/1"
+            schemas::BUNDLE
         }
         .into(),
         authenticity: if signer.is_some() {
@@ -418,9 +418,8 @@ fn verify_directory(
 ) -> Result<Value> {
     let value = read_json(files::member(dir, "bundle.json", false)?)?;
     let manifest: Manifest = serde_json::from_value(value.clone())?;
-    let signed = manifest.schema == "ouro.ledger.bundle/2" && manifest.authenticity == "signed";
-    if !(signed
-        || (manifest.schema == "ouro.ledger.bundle/1" && manifest.authenticity == "unsigned"))
+    let signed = manifest.schema == schemas::SIGNED_BUNDLE && manifest.authenticity == "signed";
+    if !(signed || (manifest.schema == schemas::BUNDLE && manifest.authenticity == "unsigned"))
         || manifest.capture_digest_basis != "bundle_time"
         || !(2..=5).contains(&manifest.files.len())
     {
@@ -496,13 +495,13 @@ fn verify_directory(
         ));
     }
     check_time(start)?;
-    let mut report = json!({"schema":"ouro.ledger.bundle-verification/1", "run_id":run.run_id,
+    let mut report = json!({"schema":schemas::BUNDLE_VERIFICATION, "run_id":run.run_id,
         "snapshot":run.chain, "state":run.state, "child_protection":run.child_protection,
         "coverage":run.coverage, "local_consistency":true, "authenticity":"unsigned",
         "external_custody":false, "capture_digest_basis":"bundle_time", "captures":captures,
         "manifest_digest":sha256_prefixed(&canonical_json(&value)?)});
     if let Some(signature) = signature {
-        report["schema"] = json!("ouro.ledger.bundle-verification/2");
+        report["schema"] = json!(schemas::SIGNED_BUNDLE_VERIFICATION);
         report["authenticity"] = json!("signed");
         report["signature"] = signature;
     }

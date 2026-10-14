@@ -1039,3 +1039,35 @@ fn writer_keeps_accepting_after_descriptor_exhaustion() {
     ));
     assert!(writer.0.try_wait().unwrap().is_none());
 }
+
+#[test]
+fn version_needs_no_data_directory_and_freezes_only_contract_backed_schemas() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"))
+        .args(["version", "--json"])
+        .env_remove("HOME")
+        .env_remove("OURO_DATA_DIR")
+        .env("XDG_DATA_HOME", "relative")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let version: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(version["schemas"]["run"], "ouro.ledger.run/1");
+    assert_eq!(version["schemas"]["record"], "ouro.ledger.event/1");
+    assert_eq!(version["schemas"]["request"], "ouro.ledger.request/1");
+    assert!(version.get("schema_frozen").is_none());
+    let frozen: Vec<&str> = version["frozen_schemas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap())
+        .collect();
+    assert!(frozen.contains(&"run") && frozen.contains(&"gc_result"));
+    for open in ["doctor", "catalog_position", "discovery_position"] {
+        assert!(version["schemas"][open].is_string() && !frozen.contains(&open));
+    }
+}

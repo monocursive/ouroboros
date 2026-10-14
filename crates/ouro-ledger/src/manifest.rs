@@ -12,7 +12,10 @@ use ouro_records::canonical::to_jcs;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::protocol::{LedgerError, Result};
+use crate::{
+    protocol::{LedgerError, Result},
+    schemas,
+};
 
 pub(crate) const NAME: &str = "segments.json";
 pub(crate) const STREAM: &str = "events-0001.ndjson";
@@ -129,9 +132,9 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
     let wire: Wire = serde_json::from_slice(&bytes)?;
     let value = serde_json::to_value(&wire)?;
     let manifest = match wire {
-        Wire::Current(m) if m.schema == "ouro.ledger.segments/2" => m,
-        Wire::Legacy(m) if m.schema == "ouro.ledger.segments/1" => Manifest {
-            schema: "ouro.ledger.segments/2".into(),
+        Wire::Current(m) if m.schema == schemas::SEGMENTS => m,
+        Wire::Legacy(m) if m.schema == schemas::SEGMENTS_V1 => Manifest {
+            schema: schemas::SEGMENTS.into(),
             run_id: m.run_id,
             attempt_id: m.attempt_id,
             segments: vec![m.segment],

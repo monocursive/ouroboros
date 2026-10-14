@@ -441,7 +441,7 @@ fn compare_with(
         .values()
         .filter(|v| v["status"] == "comparable")
         .count();
-    let mut report = json!({"schema":"ouro.ledger.diff/1","mode":mode,"complete":complete,
+    let mut report = json!({"schema":crate::schemas::DIFF,"mode":mode,"complete":complete,
         "comparison_status":if compared == 0 {"incomparable"} else if compared == CLASSES.len() {"comparable"} else {"partial"},
         "left":a.summary,"right":b.summary,"classes":classes,"changes":items,
         "total_changes":total,"next_after":next_after});

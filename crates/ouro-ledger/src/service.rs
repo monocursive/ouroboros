@@ -324,7 +324,7 @@ mod linux {
         // Validate the whole frame before creating a service. No raw request
         // values occur in its command, unit properties, logs or environment.
         let launch = Launch {
-            schema: "ouro.ledger.owner-launch/1".into(),
+            schema: crate::schemas::OWNER_LAUNCH.into(),
             options: options.clone(),
             cwd: std::env::current_dir()?,
             environment: std::env::vars_os().collect(),
@@ -400,7 +400,7 @@ mod linux {
         // no abandoned socket once the service connects.
         fs::remove_file(path)?;
         let launch: Launch = read_frame(&mut stream)?;
-        if launch.schema != "ouro.ledger.owner-launch/1"
+        if launch.schema != crate::schemas::OWNER_LAUNCH
             || !launch.options.batch
             || !launch.options.detached
         {

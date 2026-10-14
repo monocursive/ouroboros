@@ -203,7 +203,7 @@ impl Store {
         let prior: Option<Position> = position(request.after.as_deref())?;
         if let Some(prior) = &prior {
             check_run_id(&prior.last_run)?;
-            if prior.schema != "ouro.ledger.catalog-position/1" || prior.scope != scope {
+            if prior.schema != schemas::CATALOG_POSITION || prior.scope != scope {
                 return Err(LedgerError(
                     "catalog position belongs to a different scope or limit".into(),
                 ));
@@ -253,7 +253,7 @@ impl Store {
         }
         let next_after = if more {
             Some(serde_json::to_string(&Position {
-                schema: "ouro.ledger.catalog-position/1".into(),
+                schema: schemas::CATALOG_POSITION.into(),
                 snapshot: snapshot.clone(),
                 scope,
                 last_run: runs
@@ -266,7 +266,7 @@ impl Store {
             None
         };
         Ok(CatalogPage {
-            schema: "ouro.ledger.catalog/1".into(),
+            schema: schemas::CATALOG.into(),
             snapshot,
             runs,
             matched_runs,
@@ -295,7 +295,7 @@ impl Store {
         let prior: Option<DiscoveryPosition> = position(request.after.as_deref())?;
         if prior
             .as_ref()
-            .is_some_and(|p| p.schema != "ouro.ledger.discovery-position/1" || p.scope != scope)
+            .is_some_and(|p| p.schema != schemas::DISCOVERY_POSITION || p.scope != scope)
         {
             return Err(LedgerError(
                 "query discovery position belongs to a different scope or limit".into(),
@@ -317,7 +317,7 @@ impl Store {
         }
         let run = catalog.runs.into_iter().next();
         let mut result = DiscoveryPage {
-            schema: "ouro.ledger.discovery/1".into(),
+            schema: schemas::DISCOVERY.into(),
             catalog_snapshot: catalog.snapshot.clone(),
             matched_runs: catalog.matched_runs,
             run: run.clone(),
@@ -357,7 +357,7 @@ impl Store {
         };
         if let Some((catalog_after, read_position)) = continuation {
             result.next_after = Some(serde_json::to_string(&DiscoveryPosition {
-                schema: "ouro.ledger.discovery-position/1".into(),
+                schema: schemas::DISCOVERY_POSITION.into(),
                 snapshot: catalog.snapshot,
                 scope,
                 catalog_after,
