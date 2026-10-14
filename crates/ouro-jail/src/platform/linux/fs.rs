@@ -10,11 +10,12 @@
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::sys::{PathError, cstring_from_path, empty_stat, errno_name, last_errno};
+use crate::state::anchored::{Dir, Kind, Name, Stat, fstat};
 
 /// The two path segments the `tool` profile protects (north-star §4.4).
 pub const PROTECTED_LITERALS: [&str; 2] = [".git", ".ouroboros"];
@@ -108,15 +109,12 @@ pub struct DirectoryStamp {
     modified: (i64, i64, i64, i64),
 }
 impl DirectoryStamp {
-    fn read(path: &Path, fd: RawFd) -> io::Result<Self> {
-        let mut st = empty_stat();
-        if unsafe { libc::fstat(fd, &raw mut st) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+    fn read(path: &Path, fd: BorrowedFd<'_>) -> io::Result<Self> {
+        let stat = fstat(fd)?;
         Ok(Self {
             path: path.to_owned(),
-            identity: (st.st_dev, st.st_ino),
-            modified: (st.st_mtime, st.st_mtime_nsec, st.st_ctime, st.st_ctime_nsec),
+            identity: stat.identity(),
+            modified: (stat.mtime.0, stat.mtime.1, stat.ctime.0, stat.ctime.1),
         })
     }
     /// Whether the directory's pathname, resolved again with every symlink
@@ -128,7 +126,7 @@ impl DirectoryStamp {
     /// The resolution's errno, or a description of the change.
     pub fn verify(&self) -> io::Result<()> {
         let pin = PinnedPath::open(&self.path)?;
-        let now = Self::read(&self.path, pin.fd.as_raw_fd())?;
+        let now = Self::read(&self.path, pin.fd.as_fd())?;
         if now != *self {
             return Err(io::Error::other(format!(
                 "scanned directory changed: {}",
@@ -271,12 +269,12 @@ pub fn scan_protected_names(
     names: &[&str],
     limits: ScanLimits,
 ) -> Result<ProtectedScan, ScanError> {
-    let root_c = cstring_from_path(root)?;
-    let root_dir = DirHandle::open_root(&root_c).map_err(|errno| ScanError::BadRoot {
+    cstring_from_path(root)?;
+    let root_dir = Dir::open_trusted(root).map_err(|error| ScanError::BadRoot {
         path: root.to_owned(),
-        errno,
+        errno: errno_of(&error),
     })?;
-    scan_directory(root, root_dir, names, limits)
+    scan_directory(root, &root_dir, names, limits)
 }
 
 /// Scan the directory `root` holds, then confirm the scan.
@@ -298,23 +296,11 @@ pub fn scan_pinned(
 ) -> Result<ProtectedScan, ScanError> {
     let mut retried = false;
     loop {
-        // SAFETY: `root.fd` is a live `O_PATH` directory handle, which may
-        // serve as `openat`'s directory; `"."` is a static NUL-terminated
-        // name, and the flags open that same directory for reading without
-        // following anything.
-        let fd = unsafe { libc::openat(root.fd.as_raw_fd(), c".".as_ptr(), DIR_FLAGS) };
-        if fd < 0 {
-            return Err(ScanError::BadRoot {
-                path: root.path.clone(),
-                errno: last_errno(),
-            });
-        }
-        let dir = DirHandle {
-            // SAFETY: `fd` was just returned by `openat` and nothing else
-            // owns it.
-            fd: unsafe { OwnedFd::from_raw_fd(fd) },
-        };
-        let scan = scan_directory(&root.path, dir, names, limits)?;
+        let dir = root.open_directory().map_err(|error| ScanError::BadRoot {
+            path: root.path.clone(),
+            errno: errno_of(&error),
+        })?;
+        let scan = scan_directory(&root.path, &dir, names, limits)?;
         let changed = scan.directories.iter().find_map(|directory| {
             directory
                 .verify()
@@ -331,7 +317,7 @@ pub fn scan_pinned(
 
 fn scan_directory(
     root: &Path,
-    root_dir: DirHandle,
+    root_dir: &Dir,
     names: &[&str],
     limits: ScanLimits,
 ) -> Result<ProtectedScan, ScanError> {
@@ -344,7 +330,7 @@ fn scan_directory(
         skipped_symlinks: Vec::new(),
         root_found: Vec::new(),
     };
-    walk(&root_dir, root, b"", 1, names, &mut state)?;
+    walk(root_dir, root, b"", 1, names, &mut state)?;
 
     // Audit 2026-10-08 M5: only single-component names are root literals —
     // a multi-component name like `.git/hooks` protects what exists and
@@ -384,151 +370,142 @@ struct WalkState {
     root_found: Vec<(String, RootLiteralState)>,
 }
 
+/// One directory entry, as the walk sees it.
+struct Child<'a> {
+    /// The entry's name.
+    name: &'a CStr,
+    /// Its absolute path on the host.
+    path: PathBuf,
+    /// Its path beneath the writable root, `/`-separated.
+    relative: Vec<u8>,
+}
+
+/// What the walk does with one entry.
+enum EntryAction<'n> {
+    /// Nothing beneath it can be protected, and it is not protected itself.
+    Skip,
+    /// A protected name that is not a symlink: covered whole, never entered.
+    Segment {
+        literal: &'n str,
+        kind: SegmentKind,
+        dev: u64,
+        ino: u64,
+    },
+    /// A protected name that is a symlink: neither followed nor reported as
+    /// covering anything.
+    ProtectedSymlink { literal: &'n str },
+    /// A symlink on the way to a deeper protected name, which hides whatever
+    /// lives behind it.
+    HidingSymlink,
+    /// A directory to walk.
+    Descend,
+}
+
 fn walk(
-    dir: &DirHandle,
+    dir: &Dir,
     dir_path: &Path,
     relative: &[u8],
     depth: usize,
     names: &[&str],
     state: &mut WalkState,
 ) -> Result<(), ScanError> {
-    state.directories.push(
-        DirectoryStamp::read(dir_path, dir.fd.as_raw_fd()).map_err(|e| ScanError::Unreadable {
-            path: dir_path.to_owned(),
-            errno: e.raw_os_error().unwrap_or(libc::EIO),
-        })?,
-    );
+    let stamp = DirectoryStamp::read(dir_path, dir.as_fd()).map_err(|e| ScanError::Unreadable {
+        path: dir_path.to_owned(),
+        errno: errno_of(&e),
+    })?;
     // A recent directory can change type within one filesystem clock tick
     // without a distinguishable timestamp. Keep the original stat checks in
     // that case and on filesystems whose timestamp clock is not local.
-    let ordinary_hint_safe = dir.stable_regular_file_hints(
-        state
-            .directories
-            .last()
-            .expect("directory stamp just recorded"),
-    );
+    let ordinary_hint_safe = stable_regular_file_hints(dir, &stamp);
+    state.directories.push(stamp);
     state.max_depth_seen = state.max_depth_seen.max(depth);
-    let entries = dir
-        .entries(state.limits.max_entries.saturating_sub(state.entries_seen))
-        .map_err(|errno| {
-            if errno == libc::E2BIG {
-                ScanError::EntryLimit {
-                    limit: state.limits.max_entries,
-                }
-            } else {
-                ScanError::Unreadable {
-                    path: dir_path.to_owned(),
-                    errno,
-                }
+    let entries = read_entries(
+        dir,
+        state.limits.max_entries.saturating_sub(state.entries_seen),
+    )
+    .map_err(|errno| {
+        if errno == libc::E2BIG {
+            ScanError::EntryLimit {
+                limit: state.limits.max_entries,
             }
-        })?;
+        } else {
+            ScanError::Unreadable {
+                path: dir_path.to_owned(),
+                errno,
+            }
+        }
+    })?;
 
-    let mut subdirs: Vec<(CString, Vec<u8>)> = Vec::new();
-    for entry in entries {
-        let name = entry.name;
+    let mut subdirs: Vec<(PathBuf, Name, Vec<u8>)> = Vec::new();
+    for entry in &entries {
         state.entries_seen += 1;
         if state.entries_seen > state.limits.max_entries {
             return Err(ScanError::EntryLimit {
                 limit: state.limits.max_entries,
             });
         }
-        let name_os = OsStr::from_bytes(name.to_bytes());
-        let child_path = dir_path.join(name_os);
+        let name = entry.name.as_c_str();
         let mut child_relative = relative.to_vec();
         if !child_relative.is_empty() {
             child_relative.push(b'/');
         }
         child_relative.extend_from_slice(name.to_bytes());
-        // A single-component name matches any directory entry; a
-        // multi-component name (audit 2026-10-08 M5) matches the entry's
-        // whole path beneath the writable root, so `.git/hooks` protects a
-        // nested hooks directory while `.git` itself stays writable. A
-        // multi-component name never matches at the root: it is not a root
-        // literal and a writable root is never itself protected.
-        let literal = names.iter().copied().find(|literal| {
-            if literal.contains('/') {
-                depth > 1 && literal.as_bytes() == child_relative.as_slice()
-            } else {
-                name_os == OsStr::new(*literal)
+        let child = Child {
+            name,
+            path: dir_path.join(OsStr::from_bytes(name.to_bytes())),
+            relative: child_relative,
+        };
+        match classify_entry(dir, entry.kind, &child, depth, names, ordinary_hint_safe)? {
+            EntryAction::Skip => {}
+            EntryAction::Segment {
+                literal,
+                kind,
+                dev,
+                ino,
+            } => {
+                state.segments.push(ProtectedSegment {
+                    path: child.path,
+                    kind,
+                    dev,
+                    ino,
+                });
+                if depth == 1 {
+                    state
+                        .root_found
+                        .push((literal.to_owned(), RootLiteralState::Present(kind)));
+                }
             }
-        });
-
-        // readdir already identifies ordinary regular files. Their identity
-        // is irrelevant unless their name is protected: they cannot contain
-        // deeper segments and are never followed. Unknown types, directories,
-        // symlinks and every protected name still get the no-follow stat.
-        // The existing directory stamps and mount-handoff verification remain
-        // responsible for a rename/type swap after enumeration.
-        if ordinary_hint_safe && literal.is_none() && entry.kind == libc::DT_REG {
-            continue;
-        }
-        let meta = dir
-            .stat_child_nofollow(&name)
-            .map_err(|errno| ScanError::Unreadable {
-                path: child_path.clone(),
-                errno,
-            })?;
-
-        if let Some(literal) = literal {
-            if meta.is_symlink {
-                state.skipped_symlinks.push(child_path.clone());
+            EntryAction::ProtectedSymlink { literal } => {
+                state.skipped_symlinks.push(child.path);
                 if depth == 1 {
                     state
                         .root_found
                         .push((literal.to_owned(), RootLiteralState::Symlink));
                 }
-                continue;
             }
-            let kind = meta.kind();
-            state.segments.push(ProtectedSegment {
-                path: child_path,
-                kind,
-                dev: meta.dev,
-                ino: meta.ino,
-            });
-            if depth == 1 {
-                state
-                    .root_found
-                    .push((literal.to_owned(), RootLiteralState::Present(kind)));
+            EntryAction::HidingSymlink => state.skipped_symlinks.push(child.path),
+            EntryAction::Descend => {
+                let component = Name::new(name.to_bytes()).map_err(|_| ScanError::Unreadable {
+                    path: child.path.clone(),
+                    errno: libc::EINVAL,
+                })?;
+                subdirs.push((child.path, component, child.relative));
             }
-            // Never descend into a protected segment: it is covered whole.
-            continue;
-        }
-
-        // A symlink on the path *to* a deeper protected name hides whatever
-        // lives behind it, so `existing_and_root` cannot claim coverage it
-        // could not see (audit 2026-10-08 M5): a `.git` symlink while
-        // `.git/hooks` is protected is recorded like a protected symlink.
-        if meta.is_symlink
-            && names.iter().any(|literal| {
-                let literal = literal.as_bytes();
-                literal.starts_with(child_relative.as_slice())
-                    && literal.get(child_relative.len()) == Some(&b'/')
-            })
-        {
-            state.skipped_symlinks.push(child_path.clone());
-            continue;
-        }
-
-        if meta.is_dir && !meta.is_symlink {
-            subdirs.push((name, child_relative));
         }
     }
 
-    for (name, child_relative) in subdirs {
+    for (child_path, name, child_relative) in subdirs {
         if depth + 1 > state.limits.max_depth {
-            let child = dir_path.join(OsStr::from_bytes(name.to_bytes()));
             return Err(ScanError::DepthLimit {
                 limit: state.limits.max_depth,
-                path: child,
+                path: child_path,
             });
         }
-        let child_path = dir_path.join(OsStr::from_bytes(name.to_bytes()));
         let child = dir
-            .open_child(&name)
-            .map_err(|errno| ScanError::Unreadable {
+            .open_dir_at(&name, None)
+            .map_err(|error| ScanError::Unreadable {
                 path: child_path.clone(),
-                errno,
+                errno: errno_of(&error),
             })?;
         walk(
             &child,
@@ -542,13 +519,92 @@ fn walk(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Directory handles: openat / fdopendir, never a path lookup from the root
-// ---------------------------------------------------------------------------
+/// Decides what the walk does with one entry of `dir` whose `readdir` type
+/// is `kind`.
+fn classify_entry<'n>(
+    dir: &Dir,
+    kind: u8,
+    child: &Child<'_>,
+    depth: usize,
+    names: &[&'n str],
+    ordinary_hint_safe: bool,
+) -> Result<EntryAction<'n>, ScanError> {
+    // A single-component name matches any directory entry; a
+    // multi-component name (audit 2026-10-08 M5) matches the entry's whole
+    // path beneath the writable root, so `.git/hooks` protects a nested
+    // hooks directory while `.git` itself stays writable. A multi-component
+    // name never matches at the root: it is not a root literal and a
+    // writable root is never itself protected.
+    let entry_name = child.name.to_bytes();
+    let literal = names.iter().copied().find(|literal| {
+        if literal.contains('/') {
+            depth > 1 && literal.as_bytes() == child.relative.as_slice()
+        } else {
+            entry_name == literal.as_bytes()
+        }
+    });
 
-struct DirHandle {
-    fd: OwnedFd,
+    // readdir already identifies ordinary regular files. Their identity is
+    // irrelevant unless their name is protected: they cannot contain deeper
+    // segments and are never followed. Unknown types, directories, symlinks
+    // and every protected name still get the no-follow stat. The directory
+    // stamps and mount-handoff verification remain responsible for a
+    // rename or type swap after enumeration.
+    if ordinary_hint_safe && literal.is_none() && kind == libc::DT_REG {
+        return Ok(EntryAction::Skip);
+    }
+    let meta = stat_entry(dir, child.name).map_err(|errno| ScanError::Unreadable {
+        path: child.path.clone(),
+        errno,
+    })?;
+
+    if let Some(literal) = literal {
+        return Ok(if meta.kind == Kind::Symlink {
+            EntryAction::ProtectedSymlink { literal }
+        } else {
+            EntryAction::Segment {
+                literal,
+                kind: segment_kind(meta.kind),
+                dev: meta.dev,
+                ino: meta.ino,
+            }
+        });
+    }
+    // A symlink on the path *to* a deeper protected name hides whatever
+    // lives behind it, so `existing_and_root` cannot claim coverage it could
+    // not see (audit 2026-10-08 M5): a `.git` symlink while `.git/hooks` is
+    // protected is recorded like a protected symlink.
+    if meta.kind == Kind::Symlink
+        && names.iter().any(|literal| {
+            let literal = literal.as_bytes();
+            literal.starts_with(child.relative.as_slice())
+                && literal.get(child.relative.len()) == Some(&b'/')
+        })
+    {
+        return Ok(EntryAction::HidingSymlink);
+    }
+    Ok(if meta.kind == Kind::Directory {
+        EntryAction::Descend
+    } else {
+        EntryAction::Skip
+    })
 }
+
+fn segment_kind(kind: Kind) -> SegmentKind {
+    match kind {
+        Kind::Directory => SegmentKind::Directory,
+        Kind::Regular => SegmentKind::File,
+        _ => SegmentKind::Other,
+    }
+}
+
+fn errno_of(error: &io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(libc::EIO)
+}
+
+// ---------------------------------------------------------------------------
+// Directory reads: anchored at a descriptor, never a path lookup from the root
+// ---------------------------------------------------------------------------
 
 fn stable_hint_clock(fs_type: libc::c_long, changed_second: i64, now_second: Option<i64>) -> bool {
     // The ext family may store only whole-second timestamps. A strictly newer
@@ -574,161 +630,179 @@ mod hint_clock_tests {
     }
 }
 
+/// Whether `readdir`'s regular-file type can stand in for a stat in the
+/// directory `stamp` describes.
+fn stable_regular_file_hints(dir: &Dir, stamp: &DirectoryStamp) -> bool {
+    // SAFETY: statfs consists only of C integer fields, for which all-zero
+    // is a valid value; the call below overwrites it.
+    let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: the directory descriptor is live and `filesystem` is writable
+    // storage of the type fstatfs fills.
+    if unsafe { libc::fstatfs(dir.as_fd().as_raw_fd(), &raw mut filesystem) } != 0 {
+        return false;
+    }
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: now is live writable storage for this clock result.
+    let clock = (unsafe { libc::clock_gettime(libc::CLOCK_REALTIME_COARSE, &raw mut now) } == 0)
+        .then_some(now.tv_sec);
+    stable_hint_clock(filesystem.f_type, stamp.modified.2, clock)
+}
+
+/// One `readdir` entry: its name and the type `readdir` reported for it.
 struct DirectoryEntry {
     name: CString,
     kind: u8,
 }
 
-#[derive(Clone, Copy)]
-struct ChildMeta {
-    is_dir: bool,
-    is_symlink: bool,
-    is_file: bool,
+/// The kind and identity a no-follow stat of one entry found.
+struct EntryMeta {
+    kind: Kind,
     dev: u64,
     ino: u64,
 }
 
-impl ChildMeta {
-    fn kind(self) -> SegmentKind {
-        if self.is_dir {
-            SegmentKind::Directory
-        } else if self.is_file {
-            SegmentKind::File
-        } else {
-            SegmentKind::Other
-        }
+/// `fstatat(AT_SYMLINK_NOFOLLOW)` of one entry of `dir`.
+///
+/// Deliberately not [`Dir::stat_at`], which adds a `statx` for the mount-root
+/// flag to every call: the walk stats up to [`ScanLimits::DEFAULT`] entries
+/// and needs only kind and identity.
+fn stat_entry(dir: &Dir, name: &CStr) -> Result<EntryMeta, i32> {
+    let mut st = empty_stat();
+    // SAFETY: the directory descriptor is live, `name` is NUL-terminated and
+    // valid for the call, `st` is a writable stat buffer, and
+    // AT_SYMLINK_NOFOLLOW stats the entry itself.
+    let rc = unsafe {
+        libc::fstatat(
+            dir.as_fd().as_raw_fd(),
+            name.as_ptr(),
+            &raw mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc != 0 {
+        return Err(last_errno());
     }
+    let mode = st.st_mode & libc::S_IFMT;
+    Ok(EntryMeta {
+        kind: if mode == libc::S_IFDIR {
+            Kind::Directory
+        } else if mode == libc::S_IFLNK {
+            Kind::Symlink
+        } else if mode == libc::S_IFREG {
+            Kind::Regular
+        } else {
+            Kind::Other
+        },
+        dev: st.st_dev,
+        ino: st.st_ino,
+    })
 }
 
-const DIR_FLAGS: libc::c_int =
-    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-
-impl DirHandle {
-    fn open_root(path: &CStr) -> Result<Self, i32> {
-        // SAFETY: `path` is a NUL-terminated C string that outlives the call;
-        // O_NOFOLLOW means a symlinked root is refused rather than followed.
-        let fd = unsafe { libc::open(path.as_ptr(), DIR_FLAGS) };
-        if fd < 0 {
-            return Err(last_errno());
-        }
-        // SAFETY: `fd` was just opened and is owned here.
-        Ok(Self {
-            fd: unsafe { OwnedFd::from_raw_fd(fd) },
-        })
+/// Every entry of `dir` but `.` and `..`, with the type `readdir` reports,
+/// read from the start; `E2BIG` once more than `remaining` are found.
+///
+/// [`Dir::names`] reads names alone; the walk needs the type as well, which
+/// is what lets it skip an ordinary file without a stat.
+fn read_entries(dir: &Dir, remaining: usize) -> Result<Vec<DirectoryEntry>, i32> {
+    // `fdopendir` takes ownership of the descriptor it is given, so it gets a
+    // duplicate; a duplicate shares the file offset, so the stream is
+    // rewound before reading.
+    let duplicate = dir
+        .try_clone_fd()
+        .map_err(|error| errno_of(&error))?
+        .into_raw_fd();
+    // SAFETY: `duplicate` is a live directory descriptor owned here; on
+    // success the stream owns it and `closedir` below releases it once.
+    let dirp = unsafe { libc::fdopendir(duplicate) };
+    if dirp.is_null() {
+        let errno = last_errno();
+        // SAFETY: fdopendir failed, so the descriptor is still ours to close.
+        unsafe { libc::close(duplicate) };
+        return Err(errno);
     }
-
-    fn open_child(&self, name: &CStr) -> Result<Self, i32> {
-        // SAFETY: `self.fd` is a live directory fd and `name` is a
-        // NUL-terminated string valid for the call. O_NOFOLLOW keeps the walk
-        // inside the root even if an entry is replaced by a symlink.
-        let fd = unsafe { libc::openat(self.fd.as_raw_fd(), name.as_ptr(), DIR_FLAGS) };
-        if fd < 0 {
-            return Err(last_errno());
-        }
-        // SAFETY: `fd` was just opened and is owned here.
-        Ok(Self {
-            fd: unsafe { OwnedFd::from_raw_fd(fd) },
-        })
-    }
-
-    fn stat_child_nofollow(&self, name: &CStr) -> Result<ChildMeta, i32> {
-        let mut st = empty_stat();
-        // SAFETY: `st` is a live, writable stat buffer; `name` is
-        // NUL-terminated; AT_SYMLINK_NOFOLLOW stats the link itself.
-        let rc = unsafe {
-            libc::fstatat(
-                self.fd.as_raw_fd(),
-                name.as_ptr(),
-                &raw mut st,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if rc != 0 {
-            return Err(last_errno());
-        }
-        let mode = st.st_mode & libc::S_IFMT;
-        Ok(ChildMeta {
-            is_dir: mode == libc::S_IFDIR,
-            is_symlink: mode == libc::S_IFLNK,
-            is_file: mode == libc::S_IFREG,
-            dev: st.st_dev,
-            ino: st.st_ino,
-        })
-    }
-
-    fn stable_regular_file_hints(&self, stamp: &DirectoryStamp) -> bool {
-        // SAFETY: statfs consists only of C integer fields; the kernel fills
-        // this live output storage, using a live directory descriptor.
-        let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstatfs(self.fd.as_raw_fd(), &raw mut filesystem) } != 0 {
-            return false;
-        }
-        let mut now = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: now is live writable storage for this clock result.
-        let clock = (unsafe { libc::clock_gettime(libc::CLOCK_REALTIME_COARSE, &raw mut now) }
-            == 0)
-            .then_some(now.tv_sec);
-        stable_hint_clock(filesystem.f_type, stamp.modified.2, clock)
-    }
-
-    /// Every entry name in this directory except `.` and `..`.
-    fn entries(&self, remaining: usize) -> Result<Vec<DirectoryEntry>, i32> {
-        // `fdopendir` takes ownership of the fd it is given, so hand it a
-        // duplicate and keep ours for `openat`.
-        // SAFETY: `self.fd` is a live directory fd; F_DUPFD_CLOEXEC returns a
-        // new owned descriptor for the same description.
-        let dup = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-        if dup < 0 {
-            return Err(last_errno());
-        }
-        // SAFETY: `dup` is a fresh directory fd; fdopendir consumes it and
-        // closedir below releases it exactly once.
-        let dirp = unsafe { libc::fdopendir(dup) };
-        if dirp.is_null() {
+    // SAFETY: `dirp` is the live DIR* created above.
+    unsafe { libc::rewinddir(dirp) };
+    let mut out = Vec::new();
+    let mut result = Ok(());
+    loop {
+        // SAFETY: errno is this thread's own.
+        unsafe { *libc::__errno_location() = 0 };
+        // SAFETY: `dirp` is live; the entry it returns stays valid until the
+        // next call on this stream.
+        let entry = unsafe { libc::readdir(dirp) };
+        if entry.is_null() {
             let err = last_errno();
-            // SAFETY: fdopendir failed, so `dup` is still ours to close.
-            unsafe { libc::close(dup) };
-            return Err(err);
+            if err != 0 {
+                result = Err(err);
+            }
+            break;
         }
-        let mut out = Vec::new();
-        let mut result = Ok(());
-        loop {
-            // SAFETY: readdir is given the DIR* just created; it returns a
-            // pointer valid until the next readdir on the same stream.
-            unsafe { *libc::__errno_location() = 0 };
-            // SAFETY: as above.
-            let entry = unsafe { libc::readdir(dirp) };
-            if entry.is_null() {
-                let err = last_errno();
-                if err != 0 {
-                    result = Err(err);
-                }
-                break;
-            }
-            // SAFETY: `entry` is non-null and points at a live dirent; d_name
-            // is a NUL-terminated array inside it.
-            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-            let bytes = name.to_bytes();
-            if bytes == b"." || bytes == b".." {
-                continue;
-            }
-            if out.len() >= remaining {
-                result = Err(libc::E2BIG);
-                break;
-            }
-            out.push(DirectoryEntry {
-                name: name.to_owned(),
-                // SAFETY: the dirent is still live until the next readdir.
-                kind: unsafe { (*entry).d_type },
-            });
+        // SAFETY: `entry` is non-null and points at a live dirent whose
+        // `d_name` is a NUL-terminated array inside it.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let bytes = name.to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
         }
-        // SAFETY: `dirp` was created above and is closed exactly once here.
-        unsafe { libc::closedir(dirp) };
-        result.map(|()| out)
+        if out.len() >= remaining {
+            result = Err(libc::E2BIG);
+            break;
+        }
+        out.push(DirectoryEntry {
+            name: name.to_owned(),
+            // SAFETY: the dirent is still live until the next readdir.
+            kind: unsafe { (*entry).d_type },
+        });
     }
+    // SAFETY: `dirp` was created above and is closed exactly once here.
+    unsafe { libc::closedir(dirp) };
+    result.map(|()| out)
+}
+
+/// `openat2(dir, path, flags, how.resolve = resolve)`, relative to `dir` or,
+/// with `None`, to the working directory.
+///
+/// # Errors
+///
+/// The errno from `openat2` (`ELOOP` for a symlink `RESOLVE_NO_SYMLINKS`
+/// refuses), or `InvalidInput` for a path with an interior NUL.
+pub(crate) fn openat2(
+    dir: Option<BorrowedFd<'_>>,
+    path: &Path,
+    flags: libc::c_int,
+    resolve: u64,
+) -> io::Result<OwnedFd> {
+    let c = cstring_from_path(path)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    // SAFETY: `open_how` is a plain struct of integers (and non-exhaustive,
+    // so it is built zeroed); all-zero asks for no flags, mode or resolution.
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags = u64::try_from(flags)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "negative open flags"))?;
+    how.resolve = resolve;
+    let base = dir.map_or(libc::AT_FDCWD, |dir| dir.as_raw_fd());
+    // SAFETY: `base` is AT_FDCWD or a live descriptor, `c` is a NUL-terminated
+    // path and `how` a live `open_how` of the size passed, all valid for the
+    // call; openat2 returns a new descriptor or -1.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            base,
+            c.as_ptr(),
+            &raw const how,
+            size_of::<libc::open_how>(),
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = RawFd::try_from(rc)
+        .map_err(|_| io::Error::other("openat2 returned an out-of-range descriptor"))?;
+    // SAFETY: `fd` was just returned by openat2 and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 // ---------------------------------------------------------------------------
@@ -739,22 +813,20 @@ impl DirHandle {
 /// between validation and mount handoff is detected rather than mounted.
 #[derive(Debug)]
 pub struct PinnedPath {
-    uid: u32,
-    mode: u32,
     fd: OwnedFd,
     path: PathBuf,
-    dev: u64,
-    ino: u64,
+    /// What `fstat` of the handle found at pin time.
+    stat: Stat,
 }
 
 /// Why a pinned path is no longer the object that was pinned.
 #[derive(Debug)]
 pub enum PinError {
-    /// The path no longer resolves.
+    /// The path no longer resolves without a symlink.
     Missing {
         /// The path.
         path: PathBuf,
-        /// The errno from `lstat`.
+        /// The errno from resolving it again.
         errno: i32,
     },
     /// The path resolves to a different object than the one pinned.
@@ -798,75 +870,53 @@ impl fmt::Display for PinError {
 
 impl std::error::Error for PinError {}
 
+/// Opens `path` as an `O_PATH` handle, refusing a symlink at every component
+/// (`RESOLVE_NO_SYMLINKS`), so no mutable ancestor can redirect it.
+fn open_no_symlinks(path: &Path) -> io::Result<OwnedFd> {
+    openat2(
+        None,
+        path,
+        libc::O_PATH | libc::O_CLOEXEC,
+        libc::RESOLVE_NO_SYMLINKS,
+    )
+}
+
 impl PinnedPath {
-    /// Pin `path` by opening an `O_PATH|O_NOFOLLOW` handle and recording the
-    /// object's device and inode.
+    /// Pin `path` by opening an `O_PATH` handle with no symlink at any
+    /// component and recording the object's identity, owner and mode.
     ///
     /// `O_PATH` opens the object without any read or write authority, which is
     /// all pinning needs.
     ///
     /// # Errors
     ///
-    /// The errno from `open` or `fstat`, or [`PathError`] for an unusable path.
+    /// The errno from `openat2` (`ELOOP` for a symlink anywhere on the path)
+    /// or `fstat`, or `InvalidInput` for an unusable path.
     pub fn open(path: &Path) -> Result<Self, io::Error> {
-        let c = cstring_from_path(path).map_err(|e| io::Error::other(e.to_string()))?;
-        // SAFETY: `c` is NUL-terminated and outlives the call. O_PATH means no
-        // I/O authority is acquired; openat2 rejects symlinks at every
-        // component rather than following a mutable ancestor.
-        #[repr(C)]
-        struct OpenHow {
-            flags: u64,
-            mode: u64,
-            resolve: u64,
-        }
-        let how = OpenHow {
-            flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
-            mode: 0,
-            resolve: 0x04, // RESOLVE_NO_SYMLINKS, on every component.
-        };
-        // SAFETY: both buffers are live; the kernel validates every path component.
-        let fd = unsafe {
-            libc::syscall(
-                libc::SYS_openat2,
-                libc::AT_FDCWD,
-                c.as_ptr(),
-                &raw const how,
-                size_of::<OpenHow>(),
-            ) as i32
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `fd` was just opened and is owned here.
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let mut st = empty_stat();
-        // SAFETY: `fd` is live and `st` is a writable stat buffer; fstat on an
-        // O_PATH descriptor is permitted.
-        let rc = unsafe { libc::fstat(fd.as_raw_fd(), &raw mut st) };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let fd = open_no_symlinks(path)?;
+        let stat = fstat(fd.as_fd())?;
         Ok(Self {
             fd,
             path: path.to_owned(),
-            uid: st.st_uid,
-            mode: st.st_mode,
-            dev: st.st_dev,
-            ino: st.st_ino,
+            stat,
         })
     }
 
     /// Executable owner/mode must stay fixed as well as its pinned identity.
+    ///
+    /// # Errors
+    ///
+    /// `PermissionDenied` for an owner or mode that is unsafe or changed, the
+    /// errno from `fstat`, or the [`PinError`] of [`PinnedPath::verify`].
     pub fn verify_executable(&self) -> io::Result<()> {
-        let mut st = empty_stat();
-        if unsafe { libc::fstat(self.fd.as_raw_fd(), &raw mut st) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if (st.st_uid != 0 && st.st_uid != unsafe { libc::geteuid() })
-            || st.st_uid != self.uid
-            || st.st_mode != self.mode
-            || st.st_mode & libc::S_IFMT != libc::S_IFREG
-            || st.st_mode & 0o022 != 0
+        let now = fstat(self.fd.as_fd())?;
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        if (now.uid != 0 && now.uid != euid)
+            || now.uid != self.stat.uid
+            || (now.kind, now.mode) != (self.stat.kind, self.stat.mode)
+            || now.kind != Kind::Regular
+            || now.mode & 0o022 != 0
         {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -885,17 +935,16 @@ impl PinnedPath {
     /// Device and inode recorded at pin time.
     #[must_use]
     pub const fn identity(&self) -> (u64, u64) {
-        (self.dev, self.ino)
+        self.stat.identity()
     }
 
     /// Whether the pinned object, rather than its current pathname, is a directory.
+    ///
+    /// # Errors
+    ///
+    /// The errno from `fstat`.
     pub fn is_dir(&self) -> io::Result<bool> {
-        let mut st = empty_stat();
-        // SAFETY: live owned fd and writable stat buffer.
-        if unsafe { libc::fstat(self.fd.as_raw_fd(), &raw mut st) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(st.st_mode & libc::S_IFMT == libc::S_IFDIR)
+        Ok(fstat(self.fd.as_fd())?.kind == Kind::Directory)
     }
 
     /// The `O_PATH` handle, for callers that want to hand the kernel the
@@ -905,54 +954,59 @@ impl PinnedPath {
         self.fd.as_fd()
     }
 
-    /// Check that the name still resolves to the pinned object.
+    /// The pinned directory, opened for reading through the handle rather
+    /// than its pathname.
+    fn open_directory(&self) -> io::Result<Dir> {
+        // SAFETY: the handle is a live `O_PATH` descriptor, which may serve
+        // as `openat`'s directory; `"."` is a static NUL-terminated name, and
+        // the flags open that same directory for reading, following nothing.
+        let fd = unsafe {
+            libc::openat(
+                self.fd.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` was just returned by `openat` and nothing else owns it.
+        Ok(Dir::from_owned(unsafe { OwnedFd::from_raw_fd(fd) }))
+    }
+
+    /// Check that the name, resolved again the way it was pinned (no symlink
+    /// at any component), still names the pinned object.
     ///
     /// # Errors
     ///
     /// [`PinError::Missing`] or [`PinError::Replaced`].
     pub fn verify(&self) -> Result<(), PinError> {
-        let Ok(c) = cstring_from_path(&self.path) else {
-            return Err(PinError::Missing {
-                path: self.path.clone(),
-                errno: libc::EINVAL,
-            });
+        let missing = |error: io::Error| PinError::Missing {
+            path: self.path.clone(),
+            errno: error.raw_os_error().unwrap_or(libc::EINVAL),
         };
-        let mut st = empty_stat();
-        // SAFETY: `c` is NUL-terminated and `st` is writable; lstat does not
-        // follow a final symlink, matching how the path was pinned.
-        let rc = unsafe { libc::lstat(c.as_ptr(), &raw mut st) };
-        if rc != 0 {
-            return Err(PinError::Missing {
-                path: self.path.clone(),
-                errno: last_errno(),
-            });
-        }
-        if (st.st_dev, st.st_ino) != (self.dev, self.ino) {
+        let now = open_no_symlinks(&self.path)
+            .and_then(|fd| fstat(fd.as_fd()))
+            .map_err(missing)?;
+        if now.identity() != self.stat.identity() {
             return Err(PinError::Replaced {
                 path: self.path.clone(),
-                expected: (self.dev, self.ino),
-                found: (st.st_dev, st.st_ino),
+                expected: self.stat.identity(),
+                found: now.identity(),
             });
         }
         Ok(())
     }
 
-    /// Duplicate the `O_PATH` handle so a spawn map can install it at a fixed
-    /// descriptor number for `bwrap --ro-bind-fd`, while the pin itself stays
-    /// here for verification (§9.1).
+    /// Duplicate the `O_PATH` handle (close-on-exec) so a spawn map can
+    /// install it at a fixed descriptor number for `bwrap --ro-bind-fd`,
+    /// while the pin itself stays here for verification (§9.1).
     ///
     /// # Errors
     ///
-    /// The errno from `dup`.
+    /// The errno from `fcntl(F_DUPFD_CLOEXEC)`.
     pub fn try_clone_fd(&self) -> io::Result<OwnedFd> {
-        // SAFETY: `self.fd` is a live owned descriptor; `dup` returns a new
-        // owned descriptor or -1.
-        let copy = unsafe { libc::dup(self.fd.as_raw_fd()) };
-        if copy < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `copy` was just created by `dup` and is owned here.
-        Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+        self.fd.try_clone()
     }
 }
 
@@ -1067,5 +1121,28 @@ mod tests {
             }
             other => panic!("expected a changed-tree refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_pin_is_verified_the_way_it_was_made() {
+        let base = tempfile::tempdir().unwrap();
+        let parent = base.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::write(parent.join("leaf"), b"x").unwrap();
+        let pin = PinnedPath::open(&parent.join("leaf")).unwrap();
+        pin.verify().expect("unchanged");
+        // The same object, now reached through a symlinked ancestor: the pin
+        // refused symlinks at every component, so the check does too.
+        let moved = base.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &parent).unwrap();
+        match pin.verify() {
+            Err(PinError::Missing { errno, .. }) => assert_eq!(errno, libc::ELOOP),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            PinnedPath::open(&parent.join("leaf")).map_err(|e| e.raw_os_error()),
+            Err(Some(libc::ELOOP))
+        ));
     }
 }
