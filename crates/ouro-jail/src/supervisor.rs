@@ -917,7 +917,9 @@ fn plan_request(plan: &Plan) -> PlanRequest {
     }
 }
 
-fn platform_record(ctx: &Context) -> PlatformRecord {
+/// Who this binary is running as, for a record's `platform` group.
+#[must_use]
+pub fn platform_record(ctx: &Context) -> PlatformRecord {
     let identity = ctx.platform.identity();
     PlatformRecord {
         os: identity.os,

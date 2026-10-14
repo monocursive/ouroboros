@@ -9,7 +9,9 @@ use std::process::ExitCode;
 
 use clap::Parser as _;
 use ouro_jail::capability::Capability;
-use ouro_jail::cli::{Cli, Command, DoctorArgs, ExplainArgs, GcArgs, RunArgs, VersionArgs};
+use ouro_jail::cli::{
+    Cli, Command, DoctorArgs, ExplainArgs, GcArgs, RunArgs, TailArgs, VersionArgs,
+};
 use ouro_jail::config;
 use ouro_jail::observer::CoverageSummary;
 use ouro_jail::platform;
@@ -52,34 +54,13 @@ fn main() -> ExitCode {
         Command::Gc(args) => gc(&context, &args),
         Command::Run(args) => run(&context, &args),
         Command::Learn(args) => match ouro_jail::learn::run(&context, *args) {
-            Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(125)),
+            Ok(code) => exit(code),
             Err(e) => {
                 ouro_jail::diag!("learn: {e}");
                 ExitCode::from(2)
             }
         },
-        Command::Tail(args) => {
-            let result = (|| {
-                let data =
-                    ouro_jail::state::data_dir(&context.env_settings, context.home.as_deref())
-                        .map_err(|e| e.message)?;
-                let attempt = ouro_jail::journal::attempt_path(&data, args.attempt.as_deref())?;
-                ouro_jail::journal::tail(
-                    &attempt,
-                    args.follow,
-                    args.json,
-                    args.since.as_deref(),
-                    &mut std::io::stdout().lock(),
-                )
-            })();
-            match result {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    ouro_jail::diag!("tail: {e}");
-                    ExitCode::from(2)
-                }
-            }
-        }
+        Command::Tail(args) => tail(&context, &args),
     }
 }
 
@@ -112,6 +93,8 @@ fn fail(error: &JailError) -> ExitCode {
     exit(error.exit_code())
 }
 
+/// The process status for a §6.4 exit code. Every code this binary computes
+/// fits a byte; one that does not is this tool's own failure, so it is 1.
 fn exit(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
@@ -126,23 +109,28 @@ fn print_json(value: &serde_json::Value) {
 // version
 // ---------------------------------------------------------------------------
 
-/// The schema identifiers this build announces (§4: "the schema identifiers
-/// that `ouro version --json` announces are constants tested against those
-/// files").
+/// The schema identifiers this build announces, by name, in the order the
+/// text rendering prints them (§4: "the schema identifiers that `ouro
+/// version --json` announces are constants tested against those files").
+const SCHEMAS: [(&str, &str); 10] = [
+    ("receipt", SCHEMA_RECEIPT),
+    ("event", SCHEMA_EVENT),
+    ("policy", SCHEMA_POLICY),
+    ("policy_snapshot", SCHEMA_POLICY_SNAPSHOT),
+    ("policy_file", SCHEMA_POLICY_FILE),
+    ("gate", SCHEMA_GATE),
+    ("control", SCHEMA_CONTROL),
+    ("network", SCHEMA_NETWORK),
+    ("learned_policy", records::SCHEMA_LEARNED_POLICY),
+    ("doctor", SCHEMA_DOCTOR),
+];
+
 fn schema_identifiers() -> serde_json::Value {
-    serde_json::json!({
-        "receipt": SCHEMA_RECEIPT,
-        "event": SCHEMA_EVENT,
-        "policy": SCHEMA_POLICY,
-        "policy_snapshot": SCHEMA_POLICY_SNAPSHOT,
-        "policy_file": SCHEMA_POLICY_FILE,
-        "gate": SCHEMA_GATE,
-        "control": SCHEMA_CONTROL,
-        "network": SCHEMA_NETWORK,
-        "learned_policy": records::SCHEMA_LEARNED_POLICY,
-        // J5-D
-        "doctor": SCHEMA_DOCTOR,
-    })
+    SCHEMAS
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), serde_json::Value::from(*value)))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
 }
 
 // Build provenance (§16) and the doctor record's identifier
@@ -227,12 +215,7 @@ fn closed_set_for(linux: bool, arch: &str) -> Option<&'static str> {
 }
 
 fn version(context: &Context, args: &VersionArgs) -> ExitCode {
-    let identity = context.platform.identity();
-    let platform = PlatformRecord {
-        os: identity.os,
-        arch: identity.arch,
-        kernel: identity.kernel,
-    };
+    let platform = supervisor::platform_record(context);
     if args.json {
         print_json(&serde_json::json!({
             "component": "ouro-jail",
@@ -254,19 +237,7 @@ fn version(context: &Context, args: &VersionArgs) -> ExitCode {
             platform.kernel
         );
         println!("closed set {}", closed_set().unwrap_or("none"));
-        for (name, value) in [
-            ("receipt", SCHEMA_RECEIPT),
-            ("event", SCHEMA_EVENT),
-            ("policy", SCHEMA_POLICY),
-            ("policy_snapshot", SCHEMA_POLICY_SNAPSHOT),
-            ("policy_file", SCHEMA_POLICY_FILE),
-            ("gate", SCHEMA_GATE),
-            ("control", SCHEMA_CONTROL),
-            ("network", SCHEMA_NETWORK),
-            ("learned_policy", records::SCHEMA_LEARNED_POLICY),
-            // J5-D
-            ("doctor", SCHEMA_DOCTOR),
-        ] {
+        for (name, value) in SCHEMAS {
             println!("schema {name} {value}");
         }
         if ouro_jail::records::SCHEMAS_FROZEN {
@@ -298,9 +269,7 @@ fn explain(context: &Context, args: &ExplainArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Renders `explain --json`.
-///
-/// Replaces every environment binding's value with its name.
+/// Removes every environment binding's value, leaving its name.
 ///
 /// §13.2 and §12: receipts and traces carry environment names, never values,
 /// and inspection output is held to the same rule. The digest is printed
@@ -344,6 +313,7 @@ fn redact_launch(snapshot: &mut serde_json::Value) {
     }
 }
 
+/// Renders `explain --json`.
 fn explain_json(report: &ExplainReport) -> Result<serde_json::Value, JailError> {
     let mut snapshot = report.resolved.snapshot.to_canonical_value()?;
     redact_environment(&mut snapshot);
@@ -520,7 +490,6 @@ fn doctor(context: &Context, args: &DoctorArgs) -> ExitCode {
 }
 
 fn doctor_json(report: &DoctorReport) -> serde_json::Value {
-    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut value = serde_json::json!({
         // J5-D: a versioned record (§3.2), with what built this binary
         "schema": SCHEMA_DOCTOR,
@@ -613,14 +582,7 @@ fn doctor_text(report: &DoctorReport) -> String {
         report.platform.kernel
     );
     for capability in &report.capabilities {
-        let _ = writeln!(
-            out,
-            "capability {} {} scope={} reason={}",
-            capability.name,
-            status_name(capability),
-            scope_name(capability),
-            capability.reason_code.as_deref().unwrap_or("none")
-        );
+        let _ = writeln!(out, "{}", capability_line(capability));
     }
     // §14.1 launch readiness, names and statuses only
     if let Some(launch) = &report.launch {
@@ -810,13 +772,7 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
         println!("{}", records::escape_control(label));
     }
     for capability in &report.capabilities {
-        println!(
-            "capability {} {} scope={} reason={}",
-            capability.name,
-            status_name(capability),
-            scope_name(capability),
-            capability.reason_code.as_deref().unwrap_or("none")
-        );
+        println!("{}", capability_line(capability));
     }
     if let Some(error) = &report.error {
         ouro_jail::diag!("{error}");
@@ -852,18 +808,41 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
     exit(report.exit_code)
 }
 
-fn status_name(capability: &Capability) -> String {
-    serde_json::to_value(capability.status)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned())
+/// One capability as `doctor` and `run --label-only` print it.
+fn capability_line(capability: &Capability) -> String {
+    format!(
+        "capability {} {} scope={} reason={}",
+        capability.name,
+        capability.status.as_str(),
+        capability.scope.as_str(),
+        capability.reason_code.as_deref().unwrap_or("none")
+    )
 }
 
-fn scope_name(capability: &Capability) -> String {
-    serde_json::to_value(capability.scope)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "unknown".to_owned())
+// ---------------------------------------------------------------------------
+// tail
+// ---------------------------------------------------------------------------
+
+fn tail(context: &Context, args: &TailArgs) -> ExitCode {
+    let result = ouro_jail::state::data_dir(&context.env_settings, context.home.as_deref())
+        .map_err(|error| error.message)
+        .and_then(|data| ouro_jail::journal::attempt_path(&data, args.attempt.as_deref()))
+        .and_then(|attempt| {
+            ouro_jail::journal::tail(
+                &attempt,
+                args.follow,
+                args.json,
+                args.since.as_deref(),
+                &mut std::io::stdout().lock(),
+            )
+        });
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            ouro_jail::diag!("tail: {error}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1060,49 @@ mod tests {
         report.entries[0].leftover_temp_files = vec!["\u{202e}tmp".to_owned()];
         let text = gc_text(&report);
         assert!(text.contains("leftover_temp_file <U+202E>tmp"), "{text}");
+    }
+
+    /// The capability line spells status and scope as the JSON does.
+    #[test]
+    fn the_capability_line_uses_the_wire_spellings() {
+        use ouro_jail::capability::{CapabilityScope, CapabilityStatus};
+        for status in [
+            CapabilityStatus::Available,
+            CapabilityStatus::Unavailable,
+            CapabilityStatus::Unsupported,
+            CapabilityStatus::Error,
+            CapabilityStatus::Skipped,
+        ] {
+            assert_eq!(serde_json::json!(status), status.as_str());
+        }
+        for scope in [
+            CapabilityScope::Process,
+            CapabilityScope::Tree,
+            CapabilityScope::Host,
+        ] {
+            assert_eq!(serde_json::json!(scope), scope.as_str());
+        }
+        let line = capability_line(&Capability::unsupported(
+            "syscall_filter",
+            CapabilityScope::Process,
+            "unsupported_platform",
+        ));
+        assert_eq!(
+            line,
+            "capability syscall_filter unsupported scope=process reason=unsupported_platform"
+        );
+    }
+
+    /// `version` announces every schema once, in JSON and in text alike.
+    #[test]
+    fn the_schema_identifiers_are_one_table() {
+        let json = schema_identifiers();
+        let object = json.as_object().expect("an object");
+        assert_eq!(object.len(), SCHEMAS.len(), "no name is announced twice");
+        for (name, value) in SCHEMAS {
+            assert_eq!(object[name], value, "{name}");
+        }
+        assert_eq!(object["doctor"], "ouro.jail.doctor/1");
     }
 
     /// Review F7: `version` announces the closed set only where this build

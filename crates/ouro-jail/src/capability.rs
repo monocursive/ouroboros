@@ -39,6 +39,32 @@ pub enum CapabilityScope {
     Host,
 }
 
+impl CapabilityStatus {
+    /// The wire spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CapabilityStatus::Available => "available",
+            CapabilityStatus::Unavailable => "unavailable",
+            CapabilityStatus::Unsupported => "unsupported",
+            CapabilityStatus::Error => "error",
+            CapabilityStatus::Skipped => "skipped",
+        }
+    }
+}
+
+impl CapabilityScope {
+    /// The wire spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CapabilityScope::Process => "process",
+            CapabilityScope::Tree => "tree",
+            CapabilityScope::Host => "host",
+        }
+    }
+}
+
 /// One capability result (§3.1).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
