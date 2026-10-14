@@ -200,7 +200,13 @@ fn compile(fixture: &Fixture) -> Result<Built, String> {
         filter: dir.join("filter.bin"),
     };
     if dir.is_dir() {
-        return Ok(built);
+        // Complete only with both outputs: a build cache that restores the
+        // directory but not the compiled helper (as CI's target cache can)
+        // must rebuild, not hand every check a launcher that is not there.
+        if built.helper.is_file() && built.filter.is_file() {
+            return Ok(built);
+        }
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
     }
     std::fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
     remove_dead_staging(&root);
