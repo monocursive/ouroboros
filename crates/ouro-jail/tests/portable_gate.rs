@@ -249,3 +249,77 @@ fn x02_a_gate_that_never_delivers_times_out_rather_than_waiting_forever() {
         "§8.2 names 60 seconds for the real wait"
     );
 }
+
+/// §8.2 and §13.2 row 4, from the supervisor's side: a gate that closes
+/// without a release frame refuses the attempt only after the boundary it
+/// prepared is torn down (`abort`), so no blocked launcher outlives the
+/// refusal. Over a simulated platform, which counts the teardowns.
+#[test]
+fn x02_a_closed_gate_tears_the_prepared_boundary_down() {
+    use clap::Parser as _;
+    use std::os::fd::IntoRawFd as _;
+
+    let root = common::private_tempdir();
+    let root_path = root.path().canonicalize().unwrap();
+    let workspace = root_path.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let (gate, writer) = std::io::pipe().expect("a pipe");
+    // The writer closes before any frame: the gate reads EOF. The read end
+    // is the supervisor's from here on, as an inherited `--gate-fd` is.
+    drop(writer);
+    let gate = gate.into_raw_fd();
+    let platform =
+        common::sim::ScriptedPlatform::new("gate simulation", common::sim::namespace_boundary())
+            .abort_tree(common::sim::verified_tree(
+                ouro_jail::lifecycle::VerificationScope::AttemptTree,
+            ));
+    let calls = platform.calls.clone();
+    let ouro_jail::cli::Command::Run(args) = ouro_jail::cli::Cli::parse_from([
+        "ouro-jail".to_owned(),
+        "run".to_owned(),
+        "--workspace".to_owned(),
+        workspace.display().to_string(),
+        "--gate-fd".to_owned(),
+        gate.to_string(),
+        "--".to_owned(),
+        "simulated-target".to_owned(),
+    ])
+    .command
+    else {
+        unreachable!()
+    };
+    let context = ouro_jail::supervisor::Context {
+        platform: Box::new(platform),
+        env_settings: ouro_jail::config::EnvSettings {
+            config_dir: Some(root_path.join("config")),
+            data_dir: Some(root_path.join("data")),
+            ..Default::default()
+        },
+        cwd: workspace,
+        home: None,
+        env_lookup: Box::new(|_| None),
+    };
+    let report = ouro_jail::supervisor::run(&context, &args);
+    assert_eq!(
+        report.error.as_ref().map(|error| error.code),
+        Some(ErrorCode::GateClosed),
+        "{:?}",
+        report.error
+    );
+    assert_eq!(
+        *calls.aborts.lock().unwrap(),
+        1,
+        "the boundary was not torn down"
+    );
+    assert!(
+        calls.stops.lock().unwrap().is_empty(),
+        "nothing was released"
+    );
+    let receipt = report.receipt.expect("the refusal is recorded");
+    assert_eq!(receipt.phase, ouro_jail::records::Phase::Refused);
+    assert_eq!(
+        receipt.lifetime.tree_empty,
+        Some(true),
+        "the teardown verified the tree"
+    );
+}
