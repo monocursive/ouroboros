@@ -3,6 +3,7 @@
 use crate::{
     cli::{LearnArgs, RunArgs},
     journal,
+    records::{Decision, Event, EventSource, EvidenceMode, ObserveMode},
     supervisor::{self, Context},
 };
 use serde::Serialize;
@@ -11,6 +12,18 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+
+/// `fields.kind` of the observer's opt-in read-only open attempts, the events
+/// a proposal's read grants come from.
+pub const LEARNING_READ: &str = "learning_read";
+
+/// The largest receipt read. Receipts are a few KiB; the bound only keeps a
+/// corrupt or hostile file from being read whole.
+const RECEIPT_MAX: u64 = 8 * 1024 * 1024;
+
+/// The longest trace line: one event, which the trace never writes above
+/// [`crate::trace::EVENT_MAX`] bytes, and its newline.
+const FRAME_MAX: usize = crate::trace::EVENT_MAX + 1;
 
 #[derive(Serialize, Debug)]
 pub struct Proposal {
@@ -38,10 +51,10 @@ pub fn derive(attempt: &Path, workspace: &Path, min_hits: u32) -> Result<Proposa
     let mut receipt_bytes = Vec::new();
     journal::open(attempt, "jail.json")
         .map_err(|e| e.to_string())?
-        .take(8 * 1024 * 1024 + 1)
+        .take(RECEIPT_MAX + 1)
         .read_to_end(&mut receipt_bytes)
         .map_err(|e| e.to_string())?;
-    if receipt_bytes.len() > 8 * 1024 * 1024 {
+    if receipt_bytes.len() as u64 > RECEIPT_MAX {
         return Err("receipt exceeds size limit".into());
     }
     let receipt: serde_json::Value =
@@ -76,7 +89,7 @@ pub fn derive(attempt: &Path, workspace: &Path, min_hits: u32) -> Result<Proposa
     loop {
         let mut line = Vec::new();
         let n = (&mut reader)
-            .take(1024 * 1024 + 1)
+            .take(FRAME_MAX as u64 + 1)
             .read_until(b'\n', &mut line)
             .map_err(|e| e.to_string())?;
         if n == 0 {
@@ -85,35 +98,30 @@ pub fn derive(attempt: &Path, workspace: &Path, min_hits: u32) -> Result<Proposa
         if !line.ends_with(b"\n") {
             return Err("incomplete or oversized journal frame".into());
         }
-        if line.is_empty() {
-            continue;
-        }
-        if line.len() > 1024 * 1024 {
+        if line.len() > FRAME_MAX {
             return Err("oversized journal frame".into());
         }
-        let event: serde_json::Value = serde_json::from_slice(&line).map_err(|e| e.to_string())?;
-        if event["attempt_id"].as_str() != Some(&proposal.provenance.attempt) {
+        let event: Event = serde_json::from_slice(&line).map_err(|e| e.to_string())?;
+        if event.attempt_id != proposal.provenance.attempt {
             return Err("mixed attempt journal".into());
         }
-        let op = event["operation"].as_str().unwrap_or("unknown");
+        let op = event.operation.as_str();
         *proposal
             .provenance
             .event_counts
             .entry(op.into())
             .or_default() += 1;
-        let fields = &event["fields"];
-        let evidence = format!(
-            "{}:{}",
-            event["source"].as_str().unwrap_or("?"),
-            event["source_seq"]
-        );
-        if fields["kind"] == "learning_read"
-            && matches!(
-                fields["errno"].as_str(),
-                Some("ENOENT" | "EACCES" | "EPERM")
-            )
+        let fields = &event.fields;
+        let field = |name: &str| fields.get(name).and_then(serde_json::Value::as_str);
+        let source = serde_json::to_value(event.source)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "?".to_owned());
+        let evidence = format!("{source}:{}", event.source_seq);
+        if field("kind") == Some(LEARNING_READ)
+            && matches!(field("errno"), Some("ENOENT" | "EACCES" | "EPERM"))
         {
-            if let Some(path) = fields["path"].as_str() {
+            if let Some(path) = field("path") {
                 let candidate = Path::new(path);
                 if candidate.starts_with(workspace)
                     || path.starts_with("/tmp/")
@@ -140,11 +148,11 @@ pub fn derive(attempt: &Path, workspace: &Path, min_hits: u32) -> Result<Proposa
                     proposal.unresolved_reads.push(path.into());
                 }
             }
-        } else if event["source"] == "proxy"
-            && event["decision"] == "deny"
-            && fields["reason"] == "host_not_allowed"
+        } else if event.source == EventSource::Proxy
+            && event.decision == Some(Decision::Deny)
+            && field("reason") == Some("host_not_allowed")
         {
-            if let Some(host) = fields["destination"].as_str()
+            if let Some(host) = field("destination")
                 && crate::network::parse_authority(host, None).is_ok()
             {
                 *hosts.entry(host.into()).or_default() += 1;
@@ -155,22 +163,27 @@ pub fn derive(attempt: &Path, workspace: &Path, min_hits: u32) -> Result<Proposa
                     .or_default()
                     .push(evidence);
             }
-        } else if (op == "fs.deny"
-            && fields["attempted_operation"]
-                .as_str()
-                .is_some_and(|s| s.starts_with("fs.")))
+        } else if (op == "fs.deny" && field("attempted_operation").is_some_and(|s| s.starts_with("fs.")))
             // The audit contract preserves EROFS under its original filesystem
             // operation. It is still a refused mutation for the learning report.
-            || (op.starts_with("fs.") && event["outcome"]["errno"] == "EROFS")
+            || (op.starts_with("fs.")
+                && event
+                    .outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.errno.as_deref())
+                    == Some("EROFS"))
         {
             // Plain paths report as themselves; digest snapshots and absent
             // fields keep their recorded JSON shape, never a quoted string.
-            proposal.denied_writes.push(match fields["path"].as_str() {
+            let path = fields.get("path").unwrap_or(&serde_json::Value::Null);
+            proposal.denied_writes.push(match path.as_str() {
                 Some(path) => path.to_owned(),
-                None => fields["path"].to_string(),
+                None => path.to_string(),
             });
         } else if op == "proc.exec" {
-            proposal.execs.push(fields.to_string());
+            proposal
+                .execs
+                .push(serde_json::Value::Object(fields.clone()).to_string());
         }
     }
     proposal.read_only = reads
@@ -192,10 +205,8 @@ pub fn derive(attempt: &Path, workspace: &Path, min_hits: u32) -> Result<Proposa
 // reads. This establishes a candidate at lookup time, not a durable grant.
 fn exact_host_object(path: &Path) -> bool {
     use crate::state::anchored::{Dir, Kind, split_absolute};
-    // Proposals must not suggest authority the boundary will always refuse.
-    if crate::policy::grant_exposes_pseudo_fs(path, false, &[]) {
-        return false;
-    }
+    // Proposals must not suggest authority the boundary will always refuse;
+    // the Linux platform's refusal reads the real mount topology.
     #[cfg(target_os = "linux")]
     if crate::platform::linux::platform::refuse_pseudo_fs_grants(
         &[(path.to_path_buf(), path.to_path_buf())],
@@ -232,9 +243,23 @@ fn exact_host_object(path: &Path) -> bool {
 }
 
 pub fn run(ctx: &Context, mut args: LearnArgs) -> Result<i32, String> {
-    if args.policy.observe.as_deref() == Some("off")
-        || args.policy.evidence.as_deref() == Some("best-effort")
-    {
+    // Parsed exactly as `run` parses them, so a spelling `run` would refuse
+    // is refused here too rather than replaced by the forced values below.
+    let observe = args
+        .policy
+        .observe
+        .as_deref()
+        .map(|text| crate::config::parse_observe("--observe", text))
+        .transpose()
+        .map_err(|e| e.message)?;
+    let evidence = args
+        .policy
+        .evidence
+        .as_deref()
+        .map(|text| crate::config::parse_evidence("--evidence", text))
+        .transpose()
+        .map_err(|e| e.message)?;
+    if observe == Some(ObserveMode::Off) || evidence == Some(EvidenceMode::BestEffort) {
         return Err("learn requires --observe on and strict evidence".into());
     }
     if args.adopt && !std::io::stdin().is_terminal() {
@@ -369,6 +394,14 @@ mod tests {
     use serde_json::json;
     use std::os::unix::fs::symlink;
 
+    /// One trace line: a complete `ouro.event/1` wrapper note with `fields`.
+    fn note(seq: u64, fields: serde_json::Value) -> String {
+        let mut event =
+            Event::lifecycle_note("fixture", seq, std::time::SystemTime::UNIX_EPOCH, 0, "x");
+        event.fields = fields.as_object().expect("an object").clone();
+        format!("{}\n", serde_json::to_string(&event).expect("serializes"))
+    }
+
     #[test]
     fn proposals_are_exact_filtered_and_receipt_bound() {
         let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
@@ -393,15 +426,14 @@ mod tests {
         let receipt = br#"{"attempt_id":"fixture","coverage":{"exec":{"status":"active"}}}"#;
         std::fs::write(attempt.join("jail.json"), receipt).unwrap();
         let events = [
-            json!({"kind":"learning_read", "errno":"ENOENT", "path":object}),
-            json!({"kind":"learning_read", "errno":"ENOENT", "path":object}),
-            json!({"kind":"learning_read", "errno":"EPERM", "path":alias}),
-            json!({"kind":"learning_read", "errno":"ENOENT", "path":workspace}),
+            json!({"kind":LEARNING_READ, "errno":"ENOENT", "path":object}),
+            json!({"kind":LEARNING_READ, "errno":"ENOENT", "path":object}),
+            json!({"kind":LEARNING_READ, "errno":"EPERM", "path":alias}),
+            json!({"kind":LEARNING_READ, "errno":"ENOENT", "path":workspace}),
         ];
         let mut journal = String::new();
-        for (seq, fields) in events.into_iter().enumerate() {
-            let event = json!({"attempt_id":"fixture", "operation":"note", "source":"wrapper", "source_seq":seq, "fields":fields});
-            journal.push_str(&format!("{event}\n"));
+        for (seq, fields) in (1..).zip(events) {
+            journal.push_str(&note(seq, fields));
         }
         std::fs::write(attempt.join("trace.ndjson"), &journal).unwrap();
         let proposal = derive(&attempt, &workspace, 2).unwrap();
@@ -414,7 +446,7 @@ mod tests {
         );
         assert_eq!(
             proposal.provenance.evidence[object.to_str().unwrap()],
-            ["wrapper:0", "wrapper:1"]
+            ["wrapper:1", "wrapper:2"]
         );
         assert!(
             derive(&attempt, &workspace, 3)
@@ -431,6 +463,38 @@ mod tests {
         );
     }
 
+    /// The trace holds `ouro.event/1` events and nothing else, so a line that
+    /// is not one (here: no schema, time or stage) is a corrupt journal, not
+    /// evidence to read loosely; and a line longer than any event the trace
+    /// writes is refused before it is parsed.
+    #[test]
+    fn a_trace_line_that_is_not_an_event_refuses() {
+        let temp = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        let attempt = temp.path().canonicalize().unwrap();
+        std::fs::write(attempt.join("jail.json"), br#"{"attempt_id":"fixture"}"#).unwrap();
+        let loose = json!({"attempt_id": "fixture", "operation": "note", "source": "wrapper",
+            "source_seq": 1, "fields": {"kind": LEARNING_READ, "errno": "ENOENT", "path": "/x"}});
+        std::fs::write(attempt.join("trace.ndjson"), format!("{loose}\n")).unwrap();
+        assert!(derive(&attempt, &attempt, 1).is_err());
+        // An event the trace would have refused to write: past EVENT_MAX.
+        let long = note(
+            1,
+            json!({"kind": "lifecycle", "pad": "x".repeat(crate::trace::EVENT_MAX)}),
+        );
+        std::fs::write(attempt.join("trace.ndjson"), long).unwrap();
+        assert!(
+            derive(&attempt, &attempt, 1)
+                .unwrap_err()
+                .contains("oversized")
+        );
+        std::fs::write(
+            attempt.join("trace.ndjson"),
+            note(1, json!({"kind": "lifecycle"})),
+        )
+        .unwrap();
+        assert!(derive(&attempt, &attempt, 1).is_ok());
+    }
+
     /// L1: the refusal list for learning roots (`/`, `/etc`, `/home`,
     /// `/Users`, `/proc`, `/sys`, `/dev`) must not be emptiable: a read of
     /// such a root is recorded as unresolved, never proposed as a grant.
@@ -444,13 +508,11 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(attempt.join("jail.json"), br#"{"attempt_id":"fixture"}"#).unwrap();
         let mut journal = String::new();
-        for (seq, path) in ["/etc", "/"].iter().enumerate() {
-            let event = json!({
-                "attempt_id": "fixture", "operation": "note", "source": "wrapper",
-                "source_seq": seq,
-                "fields": {"kind": "learning_read", "errno": "EACCES", "path": path},
-            });
-            journal.push_str(&format!("{event}\n"));
+        for (seq, path) in (1..).zip(["/etc", "/"]) {
+            journal.push_str(&note(
+                seq,
+                json!({"kind": LEARNING_READ, "errno": "EACCES", "path": path}),
+            ));
         }
         std::fs::write(attempt.join("trace.ndjson"), &journal).unwrap();
         let proposal = derive(&attempt, &workspace, 1).unwrap();

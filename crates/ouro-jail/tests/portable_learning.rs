@@ -1,6 +1,31 @@
 //! Learned output is a proposal with receipt-bound evidence, never a policy file.
 use serde_json::json;
 
+/// One complete `ouro.event/1` result event of the fixture attempt, as the
+/// trace records it (learning parses the typed event).
+fn event(
+    source: &str,
+    source_seq: usize,
+    operation: &str,
+    decision: Option<&str>,
+    outcome: serde_json::Value,
+    fields: serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "schema": "ouro.event/1",
+        "attempt_id": "fixture",
+        "source": source,
+        "source_seq": source_seq,
+        "observed_at": "2026-10-14T00:00:00Z",
+        "monotonic_ns": "1",
+        "operation": operation,
+        "stage": "result",
+        "decision": decision,
+        "outcome": outcome,
+        "fields": fields,
+    })
+}
+
 #[test]
 fn learning_filters_network_causes_and_never_grants_denied_writes() {
     let temp = tempfile::tempdir().unwrap();
@@ -16,10 +41,31 @@ fn learning_filters_network_causes_and_never_grants_denied_writes() {
         ("two.example:80", "host_not_allowed"),
         ("private.example:443", "address_not_allowed"),
     ] {
-        events.push(json!({"attempt_id":"fixture", "source":"proxy", "source_seq":events.len()+1,"operation":"net.connect","decision":"deny","fields":{"destination":destination,"reason":reason}}));
+        events.push(event(
+            "proxy",
+            events.len() + 1,
+            "net.connect",
+            Some("deny"),
+            json!({"ok": false, "completion": "proxy_close"}),
+            json!({"destination": destination, "reason": reason}),
+        ));
     }
-    events.push(json!({"attempt_id":"fixture", "source":"audit", "source_seq":1,"operation":"fs.deny","decision":"deny","fields":{"path":"/home/operator/private","attempted_operation":"fs.create"}}));
-    events.push(json!({"attempt_id":"fixture", "source":"audit", "source_seq":2,"operation":"fs.write","outcome":{"ok":false,"errno":"EROFS","return_value":-30},"fields":{"path":{"kind":"digest","digest":"sha256:fixture"},"action":"opened_for_mutation"}}));
+    events.push(event(
+        "audit",
+        1,
+        "fs.deny",
+        None,
+        json!({"ok": false, "errno": "EACCES", "return_value": -13, "completion": "syscall_return"}),
+        json!({"path": "/home/operator/private", "attempted_operation": "fs.create"}),
+    ));
+    events.push(event(
+        "audit",
+        2,
+        "fs.write",
+        None,
+        json!({"ok": false, "errno": "EROFS", "return_value": -30, "completion": "syscall_return"}),
+        json!({"path": {"kind": "digest", "digest": "sha256:fixture"}, "action": "opened_for_mutation"}),
+    ));
     let journal = events.iter().map(|e| format!("{e}\n")).collect::<String>();
     std::fs::write(root.join("trace.ndjson"), journal).unwrap();
     let proposal = ouro_jail::learn::derive(&root, &root.join("workspace"), 1).unwrap();
