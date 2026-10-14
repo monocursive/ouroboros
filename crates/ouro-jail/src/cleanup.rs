@@ -648,14 +648,76 @@ fn read_receipt(attempt_dir: &AttemptDir) -> Result<Option<Receipt>, JailError> 
         .map_err(|error| failure(error.to_string()))
 }
 
-fn scratch_is_managed(attempt_dir: &AttemptDir) -> bool {
-    let Ok(Some(bytes)) = state::read_capped(&attempt_dir.policy_path(), RECEIPT_MAX) else {
-        return false;
+/// What an attempt's scratch is, as its `policy.json` records it, and which
+/// managed directories are present.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Scratch {
+    /// Managed scratch: the [`state::MANAGED_DIRS`] present now.
+    Managed(Vec<&'static str>),
+    /// Nothing here is managed scratch: the policy names an operator
+    /// `--scratch`, which is never deleted, or there is no `policy.json`,
+    /// which the supervisor writes before it makes any scratch.
+    NotManaged,
+    /// Whether scratch is managed, or what is present, cannot be read; why.
+    /// Nothing is removed, and nothing is reported finished, on it.
+    Unknown(String),
+}
+
+impl Scratch {
+    /// Whether nothing managed is left: no managed directory present, or
+    /// none this tool would ever remove.
+    #[must_use]
+    pub fn is_gone(&self) -> bool {
+        match self {
+            Scratch::Managed(present) => present.is_empty(),
+            Scratch::NotManaged => true,
+            Scratch::Unknown(_) => false,
+        }
+    }
+
+    /// The same scratch with its managed directories looked up again (the
+    /// policy is not read twice).
+    #[must_use]
+    pub fn recheck(&self, attempt_dir: &AttemptDir) -> Scratch {
+        match self {
+            Scratch::Managed(_) => present_managed_dirs(attempt_dir),
+            other => other.clone(),
+        }
+    }
+}
+
+/// Reads what the attempt's scratch is (see [`Scratch`]).
+#[must_use]
+pub fn managed_scratch(attempt_dir: &AttemptDir) -> Scratch {
+    let bytes = match state::read_capped(&attempt_dir.policy_path(), RECEIPT_MAX) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Scratch::NotManaged,
+        Err(error) => return Scratch::Unknown(format!("policy.json cannot be read: {error}")),
     };
-    let Ok(policy) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return false;
+    let policy = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(policy) => policy,
+        Err(error) => return Scratch::Unknown(format!("policy.json is not JSON: {error}")),
     };
-    policy["snapshot"]["roots"]["scratch"]["kind"] == "managed"
+    match policy
+        .pointer("/snapshot/roots/scratch/kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("managed") => present_managed_dirs(attempt_dir),
+        Some("host") => Scratch::NotManaged,
+        _ => Scratch::Unknown("policy.json records no scratch kind this tool writes".to_owned()),
+    }
+}
+
+fn present_managed_dirs(attempt_dir: &AttemptDir) -> Scratch {
+    let mut present = Vec::new();
+    for name in state::MANAGED_DIRS {
+        match std::fs::symlink_metadata(attempt_dir.root().join(name)) {
+            Ok(_) => present.push(name),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Scratch::Unknown(format!("{name} cannot be inspected: {error}")),
+        }
+    }
+    Scratch::Managed(present)
 }
 
 /// Resumes an interrupted vendor-state cleanup from jail state (§12, §14.2).
@@ -675,7 +737,8 @@ fn scratch_is_managed(attempt_dir: &AttemptDir) -> bool {
 ///
 /// For a settled attempt the supervisor's `complete` also covers managed
 /// scratch and placeholder directories, so those are removed here too, with
-/// the same traversal, and only when `policy.json` says scratch was managed.
+/// the same traversal, and only when `policy.json` says scratch was managed;
+/// a `policy.json` that cannot be read keeps the cleanup pending.
 ///
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when jail state or the receipt
@@ -751,18 +814,27 @@ fn resume_within(
         && receipt
             .as_ref()
             .is_some_and(|receipt| receipt.phase == Phase::Settled)
-        && scratch_is_managed(attempt_dir)
     {
-        for name in ["scratch", "placeholders"] {
-            let removal = remove_managed_dir(attempt_dir, name, left(*visited));
-            *visited += removal.visited;
-            if !removal.complete {
-                result = VendorCleanup {
-                    status: StateCleanup::Pending,
-                    reason: removal.reason,
-                    record_error: None,
-                };
-                break;
+        match managed_scratch(attempt_dir) {
+            Scratch::Managed(present) => {
+                for name in present {
+                    let removal = remove_managed_dir(attempt_dir, name, left(*visited));
+                    *visited += removal.visited;
+                    if !removal.complete {
+                        result = VendorCleanup {
+                            status: StateCleanup::Pending,
+                            reason: removal.reason,
+                            record_error: None,
+                        };
+                        break;
+                    }
+                }
+            }
+            Scratch::NotManaged => {}
+            // The settled `complete` covers managed scratch too, so it is not
+            // recorded while what scratch is cannot be read.
+            Scratch::Unknown(reason) => {
+                result = VendorCleanup::pending(format!("scratch_unknown: {reason}"));
             }
         }
     }

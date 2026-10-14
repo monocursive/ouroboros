@@ -390,6 +390,14 @@ impl AttemptId {
     }
 }
 
+/// Managed scratch's name inside an attempt directory.
+pub const SCRATCH_NAME: &str = "scratch";
+/// The placeholder holders' name inside an attempt directory.
+pub const PLACEHOLDERS_NAME: &str = "placeholders";
+/// The managed directories of an attempt: removed at settlement, or by `gc`
+/// once the tree's end is proven, when the attempt's scratch is managed.
+pub const MANAGED_DIRS: [&str; 2] = [SCRATCH_NAME, PLACEHOLDERS_NAME];
+
 /// The attempt directory layout of §7.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct AttemptDir {
@@ -458,7 +466,13 @@ impl AttemptDir {
     /// `scratch/`: the default child-writable scratch directory.
     #[must_use]
     pub fn scratch_path(&self) -> PathBuf {
-        self.root.join("scratch")
+        self.root.join(SCRATCH_NAME)
+    }
+
+    /// `placeholders/`: the holders of workspace paths a run masks.
+    #[must_use]
+    pub fn placeholders_path(&self) -> PathBuf {
+        self.root.join(PLACEHOLDERS_NAME)
     }
 
     /// Creates the attempt root, checking every ancestor this tool owns.

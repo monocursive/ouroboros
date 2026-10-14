@@ -1468,6 +1468,87 @@ mod scripted {
         }
         assert!(scratches.iter().all(|scratch| !scratch.exists()));
     }
+
+    /// A `policy.json` gc cannot read leaves unknown whether the attempt's
+    /// scratch is managed. gc removes nothing on it, never records the
+    /// attempt finished (a later pass may find managed scratch there), says
+    /// so in the report and exits 1 (§6.4: a failed state access).
+    #[test]
+    fn scratch_whose_kind_cannot_be_read_is_never_finished() {
+        let fixture = Fixture::new();
+        let id = fresh_id();
+        let dir = fixture.root_of(&id);
+        free_lock(&dir);
+        claim_dead_owner(&dir, OTHER_BOOT);
+        let scratch = managed_scratch(&dir, 2);
+        private_file(&dir.policy_path(), b"{\"snapshot\": ");
+        for pass in 0..2 {
+            let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+            let report = run(&fixture, &host, false);
+            let entry = only(&report, &id);
+            assert!(scratch.join("f0").is_file(), "pass {pass}: {entry:?}");
+            assert!(
+                entry
+                    .scratch
+                    .as_deref()
+                    .is_some_and(|scratch| scratch.starts_with("unknown: ")),
+                "pass {pass}: {entry:?}"
+            );
+            assert!(
+                report.incomplete.iter().any(|item| item.contains(&id)),
+                "pass {pass}: {:?}",
+                report.incomplete
+            );
+            let state = read_json(&dir.state_path());
+            assert!(
+                state["gc_actions"].as_array().is_none_or(|actions| actions
+                    .iter()
+                    .all(|action| action["action"] != "gc_finished")),
+                "pass {pass}: finished while managed scratch may remain: {state:#}"
+            );
+        }
+    }
+
+    /// The vendor-state resumption of a settled attempt also removes its
+    /// managed scratch before it records `complete`. When `policy.json`
+    /// cannot be read, whether there is managed scratch is unknown, so the
+    /// cleanup stays pending in jail state and in the receipt: `complete`
+    /// would claim a removal nothing did.
+    #[test]
+    fn a_settled_cleanup_is_not_completed_while_its_scratch_kind_is_unknown() {
+        let fixture = Fixture::new();
+        let id = fresh_id();
+        let dir = fixture.root_of(&id);
+        free_lock(&dir);
+        claim_dead_owner(&dir, HOST_BOOT);
+        let vendor = vendor_state_pending(&dir);
+        settled_receipt(&dir, HOST_BOOT);
+        let scratch = managed_scratch(&dir, 2);
+        private_file(&dir.policy_path(), b"not json");
+        let host = Scripted::new(Liveness::Gone, LeafProbe::Absent);
+        let report = run(&fixture, &host, false);
+        let entry = only(&report, &id);
+        assert!(!vendor.exists(), "{entry:?}");
+        assert!(scratch.join("f0").is_file(), "{entry:?}");
+        let state = read_json(&dir.state_path());
+        assert_eq!(state["state_cleanup"], "pending", "{state:#}");
+        assert!(
+            state["cleanup_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("scratch_unknown: ")),
+            "{state:#}"
+        );
+        assert_eq!(
+            read_json(&dir.receipt_path())["state_cleanup"],
+            "pending",
+            "{entry:?}"
+        );
+        assert!(
+            report.incomplete.iter().any(|item| item.contains(&id)),
+            "{:?}",
+            report.incomplete
+        );
+    }
 }
 
 // ===========================================================================

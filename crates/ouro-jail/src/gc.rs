@@ -1591,6 +1591,14 @@ fn visit(
     let (action, reason) = combine(action, reason, &done);
     entry.action = action;
     entry.reason = reason;
+    // What is left after the resumption, which may remove managed scratch
+    // too. Scratch whose kind cannot be read may be managed scratch nothing
+    // removes: never finished, and reported as §6.4's failed state access.
+    let scratch = done.scratch.recheck(&dir);
+    if let cleanup::Scratch::Unknown(why) = &scratch {
+        entry.scratch = Some(format!("unknown: {why}"));
+        incomplete.push(format!("{display} (scratch: {why})"));
+    }
     // J4 wave 3 (G4): nothing is left for any later pass: the owner is
     // dead, the cgroup settled, no scratch, temporary file, proxy directory
     // or vendor state remains, and nothing failed. Recorded last, so a crash
@@ -1605,7 +1613,7 @@ fn visit(
             .as_deref()
             .is_none_or(|text| text.starts_with("removed "))
         && resumed_settled
-        && managed_scratch_present(&dir).is_none_or(|present| present.is_empty());
+        && scratch.is_gone();
     if finished {
         match record(&dir, "gc_finished", Value::Null, &mut entry.recorded) {
             Ok(()) => {}
@@ -1671,7 +1679,6 @@ fn unclaimed(dir: &AttemptDir) -> (&'static str, String) {
 }
 
 /// What [`reconcile`] did, for the entry's summary.
-#[derive(Default)]
 struct Done {
     /// The most significant step, as an action word: `terminated_orphan`,
     /// `removed_cgroup`, `removed_scratch` or their `would_` forms.
@@ -1680,6 +1687,8 @@ struct Done {
     failure: Option<String>,
     /// J4 wave 3 (G4): nothing is left for gc to do with the cgroup.
     cgroup_final: bool,
+    /// The attempt's scratch as this pass left it.
+    scratch: cleanup::Scratch,
 }
 
 /// Performs the cgroup and scratch steps of a decision and records them.
@@ -1692,7 +1701,12 @@ fn reconcile(
     meter: &mut Meter,
     entry: &mut Entry,
 ) -> Done {
-    let mut done = Done::default();
+    let mut done = Done {
+        action: None,
+        failure: None,
+        cgroup_final: false,
+        scratch: cleanup::managed_scratch(dir),
+    };
     // How the tree's end was verified by this pass, when it was.
     let mut verified: Option<&'static str> = None;
     match &decision.cgroup {
@@ -1758,7 +1772,7 @@ fn reconcile(
     let basis: Option<String> = match &decision.scratch {
         ScratchStep::NotApplicable => None,
         ScratchStep::Keep(reason) => {
-            if managed_scratch_present(dir).is_some_and(|present| !present.is_empty()) {
+            if !present(&done.scratch).is_empty() {
                 entry.scratch = Some(format!("retained: {reason}"));
             }
             None
@@ -1770,7 +1784,7 @@ fn reconcile(
             } else if let Some(basis) = verified {
                 Some(basis.to_owned())
             } else {
-                if managed_scratch_present(dir).is_some_and(|present| !present.is_empty()) {
+                if !present(&done.scratch).is_empty() {
                     entry.scratch = Some("retained: the tree's end was not verified".to_owned());
                 }
                 None
@@ -1942,17 +1956,14 @@ fn remove_named(
     )
 }
 
-/// The managed directories present, or `None` when scratch is not managed
-/// (an operator `--scratch` is never deleted) or the policy is unreadable.
-fn managed_scratch_present(dir: &AttemptDir) -> Option<Vec<&'static str>> {
-    let bytes = state::read_capped(&dir.policy_path(), RECORD_MAX).ok()??;
-    let policy: Value = serde_json::from_slice(&bytes).ok()?;
-    (policy.pointer("/snapshot/roots/scratch/kind") == Some(&Value::from("managed"))).then(|| {
-        ["scratch", "placeholders"]
-            .into_iter()
-            .filter(|name| std::fs::symlink_metadata(dir.root().join(name)).is_ok())
-            .collect()
-    })
+/// The managed directories present, or none when scratch is not managed (an
+/// operator `--scratch` is never deleted) or cannot be read ([`visit`]
+/// reports that).
+fn present(scratch: &cleanup::Scratch) -> &[&'static str] {
+    match scratch {
+        cleanup::Scratch::Managed(present) => present,
+        cleanup::Scratch::NotManaged | cleanup::Scratch::Unknown(_) => &[],
+    }
 }
 
 /// §14.2: "when tree death is unverified the scratch is retained and GC may
@@ -1967,9 +1978,7 @@ fn remove_scratch(
     entry: &mut Entry,
     done: &mut Done,
 ) {
-    let Some(present) = managed_scratch_present(dir) else {
-        return;
-    };
+    let present = present(&done.scratch).to_vec();
     if present.is_empty() {
         return;
     }
@@ -1985,6 +1994,7 @@ fn remove_scratch(
             done.failure
                 .get_or_insert_with(|| format!("scratch: {reason}"));
             entry.scratch = Some(reason);
+            done.scratch = done.scratch.recheck(dir);
             return;
         }
         let removal = cleanup::remove_managed_dir(
@@ -2004,9 +2014,11 @@ fn remove_scratch(
             done.failure
                 .get_or_insert_with(|| format!("scratch: {reason}"));
             entry.scratch = Some(reason);
+            done.scratch = done.scratch.recheck(dir);
             return;
         }
     }
+    done.scratch = done.scratch.recheck(dir);
     match record(
         dir,
         "gc_removed_scratch",
