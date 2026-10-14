@@ -459,14 +459,129 @@ pub enum Remediation {
     InspectState,
 }
 
+/// A closed vocabulary whose values a record spells as text.
+pub trait Vocabulary: Copy + de::DeserializeOwned {
+    /// The value's wire spelling.
+    fn as_str(self) -> &'static str;
+}
+
+impl Vocabulary for ErrorCode {
+    fn as_str(self) -> &'static str {
+        ErrorCode::as_str(self)
+    }
+}
+
+impl Vocabulary for ErrorStage {
+    fn as_str(self) -> &'static str {
+        ErrorStage::as_str(self)
+    }
+}
+
+/// A [`Vocabulary`] value as a record carries it: one this build knows, or
+/// a spelling it does not (a record another build wrote, or a schema value
+/// this build never raises, such as the stage `refused`), kept verbatim.
+///
+/// Reading never fails on the value, so an old or newer record stays
+/// readable to `gc`, cleanup and every other reader, and writing it back
+/// gives the same bytes. Two values are equal when their spellings are.
+#[derive(Clone, Debug)]
+pub enum Recorded<T> {
+    /// A value this build knows.
+    Known(T),
+    /// A spelling this build does not know.
+    Unknown(String),
+}
+
+impl<T: Vocabulary> Recorded<T> {
+    /// The value read from `text`: [`Recorded::Known`] exactly when a value
+    /// of `T` spells itself `text`.
+    #[must_use]
+    pub fn from_text(text: String) -> Self {
+        use de::IntoDeserializer as _;
+        let parsed: Result<T, de::value::Error> = T::deserialize(text.as_str().into_deserializer());
+        match parsed {
+            Ok(value) if value.as_str() == text => Recorded::Known(value),
+            _ => Recorded::Unknown(text),
+        }
+    }
+
+    /// The wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Recorded::Known(value) => value.as_str(),
+            Recorded::Unknown(text) => text,
+        }
+    }
+
+    /// The value, when this build knows it.
+    #[must_use]
+    pub fn known(&self) -> Option<T> {
+        match self {
+            Recorded::Known(value) => Some(*value),
+            Recorded::Unknown(_) => None,
+        }
+    }
+}
+
+impl<T: Vocabulary> From<T> for Recorded<T> {
+    fn from(value: T) -> Self {
+        Recorded::Known(value)
+    }
+}
+
+impl<T: Vocabulary> PartialEq for Recorded<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl<T: Vocabulary> Eq for Recorded<T> {}
+
+impl<T: Vocabulary> PartialEq<T> for Recorded<T> {
+    fn eq(&self, other: &T) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl<T: Vocabulary> PartialEq<str> for Recorded<T> {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl<T: Vocabulary> PartialEq<&str> for Recorded<T> {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl<T: Vocabulary> fmt::Display for Recorded<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<T: Vocabulary> Serialize for Recorded<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de, T: Vocabulary> Deserialize<'de> for Recorded<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Recorded::from_text)
+    }
+}
+
 /// The error object as it appears in a receipt (`$defs/error`).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ErrorObject {
-    /// Stable code from [`ErrorCode`].
-    pub code: String,
-    /// Lifecycle stage from [`ErrorStage`].
-    pub stage: String,
+    /// Stable code from [`ErrorCode`], or one this build does not know.
+    pub code: Recorded<ErrorCode>,
+    /// Lifecycle stage from [`ErrorStage`], or one this build does not know.
+    pub stage: Recorded<ErrorStage>,
     /// A safe message: never raw argv, environment values or credentials.
     pub message: String,
     /// The exact configuration key path, when the error names one.
@@ -550,8 +665,8 @@ impl JailError {
     #[must_use]
     pub fn to_object(&self) -> ErrorObject {
         ErrorObject {
-            code: self.code.as_str().to_owned(),
-            stage: self.stage.as_str().to_owned(),
+            code: self.code.into(),
+            stage: self.stage.into(),
             message: self.message.clone(),
             key_path: self.key_path.clone(),
             remediation_category: self.remediation,
@@ -574,13 +689,14 @@ impl fmt::Display for JailError {
 
 // P5, an error that reached no receipt is printed like any other
 /// The same one-line diagnostic as [`JailError`]'s, for an error known only
-/// in its wire form.
+/// in its wire form. A code or stage this build does not know was read from
+/// a record, not spelled here, so it is escaped like the message.
 impl fmt::Display for ErrorObject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write_error_line(
             f,
-            &self.code,
-            &self.stage,
+            &escape_control(self.code.as_str()),
+            &escape_control(self.stage.as_str()),
             self.remediation_category,
             &self.message,
             self.key_path.as_deref(),
@@ -646,8 +762,9 @@ fn write_error_line(
 ) -> fmt::Result {
     // Security 2026-09-27 (audit 3 A6): the message and key path carry untrusted
     // text (project-config values name both); the code and stage are this
-    // crate's own spellings. Escaped, the text cannot address the terminal or
-    // forge a second `ouro-jail:` line.
+    // crate's own spellings, or escaped by the caller when read from a
+    // record. Escaped, the text cannot address the terminal or forge a
+    // second `ouro-jail:` line.
     let message = escape_control(message);
     write!(
         f,
@@ -1928,6 +2045,100 @@ use std::io::Read as _;
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    fn fixture(name: &str) -> Value {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/specs/jail-v1/fixtures"
+        ))
+        .join(name);
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// An error's code and stage are typed, and still read whatever a record
+    /// spells: a code or stage this build does not know (another build's, or
+    /// the schema's `refused` stage) keeps the receipt, the outcome and the
+    /// control message readable, and every one writes back the bytes read.
+    #[test]
+    fn an_error_code_or_stage_this_build_does_not_know_still_reads() {
+        let receipt = fixture("receipt-trace-loss.json");
+        let typed: Receipt = serde_json::from_value(receipt.clone()).unwrap();
+        assert_eq!(typed.errors[0].code, ErrorCode::EvidenceLost);
+        assert_eq!(typed.errors[0].code.known(), Some(ErrorCode::EvidenceLost));
+        assert_eq!(typed.errors[0].stage, ErrorStage::Running);
+        assert_eq!(serde_json::to_value(&typed).unwrap(), receipt);
+
+        let foreign = json!({
+            "code": "a_code_from_another_build",
+            "stage": "refused",
+            "message": "m",
+            "remediation_category": "retry"
+        });
+        let mut receipt = receipt;
+        receipt["errors"] = json!([foreign.clone()]);
+        receipt["outcome"]["error"] = foreign.clone();
+        let typed: Receipt = serde_json::from_value(receipt.clone()).unwrap();
+        let error = &typed.errors[0];
+        assert_eq!(error.code.known(), None);
+        assert_eq!(error.code, "a_code_from_another_build");
+        assert_eq!(error.stage.known(), None);
+        assert_eq!(error.stage.as_str(), "refused");
+        assert_eq!(typed.outcome.error.as_ref(), Some(error));
+        assert_eq!(serde_json::to_value(&typed).unwrap(), receipt);
+
+        let mut control = fixture("control-tool.json")[0].clone();
+        control["error"] = foreign.clone();
+        let typed: ControlMessage = serde_json::from_value(control.clone()).unwrap();
+        assert_eq!(
+            typed.error.as_ref().unwrap().code,
+            "a_code_from_another_build"
+        );
+        assert_eq!(serde_json::to_value(&typed).unwrap(), control);
+    }
+
+    /// The typed object writes the bytes the strings did, for every value
+    /// a known spelling reads back as, and an unknown one prints escaped.
+    #[test]
+    fn a_recorded_value_spells_itself_and_prints_escaped_when_unknown() {
+        let error = JailError::new(
+            ErrorCode::ExecInterpreterMissing,
+            ErrorStage::Reconciling,
+            Remediation::InspectState,
+            "m",
+        );
+        let object = error.to_object();
+        assert_eq!(
+            serde_json::to_value(&object).unwrap(),
+            json!({"code": "exec_interpreter_missing", "stage": "reconciling", "message": "m",
+                "remediation_category": "inspect_state"})
+        );
+        assert_eq!(object.to_string(), error.to_string());
+        assert_eq!(
+            Recorded::<ErrorCode>::from_text("exec_interpreter_missing".to_owned()),
+            Recorded::Known(ErrorCode::ExecInterpreterMissing)
+        );
+        // Equal by spelling, however the value was built.
+        assert_eq!(
+            Recorded::<ErrorCode>::Unknown("evidence_lost".to_owned()),
+            ErrorCode::EvidenceLost
+        );
+        // Only the exact spelling is the value: one that differs in case is
+        // kept as read.
+        assert_eq!(
+            Recorded::<ErrorStage>::from_text("Running".to_owned()).known(),
+            None
+        );
+        let hostile = ErrorObject {
+            code: Recorded::Unknown("x\u{1b}]52;c;YQ==\u{7}".to_owned()),
+            ..object
+        };
+        let line = hostile.to_string();
+        assert!(
+            !line.contains('\u{1b}') && !line.contains('\u{7}'),
+            "{line}"
+        );
+        assert!(line.contains("x<U+001B>]52;c;YQ==<U+0007>"), "{line}");
+    }
 
     /// The wire bytes of every wrapper note this crate constructs.
     #[test]

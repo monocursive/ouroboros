@@ -1503,6 +1503,32 @@ mod tests {
         assert_eq!(std::fs::read(attempt.receipt_path()).unwrap(), bytes);
     }
 
+    /// gc's receipt reader takes an error code or stage this build does not
+    /// know as written: the receipt stays readable, so the attempt is not
+    /// left unsettleable by another build's vocabulary.
+    #[test]
+    fn a_receipt_with_an_error_this_build_does_not_know_is_read() {
+        let (_dir, attempt) = registered_attempt(None);
+        let mut receipt = serde_json::to_value(sample_receipt()).unwrap();
+        receipt["errors"] = serde_json::json!([{
+            "code": "a_code_from_another_build",
+            "stage": "refused",
+            "message": "m",
+            "remediation_category": "retry"
+        }]);
+        std::fs::write(
+            attempt.receipt_path(),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        let read = read_receipt(&attempt)
+            .expect("the receipt reads")
+            .expect("a receipt is there");
+        assert_eq!(read.errors[0].code, "a_code_from_another_build");
+        assert_eq!(read.errors[0].code.known(), None);
+        assert_eq!(read.errors[0].stage, "refused");
+    }
+
     fn sample_receipt() -> Receipt {
         use crate::observer::CoverageSummary;
         use crate::records::{

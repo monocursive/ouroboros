@@ -2973,10 +2973,7 @@ fn omit_past_the_item_bound(receipt: &mut Receipt) {
             });
         };
     omit_oldest(&mut receipt.errors, &|error| {
-        refusal.as_ref() == Some(error)
-            || ERRORS_KEPT_WHOLE
-                .iter()
-                .any(|code| code.as_str() == error.code)
+        refusal.as_ref() == Some(error) || ERRORS_KEPT_WHOLE.iter().any(|code| error.code == *code)
     });
     // Only errors kept whole are left: the oldest of them go too.
     omit_oldest(&mut receipt.errors, &|error| {

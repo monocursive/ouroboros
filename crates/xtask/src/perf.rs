@@ -796,7 +796,7 @@ pub fn receipt_facts(r: &Receipt) -> ReceiptFacts {
         outcome_kind: wire(r.outcome.kind),
         outcome_code: r.outcome.code.map(i64::from),
         outcome_cause: r.outcome.cause.clone(),
-        errors: r.errors.iter().map(|e| e.code.clone()).collect(),
+        errors: r.errors.iter().map(|e| e.code.to_string()).collect(),
         integrity: Some(r.lifetime.integrity.clone()),
         tree_empty: r.lifetime.tree_empty,
         observer_attached: r.observer.attached,
@@ -4451,8 +4451,8 @@ not json
         r.coverage.fs_write.status = SourceStatus::Degraded;
         r.coverage.fs_write.gaps = vec![gap(Some(5))];
         r.errors = vec![ouro_jail::records::ErrorObject {
-            code: "evidence_lost".to_owned(),
-            stage: "running".to_owned(),
+            code: ouro_jail::records::ErrorCode::EvidenceLost.into(),
+            stage: ouro_jail::records::ErrorStage::Running.into(),
             message: "m".to_owned(),
             key_path: None,
             remediation_category: ouro_jail::records::Remediation::InspectState,
