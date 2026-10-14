@@ -1567,4 +1567,39 @@ mod tests {
             super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&moved)).is_err()
         );
     }
+
+    /// A workspace granted both read-only and writable is read-only: the
+    /// narrower grant wins, whichever list the policy layers put it in. A
+    /// workspace in neither list is hidden.
+    #[test]
+    fn a_read_only_workspace_grant_wins_over_a_writable_one() {
+        use crate::policy::{PathRef, RootToken};
+        let workspace = PathRef {
+            root: RootToken::Workspace,
+            path: NativeString::Text(String::new()),
+        };
+        let paths = PlanPaths {
+            bwrap: Path::new("/usr/bin/bwrap"),
+            workspace: Path::new("/work"),
+            scratch: Path::new("/scratch"),
+            jail_exe: Path::new("/opt/ouro-jail"),
+            proxy_dir: None,
+        };
+        let access = |read_only: bool, read_write: bool| {
+            let mut snapshot = launch_snapshot(ProfileName::Tool, false);
+            snapshot.filesystem.read_only.clear();
+            snapshot.filesystem.read_write.clear();
+            if read_only {
+                snapshot.filesystem.read_only.push(workspace.clone());
+            }
+            if read_write {
+                snapshot.filesystem.read_write.push(workspace.clone());
+            }
+            plan_for(&snapshot, &paths).unwrap().workspace_access
+        };
+        assert_eq!(access(true, true), bwrap::WorkspaceAccess::ReadOnly);
+        assert_eq!(access(true, false), bwrap::WorkspaceAccess::ReadOnly);
+        assert_eq!(access(false, true), bwrap::WorkspaceAccess::Writable);
+        assert_eq!(access(false, false), bwrap::WorkspaceAccess::Hidden);
+    }
 }
