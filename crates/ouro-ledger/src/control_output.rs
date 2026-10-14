@@ -105,8 +105,10 @@ impl ControlOutput {
         }
         // Descriptor flags are per-fd. Do not change the shared open-file flags:
         // O_NONBLOCK on a dup would also change the caller's descriptor behavior.
+        // SAFETY: scalar fcntl calls on the descriptor `file` now owns.
         let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         if descriptor_flags < 0
+            // SAFETY: as above.
             || unsafe { libc::fcntl(fd, libc::F_SETFD, descriptor_flags | libc::FD_CLOEXEC) } < 0
         {
             return Err(std::io::Error::last_os_error().into());

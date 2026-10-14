@@ -13,7 +13,7 @@ rust_version = "1.98.1"
 
 # Cargo.lock, byte for byte
 [cargo_lock]
-sha256 = "a826264258b381e16a1b2f3f9aca7f1aed4c87efe387ec416ba57ce26e5703b9"
+sha256 = "22809b8e221ca87d21ea7e0af050423af9ba19b11fb4411bb66f2fe899c7e298"
 packages = 194
 
 # The seccomp programs' digests, from docs/specs/jail-v1/evidence/seccomp-table-*.txt
@@ -930,14 +930,16 @@ sections = '''
       "version": "4"
     },
     "libc": "0.2",
+    "ouro-records": {
+      "path": "../ouro-records"
+    },
     "serde": {
       "features": [
         "derive"
       ],
       "version": "1"
     },
-    "serde_json": "1",
-    "sha2": "0.10.9"
+    "serde_json": "1"
   },
   "dev-dependencies": {
     "tempfile": "3"
@@ -1093,9 +1095,12 @@ sections = '''
       "features": [
         "derive"
       ],
-      "version": "4"
+      "version": "4.6.6"
     },
-    "serde_json": "1"
+    "ouro-records": {
+      "path": "../ouro-records"
+    },
+    "serde_json": "1.0.151"
   }
 }
 '''
@@ -1110,6 +1115,9 @@ sections = '''
         "derive"
       ],
       "version": "4"
+    },
+    "ouro-fixture": {
+      "path": "../ouro-fixture"
     },
     "ouro-jail": {
       "path": "../ouro-jail"
@@ -1147,12 +1155,12 @@ sha256 = "491707ab300953f809dc34010f1c564995479247c16680a8043809ca5dc98c46"
 file = "jail-receipt.schema.json"
 id = "urn:ouro:schema:jail-receipt:1"
 identifier = "ouro.jail.receipt/1"
-sha256 = "2bb04b1823574a188fd8fdced61148c3d9a10554a4a7441a06b0e9458c5520b9"
+sha256 = "101fcaa7a343eb5eb01e144943fd946e8dc5d631e1a67e518f9b0a3ffbf57fa7"
 [[frozen_schemas.entry]]
 file = "policy-snapshot.schema.json"
 id = "urn:ouro:schema:jail-policy-snapshot:1"
 identifier = "ouro.jail.policy-snapshot/1"
-sha256 = "b73cd5eca9710f0b5e576937f8bf876836e52b1c8217d3c0dde4f3fd4f550157"
+sha256 = "b9b09f9a66e2b582863a6ad5c857762bb9586fa2707a627ba869f081b0e231e6"
 [[frozen_schemas.entry]]
 file = "jail-gate.schema.json"
 id = "urn:ouro:schema:jail-gate:1"
@@ -1174,64 +1182,6 @@ id = "urn:ouro:schema:learned-policy:1"
 identifier = "ouro.jail.learned-policy/1"
 sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"
 
-# --- the tested run (cargo xtask freeze --doctor); everything above is the tree ---
-[tested]
-debug_assertions = false
-dirty = false
-inputs = "sha256:083501cb1907d1f50684f40044fcaa429f0a3a970e06f6ca6764a5569fe5a9ce"
-opt_level = "3"
-ouro_jail_sha256 = "9c4f6619cfcb0434dbe326fa029af7d25ff3cb58170267d0940c85fb68089f68"
-platform_arch = "x86_64"
-platform_kernel = "Linux 7.0.0-31-generic"
-platform_os = "linux"
-ready = true
-revision = "7ea94a09d67c50abd6c75cfbcc396ed7160353df"
-rustc = "rustc 1.98.1 (48a229cea 2026-09-01)"
-target = "x86_64-unknown-linux-gnu"
-unknown = ["supervisor_scope.reason", "supervisor_scope.reason_code", "supervisor_scope.unit"]
-verification = ["inputs_match_tree", "revision_is_ancestor_of_head", "inputs_match_revision", "frozen_inputs_unchanged_since_revision"]
-
-[tested.backend]
-path = "/usr/bin/bwrap"
-sha256 = "523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6"
-version = "bubblewrap 0.11.1"
-
-[tested.host]
-apparmor_enabled = true
-cpus_online = 4
-distribution = "Ubuntu 26.04.1 LTS"
-kernel_release = "7.0.0-31-generic"
-kernel_version = "#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026"
-linger = true
-operator_identity = "unprivileged"
-privileged_groups = []
-systemd_version = "systemd 259 (259.5-0ubuntu3.4)"
-virtualization = "kvm"
-
-[tested.host.apparmor_userns_restriction]
-local_files = ["README"]
-profile_files = ["bwrap-userns-restrict", "glycin.bwrap", "lxc-usernsexec", "unprivileged_userns"]
-state = "on"
-unpackaged_files = []
-
-[tested.host.cgroup]
-controllers = ["cpu", "memory", "pids"]
-delegated_root = "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service"
-root_controllers = ["cpuset", "cpu", "io", "memory", "hugetlb", "pids", "rdma", "misc", "dmem"]
-subtree_control = ["cpu", "memory", "pids"]
-
-[tested.host.memory]
-mem_total_kib = 3905584
-swap_total_kib = 8388604
-
-[tested.host.sysctls]
-"kernel.apparmor_restrict_unprivileged_userns" = "1"
-"kernel.io_uring_disabled" = "0"
-"kernel.perf_event_paranoid" = "4"
-"kernel.unprivileged_bpf_disabled" = "2"
-"kernel.yama.ptrace_scope" = "1"
-"user.max_user_namespaces" = "11829"
-
-[tested.supervisor_scope]
-cgroup = "/user.slice/user-1001.slice/user@1001.service/app.slice/run-p1152491-i22123620.scope"
-state = "already_delegated"
+# No tested run is recorded: `cargo xtask freeze --doctor <run>/doctor.json`
+# records the milestone conformance run, and `cargo xtask freeze --check`
+# fails until it is.

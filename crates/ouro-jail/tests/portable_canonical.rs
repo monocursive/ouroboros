@@ -436,3 +436,80 @@ fn p01_non_utf8_paths_and_argv_survive_as_the_base64_object() {
     assert_eq!(argv[3], vec![0xffu8], "the byte argument survives decoding");
     assert_eq!(argv[2], Vec::<u8>::new(), "an empty argument is preserved");
 }
+
+/// Whether a host grant named its port is digest input (canonicalization.md,
+/// `network.tls_only`): `api.example.test` and `api.example.test:443` spell
+/// one canonical allow rule, admit different requests (only the second
+/// admits plaintext HTTP) and so resolve to different digests. A policy
+/// whose grants all name their ports has no `tls_only` member, so its bytes
+/// are what they were before the field existed; a rule granted both ways
+/// admits plaintext and is not TLS-only; and `tls_only` is a set like
+/// `allow`, so order and repetition do not move the digest.
+#[test]
+fn p01_whether_a_grant_named_its_port_is_digest_input() {
+    let resolve = |grants: &[&str]| -> Resolved {
+        let inputs = ResolveInputs {
+            platform: Os::Linux,
+            base_profile: ProfileName::Agent,
+            policy_name: "agent".to_owned(),
+            baseline: profiles::baseline(ProfileName::Agent, Os::Linux, &|_| None),
+            workspace: b"/srv/demo".to_vec(),
+            scratch: ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: None,
+            translation_prefixes: Vec::new(),
+            layers: vec![Layer {
+                origin: LayerOrigin::CommandLine,
+                base_dir: None,
+                delta: PolicyDelta {
+                    network_allow: grants.iter().map(|grant| (*grant).to_owned()).collect(),
+                    ..PolicyDelta::default()
+                },
+            }],
+        };
+        ouro_jail::policy::resolve(&inputs).expect("the policy resolves")
+    };
+    let canonical = |resolved: &Resolved| {
+        resolved
+            .snapshot
+            .to_canonical_value()
+            .expect("the snapshot canonicalizes")
+    };
+
+    let implied = resolve(&["api.example.test"]);
+    let explicit = resolve(&["api.example.test:443"]);
+    assert_eq!(
+        implied.snapshot.network.allow,
+        explicit.snapshot.network.allow
+    );
+    assert_ne!(implied.digest, explicit.digest);
+    assert_eq!(
+        canonical(&implied)["network"]["tls_only"],
+        serde_json::json!(["api.example.test:443"])
+    );
+    assert_eq!(
+        canonical(&explicit)["network"].get("tls_only"),
+        None,
+        "omitted when empty"
+    );
+
+    let both = resolve(&["api.example.test", "api.example.test:443"]);
+    assert!(both.snapshot.network.tls_only.is_empty());
+    assert_eq!(both.digest, explicit.digest);
+
+    let shuffled = resolve(&["b.example.test", "a.example.test", "b.example.test"]);
+    let sorted = resolve(&["a.example.test", "b.example.test"]);
+    assert_eq!(shuffled.digest, sorted.digest);
+    assert_eq!(
+        canonical(&sorted)["network"]["tls_only"],
+        serde_json::json!(["a.example.test:443", "b.example.test:443"])
+    );
+
+    let schema: serde_json::Value = serde_json::from_str(&read_text("policy-snapshot.schema.json"))
+        .expect("the snapshot schema is JSON");
+    let validator = jsonschema::validator_for(&schema).expect("the schema compiles");
+    for resolved in [&implied, &explicit, &both, &shuffled] {
+        let value = canonical(resolved);
+        assert!(validator.is_valid(&value), "{value}");
+    }
+}

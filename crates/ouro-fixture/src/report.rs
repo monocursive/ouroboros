@@ -15,6 +15,10 @@ pub struct OpReport {
     pub args: Map<String, Value>,
     pub ret: i64,
     pub errno: Option<String>,
+    /// The raw errno `errno` names, for the fixture's own decisions: the
+    /// name of a value outside the table does not read back as a number.
+    #[serde(skip)]
+    pub raw_errno: Option<c_int>,
 }
 
 impl OpReport {
@@ -25,13 +29,8 @@ impl OpReport {
             args: Map::new(),
             ret: 0,
             errno: None,
+            raw_errno: None,
         }
-    }
-
-    #[must_use]
-    pub fn with(mut self, key: &str, value: impl Into<Value>) -> Self {
-        self.args.insert(key.to_string(), value.into());
-        self
     }
 
     pub fn set(&mut self, key: &str, value: impl Into<Value>) {
@@ -41,9 +40,8 @@ impl OpReport {
     /// Record a raw syscall return and its errno name.
     pub fn result(&mut self, ret: i64, raw_errno: Option<c_int>) {
         self.ret = ret;
-        self.errno = raw_errno.map(|e| {
-            errno::name(e).map_or_else(|| format!("errno_{e}"), std::string::ToString::to_string)
-        });
+        self.errno = raw_errno.map(errno::spelling);
+        self.raw_errno = raw_errno;
     }
 
     #[must_use]
@@ -53,6 +51,29 @@ impl OpReport {
             format!("{{\"op\":\"report_error\",\"args\":{{}},\"ret\":-1,\"errno\":\"{e}\"}}")
         })
     }
+}
+
+/// The directions a descriptor is open for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenFor {
+    pub readable: bool,
+    pub writable: bool,
+}
+
+/// The directions `fd` is open for (`F_GETFL`), or `None` when it is not
+/// open.
+#[must_use]
+pub fn open_for(fd: c_int) -> Option<OpenFor> {
+    // SAFETY: `F_GETFL` only reads the status flags of a descriptor number.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return None;
+    }
+    let access = flags & libc::O_ACCMODE;
+    Some(OpenFor {
+        readable: access == libc::O_RDONLY || access == libc::O_RDWR,
+        writable: access == libc::O_WRONLY || access == libc::O_RDWR,
+    })
 }
 
 /// A path as JSON: always a lossy string for readability, plus the exact bytes
@@ -189,16 +210,10 @@ impl Reporter {
     /// Is this descriptor open and writable? A report that goes nowhere is a
     /// usage error, not a run that quietly succeeded.
     pub fn check_fd(fd: c_int) -> Result<(), String> {
-        // SAFETY: `F_GETFL` only reads the status flags of a descriptor number.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags < 0 {
-            return Err(format!("--report-fd {fd} is not open"));
-        }
-        let access = flags & libc::O_ACCMODE;
-        if access == libc::O_WRONLY || access == libc::O_RDWR {
-            Ok(())
-        } else {
-            Err(format!("--report-fd {fd} is not writable"))
+        match open_for(fd) {
+            None => Err(format!("--report-fd {fd} is not open")),
+            Some(access) if access.writable => Ok(()),
+            Some(_) => Err(format!("--report-fd {fd} is not writable")),
         }
     }
 

@@ -135,7 +135,8 @@ pub struct DoctorReport {
 /// separately." Each credential is named by the profile's own id, mode and
 /// destination; the support status is reported apart from the host probes.
 pub struct LaunchReadiness {
-    /// Embedded data or a trusted operator override.
+    /// `bundled` or `operator file`, the profile's `LaunchSource` spelling
+    /// (the doctor schema's enum).
     pub resolution: String,
     /// The launch profile name.
     pub name: String,
@@ -305,10 +306,11 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
             let path = if args.profile.is_some() {
                 absolutize(&ctx.cwd, Path::new(&selection))
             } else if let Some(suffix) = selection.strip_prefix("~/") {
-                ctx.home
+                let home = ctx
+                    .home
                     .as_ref()
-                    .ok_or_else(|| usage("jail.profile", "operator home is unavailable"))?
-                    .join(suffix)
+                    .ok_or_else(|| usage("jail.profile", "operator home is unavailable"))?;
+                config::absolute_dir(config::HOME_VAR, home)?.join(suffix)
             } else {
                 absolutize(&config_dir, Path::new(&selection))
             };
@@ -2997,6 +2999,7 @@ fn pending_applied(plan: &Plan) -> Applied {
             mode: mode.to_owned(),
             mechanism: None,
             allowed_hosts: Vec::new(),
+            tls_only: Vec::new(),
         },
         syscalls: None,
         limits: Vec::new(),
@@ -4562,6 +4565,7 @@ mod tests {
                     mode: "none".to_owned(),
                     mechanism: None,
                     allowed_hosts: Vec::new(),
+                    tls_only: Vec::new(),
                 },
                 syscalls: None,
                 limits: Vec::new(),

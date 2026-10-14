@@ -116,7 +116,7 @@ fn vendor_state_is_removed_after_normal_exit_writer_death_and_owner_death() {
             assert_eq!(ending, "writer-death", "{report:?}");
             assert_eq!(
                 report.problems,
-                vec!["oversized or interrupted canonical frame; bytes retained".to_owned()]
+                vec!["interrupted canonical frame; bytes retained".to_owned()]
             );
             let tail = canonical.rsplit(|byte| *byte == b'\n').next().unwrap();
             assert!(!tail.is_empty(), "interrupted frame must lack its newline");

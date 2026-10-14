@@ -581,6 +581,7 @@ mod d4 {
                     mode: "pending".to_owned(),
                     mechanism: None,
                     allowed_hosts: Vec::new(),
+                    tls_only: Vec::new(),
                 },
                 syscalls: None,
                 limits: Vec::new(),

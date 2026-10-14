@@ -1,9 +1,8 @@
 //! A private temporary directory, without a runtime dependency.
 //!
-//! The J1 contract allows `tempfile` only as a dev-dependency, and the harness
-//! lives in the library so `ouro-jail`'s own tests can use it. Forty lines of
-//! `mkdtemp` keep the binary's dependency set to `libc`, `clap`, `serde` and
-//! `serde_json`.
+//! `tempfile` is only a dev-dependency, and the harness lives in the library
+//! so `ouro-jail`'s own tests can use it. Forty lines of `mkdtemp` keep it
+//! out of the binary's dependencies.
 
 use std::ffi::{CString, OsString};
 use std::io;

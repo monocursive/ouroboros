@@ -172,7 +172,7 @@ impl Store {
             &coverage
         ));
         Ok(TailPage {
-            schema: "ouro.ledger.tail/1".into(),
+            schema: schemas::TAIL.into(),
             run_id: request.run_id.clone(),
             head: stream.run.chain.clone(),
             state: stream.run.state.clone(),

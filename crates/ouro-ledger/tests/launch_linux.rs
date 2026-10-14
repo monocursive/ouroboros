@@ -409,6 +409,29 @@ impl Fixture {
         Client::connect(&self.data).unwrap()
     }
 
+    /// Every run's projection, through the paginated catalog.
+    fn runs(&self) -> Vec<RunRecord> {
+        let mut client = self.client();
+        let mut runs = Vec::new();
+        let mut after = None;
+        loop {
+            let page = client
+                .catalog(&ouro_ledger::protocol::CatalogRequest {
+                    filter: Default::default(),
+                    after: after.take(),
+                    limit: 100,
+                })
+                .unwrap();
+            for summary in &page.runs {
+                runs.push(client.show(&summary.run_id).unwrap());
+            }
+            if page.done {
+                return runs;
+            }
+            after = page.next_after;
+        }
+    }
+
     fn events(&self, record: &RunRecord) -> Vec<Value> {
         fs::read(
             self.data
@@ -427,7 +450,7 @@ impl Fixture {
         let deadline = Instant::now() + COMMAND_LIMIT;
         loop {
             if self.workspace.join("started").exists() {
-                let runs = self.client().runs().unwrap();
+                let runs = self.runs();
                 assert_eq!(runs.len(), 1);
                 assert_eq!(
                     runs[0].state, "admitted",
@@ -750,7 +773,7 @@ fn invalid_inherited_stdout_is_denied_before_admission_and_never_executes() {
         .stderr(Stdio::piped());
     let first = Process::from_child(command.spawn().unwrap(), false).finish();
     assert_eq!(first.status.code(), Some(125));
-    let runs = fixture.client().runs().unwrap();
+    let runs = fixture.runs();
     assert_eq!(runs.len(), 1);
     let run = &runs[0];
     assert_eq!(run.state, "denied");
@@ -961,7 +984,7 @@ fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() 
             // a journal clear that must never occur.
             assert_eq!(
                 verification[0].problems,
-                vec!["oversized or interrupted canonical frame; bytes retained".to_owned()]
+                vec!["interrupted canonical frame; bytes retained".to_owned()]
             );
             let path = fixture
                 .data
@@ -1276,7 +1299,7 @@ fn best_effort_dead_owner_without_exit_record_stays_unknown() {
 }
 
 #[test]
-fn an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever() {
+fn an_unread_foreground_terminal_stops_forwarding_but_not_the_run() {
     let Some(jail) = live_jail() else {
         return;
     };
@@ -1290,18 +1313,33 @@ fn an_unread_foreground_capture_sink_cannot_hold_the_launch_owner_forever() {
         "--",
         "/bin/sh",
         "-c",
-        "head -c 2097152 /dev/zero; sleep 30",
+        "head -c 2097152 /dev/zero",
     ]);
     let started = Instant::now();
     let output = Process::spawn(&mut command, false).finish();
-    assert!(!output.status.success());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(started.elapsed() < COMMAND_LIMIT);
-    let runs = fixture.client().runs().unwrap();
+    let runs = fixture.runs();
     assert_eq!(runs.len(), 1);
-    let run = fixture.assert_unknown(&runs[0].run_id);
-    fixture.assert_tree_stopped(&run);
-    assert_eq!(run.capture["stdout"]["state"], "incomplete");
-    assert!(run.capture["stdout"]["stored_bytes"].as_u64().unwrap() <= 8);
+    let run = &runs[0];
+    assert_eq!(run.state, "settled");
+    let stdout = &run.capture["stdout"];
+    assert_eq!(stdout["state"], "captured");
+    assert_eq!(stdout["stored_bytes"], 8);
+    assert_eq!(stdout["observed_bytes"], 2_097_152);
+    let forwarding = &stdout["forwarding"];
+    assert_eq!(forwarding["reason"], "queue_full");
+    assert_ne!(forwarding["state"], "complete");
+    assert_eq!(
+        forwarding["delivered_bytes"].as_u64().unwrap()
+            + forwarding["undelivered_bytes"].as_u64().unwrap(),
+        2_097_152
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("stdout forwarding"));
 }
 
 fn detached_fixture() -> Option<Fixture> {
@@ -1549,7 +1587,7 @@ fn detached_lost_client_output_does_not_cancel_or_duplicate_the_attempt() {
         fs::read(fixture.workspace.join("executions")).unwrap(),
         b"x"
     );
-    assert_eq!(fixture.client().runs().unwrap().len(), 1);
+    assert_eq!(fixture.runs().len(), 1);
 }
 
 #[test]
@@ -1644,7 +1682,7 @@ fn detached_mode_refuses_a_session_bound_existing_writer() {
     let output = Process::spawn(&mut command, true).finish();
     assert!(!output.status.success());
     assert!(!fixture.workspace.join("must-not-execute").exists());
-    assert!(fixture.client().runs().unwrap().is_empty());
+    assert!(fixture.runs().is_empty());
 }
 
 #[test]

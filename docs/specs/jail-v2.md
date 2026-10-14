@@ -356,9 +356,13 @@ ouro-jail learn [--launch NAME] [--profile NAME] [--workspace PATH]
   not produce grants. A host lookup confirms existence at that time;
   it does not establish which inode a previous failed syscall needed.
 - **Network**: every proxy-source denial event with reason `host_not_allowed`
-  contributes its normalized destination as an `allow` proposal. Denied
-  destinations of other reasons are never proposed; they stay in the run's
-  own trace journal.
+  or `plaintext_not_granted` contributes its normalized destination as an
+  `allow` proposal, in the narrowest shape that admits what was refused: a
+  tunnel to port 443 as the bare host (TLS only), and a plaintext request, a
+  tunnel refused for its plaintext first flight or any other port with the
+  port written out (network-rules.md: an explicit port admits plaintext).
+  Denied destinations of other reasons are never proposed; they stay in the
+  run's own trace journal.
 - **Execs**: copy the observed exec fields into the proposal's notes,
   including explicit unavailable digests. Do not infer interpreter,
   library, environment or filesystem grants from an executable name.

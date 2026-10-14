@@ -1,7 +1,7 @@
 //! `ouro-fixture`: the conformance child of `ouro-jail` (jail-v1 §15) and the
 //! test harness that drives the jail around it.
 //!
-//! Two halves that never mix at run time:
+//! Two halves:
 //!
 //! * The **binary** runs *inside* the jail. Its only channels are stdio and
 //!   files under the workspace or scratch. It performs one named syscall per
@@ -13,6 +13,9 @@
 //!   It builds a private state directory, plumbs the gate/control/trace pipes,
 //!   runs `ouro-jail`, and reads back receipts, control messages and trace
 //!   events. It never sleeps to synchronise.
+//! * Between them, `perf-launch` (`perf`) is a mode of the binary that runs
+//!   *outside* the jail, as the parent of the measured command, and reads
+//!   the attempt back with the harness's trace recogniser.
 //!
 //! The modes, grouped by what they exercise:
 //!
@@ -37,6 +40,7 @@ pub mod errno;
 pub mod harness;
 pub mod net;
 pub mod ops;
+pub mod perf;
 pub mod raw;
 pub mod report;
 pub mod sandbox;
@@ -44,8 +48,8 @@ pub mod sockaddr;
 pub mod unix;
 
 /// Exit code when every expectation held.
-pub const EXIT_OK: i32 = 0;
+pub const EXIT_OK: u8 = 0;
 /// Exit code for a usage error, matching jail-v1 §6.4.
-pub const EXIT_USAGE: i32 = 2;
+pub const EXIT_USAGE: u8 = 2;
 /// Exit code when at least one operation did not match its `--expect`.
-pub const EXIT_EXPECTATION_FAILED: i32 = 3;
+pub const EXIT_EXPECTATION_FAILED: u8 = 3;

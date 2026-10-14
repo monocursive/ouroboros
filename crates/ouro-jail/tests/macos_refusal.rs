@@ -929,11 +929,11 @@ fn translation_prefixes_are_canonicalized_before_the_digest() {
     let harness = Harness::new();
     let write_config = |prefixes: &str| {
         // Prefixes merge into proxy policy only, so the trusted defaults file
-        // also selects the proxy mode for this attempt.
+        // also selects `agent`, the one profile with a proxy.
         std::fs::write(
             harness.config.join("config.toml"),
             format!(
-                "[jail.network]\nmode = \"proxy\"\n\n[jail_host.network]\ntranslation_prefixes = [{prefixes}]\n"
+                "[jail]\nprofile = \"agent\"\n\n[jail_host.network]\ntranslation_prefixes = [{prefixes}]\n"
             ),
         )
         .expect("the file is written");

@@ -255,6 +255,14 @@
                 "type": "string"
               },
               "maxItems": 1024
+            },
+            "tls_only": {
+              "description": "The allowed_hosts entries every grant of which omitted its port, which the proxy applied as TLS only: it refuses plaintext HTTP to them where network-rules.md (Normalization) says it can see it. Omitted when empty.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 1024
             }
           },
           "required": [
@@ -2136,6 +2144,9 @@
                     "type": "null"
                   },
                   "allowed_hosts": {
+                    "maxItems": 0
+                  },
+                  "tls_only": {
                     "maxItems": 0
                   }
                 }

@@ -1,8 +1,11 @@
 //! Bounded portable evidence bundles, independently replayable without a writer.
 use crate::{
     daemon::Client,
-    protocol::{LedgerError, ReadFilter, ReadPage, ReadRequest, ReadSelector, Result, RunRecord},
-    store,
+    protocol::{
+        CAPTURE_STREAMS, LedgerError, MAX_CAPTURE_BYTES, ReadFilter, ReadPage, ReadRequest,
+        ReadSelector, Result, RunRecord, read_bounded,
+    },
+    schemas, store,
 };
 use ouro_records::canonical::{sha256_prefixed, to_jcs};
 use serde::{Deserialize, Serialize};
@@ -20,7 +23,6 @@ pub(crate) mod files;
 mod signing;
 pub const MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RECORDS: u64 = 10_000;
-const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(300);
 
@@ -63,11 +65,7 @@ fn canonical_json(value: &impl Serialize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 fn read_json(file: impl Read) -> Result<Value> {
-    let mut bytes = Vec::new();
-    file.take(MAX_JSON_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_JSON_BYTES {
-        return Err(error("bundle JSON exceeds 4 MiB"));
-    }
+    let bytes = read_bounded(file, MAX_JSON_BYTES, "bundle JSON exceeds 4 MiB")?;
     let value: Value = serde_json::from_slice(&bytes)?;
     if canonical_json(&value)? != bytes {
         return Err(error("bundle JSON is not canonical with one LF"));
@@ -86,45 +84,22 @@ fn write_json(dir: &File, name: &str, value: &impl Serialize) -> Result<Member> 
     })
 }
 
+/// Copy a member while hashing exactly the bytes copied.
 fn copy_hash(
-    input: &mut File,
+    input: File,
     output: &mut impl Write,
     name: &str,
     max: u64,
     start: Instant,
 ) -> Result<Member> {
-    let before = input.metadata()?;
-    if before.len() > max {
-        return Err(error("bundle member exceeds its byte bound"));
-    }
-    let mut hash = Sha256::new();
-    let mut bytes = 0;
-    let mut buffer = [0u8; 65_536];
-    loop {
-        check_time(start)?;
-        let n = input.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        bytes += n as u64;
-        if bytes > max {
-            return Err(error("bundle member grew beyond its byte bound"));
-        }
-        hash.update(&buffer[..n]);
-        output.write_all(&buffer[..n])?;
-    }
-    let after = input.metadata()?;
-    if bytes != before.len() || bytes != after.len() || before.modified()? != after.modified()? {
-        return Err(error("bundle member changed while being read"));
-    }
-    Ok(Member {
-        name: name.into(),
-        bytes,
-        digest: format!("sha256:{:x}", hash.finalize()),
-    })
+    let mut reader = CheckedReader::new(input, max, start)?;
+    std::io::copy(&mut reader, output)?;
+    reader.finish(name)
 }
 
-// Hash precisely the bytes consumed by semantic replay, on the same descriptor.
+/// Hash precisely the bytes consumed, on the same descriptor, within the
+/// member's byte bound and the bundle's work budget, and refuse a member
+/// that changed while it was read.
 struct CheckedReader {
     file: File,
     before: std::fs::Metadata,
@@ -179,7 +154,7 @@ impl Read for CheckedReader {
 }
 
 fn capture_bytes(run: &RunRecord, name: &str) -> Result<u64> {
-    if !["stdout", "stderr", "argv"].contains(&name)
+    if !CAPTURE_STREAMS.contains(&name)
         || !["settled", "denied", "outcome_unknown"].contains(&run.state.as_str())
         || !run.payload["capture"]["streams"]
             .as_array()
@@ -252,11 +227,7 @@ fn assemble(
 ) -> Result<Value> {
     let start = Instant::now();
     let selected: BTreeSet<_> = captures.iter().map(String::as_str).collect();
-    if selected.len() != captures.len()
-        || selected
-            .iter()
-            .any(|s| !["stdout", "stderr", "argv"].contains(s))
-    {
+    if selected.len() != captures.len() || selected.iter().any(|s| !CAPTURE_STREAMS.contains(s)) {
         return Err(error("select stdout, stderr and/or argv once each"));
     }
     let stage = files::Staging::new(output)?;
@@ -337,7 +308,7 @@ fn assemble(
     events.seek(SeekFrom::Start(0))?;
     let mut members = vec![
         copy_hash(
-            &mut events,
+            events,
             &mut std::io::sink(),
             "events.ndjson",
             MAX_STREAM_BYTES,
@@ -357,10 +328,10 @@ fn assemble(
         for name in selected {
             let expected = capture_bytes(&run, name)?;
             let leaf = format!("{name}.bin");
-            let mut input = files::member(&artifacts, &leaf, false)?;
+            let input = files::member(&artifacts, &leaf, false)?;
             files::private(&input)?;
             let mut output = files::member(&stage.dir, &leaf, true)?;
-            let member = copy_hash(&mut input, &mut output, &leaf, MAX_CAPTURE_BYTES, start)?;
+            let member = copy_hash(input, &mut output, &leaf, MAX_CAPTURE_BYTES, start)?;
             if member.bytes != expected {
                 return Err(error("capture differs from its recorded size"));
             }
@@ -370,9 +341,9 @@ fn assemble(
     }
     let manifest = Manifest {
         schema: if signer.is_some() {
-            "ouro.ledger.bundle/2"
+            schemas::SIGNED_BUNDLE
         } else {
-            "ouro.ledger.bundle/1"
+            schemas::BUNDLE
         }
         .into(),
         authenticity: if signer.is_some() {
@@ -418,9 +389,8 @@ fn verify_directory(
 ) -> Result<Value> {
     let value = read_json(files::member(dir, "bundle.json", false)?)?;
     let manifest: Manifest = serde_json::from_value(value.clone())?;
-    let signed = manifest.schema == "ouro.ledger.bundle/2" && manifest.authenticity == "signed";
-    if !(signed
-        || (manifest.schema == "ouro.ledger.bundle/1" && manifest.authenticity == "unsigned"))
+    let signed = manifest.schema == schemas::SIGNED_BUNDLE && manifest.authenticity == "signed";
+    if !(signed || (manifest.schema == schemas::BUNDLE && manifest.authenticity == "unsigned"))
         || manifest.capture_digest_basis != "bundle_time"
         || !(2..=5).contains(&manifest.files.len())
     {
@@ -496,13 +466,13 @@ fn verify_directory(
         ));
     }
     check_time(start)?;
-    let mut report = json!({"schema":"ouro.ledger.bundle-verification/1", "run_id":run.run_id,
+    let mut report = json!({"schema":schemas::BUNDLE_VERIFICATION, "run_id":run.run_id,
         "snapshot":run.chain, "state":run.state, "child_protection":run.child_protection,
         "coverage":run.coverage, "local_consistency":true, "authenticity":"unsigned",
         "external_custody":false, "capture_digest_basis":"bundle_time", "captures":captures,
         "manifest_digest":sha256_prefixed(&canonical_json(&value)?)});
     if let Some(signature) = signature {
-        report["schema"] = json!("ouro.ledger.bundle-verification/2");
+        report["schema"] = json!(schemas::SIGNED_BUNDLE_VERIFICATION);
         report["authenticity"] = json!("signed");
         report["signature"] = signature;
     }

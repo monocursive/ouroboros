@@ -461,6 +461,13 @@ A recovery sync failure refuses startup; no recovered retry can be acknowledged 
 A valid chain is local consistency only: deleting both history and its same-user
 manifest anchor has no external witness in this slice.
 Source gaps remain explicit even when the hash chain is consistent.
+Whole-store `verify` re-reads history one page per writer request: at most 25
+runs, stopping before 8 MiB of canonical bytes unless a single run is larger, so
+live owners' requests interleave with it. Its `coverage` is the bounded summary
+(status, per-class status, sources and gap counts); `show` has the full record.
+`doctor` reports only the writer's accepted state (run count, ambiguous streams,
+unfinished deletions, blocked preparation and the index) without re-reading
+history; it is ready only when none of those is set. Use `verify` for a fresh check.
 
 ## 6. Captures and privacy
 
@@ -470,9 +477,12 @@ bytes, and records total observed bytes, stored bytes and `truncated`. A cap doe
 not block the child. Unselected streams are `not_captured`. Captures may contain
 secrets; the opt-in is recorded in preparation and the final canonical evidence.
 Foreground forwarding has a separate queue capped at 1 MiB per selected stream.
-A full or disconnected queue stops the tree and records an unknown outcome with
-incomplete capture. Final forwarding has a two-second drain deadline so it
-cannot block the owner's evidence and lifetime loop.
+Forwarding is display, not evidence: a full queue (a terminal slower than the
+child) or a lost terminal stops forwarding only. The owner keeps draining and
+capturing, and the stream's capture records `forwarding` with its `state`
+(`complete`, `stopped` or `unfinished`), the stop `reason`, and delivered and
+undelivered byte counts. Final forwarding has a two-second grace; bytes still
+queued then are recorded as undelivered (`unfinished`), never as an owner failure.
 Default metadata uses argv digests and existing jail-redacted observation fields.
 The ledger does not archive vendor state. Whole-run GC removes inventoried
 stdout/stderr/argv captures with canonical history. Capture-only expiry retains
@@ -537,9 +547,10 @@ has the same local-artifact integrity limits as output captures.
 
 Selected foreground streams are forwarded through separate queues of at most
 128 chunks of 8192 bytes each (1 MiB queued per stream). Queue overflow or a lost
-sink fails strict execution; forwarding completion has a two-second grace.
-Capture or forwarding failure records incomplete capture evidence and an unknown
-run outcome when the writer is reachable. Batch output uses independent sinks.
+sink stops forwarding and is recorded in the capture's `forwarding`; it does not
+stop the child or change the outcome. Capture failure records incomplete capture
+evidence and an unknown run outcome when the writer is reachable. Batch output
+uses independent sinks.
 
 `show RUN --with-transcript` explicitly displays private capture content. The
 ordinary `show` response remains metadata only. With the flag, the CLI returns

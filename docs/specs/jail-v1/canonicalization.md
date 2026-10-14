@@ -21,10 +21,10 @@ The complete hash input is the `ouro.jail.policy-snapshot/1` object validated
 by [policy-snapshot.schema.json](policy-snapshot.schema.json). The schema's
 `required` list and `additionalProperties: false` govern presence: every field
 the schema requires is present, optional values use null or empty arrays, and
-three kinds of value are omitted rather than emitted as null or false —
-`commands` when both filter lists are empty, `limits.swap`, `limits.storage`
-and `limits.inodes` when unset, and `observation.learning` when false. No
-other fields are accepted. Resolve configuration, expand the built-in profile and
+four kinds of value are omitted rather than emitted as null, false or empty —
+`commands` when both filter lists are empty, `network.tls_only` when empty,
+`limits.swap`, `limits.storage` and `limits.inodes` when unset, and
+`observation.learning` when false. No other fields are accepted. Resolve configuration, expand the built-in profile and
 apply project narrowing before constructing it:
 
 | Field | Canonical meaning |
@@ -35,7 +35,7 @@ apply project narrowing before constructing it:
 | platform | `linux` or `macos`; never kernel/build/probe results |
 | roots | Absolute resolved workspace; scratch as managed or explicit host path; vendor_state as managed or null |
 | filesystem | Effective read_write/read_only/deny_read path-reference sets, protected_segments set, protected_coverage |
-| network | Mode, normalized allow-rule set, ruleset identifier and configured translation-prefix set |
+| network | Mode, normalized allow-rule set, the TLS-only subset of it (`tls_only`, below), ruleset identifier and configured translation-prefix set |
 | limits | Seven ceilings: wall (ms), pids (count), mem (bytes) and cpu (percent, 100 = one core) always present, each null or `{value, required}`; swap (bytes), storage (aggregate writable bytes) and inodes (aggregate writable inode count) present only when set, each `{value, required}`. `value` is a decimal string; swap may be `0` (zero disables swap), every other ceiling is positive |
 | observation | mode on/off, evidence strict/best-effort, and the learning flag; `learning` is omitted when false |
 | commands | optional operator argv accident filters: `{deny, forbid}` pattern arrays, present only when either list is non-empty; both arrays are always present inside the object, possibly empty |
@@ -65,9 +65,19 @@ host names the credential may be sent to, `allow_plaintext` a boolean. The
 vendor version and the input file's identity are provenance, not semantic
 values.
 
-For network=proxy, ruleset is `ouro.jail.network/1`; for none/host it is null
-and allow/translation_prefixes are empty. Non-proxy policy changes cannot
-smuggle unused grants into the digest. Contained filesystem grants include
+For network=proxy, ruleset is `ouro.jail.network/1`; for none/host it is null,
+allow/translation_prefixes are empty and tls_only is absent. Non-proxy policy
+changes cannot smuggle unused grants into the digest.
+
+A canonical allow rule always writes its port, so it cannot say whether the
+grant named it, and that decides whether plaintext HTTP is admitted
+([network-rules.md](network-rules.md), Normalization). `network.tls_only`
+carries it: the canonical allow rules every grant of which omitted its port.
+A rule also granted with its port written out (`host` and `host:443` both
+given) admits plaintext and is not in `tls_only`. Two policies that differ
+only in that bit therefore have different digests; a policy with no
+omitted-port grant has no `tls_only` and keeps the bytes and digest it had
+before the field existed. Contained filesystem grants include
 resolved baseline runtime paths as well as operator grants. A fixture baseline
 does not authorize a production backend to omit or add runtime mounts.
 Capability requirements are derived from these semantics by §6.4 and the
@@ -80,7 +90,8 @@ duplicate keys in the keyed collections. Deduplicate set elements by their
 canonical bytes, then sort every set array lexicographically by each element's
 RFC 8785 UTF-8 bytes; the set arrays are `filesystem.read_write`,
 `filesystem.read_only`, `filesystem.deny_read`, `filesystem.protected_segments`,
-`network.allow`, `network.translation_prefixes` and `launch.state_subdirs`.
+`network.allow`, `network.tls_only`, `network.translation_prefixes` and
+`launch.state_subdirs`.
 Keyed collections are sorted the same way, by their elements' canonical bytes
 and not by key, and are never deduplicated (a duplicate key is refused where
 the collection is built); a credential's canonical bytes begin with `dest`

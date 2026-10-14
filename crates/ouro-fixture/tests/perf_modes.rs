@@ -1,4 +1,4 @@
-//! J5-E: the performance workloads and the per-launch launcher of
+//! The performance workloads and the per-launch launcher of
 //! `cargo xtask perf` (jail-v1 §5), run as real processes.
 //!
 //! `fileops` and `spawn-tree` are the fixed file-operation and the
@@ -11,42 +11,14 @@
 //! harness consumes; a line that claims work was done is checked against the
 //! filesystem or the process table.
 
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::ffi::OsString;
+use std::path::Path;
+use std::process::Output;
 
 use serde_json::{Value, json};
 
-const EXIT_EXPECTATION_FAILED: i32 = 3;
-const EXIT_USAGE: i32 = 2;
-
-fn fixture() -> PathBuf {
-    ouro_fixture::harness::fixture_path()
-}
-
-fn run<S: AsRef<OsStr>>(args: &[S]) -> Output {
-    Command::new(fixture())
-        .args(args.iter().map(AsRef::as_ref))
-        .output()
-        .expect("the fixture binary must run")
-}
-
-fn lines(out: &Output) -> Vec<Value> {
-    out.stdout
-        .split(|b| *b == b'\n')
-        .filter(|l| !l.is_empty())
-        .map(|l| {
-            serde_json::from_slice(l)
-                .unwrap_or_else(|e| panic!("not a JSON line: {e}: {}", String::from_utf8_lossy(l)))
-        })
-        .collect()
-}
-
-fn code(out: &Output) -> i32 {
-    out.status
-        .code()
-        .expect("the fixture must not die on a signal")
-}
+mod common;
+use common::{EXIT_EXPECTATION_FAILED, EXIT_USAGE, code, fixture, lines, run};
 
 fn tmp() -> ouro_fixture::harness::TempDir {
     ouro_fixture::harness::TempDir::new("ouro-fixture-perf").unwrap()
@@ -240,6 +212,10 @@ fn perf_launch(extra: &[OsString], argv: &[OsString]) -> Launch {
         String::from_utf8_lossy(&out.stderr)
     );
     let bytes = std::fs::read(&result_path).expect("perf-launch writes its result");
+    // What `cargo xtask perf` reads: strictly, every field present.
+    if let Err(e) = ouro_fixture::perf::PerfLaunchResult::parse(&bytes) {
+        panic!("{e}: {}", String::from_utf8_lossy(&bytes));
+    }
     let result: Value = serde_json::from_slice(&bytes).expect("the result is one JSON object");
     Launch { out, result }
 }
@@ -266,7 +242,7 @@ fn perf_launch_brackets_the_command_on_the_clock_the_workload_reads() {
         ],
     );
     let r = &launch.result;
-    assert_eq!(r["schema"], "ouro.fixture.perf-launch/1", "{r:#}");
+    assert_eq!(r["schema"], ouro_fixture::perf::PERF_LAUNCH_SCHEMA, "{r:#}");
     assert_eq!(r["exec_errno"], Value::Null, "{r:#}");
     assert_eq!(r["timed_out"], false);
     assert_eq!(r["status"]["exited"], true, "{r:#}");
@@ -310,10 +286,12 @@ fn perf_launch_reads_the_clock_before_fork_and_again_after_exec() {
     let (start, _) = start_and_summary(&launch.out, "spawn-tree");
     let (t0, exec) = (n(r, &["t0_ns"]), n(r, &["exec_ns"]));
     // fork and exec take time, so the pre-fork reading is strictly earlier
-    // than the one taken once the exec is confirmed, which precedes the
-    // target's own entry reading.
+    // than the one taken once the exec is confirmed, and than the target's
+    // own entry reading. The launcher learns of the exec only when it is
+    // scheduled again, so the target may well read the clock first: the
+    // two later readings have no order.
     assert!(t0 < exec, "{t0} {exec}");
-    assert!(exec <= u64_at(&start, "monotonic_ns"), "{r:#} {start}");
+    assert!(t0 < u64_at(&start, "monotonic_ns"), "{r:#} {start}");
 }
 
 /// Linux only: sampling reads /proc. On macOS the test does not exist rather
@@ -392,20 +370,22 @@ fn receipt_with_leaf(leaf: &Path) -> Value {
     receipt
 }
 
-/// A trace whose last frame is the note of `receipt`, as the product ends one.
+/// A trace whose last frame is the note of `receipt`, as the product ends one:
+/// every frame of the receipt's own attempt.
 fn trace_ending_on(receipt: &[u8]) -> Vec<u8> {
     let (phase, digest) = ouro_fixture::harness::receipt_note_of(receipt).unwrap();
+    let attempt = serde_json::from_slice::<Value>(receipt).unwrap()["attempt_id"].clone();
     let event = json!({
-        "schema": "ouro.event/1", "attempt_id": "att_x", "source": "audit",
+        "schema": "ouro.event/1", "attempt_id": attempt, "source": "audit",
         "source_seq": 1, "operation": "fs.write", "stage": "result",
     });
     let note = json!({
-        "schema": "ouro.event/1", "attempt_id": "att_x", "source": "wrapper",
+        "schema": "ouro.event/1", "attempt_id": attempt, "source": "wrapper",
         "source_seq": 1, "operation": "jail.receipt", "stage": "result",
         "fields": { "phase": phase, "receipt_digest": digest },
     });
     let exit = json!({
-        "schema": "ouro.event/1", "attempt_id": "att_x", "source": "wrapper",
+        "schema": "ouro.event/1", "attempt_id": attempt, "source": "wrapper",
         "source_seq": 0, "operation": "note", "stage": "result",
         "fields": { "kind": "coverage_gap" },
     });
@@ -451,7 +431,7 @@ fn perf_launch_finds_the_leaf_from_the_receipt_and_harvests_the_attempt() {
     let a = &attempts[0];
     assert_eq!(a["id"], "att_x");
     assert_eq!(a["receipt"], true);
-    let t = &a["trace"];
+    let t = &a["trace"]["read"];
     assert_eq!(t["state"], "complete", "{r:#}");
     assert_eq!(t["frames"], 4);
     assert_eq!(
@@ -488,7 +468,7 @@ fn perf_launch_says_when_a_trace_does_not_end_on_its_receipt() {
         &["--data-dir".into(), os(&state.path().join("data"))],
         &["/usr/bin/true".into()],
     );
-    let t = &launch.result["attempts"][0]["trace"];
+    let t = &launch.result["attempts"][0]["trace"]["read"];
     assert_eq!(t["state"], "complete", "{t:#}");
     assert!(
         t["guard"]

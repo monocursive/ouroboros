@@ -785,9 +785,10 @@ fn n03_host_and_absolute_uri_disagreement_refuses_before_resolution() {
 
 /// Plaintext HTTP requires a grant that named its port explicitly (audit
 /// 2026-10-08 L21): a host-only grant is the omitted-port expansion to 443,
-/// the TLS shape, so a plain request to it is refused before resolution.
+/// the TLS shape, so a plain request to it is refused before resolution,
+/// as `plaintext_not_granted` (the host rule did permit the destination).
 /// Any explicitly granted port serves plaintext — 80 or an origin port —
-/// and CONNECT is not subject to the rule.
+/// and CONNECT itself is not subject to the rule.
 #[test]
 fn n03_plaintext_http_requires_a_grant_that_named_its_port() {
     let resolver = fixtures("", &[]);
@@ -798,6 +799,12 @@ fn n03_plaintext_http_requires_a_grant_that_named_its_port() {
     };
     // Plaintext against a host-only (port 443) grant is refused.
     let harness = start(&allow(&["127.0.0.1"]), &resolver);
+    let (status, reason) = refused(
+        &harness,
+        "GET http://127.0.0.1:443/ HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n",
+    );
+    assert_eq!((status, reason.as_str()), (403, "plaintext_not_granted"));
+    // A plain request to a port no rule names is refused by the host rule.
     let (status, reason) = refused(
         &harness,
         "GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
@@ -834,12 +841,12 @@ fn n03_plaintext_http_requires_a_grant_that_named_its_port() {
     harness.stop(WAIT);
 }
 
-/// L21 through resolution: the `agent` proxy enforces the typed rules the
-/// resolver produced, not a re-parse of the snapshot's canonical strings,
-/// which always write the port. A host-only grant, from the command line or
-/// from a launch profile, refuses plaintext HTTP to port 443 before
-/// resolving and still lets CONNECT past the host rule; an explicit `:443`
-/// grant passes both. (Past the host rule the loopback answer is a
+/// L21 through resolution: the `agent` proxy enforces the rules the
+/// snapshot states, the canonical strings (which always write the port)
+/// with `tls_only`, not a re-parse of the strings alone. A host-only grant,
+/// from the command line or from a launch profile, refuses plaintext HTTP
+/// to port 443 before resolving and still lets CONNECT past the host rule;
+/// an explicit `:443` grant passes both. (Past the host rule the loopback answer is a
 /// forbidden address, which proves the rule let the request through.)
 #[test]
 fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
@@ -850,6 +857,11 @@ fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
     use ouro_jail::records::Os;
 
     let resolve = |layer: Layer| -> Rules {
+        let explicit = layer
+            .delta
+            .network_allow
+            .iter()
+            .all(|grant| grant.ends_with(":443"));
         let inputs = ResolveInputs {
             platform: Os::Linux,
             base_profile: ProfileName::Agent,
@@ -866,6 +878,14 @@ fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
             .expect("the policy resolves")
             .snapshot;
         assert_eq!(snapshot.network.allow, ["fixture.test:443"]);
+        // The snapshot itself says which: `tls_only` is all the proxy reads
+        // besides the canonical rules.
+        assert_eq!(
+            snapshot.network.tls_only.is_empty(),
+            explicit,
+            "{:?}",
+            snapshot.network.tls_only
+        );
         snapshot.network.proxy_rules().expect("the rules build")
     };
     let cli = |grant: &str| Layer {
@@ -935,7 +955,7 @@ fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
         } else {
             assert_eq!(
                 (plain.0, plain.1.as_str()),
-                (403, "host_not_allowed"),
+                (403, "plaintext_not_granted"),
                 "{label}"
             );
             assert_eq!(
@@ -951,6 +971,56 @@ fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
             "{label}: CONNECT passes the host rule"
         );
         harness.stop(WAIT);
+    }
+}
+
+/// A tunnel whose first flight is plaintext HTTP carries plaintext HTTP, so
+/// under an omitted-port grant it is refused `plaintext_not_granted` once
+/// the flight shows it, before any upstream connection; a TLS first flight
+/// passes, and an explicit `:443` grant admits both. The numeric grant only
+/// lets the loopback answer through the address check. Past the check the
+/// tunnel connects to port 443 (refused, or relayed if something listens),
+/// so any other result proves the check let it through.
+#[test]
+fn n03_plaintext_inside_a_tunnel_needs_a_grant_that_named_its_port() {
+    for (grant, plaintext_admitted) in [("fixture.test", false), ("fixture.test:443", true)] {
+        for (label, flight, plaintext) in [
+            (
+                "an HTTP first flight",
+                b"GET / HTTP/1.1\r\nHost: fixture.test:443\r\n\r\n".to_vec(),
+                true,
+            ),
+            ("a TLS first flight", client_hello("fixture.test"), false),
+        ] {
+            let resolver = fixtures("fixture.test", &["127.0.0.1"]);
+            let harness = start(&allow(&[grant, "127.0.0.1:443"]), &resolver);
+            let mut client = harness.connect();
+            client
+                .write_all(connect_request("fixture.test:443").as_bytes())
+                .expect("writes");
+            assert_eq!(read_head(&mut client).0, 200, "{grant}, {label}");
+            client.write_all(&flight).expect("writes the first flight");
+            drop(client);
+            let result = harness.sink.wait_for(1).remove(0);
+            assert_eq!(result.kind, RequestKind::Connect);
+            if plaintext && !plaintext_admitted {
+                assert_eq!(result.decision, ProxyDecision::Deny, "{grant}, {label}");
+                assert_eq!(
+                    result.reason,
+                    Reason::PlaintextNotGranted,
+                    "{grant}, {label}"
+                );
+                assert_eq!(result.connected, None, "refused before connecting");
+            } else {
+                assert_ne!(
+                    result.reason,
+                    Reason::PlaintextNotGranted,
+                    "{grant}, {label}"
+                );
+                assert_eq!(result.decision, ProxyDecision::Allow, "{grant}, {label}");
+            }
+            harness.stop(WAIT);
+        }
     }
 }
 

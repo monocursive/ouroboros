@@ -27,7 +27,8 @@ const SIDECARS: [&str; 3] = [
 ];
 const APPLICATION_ID: i32 = 0x4f55_524f; // OURO
 const VERSION: i32 = 1;
-const MAX_RUN_BYTES: usize = 4 * MAX_FRAME_BYTES;
+/// The bound on one run projection, wherever it is read.
+pub(crate) const MAX_RUN_BYTES: usize = 4 * MAX_FRAME_BYTES;
 // Bound a disposable file before asking SQLite to parse it and bound growth.
 const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 const RUNS_SQL: &str = "CREATE TABLE runs (
@@ -63,7 +64,7 @@ fn sqlite<T>(result: rusqlite::Result<T>) -> Result<T> {
 }
 
 fn private_metadata(metadata: &fs::Metadata, directory: bool) -> Result<()> {
-    if metadata.uid() != unsafe { libc::geteuid() }
+    if metadata.uid() != crate::os::euid()
         || metadata.mode() & 0o077 != 0
         || if directory {
             !metadata.is_dir()
@@ -348,7 +349,7 @@ mod tests {
             holds: vec![],
             history: None,
             capture_history: None,
-            schema: "ouro.ledger.run/1".into(),
+            schema: crate::schemas::RUN.into(),
             run_id: id.into(),
             attempt_id: format!("attempt_{id}"),
             request_id: format!("request_{id}"),

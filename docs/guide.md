@@ -235,8 +235,12 @@ was actually applied.
 
 - `--ro PATH` makes a file or directory visible for reading.
 - `--rw PATH` permits changes to that path.
-- `--allow-host HOST:PORT` allows a proxied destination with the `agent`
-  profile. Without a port, the grant means port 443.
+- `--allow-host HOST[:PORT]` allows a proxied destination with the `agent`
+  profile. Without a port, the grant is TLS only: it admits a tunnel to port
+  443, and the proxy refuses plaintext HTTP to it (except inside a tunnel to
+  a bare IP address, which it does not inspect). Plaintext HTTP needs the
+  port written out (`HOST:80`, or `HOST:443` for plaintext on 443); the
+  receipt lists TLS-only grants in `applied.network.tls_only`.
 - `--limit wall=5m` sets a deadline. Resource limits use forms such as
   `--limit mem=512MiB`, `--limit pids=64`, or `--limit cpu=100` for one core's
   worth of CPU bandwidth. Every explicit limit is required.
@@ -373,7 +377,10 @@ ouro-jail learn --launch opencode --workspace "$PWD" \
 ```
 
 The proposal can include exact read-only paths and denied network
-destinations. Denied writes are reported without becoming write grants.
+destinations. A refused tunnel to port 443 is proposed as the bare host,
+which grants TLS only; a destination is proposed with its port only when
+the run sent plaintext HTTP there. Denied writes are reported without
+becoming write grants.
 Read the proposal, check that the access fits the task, and then apply only
 what you intend. `--adopt` shows the change and requires confirmation in an
 interactive terminal.

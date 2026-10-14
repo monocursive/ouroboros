@@ -30,7 +30,15 @@ one rule, port 443, and that expansion is the TLS shape: plaintext HTTP
 requires a grant that named its port explicitly (any port — an explicit
 `host:8080` grant serves a plaintext origin on 8080), while a plain request
 against an omitted-port grant has no rule that permits it (audit 2026-10-08
-L21). IPv6 uses RFC 5952 lowercase compressed form
+L21). Because the canonical rule writes the port either way, the snapshot
+lists the rules every grant of which omitted its port in `network.tls_only`
+([canonicalization.md](canonicalization.md)), and the receipt lists the ones
+the proxy applied that way in `applied.network.tls_only`. The proxy refuses
+plaintext HTTP to them as `plaintext_not_granted`: an absolute-form `http://`
+request, or a CONNECT or SOCKS5 tunnel to a name whose first flight is an
+HTTP request. A tunnel to an address is not inspected (its result says
+`explicit_ip`), so for an address rule the TLS shape holds only for requests
+the proxy parses. IPv6 uses RFC 5952 lowercase compressed form
 in brackets; IPv4-mapped addresses use their normalized IPv4 form.
 
 Normalize `::ffff:0:0/96` IPv4-mapped IPv6 to the embedded IPv4 before address

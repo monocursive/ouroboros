@@ -3,7 +3,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
 };
@@ -12,7 +12,10 @@ use ouro_records::canonical::to_jcs;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::protocol::{LedgerError, Result};
+use crate::{
+    protocol::{LedgerError, Result, read_bounded, sha256_digest},
+    schemas,
+};
 
 pub(crate) const NAME: &str = "segments.json";
 pub(crate) const STREAM: &str = "events-0001.ndjson";
@@ -85,25 +88,13 @@ enum Wire {
     Legacy(Legacy),
 }
 
-fn digest(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..]
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-}
-
 fn safe_file(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)?;
     let m = file.metadata()?;
-    if !m.is_file()
-        || m.uid() != unsafe { libc::geteuid() }
-        || m.mode() & 0o077 != 0
-        || m.nlink() != 1
-    {
+    if !m.is_file() || m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 || m.nlink() != 1 {
         return Err(LedgerError("unsafe segment manifest".into()));
     }
     Ok(file)
@@ -116,11 +107,9 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
         Err(e) => return Err(e.into()),
         Ok(_) => {}
     }
-    let mut bytes = Vec::new();
-    safe_file(&path)?
-        .take(MAX_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_BYTES || bytes.last() != Some(&b'\n') {
+    const REFUSAL: &str = "oversized or interrupted segment manifest";
+    let mut bytes = read_bounded(safe_file(&path)?, MAX_BYTES, REFUSAL)?;
+    if bytes.last() != Some(&b'\n') {
         return Err(LedgerError(
             "oversized or interrupted segment manifest".into(),
         ));
@@ -129,9 +118,9 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
     let wire: Wire = serde_json::from_slice(&bytes)?;
     let value = serde_json::to_value(&wire)?;
     let manifest = match wire {
-        Wire::Current(m) if m.schema == "ouro.ledger.segments/2" => m,
-        Wire::Legacy(m) if m.schema == "ouro.ledger.segments/1" => Manifest {
-            schema: "ouro.ledger.segments/2".into(),
+        Wire::Current(m) if m.schema == schemas::SEGMENTS => m,
+        Wire::Legacy(m) if m.schema == schemas::SEGMENTS_V1 => Manifest {
+            schema: schemas::SEGMENTS.into(),
             run_id: m.run_id,
             attempt_id: m.attempt_id,
             segments: vec![m.segment],
@@ -147,21 +136,32 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
                 && Some(s.first_seq) == next_seq
                 && s.last_seq >= s.first_seq
                 && s.bytes > 0
-                && digest(&s.digest)
-                && digest(&s.head_digest);
+                && sha256_digest(&s.digest)
+                && sha256_digest(&s.head_digest);
             next_seq = s.last_seq.checked_add(1);
             valid
         });
     if to_jcs(&value).map_err(|e| LedgerError(e.to_string()))? != bytes
         || manifest.run_id != run_id
         || !valid_segments
-        || !digest(&manifest.replay_digest)
+        || !sha256_digest(&manifest.replay_digest)
     {
         return Err(LedgerError(
             "segment manifest identity or canonical encoding mismatch".into(),
         ));
     }
     Ok(Some(manifest))
+}
+
+/// The exact published bytes: canonical JSON and one LF, within the bound.
+pub(crate) fn encode(manifest: &Manifest) -> Result<Vec<u8>> {
+    let mut bytes =
+        to_jcs(&serde_json::to_value(manifest)?).map_err(|e| LedgerError(e.to_string()))?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(LedgerError("segment manifest exceeds bounded size".into()));
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn write(directory: &Path, manifest: &Manifest) -> Result<()> {
@@ -173,10 +173,7 @@ pub(crate) fn write(directory: &Path, manifest: &Manifest) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    let bytes = to_jcs(&serde_json::to_value(manifest)?).map_err(|e| LedgerError(e.to_string()))?;
-    if bytes.len() as u64 + 1 > MAX_BYTES {
-        return Err(LedgerError("segment manifest exceeds bounded size".into()));
-    }
+    let bytes = encode(manifest)?;
     let temp = directory.join(format!(".segments-{}.tmp", Uuid::new_v4().simple()));
     let result = (|| -> Result<()> {
         let mut file = OpenOptions::new()
@@ -188,7 +185,6 @@ pub(crate) fn write(directory: &Path, manifest: &Manifest) -> Result<()> {
         #[cfg(test)]
         crate::faults::hit("manifest.before_write")?;
         file.write_all(&bytes)?;
-        file.write_all(b"\n")?;
         #[cfg(test)]
         crate::faults::hit("manifest.before_sync")?;
         file.sync_all()?;

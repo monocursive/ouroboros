@@ -18,6 +18,8 @@ pub(crate) enum Refusal {
     EscapesRoot,
     /// A leading `~/` with no operator home to expand it against.
     HomeUnavailable,
+    /// A leading `~/`, and the operator home is not an absolute path.
+    HomeNotAbsolute,
 }
 
 /// The non-empty components of `path`, in order: `a//b/` is `a`, `b`.
@@ -63,12 +65,17 @@ pub(crate) fn join(parts: &[&[u8]]) -> Vec<u8> {
 ///
 /// # Errors
 /// [`Refusal::HomeUnavailable`] for a `~/` path without a home: the literal
-/// directory `~` beneath some base is never what the operator meant.
+/// directory `~` beneath some base is never what the operator meant; and
+/// [`Refusal::HomeNotAbsolute`] for one with a relative home, which would
+/// otherwise be resolved against the file's own directory.
 pub(crate) fn expand_home(raw: &[u8], home: Option<&[u8]>) -> Result<Vec<u8>, Refusal> {
     let Some(rest) = raw.strip_prefix(b"~/") else {
         return Ok(raw.to_vec());
     };
     let home = home.ok_or(Refusal::HomeUnavailable)?;
+    if !home.starts_with(b"/") {
+        return Err(Refusal::HomeNotAbsolute);
+    }
     let mut out = home.to_vec();
     out.push(b'/');
     out.extend_from_slice(rest);
@@ -155,6 +162,11 @@ mod tests {
             Ok(b"/home/op/x".to_vec())
         );
         assert_eq!(expand_home(b"~/x", None), Err(Refusal::HomeUnavailable));
+        assert_eq!(
+            expand_home(b"~/x", Some(b"home/op")),
+            Err(Refusal::HomeNotAbsolute)
+        );
+        assert_eq!(expand_home(b"x", Some(b"home/op")), Ok(b"x".to_vec()));
         assert_eq!(expand_home(b"x/~/y", None), Ok(b"x/~/y".to_vec()));
         assert_eq!(expand_home(b"~x", None), Ok(b"~x".to_vec()));
     }

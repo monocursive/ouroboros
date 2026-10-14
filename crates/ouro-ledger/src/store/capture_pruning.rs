@@ -61,7 +61,7 @@ impl Retained {
         value
     }
     fn completion(&self) -> Result<Value> {
-        Ok(json!({"schema":"ouro.ledger.capture-gc-complete/1","anchor_digest":self.digest()?}))
+        Ok(json!({"schema":schemas::CAPTURE_GC_COMPLETE,"anchor_digest":self.digest()?}))
     }
     fn complete(&self, root: &Path) -> Result<bool> {
         match fs::symlink_metadata(root.join(DONE)) {
@@ -116,15 +116,15 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
     let r = &envelope.retained;
     if envelope.digest != r.digest()?
         || serde_json::to_value(&envelope)? != value
-        || r.schema != "ouro.ledger.capture-gc-anchor/1"
+        || r.schema != schemas::CAPTURE_GC_ANCHOR
         || r.run_id != id
         || r.chain.head_seq == 0
         || !r
             .chain
             .head_digest
             .as_deref()
-            .is_some_and(pruning::digest_valid)
-        || !(1..=36_500).contains(&r.retain_days)
+            .is_some_and(crate::protocol::sha256_digest)
+        || !ouro_records::retention::RETAIN_DAYS.contains(&r.retain_days)
         || r.files.is_empty()
         || r.files.len() > 3
         || ![&r.last_activity_at, &r.cutoff, &r.collected_at]
@@ -142,8 +142,8 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
             "artifacts/argv.bin" => "argv",
             _ => return Err(LedgerError("unsafe capture GC inventory".into())),
         };
-        if f.bytes > 16 * 1024 * 1024
-            || !pruning::digest_valid(&f.digest)
+        if f.bytes > crate::protocol::MAX_CAPTURE_BYTES
+            || !crate::protocol::sha256_digest(&f.digest)
             || r.files[..i].iter().any(|other| other.path == f.path)
             || r.capture[name]["stored_bytes"].as_u64() != Some(f.bytes)
             || !matches!(
@@ -156,7 +156,7 @@ fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
             ));
         }
     }
-    for name in ["stdout", "stderr", "argv"] {
+    for name in crate::protocol::CAPTURE_STREAMS {
         if matches!(
             r.capture[name]["state"].as_str(),
             Some("captured" | "incomplete")
@@ -276,7 +276,7 @@ impl Store {
                     return Err(LedgerError("no captures available for expiry".into()));
                 }
                 let r = Retained {
-                    schema: "ouro.ledger.capture-gc-anchor/1".into(),
+                    schema: schemas::CAPTURE_GC_ANCHOR.into(),
                     run_id: id.into(),
                     attempt_id: verified.run.attempt_id.clone(),
                     chain: verified.run.chain.clone(),
@@ -298,14 +298,14 @@ impl Store {
                     retained: r.clone(),
                 })?;
                 if let Err(e) = publish(&root, ANCHOR, &value, MAX_ANCHOR) {
-                    self.streams
-                        .get_mut(id)
-                        .expect("known run")
-                        .poisoned
-                        .push("uncertain capture GC publication; restart required".into());
+                    self.poison(
+                        id,
+                        PoisonKind::Incomplete,
+                        "uncertain capture GC publication; restart required",
+                    );
                     return Err(e);
                 }
-                let stream = self.streams.get_mut(id).expect("known run");
+                let stream = self.stream_mut(id);
                 stream.run.capture = r.capture(false);
                 stream.run.capture_history = Some(r.history(false)?);
                 #[cfg(test)]
@@ -316,7 +316,7 @@ impl Store {
             }
         };
         self.finish_capture_pruning(id, &retained)?;
-        let stream = self.streams.get_mut(id).expect("known run");
+        let stream = self.stream_mut(id);
         stream.run.capture = retained.capture(true);
         stream.run.capture_history = Some(retained.history(true)?);
         let run = stream.run.clone();
@@ -386,7 +386,7 @@ impl Store {
 pub(super) fn inventory(root: &Path, run: &RunRecord) -> Result<Vec<RemovedFile>> {
     directory(&root.join("artifacts"))?;
     let mut files = Vec::new();
-    for name in ["stdout", "stderr", "argv"] {
+    for name in crate::protocol::CAPTURE_STREAMS {
         let path = format!("artifacts/{name}.bin");
         let (_, _, file) = member(root, &path)?;
         let expected = run.capture[name]["stored_bytes"].as_u64().unwrap_or(0);
@@ -395,7 +395,7 @@ pub(super) fn inventory(root: &Path, run: &RunRecord) -> Result<Vec<RemovedFile>
             if !run.payload["capture"]["streams"]
                 .as_array()
                 .is_some_and(|s| s.contains(&json!(name)))
-                || m.len() > 16 * 1024 * 1024
+                || m.len() > crate::protocol::MAX_CAPTURE_BYTES
                 || m.len() != expected
                 || run.capture[name]["stored_bytes"].as_u64().is_none()
                 || !matches!(

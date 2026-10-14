@@ -83,6 +83,43 @@ pub const fn has_legacy_syscalls() -> bool {
     !cfg!(target_os = "linux") || cfg!(any(target_arch = "x86_64", target_arch = "x86"))
 }
 
+/// The non-`at` calls [`has_legacy_syscalls`] is about.
+const LEGACY: [&str; 9] = [
+    "open", "creat", "mkdir", "rename", "unlink", "rmdir", "link", "symlink", "mknod",
+];
+
+/// The calls only Linux has. `mknodat` is here rather than among the legacy
+/// calls: Darwin has no such syscall at all, while Linux has it on every
+/// architecture.
+const LINUX_ONLY: [&str; 4] = ["openat2", "renameat2", "execveat", "mknodat"];
+
+/// Why `name` cannot be called on this build, or `None` when it can: the one
+/// list of what the architecture or the platform lacks, which every
+/// [`Attempt::Absent`] of these calls carries.
+#[must_use]
+pub fn absent(name: &str) -> Option<String> {
+    if LEGACY.contains(&name) && !has_legacy_syscalls() {
+        return Some(format!(
+            "{name} has no syscall number on {}/{}; use the *at variant",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
+    }
+    if LINUX_ONLY.contains(&name) && !cfg!(target_os = "linux") {
+        return Some(format!(
+            "{name} is a Linux syscall; unsupported on this platform ({})",
+            std::env::consts::OS
+        ));
+    }
+    None
+}
+
+/// The [`Attempt::Absent`] of a call [`absent`] names.
+#[allow(dead_code)]
+fn absent_attempt(name: &str) -> Attempt {
+    Attempt::Absent(absent(name).unwrap_or_else(|| format!("{name} is absent on this build")))
+}
+
 /// How a given operation reached the kernel, for the report line.
 #[must_use]
 pub const fn mechanism() -> &'static str {
@@ -117,10 +154,7 @@ mod imp {
     /// Unused on x86 and x86_64, which kept every one of them.
     #[allow(dead_code)]
     fn legacy_absent(name: &str) -> Attempt {
-        Attempt::Absent(format!(
-            "{name} has no syscall number on linux/{}; use the *at variant",
-            std::env::consts::ARCH
-        ))
+        super::absent_attempt(name)
     }
 
     pub(crate) fn openat(dirfd: c_int, path: *const c_char, flags: c_int, mode: u32) -> Attempt {
@@ -768,11 +802,7 @@ mod imp {
 
     macro_rules! linux_only {
         ($name:literal) => {
-            Attempt::Absent(format!(
-                "{} is a Linux syscall; this build targets {}",
-                $name,
-                std::env::consts::OS
-            ))
+            super::absent_attempt($name)
         };
     }
 

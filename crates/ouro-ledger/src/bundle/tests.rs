@@ -17,7 +17,7 @@ struct Fixture {
 }
 fn peer() -> Peer {
     Peer {
-        uid: unsafe { libc::geteuid() },
+        uid: crate::os::euid(),
         pid: std::process::id(),
         birth: "bundle-test".into(),
         boot_id: "bundle-boot".into(),

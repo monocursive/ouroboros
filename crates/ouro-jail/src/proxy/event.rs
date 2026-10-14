@@ -11,7 +11,14 @@ use crate::records::{
     Completion, Decision, Event, EventOutcome, EventSource, EventStage, SCHEMA_EVENT, rfc3339_utc,
 };
 
-/// The errno name of a connect failure, for the errors a connect can return.
+/// The errno name of a connect failure, for the errors a connect can return;
+/// any other errno is recorded as null, never guessed at.
+///
+/// Not the jail's errno table (`platform::linux::sys::errno_name`): that one
+/// holds Linux's numbers and builds only there, while the proxy is portable
+/// code, built and tested on every host. Each `libc` constant below is the
+/// building platform's own number, so this short list names correctly
+/// wherever it builds.
 fn errno_name(errno: i32) -> Option<&'static str> {
     Some(match errno {
         libc::ECONNREFUSED => "ECONNREFUSED",

@@ -52,7 +52,8 @@ def main():
     p.add_argument('--record', action='append', default=[], metavar='REL')
     p.add_argument('--target', type=Path, required=True)
     p.add_argument('--revision', required=True)
-    p.add_argument('--test', default='vault::origin::tests')
+    # Both modules: `tests` (portable) and `linux_tests` (the rendezvous).
+    p.add_argument('--test', default='vault::origin')
     p.add_argument('--operation', choices=['test', 'clippy', 'build'], default='test')
     p.add_argument('--expected-exit', type=int, required=True)
     a = p.parse_args()
@@ -116,10 +117,15 @@ def main():
     text = (output / 'test.log').read_text()
     summaries = re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed;', text)
     native_tests_ran = bool(summaries and sum(int(v[1]) + int(v[2]) for v in summaries) > 0)
+    # A filter can match only the portable module and still "run" tests.
+    # Counted where each test starts: under --nocapture a failing test's
+    # panic output splits its name from its verdict.
+    linux_tests_ran = len(re.findall(r'^test vault::origin::linux_tests::\S+ \.\.\. ', text, re.M))
     expected = run.returncode == a.expected_exit and (
         native_tests_ran if a.operation == 'test' else 'Finished `release` profile' in text)
     record.update({'exit': run.returncode, 'finished_unix': time.time(),
-                   'native_tests_ran': native_tests_ran, 'test_summaries': summaries,
+                   'native_tests_ran': native_tests_ran, 'linux_tests_ran': linux_tests_ran,
+                   'test_summaries': summaries,
                    'expected_exit_observed': expected,
                    'test_log_sha256': digest(output / 'test.log')})
     (output / 'result.json').write_text(json.dumps(record, indent=2) + '\n')

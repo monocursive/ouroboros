@@ -268,23 +268,6 @@ struct Position {
 
 /// Every invocation verifies both streams afresh. Output pagination binds the
 /// two heads and run order; a changed head refuses rather than mixing snapshots.
-pub fn compare(
-    client: &mut Client,
-    left: &str,
-    right: &str,
-    after: Option<&str>,
-    limit: u32,
-) -> Result<Value> {
-    compare_mode(
-        client,
-        left,
-        right,
-        after,
-        limit,
-        ComparisonMode::EventCounts,
-    )
-}
-
 pub fn compare_mode(
     client: &mut Client,
     left: &str,
@@ -441,7 +424,7 @@ fn compare_with(
         .values()
         .filter(|v| v["status"] == "comparable")
         .count();
-    let mut report = json!({"schema":"ouro.ledger.diff/1","mode":mode,"complete":complete,
+    let mut report = json!({"schema":crate::schemas::DIFF,"mode":mode,"complete":complete,
         "comparison_status":if compared == 0 {"incomparable"} else if compared == CLASSES.len() {"comparable"} else {"partial"},
         "left":a.summary,"right":b.summary,"classes":classes,"changes":items,
         "total_changes":total,"next_after":next_after});

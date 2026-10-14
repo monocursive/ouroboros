@@ -83,7 +83,6 @@ mod linux {
     use std::{
         ffi::OsString,
         fs,
-        io::Read,
         os::{
             fd::{AsRawFd, FromRawFd, OwnedFd},
             unix::{
@@ -133,18 +132,18 @@ mod linux {
         let deadline = Instant::now() + COMMAND_TIMEOUT;
         loop {
             if let Some(status) = child.try_wait()? {
-                let mut text = String::new();
-                child
+                const REFUSAL: &str =
+                    "systemd user-manager command failed or exceeded its output bound";
+                let stdout = child
                     .stdout
                     .take()
-                    .unwrap()
-                    .take(16_385)
-                    .read_to_string(&mut text)?;
-                if !status.success() || text.len() > 16_384 {
-                    return Err(LedgerError(
-                        "systemd user-manager command failed or exceeded its output bound".into(),
-                    ));
+                    .ok_or_else(|| LedgerError("systemd user-manager output unavailable".into()))?;
+                let bytes = crate::protocol::read_bounded(stdout, 16_384, REFUSAL)?;
+                if !status.success() {
+                    return Err(LedgerError(REFUSAL.into()));
                 }
+                let text = String::from_utf8(bytes)
+                    .map_err(|_| LedgerError("systemd user-manager output is not UTF-8".into()))?;
                 return Ok(text.trim().to_owned());
             }
             if Instant::now() >= deadline {
@@ -157,7 +156,7 @@ mod linux {
     }
 
     fn ready() -> Result<()> {
-        let uid = unsafe { libc::geteuid() }.to_string();
+        let uid = crate::os::euid().to_string();
         if command_output(Command::new("/usr/bin/loginctl").args([
             "show-user",
             &uid,
@@ -274,7 +273,7 @@ mod linux {
         loop {
             if let Ok(stream) = UnixStream::connect(data.join("ledger/serve.sock")) {
                 let peer = peer_credentials(&stream)?;
-                if peer.uid != unsafe { libc::geteuid() }
+                if peer.uid != crate::os::euid()
                     || peer.pid != main_pid(&unit)?
                     || !peer_alive(&peer)
                 {
@@ -324,7 +323,7 @@ mod linux {
         // Validate the whole frame before creating a service. No raw request
         // values occur in its command, unit properties, logs or environment.
         let launch = Launch {
-            schema: "ouro.ledger.owner-launch/1".into(),
+            schema: crate::schemas::OWNER_LAUNCH.into(),
             options: options.clone(),
             cwd: std::env::current_dir()?,
             environment: std::env::vars_os().collect(),
@@ -341,26 +340,11 @@ mod linux {
                 .arg("--unit")
                 .arg(&unit),
         )?;
-        let deadline = Instant::now() + START_TIMEOUT;
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && Instant::now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(10))
-                }
-                Err(error) => return Err(error.into()),
-            }
-        };
+        let mut stream = await_owner(&listener, &unit, Instant::now() + START_TIMEOUT)?;
         stream.set_read_timeout(Some(START_TIMEOUT))?;
         stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
         let peer = peer_credentials(&stream)?;
-        if peer.uid != unsafe { libc::geteuid() }
-            || peer.pid != main_pid(&unit)?
-            || !peer_alive(&peer)
-        {
+        if peer.uid != crate::os::euid() || peer.pid != main_pid(&unit)? || !peer_alive(&peer) {
             return Err(LedgerError(
                 "bootstrap peer is not the independent service owner".into(),
             ));
@@ -370,6 +354,28 @@ mod linux {
         match read_frame::<Started>(&mut stream)? {
             Started::Owned { run } => Ok(*run),
             Started::Refused { reason } => Err(LedgerError(reason)),
+        }
+    }
+
+    /// The bootstrap connection from the owner service just started. One that
+    /// never connects is named, so the operator can inspect that unit.
+    fn await_owner(listener: &UnixListener, unit: &str, deadline: Instant) -> Result<UnixStream> {
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Ok(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(LedgerError(format!(
+                            "owner service {unit} did not connect within {} seconds; \
+                             inspect it with `systemctl --user status {unit}`",
+                            START_TIMEOUT.as_secs()
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error.into()),
+            }
         }
     }
 
@@ -393,14 +399,14 @@ mod linux {
         stream.set_read_timeout(Some(COMMAND_TIMEOUT))?;
         stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
         let peer = peer_credentials(&stream)?;
-        if peer.uid != unsafe { libc::geteuid() } {
+        if peer.uid != crate::os::euid() {
             return Err(LedgerError("bootstrap peer uid mismatch".into()));
         }
         // Remove the rendezvous before receiving secrets; a killed caller leaves
         // no abandoned socket once the service connects.
         fs::remove_file(path)?;
         let launch: Launch = read_frame(&mut stream)?;
-        if launch.schema != "ouro.ledger.owner-launch/1"
+        if launch.schema != crate::schemas::OWNER_LAUNCH
             || !launch.options.batch
             || !launch.options.detached
         {
@@ -471,16 +477,20 @@ mod linux {
             .owner
             .ok_or_else(|| LedgerError("attempt has no launch owner".into()))?;
         // Open first, then validate birth. Signal the pinned task, never a reused pid.
+        // SAFETY: pidfd_open takes a pid and flags by value and reads no memory.
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, peer.pid as libc::pid_t, 0) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
+        // SAFETY: a successful pidfd_open returned a new descriptor owned only here.
         let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-        if peer.uid != unsafe { libc::geteuid() } || !peer_alive(&peer) {
+        if peer.uid != crate::os::euid() || !peer_alive(&peer) {
             return Err(LedgerError(
                 "launch owner is gone; reconcile before reporting an outcome".into(),
             ));
         }
+        // SAFETY: the pidfd stays open through the call; a null siginfo asks the
+        // kernel for the default kill(2)-style information and is never read.
         if unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
@@ -494,5 +504,21 @@ mod linux {
             return Err(std::io::Error::last_os_error().into());
         }
         Ok(json!({"run_id":run_id,"status":"stop_requested","settlement":"pending"}))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn an_owner_that_never_connects_is_named_not_an_eagain() {
+            let temp = tempfile::tempdir().unwrap();
+            let listener = UnixListener::bind(temp.path().join("start.sock")).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let unit = "ouro-ledger-owner-00000000000000000000000000000000.service";
+            let refused = await_owner(&listener, unit, Instant::now()).unwrap_err();
+            assert!(refused.0.contains(unit), "{refused}");
+            assert!(refused.0.contains("did not connect"), "{refused}");
+        }
     }
 }

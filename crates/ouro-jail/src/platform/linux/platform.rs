@@ -72,10 +72,12 @@ const TRACE_DATA_FD: RawFd = 9;
 pub(crate) const SECCOMP_FD: RawFd = 10;
 /// Descriptor bubblewrap writes its JSON status to.
 pub(crate) const STATUS_FD: RawFd = 11;
-/// Descriptor the launcher blocks reading.
-const RELEASE_FD: RawFd = 12;
-/// Descriptor the launcher writes a failed exec's errno to.
-const ERROR_FD: RawFd = 13;
+/// Descriptor the launcher blocks reading (`__launch --release-fd`), and the
+/// one a gate checks it is blocked on.
+pub(super) const RELEASE_FD: RawFd = 12;
+/// Descriptor the launcher writes a failed exec's errno to
+/// (`__launch --error-fd`).
+pub(super) const ERROR_FD: RawFd = 13;
 /// Descriptor a long argument list is handed over.
 pub(crate) const ARGS_FD: RawFd = 14;
 /// Descriptor the vendor-state directory is handed to bubblewrap on
@@ -579,8 +581,15 @@ impl Platform for LinuxPlatform {
         sinks: Sinks,
     ) -> Result<Box<dyn PreparedExecution>, JailError> {
         // §8.2: what the supervisor's preparation budget has left, on the
-        // same boot clock.
+        // same boot clock. A budget already spent refuses before anything
+        // is built, rather than at the first wait that notices it.
         let deadline = clock::Deadline::after(plan.prepare_deadline.remaining());
+        if deadline.expired() {
+            return Err(prepare_timeout(
+                "preparation did not complete within its budget: it was spent before the \
+                 boundary was built",
+            ));
+        }
         // The uncontained profile has its own registered boundary (§9.3)
         if plan.request.snapshot.profile == ProfileName::None {
             return super::uncontained::prepare(plan, sinks, deadline);
@@ -731,6 +740,9 @@ struct Boundary {
     ns_ids: identity::NsIds,
     cgroup: Option<ExecutionCgroup>,
     storage: Option<super::storage::Storage>,
+    /// Whether the installed baseline denies `link` and `linkat`, read from
+    /// the program itself; the storage ceiling's evidence states it.
+    hard_links_denied: bool,
     cgroup_lost: bool,
     /// Why no execution cgroup exists, when preferred ceilings run unenforced.
     cgroup_unavailable: Option<String>,
@@ -910,7 +922,6 @@ impl Boundary {
                 handoff,
                 &exe,
                 bwrap_path,
-                bplan.bounded_storage,
             )?;
             bplan.proxy_dir = Some(bwrap::Staged {
                 host: agent.dir_path().to_path_buf(),
@@ -1151,6 +1162,30 @@ impl Boundary {
             })?,
         };
         let filter_digest = filter.digest();
+        // A storage ceiling rests on the hard-link denials (a link could
+        // charge a foreign inode to the bounded tree), and its receipt
+        // evidence states them. Both read the program that is installed, so
+        // neither can claim a rule it lacks.
+        let variant = agent.as_ref().map(super::agent::AgentNet::variant);
+        let hard_links_denied = match installed_hard_link_rule(&filter, variant) {
+            Ok(denied) if denied == bplan.bounded_storage => denied,
+            Ok(denied) => {
+                return Err(preparing(
+                    ErrorCode::InternalError,
+                    format!(
+                        "the syscall filter {} hard links while a storage ceiling is {}",
+                        if denied { "denies" } else { "permits" },
+                        if denied { "not requested" } else { "requested" }
+                    ),
+                ));
+            }
+            Err(reason) => {
+                return Err(preparing(
+                    ErrorCode::InternalError,
+                    format!("the syscall filter's hard-link rule cannot be read: {reason}"),
+                ));
+            }
+        };
 
         let target: Vec<OsString> = plan
             .argv
@@ -1205,6 +1240,11 @@ impl Boundary {
             )
         })?;
 
+        refuse_unrecordable_mounts(
+            &bplan,
+            scan.segments.len(),
+            skipped_protected_names(&scan).len(),
+        )?;
         let rendered = bplan.render().map_err(|err| {
             error(
                 ErrorCode::InvalidConfig,
@@ -1454,6 +1494,7 @@ impl Boundary {
                     mode: "pending".to_owned(),
                     mechanism: None,
                     allowed_hosts: Vec::new(),
+                    tls_only: Vec::new(),
                 },
                 syscalls: None,
                 limits: Vec::new(),
@@ -1470,6 +1511,7 @@ impl Boundary {
             cgroup_lost: false,
             cgroup_unavailable,
             storage: None,
+            hard_links_denied,
             stdio_relays,
             watcher,
             agent: agent.take(),
@@ -1481,8 +1523,7 @@ impl Boundary {
         if let Some(agent) = boundary.agent.as_mut()
             && let Err(err) = agent.start_proxy()
         {
-            boundary.teardown();
-            return Err(err);
+            return Err(boundary.refuse(err));
         }
         if let Some(reason) = boundary.cgroup_unavailable.clone() {
             for (key, ceiling) in [
@@ -1498,8 +1539,7 @@ impl Boundary {
         }
 
         if let Err(err) = boundary.discover(bwrap_path, deadline, &filter_digest, &scan) {
-            boundary.teardown();
-            return Err(err);
+            return Err(boundary.refuse(err));
         }
         // Audit 2026-10-08 M2: storage and inode ceilings expose occupancy,
         // not refusal counters — their hit evidence is positive-only
@@ -1523,11 +1563,10 @@ impl Boundary {
         {
             // Placement can have succeeded before read-back failed. Never
             // discard that leaf and claim the target has no resource boundary.
-            boundary.teardown();
-            return Err(preparing(
+            return Err(boundary.refuse(preparing(
                 ErrorCode::MissingCapability,
                 format!("target cgroup placement failed: {err}"),
-            ));
+            )));
         }
         if let Some(plan) = boundary.observer_plan.as_ref() {
             // §13.1: gap intervals count from supervisor start on the same
@@ -1543,29 +1582,29 @@ impl Boundary {
             config.commands = match boundary.snapshot.commands.compile() {
                 Ok(filter) => filter,
                 Err(reason) => {
-                    boundary.teardown();
-                    return Err(error(
-                        ErrorCode::InvalidConfig,
-                        ErrorStage::Preparing,
-                        Remediation::Configuration,
-                        format!("the command rules do not compile: {reason}"),
-                    )
-                    .with_key_path("jail.commands"));
+                    return Err(boundary.refuse(
+                        error(
+                            ErrorCode::InvalidConfig,
+                            ErrorStage::Preparing,
+                            Remediation::Configuration,
+                            format!("the command rules do not compile: {reason}"),
+                        )
+                        .with_key_path("jail.commands"),
+                    ));
                 }
             };
             config.target = Some((boundary.launcher.pid, boundary.target_images.clone()));
             match Tracer::attach(boundary.launcher.pid, config) {
                 Ok(tracer) => boundary.tracer = Some(tracer),
                 Err(err) => {
-                    boundary.teardown();
                     // §11.4: an observer that cannot attach refuses before
                     // exec, whatever the evidence mode says.
-                    return Err(error(
+                    return Err(boundary.refuse(error(
                         ErrorCode::ObserverUnavailable,
                         ErrorStage::Preparing,
                         Remediation::HostSetup,
                         format!("the closed-set observer could not attach: {err}"),
-                    ));
+                    )));
                 }
             }
         }
@@ -1891,6 +1930,7 @@ impl Boundary {
                 });
             }
         }
+        let mounts = recordable_mounts(mounts)?;
         Ok(Applied {
             filesystem: Some(AppliedFilesystem {
                 mechanism: "bubblewrap-binds".to_owned(),
@@ -1912,6 +1952,7 @@ impl Boundary {
                     mode: "none".to_owned(),
                     mechanism: Some("network-namespace".to_owned()),
                     allowed_hosts: Vec::new(),
+                    tls_only: Vec::new(),
                 },
                 super::agent::AgentNet::applied_network,
             ),
@@ -1954,7 +1995,8 @@ impl Boundary {
         }
     }
 
-    /// Kills and reaps everything this boundary owns.
+    /// Kills and reaps everything this boundary owns, and removes its
+    /// placeholders once the tree is known dead.
     fn teardown(&mut self) {
         let deadline = clock::Deadline::after(TREE_BUDGET);
         self.kill_boundary();
@@ -1967,8 +2009,72 @@ impl Boundary {
             std::thread::sleep(WAIT_STEP);
         }
         self.watcher.reap();
+        // The init's pidfd and the leaf report the tree's death a little
+        // after the kill. Wait for them inside the same budget, so the
+        // placeholders are not kept only because the first look came early.
+        while self.tree_death_provable() && !self.tree_dead() && !deadline.expired() {
+            std::thread::sleep(WAIT_STEP);
+        }
         self.remove_placeholders();
         self.stop_agent(deadline.remaining());
+    }
+
+    /// Tears the boundary down after a refusal and returns `refusal`, which
+    /// then also says which placeholders it leaves in the operator's
+    /// workspace and why, when it leaves any.
+    fn refuse(&mut self, mut refusal: JailError) -> JailError {
+        self.teardown();
+        if let Some(left) = self.placeholders_left() {
+            refusal.message = format!("{}; {left}", refusal.message);
+            // What the record says is left stays left: nothing removes them
+            // after the refusal named them.
+            self.placeholders.clear();
+        }
+        refusal
+    }
+
+    /// The placeholders a teardown did not remove, for a refusal's message;
+    /// `None` when every one is gone.
+    fn placeholders_left(&self) -> Option<String> {
+        if self.placeholder_outcomes.is_empty() {
+            if self.placeholders.is_empty() {
+                return None;
+            }
+            let paths: Vec<String> = self
+                .placeholders
+                .iter()
+                .map(|placeholder| placeholder.destination().display().to_string())
+                .collect();
+            return Some(format!(
+                "the placeholder directories {} are left in the workspace: the boundary's tree \
+                 was not shown dead within its budget",
+                paths.join(", ")
+            ));
+        }
+        let kept: Vec<String> = self
+            .placeholder_outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                PlaceholderOutcome::Removed(_) | PlaceholderOutcome::AlreadyGone(_) => None,
+                PlaceholderOutcome::KeptChanged(path, reason) => {
+                    Some(format!("{} ({reason})", path.display()))
+                }
+                PlaceholderOutcome::KeptNotEmpty(path) => {
+                    Some(format!("{} (not empty)", path.display()))
+                }
+                PlaceholderOutcome::KeptError(path, errno) => Some(format!(
+                    "{} ({})",
+                    path.display(),
+                    super::sys::errno_name(*errno)
+                )),
+            })
+            .collect();
+        (!kept.is_empty()).then(|| {
+            format!(
+                "the placeholder directories {} are kept in the workspace",
+                kept.join(", ")
+            )
+        })
     }
 
     // The agent network ends after the tree it served
@@ -2047,11 +2153,20 @@ impl Boundary {
         observer_verdict(self.tracer_summary.as_ref())
     }
 
+    /// Whether the tree's death can still be shown: the observer's account
+    /// does not object and the leaf's identity was never lost.
+    fn tree_death_provable(&self) -> bool {
+        self.observer_verified_the_tree() && !self.cgroup_lost
+    }
+
+    /// Whether the tree is seen dead now: the namespace init has ended and
+    /// the leaf, when there is one, is unpopulated.
+    fn tree_dead(&self) -> bool {
+        !init_alive(self.init_fd.as_ref(), self.init_pid) && self.cgroup_empty()
+    }
+
     fn remove_placeholders(&mut self) {
-        if init_alive(self.init_fd.as_ref(), self.init_pid)
-            || !self.observer_verified_the_tree()
-            || !self.cgroup_empty()
-        {
+        if !(self.tree_death_provable() && self.tree_dead()) {
             return;
         }
         if self.placeholder_outcomes.is_empty() {
@@ -2243,7 +2358,10 @@ impl Boundary {
             Value::from(i64::from(self.bwrap_pid)),
         );
         if let Some(storage) = &self.storage {
-            details.insert("storage_ceiling".to_owned(), storage.evidence());
+            details.insert(
+                "storage_ceiling".to_owned(),
+                storage.evidence(self.hard_links_denied),
+            );
         }
         details.insert(
             "readonly_open_fast_path".to_owned(),
@@ -2911,6 +3029,34 @@ fn pump_stdio_relays(relays: &mut [StdioRelay]) -> std::io::Result<bool> {
     failure.map_or(Ok(progress), Err)
 }
 
+/// Whether `filter`, the baseline bubblewrap installs, denies `link` and
+/// `linkat`, read from the program itself: it is matched against its
+/// profile's baseline (`tool`'s, or `agent`'s in `variant`) built with and
+/// without the storage rules.
+///
+/// # Errors
+/// Why the answer is unknown: a baseline that cannot be built, or a program
+/// that is neither of the two, which no preparation installs.
+fn installed_hard_link_rule(
+    filter: &super::bpf::Program,
+    variant: Option<seccomp::AgentVariant>,
+) -> Result<bool, String> {
+    let baseline = |storage| {
+        match variant {
+            Some(variant) => seccomp::agent_baseline_with_storage(variant, storage),
+            None => seccomp::tool_baseline_with_storage(storage),
+        }
+        .map_err(|err| format!("its baseline cannot be built: {err}"))
+    };
+    if *filter == baseline(true)? {
+        Ok(true)
+    } else if *filter == baseline(false)? {
+        Ok(false)
+    } else {
+        Err("it is not its profile's baseline".to_owned())
+    }
+}
+
 /// The coverage the plan actually obtained, derived from the walk.
 ///
 /// `existing_and_root` means every protected segment that existed at launch is
@@ -2945,10 +3091,66 @@ fn skipped_protected_names(scan: &jfs::ProtectedScan) -> Vec<String> {
         .collect()
 }
 
-/// The most rows a receipt's mount table records. A boundary with more is
+/// The most rows a receipt's mount table records: the receipt schema's
+/// `maxItems` for `applied.filesystem.mounts`. A boundary with more is
 /// refused rather than recorded in part: a shortened table would still read
 /// as the child's whole view (§13.2).
 const MOUNT_TABLE_ROWS_MAX: usize = 1024;
+
+/// Refuses, before anything is spawned, a plan whose mount table no receipt
+/// can record. Every protected segment the walk found (`segments`) is one
+/// read-only bind of the plan, so a workspace holding about a thousand
+/// `.git` directories passes the bound on its own: a configuration to
+/// narrow, not a host to repair. The count is the plan's lower bound
+/// ([`BwrapPlan::mount_rows_at_least`]) plus the `hidden` row of each
+/// protected name the walk would not follow; [`recordable_mounts`] still
+/// refuses what the host's own mounts add after the spawn.
+fn refuse_unrecordable_mounts(
+    plan: &BwrapPlan,
+    segments: usize,
+    hidden: usize,
+) -> Result<(), JailError> {
+    let rows = plan.mount_rows_at_least() + hidden;
+    if rows <= MOUNT_TABLE_ROWS_MAX {
+        return Ok(());
+    }
+    Err(error(
+        ErrorCode::InvalidConfig,
+        ErrorStage::Preparing,
+        Remediation::Configuration,
+        format!(
+            "the writable roots (workspace, scratch and read-write grants) hold {} protected \
+             segments, each bound read-only, so the boundary would hold at least {rows} mounts, \
+             more than the {MOUNT_TABLE_ROWS_MAX} a receipt's mount table records; run over a \
+             narrower workspace",
+            segments + plan.placeholders.len() + hidden
+        ),
+    ))
+}
+
+/// The rows a receipt records, whole or not at all (§13.2). The plan's own
+/// rows were bounded before the spawn ([`refuse_unrecordable_mounts`]); what
+/// can still pass the bound here is what the host mounted beneath a path
+/// the plan binds, since each bind brings those mounts along.
+///
+/// # Errors
+/// A configuration refusal naming the count and the bound.
+fn recordable_mounts(mounts: Vec<AppliedMount>) -> Result<Vec<AppliedMount>, JailError> {
+    if mounts.len() <= MOUNT_TABLE_ROWS_MAX {
+        return Ok(mounts);
+    }
+    Err(error(
+        ErrorCode::InvalidConfig,
+        ErrorStage::Preparing,
+        Remediation::Configuration,
+        format!(
+            "the boundary holds {} mounts, more than the {MOUNT_TABLE_ROWS_MAX} a receipt's \
+             mount table records: the plan's own and the host's mounts beneath the paths it \
+             binds; run over a narrower workspace or fewer grants",
+            mounts.len()
+        ),
+    ))
+}
 
 /// The mount table the launcher actually sees, from `/proc/<pid>/mountinfo`
 /// read as bytes (P01.8): one mount point that is not UTF-8 must not cost
@@ -2966,8 +3168,8 @@ fn read_mount_table(pid: libc::pid_t) -> std::io::Result<Vec<AppliedMount>> {
 ///
 /// # Errors
 /// [`std::io::ErrorKind::InvalidData`] for a row without a mount point and
-/// options, a mount point holding a NUL, or more than
-/// [`MOUNT_TABLE_ROWS_MAX`] rows: the table is read whole or not at all.
+/// options, or a mount point holding a NUL: the table is read whole or not
+/// at all.
 fn parse_mount_table(raw: &[u8]) -> std::io::Result<Vec<AppliedMount>> {
     let invalid = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidData, what);
     let mut out = Vec::new();
@@ -2995,12 +3197,6 @@ fn parse_mount_table(raw: &[u8]) -> std::io::Result<Vec<AppliedMount>> {
         };
         let native = NativeString::from_bytes(decode_mountinfo_path(point))
             .map_err(|_| invalid("a mount point holds a NUL byte".to_owned()))?;
-        if out.len() == MOUNT_TABLE_ROWS_MAX {
-            return Err(invalid(format!(
-                "the boundary has more than {MOUNT_TABLE_ROWS_MAX} mounts, more than a \
-                 receipt records"
-            )));
-        }
         out.push(AppliedMount {
             path: native,
             mode: mode.to_owned(),
@@ -4333,7 +4529,10 @@ impl RunningExecution for LinuxRunning {
     fn final_native_details(&self) -> serde_json::Map<String, Value> {
         let mut details = serde_json::Map::new();
         if let Some(storage) = &self.boundary.storage {
-            details.insert("storage_ceiling".to_owned(), storage.evidence());
+            details.insert(
+                "storage_ceiling".to_owned(),
+                storage.evidence(self.boundary.hard_links_denied),
+            );
         }
         if let Some(agent) = self.boundary.agent.as_ref() {
             details.insert("helpers".to_owned(), agent.details().1);
@@ -4591,11 +4790,21 @@ fn step_for(deadline: PortableDeadline) -> Duration {
     remaining.min(WAIT_STEP).max(Duration::from_micros(200))
 }
 
-/// What the contained boundary and `super::uncontained` share: the rules
-/// both run loops apply, each written once in this module, and delegations
-/// to helpers above. A fix to one of these rules (an evidence gap, a stop, a
-/// refusal) reaches both boundaries; what still differs between them is the
-/// state each keeps, not these rules.
+/// What the contained boundary and `super::uncontained` share, each written
+/// once: the privileged-supervisor refusal, the ceiling rows, the error-pipe
+/// drain, the counter sample and its loss, the sample cadence, the wall and
+/// grace checks, the hard-kill arming, the exec evidence without an
+/// observer, the order of an observed outcome, the observer's verdict, and
+/// delegations to helpers above. A fix to one of these reaches both
+/// boundaries.
+///
+/// The run loops themselves are still written twice, because each keeps its
+/// own state: `pump_tracer`, `handle_tracer_event` and `stop_observer` (the
+/// contained loop also takes the backend's untraced exit and command-rule
+/// hits; `none` tracks a late target exit), and the methods that apply the
+/// shared rules to that state — the limit sample, `hard_kill`,
+/// `terminal_event`, `request_stop`, `wait_tree` and `observer_summary`. A
+/// fix to any of those must be made in both.
 pub(super) mod shared {
     use std::collections::VecDeque;
     use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
@@ -5670,8 +5879,9 @@ mod tests {
         );
     }
 
-    /// The table is read whole or not at all: a row the parser cannot read,
-    /// or more rows than a receipt records, refuses instead of shortening.
+    /// The table is read whole or not at all: a row the parser cannot read
+    /// refuses, and so does a table with more rows than a receipt records,
+    /// as a configuration to narrow rather than a host to repair.
     #[test]
     fn a_mount_table_is_never_recorded_in_part() {
         assert!(parse_mount_table(b"22 1 0:1 / / ro - tmpfs tmpfs ro\n\n").is_ok());
@@ -5679,13 +5889,59 @@ mod tests {
         assert!(parse_mount_table(b"22 1 0:1 / /a\\000b ro - tmpfs t ro\n").is_err());
         let row = |index: usize| format!("{index} 1 0:1 / /m{index} ro - tmpfs tmpfs ro\n");
         let full: String = (0..MOUNT_TABLE_ROWS_MAX).map(row).collect();
-        assert_eq!(
-            parse_mount_table(full.as_bytes()).unwrap().len(),
-            MOUNT_TABLE_ROWS_MAX
+        let full = parse_mount_table(full.as_bytes()).unwrap();
+        assert_eq!(full.len(), MOUNT_TABLE_ROWS_MAX);
+        let mut over = full.clone();
+        over.push(full[0].clone());
+        assert_eq!(recordable_mounts(full).unwrap().len(), MOUNT_TABLE_ROWS_MAX);
+        let error = recordable_mounts(over).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.remediation, Remediation::Configuration);
+        assert!(error.message.contains("1025 mounts"), "{}", error.message);
+    }
+
+    /// A workspace with about a thousand protected segments passes the bound
+    /// on the plan's own rows: refused before anything is spawned, as a
+    /// configuration, naming the segments and the bound. A protected name the
+    /// walk would not follow costs a `hidden` row and counts too.
+    #[test]
+    fn a_plan_past_the_receipt_mount_bound_refuses_before_the_spawn() {
+        let mut plan = BwrapPlan::tool(
+            Path::new("/work"),
+            Path::new("/scratch"),
+            Path::new("/opt/ouro-jail"),
         );
-        let over = format!("{full}{}", row(MOUNT_TABLE_ROWS_MAX));
-        let error = parse_mount_table(over.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("more than"), "{error}");
+        let fixed = plan.mount_rows_at_least();
+        // As `prepare_mounts` binds each segment the walk found.
+        let protect = |plan: &mut BwrapPlan, count: usize| {
+            plan.extra_ro_binds = (0..count)
+                .map(|index| {
+                    let path = PathBuf::from(format!("/work/r{index}/.git"));
+                    (path.clone(), path)
+                })
+                .collect();
+        };
+        let at_bound = MOUNT_TABLE_ROWS_MAX - fixed;
+        protect(&mut plan, at_bound);
+        assert_eq!(plan.mount_rows_at_least(), MOUNT_TABLE_ROWS_MAX);
+        super::refuse_unrecordable_mounts(&plan, at_bound, 0).unwrap();
+        let error = super::refuse_unrecordable_mounts(&plan, at_bound, 1).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+
+        protect(&mut plan, 1100);
+        let error = super::refuse_unrecordable_mounts(&plan, 1100, 0).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.stage, ErrorStage::Preparing);
+        assert_eq!(error.remediation, Remediation::Configuration);
+        assert!(
+            error.message.contains("hold 1100 protected segments")
+                && error
+                    .message
+                    .contains(&format!("at least {} mounts", fixed + 1100))
+                && error.message.contains("1024"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
@@ -6110,6 +6366,56 @@ mod tests {
             super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&moved)).is_err()
         );
     }
+    /// §8.2: steps 3 to 5 spend what is left of the supervisor's one
+    /// preparation budget. A plan whose budget is already spent refuses as
+    /// the platform's own `prepare_timeout` (remediation `retry`), for both
+    /// boundaries, before anything is built; a fresh budget of its own would
+    /// go on to build one.
+    #[test]
+    fn a_spent_preparation_budget_refuses_before_any_boundary_is_built() {
+        use crate::platform::{ContinuousDeadline, Platform as _, PreparedPlan, Sinks};
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        for profile in [ProfileName::Tool, ProfileName::None] {
+            let workspace = root.join(format!("{}-workspace", profile.as_str()));
+            let attempt_dir = root.join(format!("{}-attempt", profile.as_str()));
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::create_dir(&attempt_dir).unwrap();
+            let marker = workspace.join("target-ran");
+            let plan = PreparedPlan {
+                attempt_id: "att_00000000-0000-4000-8000-000000000001".to_owned(),
+                attempt_dir,
+                request: plan_for(profile, false),
+                argv: vec![
+                    b"/usr/bin/touch".to_vec(),
+                    marker.as_os_str().as_bytes().to_vec(),
+                ],
+                prepare_deadline: ContinuousDeadline::after(Duration::ZERO),
+                workspace,
+                config_dir: root.join("config"),
+                launch: None,
+                proxy: None,
+            };
+            let Err(error) = LinuxPlatform::new().prepare(plan, Sinks { trace: None }) else {
+                panic!("{profile:?}: a boundary was prepared on a spent budget");
+            };
+            assert_eq!(
+                error.code,
+                ErrorCode::PrepareTimeout,
+                "{profile:?}: {error:?}"
+            );
+            assert_eq!(error.remediation, Remediation::Retry);
+            assert!(!marker.exists(), "{profile:?}: the target ran");
+            assert_eq!(
+                std::fs::read_dir(root.join(format!("{}-attempt", profile.as_str())))
+                    .unwrap()
+                    .count(),
+                0,
+                "{profile:?}: preparation wrote into the attempt"
+            );
+        }
+    }
+
     /// Unreadable counters leave every `hit: false` unsupported (§11.4). The
     /// sample both boundaries take records the `limits` gap, so the class
     /// reads degraded with a null count in a contained run exactly as in
@@ -6210,19 +6516,34 @@ mod tests {
         assert!(!init_alive(None, -1), "no init named: none alive");
     }
 
-    /// A storage ceiling adds the hard-link denials to the `agent` baseline
-    /// bubblewrap installs. The receipt's agent detail names that program —
-    /// the one `applied.syscalls.digest` names — never the plain baseline,
-    /// which does not run.
+    /// A storage or inode ceiling in the snapshot adds the hard-link denials
+    /// to the `agent` baseline bubblewrap installs: the network reads the
+    /// ceiling from the snapshot itself, so no caller can build it without
+    /// them. The receipt's agent detail names that program — the one
+    /// `applied.syscalls.digest` names — never the plain baseline, which does
+    /// not run.
     #[test]
     fn the_agent_detail_names_the_installed_baseline_with_its_storage_rules() {
         use super::super::agent::AgentNet;
         use super::super::seccomp::{AgentVariant, agent_baseline_with_storage};
-        let snapshot = plan_for(ProfileName::Agent, false).snapshot;
         let root = tempfile::tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
-        for bounded_storage in [false, true] {
-            let proxy = root.join(format!("proxy-{bounded_storage}"));
+        let ceiling = || {
+            Some(crate::policy::LimitCeiling {
+                value: "1048576".to_owned(),
+                required: true,
+            })
+        };
+        for (name, storage, inodes) in [
+            ("unbounded", None, None),
+            ("storage", ceiling(), None),
+            ("inodes", None, ceiling()),
+        ] {
+            let mut snapshot = plan_for(ProfileName::Agent, false).snapshot;
+            snapshot.limits.storage = storage;
+            snapshot.limits.inodes = inodes;
+            let bounded_storage = name != "unbounded";
+            let proxy = root.join(format!("proxy-{name}"));
             std::fs::create_dir(&proxy).unwrap();
             let dir = crate::state::anchored::Dir::open_trusted(&proxy).unwrap();
             let identity = dir.stat().unwrap().identity();
@@ -6241,18 +6562,22 @@ mod tests {
                 &handoff,
                 Path::new("/nonexistent/ouro-jail"),
                 Path::new("bwrap"),
-                bounded_storage,
             )
             .unwrap();
             assert_eq!(agent.variant(), AgentVariant::UnprivilegedInner);
             let installed =
                 agent_baseline_with_storage(AgentVariant::UnprivilegedInner, bounded_storage)
                     .unwrap();
-            assert_eq!(agent.baseline(), &installed);
+            assert_eq!(agent.baseline(), &installed, "{name}");
             assert_eq!(
                 agent.details().0["baseline_filter_digest"],
                 installed.digest().as_str(),
-                "storage {bounded_storage}"
+                "{name}"
+            );
+            assert_eq!(
+                super::installed_hard_link_rule(agent.baseline(), Some(agent.variant())),
+                Ok(bounded_storage),
+                "{name}"
             );
         }
         assert_ne!(
@@ -6263,6 +6588,53 @@ mod tests {
                 .unwrap()
                 .digest(),
             "the storage rules change the installed program"
+        );
+    }
+
+    /// The storage evidence's hard-link claim is read from the installed
+    /// program: each profile's baseline says whether it carries the storage
+    /// rules, and a program that is not its profile's baseline has no answer.
+    #[test]
+    fn the_hard_link_rule_is_read_from_the_installed_program() {
+        use super::super::seccomp::{
+            AgentVariant, agent_baseline_with_storage, tool_baseline_with_storage,
+        };
+        for storage in [false, true] {
+            assert_eq!(
+                super::installed_hard_link_rule(
+                    &tool_baseline_with_storage(storage).unwrap(),
+                    None
+                ),
+                Ok(storage)
+            );
+            for variant in [
+                AgentVariant::UnprivilegedInner,
+                AgentVariant::NamespaceInner,
+            ] {
+                assert_eq!(
+                    super::installed_hard_link_rule(
+                        &agent_baseline_with_storage(variant, storage).unwrap(),
+                        Some(variant)
+                    ),
+                    Ok(storage),
+                    "{variant:?}"
+                );
+            }
+        }
+        // `tool`'s program is no `agent` baseline, and the reverse.
+        assert!(
+            super::installed_hard_link_rule(
+                &tool_baseline_with_storage(true).unwrap(),
+                Some(AgentVariant::UnprivilegedInner)
+            )
+            .is_err()
+        );
+        assert!(
+            super::installed_hard_link_rule(
+                &agent_baseline_with_storage(AgentVariant::NamespaceInner, true).unwrap(),
+                None
+            )
+            .is_err()
         );
     }
 

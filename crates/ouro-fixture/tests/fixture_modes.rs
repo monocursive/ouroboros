@@ -16,12 +16,8 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
-const EXIT_EXPECTATION_FAILED: i32 = 3;
-const EXIT_USAGE: i32 = 2;
-
-fn fixture() -> std::path::PathBuf {
-    ouro_fixture::harness::fixture_path()
-}
+mod common;
+use common::{EXIT_EXPECTATION_FAILED, EXIT_USAGE, code, fixture, lines, run};
 
 /// Build an argument list from anything that is already OS bytes.
 ///
@@ -35,34 +31,10 @@ macro_rules! osargs {
     };
 }
 
-fn run<S: AsRef<OsStr>>(args: &[S]) -> Output {
-    Command::new(fixture())
-        .args(args.iter().map(AsRef::as_ref))
-        .output()
-        .expect("the fixture binary must run")
-}
-
-fn lines(out: &Output) -> Vec<Value> {
-    out.stdout
-        .split(|b| *b == b'\n')
-        .filter(|l| !l.is_empty())
-        .map(|l| {
-            serde_json::from_slice(l)
-                .unwrap_or_else(|e| panic!("not a JSON line: {e}: {}", String::from_utf8_lossy(l)))
-        })
-        .collect()
-}
-
 fn only(out: &Output) -> Value {
     let l = lines(out);
     assert_eq!(l.len(), 1, "expected one line, got {l:?}");
     l.into_iter().next().unwrap()
-}
-
-fn code(out: &Output) -> i32 {
-    out.status
-        .code()
-        .expect("the fixture must not die on a signal")
 }
 
 struct Dir(ouro_fixture::harness::TempDir);
@@ -614,11 +586,31 @@ fn a_thread_starts_and_joins() {
     }
 }
 
+/// Review FX7: `--rdwr` used to win silently over `--write`; the two are
+/// refused together, as are `--fifo` and `--regular`.
+#[test]
+fn contradictory_open_and_mknod_flags_are_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f");
+    let out = run(&osargs!["open", &path, "--create", "--write", "--rdwr"]);
+    assert_eq!(code(&out), EXIT_USAGE);
+    assert!(!path.exists(), "nothing ran");
+    let out = run(&osargs!["mknod", &path, "--fifo", "--regular"]);
+    assert_eq!(code(&out), EXIT_USAGE);
+}
+
 #[test]
 fn exit_and_raise_produce_the_status_they_report() {
     let out = run(&osargs!["exit", "42"]);
     assert_eq!(only(&out)["args"]["code"], 42);
     assert_eq!(code(&out), 42);
+    // A code the process cannot exit with is refused, not truncated: `exit
+    // 256` used to report 256 and exit 0.
+    for unrepresentable in ["256", "-1"] {
+        let out = run(&osargs!["exit", unrepresentable]);
+        assert_eq!(code(&out), EXIT_USAGE, "exit {unrepresentable}");
+        assert!(lines(&out).is_empty(), "exit {unrepresentable}");
+    }
 
     let out = run(&osargs!["raise", "TERM"]);
     let line = only(&out);
@@ -1093,6 +1085,9 @@ fn connect_reports_a_real_result_and_refuses_a_name() {
     let l = lines(&out);
     assert_eq!(l[0]["op"], "socket");
     assert!(l[0]["ret"].as_i64().unwrap() >= 0);
+    // Through the raw layer, close-on-exec, like every other socket.
+    assert!(l[0]["args"]["mechanism"].is_string(), "{}", l[0]);
+    assert!(l[0]["args"]["cloexec"].is_string(), "{}", l[0]);
     assert_eq!(l[1]["op"], "connect");
     let errno = l[1]["errno"].as_str();
     assert!(
@@ -1206,6 +1201,26 @@ fn a_malformed_script_is_a_usage_error() {
     std::fs::write(&script, r#"[["nosuchmode"]]"#).unwrap();
     assert_eq!(code(&run(&osargs!["script", &script])), EXIT_USAGE);
 
+    // Review FX8: a usage error in a later step refuses the script before
+    // an earlier step acts.
+    let made = dir.at("made-by-step-0");
+    std::fs::write(
+        &script,
+        serde_json::to_vec(&serde_json::json!([
+            ["open", made.to_str().unwrap(), "--create", "--write"],
+            ["nosuchmode"]
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let out = run(&osargs!["script", &script]);
+    assert_eq!(code(&out), EXIT_USAGE);
+    assert!(lines(&out).is_empty(), "no step ran");
+    assert!(
+        !std::path::Path::new(&made).exists(),
+        "step 0 acted before step 1 was refused"
+    );
+
     assert_eq!(
         code(&run(&osargs!["script", &dir.at("absent.json")])),
         EXIT_USAGE
@@ -1230,6 +1245,23 @@ fn sleep_spin_and_ignore_term_report_before_they_block() {
         started.elapsed() < std::time::Duration::from_secs(20),
         "the report arrived only after the sleep"
     );
+
+    // The disposition itself, where the kernel shows it: SIGTERM's bit in
+    // SigIgn. A kill-and-look alone can look before the signal lands.
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+        let mask = status
+            .lines()
+            .find_map(|l| l.strip_prefix("SigIgn:"))
+            .map(|m| u64::from_str_radix(m.trim(), 16).unwrap())
+            .expect("a SigIgn line");
+        assert_ne!(
+            mask & (1u64 << (libc::SIGTERM - 1)),
+            0,
+            "SIGTERM is not ignored: SigIgn {mask:#x}"
+        );
+    }
 
     // SIGTERM is ignored; only SIGKILL ends it. This test kills only its own child.
     let pid = child.id() as libc::pid_t;

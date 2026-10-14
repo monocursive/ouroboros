@@ -45,21 +45,13 @@ struct Envelope {
     retained: Retained,
 }
 
-pub(super) fn digest_valid(value: &str) -> bool {
-    value.len() == 71
-        && value.starts_with("sha256:")
-        && value[7..]
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 pub(super) fn directory(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
         .open(path)?;
     let m = file.metadata()?;
-    if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 {
+    if !m.is_dir() || m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 {
         return Err(LedgerError("GC requires owned private directories".into()));
     }
     Ok(file)
@@ -75,11 +67,7 @@ pub(super) fn safe_file(path: &Path) -> Result<File> {
 }
 
 fn safe_metadata(m: &fs::Metadata) -> Result<()> {
-    if !m.is_file()
-        || m.uid() != unsafe { libc::geteuid() }
-        || m.mode() & 0o077 != 0
-        || m.nlink() != 1
-    {
+    if !m.is_file() || m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 || m.nlink() != 1 {
         return Err(LedgerError("GC refuses unsafe or linked files".into()));
     }
     Ok(())
@@ -165,6 +153,7 @@ pub(super) fn check_member(root: &Path, entry: &RemovedFile) -> Result<(File, CS
         ));
     }
     // Check the namespace again after hashing, before unlinking through the same parent.
+    // SAFETY: libc::stat is plain integer fields, for which all-zero is valid.
     let mut current: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: pointers reference a live name and writable stat buffer.
     if unsafe {
@@ -189,12 +178,10 @@ pub(super) fn check_member(root: &Path, entry: &RemovedFile) -> Result<(File, CS
 }
 
 pub(super) fn read_json(path: &Path, max: usize) -> Result<Value> {
-    let mut bytes = Vec::new();
-    safe_file(path)?
-        .take(max as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > max || bytes.pop() != Some(b'\n') {
-        return Err(LedgerError("oversized or interrupted GC metadata".into()));
+    const REFUSAL: &str = "oversized or interrupted GC metadata";
+    let mut bytes = crate::protocol::read_bounded(safe_file(path)?, max as u64, REFUSAL)?;
+    if bytes.pop() != Some(b'\n') {
+        return Err(LedgerError(REFUSAL.into()));
     }
     let value: Value = serde_json::from_slice(&bytes)?;
     if canonical(&value)? != bytes {
@@ -281,7 +268,7 @@ impl Retained {
         Ok(run)
     }
     fn completion(&self) -> Result<Value> {
-        Ok(json!({"schema":"ouro.ledger.gc-complete/1","anchor_digest":self.digest()?}))
+        Ok(json!({"schema":schemas::GC_COMPLETE,"anchor_digest":self.digest()?}))
     }
     fn complete(&self, root: &Path) -> Result<bool> {
         match fs::symlink_metadata(root.join(DONE)) {
@@ -299,7 +286,7 @@ impl Retained {
     }
     fn validate(&self, root: &Path, id: &str) -> Result<()> {
         validate_frozen("run", &serde_json::to_value(&self.run)?)?;
-        if self.schema != "ouro.ledger.gc-anchor/1"
+        if self.schema != schemas::GC_ANCHOR
             || self.run.run_id != id
             || self.run.history.is_some()
             || !self.run.holds.is_empty()
@@ -311,7 +298,7 @@ impl Retained {
                     Some("exited" | "signaled" | "exec_error" | "refused")
                 ) || outcome["unknown"] == true
             })
-            || !(1..=36_500).contains(&self.retain_days)
+            || !ouro_records::retention::RETAIN_DAYS.contains(&self.retain_days)
             || ![&self.last_activity_at, &self.cutoff, &self.collected_at]
                 .into_iter()
                 .all(|s| crate::reader::utc_second(s))
@@ -340,7 +327,7 @@ impl Retained {
             ));
         }
         for (i, file) in self.files.iter().enumerate() {
-            if !digest_valid(&file.digest) || file.bytes > 1024 * 1024 * 1024 {
+            if !crate::protocol::sha256_digest(&file.digest) || file.bytes > 1024 * 1024 * 1024 {
                 return Err(LedgerError("invalid GC file anchor".into()));
             }
             if let Some(segment) = self.manifest.segments.get(i) {
@@ -358,7 +345,7 @@ impl Retained {
                 "artifacts/argv.bin",
             ]
             .contains(&file.path.as_str())
-                || file.bytes > 16 * 1024 * 1024
+                || file.bytes > crate::protocol::MAX_CAPTURE_BYTES
             {
                 return Err(LedgerError("invalid GC capture inventory".into()));
             }
@@ -369,8 +356,8 @@ impl Retained {
         for (key, replay) in &self.replay {
             if key.is_empty()
                 || key.len() > 256
-                || !digest_valid(&replay.digest)
-                || !digest_valid(&replay.receipt.digest)
+                || !crate::protocol::sha256_digest(&replay.digest)
+                || !crate::protocol::sha256_digest(&replay.receipt.digest)
                 || replay.receipt.seq == 0
                 || replay.receipt.seq > self.run.chain.head_seq
             {
@@ -443,7 +430,8 @@ pub(super) fn read(root: &Path, id: &str) -> Result<Option<Retained>> {
 }
 
 impl Store {
-    pub fn gc(
+    #[cfg(test)]
+    pub(crate) fn gc(
         &mut self,
         retain_days: u32,
         after: Option<&str>,
@@ -504,7 +492,7 @@ impl Store {
         }
         let plan = self.gc_plan_policy_at(policy, after, limit, now)?;
         let mut result = GcResult {
-            schema: "ouro.ledger.gc-result/1".into(),
+            schema: schemas::GC_RESULT.into(),
             retain_days,
             capture_retain_days: policy.capture_retain_days,
             pruned: vec![],
@@ -559,7 +547,7 @@ impl Store {
                     self.begin_pruning(id, retain_days, &plan.evaluated_at, &plan.cutoff, peer)?
                 };
                 self.finish_pruning(id, &retained)?;
-                let stream = self.streams.get_mut(id).expect("known retained run");
+                let stream = self.stream_mut(id);
                 stream.run = retained.projection(true)?;
                 let run = stream.run.clone();
                 #[cfg(test)]
@@ -637,7 +625,7 @@ impl Store {
         }
         files.extend(capture_pruning::inventory(&root, &verified.run)?);
         let retained = Retained {
-            schema: "ouro.ledger.gc-anchor/1".into(),
+            schema: schemas::GC_ANCHOR.into(),
             run: verified.run.clone(),
             manifest: verified.manifest(),
             replay: verified.replay.clone(),
@@ -663,14 +651,14 @@ impl Store {
             retained: retained.clone(),
         })?;
         if let Err(error) = publish(&root, ANCHOR, &value, MAX_ANCHOR) {
-            self.streams
-                .get_mut(id)
-                .expect("known run")
-                .poisoned
-                .push("GC publication is uncertain; restart required".into());
+            self.poison(
+                id,
+                PoisonKind::Incomplete,
+                "GC publication is uncertain; restart required",
+            );
             return Err(error);
         }
-        let stream = self.streams.get_mut(id).expect("known run");
+        let stream = self.stream_mut(id);
         stream.pruned = Some(retained.clone());
         stream.run = retained.projection(false)?;
         // Expired in-memory sessions must release descriptors as well as pins.
@@ -736,30 +724,17 @@ impl Store {
 
     pub(super) fn restore_pruned(&self, id: &str, retained: Retained) -> Result<Stream> {
         self.finish_pruning(id, &retained)?;
-        let run = retained.projection(true)?;
         Ok(Stream {
-            run,
-            accepted_bytes: 0,
+            run: retained.projection(true)?,
             replay: retained.replay.clone(),
-            source_heads: BTreeMap::new(),
             source_gaps: if retained.strict_source_loss {
                 vec![json!({"reason":"retained_source_loss"})]
             } else {
                 vec![]
             },
-            last_source: None,
-            first_loss: None,
-            receipt_phase: None,
-            poisoned: vec![],
-            segments: vec![],
-            active_segment: 1,
-            segment_bytes: 0,
-            segment_hash: Sha256::new(),
-            replay_hash: Sha256::new(),
-            anchors: BTreeMap::new(),
             last_activity_at: Some(retained.last_activity_at.clone()),
-            retention_time_valid: true,
             pruned: Some(retained),
+            ..Stream::empty(id)
         })
     }
 
@@ -780,7 +755,7 @@ impl Store {
                     "GC deletion is incomplete; retry GC or restart the writer".into(),
                 ));
             }
-            if read_json(&root.join("run.json"), 4 * MAX_FRAME_BYTES)?
+            if read_json(&root.join("run.json"), crate::projection::MAX_RUN_BYTES)?
                 != serde_json::to_value(&stream.run)?
             {
                 return Err(LedgerError(
@@ -793,7 +768,7 @@ impl Store {
             run_id: id.into(),
             local_consistency: checked.is_ok(),
             child_protection: stream.run.child_protection.clone(),
-            coverage: stream.run.coverage.clone(),
+            coverage: crate::reader::coverage_summary(&stream.run.coverage),
             events: 0,
             problems: checked
                 .err()

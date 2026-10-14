@@ -43,7 +43,7 @@ fn open(path: &Path) -> Result<File> {
         let metadata = fs::symlink_metadata(directory)?;
         if !metadata.is_dir()
             || metadata.file_type().is_symlink()
-            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.uid() != crate::os::euid()
             || metadata.mode() & 0o077 != 0
         {
             return Err(LedgerError("reader directory is unsafe".into()));
@@ -54,11 +54,7 @@ fn open(path: &Path) -> Result<File> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)?;
     let m = file.metadata()?;
-    if !m.is_file()
-        || m.uid() != unsafe { libc::geteuid() }
-        || m.mode() & 0o077 != 0
-        || m.nlink() != 1
-    {
+    if !m.is_file() || m.uid() != crate::os::euid() || m.mode() & 0o077 != 0 || m.nlink() != 1 {
         return Err(LedgerError("reader canonical file is unsafe".into()));
     }
     Ok(file)

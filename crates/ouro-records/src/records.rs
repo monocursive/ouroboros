@@ -101,6 +101,28 @@ impl fmt::Display for NativeStringError {
 }
 
 impl NativeString {
+    /// Decodes the `data` of a `{"encoding":"base64","data":...}` object: it
+    /// must be canonical padded base64 of bytes that hold no NUL and are not
+    /// UTF-8, which uses the string form. The one statement of the byte form.
+    ///
+    /// # Errors
+    /// Which of those rules `data` breaks.
+    pub fn decode_base64(data: &str) -> Result<Vec<u8>, NativeStringError> {
+        let bytes = BASE64
+            .decode(data.as_bytes())
+            .map_err(|_| NativeStringError::NoncanonicalBase64)?;
+        if BASE64.encode(&bytes) != data {
+            return Err(NativeStringError::NoncanonicalBase64);
+        }
+        if bytes.contains(&0) {
+            return Err(NativeStringError::ContainsNul);
+        }
+        if std::str::from_utf8(&bytes).is_ok() {
+            return Err(NativeStringError::Utf8MustUseStringForm);
+        }
+        Ok(bytes)
+    }
+
     /// Chooses the codec branch for `bytes`, refusing an embedded NUL.
     ///
     /// # Errors
@@ -216,19 +238,9 @@ impl<'de> Deserialize<'de> for NativeString {
                 if encoding != "base64" {
                     return Err(de::Error::custom("unknown native-string encoding"));
                 }
-                let bytes = BASE64
-                    .decode(data.as_bytes())
-                    .map_err(|_| de::Error::custom(NativeStringError::NoncanonicalBase64))?;
-                if BASE64.encode(&bytes) != data {
-                    return Err(de::Error::custom(NativeStringError::NoncanonicalBase64));
-                }
-                if bytes.contains(&0) {
-                    return Err(de::Error::custom(NativeStringError::ContainsNul));
-                }
-                if std::str::from_utf8(&bytes).is_ok() {
-                    return Err(de::Error::custom(NativeStringError::Utf8MustUseStringForm));
-                }
-                Ok(NativeString::Bytes(bytes))
+                NativeString::decode_base64(&data)
+                    .map(NativeString::Bytes)
+                    .map_err(de::Error::custom)
             }
         }
 
@@ -869,6 +881,11 @@ pub struct AppliedNetwork {
     pub mechanism: Option<String>,
     /// Canonical allowed host rules.
     pub allowed_hosts: Vec<String>,
+    /// The `allowed_hosts` entries applied as TLS only: every grant of them
+    /// omitted its port, so the proxy admits no plaintext HTTP to them
+    /// (network-rules.md). Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tls_only: Vec<String>,
 }
 
 /// Applied syscall filter, or null when none was installed.
@@ -1465,18 +1482,16 @@ pub struct Event {
 }
 
 impl Event {
-    /// A wrapper lifecycle note (`fields.kind = lifecycle`).
-    #[must_use]
-    pub fn lifecycle_note(
+    /// A successful wrapper fact: every wrapper note shares this envelope and
+    /// differs only in its operation and `fields`, kept in the given order.
+    fn wrapper_note(
         attempt_id: &str,
         source_seq: u64,
         observed_at: SystemTime,
         monotonic_ns: u128,
-        transition: &str,
+        operation: &str,
+        fields: impl IntoIterator<Item = (&'static str, serde_json::Value)>,
     ) -> Self {
-        let mut fields = serde_json::Map::new();
-        fields.insert("kind".to_owned(), serde_json::Value::from("lifecycle"));
-        fields.insert("transition".to_owned(), serde_json::Value::from(transition));
         Event {
             schema: SCHEMA_EVENT.to_owned(),
             attempt_id: attempt_id.to_owned(),
@@ -1484,7 +1499,7 @@ impl Event {
             source_seq,
             observed_at: rfc3339_utc(observed_at),
             monotonic_ns: monotonic_ns.to_string(),
-            operation: "note".to_owned(),
+            operation: operation.to_owned(),
             stage: EventStage::Result,
             decision: None,
             outcome: Some(EventOutcome {
@@ -1496,8 +1511,33 @@ impl Event {
                 bytes_out: None,
                 duration_ms: None,
             }),
-            fields,
+            fields: fields
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect(),
         }
+    }
+
+    /// A wrapper lifecycle note (`fields.kind = lifecycle`).
+    #[must_use]
+    pub fn lifecycle_note(
+        attempt_id: &str,
+        source_seq: u64,
+        observed_at: SystemTime,
+        monotonic_ns: u128,
+        transition: &str,
+    ) -> Self {
+        Self::wrapper_note(
+            attempt_id,
+            source_seq,
+            observed_at,
+            monotonic_ns,
+            "note",
+            [
+                ("kind", "lifecycle".into()),
+                ("transition", transition.into()),
+            ],
+        )
     }
 
     /// A wrapper limit note (`fields.kind = limit`): why a requested ceiling
@@ -1511,38 +1551,24 @@ impl Event {
         key: &str,
         reason: &str,
     ) -> Self {
-        let mut fields = serde_json::Map::new();
-        fields.insert("kind".to_owned(), serde_json::Value::from("limit"));
-        fields.insert("key".to_owned(), serde_json::Value::from(key));
-        fields.insert("applied".to_owned(), serde_json::Value::from(false));
-        fields.insert("reason".to_owned(), serde_json::Value::from(reason));
-        Event {
-            schema: SCHEMA_EVENT.to_owned(),
-            attempt_id: attempt_id.to_owned(),
-            source: EventSource::Wrapper,
+        Self::wrapper_note(
+            attempt_id,
             source_seq,
-            observed_at: rfc3339_utc(observed_at),
-            monotonic_ns: monotonic_ns.to_string(),
-            operation: "note".to_owned(),
-            stage: EventStage::Result,
-            decision: None,
-            outcome: Some(EventOutcome {
-                ok: Some(true),
-                return_value: None,
-                errno: None,
-                completion: Completion::Wrapper,
-                bytes_in: None,
-                bytes_out: None,
-                duration_ms: None,
-            }),
-            fields,
-        }
+            observed_at,
+            monotonic_ns,
+            "note",
+            [
+                ("kind", "limit".into()),
+                ("key", key.into()),
+                ("applied", false.into()),
+                ("reason", reason.into()),
+            ],
+        )
     }
 
-    // The note a detected lifetime-integrity loss writes (§9.3)
-    /// A wrapper lifetime note (`fields.kind = lifetime`): the registered
-    /// boundary's integrity was lost, what lost it, and a safe reason code.
-    /// It names no path, argument or value (I09).
+    /// A wrapper lifetime note (`fields.kind = lifetime`, §9.3): the
+    /// registered boundary's integrity was lost, what lost it, and a safe
+    /// reason code. It names no path, argument or value (I09).
     #[must_use]
     pub fn lifetime_note(
         attempt_id: &str,
@@ -1552,22 +1578,19 @@ impl Event {
         subject: &str,
         reason: &str,
     ) -> Self {
-        let mut event =
-            Event::lifecycle_note(attempt_id, source_seq, observed_at, monotonic_ns, "");
-        event.fields.clear();
-        event
-            .fields
-            .insert("kind".to_owned(), serde_json::Value::from("lifetime"));
-        event
-            .fields
-            .insert("integrity".to_owned(), serde_json::Value::from("lost"));
-        event
-            .fields
-            .insert("subject".to_owned(), serde_json::Value::from(subject));
-        event
-            .fields
-            .insert("reason".to_owned(), serde_json::Value::from(reason));
-        event
+        Self::wrapper_note(
+            attempt_id,
+            source_seq,
+            observed_at,
+            monotonic_ns,
+            "note",
+            [
+                ("kind", "lifetime".into()),
+                ("integrity", "lost".into()),
+                ("subject", subject.into()),
+                ("reason", reason.into()),
+            ],
+        )
     }
 
     /// A wrapper coverage-gap note (`fields.kind = coverage_gap`).
@@ -1579,59 +1602,22 @@ impl Event {
         monotonic_ns: u128,
         gap: &Gap,
     ) -> Self {
-        let mut fields = serde_json::Map::new();
-        fields.insert("kind".to_owned(), serde_json::Value::from("coverage_gap"));
-        fields.insert(
-            "classes".to_owned(),
-            serde_json::Value::from(gap.classes.clone()),
-        );
-        fields.insert(
-            "source".to_owned(),
-            serde_json::Value::from(gap.source.clone()),
-        );
-        fields.insert(
-            "start_ns".to_owned(),
-            serde_json::Value::from(gap.start_ns.clone()),
-        );
-        fields.insert(
-            "end_ns".to_owned(),
-            match &gap.end_ns {
-                Some(value) => serde_json::Value::from(value.clone()),
-                None => serde_json::Value::Null,
-            },
-        );
-        fields.insert(
-            "reason".to_owned(),
-            serde_json::Value::from(gap.reason.clone()),
-        );
-        fields.insert(
-            "lost_count".to_owned(),
-            match gap.lost_count {
-                Some(value) => serde_json::Value::from(value),
-                None => serde_json::Value::Null,
-            },
-        );
-        Event {
-            schema: SCHEMA_EVENT.to_owned(),
-            attempt_id: attempt_id.to_owned(),
-            source: EventSource::Wrapper,
+        Self::wrapper_note(
+            attempt_id,
             source_seq,
-            observed_at: rfc3339_utc(observed_at),
-            monotonic_ns: monotonic_ns.to_string(),
-            operation: "note".to_owned(),
-            stage: EventStage::Result,
-            decision: None,
-            outcome: Some(EventOutcome {
-                ok: Some(true),
-                return_value: None,
-                errno: None,
-                completion: Completion::Wrapper,
-                bytes_in: None,
-                bytes_out: None,
-                duration_ms: None,
-            }),
-            fields,
-        }
+            observed_at,
+            monotonic_ns,
+            "note",
+            [
+                ("kind", "coverage_gap".into()),
+                ("classes", gap.classes.clone().into()),
+                ("source", gap.source.clone().into()),
+                ("start_ns", gap.start_ns.clone().into()),
+                ("end_ns", gap.end_ns.clone().into()),
+                ("reason", gap.reason.clone().into()),
+                ("lost_count", gap.lost_count.into()),
+            ],
+        )
     }
 
     /// An audit-source result for one closed-set operation (§11.2).
@@ -1674,36 +1660,20 @@ impl Event {
         phase: Phase,
         receipt_digest: &str,
     ) -> Self {
-        let mut fields = serde_json::Map::new();
-        fields.insert(
-            "phase".to_owned(),
-            serde_json::to_value(phase).unwrap_or(serde_json::Value::Null),
-        );
-        fields.insert(
-            "receipt_digest".to_owned(),
-            serde_json::Value::from(receipt_digest),
-        );
-        Event {
-            schema: SCHEMA_EVENT.to_owned(),
-            attempt_id: attempt_id.to_owned(),
-            source: EventSource::Wrapper,
+        Self::wrapper_note(
+            attempt_id,
             source_seq,
-            observed_at: rfc3339_utc(observed_at),
-            monotonic_ns: monotonic_ns.to_string(),
-            operation: "jail.receipt".to_owned(),
-            stage: EventStage::Result,
-            decision: None,
-            outcome: Some(EventOutcome {
-                ok: Some(true),
-                return_value: None,
-                errno: None,
-                completion: Completion::Wrapper,
-                bytes_in: None,
-                bytes_out: None,
-                duration_ms: None,
-            }),
-            fields,
-        }
+            observed_at,
+            monotonic_ns,
+            "jail.receipt",
+            [
+                (
+                    "phase",
+                    serde_json::to_value(phase).unwrap_or(serde_json::Value::Null),
+                ),
+                ("receipt_digest", receipt_digest.into()),
+            ],
+        )
     }
 }
 
@@ -1953,3 +1923,191 @@ pub fn read_release(
 }
 
 use std::io::Read as _;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// The wire bytes of every wrapper note this crate constructs.
+    #[test]
+    fn wrapper_notes_keep_their_wire_bytes() {
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        let envelope = |operation: &str, fields: Value| {
+            json!({"schema":"ouro.event/1","attempt_id":"att","source":"wrapper","source_seq":7,
+                "observed_at":"1970-01-01T00:00:01Z","monotonic_ns":"9","operation":operation,
+                "stage":"result","decision":null,"fields":fields,
+                "outcome":{"ok":true,"return_value":null,"errno":null,"completion":"wrapper",
+                    "bytes_in":null,"bytes_out":null,"duration_ms":null}})
+        };
+        let bytes = |event: &Event| serde_json::to_vec(event).unwrap();
+        let expected = |value: Value| {
+            let event: Event = serde_json::from_value(value).unwrap();
+            serde_json::to_vec(&event).unwrap()
+        };
+        assert_eq!(
+            bytes(&Event::lifecycle_note("att", 7, at, 9, "started")),
+            expected(envelope(
+                "note",
+                json!({"kind":"lifecycle","transition":"started"})
+            ))
+        );
+        assert_eq!(
+            bytes(&Event::limit_note("att", 7, at, 9, "swap", "unsupported")),
+            expected(envelope(
+                "note",
+                json!({"kind":"limit","key":"swap","applied":false,"reason":"unsupported"})
+            ))
+        );
+        assert_eq!(
+            bytes(&Event::lifetime_note("att", 7, at, 9, "cgroup", "moved")),
+            expected(envelope(
+                "note",
+                json!({"kind":"lifetime","integrity":"lost","subject":"cgroup","reason":"moved"})
+            ))
+        );
+        let gap = Gap {
+            classes: vec!["exec".into()],
+            source: "audit".into(),
+            start_ns: "1".into(),
+            end_ns: None,
+            reason: "queue_overflow".into(),
+            lost_count: Some(3),
+        };
+        assert_eq!(
+            bytes(&Event::coverage_gap_note("att", 7, at, 9, &gap)),
+            expected(envelope(
+                "note",
+                json!({"kind":"coverage_gap","classes":["exec"],"source":"audit","start_ns":"1",
+                    "end_ns":null,"reason":"queue_overflow","lost_count":3})
+            ))
+        );
+        assert_eq!(
+            bytes(&Event::receipt_note(
+                "att",
+                7,
+                at,
+                9,
+                Phase::Settled,
+                "sha256:x"
+            )),
+            expected(envelope(
+                "jail.receipt",
+                json!({"phase":"settled","receipt_digest":"sha256:x"})
+            ))
+        );
+    }
+
+    /// Deserialization and the semantic checker share one byte-form decoder.
+    #[test]
+    fn the_byte_form_is_decoded_by_one_rule_set() {
+        assert_eq!(NativeString::decode_base64("/w==").unwrap(), [0xff]);
+        for (data, error) in [
+            ("/w", NativeStringError::NoncanonicalBase64),
+            ("/x==", NativeStringError::NoncanonicalBase64),
+            ("/wA=", NativeStringError::ContainsNul),
+            ("YQ==", NativeStringError::Utf8MustUseStringForm),
+        ] {
+            assert_eq!(NativeString::decode_base64(data), Err(error), "{data}");
+            let object = json!({"encoding":"base64","data":data});
+            assert!(serde_json::from_value::<NativeString>(object.clone()).is_err());
+            assert_eq!(semantic::native_bytes(&object), Err(error.to_string()));
+        }
+    }
+
+    /// `as_str` restates the serde names, so each variant's two spellings
+    /// must agree in both directions.
+    #[test]
+    fn error_codes_and_stages_spell_their_serde_names() {
+        use ErrorCode as C;
+        let codes = [
+            C::CommandForbidden,
+            C::InvalidConfig,
+            C::PolicyWidening,
+            C::UnsafeStatePath,
+            C::UnsafeConfigPath,
+            C::UnsupportedPlatform,
+            C::MissingCapability,
+            C::BackendUnavailable,
+            C::ObserverUnavailable,
+            C::NestingFailed,
+            C::CredentialUnavailable,
+            C::InvalidFd,
+            C::GateInvalid,
+            C::GateClosed,
+            C::PrepareTimeout,
+            C::AttemptExists,
+            C::ExecFailed,
+            C::ExecInterpreterMissing,
+            C::ExecUnconfirmed,
+            C::EvidenceLost,
+            C::TreeUnknown,
+            C::StateWriteFailed,
+            C::StdioFailed,
+            C::InternalError,
+        ];
+        for code in codes {
+            // A new variant fails to compile here until it is listed above.
+            match code {
+                C::CommandForbidden
+                | C::InvalidConfig
+                | C::PolicyWidening
+                | C::UnsafeStatePath
+                | C::UnsafeConfigPath
+                | C::UnsupportedPlatform
+                | C::MissingCapability
+                | C::BackendUnavailable
+                | C::ObserverUnavailable
+                | C::NestingFailed
+                | C::CredentialUnavailable
+                | C::InvalidFd
+                | C::GateInvalid
+                | C::GateClosed
+                | C::PrepareTimeout
+                | C::AttemptExists
+                | C::ExecFailed
+                | C::ExecInterpreterMissing
+                | C::ExecUnconfirmed
+                | C::EvidenceLost
+                | C::TreeUnknown
+                | C::StateWriteFailed
+                | C::StdioFailed
+                | C::InternalError => {}
+            }
+            assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
+            assert_eq!(
+                serde_json::from_value::<ErrorCode>(code.as_str().into()).unwrap(),
+                code
+            );
+        }
+        use ErrorStage as S;
+        for stage in [
+            S::Resolving,
+            S::Probing,
+            S::Preparing,
+            S::Prepared,
+            S::Released,
+            S::Running,
+            S::Stopping,
+            S::Reconciling,
+            S::Settled,
+        ] {
+            match stage {
+                S::Resolving
+                | S::Probing
+                | S::Preparing
+                | S::Prepared
+                | S::Released
+                | S::Running
+                | S::Stopping
+                | S::Reconciling
+                | S::Settled => {}
+            }
+            assert_eq!(serde_json::to_value(stage).unwrap(), stage.as_str());
+            assert_eq!(
+                serde_json::from_value::<ErrorStage>(stage.as_str().into()).unwrap(),
+                stage
+            );
+        }
+    }
+}

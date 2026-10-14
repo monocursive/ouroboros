@@ -119,7 +119,7 @@ pub enum Mode {
         #[arg(long)]
         trunc: bool,
         /// Request write access (`O_WRONLY`); without it the open is read-only.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "rdwr")]
         write: bool,
         /// Request read and write access (`O_RDWR`).
         #[arg(long)]
@@ -404,7 +404,7 @@ pub enum Mode {
     /// Wrap a command the way a vendor agent's own sandbox wraps its tools
     /// (Linux): set no_new_privs, install a Landlock ruleset granting the
     /// listed trees, install a seccomp filter returning EPERM for the listed
-    /// syscalls (x86_64 numbers, architecture checked), report each step, then
+    /// syscalls (the native architecture's numbers, checked), report each step, then
     /// replace this process with ARGV. Any failed step stops before the exec.
     SandboxExec {
         /// Grant every filesystem right beneath DIR.
@@ -417,7 +417,7 @@ pub enum Mode {
         /// TCP connect is denied. Needs Landlock ABI 4.
         #[arg(long)]
         landlock_deny_tcp: bool,
-        /// Return EPERM for this syscall (an x86_64 name, or a number).
+        /// Return EPERM for this syscall (a name in the native table, or a number).
         #[arg(long = "seccomp-errno", value_name = "SYSCALL")]
         seccomp_errno: Vec<String>,
         #[arg(last = true, required = true, num_args = 1.., value_name = "ARGV")]
@@ -492,7 +492,7 @@ pub enum Mode {
         #[arg(value_name = "COUNT")]
         count: u32,
     },
-    /// `clone(CLONE_UNTRACED | SIGCHLD)` (Linux x86_64): the child makes one
+    /// `clone(CLONE_UNTRACED | SIGCHLD)` (Linux): the child makes one
     /// raw `mkdir(PATH)` and exits with its errno (0 on success); the parent
     /// reports the `clone` result and, when a child ran, an
     /// `untraced-mkdir` line with the child's result. `--expect` applies
@@ -514,7 +514,7 @@ pub enum Mode {
     /// `NSpid` line of `/proc/self/status` (Linux).
     Identity,
     /// Report, then exit with CODE.
-    Exit { code: i32 },
+    Exit { code: u8 },
     /// Report, then raise SIGNAL on self (name without `SIG`, or a number).
     Raise { signal: String },
     /// Run a JSON array of argv arrays in this one process.
@@ -566,13 +566,29 @@ pub enum Mode {
 }
 
 /// Parse an octal mode string.
+/// The largest mode a call takes: the file-type and permission bits, which
+/// is also all a Darwin `mode_t` (16 bits) holds.
+pub const MAX_MODE: u32 = 0o177_777;
+
 pub fn parse_mode(s: &str) -> Result<u32, String> {
-    u32::from_str_radix(s, 8).map_err(|_| format!("`{s}` is not an octal mode"))
+    let mode = u32::from_str_radix(s, 8).map_err(|_| format!("`{s}` is not an octal mode"))?;
+    if mode > MAX_MODE {
+        return Err(format!("`{s}` is wider than a mode (at most {MAX_MODE:o})"));
+    }
+    Ok(mode)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mode_wider_than_mode_t_is_refused_not_truncated() {
+        assert_eq!(parse_mode("177777"), Ok(MAX_MODE));
+        assert_eq!(parse_mode("600"), Ok(0o600));
+        assert!(parse_mode("200000").is_err());
+        assert!(parse_mode("9").is_err());
+    }
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("ouro-fixture").chain(args.iter().copied())).unwrap()

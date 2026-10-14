@@ -1326,6 +1326,20 @@ impl BwrapPlan {
             .collect()
     }
 
+    /// The fewest rows the boundary's `mountinfo` holds under this plan: the
+    /// tmpfs bubblewrap makes the root, and one mount per row of
+    /// [`BwrapPlan::mount_table`] that mounts something (a symlink does not).
+    /// The true count is higher: `/dev` brings its device nodes and `devpts`
+    /// beneath it, and a bind brings the host's mounts beneath its source.
+    #[must_use]
+    pub fn mount_rows_at_least(&self) -> usize {
+        1 + self
+            .mount_table()
+            .iter()
+            .filter(|row| row.kind != MountKind::Symlink)
+            .count()
+    }
+
     /// Render the invocation.
     ///
     /// # Errors

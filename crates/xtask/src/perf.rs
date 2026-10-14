@@ -34,6 +34,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use clap::{Args, Subcommand, ValueEnum};
+use ouro_fixture::perf::{HarvestedAttempt, PerfLaunchResult, TraceHarvest};
+use ouro_jail::observer::CoverageClass;
+use ouro_jail::records::{
+    Coverage, CoverageEntry, Gap, OutcomeKind, Phase, Receipt, SCHEMA_RECEIPT, SourceStatus,
+    StateCleanup,
+};
+
+use crate::util::wire;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -60,8 +68,14 @@ pub const EXEC_UNCONFIRMED: &str = "the backend ended without independent eviden
 /// J5-B1 made it a coded tool error (stage `running`, exit 1).
 pub const EXEC_UNCONFIRMED_CODE: &str = "exec_unconfirmed";
 
-/// The closed-set classes an attached observer must report active.
-const CLOSED_SET: [&str; 4] = ["exec", "fs.write", "fs.deny", "net"];
+/// The closed-set classes an attached observer must report active: the
+/// classes the audit source observes (§11.4).
+fn closed_set() -> impl Iterator<Item = &'static str> {
+    CoverageClass::ALL
+        .into_iter()
+        .filter(|class| class.source() == "audit")
+        .map(CoverageClass::as_str)
+}
 
 // ----------------------------------------------------------------------- CLI
 
@@ -349,7 +363,11 @@ pub fn cell_seed(seed: u64, session: Session, workload: Workload) -> u64 {
 
 // ------------------------------------------------------------------- records
 
-/// What `ouro-fixture perf-launch` wrote for one launch.
+/// The launcher's facts of one launch, as the raw record keeps them: the
+/// fixture's [`PerfLaunchResult`], read strictly, without its schema, argv
+/// and raw wait status. The defaults here only let raw records written
+/// before a field existed be summarised again; a fresh launch is never
+/// read through them.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct LauncherFacts {
@@ -426,6 +444,72 @@ pub struct TraceFacts {
     pub by_operation: BTreeMap<String, u64>,
     pub notes: BTreeMap<String, u64>,
     pub error: Option<String>,
+}
+
+impl From<PerfLaunchResult> for LauncherFacts {
+    fn from(r: PerfLaunchResult) -> Self {
+        LauncherFacts {
+            pid: i64::from(r.pid),
+            t0_ns: r.t0_ns,
+            exec_ns: r.exec_ns,
+            t1_ns: r.t1_ns,
+            timens: r.timens,
+            exec_errno: r.exec_errno,
+            timed_out: r.timed_out,
+            wait_errno: r.wait_errno,
+            status: ExitFacts {
+                exited: r.status.exited,
+                code: r.status.code,
+                signal: r.status.signal,
+            },
+            rusage: RusageFacts {
+                maxrss_kib: r.rusage.maxrss_kib,
+                utime_us: r.rusage.utime_us,
+                stime_us: r.rusage.stime_us,
+            },
+            sampling: SamplingFacts {
+                interval_ms: r.sampling.interval_ms,
+                samples: r.sampling.samples,
+                hwm_kib: r.sampling.hwm_kib,
+                leaf_path: r.sampling.leaf_path,
+                leaf_peak_bytes: r.sampling.leaf_peak_bytes,
+                leaf_samples: r.sampling.leaf_samples,
+                leaf_note: r.sampling.leaf_note,
+            },
+            attempts: r
+                .attempts
+                .map(|attempts| attempts.into_iter().map(AttemptFacts::from).collect()),
+            cgroup: r.cgroup,
+            waited_via: Some(r.waited_via.as_str().to_owned()),
+        }
+    }
+}
+
+impl From<HarvestedAttempt> for AttemptFacts {
+    fn from(a: HarvestedAttempt) -> Self {
+        let trace = match a.trace {
+            TraceHarvest::Read(c) => TraceFacts {
+                bytes: c.bytes,
+                state: c.state.as_str().to_owned(),
+                frames: c.frames,
+                guard: c.guard,
+                by_source: c.by_source,
+                by_operation: c.by_operation,
+                notes: c.notes,
+                error: None,
+            },
+            TraceHarvest::Unreadable(error) => TraceFacts {
+                error: Some(error),
+                ..TraceFacts::default()
+            },
+        };
+        AttemptFacts {
+            id: a.id,
+            dir: a.dir,
+            receipt: a.receipt,
+            trace,
+        }
+    }
 }
 
 /// The target's own two lines.
@@ -646,61 +730,83 @@ pub fn target_facts(stdout: &[u8], workload: Workload) -> TargetFacts {
     facts
 }
 
-/// The facts of a receipt document.
+/// A final receipt, read strictly: every field the schema requires, nothing
+/// it does not know. A receipt that is not one is no receipt, never one
+/// with no errors, no gaps and no coverage.
 ///
 /// # Errors
-/// When the document is not a receipt with a phase and an outcome.
-pub fn receipt_facts(r: &Value) -> Result<ReceiptFacts, String> {
-    let text = |v: &Value| v.as_str().map(str::to_owned);
-    let gaps_of = |v: &Value| v.as_array().map_or(0, Vec::len);
-    let lost_of = |v: &Value| {
-        v.as_array().map_or(0, |gaps| {
-            gaps.iter()
-                .filter_map(|g| g["lost_count"].as_u64())
-                .sum::<u64>()
-        })
-    };
-    let phase = text(&r["phase"]).ok_or("the receipt has no phase")?;
-    let outcome_kind = text(&r["outcome"]["kind"]).ok_or("the receipt has no outcome kind")?;
-    let mut coverage = BTreeMap::new();
-    if let Some(classes) = r["coverage"].as_object() {
-        for (name, c) in classes {
-            coverage.insert(
-                name.clone(),
-                ClassFacts {
-                    status: text(&c["status"]).unwrap_or_default(),
-                    observed_count: c["observed_count"].as_u64(),
-                    gaps: gaps_of(&c["gaps"]),
-                    lost: lost_of(&c["gaps"]),
-                },
-            );
-        }
+/// Bytes that are not an `ouro.jail.receipt/1` record.
+pub fn read_receipt(bytes: &[u8]) -> Result<Receipt, String> {
+    let receipt: Receipt =
+        serde_json::from_slice(bytes).map_err(|e| format!("not a receipt: {e}"))?;
+    if receipt.schema != SCHEMA_RECEIPT {
+        return Err(format!(
+            "the schema is {:?}, not {SCHEMA_RECEIPT:?}",
+            receipt.schema
+        ));
     }
-    let details = &r["lifetime"]["native"]["details"];
-    Ok(ReceiptFacts {
-        attempt_id: text(&r["attempt_id"]).unwrap_or_default(),
-        phase,
-        policy_name: text(&r["policy"]["name"]),
-        policy_observe: text(&r["policy"]["observe"]),
-        outcome_kind,
-        outcome_code: r["outcome"]["code"].as_i64(),
-        outcome_cause: text(&r["outcome"]["cause"]),
-        errors: r["errors"].as_array().map_or_else(Vec::new, |errors| {
-            errors
-                .iter()
-                .map(|e| e["code"].as_str().unwrap_or("?").to_owned())
-                .collect()
-        }),
-        integrity: text(&r["lifetime"]["integrity"]),
-        tree_empty: r["lifetime"]["tree_empty"].as_bool(),
-        observer_attached: r["observer"]["attached"].as_bool().unwrap_or(false),
-        observer_gaps: gaps_of(&r["observer"]["gaps"]),
-        observer_lost: lost_of(&r["observer"]["gaps"]),
+    Ok(receipt)
+}
+
+/// The coverage entry of `class`.
+fn coverage_entry(coverage: &Coverage, class: CoverageClass) -> &CoverageEntry {
+    match class {
+        CoverageClass::Exec => &coverage.exec,
+        CoverageClass::FsWrite => &coverage.fs_write,
+        CoverageClass::FsDeny => &coverage.fs_deny,
+        CoverageClass::Net => &coverage.net,
+        CoverageClass::ProxyNet => &coverage.proxy_net,
+        CoverageClass::Limits => &coverage.limits,
+    }
+}
+
+/// The facts of a receipt the harness uses.
+#[must_use]
+pub fn receipt_facts(r: &Receipt) -> ReceiptFacts {
+    let lost = |gaps: &[Gap]| gaps.iter().filter_map(|g| g.lost_count).sum::<u64>();
+    let coverage = CoverageClass::ALL
+        .into_iter()
+        .map(|class| {
+            let c = coverage_entry(&r.coverage, class);
+            let facts = ClassFacts {
+                status: wire(c.status),
+                observed_count: c.observed_count,
+                gaps: c.gaps.len(),
+                lost: lost(&c.gaps),
+            };
+            (class.as_str().to_owned(), facts)
+        })
+        .collect();
+    // The native details are an open map in the record: what the Linux
+    // boundary records there is read by name.
+    let detail = |group: &str, key: &str| {
+        r.lifetime
+            .native
+            .as_ref()
+            .and_then(|native| native.details.get(group))
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    ReceiptFacts {
+        attempt_id: r.attempt_id.clone(),
+        phase: wire(r.phase),
+        policy_name: Some(r.policy.name.clone()),
+        policy_observe: Some(wire(r.policy.observe)),
+        outcome_kind: wire(r.outcome.kind),
+        outcome_code: r.outcome.code.map(i64::from),
+        outcome_cause: r.outcome.cause.clone(),
+        errors: r.errors.iter().map(|e| e.code.clone()).collect(),
+        integrity: Some(r.lifetime.integrity.clone()),
+        tree_empty: r.lifetime.tree_empty,
+        observer_attached: r.observer.attached,
+        observer_gaps: r.observer.gaps.len(),
+        observer_lost: lost(&r.observer.gaps),
         coverage,
-        supervisor_scope: text(&details["supervisor_scope"]["state"]),
-        leaf_path: text(&details["execution_cgroup"]["path"]),
-        state_cleanup: text(&r["state_cleanup"]),
-    })
+        supervisor_scope: detail("supervisor_scope", "state"),
+        leaf_path: detail("execution_cgroup", "path"),
+        state_cleanup: Some(wire(r.state_cleanup)),
+    }
 }
 
 // ------------------------------------------------------------------ validity
@@ -787,7 +893,7 @@ fn validate_jailed(
         reasons.push(Reason::NoReceipt);
         return;
     };
-    if r.phase != "settled" {
+    if r.phase != wire(Phase::Settled) {
         reasons.push(Reason::NotSettled);
     }
     if r.policy_name.as_deref() != Some(profile.name())
@@ -798,9 +904,9 @@ fn validate_jailed(
     if r.supervisor_scope.as_deref() != Some(rec.session.expected_scope_state()) {
         reasons.push(Reason::SessionMismatch);
     }
-    let exited_zero = r.outcome_kind == "exited" && r.outcome_code == Some(0);
+    let exited_zero = r.outcome_kind == wire(OutcomeKind::Exited) && r.outcome_code == Some(0);
     let unconfirmed = observe == Observe::Off
-        && r.outcome_kind == "unknown"
+        && r.outcome_kind == wire(OutcomeKind::Unknown)
         && r.outcome_cause.as_deref() == Some(EXEC_UNCONFIRMED);
     if exited_zero {
         if !(l.status.exited && l.status.code == Some(0)) {
@@ -825,7 +931,10 @@ fn validate_jailed(
     if r.integrity.as_deref() != Some("verified") || r.tree_empty != Some(true) {
         reasons.push(Reason::TreeNotVerified);
     }
-    if r.coverage.values().any(|c| c.status == "degraded") {
+    if r.coverage
+        .values()
+        .any(|c| c.status == wire(SourceStatus::Degraded))
+    {
         reasons.push(Reason::CoverageDegraded);
     }
     if r.coverage.values().any(|c| c.gaps > 0) {
@@ -841,10 +950,11 @@ fn validate_jailed(
         if !r.observer_attached {
             reasons.push(Reason::ObserverDetached);
         }
-        if CLOSED_SET
-            .iter()
-            .any(|class| r.coverage.get(*class).is_none_or(|c| c.status != "active"))
-        {
+        if closed_set().any(|class| {
+            r.coverage
+                .get(class)
+                .is_none_or(|c| c.status != wire(SourceStatus::Active))
+        }) {
             reasons.push(Reason::ClassNotActive);
         }
     }
@@ -906,30 +1016,33 @@ pub fn counts_match(rec: &LaunchRecord, observe: Observe) -> bool {
         // Missing facts are excluded by their own reasons.
         return true;
     };
-    let class = |k: &str| r.coverage.get(k).and_then(|c| c.observed_count);
+    let class = |k: CoverageClass| r.coverage.get(k.as_str()).and_then(|c| c.observed_count);
     let op = |k: &str| trace.by_operation.get(k).copied().unwrap_or(0);
     let audit = trace.by_source.get("audit").copied().unwrap_or(0);
     // No limit is hit and nothing is proxied by these workloads.
-    if class("limits").is_some_and(|c| c != 0) || class("proxy.net").is_some_and(|c| c != 0) {
+    if class(CoverageClass::Limits).is_some_and(|c| c != 0)
+        || class(CoverageClass::ProxyNet).is_some_and(|c| c != 0)
+    {
         return false;
     }
     if observe == Observe::Off {
         return audit == 0;
     }
-    if CLOSED_SET
-        .iter()
-        .any(|k| r.coverage.get(*k).is_none_or(|c| c.status != "active"))
-    {
+    if closed_set().any(|class| {
+        r.coverage
+            .get(class)
+            .is_none_or(|c| c.status != wire(SourceStatus::Active))
+    }) {
         // An inactive class is excluded as `class_not_active`; its count
         // means nothing.
         return true;
     }
     let e = Expected::of(rec);
     let fs_write = e.created + e.renamed + e.unlinked;
-    class("exec") == Some(2 * e.execs)
-        && class("fs.write") == Some(fs_write)
-        && class("fs.deny") == Some(0)
-        && class("net") == Some(0)
+    class(CoverageClass::Exec) == Some(2 * e.execs)
+        && class(CoverageClass::FsWrite) == Some(fs_write)
+        && class(CoverageClass::FsDeny) == Some(0)
+        && class(CoverageClass::Net) == Some(0)
         && op("proc.exec") == e.execs
         && op("proc.exit") == e.execs
         && op("fs.create") == e.created
@@ -975,10 +1088,17 @@ pub fn timings(rec: &LaunchRecord) -> Option<Timings> {
 
 // ---------------------------------------------------------------- statistics
 
-/// The middle value of sorted data; the mean of the two middle values for
-/// an even count.
+/// `values`, sorted (NaN last).
+fn sorted(values: &[f64]) -> Vec<f64> {
+    let mut v = values.to_vec();
+    v.sort_by(f64::total_cmp);
+    v
+}
+
+/// The middle value; the mean of the two middle values for an even count.
 #[must_use]
-pub fn median(sorted: &[f64]) -> Option<f64> {
+pub fn median(values: &[f64]) -> Option<f64> {
+    let sorted = sorted(values);
     let n = sorted.len();
     if n == 0 {
         return None;
@@ -991,16 +1111,23 @@ pub fn median(sorted: &[f64]) -> Option<f64> {
 }
 
 /// The 95th percentile by nearest rank: the ⌈0.95·n⌉-th smallest value.
-/// Always an observed value; for n = 30 it is the 29th smallest.
+/// Always an observed value; for n = 30 it is the 29th smallest. The Python
+/// harnesses under `docs/benchmarks/jail` interpolate between ranks instead,
+/// so their p95s and these are not comparable value for value.
 #[must_use]
-pub fn p95(sorted: &[f64]) -> Option<f64> {
+pub fn p95(values: &[f64]) -> Option<f64> {
+    let sorted = sorted(values);
     let n = sorted.len();
     if n == 0 {
         return None;
     }
-    // ⌈0.95·n⌉ in integers: ⌈95n/100⌉.
-    let rank = (95 * n).div_ceil(100).max(1);
-    Some(sorted[rank - 1])
+    Some(sorted[p95_rank(n) - 1])
+}
+
+/// The rank [`p95`] takes of `n` values: ⌈0.95·n⌉ in integers, ⌈95n/100⌉.
+#[must_use]
+pub fn p95_rank(n: usize) -> usize {
+    (95 * n).div_ceil(100).max(1)
 }
 
 /// A distribution's summary.
@@ -1750,13 +1877,49 @@ fn med_range(d: Option<&Dist>) -> String {
     )
 }
 
-fn verdict_text(v: Option<Verdict>, value: Option<f64>, unit: &str) -> String {
+/// A measured value with its unit, or `n/a` (never with a unit).
+fn with_unit(value: Option<f64>, unit: &str) -> String {
+    value.map_or_else(|| "n/a".to_owned(), |x| format!("{x:.1}{unit}"))
+}
+
+/// The budget a verdict was judged against, with the value's margin to it.
+fn margin(value: Option<f64>, budget: f64, unit: &str) -> String {
+    match value {
+        None => format!("budget {budget:.0}{unit}"),
+        Some(x) if x < budget => {
+            format!("{:.1}{unit} under the {budget:.0}{unit} budget", budget - x)
+        }
+        Some(x) => format!("{:.1}{unit} over the {budget:.0}{unit} budget", x - budget),
+    }
+}
+
+/// A verdict with the value it judged and its margin to `budget`; `n/a`
+/// without a verdict.
+fn verdict_text(v: Option<Verdict>, value: Option<f64>, unit: &str, budget: f64) -> String {
+    let value_text = with_unit(value, unit);
+    let margin = margin(value, budget, unit);
     match v {
         None => "n/a".to_owned(),
-        Some(Verdict::Loaded) => format!("loaded (no verdict; {}{unit})", num(value, 1)),
-        Some(Verdict::Insufficient) => format!("insufficient ({}{unit})", num(value, 1)),
-        Some(v) => format!("{} ({}{unit})", enum_name(&v), num(value, 1)),
+        Some(Verdict::Loaded) => format!("loaded (no verdict; {value_text}; {margin})"),
+        Some(v) => format!("{} ({value_text}; {margin})", enum_name(&v)),
     }
+}
+
+/// [`verdict_text`], or only the measured value where no verdict applies.
+fn verdict_or_value(v: Option<Verdict>, value: Option<f64>, unit: &str, budget: f64) -> String {
+    match v {
+        None => with_unit(value, unit),
+        Some(_) => verdict_text(v, value, unit, budget),
+    }
+}
+
+/// The column heads of the two budgets, from their constants.
+fn startup_budget_head() -> String {
+    format!("p95 added startup < {STARTUP_BUDGET_MS:.0} ms")
+}
+
+fn overhead_budget_head(what: &str) -> String {
+    format!("{what} < {OVERHEAD_BUDGET_PCT:.0}%")
 }
 
 fn reasons_text(map: &BTreeMap<String, usize>) -> String {
@@ -1795,7 +1958,10 @@ fn host_line(host: &Value) -> String {
     )
 }
 
-const DEFINITIONS: &str = "\
+/// The definitions section, with the spec's numbers from their constants.
+fn definitions() -> String {
+    format!(
+        "\
 ## Definitions
 
 - **Launcher.** `ouro-fixture perf-launch`, outside the jail, forks the arm's \
@@ -1828,8 +1994,9 @@ of every arm.
 baseline arm's median, minus one. The median of these is the ratio of \
 medians minus one.
 - **Median / p95.** The middle value (mean of the two middle values for an \
-even count); p95 by nearest rank, the ⌈0.95·n⌉-th smallest value (the 29th of \
-30).
+even count); p95 by nearest rank, the ⌈0.95·n⌉-th smallest value (the {rank}th of \
+{min}); the Python harnesses interpolate, so their p95s are not comparable \
+value for value.
 - **Peak RSS.** Launched HWM: the launched process's own `VmHWM` (the \
 supervisor for a jailed arm), last sample (a lower bound). Reaped tree: \
 `wait4`'s `ru_maxrss`, the largest resident set of the launched process and \
@@ -1853,7 +2020,7 @@ audit frames equal to the receipt's closed-set counts; no audit frame with \
 observation off), and a trace that is complete and ends on the final \
 receipt's note (§13.3). Everything else is excluded, counted by reason, never \
 averaged, and its attempt, stdout and stderr are kept under `kept/`.
-- **Verdicts.** Against direct execution only. `insufficient`: fewer than 30 \
+- **Verdicts.** Against direct execution only. `insufficient`: fewer than {min} \
 valid launches on either side, any excluded launch on either side (no verdict \
 over survivors), or a raw-data problem. `loaded`: the host was not shown \
 quiet (a counted launch of either side above `--max-load` or with no load \
@@ -1867,7 +2034,11 @@ verdict. The direct target's cgroup is recorded per launch.
 - **Sessions.** The plain and scope passes run one after the other, so a \
 difference between them is confounded by time; each pass's load is in \
 `passes.ndjson`.
-";
+",
+        rank = p95_rank(SPEC_MIN_LAUNCHES),
+        min = SPEC_MIN_LAUNCHES
+    )
+}
 
 /// How the verdicts of several cells combine: pass only if all pass.
 fn roll_up(verdicts: &[Verdict]) -> (Option<Verdict>, String) {
@@ -2034,8 +2205,11 @@ pub fn render_markdown(summary: &Summary) -> String {
          end; the integrator's current reading of §5), **post-start** (work + teardown: \
          everything after entry, so startup + post-start cover the whole run), and \
          **end-to-end wall** (startup included).\n\n\
-         | Profile | Comparison | p95 added startup < 250 ms | Work phase < 20% | \
-         Post-start < 20% | End-to-end wall < 20% |\n|---|---|---|---|---|---|"
+         | Profile | Comparison | {} | {} | {} | {} |\n|---|---|---|---|---|---|",
+        startup_budget_head(),
+        overhead_budget_head("Work phase"),
+        overhead_budget_head("Post-start"),
+        overhead_budget_head("End-to-end wall"),
     );
     let profiles: Vec<Profile> = {
         let mut v: Vec<Profile> = summary.comparisons.iter().map(|c| c.profile).collect();
@@ -2255,21 +2429,27 @@ pub fn render_markdown(summary: &Summary) -> String {
                 verdict_text(
                     c.startup_verdict,
                     c.added_startup_ms.as_ref().map(|d| d.p95),
-                    " ms"
+                    " ms",
+                    STARTUP_BUDGET_MS
                 ),
-                verdict_text(c.work_verdict, median(&c.work_overhead_pct), "%")
-                    .replace("n/a", &format!("{}%", num(median(&c.work_overhead_pct), 1))),
-                verdict_text(
+                verdict_or_value(
+                    c.work_verdict,
+                    median(&c.work_overhead_pct),
+                    "%",
+                    OVERHEAD_BUDGET_PCT
+                ),
+                verdict_or_value(
                     c.post_start_verdict,
                     median(&c.post_start_overhead_pct),
-                    "%"
-                )
-                .replace(
-                    "n/a",
-                    &format!("{}%", num(median(&c.post_start_overhead_pct), 1))
+                    "%",
+                    OVERHEAD_BUDGET_PCT
                 ),
-                verdict_text(c.wall_verdict, median(&c.wall_overhead_pct), "%")
-                    .replace("n/a", &format!("{}%", num(median(&c.wall_overhead_pct), 1))),
+                verdict_or_value(
+                    c.wall_verdict,
+                    median(&c.wall_overhead_pct),
+                    "%",
+                    OVERHEAD_BUDGET_PCT
+                ),
                 cell.and_then(|x| x.launched_hwm_kib.as_ref()).map_or_else(
                     || "n/a".to_owned(),
                     |d| format!("{:.0} / {:.0}", d.median, d.p95)
@@ -2292,7 +2472,7 @@ pub fn render_markdown(summary: &Summary) -> String {
         }
         let _ = writeln!(md);
     }
-    md.push_str(DEFINITIONS);
+    md.push_str(&definitions());
     md
 }
 
@@ -2322,8 +2502,11 @@ fn comparison_table(
     if verdicts {
         let _ = write!(
             md,
-            " p95 added startup < 250 ms | Work phase < 20% (integrator's reading) | Post-start \
-             (work + teardown) < 20% | End-to-end wall < 20% |"
+            " {} | {} | {} | {} |",
+            startup_budget_head(),
+            overhead_budget_head("Work phase").replace('%', "% (integrator's reading)"),
+            overhead_budget_head("Post-start (work + teardown)"),
+            overhead_budget_head("End-to-end wall"),
         );
     }
     let _ = writeln!(md);
@@ -2370,15 +2553,27 @@ fn comparison_table(
                 verdict_text(
                     c.startup_verdict,
                     c.added_startup_ms.as_ref().map(|d| d.p95),
-                    " ms"
+                    " ms",
+                    STARTUP_BUDGET_MS
                 ),
-                verdict_text(c.work_verdict, median(&c.work_overhead_pct), "%"),
+                verdict_text(
+                    c.work_verdict,
+                    median(&c.work_overhead_pct),
+                    "%",
+                    OVERHEAD_BUDGET_PCT
+                ),
                 verdict_text(
                     c.post_start_verdict,
                     median(&c.post_start_overhead_pct),
-                    "%"
+                    "%",
+                    OVERHEAD_BUDGET_PCT
                 ),
-                verdict_text(c.wall_verdict, median(&c.wall_overhead_pct), "%"),
+                verdict_text(
+                    c.wall_verdict,
+                    median(&c.wall_overhead_pct),
+                    "%",
+                    OVERHEAD_BUDGET_PCT
+                ),
             );
         }
         let _ = writeln!(md);
@@ -2704,8 +2899,8 @@ fn write_summary(
         "summarizer": {
             "xtask_version": env!("CARGO_PKG_VERSION"),
             "record_schema": RECORD_SCHEMA,
-            "source_revision": command_text("git", &["rev-parse", "HEAD"])
-                .map(|t| t.trim().to_owned())
+            "source_revision": crate::proc::git(Path::new("."), &["rev-parse", "HEAD"])
+                .ok()
                 .filter(|t| t.len() == 40),
         },
     });
@@ -2754,30 +2949,25 @@ fn load1() -> Option<f64> {
     loadavg()?.split_whitespace().next()?.parse().ok()
 }
 
-fn command_text(program: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if !out.status.success() {
-        let _ = write!(
-            text,
-            "\n[exit {}] {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+/// What a command printed, as the host facts record it: its stdout, as
+/// JSON when it is JSON; when it failed (or did not start), its exit status
+/// and stderr beside it rather than mixed into it.
+fn command_fact(program: &str, args: &[&str]) -> Value {
+    let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+    let r = crate::proc::run(program, &args, None, None);
+    let stdout = serde_json::from_str::<Value>(&r.stdout)
+        .unwrap_or_else(|_| Value::String(r.stdout.trim_end().to_owned()));
+    if r.ok() {
+        stdout
+    } else {
+        json!({ "exit": r.code, "stdout": stdout, "stderr": r.stderr.trim() })
     }
-    Some(text)
 }
 
-fn sha256(path: &Path) -> Option<String> {
-    let p = path.to_str()?;
-    let text =
-        command_text("sha256sum", &[p]).or_else(|| command_text("shasum", &["-a", "256", p]))?;
-    let hex = text.split_whitespace().next()?;
-    (hex.len() == 64).then(|| hex.to_owned())
+/// A file's SHA-256, or why it has none (a host fact, so a failure is
+/// recorded rather than fatal).
+fn sha256(path: &Path) -> Value {
+    crate::util::sha256_file(path).map_or_else(|e| json!({ "error": e }), Value::String)
 }
 
 /// `/proc/pressure/cpu`'s `some` line: (avg10 in percent, total in µs).
@@ -2821,11 +3011,6 @@ fn host_facts(plan: &Plan) -> Value {
         .as_deref()
         .map(|u| Path::new("/var/lib/systemd/linger").join(u).exists());
     let jail = plan.jail.to_str().unwrap_or_default();
-    let json_of = |text: Option<String>| {
-        text.map_or(Value::Null, |t| {
-            serde_json::from_str::<Value>(&t).unwrap_or(Value::String(t))
-        })
-    };
     json!({
         "collected_at": crate::stamp::rfc3339_from_unix(crate::stamp::unix_now()),
         "hostname": read("/proc/sys/kernel/hostname"),
@@ -2843,12 +3028,12 @@ fn host_facts(plan: &Plan) -> Value {
         "jail": {
             "path": plan.jail,
             "sha256": sha256(&plan.jail),
-            "version": json_of(command_text(jail, &["version", "--json"])),
+            "version": command_fact(jail, &["version", "--json"]),
         },
         "fixture": { "path": plan.fixture, "sha256": sha256(&plan.fixture) },
-        "bwrap_version": command_text("bwrap", &["--version"]),
+        "bwrap_version": command_fact("bwrap", &["--version"]),
         "spawn_child_resolved": std::fs::canonicalize("/usr/bin/true").ok(),
-        "doctor_tool": json_of(command_text(jail, &["doctor", "--json", "--profile", "tool"])),
+        "doctor_tool": command_fact(jail, &["doctor", "--json", "--profile", "tool"]),
     })
 }
 
@@ -2969,20 +3154,17 @@ fn run_pass(plan: &Plan, session: Session) -> Result<(), String> {
             } else {
                 round - plan.args.warmup
             };
+            let ctx = PassCtx {
+                plan,
+                session,
+                workload: *workload,
+                target_argv: &target_argv,
+                ws: &ws,
+                scratch: &scratch,
+            };
             for arm in round_order(&arm_list, seed, round) {
                 let st = states.get_mut(&arm).ok_or("an arm without state")?;
-                let mut rec = launch(
-                    plan,
-                    session,
-                    *workload,
-                    arm,
-                    index,
-                    warmup,
-                    &target_argv,
-                    &ws,
-                    &scratch,
-                    st,
-                )?;
+                let mut rec = launch(&ctx, arm, index, warmup, st)?;
                 rec.predecessor = previous;
                 previous = Some(arm);
                 progress(&rec);
@@ -3032,19 +3214,31 @@ fn progress(rec: &LaunchRecord) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn launch(
-    plan: &Plan,
+/// What every launch of one (session, workload) cell shares.
+struct PassCtx<'a> {
+    plan: &'a Plan,
     session: Session,
     workload: Workload,
+    target_argv: &'a [OsString],
+    ws: &'a Path,
+    scratch: &'a Path,
+}
+
+fn launch(
+    ctx: &PassCtx<'_>,
     arm: Arm,
     round: u32,
     warmup: bool,
-    target_argv: &[OsString],
-    ws: &Path,
-    scratch: &Path,
     state: &mut ArmState,
 ) -> Result<LaunchRecord, String> {
+    let PassCtx {
+        plan,
+        session,
+        workload,
+        target_argv,
+        ws,
+        scratch,
+    } = *ctx;
     let mut rec = LaunchRecord::new(session, workload, arm, round, warmup);
     rec.load1_before = load1();
     let pressure_before = cpu_pressure();
@@ -3052,7 +3246,12 @@ fn launch(
     let result_path = scratch.join("result.json");
     let stdout_path = scratch.join("stdout");
     let stderr_path = scratch.join("stderr");
-    let _ = std::fs::remove_file(&result_path);
+    // A result left by the previous launch must not be read as this one's.
+    match std::fs::remove_file(&result_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", result_path.display())),
+    }
     let stdout = std::fs::File::create(&stdout_path).map_err(|e| e.to_string())?;
     let stderr = std::fs::File::create(&stderr_path).map_err(|e| e.to_string())?;
 
@@ -3100,8 +3299,8 @@ fn launch(
         Err(e) => rec.launch_error = Some(format!("perf-launch did not start: {e}")),
     }
     match std::fs::read(&result_path) {
-        Ok(bytes) => match serde_json::from_slice::<LauncherFacts>(&bytes) {
-            Ok(l) => rec.launcher = Some(l),
+        Ok(bytes) => match PerfLaunchResult::parse(&bytes) {
+            Ok(l) => rec.launcher = Some(l.into()),
             Err(e) => {
                 rec.launch_error
                     .get_or_insert(format!("the perf-launch result is unreadable: {e}"));
@@ -3120,12 +3319,14 @@ fn launch(
         .and_then(|l| l.attempts.clone())
         .unwrap_or_default();
     if let [only] = attempts.as_slice() {
-        let bytes = std::fs::read(Path::new(&only.dir).join("jail.json"));
-        if let Some(receipt) = bytes
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        let path = Path::new(&only.dir).join("jail.json");
+        // No readable receipt is excluded as `no_receipt`; say why here.
+        match std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| read_receipt(&b))
         {
-            rec.receipt = receipt_facts(&receipt).ok();
+            Ok(receipt) => rec.receipt = Some(receipt_facts(&receipt)),
+            Err(e) => eprintln!("perf: {}: {e}", path.display()),
         }
     }
     rec.validity = validate(&rec);
@@ -3150,9 +3351,17 @@ fn launch(
             round
         ));
         std::fs::create_dir_all(&kept).map_err(|e| format!("{}: {e}", kept.display()))?;
-        let _ = std::fs::copy(&stdout_path, kept.join("stdout"));
-        let _ = std::fs::copy(&stderr_path, kept.join("stderr"));
-        let _ = std::fs::copy(&result_path, kept.join("perf-launch.json"));
+        // The report says excluded launches keep this evidence: a copy that
+        // fails ends the run rather than leave the claim false. The
+        // launcher's result exists only when it wrote one.
+        let mut copies = vec![(&stdout_path, "stdout"), (&stderr_path, "stderr")];
+        if result_path.exists() {
+            copies.push((&result_path, "perf-launch.json"));
+        }
+        for (from, name) in copies {
+            std::fs::copy(from, kept.join(name))
+                .map_err(|e| format!("keeping {}: {e}", kept.join(name).display()))?;
+        }
     }
     if !attempts.is_empty() {
         if keep_attempt(&rec) || attempts.len() != 1 {
@@ -3173,8 +3382,10 @@ fn launch(
 #[must_use]
 pub fn keep_attempt(rec: &LaunchRecord) -> bool {
     let cleaned = rec.receipt.as_ref().is_some_and(|r| {
-        r.phase == "settled"
-            && matches!(r.state_cleanup.as_deref(), Some("complete" | "not_needed"))
+        r.phase == wire(Phase::Settled)
+            && [StateCleanup::Complete, StateCleanup::NotNeeded]
+                .into_iter()
+                .any(|done| r.state_cleanup.as_deref() == Some(wire(done).as_str()))
     });
     !validate(rec).valid || !cleaned
 }
@@ -3234,6 +3445,96 @@ mod tests {
             },
             ..LauncherFacts::default()
         }
+    }
+
+    /// Review FX1: the launcher's facts are the fixture's own typed result,
+    /// read strictly; a trace that could not be read stays an error.
+    #[test]
+    fn launcher_facts_come_from_the_fixtures_typed_result() {
+        use ouro_fixture::perf::{
+            LaunchRusage, LaunchStatus, PERF_LAUNCH_SCHEMA, Sampling, TraceCompleteness,
+            TraceCounts, WaitedVia,
+        };
+        let result = PerfLaunchResult {
+            schema: PERF_LAUNCH_SCHEMA.to_owned(),
+            argv: vec!["/usr/bin/true".to_owned()],
+            pid: 7,
+            t0_ns: 1,
+            exec_ns: 2,
+            t1_ns: 3,
+            timens: Some("time:[1]".to_owned()),
+            exec_errno: Some("ENOENT".to_owned()),
+            timed_out: true,
+            wait_errno: None,
+            waited_via: WaitedVia::Wnohang,
+            cgroup: Some("/x".to_owned()),
+            status: LaunchStatus {
+                raw: 127 << 8,
+                exited: true,
+                code: Some(127),
+                signal: None,
+            },
+            rusage: LaunchRusage {
+                maxrss_kib: 9,
+                utime_us: 1,
+                stime_us: 2,
+            },
+            sampling: Sampling {
+                interval_ms: 5,
+                samples: 3,
+                hwm_kib: Some(4),
+                leaf_path: None,
+                leaf_peak_bytes: None,
+                leaf_samples: 0,
+                leaf_note: Some("memory.peak: gone".to_owned()),
+            },
+            attempts: Some(vec![
+                HarvestedAttempt {
+                    id: Some("att_1".to_owned()),
+                    dir: "/d/att_1".to_owned(),
+                    receipt: true,
+                    trace: TraceHarvest::Read(TraceCounts {
+                        bytes: 10,
+                        state: TraceCompleteness::Incomplete,
+                        frames: 2,
+                        guard: Some("no final note".to_owned()),
+                        by_source: BTreeMap::from([("audit".to_owned(), 2)]),
+                        by_operation: BTreeMap::new(),
+                        notes: BTreeMap::new(),
+                    }),
+                },
+                HarvestedAttempt {
+                    id: None,
+                    dir: "/d/att_2".to_owned(),
+                    receipt: false,
+                    trace: TraceHarvest::Unreadable("No such file".to_owned()),
+                },
+            ]),
+        };
+        let bytes = serde_json::to_vec(&result).unwrap();
+        let facts = LauncherFacts::from(PerfLaunchResult::parse(&bytes).unwrap());
+        assert_eq!(
+            (facts.pid, facts.t0_ns, facts.exec_ns, facts.t1_ns),
+            (7, 1, 2, 3)
+        );
+        assert_eq!(facts.exec_errno.as_deref(), Some("ENOENT"));
+        assert!(facts.timed_out);
+        assert_eq!(facts.waited_via.as_deref(), Some("wnohang"));
+        assert_eq!(facts.status.code, Some(127));
+        assert_eq!(
+            facts.sampling.leaf_note.as_deref(),
+            Some("memory.peak: gone")
+        );
+        let attempts = facts.attempts.unwrap();
+        assert_eq!(attempts[0].trace.state, "incomplete");
+        assert_eq!(attempts[0].trace.guard.as_deref(), Some("no final note"));
+        assert_eq!(attempts[0].trace.error, None);
+        assert_eq!(attempts[1].trace.error.as_deref(), Some("No such file"));
+        // A result of another schema is not read as this one.
+        let old = String::from_utf8(bytes)
+            .unwrap()
+            .replace(PERF_LAUNCH_SCHEMA, "ouro.fixture.perf-launch/1");
+        assert!(PerfLaunchResult::parse(old.as_bytes()).is_err());
     }
 
     fn complete_attempt() -> AttemptFacts {
@@ -3351,6 +3652,10 @@ mod tests {
         assert_eq!(median(&[5.0]), Some(5.0));
         assert_eq!(median(&[1.0, 2.0, 9.0]), Some(2.0));
         assert_eq!(median(&[1.0, 2.0, 4.0, 9.0]), Some(3.0));
+        // Unsorted input is sorted first (review XT25).
+        assert_eq!(median(&[9.0, 1.0, 4.0, 2.0]), Some(3.0));
+        let reversed: Vec<f64> = (1..=30).rev().map(f64::from).collect();
+        assert_eq!(p95(&reversed), Some(29.0));
     }
 
     #[test]
@@ -3605,7 +3910,7 @@ mod tests {
         let mut r = jailed(Observe::On, 100, 900);
         r.receipt.as_mut().unwrap().observer_attached = false;
         assert_eq!(reasons(&r), vec![Reason::ObserverDetached]);
-        for missing in CLOSED_SET {
+        for missing in closed_set() {
             let mut r = jailed(Observe::On, 100, 900);
             r.receipt
                 .as_mut()
@@ -3916,8 +4221,9 @@ mod tests {
             "## Observation cost: `--observe on` against `--observe off`",
             "tool/off / direct",
             "tool/on / tool/off",
-            "fail (100.0%)",
+            "fail (100.0%; 80.0% over the 20% budget)",
             "pass (",
+            "under the 250 ms budget)",
             "Work phase < 20% (integrator's reading)",
             "Post-start (work + teardown) < 20%",
             "End-to-end wall < 20%",
@@ -3929,6 +4235,25 @@ mod tests {
         assert!(
             !md.contains("Not the §5 measurement"),
             "30 valid everywhere"
+        );
+        // The spec's numbers come from their constants, never stale prose.
+        assert!(md.contains("(the 29th of 30)"), "{md}");
+        assert!(md.contains("fewer than 30 valid launches"), "{md}");
+        assert!(!md.contains("%%") && !md.contains("n/a%"), "{md}");
+    }
+
+    /// Review XT18: no verdict and no value reads `n/a`, never `n/a%%`.
+    #[test]
+    fn a_missing_value_reads_n_a_without_a_unit() {
+        assert_eq!(verdict_or_value(None, None, "%", 20.0), "n/a");
+        assert_eq!(verdict_or_value(None, Some(3.25), "%", 20.0), "3.2%");
+        assert_eq!(
+            verdict_text(Some(Verdict::Insufficient), None, "%", 20.0),
+            "insufficient (n/a; budget 20%)"
+        );
+        assert_eq!(
+            verdict_text(Some(Verdict::Pass), Some(130.6), " ms", 250.0),
+            "pass (130.6 ms; 119.4 ms under the 250 ms budget)"
         );
     }
 
@@ -3952,42 +4277,123 @@ not json
         assert_eq!(t.end_ns, None);
     }
 
+    fn example_receipt() -> Vec<u8> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1/examples");
+        std::fs::read(root.join("receipt-tool.json")).unwrap()
+    }
+
     #[test]
     fn the_checked_in_receipt_example_reads_as_facts() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1/examples");
-        let v: Value =
-            serde_json::from_slice(&std::fs::read(root.join("receipt-tool.json")).unwrap())
-                .unwrap();
-        let f = receipt_facts(&v).unwrap();
+        let f = receipt_facts(&read_receipt(&example_receipt()).unwrap());
         assert_eq!(f.phase, "settled");
         assert_eq!(f.policy_name.as_deref(), Some("tool"));
         assert_eq!(f.policy_observe.as_deref(), Some("on"));
         assert_eq!(f.outcome_kind, "exited");
         assert_eq!(f.outcome_code, Some(0));
         assert_eq!(f.integrity.as_deref(), Some("verified"));
+        assert_eq!(f.tree_empty, Some(true));
         assert_eq!(f.coverage["exec"].status, "active");
         assert_eq!(f.coverage["exec"].observed_count, Some(1));
         assert_eq!(f.coverage["proxy.net"].observed_count, None);
+        assert_eq!(f.coverage.len(), 6);
+        assert!(f.coverage.values().all(|c| c.gaps == 0 && c.lost == 0));
         assert!(f.observer_attached);
+        assert_eq!((f.observer_gaps, f.observer_lost), (0, 0));
+        assert!(f.errors.is_empty());
+        // The example records no native scope details.
+        assert_eq!(f.supervisor_scope, None);
         assert_eq!(f.state_cleanup.as_deref(), Some("not_needed"));
-        assert!(receipt_facts(&json!({})).is_err());
+    }
+
+    /// Review XT4: a receipt missing a field is no receipt. Read as untyped
+    /// JSON it was one with no errors, no gaps and no coverage.
+    #[test]
+    fn a_receipt_is_read_strictly() {
+        let good: Value = serde_json::from_slice(&example_receipt()).unwrap();
+        // (An absent `Option` field, such as `tree_empty`, still reads as
+        // null: that is the records crate's own rule.)
+        let broken: [(&str, &[&str]); 4] = [
+            ("errors", &["errors"]),
+            ("observer gaps", &["observer", "gaps"]),
+            ("a coverage class", &["coverage", "fs.write"]),
+            ("a class's gaps", &["coverage", "exec", "gaps"]),
+        ];
+        for (label, path) in broken {
+            let mut v = good.clone();
+            let (last, parents) = path.split_last().unwrap();
+            let parent = parents.iter().fold(&mut v, |node, key| &mut node[*key]);
+            parent.as_object_mut().unwrap().remove(*last);
+            let bytes = serde_json::to_vec(&v).unwrap();
+            assert!(read_receipt(&bytes).is_err(), "{label} missing was read");
+        }
+        let mut other = good;
+        other["schema"] = "ouro.jail.receipt/0".into();
+        assert!(read_receipt(&serde_json::to_vec(&other).unwrap()).is_err());
+        assert!(read_receipt(b"{}").is_err());
     }
 
     #[test]
-    fn gaps_and_their_losses_are_summed() {
-        let v = json!({
-            "phase": "settled",
-            "outcome": {"kind": "exited", "code": 0},
-            "observer": {"attached": true, "gaps": [{"lost_count": 3}, {"lost_count": null}]},
-            "coverage": {"fs.write": {"status": "degraded", "observed_count": null,
-                                      "gaps": [{"lost_count": 5}]}},
-            "errors": [{"code": "evidence_lost"}],
-        });
-        let f = receipt_facts(&v).unwrap();
+    fn gaps_errors_and_the_scope_are_read() {
+        let mut r = read_receipt(&example_receipt()).unwrap();
+        let gap = |lost: Option<u64>| Gap {
+            classes: vec!["fs.write".to_owned()],
+            source: "audit".to_owned(),
+            start_ns: "1".to_owned(),
+            end_ns: Some("2".to_owned()),
+            reason: "ring overflow".to_owned(),
+            lost_count: lost,
+        };
+        r.observer.gaps = vec![gap(Some(3)), gap(None)];
+        r.coverage.fs_write.status = SourceStatus::Degraded;
+        r.coverage.fs_write.gaps = vec![gap(Some(5))];
+        r.errors = vec![ouro_jail::records::ErrorObject {
+            code: "evidence_lost".to_owned(),
+            stage: "running".to_owned(),
+            message: "m".to_owned(),
+            key_path: None,
+            remediation_category: ouro_jail::records::Remediation::InspectState,
+        }];
+        r.lifetime.tree_empty = None;
+        let details = &mut r.lifetime.native.as_mut().unwrap().details;
+        details.insert(
+            "supervisor_scope".to_owned(),
+            json!({"state": "already_delegated"}),
+        );
+        details.insert("execution_cgroup".to_owned(), json!({"path": "/leaf"}));
+        let f = receipt_facts(&r);
         assert_eq!((f.observer_gaps, f.observer_lost), (2, 3));
+        assert_eq!(f.coverage["fs.write"].status, "degraded");
         assert_eq!(f.coverage["fs.write"].gaps, 1);
         assert_eq!(f.coverage["fs.write"].lost, 5);
         assert_eq!(f.errors, vec!["evidence_lost".to_owned()]);
+        assert_eq!(f.tree_empty, None);
+        assert_eq!(f.supervisor_scope.as_deref(), Some("already_delegated"));
+        assert_eq!(f.leaf_path.as_deref(), Some("/leaf"));
+    }
+
+    /// The class names the facts use are the receipt's own keys, and the
+    /// closed set is the four audit classes.
+    #[test]
+    fn coverage_classes_are_the_receipts_keys() {
+        let keys: Vec<String> = serde_json::to_value(Coverage::all_unsupported())
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let mut ours: Vec<String> = CoverageClass::ALL
+            .iter()
+            .map(|c| c.as_str().to_owned())
+            .collect();
+        ours.sort();
+        let mut keys = keys;
+        keys.sort();
+        assert_eq!(ours, keys);
+        assert_eq!(
+            closed_set().collect::<Vec<_>>(),
+            ["exec", "fs.write", "fs.deny", "net"]
+        );
     }
 
     #[test]

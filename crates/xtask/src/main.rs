@@ -14,7 +14,10 @@ mod gates;
 mod i02;
 mod manifest;
 mod perf;
+mod proc;
+mod revision;
 mod stamp;
+mod util;
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Repository tasks for the ouro workspace")]
@@ -82,51 +85,59 @@ enum Task {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().task {
-        Task::I02Scan { root } => i02_scan(root),
+    match run(Cli::parse().task) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("xtask: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `root`, or the current worktree's root, which must be found.
+fn root_or_worktree(root: Option<PathBuf>) -> Result<PathBuf, String> {
+    root.map_or_else(proc::worktree_root, Ok)
+}
+
+fn run(task: Task) -> Result<ExitCode, String> {
+    Ok(match task {
+        Task::I02Scan { root } => i02_scan(&root_or_worktree(root)?),
         Task::Freeze {
             root,
-            doctor,
+            doctor: _,
             check: true,
-        } => {
-            let _ = doctor;
-            let root = root.unwrap_or_else(conformance::worktree_root);
-            match freeze::check(&root) {
-                Ok(verified) => {
-                    println!(
-                        "xtask freeze --check: the freeze file is this tree's, and its tested \
-                         run passed: {}",
-                        verified.join(", ")
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(problems) => {
-                    for problem in problems {
-                        eprintln!("xtask freeze --check: {problem}");
-                    }
-                    ExitCode::FAILURE
-                }
+        } => match freeze::check(&root_or_worktree(root)?) {
+            Ok(verified) => {
+                println!(
+                    "xtask freeze --check: the freeze file is this tree's, and its tested \
+                     run passed: {}",
+                    verified.join(", ")
+                );
+                ExitCode::SUCCESS
             }
-        }
+            Err(problems) => {
+                for problem in problems {
+                    eprintln!("xtask freeze --check: {problem}");
+                }
+                ExitCode::FAILURE
+            }
+        },
         Task::Freeze {
             root,
             doctor,
             check: false,
-        } => {
-            let root = root.unwrap_or_else(conformance::worktree_root);
-            match freeze::run(&root, doctor.as_deref()) {
-                Ok(path) => {
-                    println!("xtask freeze: wrote {}", path.display());
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("xtask freeze: {error}");
-                    ExitCode::FAILURE
-                }
+        } => match freeze::run(&root_or_worktree(root)?, doctor.as_deref()) {
+            Ok(path) => {
+                println!("xtask freeze: wrote {}", path.display());
+                ExitCode::SUCCESS
             }
-        }
-        Task::Gates(args) => gates::run_cli(&args, &conformance::worktree_root()),
-        Task::GatesMerge(args) => gates::run_merge(&args, &conformance::worktree_root()),
+            Err(error) => {
+                eprintln!("xtask freeze: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Task::Gates(args) => gates::run_cli(&args, &proc::worktree_root()?),
+        Task::GatesMerge(args) => gates::run_merge(&args, &proc::worktree_root()?),
         Task::Perf(cli) => perf::main(cli),
         Task::Conformance {
             host,
@@ -139,7 +150,7 @@ fn main() -> ExitCode {
             keep_remote,
             linux_release,
         } => {
-            let worktree = conformance::worktree_root();
+            let worktree = proc::worktree_root()?;
             let opts = conformance::Options {
                 target: conformance::Target {
                     host,
@@ -152,32 +163,30 @@ fn main() -> ExitCode {
                 host_manifest_script: worktree.join("docs/specs/jail-v1/host-manifest.sh"),
                 worktree,
                 jobs,
-                keep_remote,
-                linux_release,
+                config: conformance::Config {
+                    keep_remote,
+                    linux_release,
+                },
             };
-            match conformance::drive(&opts) {
-                Ok(report) if report.failures.is_empty() => {
-                    println!(
-                        "xtask conformance: evidence in {}",
-                        report.evidence.display()
-                    );
-                    ExitCode::SUCCESS
+            let report = conformance::drive(&opts);
+            if report.failures.is_empty() {
+                println!(
+                    "xtask conformance: evidence in {}",
+                    report.evidence.display()
+                );
+                ExitCode::SUCCESS
+            } else {
+                match &report.remote_kept {
+                    Some(remote) => eprintln!(
+                        "xtask conformance: {} problem(s); remote run directory {remote} kept",
+                        report.failures.len()
+                    ),
+                    None => eprintln!("xtask conformance: {} problem(s)", report.failures.len()),
                 }
-                Ok(report) => {
-                    eprintln!(
-                        "xtask conformance: {} problem(s); remote run directory {} kept",
-                        report.failures.len(),
-                        report.remote_dir
-                    );
-                    ExitCode::FAILURE
-                }
-                Err(e) => {
-                    eprintln!("xtask conformance: {e}");
-                    ExitCode::FAILURE
-                }
+                ExitCode::FAILURE
             }
         }
-    }
+    })
 }
 
 fn absolutise(root: &std::path::Path, p: &std::path::Path) -> PathBuf {
@@ -188,9 +197,8 @@ fn absolutise(root: &std::path::Path, p: &std::path::Path) -> PathBuf {
     }
 }
 
-fn i02_scan(root: Option<PathBuf>) -> ExitCode {
-    let base = root.unwrap_or_else(conformance::worktree_root);
-    let scan = match i02::scan_roots(&base, i02::ROOTS) {
+fn i02_scan(base: &std::path::Path) -> ExitCode {
+    let scan = match i02::scan_roots(base, &i02::roots()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("xtask i02-scan: {e}");

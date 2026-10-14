@@ -10,11 +10,12 @@ use clap::{Args, Parser, Subcommand};
 use ouro_ledger::{
     daemon,
     protocol::{
-        CatalogRequest, DiscoveryRequest, LedgerError, OperatorIntent, ReadFilter, ReadRequest,
-        ReadSelector, ReadStage, Result, RunFilter, TailRequest,
+        CatalogRequest, DiscoveryRequest, LedgerError, MAX_FRAME_BYTES, OperatorIntent, ReadFilter,
+        ReadRequest, ReadSelector, ReadStage, Result, RunFilter, TailRequest, read_bounded,
     },
-    runner, service,
+    runner, schemas, service,
 };
+use ouro_records::retention::MAX_RETAIN_DAYS;
 use serde_json::{Value, json};
 
 #[derive(Parser)]
@@ -24,7 +25,9 @@ use serde_json::{Value, json};
     about = "Durable admission and evidence around ouro-jail"
 )]
 struct Cli {
-    /// Private node data directory, shared with the jail (also OURO_DATA_DIR).
+    /// Private node data directory (also OURO_DATA_DIR; default
+    /// $XDG_DATA_HOME/ouro, else ~/.local/share/ouro). Jails this ledger
+    /// launches receive it; a jail run on its own ignores XDG_DATA_HOME.
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -142,7 +145,8 @@ enum Action {
     Append(AppendArgs),
     /// Read bounded canonical fragments, optionally following later appends.
     Tail(TailArgs),
-    /// Verify canonical bytes, hash chains, and durable projections.
+    /// Freshly re-read canonical bytes, hash chains and durable projections,
+    /// one bounded page of runs per writer request.
     Verify {
         run_id: Option<String>,
         #[arg(long)]
@@ -162,10 +166,10 @@ enum Action {
         #[arg(long)]
         dry_run: bool,
         /// Override the writer's history retention for this invocation.
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=36500))]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_RETAIN_DAYS)))]
         retain_days: Option<u32>,
         /// Override capture retention; cannot exceed history retention.
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=36500))]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_RETAIN_DAYS)))]
         capture_retain_days: Option<u32>,
         /// Continue after the last run id returned by the previous page.
         #[arg(long)]
@@ -175,7 +179,8 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
-    /// Check the local writer and store; does not measure jail capabilities.
+    /// Check the writer and its accepted store state without re-reading history
+    /// (use verify for that); does not measure jail capabilities.
     Doctor {
         #[arg(long)]
         json: bool,
@@ -218,16 +223,13 @@ struct TailArgs {
 }
 
 fn append_command(data: &std::path::Path, args: AppendArgs) -> Result<i32> {
-    use std::io::Read as _;
     let result = (|| -> Result<()> {
         // Validate input size before bootstrapping a writer or making a mutation.
-        let mut bytes = Vec::new();
-        std::fs::File::open(&args.body_file)?
-            .take(65_537)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > 65_536 {
-            return Err(LedgerError("operator body exceeds 64 KiB bound".into()));
-        }
+        let bytes = read_bounded(
+            std::fs::File::open(&args.body_file)?,
+            65_536,
+            "operator body exceeds 64 KiB bound",
+        )?;
         let body = serde_json::from_slice(&bytes)?;
         let mut client = runner::connect_or_start(data)?;
         let receipt = client.append(&OperatorIntent {
@@ -605,7 +607,7 @@ fn query(client: &mut daemon::Client, args: QueryArgs) -> Result<i32> {
             }
         }
         output(
-            &json!({"schema":"ouro.ledger.query/1","snapshot_scope":"independent_per_run",
+            &json!({"schema":schemas::QUERY,"snapshot_scope":"independent_per_run",
             "pages":pages,"problems":problems}),
             args.json,
         )?;
@@ -680,7 +682,7 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
         bytes_written += page.ndjson.len() as u64;
         if page.done {
             let status = json!({
-                "schema": "ouro.ledger.export/1",
+                "schema": schemas::EXPORT,
                 "event": "finished",
                 "run_id": page.run_id,
                 "snapshot": page.snapshot,
@@ -723,7 +725,7 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
             serde_json::to_writer(
                 &mut stderr,
                 &json!({
-                    "schema": "ouro.ledger.export/1",
+                    "schema": schemas::EXPORT,
                     "event": "checkpoint",
                     "run_id": request.run_id,
                     "snapshot": page.snapshot,
@@ -752,7 +754,28 @@ fn export(client: &mut daemon::Client, data: &std::path::Path, args: ExportArgs)
     }
 }
 
+/// Identifiers with a contract file are frozen; the rest may change with the
+/// ledger version, and the announcement says which is which.
+fn version() -> Value {
+    let schemas: serde_json::Map<_, _> = schemas::ANNOUNCED
+        .iter()
+        .map(|entry| (entry.key.to_owned(), json!(entry.id)))
+        .collect();
+    let frozen: Vec<_> = schemas::ANNOUNCED
+        .iter()
+        .filter(|entry| entry.contract.is_some())
+        .map(|entry| entry.key)
+        .collect();
+    json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":schemas,
+        "frozen_schemas":frozen,"execution_platform":"linux"})
+}
+
 fn execute(cli: Cli) -> Result<i32> {
+    // Announcing the build needs no data directory, HOME or writer.
+    if let Action::Version { json } = &cli.command {
+        output(&version(), *json)?;
+        return Ok(0);
+    }
     if let Action::VerifyBundle {
         path,
         trusted_key,
@@ -784,13 +807,6 @@ fn execute(cli: Cli) -> Result<i32> {
     };
     let data = data_dir(cli.data_dir)?;
     match cli.command {
-        Action::Version { json } => {
-            output(
-                &json!({"component":"ouro-ledger","version":env!("CARGO_PKG_VERSION"),"schemas":{"run":"ouro.ledger.run/1","event":ouro_records::records::SCHEMA_EVENT,"receipt":ouro_records::records::SCHEMA_RECEIPT,"read":"ouro.ledger.read/1","export":"ouro.ledger.export/1","tail":"ouro.ledger.tail/1","query":"ouro.ledger.query/1","diff":"ouro.ledger.diff/1","catalog":"ouro.ledger.catalog/1","discovery":"ouro.ledger.discovery/1","bundle":"ouro.ledger.bundle/1","bundle_verification":"ouro.ledger.bundle-verification/1","signed_bundle":"ouro.ledger.bundle/2","signed_bundle_verification":"ouro.ledger.bundle-verification/2","bundle_signature":"ouro.ledger.bundle-signature/1","signer":"ouro.ledger.signer/1"},"schema_frozen":true,"execution_platform":"linux"}),
-                json,
-            )?;
-            Ok(0)
-        }
         Action::Serve { detach } => {
             if detach {
                 service::start_writer(&data)?;
@@ -893,11 +909,13 @@ fn execute(cli: Cli) -> Result<i32> {
                     return Ok(1);
                 }
             };
+            // The writer's accepted state only: re-hashing every stream here
+            // would stall live owners' heartbeats. `verify` is the fresh check.
             let writer = client.ping()?;
-            let reports = client.verify(None)?;
-            let ready = reports.iter().all(|r| r.local_consistency);
+            let store = client.status()?;
+            let ready = store.ready();
             output(
-                &json!({"component":"ouro-ledger","ready":ready,"writer":"reachable","store":reports,"retention":writer["retention"],"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
+                &json!({"component":"ouro-ledger","ready":ready,"writer":"reachable","store":store,"index":writer["index"],"retention":writer["retention"],"execution_platform":"linux","detached_owner":detached_owner,"managed_authorization":"not_implemented"}),
                 json,
             )?;
             Ok(if ready { 0 } else { 1 })
@@ -1001,6 +1019,18 @@ fn execute(cli: Cli) -> Result<i32> {
                     result.record.child_protection
                 );
             }
+            for name in ["stdout", "stderr"] {
+                let forwarding = &result.record.capture[name]["forwarding"];
+                if forwarding.is_object() && forwarding["state"] != "complete" {
+                    eprintln!(
+                        "ouro-ledger: {name} forwarding {}: {} bytes were not shown; the capture records them",
+                        ouro_records::records::escape_control(
+                            forwarding["state"].as_str().unwrap_or("unknown")
+                        ),
+                        forwarding["undelivered_bytes"],
+                    );
+                }
+            }
             Ok(result.exit_code)
         }
         command => {
@@ -1011,13 +1041,11 @@ fn execute(cli: Cli) -> Result<i32> {
                     body_file,
                     json,
                 } => {
-                    let file = std::fs::File::open(body_file)?;
-                    use std::io::Read as _;
-                    let mut bytes = Vec::new();
-                    file.take(1_048_577).read_to_end(&mut bytes)?;
-                    if bytes.len() > 1_048_576 {
-                        return Err(LedgerError("prepare metadata exceeds frame bound".into()));
-                    }
+                    let bytes = read_bounded(
+                        std::fs::File::open(body_file)?,
+                        MAX_FRAME_BYTES as u64,
+                        "prepare metadata exceeds frame bound",
+                    )?;
                     let payload: Value = serde_json::from_slice(&bytes)?;
                     output(
                         &serde_json::to_value(client.prepare(&request_id, &payload)?)?,

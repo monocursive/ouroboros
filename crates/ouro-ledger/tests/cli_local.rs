@@ -585,7 +585,10 @@ fn assert_consistent_unlaunched_report(report: &Value, run_id: &str) {
     assert_eq!(reports[0]["events"], 1);
     assert_eq!(reports[0]["problems"], json!([]));
     assert_eq!(reports[0]["child_protection"], "unprotected");
-    assert_eq!(reports[0]["coverage"], json!({"status":"unobserved"}));
+    assert_eq!(
+        reports[0]["coverage"],
+        json!({"scope":"snapshot_run","status":"unobserved","classes":{},"gap_count":0})
+    );
 }
 
 #[test]
@@ -643,7 +646,12 @@ fn preparation_replay_and_inspection_survive_writer_restart() {
     assert_eq!(doctor["component"], "ouro-ledger");
     assert_eq!(doctor["ready"], true);
     assert_eq!(doctor["writer"], "reachable");
-    assert_eq!(doctor["store"], verification);
+    assert_eq!(
+        doctor["store"],
+        json!({"scope":"writer_accepted_state","runs":1,"ambiguous_runs":0,
+            "incomplete_deletions":0,"preparation_blocked":false})
+    );
+    assert_eq!(doctor["index"]["state"], "ready");
     assert_eq!(doctor["managed_authorization"], "not_implemented");
 
     let stream = cli
@@ -707,7 +715,20 @@ fn locked_disposable_index_does_not_delay_the_next_daemon_request() {
         "retry keeps the original identities and receipt while the index stays locked"
     );
     assert_eq!(
-        serde_json::to_value(client.runs().unwrap()).unwrap(),
+        serde_json::to_value(
+            client
+                .catalog(&ouro_ledger::protocol::CatalogRequest {
+                    filter: Default::default(),
+                    after: None,
+                    limit: 100,
+                })
+                .unwrap()
+                .runs
+                .iter()
+                .map(|summary| client.show(&summary.run_id).unwrap())
+                .collect::<Vec<_>>()
+        )
+        .unwrap(),
         json!([original])
     );
     assert_eq!(original.chain.head_seq, 1);
@@ -920,11 +941,146 @@ fn concurrent_operator_ingress_and_lost_reply_keep_one_sequence_per_identity() {
     let mut socket = UnixStream::connect(cli.data.join("ledger/serve.sock")).unwrap();
     socket.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
     write_frame(&mut socket, &forged).unwrap();
+    let refused = ouro_ledger::daemon::read_frame::<ouro_ledger::protocol::Response>(&mut socket);
     assert!(
-        ouro_ledger::daemon::read_frame::<ouro_ledger::protocol::Response>(&mut socket).is_err()
+        matches!(&refused, Ok(ouro_ledger::protocol::Response::Error { message })
+            if message.starts_with("unsupported_request:")),
+        "{refused:?}"
     );
     assert_eq!(
         cli.json(&["show", &run_id, "--json"])["chain"]["head_seq"],
         2
     );
+}
+
+#[test]
+fn writer_refuses_undecodable_oversized_and_excess_connections_explicitly() {
+    use ouro_ledger::{
+        daemon::{Client, read_frame, write_frame},
+        protocol::{MAX_CONNECTIONS, MAX_FRAME_BYTES, PROTOCOL_VERSION, Response},
+    };
+    use std::io::{Read as _, Write as _};
+    let mut cli = LocalCli::new();
+    let _writer = cli.start_writer();
+    let socket_path = cli.data.join("ledger/serve.sock");
+    let refusal = |socket: &mut UnixStream| -> String {
+        socket.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
+        match read_frame::<Response>(socket).unwrap() {
+            Response::Error { message } => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    };
+    let closed = |socket: &mut UnixStream| {
+        let mut byte = [0];
+        assert_eq!(socket.read(&mut byte).unwrap(), 0, "connection stays open");
+    };
+    // A request from another protocol version gets a reason, then a close.
+    let mut socket = UnixStream::connect(&socket_path).unwrap();
+    write_frame(&mut socket, &json!({"op":"from_the_future"})).unwrap();
+    assert!(refusal(&mut socket).starts_with("unsupported_request:"));
+    closed(&mut socket);
+    let mut socket = UnixStream::connect(&socket_path).unwrap();
+    socket
+        .write_all(&((MAX_FRAME_BYTES + 1) as u32).to_be_bytes())
+        .unwrap();
+    assert!(refusal(&mut socket).starts_with("invalid_frame:"));
+    closed(&mut socket);
+    // Connections past the bound are told so instead of being dropped.
+    let held: Vec<_> = (0..MAX_CONNECTIONS)
+        .map(|_| UnixStream::connect(&socket_path).unwrap())
+        .collect();
+    let mut excess = UnixStream::connect(&socket_path).unwrap();
+    assert!(refusal(&mut excess).starts_with("writer_busy:"));
+    drop(held);
+    let deadline = Instant::now() + WAIT_LIMIT;
+    let mut client = loop {
+        match Client::connect(&cli.data) {
+            Ok(client) => break client,
+            Err(error) => assert!(Instant::now() < deadline, "{error}"),
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(client.ping().unwrap()["protocol"], PROTOCOL_VERSION);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn writer_keeps_accepting_after_descriptor_exhaustion() {
+    use ouro_ledger::{
+        daemon::{read_frame, write_frame},
+        protocol::{Request, Response},
+    };
+    let mut cli = LocalCli::new();
+    let mut writer = cli.start_writer();
+    let pid = writer.0.id() as libc::pid_t;
+    let mut original = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: both pointers reference live, correctly typed rlimit values.
+    assert_eq!(
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, std::ptr::null(), &mut original) },
+        0
+    );
+    // Descriptors already open stay usable; every new one fails with EMFILE.
+    let exhausted = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: original.rlim_max,
+    };
+    // SAFETY: as above; this lowers only the writer's soft descriptor limit.
+    assert_eq!(
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &exhausted, std::ptr::null_mut()) },
+        0
+    );
+    // The writer cannot take a descriptor for this connection: accept fails.
+    let mut queued = UnixStream::connect(cli.data.join("ledger/serve.sock")).unwrap();
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        writer.0.try_wait().unwrap().is_none(),
+        "the writer exited after a transient accept failure"
+    );
+    // SAFETY: as above; this restores the writer's original limits.
+    assert_eq!(
+        unsafe { libc::prlimit(pid, libc::RLIMIT_NOFILE, &original, std::ptr::null_mut()) },
+        0
+    );
+    queued.set_read_timeout(Some(WAIT_LIMIT)).unwrap();
+    write_frame(&mut queued, &Request::Ping).unwrap();
+    assert!(matches!(
+        read_frame::<Response>(&mut queued).unwrap(),
+        Response::Ok { .. }
+    ));
+    assert!(writer.0.try_wait().unwrap().is_none());
+}
+
+#[test]
+fn version_needs_no_data_directory_and_freezes_only_contract_backed_schemas() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"))
+        .args(["version", "--json"])
+        .env_remove("HOME")
+        .env_remove("OURO_DATA_DIR")
+        .env("XDG_DATA_HOME", "relative")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let version: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(version["schemas"]["run"], "ouro.ledger.run/1");
+    assert_eq!(version["schemas"]["record"], "ouro.ledger.event/1");
+    assert_eq!(version["schemas"]["request"], "ouro.ledger.request/1");
+    assert!(version.get("schema_frozen").is_none());
+    let frozen: Vec<&str> = version["frozen_schemas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap())
+        .collect();
+    assert!(frozen.contains(&"run") && frozen.contains(&"gc_result"));
+    for open in ["doctor", "catalog_position", "discovery_position"] {
+        assert!(version["schemas"][open].is_string() && !frozen.contains(&open));
+    }
 }

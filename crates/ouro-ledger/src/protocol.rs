@@ -6,7 +6,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
+/// The most bytes one selected capture stream may store.
+pub const MAX_CAPTURE_BYTES: u64 = 16 * 1_048_576;
+/// The streams a request may select for capture.
+pub const CAPTURE_STREAMS: [&str; 3] = ["stdout", "stderr", "argv"];
 pub const MAX_CONNECTIONS: usize = 32;
+/// The socket protocol this build speaks. The writer reports it in `ping`;
+/// clients refuse a writer that speaks another.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub struct LedgerError(pub String);
@@ -29,6 +36,32 @@ impl From<serde_json::Error> for LedgerError {
 }
 
 pub type Result<T> = std::result::Result<T, LedgerError>;
+
+/// All of `reader`, or the `refusal` once it holds more than `max` bytes. One
+/// byte past the bound is read, so an oversized input is refused rather than
+/// truncated into something that looks complete.
+///
+/// # Errors
+/// The read's own error, or `refusal` for an oversized input.
+pub fn read_bounded(reader: impl io::Read, max: u64, refusal: &str) -> Result<Vec<u8>> {
+    use io::Read as _;
+    let mut bytes = Vec::new();
+    reader.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(LedgerError(refusal.into()));
+    }
+    Ok(bytes)
+}
+
+/// A `sha256:` digest in lower-case hexadecimal, as every ledger record
+/// writes one.
+pub(crate) fn sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -176,6 +209,39 @@ pub struct VerifyReport {
     pub problems: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<PrunedHistory>,
+}
+
+/// One fresh verification page. `next_after` resumes after its last run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyPage {
+    pub reports: Vec<VerifyReport>,
+    pub next_after: Option<String>,
+    pub done: bool,
+}
+
+pub const MAX_VERIFY_LIMIT: u32 = 100;
+pub const DEFAULT_VERIFY_LIMIT: u32 = 25;
+
+/// The writer's accepted in-memory state, as `doctor` reports it. It is not a
+/// fresh check of the bytes on disk; that is `verify`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StoreStatus {
+    pub scope: String,
+    pub runs: u32,
+    /// Streams whose persistence or recovery is ambiguous.
+    pub ambiguous_runs: u32,
+    /// Runs whose history or capture deletion has not finished.
+    pub incomplete_deletions: u32,
+    /// An ambiguous recovery or preparation refuses every new preparation.
+    pub preparation_blocked: bool,
+}
+
+impl StoreStatus {
+    pub fn ready(&self) -> bool {
+        self.ambiguous_runs == 0 && self.incomplete_deletions == 0 && !self.preparation_blocked
+    }
 }
 
 pub const MAX_READ_LIMIT: u32 = 1000;
@@ -358,6 +424,10 @@ pub struct TailPage {
     pub scanned_through_seq: u64,
 }
 
+fn default_verify_limit() -> u32 {
+    DEFAULT_VERIFY_LIMIT
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
@@ -393,7 +463,6 @@ pub enum Request {
     ShowWithTranscript {
         run_id: String,
     },
-    Runs,
     Catalog {
         request: CatalogRequest,
     },
@@ -402,7 +471,12 @@ pub enum Request {
     },
     Verify {
         run_id: Option<String>,
+        #[serde(default)]
+        after: Option<String>,
+        #[serde(default = "default_verify_limit")]
+        limit: u32,
     },
+    Status,
     Read {
         request: ReadRequest,
     },

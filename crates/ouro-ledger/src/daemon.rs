@@ -27,22 +27,27 @@ use uuid::Uuid;
 
 use crate::{
     protocol::{
-        AppendReceipt, CatalogPage, CatalogRequest, ClaimedOwner, DiscoveryPage, DiscoveryRequest,
-        GcPlan, GcResult, LedgerError, MAX_CONNECTIONS, MAX_FRAME_BYTES, OperatorIntent, Peer,
-        ReadPage, ReadRequest, Request, Response, Result, RunRecord, TailPage, TailRequest,
-        VerifyReport,
+        AppendReceipt, CatalogPage, CatalogRequest, ClaimedOwner, DEFAULT_VERIFY_LIMIT,
+        DiscoveryPage, DiscoveryRequest, GcPlan, GcResult, LedgerError, MAX_CONNECTIONS,
+        MAX_FRAME_BYTES, OperatorIntent, PROTOCOL_VERSION, Peer, ReadPage, ReadRequest, Request,
+        Response, Result, RunRecord, StoreStatus, TailPage, TailRequest, VerifyPage, VerifyReport,
     },
     store::Store,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(2);
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
+const ACCEPT_BACKOFF_LIMIT: Duration = Duration::from_secs(1);
 const GC_TIMEOUT: Duration = Duration::from_secs(300);
+/// One verify page re-reads a bounded amount of history, but a single large
+/// run still takes longer than an ordinary request.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn response_timeout(request: &Request) -> Duration {
-    if matches!(request, Request::Gc { dry_run: false, .. }) {
-        GC_TIMEOUT
-    } else {
-        TIMEOUT
+    match request {
+        Request::Gc { dry_run: false, .. } => GC_TIMEOUT,
+        Request::Verify { .. } => VERIFY_TIMEOUT,
+        _ => TIMEOUT,
     }
 }
 
@@ -52,17 +57,25 @@ pub struct Client {
 }
 
 impl Client {
+    /// Connect to the live writer and require that it speaks this protocol.
     pub fn connect(data: &Path) -> Result<Self> {
+        let mut client = Self::open(data)?;
+        client.check_protocol()?;
+        Ok(client)
+    }
+
+    /// An authenticated connection whose protocol has not been checked yet.
+    pub(crate) fn open(data: &Path) -> Result<Self> {
         let path = data.join("ledger/serve.sock");
         let meta = fs::symlink_metadata(&path)?;
-        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+        if meta.uid() != crate::os::euid() || meta.mode() & 0o077 != 0 {
             return Err(LedgerError("daemon socket is not owned and private".into()));
         }
         let stream = UnixStream::connect(path)?;
         stream.set_read_timeout(Some(TIMEOUT))?;
         stream.set_write_timeout(Some(TIMEOUT))?;
         let server = peer_credentials(&stream)?;
-        if server.uid != unsafe { libc::geteuid() } {
+        if server.uid != crate::os::euid() {
             return Err(LedgerError(
                 "daemon peer uid is not the current user".into(),
             ));
@@ -71,6 +84,20 @@ impl Client {
             stream,
             transport_failed: false,
         })
+    }
+
+    /// A writer of another version could misread or refuse every request;
+    /// say so once, instead of failing later on an undecodable reply.
+    pub(crate) fn check_protocol(&mut self) -> Result<()> {
+        let writer = self.ping()?;
+        if writer["protocol"] != PROTOCOL_VERSION {
+            return Err(LedgerError(format!(
+                "ledger writer speaks protocol {}, this client speaks {PROTOCOL_VERSION}; \
+                 restart the writer with this version once its runs settle",
+                writer["protocol"]
+            )));
+        }
+        Ok(())
     }
 
     fn request<T: DeserializeOwned>(&mut self, request: Request) -> Result<T> {
@@ -165,8 +192,25 @@ impl Client {
             run_id: run_id.into(),
         })
     }
-    pub fn runs(&mut self) -> Result<Vec<RunRecord>> {
-        self.request(Request::Runs)
+    /// Every run's projection, through the paginated catalog.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn runs(&mut self) -> Result<Vec<RunRecord>> {
+        let mut runs = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.catalog(&CatalogRequest {
+                filter: Default::default(),
+                after: after.take(),
+                limit: crate::discovery::MAX_CATALOG_LIMIT,
+            })?;
+            for summary in &page.runs {
+                runs.push(self.show(&summary.run_id)?);
+            }
+            if page.done {
+                return Ok(runs);
+            }
+            after = page.next_after;
+        }
     }
     pub fn catalog(&mut self, request: &CatalogRequest) -> Result<CatalogPage> {
         self.request(Request::Catalog {
@@ -178,10 +222,25 @@ impl Client {
             request: request.clone(),
         })
     }
+    /// Fresh verification of one run, or of every run page by page.
     pub fn verify(&mut self, run_id: Option<&str>) -> Result<Vec<VerifyReport>> {
-        self.request(Request::Verify {
-            run_id: run_id.map(str::to_owned),
-        })
+        let mut reports = Vec::new();
+        let mut after = None;
+        loop {
+            let page: VerifyPage = self.request(Request::Verify {
+                run_id: run_id.map(str::to_owned),
+                after: after.take(),
+                limit: DEFAULT_VERIFY_LIMIT,
+            })?;
+            reports.extend(page.reports);
+            match page.next_after {
+                Some(next) if !page.done => after = Some(next),
+                _ => return Ok(reports),
+            }
+        }
+    }
+    pub fn status(&mut self) -> Result<StoreStatus> {
+        self.request(Request::Status)
     }
     pub fn read(&mut self, request: &ReadRequest) -> Result<ReadPage> {
         self.request(Request::Read {
@@ -201,15 +260,6 @@ impl Client {
         self.request(Request::Release {
             run_id: run_id.into(),
             request_id: request_id.into(),
-        })
-    }
-    pub fn gc_plan(&mut self, retain_days: u32, after: Option<&str>, limit: u32) -> Result<GcPlan> {
-        self.request(Request::Gc {
-            dry_run: true,
-            retain_days: Some(retain_days),
-            capture_retain_days: None,
-            after: after.map(str::to_owned),
-            limit,
         })
     }
     pub fn gc_plan_policy(
@@ -242,15 +292,6 @@ impl Client {
             limit,
         })
     }
-    pub fn gc(&mut self, retain_days: u32, after: Option<&str>, limit: u32) -> Result<GcResult> {
-        self.request(Request::Gc {
-            dry_run: false,
-            retain_days: Some(retain_days),
-            capture_retain_days: None,
-            after: after.map(str::to_owned),
-            limit,
-        })
-    }
 }
 
 pub fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<()> {
@@ -267,17 +308,143 @@ pub fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<(
 }
 
 pub fn read_frame<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T> {
+    Ok(serde_json::from_slice(&read_frame_bytes(reader)?)?)
+}
+
+/// An out-of-bounds length is `InvalidData`; anything else is transport.
+fn read_frame_bytes(reader: &mut impl Read) -> std::io::Result<Vec<u8>> {
     let mut size = [0; 4];
     reader.read_exact(&mut size)?;
     let size = u32::from_be_bytes(size) as usize;
     if size == 0 || size > MAX_FRAME_BYTES {
-        return Err(LedgerError(
-            "socket frame exceeds its 1048576-byte limit".into(),
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("socket frame exceeds its {MAX_FRAME_BYTES}-byte limit"),
         ));
     }
     let mut bytes = vec![0; size];
     reader.read_exact(&mut bytes)?;
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(bytes)
+}
+
+/// The next request, or the refusal to send before closing a connection
+/// whose frames cannot be trusted. A transport error closes it silently.
+fn next_request(socket: &mut UnixStream) -> std::result::Result<Request, Option<String>> {
+    let bytes = match read_frame_bytes(socket) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            return Err(Some(format!("invalid_frame: {error}")));
+        }
+        Err(_) => return Err(None),
+    };
+    serde_json::from_slice(&bytes).map_err(|error| {
+        let detail: String = error.to_string().chars().take(256).collect();
+        Some(format!(
+            "unsupported_request: this writer (protocol {PROTOCOL_VERSION}) cannot decode \
+             the request; client and writer versions may differ: {detail}"
+        ))
+    })
+}
+
+/// Transient accept failures (descriptor or memory exhaustion, a connection
+/// reset while queued) must not stop the writer from accepting later ones.
+fn transient_accept_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            libc::EINTR
+                | libc::EAGAIN
+                | libc::ECONNABORTED
+                | libc::EMFILE
+                | libc::ENFILE
+                | libc::ENOBUFS
+                | libc::ENOMEM
+                | libc::EPROTO
+        )
+    )
+}
+
+/// Accept until a non-transient failure, which is returned. Connections past
+/// the bound are refused explicitly rather than dropped.
+fn accept_connections(listener: UnixListener, sender: mpsc::SyncSender<Message>) -> LedgerError {
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut backoff = ACCEPT_BACKOFF;
+    loop {
+        let mut socket = match listener.accept() {
+            Ok((socket, _)) => {
+                backoff = ACCEPT_BACKOFF;
+                socket
+            }
+            Err(error) if transient_accept_error(&error) => {
+                eprintln!("ouro-ledger: retrying accept after {error}");
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(ACCEPT_BACKOFF_LIMIT);
+                continue;
+            }
+            Err(error) => return error.into(),
+        };
+        let Ok(peer) = peer_credentials(&socket) else {
+            continue;
+        };
+        if peer.uid != crate::os::euid() {
+            continue;
+        }
+        if count.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+            count.fetch_sub(1, Ordering::AcqRel);
+            // A fresh socket's send buffer holds this small frame, so the
+            // acceptor never waits on a client that does not read.
+            let _ = socket.set_nonblocking(true);
+            let _ = write_frame(
+                &mut socket,
+                &Response::Error {
+                    message: format!(
+                        "writer_busy: the writer already serves {MAX_CONNECTIONS} connections; retry"
+                    ),
+                },
+            );
+            continue;
+        }
+        let sender = sender.clone();
+        let count = count.clone();
+        thread::spawn(move || {
+            let _ = socket.set_read_timeout(Some(TIMEOUT));
+            let _ = socket.set_write_timeout(Some(TIMEOUT));
+            loop {
+                let request = match next_request(&mut socket) {
+                    Ok(request) => request,
+                    Err(refusal) => {
+                        if let Some(message) = refusal {
+                            let _ = write_frame(&mut socket, &Response::Error { message });
+                        }
+                        break;
+                    }
+                };
+                let timeout = response_timeout(&request);
+                let (reply, response) = mpsc::sync_channel(1);
+                let message = Message {
+                    request,
+                    peer: peer.clone(),
+                    reply,
+                };
+                if sender.try_send(message).is_err() {
+                    let _ = write_frame(
+                        &mut socket,
+                        &Response::Error {
+                            message: "bounded daemon queue is full".into(),
+                        },
+                    );
+                    break;
+                }
+                let Ok(value) = response.recv_timeout(timeout) else {
+                    break;
+                };
+                if write_frame(&mut socket, &value).is_err() {
+                    break;
+                }
+            }
+            count.fetch_sub(1, Ordering::AcqRel);
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -301,7 +468,7 @@ pub fn serve(data: &Path) -> Result<()> {
     let path = store.root().join("serve.sock");
     if let Ok(meta) = fs::symlink_metadata(&path) {
         use std::os::unix::fs::FileTypeExt as _;
-        if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } {
+        if !meta.file_type().is_socket() || meta.uid() != crate::os::euid() {
             return Err(LedgerError("refusing unsafe existing daemon socket".into()));
         }
         fs::remove_file(&path)?;
@@ -310,60 +477,14 @@ pub fn serve(data: &Path) -> Result<()> {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     fs::File::open(store.root())?.sync_all()?;
     let (sender, receiver) = mpsc::sync_channel::<Message>(MAX_CONNECTIONS);
-    let count = Arc::new(AtomicUsize::new(0));
-    thread::spawn(move || {
-        for accepted in listener.incoming() {
-            let Ok(mut socket) = accepted else {
-                break;
-            };
-            let Ok(peer) = peer_credentials(&socket) else {
-                continue;
-            };
-            if peer.uid != unsafe { libc::geteuid() } {
-                continue;
-            }
-            if count.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
-                count.fetch_sub(1, Ordering::AcqRel);
-                continue;
-            }
-            let sender = sender.clone();
-            let count = count.clone();
-            thread::spawn(move || {
-                let _ = socket.set_read_timeout(Some(TIMEOUT));
-                let _ = socket.set_write_timeout(Some(TIMEOUT));
-                while let Ok(request) = read_frame::<Request>(&mut socket) {
-                    let timeout = response_timeout(&request);
-                    let (reply, response) = mpsc::sync_channel(1);
-                    let message = Message {
-                        request,
-                        peer: peer.clone(),
-                        reply,
-                    };
-                    if sender.try_send(message).is_err() {
-                        let _ = write_frame(
-                            &mut socket,
-                            &Response::Error {
-                                message: "bounded daemon queue is full".into(),
-                            },
-                        );
-                        break;
-                    }
-                    let Ok(value) = response.recv_timeout(timeout) else {
-                        break;
-                    };
-                    if write_frame(&mut socket, &value).is_err() {
-                        break;
-                    }
-                }
-                count.fetch_sub(1, Ordering::AcqRel);
-            });
-        }
-    });
+    let acceptor = thread::spawn(move || accept_connections(listener, sender));
     let mut capabilities = BTreeMap::new();
     #[cfg(target_os = "linux")]
-    let recovery_peer = peer_identity(unsafe { libc::geteuid() }, std::process::id())?;
+    let recovery_peer = peer_identity(crate::os::euid(), std::process::id())?;
     let mut last_recovery = std::time::Instant::now() - Duration::from_secs(1);
-    loop {
+    // A writer that can no longer accept connections cannot serve owners; it
+    // exits with the acceptor's error rather than as a clean shutdown.
+    while !acceptor.is_finished() {
         if last_recovery.elapsed() >= Duration::from_secs(1) {
             #[cfg(target_os = "linux")]
             store.recover_pending_orphans(&recovery_peer);
@@ -394,7 +515,12 @@ pub fn serve(data: &Path) -> Result<()> {
         let _ = message.reply.try_send(response);
         store.flush_index();
     }
-    Ok(())
+    let problem = acceptor
+        .join()
+        .unwrap_or_else(|_| LedgerError("the connection acceptor panicked".into()));
+    Err(LedgerError(format!(
+        "ledger writer stopped accepting connections: {problem}"
+    )))
 }
 
 fn authorize<'a>(
@@ -485,13 +611,21 @@ fn dispatch(
         }
         Request::Show { run_id } => Ok(serde_json::to_value(store.show(&run_id)?)?),
         Request::ShowWithTranscript { run_id } => store.show_with_transcript(&run_id),
-        Request::Runs => Ok(serde_json::to_value(store.legacy_runs()?)?),
         Request::Catalog { request } => Ok(serde_json::to_value(store.catalog(&request)?)?),
         Request::Discover { request } => Ok(serde_json::to_value(store.discover(&request)?)?),
-        Request::Verify { run_id } => Ok(serde_json::to_value(store.verify(run_id.as_deref())?)?),
+        Request::Verify {
+            run_id,
+            after,
+            limit,
+        } => Ok(serde_json::to_value(store.verify_page(
+            run_id.as_deref(),
+            after.as_deref(),
+            limit,
+        )?)?),
+        Request::Status => Ok(serde_json::to_value(store.status())?),
         Request::Read { request } => Ok(serde_json::to_value(store.read(&request)?)?),
         Request::Ping => Ok(
-            json!({"schema":"ouro.ledger.doctor/1","writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status(),"retention":{"retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.retain_days,"capture_retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.capture_retain_days}}),
+            json!({"schema":crate::schemas::DOCTOR,"protocol":PROTOCOL_VERSION,"writer":"available","launch_owner_supported":cfg!(target_os="linux"),"frame_limit_bytes":MAX_FRAME_BYTES,"queue_limit":MAX_CONNECTIONS,"scope":"local","managed_authorization":false,"index":store.index_status(),"retention":{"retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.retain_days,"capture_retain_days":store.retention.resolve(None,None).map_err(|e|LedgerError(e.into()))?.capture_retain_days}}),
         ),
         Request::ReconcilePending { run_id } => Ok(serde_json::to_value(
             store.reconcile_pending(&run_id, peer, &peer_alive)?,
@@ -562,6 +696,8 @@ pub fn peer_credentials(socket: &UnixStream) -> Result<Peer> {
         gid: 0,
     };
     let mut size = std::mem::size_of_val(&credential) as libc::socklen_t;
+    // SAFETY: the socket is open for this call, and the output pointer and
+    // its length describe the one live ucred the kernel fills.
     if unsafe {
         libc::getsockopt(
             socket.as_raw_fd(),
@@ -603,11 +739,14 @@ pub(crate) fn peer_identity(uid: u32, pid: u32) -> Result<Peer> {
 pub fn peer_credentials(socket: &UnixStream) -> Result<Peer> {
     let mut uid = 0;
     let mut gid = 0;
+    // SAFETY: the socket is open for this call; both outputs are live locals.
     if unsafe { libc::getpeereid(socket.as_raw_fd(), &mut uid, &mut gid) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
     let mut pid: libc::pid_t = 0;
     let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
+    // SAFETY: the socket is open for this call, and the output pointer and
+    // its length describe the one live pid_t the kernel fills.
     if unsafe {
         libc::getsockopt(
             socket.as_raw_fd(),
@@ -646,7 +785,7 @@ mod tests {
 
     fn fixture_peer() -> Peer {
         Peer {
-            uid: unsafe { libc::geteuid() },
+            uid: crate::os::euid(),
             pid: std::process::id(),
             birth: "fixture".into(),
             boot_id: "fixture".into(),

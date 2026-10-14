@@ -605,11 +605,15 @@ impl Uncontained {
             )
         })?;
         drop(fds);
-        let pid = libc::pid_t::try_from(child.id()).unwrap_or(-1);
         // Opened while the launcher is this process's unreaped child, so the
-        // descriptor names it and nothing that inherits the number later.
-        let launcher_fd = match identity::pidfd_open(pid) {
-            Ok(fd) => fd,
+        // descriptor names it and nothing that inherits the number later. A
+        // pid that does not fit `pid_t` names no process: refuse, never a
+        // stand-in number.
+        let opened = libc::pid_t::try_from(child.id())
+            .map_err(|_| std::io::Error::other("the launcher's pid does not fit pid_t"))
+            .and_then(|pid| identity::pidfd_open(pid).map(|fd| (pid, fd)));
+        let (pid, launcher_fd) = match opened {
+            Ok(opened) => opened,
             Err(err) => {
                 let _ = child.kill();
                 reap_until(&mut child, clock::Deadline::after(TREE_BUDGET));
@@ -652,6 +656,7 @@ impl Uncontained {
                     mode: "host".to_owned(),
                     mechanism: None,
                     allowed_hosts: Vec::new(),
+                    tls_only: Vec::new(),
                 },
                 syscalls: None,
                 limits: Vec::new(),
@@ -746,21 +751,34 @@ impl Uncontained {
         // nowhere. One more filter than this process has is the read-back;
         // a filter inherited from the operator's own session is not ours.
         if self.observe_on {
-            let filters = |target: libc::pid_t| {
-                identity::status_field(target, "Seccomp_filters")
-                    .ok()
+            // One status snapshot per process, parsed as every other
+            // privilege read-back parses it: the launcher's filter count and
+            // its NoNewPrivs come from the same read.
+            let status = |target: libc::pid_t, whose: &str| {
+                identity::Privilege::read(target).map_err(|err| {
+                    host_setup(
+                        ErrorCode::ObserverUnavailable,
+                        format!("{whose} status cannot be read back: {err}"),
+                    )
+                })
+            };
+            let filters = |privilege: &identity::Privilege| {
+                privilege
+                    .seccomp_filters
+                    .as_deref()
                     .and_then(|value| value.parse::<u64>().ok())
             };
             // SAFETY: getpid takes no arguments and cannot fail.
-            let own = filters(unsafe { libc::getpid() });
-            let launcher = filters(pid);
-            let no_new_privs = identity::status_field(pid, "NoNewPrivs").unwrap_or_default();
-            if own.is_none() || launcher != own.map(|count| count + 1) || no_new_privs != "1" {
+            let own = filters(&status(unsafe { libc::getpid() }, "this process's")?);
+            let launcher_status = status(pid, "the launcher's")?;
+            let launcher = filters(&launcher_status);
+            let no_new_privs = launcher_status.no_new_privs;
+            if own.is_none() || launcher != own.map(|count| count + 1) || !no_new_privs {
                 return Err(host_setup(
                     ErrorCode::ObserverUnavailable,
                     format!(
                         "the observer's narrowing filter is not in force in the launcher \
-                         (filters {launcher:?} against {own:?} here, NoNewPrivs {no_new_privs:?})"
+                         (filters {launcher:?} against {own:?} here, NoNewPrivs {no_new_privs})"
                     ),
                 ));
             }
@@ -820,6 +838,7 @@ impl Uncontained {
                 mode: "host".to_owned(),
                 mechanism: None,
                 allowed_hosts: Vec::new(),
+                tls_only: Vec::new(),
             },
             syscalls: None,
             limits,
@@ -2017,6 +2036,7 @@ mod tests {
                     mode: "host".to_owned(),
                     mechanism: None,
                     allowed_hosts: Vec::new(),
+                    tls_only: Vec::new(),
                 },
                 syscalls: None,
                 limits: Vec::new(),

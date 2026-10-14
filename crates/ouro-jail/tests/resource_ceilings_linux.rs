@@ -234,6 +234,190 @@ fn hard_links_are_denied_under_a_storage_ceiling_and_allowed_without_it() {
     }
 }
 
+/// The `agent` profile under a storage ceiling. Its unprivileged variant
+/// admits the ceiling, and then the baseline bubblewrap installs carries the
+/// hard-link denials: the link fails with EPERM, the receipt names that one
+/// program in both places it names one (`applied.syscalls.digest` and the
+/// agent detail), never the plain baseline, and the storage evidence states
+/// the denial. A host whose nested user namespaces select the
+/// namespace-inner variant, which permits new mounts, refuses the ceiling
+/// instead, and the check says so rather than pass vacuously.
+#[test]
+fn an_agent_storage_ceiling_installs_and_names_the_hard_link_denials() {
+    if !common::live() {
+        return;
+    }
+    let jail = Jail::new().unwrap();
+    let ws = jail.root().join("workspace");
+    std::fs::create_dir(&ws).unwrap();
+    let path = CString::new(ws.as_os_str().as_bytes()).unwrap();
+    let mut stats = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: terminated path and writable statfs output.
+    assert_eq!(
+        unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) },
+        0
+    );
+    // SAFETY: successful statfs initialized the structure.
+    let stats = unsafe { stats.assume_init() };
+    if stats.f_type != libc::TMPFS_MAGIC || stats.f_blocks == 0 || stats.f_files == 0 {
+        harness::skip_or_fail("a storage ceiling needs a bounded tmpfs test directory");
+        return;
+    }
+    let fixture = ws.join("ouro-fixture");
+    std::fs::copy(harness::fixture_path(), &fixture).unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(ws.join("from"), b"hard link source").unwrap();
+    let bytes = stats.f_blocks * u64::try_from(stats.f_bsize).unwrap();
+    let run = jail
+        .arg("run")
+        .arg("--profile")
+        .arg("agent")
+        .arg("--workspace")
+        .arg(&ws)
+        .args(["--limit", &format!("storage={bytes}")])
+        .receipt()
+        .target([
+            fixture.as_os_str(),
+            std::ffi::OsStr::new("link"),
+            std::ffi::OsStr::new("from"),
+            std::ffi::OsStr::new("to"),
+            std::ffi::OsStr::new("--via"),
+            std::ffi::OsStr::new("linkat"),
+            std::ffi::OsStr::new("--expect"),
+            std::ffi::OsStr::new("EPERM"),
+        ])
+        .run()
+        .unwrap();
+    if run.code() == Some(125)
+        && run
+            .stderr_text()
+            .contains("storage ceilings require a profile that cannot create new mounts")
+    {
+        harness::skip_or_fail(
+            "this host's `agent` variant permits new mounts, so it refuses a storage ceiling",
+        );
+        return;
+    }
+    assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
+    let receipt = common::checked_receipt(run.receipt_phase("settled").unwrap());
+    let details = &receipt["lifetime"]["native"]["details"];
+    assert_eq!(details["agent"]["filter_variant"], "unprivileged_inner");
+    let installed = receipt["applied"]["syscalls"]["digest"].as_str().unwrap();
+    assert_eq!(details["agent"]["baseline_filter_digest"], installed);
+    let plain = ouro_jail::platform::linux::seccomp::agent_baseline(
+        ouro_jail::platform::linux::seccomp::AgentVariant::UnprivilegedInner,
+    )
+    .unwrap()
+    .digest();
+    assert_ne!(
+        installed, plain,
+        "the installed program carries the storage rules"
+    );
+    assert_eq!(
+        details["storage_ceiling"]["hard_links"], "denied",
+        "{details:#}"
+    );
+    assert!(!ws.join("to").exists(), "the hard link was made");
+}
+
+/// Counters a contained run can no longer read (§11.4). Once the target runs,
+/// the execution cgroup's `pids.events` is made unreadable — the leaf sits
+/// in the operator's delegated subtree, so its owner can — and the run
+/// loop's next sample fails. Every `hit` it had not yet seen is then
+/// unsupported: the `pids` row's `hit` is null, and the `limits` class reads
+/// degraded with a null count and names `cgroup_counters_unreadable`,
+/// instead of active with a count nothing read.
+#[test]
+fn unreadable_counters_degrade_the_limits_class_of_a_contained_run() {
+    if !common::live() {
+        return;
+    }
+    let probe = ouro_jail::platform::linux::probe::run_one(
+        "cgroup_pids",
+        &harness::jail_path(),
+        std::path::Path::new("bwrap"),
+    );
+    if probe.status != ouro_jail::platform::linux::probe::ProbeStatus::Available {
+        harness::skip_or_fail("unreadable counters need a delegated cgroup with pids");
+        return;
+    }
+    let jail = Jail::new().unwrap();
+    let ws = jail.root().join("workspace");
+    std::fs::create_dir(&ws).unwrap();
+    let mut spawned = jail
+        .arg("run")
+        .arg("--profile")
+        .arg("tool")
+        .arg("--workspace")
+        .arg(&ws)
+        .args(["--limit", "pids=64"])
+        .control()
+        .gate()
+        .receipt()
+        .target(["/bin/sleep", "10"])
+        .spawn()
+        .unwrap();
+    let prepared = spawned.owner().await_prepared().unwrap();
+    let before = common::checked_receipt(spawned.receipt_value().unwrap());
+    let leaf = std::path::PathBuf::from(
+        before["lifetime"]["native"]["details"]["execution_cgroup"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    spawned
+        .owner()
+        .release(
+            &harness::gate::Release::Valid,
+            prepared["attempt_id"].as_str().unwrap(),
+            before["policy"]["digest"].as_str().unwrap(),
+        )
+        .unwrap();
+    // Time for the target to start: the counters are lost while it runs.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::fs::set_permissions(
+        leaf.join("pids.events"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let run = spawned.wait().unwrap();
+    // A leaf whose counters cannot be read is a boundary whose integrity is
+    // lost, so the attempt ends unsettled: its final receipt is the last
+    // one, and it says the tree's end is unknown.
+    let receipts = run.receipts();
+    for receipt in &receipts {
+        let _ = common::checked_receipt(receipt.clone());
+    }
+    let receipt = receipts
+        .last()
+        .unwrap_or_else(|| panic!("no receipt: {}", run.stderr_text()));
+    assert!(
+        receipt["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["code"] == "tree_unknown"),
+        "not the final receipt: {receipt:#}"
+    );
+    let pids = receipt["applied"]["limits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|limit| limit["key"] == "pids")
+        .unwrap();
+    assert!(pids["hit"].is_null(), "{pids}");
+    let class = &receipt["coverage"]["limits"];
+    assert_eq!(class["status"], "degraded", "{class:#}");
+    assert!(class["observed_count"].is_null(), "{class:#}");
+    assert!(
+        class["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["reason"] == "cgroup_counters_unreadable"),
+        "{class:#}"
+    );
+}
+
 /// Mutation-M03 guard: a requested ceiling over a writable filesystem the
 /// runtime cannot bound — an unbounded tmpfs, `f_blocks == 0` — refuses
 /// before exec instead of admitting an unbounded volume. The condition

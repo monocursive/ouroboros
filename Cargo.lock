@@ -805,6 +805,7 @@ name = "ouro"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ouro-records",
  "serde_json",
 ]
 
@@ -814,9 +815,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "libc",
+ "ouro-records",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
 ]
 
@@ -1736,6 +1737,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ouro-fixture",
  "ouro-jail",
  "serde",
  "serde_json",

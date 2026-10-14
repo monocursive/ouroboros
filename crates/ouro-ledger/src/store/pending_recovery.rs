@@ -1,9 +1,53 @@
 use super::*;
-use crate::pending::{Completion, Journal};
+use crate::pending::{Completion, Journal, STATE};
+
+/// A pending journal's identity and change times, as last seen.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct JournalSeen {
+    device: u64,
+    inode: u64,
+    bytes: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
 
 impl Store {
     pub(super) fn pending_exists(&self, id: &str) -> bool {
-        fs::symlink_metadata(self.root.join(id).join("owner-pending.json")).is_ok()
+        fs::symlink_metadata(self.root.join(id).join(STATE)).is_ok()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn journal_seen(&self, id: &str) -> Option<JournalSeen> {
+        let m = fs::symlink_metadata(self.root.join(id).join(STATE)).ok()?;
+        Some(JournalSeen {
+            device: m.dev(),
+            inode: m.ino(),
+            bytes: m.len(),
+            modified: (m.mtime(), m.mtime_nsec()),
+            changed: (m.ctime(), m.ctime_nsec()),
+        })
+    }
+
+    /// A dead owner's local evidence could not be reconciled. Record the
+    /// unknown outcome with the refusal; the journal stays for inspection.
+    pub(super) fn record_invalid_pending(
+        &mut self,
+        id: &str,
+        peer: &Peer,
+        problem: &LedgerError,
+    ) -> Result<AppendReceipt> {
+        let problem: String = problem.to_string().chars().take(512).collect();
+        self.append(
+            id,
+            json!({"kind":"outcome_unknown","request_id":"reconcile:pending-invalid","body":{
+                "reason":"invalid_pending_evidence","problem":problem,
+                "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"pending evidence could not be reconciled"},
+                "coverage":{"status":"degraded","gaps":[{"reason":"invalid_pending_evidence"}]}}}),
+            "operator",
+            peer,
+            None,
+        )
     }
 
     /// Reconcile evidence only. Neither this path nor orphan recovery can launch.
@@ -69,7 +113,6 @@ impl Store {
         }
         if let Some(completion) = &state.completion {
             let record = json!({"kind":completion.kind,"request_id":"settlement","effect_id":null,"body":completion.body});
-            validate_intent(self.stream(id)?, &record)?;
             self.append(id, record, "recovery", peer, None)?;
             journal.remove()?;
         } else if !alive(owner) {
@@ -100,17 +143,26 @@ impl Store {
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
-            if let Err(problem) = self.reconcile_pending(&id, peer, &crate::daemon::peer_alive) {
-                // Retain the failed journal for inspection. A bad local file is
-                // never sufficient evidence for a successful terminal outcome.
-                if self
-                    .stream(&id)
-                    .is_ok_and(|s| ["prepared", "admitted"].contains(&s.run.state.as_str()))
-                {
-                    let _ = self.append(&id, json!({"kind":"outcome_unknown","request_id":"reconcile:pending-invalid","body":{"reason":"invalid_pending_evidence","outcome":{"kind":"unknown","unknown":true,"unknown_reason":"pending evidence could not be reconciled"},"coverage":{"status":"degraded","gaps":[{"reason":"invalid_pending_evidence"}]}}}), "operator", peer, None);
-                    eprintln!("pending recovery for {id}: {problem}");
-                }
+            let seen = self.journal_seen(&id);
+            if self.pending_failures.get(&id) == Some(&seen) {
+                continue;
             }
+            let Err(problem) = self.reconcile_pending(&id, peer, &crate::daemon::peer_alive) else {
+                self.pending_failures.remove(&id);
+                continue;
+            };
+            eprintln!("pending recovery for {id}: {problem}");
+            // Retain the failed journal for inspection. A bad local file is
+            // never sufficient evidence for a successful terminal outcome.
+            if self
+                .stream(&id)
+                .is_ok_and(|s| ["prepared", "admitted"].contains(&s.run.state.as_str()))
+                && let Err(error) = self.record_invalid_pending(&id, peer, &problem)
+            {
+                eprintln!("recording unknown outcome for {id}: {error}");
+            }
+            // Retrying an unchanged journal every second cannot succeed.
+            self.pending_failures.insert(id, seen);
         }
     }
 }

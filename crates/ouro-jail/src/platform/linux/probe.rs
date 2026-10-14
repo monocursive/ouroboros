@@ -1449,6 +1449,7 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
     use std::process::Stdio;
     const NAME: &str = Probe::ObserverClosedSet.name();
     const MECHANISM: &str = Probe::ObserverClosedSet.mechanism();
+    use super::platform::{ERROR_FD, RELEASE_FD};
     let deadline = Deadline::after(PROBE_DEADLINE);
     let measured = (|| -> io::Result<()> {
         let temp = OwnedTempDir::new("observer-probe")?;
@@ -1456,11 +1457,11 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
         let (release_r, release_w) = exec::pipe()?;
         let (_error_r, error_w) = exec::pipe()?;
         let mut fds = FdMap::new();
-        fds.add(release_r, 12)?;
-        fds.add(error_w, 13)?;
+        fds.add(release_r, RELEASE_FD)?;
+        fds.add(error_w, ERROR_FD)?;
         let launch = super::launch::LaunchArgs {
-            release_fd: 12,
-            error_fd: 13,
+            release_fd: RELEASE_FD,
+            error_fd: ERROR_FD,
             narrow: true,
             read_open_fast_path: false,
             trace_data_fd: None,
@@ -1495,7 +1496,7 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
         let measured = (|| -> io::Result<()> {
             loop {
                 // Blocked on the `--release-fd` above, not on an earlier read.
-                if identity::blocked_in_read(pid, 12)? {
+                if identity::blocked_in_read(pid, RELEASE_FD)? {
                     break;
                 }
                 if deadline.expired() {

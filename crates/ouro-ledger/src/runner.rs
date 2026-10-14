@@ -11,7 +11,7 @@ use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::ExitStatusExt;
@@ -36,12 +36,9 @@ use serde_json::json;
 use crate::daemon::Client;
 #[cfg(target_os = "linux")]
 use crate::protocol::ClaimedOwner;
+#[cfg(target_os = "linux")]
+use crate::protocol::{CAPTURE_STREAMS, MAX_CAPTURE_BYTES, MAX_FRAME_BYTES};
 use crate::protocol::{LedgerError, Result, RunRecord};
-
-#[cfg(target_os = "linux")]
-const FRAME_MAX: usize = 1_048_576;
-#[cfg(target_os = "linux")]
-const CAPTURE_MAX: u64 = 16 * 1_048_576;
 
 /// The operator's literal execution request. Raw argv is persisted only with
 /// explicit capture; detached submission uses a private socket either way.
@@ -84,19 +81,53 @@ pub fn resolve_request(options: &RunOptions) -> Result<Value> {
     }
     #[cfg(target_os = "linux")]
     {
-        if options.argv.is_empty() || options.capture_limit > CAPTURE_MAX {
-            return Err(error("invalid launch arguments or capture limit"));
-        }
-        let image = pinned_image(&options.jail)?;
-        let digest = image_digest(&image)?;
-        let resolved = plan(options, &image)?;
-        if image_digest(&image)? != digest {
-            return Err(error("jail image changed during policy resolution"));
-        }
-        let request = payload(options, &resolved, &digest)?;
-        crate::store::validate_payload(&request)?;
-        Ok(request)
+        Ok(resolve(options)?.payload)
     }
+}
+
+/// A launch request resolved against one pinned jail image.
+#[cfg(target_os = "linux")]
+struct Resolved {
+    image: File,
+    image_digest: String,
+    payload: Value,
+}
+
+/// Every check a launch request gets, shared by planning, preparation and
+/// launch so that none of them can accept what another refuses.
+#[cfg(target_os = "linux")]
+fn resolve(options: &RunOptions) -> Result<Resolved> {
+    if options.detached && options.separate_control {
+        return Err(error(
+            "detached owners cannot depend on a client control descriptor",
+        ));
+    }
+    if options.argv.is_empty() {
+        return Err(error("run needs a program after --"));
+    }
+    if options.capture_limit > MAX_CAPTURE_BYTES {
+        return Err(error("capture limit exceeds 16 MiB per stream"));
+    }
+    if options
+        .captures
+        .iter()
+        .any(|s| !CAPTURE_STREAMS.contains(&s.as_str()))
+    {
+        return Err(error("capture accepts stdout, stderr and argv only"));
+    }
+    let image = pinned_image(&options.jail)?;
+    let digest = image_digest(&image)?;
+    let plan = plan(options, &image)?;
+    if image_digest(&image)? != digest {
+        return Err(error("jail image changed during policy resolution"));
+    }
+    let payload = payload(options, &plan, &digest)?;
+    crate::store::validate_payload(&payload)?;
+    Ok(Resolved {
+        image,
+        image_digest: digest,
+        payload,
+    })
 }
 
 fn error(message: impl Into<String>) -> LedgerError {
@@ -105,7 +136,10 @@ fn error(message: impl Into<String>) -> LedgerError {
 
 /// Start a writer on demand. The writer has no terminal or child-stream fds.
 pub fn connect_or_start(data: &Path) -> Result<Client> {
-    if let Ok(client) = Client::connect(data) {
+    // A reachable writer of another protocol is an answer, not an absence:
+    // starting a second writer would only fail on the store lock.
+    if let Ok(mut client) = Client::open(data) {
+        client.check_protocol()?;
         return Ok(client);
     }
     let mut command = Command::new(std::env::current_exe()?);
@@ -193,7 +227,7 @@ fn plan(options: &RunOptions, image: &File) -> Result<Value> {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),
         }
-        if bytes.len() > FRAME_MAX {
+        if bytes.len() > MAX_FRAME_BYTES {
             return Err(error("jail explain exceeded frame bound"));
         }
         if Instant::now() >= deadline {
@@ -224,13 +258,11 @@ fn plan(options: &RunOptions, image: &File) -> Result<Value> {
 fn image_digest(image: &File) -> Result<String> {
     let mut file = image.try_clone()?;
     file.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    std::io::Read::by_ref(&mut file)
-        .take(256 * 1_048_576 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > 256 * 1_048_576 {
-        return Err(error("jail executable exceeds image bound"));
-    }
+    let bytes = crate::protocol::read_bounded(
+        file,
+        256 * 1_048_576,
+        "jail executable exceeds image bound",
+    )?;
     Ok(canonical::sha256_prefixed(&bytes))
 }
 
@@ -243,7 +275,7 @@ fn payload(options: &RunOptions, plan: &Value, image_digest: &str) -> Result<Val
         .iter()
         .map(|r| r["name"].clone())
         .collect();
-    let mut request = json!({"schema":"ouro.ledger.request/1", "argv_digest":canonical::argv_digest(&argv),
+    let mut request = json!({"schema":crate::schemas::REQUEST, "argv_digest":canonical::argv_digest(&argv),
         "policy_digest":plan["policy"]["digest"], "requirements":requirements,
         "profile":plan["policy"]["name"], "jail_image_digest":image_digest,
         "io":{"mode":if options.batch {"batch"} else {"foreground"},"pty":false},
@@ -374,13 +406,13 @@ impl Frames {
                 Err(e) => return Err(e.into()),
             }
             while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
-                if end + 1 > FRAME_MAX {
+                if end + 1 > MAX_FRAME_BYTES {
                     return Err(error("oversized jail event/control frame"));
                 }
                 result.push(serde_json::from_slice(&self.pending[..end])?);
                 self.pending.drain(..=end);
             }
-            if self.pending.len() > FRAME_MAX {
+            if self.pending.len() > MAX_FRAME_BYTES {
                 return Err(error("unterminated oversized jail frame"));
             }
         }
@@ -406,23 +438,73 @@ fn read_receipt(path: &Path, phase: &str) -> Result<Value> {
     if !file.metadata()?.is_file() {
         return Err(error("receipt is not a regular file"));
     }
-    let mut bytes = Vec::new();
-    file.take((FRAME_MAX + 1) as u64).read_to_end(&mut bytes)?;
-    if bytes.len() > FRAME_MAX {
-        return Err(error("receipt exceeded frame bound"));
-    }
+    let bytes = crate::protocol::read_bounded(
+        file,
+        MAX_FRAME_BYTES as u64,
+        "receipt exceeded frame bound",
+    )?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+/// Foreground forwarding is display, not evidence. A terminal slower than the
+/// child or a lost terminal stops it; the owner keeps draining and capturing,
+/// and the capture records what was not delivered instead of failing the run.
 #[cfg(target_os = "linux")]
 struct Tee {
     sender: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
     finished: std::sync::mpsc::Receiver<std::io::Result<()>>,
+    result: Option<std::io::Result<()>>,
+    delivered: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    stopped: Option<&'static str>,
+}
+
+/// After the child's streams end, queued output gets this long to reach the
+/// terminal before the run is recorded; the rest is reported undelivered.
+#[cfg(target_os = "linux")]
+const FORWARDING_GRACE: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const HEARTBEAT: Duration = Duration::from_millis(250);
+/// The longest the owner loop sleeps when it cannot be woken by the jail's
+/// exit (no pidfd).
+#[cfg(target_os = "linux")]
+const EXIT_POLL: Duration = Duration::from_millis(5);
+
+/// A descriptor that becomes readable when `pid` exits. The caller holds the
+/// unreaped child, so the pid cannot name another process.
+#[cfg(target_os = "linux")]
+fn exit_descriptor(pid: u32) -> Option<OwnedFd> {
+    // SAFETY: pidfd_open takes a pid and flags by value and reads no memory.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    // SAFETY: a successful pidfd_open returned a new descriptor owned only here.
+    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+/// Sleep until one of `fds` is readable or `timeout` passes. Readiness is
+/// only a wake-up: the caller re-checks every stream, deadline and the child.
+#[cfg(target_os = "linux")]
+fn wait_readable(fds: &[RawFd], timeout: Duration) {
+    let mut polls: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|&fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    // Round up so a wait never ends just short of the deadline it aims at.
+    let millis = timeout.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+    // SAFETY: `polls` is an initialized array of descriptors that stay open
+    // for the call; poll writes only their revents.
+    let ready = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, millis) };
+    if ready < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+        // Never spin on a failing poll; a signal (cancellation) ends it early.
+        std::thread::sleep(timeout.min(EXIT_POLL));
+    }
 }
 
 #[cfg(target_os = "linux")]
 impl Tee {
-    fn new(name: &str) -> Result<Self> {
+    fn stdio(name: &str) -> Result<Self> {
         use std::os::fd::FromRawFd as _;
         let source = if name == "stdout" {
             libc::STDOUT_FILENO
@@ -435,7 +517,12 @@ impl Tee {
             return Err(std::io::Error::last_os_error().into());
         }
         // SAFETY: fcntl returned a new descriptor exclusively owned here.
-        let mut sink = unsafe { File::from_raw_fd(fd) };
+        Ok(Self::new(unsafe { File::from_raw_fd(fd) }))
+    }
+    fn new(mut sink: File) -> Self {
+        use std::sync::atomic::Ordering;
+        let delivered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let written = delivered.clone();
         // At most 1 MiB queued per selected stream. The owner never waits on a client write.
         let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(128);
         let (done, finished) = std::sync::mpsc::sync_channel(1);
@@ -443,37 +530,69 @@ impl Tee {
             let result = (|| {
                 for bytes in receiver {
                     sink.write_all(&bytes)?;
+                    written.fetch_add(bytes.len() as u64, Ordering::Release);
                 }
                 Ok(())
             })();
             let _ = done.send(result);
         });
-        Ok(Self {
+        Self {
             sender: Some(sender),
             finished,
-        })
-    }
-    fn forward(&mut self, bytes: &[u8]) -> Result<()> {
-        if self
-            .sender
-            .as_ref()
-            .is_none_or(|s| s.try_send(bytes.to_vec()).is_err())
-        {
-            self.sender.take();
-            return Err(error(
-                "foreground output forwarding exceeded its bound or lost its sink",
-            ));
+            result: None,
+            delivered,
+            stopped: None,
         }
-        Ok(())
     }
-    fn finish(&mut self) -> Result<()> {
-        self.sender.take();
-        self.finished
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| {
-                error("foreground output forwarding did not finish within two seconds")
-            })??;
-        Ok(())
+    fn forward(&mut self, bytes: &[u8]) {
+        use std::sync::mpsc::TrySendError;
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        let reason = match sender.try_send(bytes.to_vec()) {
+            Ok(()) => return,
+            Err(TrySendError::Full(_)) => "queue_full",
+            Err(TrySendError::Disconnected(_)) => "sink_failed",
+        };
+        self.sender = None;
+        self.stopped = Some(reason);
+    }
+    /// No more bytes; the sink drains what is already queued.
+    fn close(&mut self) {
+        self.sender = None;
+    }
+    /// Whether the sink has drained or failed, without waiting for it.
+    fn done(&mut self) -> bool {
+        use std::sync::mpsc::TryRecvError;
+        if self.result.is_none() {
+            self.result = match self.finished.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(std::io::ErrorKind::BrokenPipe.into())),
+            };
+        }
+        self.result.is_some()
+    }
+    /// What reached the terminal by now. Delivery is never an owner failure.
+    fn report(&mut self, observed: u64) -> Value {
+        self.close();
+        self.done();
+        let state = match &self.result {
+            Some(Ok(())) if self.stopped.is_none() => "complete",
+            Some(Ok(())) => "stopped",
+            Some(Err(_)) => {
+                self.stopped.get_or_insert("sink_failed");
+                "stopped"
+            }
+            None => "unfinished",
+        };
+        let delivered = self.delivered.load(std::sync::atomic::Ordering::Acquire);
+        let mut forwarding = json!({"state":state,"delivered_bytes":delivered,
+            "undelivered_bytes":observed.saturating_sub(delivered)});
+        if let Some(reason) = self.stopped {
+            forwarding["reason"] = json!(reason);
+        }
+        forwarding
     }
 }
 
@@ -499,9 +618,12 @@ fn output_pipe() -> Result<(File, File)> {
     }
     // SAFETY: the successful pipe2 returned distinct descriptors exclusively owned here.
     let parent = unsafe { File::from_raw_fd(fds[0]) };
+    // SAFETY: as above, for the write end.
     let child = unsafe { File::from_raw_fd(fds[1]) };
+    // SAFETY: scalar fcntl calls on the read end `parent` owns.
     let flags = unsafe { libc::fcntl(parent.as_raw_fd(), libc::F_GETFL) };
     if flags < 0
+        // SAFETY: as above.
         || unsafe { libc::fcntl(parent.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
     {
         return Err(std::io::Error::last_os_error().into());
@@ -545,7 +667,7 @@ impl Capture {
                 write_capture(file, &buffer[..keep], &mut self.stored)?;
             }
             if let Some(tee) = self.tee.as_mut() {
-                tee.forward(&buffer[..n])?;
+                tee.forward(&buffer[..n]);
             }
         }
         Ok(())
@@ -554,14 +676,23 @@ impl Capture {
         if let Some(file) = self.file.as_mut() {
             file.sync_all()?;
         }
-        if let Some(tee) = self.tee.as_mut() {
-            tee.finish()?;
-        }
-        Ok(if self.file.is_some() {
+        let mut metadata = if self.file.is_some() {
             json!({"state":if complete && self.eof {"captured"} else {"incomplete"},"limit_bytes":self.limit,"observed_bytes":self.observed,"stored_bytes":self.stored,"truncated":self.observed>self.stored,"path":format!("artifacts/{}.bin",self.name)})
         } else {
             json!({"state":"not_captured","observed_bytes":self.observed})
-        })
+        };
+        if let Some(tee) = self.tee.as_mut() {
+            metadata["forwarding"] = tee.report(self.observed);
+        }
+        Ok(metadata)
+    }
+    fn close_forwarding(&mut self) {
+        if let Some(tee) = self.tee.as_mut() {
+            tee.close();
+        }
+    }
+    fn forwarding_done(&mut self) -> bool {
+        self.tee.as_mut().is_none_or(Tee::done)
     }
 }
 
@@ -573,6 +704,7 @@ fn terminate(child: &mut Child) {
         return;
     }
     // The jail handles TERM and proves its own tree death. A forced exit cannot establish it.
+    // SAFETY: kill takes scalars; the child is unreaped, so its pid is still ours.
     unsafe {
         libc::kill(child.id() as i32, libc::SIGTERM);
     }
@@ -632,31 +764,11 @@ fn run_linux(
     options: &RunOptions,
     mut notify: Option<&mut dyn FnMut(&RunRecord)>,
 ) -> Result<RunResult> {
-    if options.detached && options.separate_control {
-        return Err(error(
-            "detached owners cannot depend on a client control descriptor",
-        ));
-    }
-    if options.argv.is_empty() {
-        return Err(error("run needs a program after --"));
-    }
-    if options.capture_limit > CAPTURE_MAX {
-        return Err(error("capture limit exceeds 16 MiB per stream"));
-    }
-    if options
-        .captures
-        .iter()
-        .any(|s| !["stdout", "stderr", "argv"].contains(&s.as_str()))
-    {
-        return Err(error("capture accepts stdout, stderr and argv only"));
-    }
-    let image = pinned_image(&options.jail)?;
-    let expected_image = image_digest(&image)?;
-    let plan = plan(options, &image)?;
-    if image_digest(&image)? != expected_image {
-        return Err(error("jail image changed during policy resolution"));
-    }
-    let payload = payload(options, &plan, &expected_image)?;
+    let Resolved {
+        image,
+        image_digest: expected_image,
+        payload,
+    } = resolve(options)?;
     let mut client = if options.detached {
         // Losing the independent writer must never create a replacement inside
         // this attempt's service cgroup. Strict evidence fails closed instead.
@@ -718,12 +830,23 @@ fn run_linux(
             &mut client,
             &claim.owner_token,
             "owner-returned-error",
-            &json!({"reason":"launch_owner_failed",
-                "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"launch_owner_failed"},
-                "coverage":{"status":"degraded","gaps":[{"reason":"launch_owner_failed"}]}}),
+            &unknown_body("launch_owner_failed", None),
         );
     }
     result
+}
+
+/// An owner's unresolved outcome: the reason, a matching degraded coverage
+/// gap and, once the child's streams are finalized, their capture state.
+#[cfg(target_os = "linux")]
+fn unknown_body(reason: &str, capture: Option<&serde_json::Map<String, Value>>) -> Value {
+    let mut body = json!({"reason":reason,
+        "outcome":{"kind":"unknown","unknown":true,"unknown_reason":reason},
+        "coverage":{"status":"degraded","gaps":[{"reason":reason}]}});
+    if let Some(capture) = capture {
+        body["capture"] = Value::Object(capture.clone());
+    }
+    body
 }
 
 #[cfg(target_os = "linux")]
@@ -851,7 +974,7 @@ fn run_owned(
                 tee: if options.batch {
                     None
                 } else {
-                    Some(Tee::new(name)?)
+                    Some(Tee::stdio(name)?)
                 },
             });
         } else if name == "stdout" {
@@ -901,6 +1024,7 @@ fn run_owned(
     drop(trace_child);
     drop(control_child);
     drop(gate_child);
+    let exited = exit_descriptor(child.0.id());
     let mut trace = Frames::new(trace_parent)?;
     let mut control = Frames::new(control_parent)?;
     let mut gate = Some(&mut gate_parent);
@@ -924,7 +1048,8 @@ fn run_owned(
                     pipe.shutdown(std::net::Shutdown::Write)?;
                 }
                 if child.0.try_wait()?.is_none() {
-                    // The direct child is unreaped, so its pid cannot be reused.
+                    // SAFETY: kill takes scalars; the direct child is unreaped,
+                    // so its pid cannot have been reused.
                     unsafe {
                         libc::kill(child.0.id() as i32, libc::SIGTERM);
                     }
@@ -1025,7 +1150,7 @@ fn run_owned(
             for capture in &mut captures {
                 capture.drain()?;
             }
-            if last_heartbeat.elapsed() >= Duration::from_millis(250) {
+            if last_heartbeat.elapsed() >= HEARTBEAT {
                 evidence.heartbeat(client)?;
                 last_heartbeat = Instant::now();
             }
@@ -1055,7 +1180,39 @@ fn run_owned(
                     "jail did not exit within five seconds of terminal control",
                 ));
             }
-            std::thread::sleep(Duration::from_millis(5));
+            // Sleep until a stream has bytes, the jail exits, or the next
+            // heartbeat or deadline is due.
+            let now = Instant::now();
+            let due = [
+                Some(last_heartbeat + HEARTBEAT),
+                (!admitted).then_some(preparation_deadline),
+                exit_seen.map(|t| t + Duration::from_secs(5)),
+                terminal_seen.map(|t| t + Duration::from_secs(5)),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .map_or(Duration::ZERO, |due| due.saturating_duration_since(now));
+            let mut fds: Vec<RawFd> = [(&control, control.eof), (&trace, trace.eof)]
+                .into_iter()
+                .filter(|(_, eof)| !eof)
+                .map(|(frames, _)| frames.stream.as_raw_fd())
+                .collect();
+            fds.extend(
+                captures
+                    .iter()
+                    .filter(|c| !c.eof)
+                    .map(|c| c.stream.as_raw_fd()),
+            );
+            let due = match (&exited, exit) {
+                (Some(exited), None) => {
+                    fds.push(exited.as_raw_fd());
+                    due
+                }
+                (None, None) => due.min(EXIT_POLL),
+                (_, Some(_)) => due,
+            };
+            wait_readable(&fds, due);
         }
         Ok(())
     })();
@@ -1064,6 +1221,22 @@ fn run_owned(
         gate.take();
         drop(gate_parent);
         terminate(&mut child.0);
+    }
+    // Give the terminal a bounded grace to show what is queued, keeping the
+    // writer connection alive meanwhile; whatever it has not shown by then
+    // is recorded as undelivered.
+    for item in &mut captures {
+        item.close_forwarding();
+    }
+    let grace = Instant::now() + FORWARDING_GRACE;
+    while !captures.iter_mut().all(Capture::forwarding_done) && Instant::now() < grace {
+        if failure.is_none() && last_heartbeat.elapsed() >= HEARTBEAT {
+            if let Err(problem) = evidence.heartbeat(client) {
+                failure = Some(problem);
+            }
+            last_heartbeat = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
     let mut capture = serde_json::Map::new();
     capture.insert("argv".into(), argv_capture);
@@ -1095,9 +1268,7 @@ fn run_owned(
             client,
             &claim.owner_token,
             "owner-failure",
-            &json!({"reason":"owner_or_evidence_failure","capture":capture,
-                "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"owner_or_evidence_failure"},
-                "coverage":{"status":"degraded","gaps":[{"reason":"owner_or_evidence_failure"}]}}),
+            &unknown_body("owner_or_evidence_failure", Some(&capture)),
         );
         return Err(problem);
     }
@@ -1119,9 +1290,7 @@ fn run_owned(
                 client,
                 &claim.owner_token,
                 "finalization-failed",
-                &json!({"reason":"finalization_failed","capture":capture,
-                    "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"finalization_failed"},
-                    "coverage":{"status":"degraded","gaps":[{"reason":"finalization_failed"}]}}),
+                &unknown_body("finalization_failed", Some(&capture)),
             );
             return Err(problem);
         }
@@ -1140,9 +1309,7 @@ fn run_owned(
             client,
             &claim.owner_token,
             "invalid-final",
-            &json!({"reason":"final_receipt_or_trace_mismatch",
-                "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"final_receipt_or_trace_mismatch"},
-                "coverage":{"status":"degraded","gaps":[{"reason":"final_receipt_or_trace_mismatch"}]}}),
+            &unknown_body("final_receipt_or_trace_mismatch", Some(&capture)),
         );
         return Err(error("terminal receipt/control/trace did not corroborate"));
     }
@@ -1219,6 +1386,159 @@ pub fn jail_binary(explicit: Option<PathBuf>) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_owner_wait_sleeps_when_idle_and_wakes_on_bytes_or_exit() {
+        let (reader, mut writer) = output_pipe().unwrap();
+        let started = Instant::now();
+        wait_readable(&[reader.as_raw_fd()], Duration::from_millis(60));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        writer.write_all(b"x").unwrap();
+        let started = Instant::now();
+        wait_readable(&[reader.as_raw_fd()], Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 0.2"])
+            .spawn()
+            .unwrap();
+        let exited = exit_descriptor(child.id()).expect("pidfd_open on the reference kernel");
+        let started = Instant::now();
+        wait_readable(&[exited.as_raw_fd()], Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        child.wait().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn planning_applies_every_launch_check_before_touching_the_jail() {
+        type Edit = fn(&mut RunOptions);
+        let options = |edit: Edit| {
+            let mut options = RunOptions {
+                data: "/nonexistent/data".into(),
+                jail: "/nonexistent/ouro-jail".into(),
+                request_id: "plan".into(),
+                prepared: None,
+                policy_args: vec![],
+                argv: vec!["true".into()],
+                batch: true,
+                separate_control: false,
+                detached: false,
+                captures: vec![],
+                redact: vec![],
+                capture_limit: 1,
+                best_effort: false,
+                launch: None,
+                tags: vec![],
+            };
+            edit(&mut options);
+            options
+        };
+        let cases: [(Edit, &str); 4] = [
+            (
+                |o| (o.detached, o.separate_control) = (true, true),
+                "client control descriptor",
+            ),
+            (|o| o.argv.clear(), "program after --"),
+            (
+                |o| o.capture_limit = MAX_CAPTURE_BYTES + 1,
+                "16 MiB per stream",
+            ),
+            (
+                |o| o.captures = vec!["environment".into()],
+                "stdout, stderr and argv only",
+            ),
+        ];
+        for (edit, refusal) in cases {
+            let refused = resolve_request(&options(edit)).unwrap_err();
+            assert!(refused.to_string().contains(refusal), "{refused}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unknown_bodies_name_one_reason_and_carry_finalized_captures() {
+        assert_eq!(
+            unknown_body("launch_owner_failed", None),
+            json!({"reason":"launch_owner_failed",
+                "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"launch_owner_failed"},
+                "coverage":{"status":"degraded","gaps":[{"reason":"launch_owner_failed"}]}})
+        );
+        let capture = json!({"stdout":{"state":"incomplete"}});
+        assert_eq!(
+            unknown_body("finalization_failed", capture.as_object())["capture"],
+            capture
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_blocked_terminal_stops_forwarding_but_never_capture_or_the_owner() {
+        let (source, mut child) = output_pipe().unwrap();
+        // Nothing reads this terminal, so its writer blocks once the pipe is full.
+        let (unread_terminal, terminal) = output_pipe().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut capture = Capture {
+            stream: source,
+            file: Some(File::create(temp.path().join("stdout.bin")).unwrap()),
+            observed: 0,
+            stored: 0,
+            limit: 16 * 1_048_576,
+            eof: false,
+            name: "stdout",
+            tee: Some(Tee::new(terminal)),
+        };
+        let chunk = vec![b'x'; 32 * 1024];
+        for _ in 0..96 {
+            child.write_all(&chunk).unwrap();
+            capture.drain().unwrap();
+        }
+        drop(child);
+        while !capture.eof {
+            capture.drain().unwrap();
+        }
+        let observed = 96 * chunk.len() as u64;
+        assert_eq!((capture.observed, capture.stored), (observed, observed));
+        capture.close_forwarding();
+        assert!(!capture.forwarding_done());
+        let metadata = capture.finish(true).unwrap();
+        assert_eq!(metadata["state"], "captured");
+        let forwarding = &metadata["forwarding"];
+        assert_eq!(forwarding["reason"], "queue_full");
+        assert_eq!(forwarding["state"], "unfinished");
+        let delivered = forwarding["delivered_bytes"].as_u64().unwrap();
+        assert!(delivered < observed);
+        assert_eq!(forwarding["undelivered_bytes"], observed - delivered);
+        drop(unread_terminal);
+
+        // A terminal that goes away stops forwarding the same way.
+        let (unread_terminal, terminal) = output_pipe().unwrap();
+        drop(unread_terminal);
+        let mut tee = Tee::new(terminal);
+        tee.forward(b"lost");
+        tee.close();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !tee.done() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let forwarding = tee.report(4);
+        assert_eq!(forwarding["state"], "stopped");
+        assert_eq!(forwarding["reason"], "sink_failed");
+        assert_eq!(forwarding["delivered_bytes"], 0);
+        assert_eq!(forwarding["undelivered_bytes"], 4);
+
+        // A terminal that keeps up shows everything.
+        let mut tee = Tee::new(File::create(temp.path().join("terminal")).unwrap());
+        tee.forward(b"shown");
+        tee.close();
+        while !tee.done() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            tee.report(5),
+            json!({"state":"complete","delivered_bytes":5,"undelivered_bytes":0})
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

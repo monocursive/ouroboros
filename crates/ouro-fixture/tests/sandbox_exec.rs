@@ -227,23 +227,35 @@ mod linux {
             .unwrap(),
         )
         .unwrap();
-        let out = run(&[
-            "sandbox-exec",
-            "--seccomp-errno",
-            "mkdirat",
-            "--seccomp-errno",
-            "mkdir",
-            "--",
-            &fixture_str(),
-            "script",
-            &status_script,
+        // Every directory-creating call the native table has: `mkdir` has
+        // no number on aarch64.
+        let named: Vec<(&str, u32)> = ["mkdirat", "mkdir"]
+            .into_iter()
+            .filter_map(|name| {
+                ouro_fixture::sandbox::NATIVE_SYSCALLS
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .copied()
+            })
+            .collect();
+        let mut args = vec!["sandbox-exec".to_owned()];
+        for (name, _) in &named {
+            args.extend(["--seccomp-errno".to_owned(), (*name).to_owned()]);
+        }
+        args.extend([
+            "--".to_owned(),
+            fixture_str(),
+            "script".to_owned(),
+            status_script.clone(),
         ]);
+        let out = run(&args);
         assert_eq!(code(&out), 0, "{}", describe(&out));
         let l = lines(&out);
         assert_eq!(ops(&l)[..2], ["prctl", "seccomp"]);
         let seccomp = &l[1];
         assert_eq!(seccomp["ret"], 0);
-        assert_eq!(seccomp["args"]["numbers"], serde_json::json!([258, 83]));
+        let numbers: Vec<u32> = named.iter().map(|(_, nr)| *nr).collect();
+        assert_eq!(seccomp["args"]["numbers"], serde_json::json!(numbers));
         assert_eq!(last(&l, "mkdirat")["errno"], "EPERM");
         assert!(!Path::new(&blocked).exists());
         assert!(

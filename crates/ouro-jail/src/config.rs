@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::net::Ipv6Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -27,6 +27,9 @@ use crate::records::{
 pub const CONFIG_DIR_VAR: &str = "OURO_CONFIG_DIR";
 /// Relocates the operator's data directory (jail state).
 pub const DATA_DIR_VAR: &str = "OURO_DATA_DIR";
+/// The operator home: the default configuration and data directories, and
+/// what a leading `~/` in an operator file names.
+pub const HOME_VAR: &str = "HOME";
 /// `observation.mode` from the environment.
 pub const OBSERVE_VAR: &str = "OURO_JAIL_OBSERVE";
 /// `observation.evidence` from the environment.
@@ -50,6 +53,29 @@ fn invalid(key: &str, message: impl Into<String>) -> JailError {
         message.into(),
     )
     .with_key_path(key)
+}
+
+/// `dir`, which the environment `variable` named, when it is absolute.
+///
+/// A relative operator directory would resolve against whatever directory
+/// the jail happens to run in, and paths beneath it would refuse as having
+/// "no directory to resolve against", naming neither the variable nor the
+/// cause; so it refuses here, naming both.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] at key `variable` for a relative `dir`.
+pub fn absolute_dir<'a>(variable: &str, dir: &'a Path) -> Result<&'a Path, JailError> {
+    if dir.is_absolute() {
+        Ok(dir)
+    } else {
+        Err(invalid(
+            variable,
+            format!(
+                "{variable} is `{}`, which is not an absolute path; it must be absolute",
+                dir.display()
+            ),
+        ))
+    }
 }
 
 /// A TOML parse error as one line: the parser's message and where in `text`
@@ -661,9 +687,18 @@ pub fn env_settings(lookup: &dyn Fn(&str) -> Option<OsString>) -> Result<EnvSett
             })
             .transpose()
     };
+    let directory = |name: &str| -> Result<Option<PathBuf>, JailError> {
+        lookup(name)
+            .map(|value| {
+                let dir = PathBuf::from(value);
+                absolute_dir(name, &dir)?;
+                Ok(dir)
+            })
+            .transpose()
+    };
     let mut settings = EnvSettings {
-        config_dir: lookup(CONFIG_DIR_VAR).map(PathBuf::from),
-        data_dir: lookup(DATA_DIR_VAR).map(PathBuf::from),
+        config_dir: directory(CONFIG_DIR_VAR)?,
+        data_dir: directory(DATA_DIR_VAR)?,
         ..EnvSettings::default()
     };
     if let Some(value) = text(OBSERVE_VAR)? {

@@ -581,7 +581,10 @@ impl Storage {
         self.failure.as_deref()
     }
 
-    pub(super) fn evidence(&self) -> serde_json::Value {
+    /// The ceiling's receipt evidence. `hard_links_denied` is what the
+    /// installed syscall filter does with `link` and `linkat`, read from that
+    /// program by the caller, never assumed here.
+    pub(super) fn evidence(&self, hard_links_denied: bool) -> serde_json::Value {
         serde_json::json!({
             "mechanism": StorageMechanism::of_all(&self.volumes).as_str(),
             "volumes": self.volumes.iter().map(|volume| serde_json::json!({
@@ -590,8 +593,8 @@ impl Storage {
                 "capacity_bytes": volume.bytes,
                 "capacity_inodes": volume.inodes,
             })).collect::<Vec<_>>(),
-            "hard_links": "denied",
-            "hard_link_denials": "seccomp_errno_not_observed",
+            "hard_links": if hard_links_denied { "denied" } else { "permitted" },
+            "hard_link_denials": hard_links_denied.then_some("seccomp_errno_not_observed"),
             "filesystems": self.volumes.len(),
             "capacity_bytes": self.capacity_bytes,
             "capacity_inodes": self.capacity_inodes,
@@ -858,7 +861,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            tmpfs.evidence()["volumes"][0]["mechanism"],
+            tmpfs.evidence(true)["volumes"][0]["mechanism"],
             "bounded-tmpfs-capacity"
         );
         // One quota-backed volume makes the whole admission a quota's.
@@ -874,9 +877,9 @@ mod tests {
             mixed.limits()[0].mechanism.as_deref(),
             Some("filesystem-user-quota")
         );
-        assert_eq!(mixed.evidence()["mechanism"], "filesystem-user-quota");
+        assert_eq!(mixed.evidence(true)["mechanism"], "filesystem-user-quota");
         assert_eq!(
-            mixed.evidence()["volumes"][0]["mechanism"],
+            mixed.evidence(true)["volumes"][0]["mechanism"],
             "user-hard-quota"
         );
         // More capacity than the ceiling refuses.

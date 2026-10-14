@@ -52,59 +52,59 @@ impl fmt::Display for Violation {
 pub const RULES: &[(&str, &str)] = &[
     (
         "native_string",
-        "canonicalization.md \"Native strings\": a byte object is canonical padded base64 of bytes that are not UTF-8, and no native value holds NUL",
+        r#"canonicalization.md "Native strings": a byte object is canonical padded base64 of bytes that are not UTF-8, and no native value holds NUL"#,
     ),
     (
         "credential_id_unique",
-        "jail-v1.md:1833 (§13.2) and canonicalization.md: staged credentials have unique logical ids",
+        r#"jail-v1.md §12 "IDs are unique logical names" and canonicalization.md "Ids are unique.": staged credentials have unique logical ids"#,
     ),
     (
         "limit_key_unique",
-        "jail-v1.md:703 and :1895-1897 (§6.4, §13.2): one limit per key, each stating its own scope and hit",
+        r#"jail-v1.md §6.4 "CLI duplicates refuse.", §9.3 "The receipt gives requested value, applied mechanism, scope and observed hit/unknown status." and §13.2 "Limits report hits in `applied.limits[].hit`": one limit per key, each stating its own scope and hit"#,
     ),
     (
         "coverage_source_unsupported",
-        "jail-v1.md:1561-1563 (§11.4): an active, supported or degraded class names its assigned source, which cannot then be unsupported",
+        r#"jail-v1.md §11.4 "Active/supported/degraded classes name their assigned source; unsupported classes name none.": an active, supported or degraded class names its assigned source, which cannot then be unsupported"#,
     ),
     (
         "gap_interval_reversed",
-        "jail-v1.md:1627-1629 (§11.4) and :1791 (§13.1): a gap is the interval from the last healthy point to recovery, so it does not end before it starts",
+        r#"jail-v1.md §11.4 "Bound the affected interval conservatively from the last known healthy point to recovery." and §13.1 "with `fields.kind=coverage_gap`, classes, interval, reason": a gap is the interval from the last healthy point to recovery, so it does not end before it starts"#,
     ),
     (
         "trace_attempt_mixed",
-        "jail-v1.md:1774 (§13.1) and :1909-1911 (§13.3): a trace is the one stream of one attempt",
+        r#"jail-v1.md §13.1 "There is one writer per trace stream." and §13.3 "write a bounded standalone `trace.ndjson` under private attempt state": a trace is the one stream of one attempt"#,
     ),
     (
         "source_seq_order",
-        "jail-v1.md:1775-1776 (§13.1): source_seq never restarts within an attempt, so it increases per source",
+        r#"jail-v1.md §13.1 "`source_seq` starts at 1 independently for each source and never restarts within an attempt": source_seq never restarts within an attempt, so it increases per source"#,
     ),
     (
         "source_seq_gap",
-        "jail-v1.md:1775-1776 (§13.1) and :1938-1940 (§13.3): each source counts from 1; a missing number is lost evidence, which the stream's first loss records as a trace_transport_loss note",
+        r#"jail-v1.md §13.1 "its numbers are consecutive except after the stream's recorded transport loss" and §13.3 "The first loss writes one wrapper `coverage_gap` note (`trace_transport_loss`)": each source counts from 1; a missing number is lost evidence, which the stream's first loss records as a trace_transport_loss note"#,
     ),
     (
         "receipt_note_order",
-        "jail-v1.md:837-851 (§8.1) and :1817-1821, :1846-1849 (§13.2): receipt notes follow the lifecycle; nothing after exec is a refusal, nothing leaves settled or refused",
+        r#"jail-v1.md §8.1 "Termination after target exec cannot be reclassified as a pre-exec refusal." and §13.2 "Normal phases are `prepared`, `enforced`, `settled`.": receipt notes follow the lifecycle; nothing after exec is a refusal, nothing leaves settled or refused"#,
     ),
     (
         "trace_final_receipt",
-        "jail-v1.md:1792-1795 (§13.1) and :1948-1949 (§13.3): a complete trace ends on the jail.receipt note naming the final receipt's phase and canonical digest",
+        r#"jail-v1.md §13.1 "Receipt updates are wrapper `jail.receipt` events referencing receipt digest and phase" and §13.3 "A trace is complete only if its last frame is the `jail.receipt` note of the attempt's final receipt.": a complete trace ends on the jail.receipt note naming the final receipt's phase and canonical digest"#,
     ),
     (
         "trace_loss_recorded",
-        "jail-v1.md:1928-1931 and :1938-1940 (§13.3): the first loss writes one trace_transport_loss note from the last healthy point, and every later receipt records that loss on each covered evidence class",
+        r#"jail-v1.md §13.3 "Once a trace loss is known, every later receipt records it" and "starting from the last point every accepted frame had been delivered": the first loss writes one trace_transport_loss note from the last healthy point, and every later receipt records that loss on each covered evidence class"#,
     ),
     (
         "control_attempt_mixed",
-        "jail-v1.md:923-924 (§8.2): control output carries one attempt's messages",
+        r#"jail-v1.md §8.2 "Control output uses NDJSON, with schema `ouro.jail.control/1`, attempt id": control output carries one attempt's messages"#,
     ),
     (
         "control_seq_order",
-        "jail-v1.md:923-924 (§8.2): the message number increases monotonically",
+        r#"jail-v1.md §8.2 "monotonically increasing message number starting at 1": the message number increases monotonically"#,
     ),
     (
         "control_kind_order",
-        "jail-v1.md:923-931 (§8.2) and :847-851 (§8.1): prepared, then exec_confirmed, then one terminal message; refused never after exec; nothing after a terminal message",
+        r#"jail-v1.md §8.2 "`refused` is sent only while the target has not executed" and "once the target has executed, the terminal message is `settled` or `unsettled`", and §8.1 "Termination after target exec cannot be reclassified as a pre-exec refusal.": prepared, then exec_confirmed, then one terminal message; refused never after exec; nothing after a terminal message"#,
     ),
 ];
 
@@ -130,7 +130,6 @@ fn violation(rule: &'static str, at: impl Into<String>, detail: impl Into<String
 /// # Errors
 /// Why the value is not a canonical native string.
 pub fn native_bytes(value: &Value) -> Result<Vec<u8>, String> {
-    use base64::Engine as _;
     let raw = match value {
         Value::String(text) => text.as_bytes().to_vec(),
         Value::Object(map) => {
@@ -145,16 +144,7 @@ pub fn native_bytes(value: &Value) -> Result<Vec<u8>, String> {
             let data = map["data"]
                 .as_str()
                 .ok_or("a byte object's data is not a string")?;
-            let raw = base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .map_err(|error| format!("the base64 does not decode: {error}"))?;
-            if base64::engine::general_purpose::STANDARD.encode(&raw) != data {
-                return Err("the base64 is not canonical".to_owned());
-            }
-            if std::str::from_utf8(&raw).is_ok() {
-                return Err("UTF-8 bytes must use the JSON string form".to_owned());
-            }
-            raw
+            super::NativeString::decode_base64(data).map_err(|error| error.to_string())?
         }
         other => return Err(format!("{other} is not a native string")),
     };
@@ -613,6 +603,79 @@ pub fn control(messages: &[Value]) -> Vec<Violation> {
 
 #[cfg(test)]
 mod tests {
+    /// The text of one numbered section of `document`, subsections included.
+    fn section(document: &str, number: &str) -> String {
+        let heading = |line: &str| -> Option<String> {
+            let title = line
+                .strip_prefix('#')?
+                .trim_start_matches('#')
+                .strip_prefix(' ')?;
+            let token = title.split_whitespace().next()?.trim_end_matches('.');
+            token
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| token.to_owned())
+        };
+        let mut inside = false;
+        let mut text = Vec::new();
+        for line in document.lines() {
+            if let Some(found) = heading(line) {
+                inside = found == number || found.starts_with(&format!("{number}."));
+            }
+            if inside {
+                text.push(line);
+            }
+        }
+        assert!(!text.is_empty(), "§{number} is not a section");
+        text.join("\n")
+    }
+
+    /// A citation names a document and section and quotes it, never a line
+    /// number a later revision can move; each quote is in the section it
+    /// follows, and the shared corpus carries the same citations.
+    #[test]
+    fn rule_citations_quote_the_sections_they_cite() {
+        let specs = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs"));
+        let read = |path: &str| std::fs::read_to_string(specs.join(path)).unwrap();
+        let jail = read("jail-v1.md");
+        let canonicalization = read("jail-v1/canonicalization.md");
+        let corpus: Value =
+            serde_json::from_str(&read("jail-v1/fixtures/semantic-cases.json")).unwrap();
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        for (rule, citation) in RULES {
+            assert_eq!(corpus["rules"][rule], *citation, "{rule}: corpus citation");
+            let (mut document, mut number, mut quotes) = ("", None, 0);
+            for (index, part) in citation.split('"').enumerate() {
+                if index % 2 == 1 {
+                    let text = match document {
+                        "canonicalization.md" => flat(&canonicalization),
+                        "jail-v1.md" => flat(&section(
+                            &jail,
+                            number.unwrap_or_else(|| panic!("{rule} quotes no section")),
+                        )),
+                        other => panic!("{rule} cites {other:?}"),
+                    };
+                    assert!(
+                        text.contains(&flat(part)),
+                        "{rule}: {document} §{number:?} does not say {part:?}"
+                    );
+                    quotes += 1;
+                    continue;
+                }
+                for word in part.split_whitespace() {
+                    let word = word.trim_end_matches([',', ':']);
+                    assert!(!word.contains(".md:"), "{rule} cites a line: {word}");
+                    if word.ends_with(".md") {
+                        (document, number) = (word, None);
+                    } else if let Some(found) = word.strip_prefix('§') {
+                        number = Some(found);
+                    }
+                }
+            }
+            assert!(quotes > 0, "{rule} quotes its specification");
+        }
+    }
+
     use super::*;
 
     /// R1 (audit 2026-10-08): the `trace_loss_recorded` rule compares the

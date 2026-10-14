@@ -1,6 +1,10 @@
 //! Shared operator retention settings; neither consumer performs automatic deletion.
 use serde::{Deserialize, Deserializer};
 
+/// The retention bound both the configuration and every override accept.
+pub const MAX_RETAIN_DAYS: u32 = 36_500;
+pub const RETAIN_DAYS: std::ops::RangeInclusive<u32> = 1..=MAX_RETAIN_DAYS;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Days(pub u32);
 
@@ -11,7 +15,7 @@ impl<'de> Deserialize<'de> for Days {
         let days = digits
             .parse::<u32>()
             .ok()
-            .filter(|n| (1..=36_500).contains(n));
+            .filter(|n| RETAIN_DAYS.contains(n));
         if !digits.bytes().all(|b| b.is_ascii_digit()) || days.is_none() {
             return Err(serde::de::Error::custom("retention must be 1d..36500d"));
         }
@@ -42,7 +46,7 @@ impl LedgerRetention {
         let capture_retain_days = captures
             .or(self.capture_retain.map(|v| v.0))
             .unwrap_or(retain_days);
-        if !(1..=36_500).contains(&retain_days) || !(1..=36_500).contains(&capture_retain_days) {
+        if !RETAIN_DAYS.contains(&retain_days) || !RETAIN_DAYS.contains(&capture_retain_days) {
             return Err("retention requires 1..36500 days");
         }
         if capture_retain_days > retain_days {

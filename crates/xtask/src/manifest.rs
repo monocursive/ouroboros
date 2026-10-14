@@ -9,8 +9,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use ouro_jail::capability::Capability;
 use serde::Deserialize;
 use serde_json::Value;
+
+use crate::util::wire;
 
 /// The `[expected]` table: capability name to expected status.
 #[derive(Debug, Deserialize)]
@@ -68,59 +71,40 @@ impl Row {
     }
 }
 
-/// Pull `name -> status` out of whatever shape `doctor --json` used.
+/// `name -> status` of `doctor --json`'s capability rows: the array of
+/// `jail-doctor.schema.json`'s `capabilities`, read as the jail's own
+/// [`Capability`] type.
 ///
-/// Four shapes are accepted, because the doctor output is owned by another J1
-/// slice and only the capability vocabulary is fixed between us:
-/// `{"capabilities": [{"name":…,"status":…}]}`, `{"capabilities": {name: …}}`,
-/// a bare array of those objects, and a bare object of `name -> status`.
-/// Anything else yields an empty map, which fails every expected row rather
-/// than passing silently.
-#[must_use]
-pub fn statuses(doctor: &Value) -> BTreeMap<String, String> {
-    let node = doctor.get("capabilities").unwrap_or(doctor);
-    let mut out = BTreeMap::new();
-    match node {
-        Value::Array(items) => {
-            for item in items {
-                if let (Some(name), Some(status)) = (
-                    item.get("name").and_then(Value::as_str),
-                    item.get("status").and_then(Value::as_str),
-                ) {
-                    out.insert(name.to_string(), status.to_string());
-                }
-            }
-        }
-        Value::Object(map) => {
-            for (name, value) in map {
-                let status = match value {
-                    Value::String(s) => Some(s.clone()),
-                    other => other
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                };
-                if let Some(status) = status {
-                    out.insert(name.clone(), status);
-                }
-            }
-        }
-        _ => {}
-    }
-    out
+/// # Errors
+/// The report has no capability rows, or they are not capability rows.
+pub fn statuses(doctor: &Value) -> Result<BTreeMap<String, String>, String> {
+    let rows = doctor
+        .get("capabilities")
+        .ok_or("doctor reported no capabilities")?;
+    let rows: Vec<Capability> = serde_json::from_value(rows.clone())
+        .map_err(|e| format!("doctor's capabilities are not capability rows: {e}"))?;
+    Ok(rows.into_iter().map(|c| (c.name, wire(c.status))).collect())
 }
 
 /// Compare every manifest row with the doctor report.
 #[must_use]
 pub fn compare(manifest: &Manifest, doctor: &Value) -> Vec<Row> {
-    let actual = statuses(doctor);
+    // Rows that cannot be read fail every expectation, never pass one.
+    let (actual, unreadable) = match statuses(doctor) {
+        Ok(actual) => (actual, None),
+        Err(e) => (BTreeMap::new(), Some(e)),
+    };
     manifest
         .expected
         .iter()
         .map(|(name, expected)| {
             let got = actual.get(name).cloned();
             let problem = match got.as_deref() {
-                None => Some("not reported by doctor".to_string()),
+                None => Some(
+                    unreadable
+                        .clone()
+                        .unwrap_or_else(|| "not reported by doctor".to_string()),
+                ),
                 Some("skipped") if expected != "skipped" => Some(
                     "doctor skipped this probe; a skipped check cannot satisfy a requirement"
                         .to_string(),
@@ -145,6 +129,7 @@ pub fn compare(manifest: &Manifest, doctor: &Value) -> Vec<Row> {
 #[must_use]
 pub fn unlisted(manifest: &Manifest, doctor: &Value) -> Vec<String> {
     statuses(doctor)
+        .unwrap_or_default()
         .into_keys()
         .filter(|k| !manifest.expected.contains_key(k))
         .collect()
@@ -167,40 +152,52 @@ mod tests {
         }
     }
 
-    #[test]
-    fn all_four_doctor_shapes_are_understood() {
-        let want = BTreeMap::from([
-            ("a".to_string(), "available".to_string()),
-            ("b".to_string(), "unavailable".to_string()),
-        ]);
-
-        let array_under_key = json!({"capabilities":[
-            {"name":"a","status":"available"},{"name":"b","status":"unavailable"}]});
-        assert_eq!(statuses(&array_under_key), want);
-
-        let object_under_key = json!({"capabilities":{
-            "a":{"status":"available"},"b":{"status":"unavailable"}}});
-        assert_eq!(statuses(&object_under_key), want);
-
-        let bare_array = json!([
-            {"name":"a","status":"available"},{"name":"b","status":"unavailable"}]);
-        assert_eq!(statuses(&bare_array), want);
-
-        let bare_object = json!({"a":"available","b":"unavailable"});
-        assert_eq!(statuses(&bare_object), want);
+    /// One capability row as `doctor --json` writes it.
+    fn row(name: &str, status: &str) -> Value {
+        json!({"name": name, "status": status, "scope": "host", "mechanism": null,
+               "reason_code": null, "measured_at": null, "evidence_ref": null})
     }
 
     #[test]
-    fn an_unrecognised_shape_yields_nothing_rather_than_a_guess() {
-        assert!(statuses(&json!("ready")).is_empty());
-        assert!(statuses(&json!({"capabilities": 7})).is_empty());
+    fn the_doctor_schemas_shape_is_read() {
+        let doctor = json!({"capabilities": [row("a", "available"), row("b", "unavailable")]});
+        assert_eq!(
+            statuses(&doctor).unwrap(),
+            BTreeMap::from([
+                ("a".to_string(), "available".to_string()),
+                ("b".to_string(), "unavailable".to_string()),
+            ])
+        );
+        // The checked-in doctor example is that shape.
+        let example: Value = serde_json::from_str(include_str!(
+            "../../../docs/specs/jail-v1/examples/doctor-linux.json"
+        ))
+        .unwrap();
+        assert!(!statuses(&example).unwrap().is_empty());
+    }
+
+    /// Review XT22: the shapes an older doctor might have used are not
+    /// guessed at; anything but the schema's fails every expected row.
+    #[test]
+    fn any_other_shape_is_an_error_that_fails_every_row() {
+        for other in [
+            json!("ready"),
+            json!({"capabilities": 7}),
+            json!({"capabilities": {"bwrap_present": {"status": "available"}}}),
+            json!([row("bwrap_present", "available")]),
+            json!({"capabilities": [{"name": "bwrap_present", "status": "available"}]}),
+        ] {
+            assert!(statuses(&other).is_err(), "{other}");
+            let rows = compare(&manifest(), &other);
+            assert!(rows.iter().all(|r| !r.ok()), "{other}: {rows:?}");
+        }
     }
 
     #[test]
     fn a_matching_report_passes_every_row() {
         let doctor = json!({"capabilities":[
-            {"name":"bwrap_present","status":"available"},
-            {"name":"cgroup_delegated_leaf","status":"unavailable"}]});
+            row("bwrap_present", "available"),
+            row("cgroup_delegated_leaf", "unavailable")]});
         let rows = compare(&manifest(), &doctor);
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(Row::ok), "{rows:?}");
@@ -209,8 +206,8 @@ mod tests {
     #[test]
     fn a_skipped_probe_never_satisfies_a_required_capability() {
         let doctor = json!({"capabilities":[
-            {"name":"bwrap_present","status":"skipped","reason_code":"no_time"},
-            {"name":"cgroup_delegated_leaf","status":"unavailable"}]});
+            row("bwrap_present", "skipped"),
+            row("cgroup_delegated_leaf", "unavailable")]});
         let rows = compare(&manifest(), &doctor);
         let row = rows.iter().find(|r| r.name == "bwrap_present").unwrap();
         assert!(!row.ok());
@@ -219,7 +216,7 @@ mod tests {
 
     #[test]
     fn a_missing_capability_fails_rather_than_being_ignored() {
-        let doctor = json!({"capabilities":[{"name":"bwrap_present","status":"available"}]});
+        let doctor = json!({"capabilities":[row("bwrap_present", "available")]});
         let rows = compare(&manifest(), &doctor);
         let row = rows
             .iter()
@@ -251,9 +248,9 @@ mod tests {
     #[test]
     fn unlisted_capabilities_are_surfaced_but_not_failures() {
         let doctor = json!({"capabilities":[
-            {"name":"bwrap_present","status":"available"},
-            {"name":"cgroup_delegated_leaf","status":"unavailable"},
-            {"name":"landlock","status":"available"}]});
+            row("bwrap_present", "available"),
+            row("cgroup_delegated_leaf", "unavailable"),
+            row("landlock", "available")]});
         assert_eq!(unlisted(&manifest(), &doctor), vec!["landlock".to_string()]);
     }
 
@@ -276,9 +273,8 @@ mod tests {
 
     #[test]
     fn a_manifest_with_an_unknown_status_is_refused() {
-        let dir = std::env::temp_dir().join(format!("xtask-manifest-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("bad.toml");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
         std::fs::write(&path, "[expected]\nx = \"probably\"\n").unwrap();
         let err = Manifest::load(&path).unwrap_err();
         assert!(err.contains("not one of"), "{err}");
@@ -286,6 +282,5 @@ mod tests {
         std::fs::write(&path, "[expected]\n").unwrap();
         let err = Manifest::load(&path).unwrap_err();
         assert!(err.contains("empty [expected] table"), "{err}");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

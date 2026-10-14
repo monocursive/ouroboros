@@ -12,12 +12,12 @@ use serde_json::Value;
 
 use super::pipes::{GateWriter, LineReader};
 
-/// The gate schema identifier, jail-v1 §8.2.
-pub const GATE_SCHEMA: &str = "ouro.jail.gate/1";
-/// The control schema identifier, jail-v1 §8.2.
-pub const CONTROL_SCHEMA: &str = "ouro.jail.control/1";
 /// Maximum frame size including the single trailing LF, jail-v1 §8.2.
-pub const GATE_MAX_BYTES: usize = 1024;
+pub use ouro_records::records::GATE_FRAME_MAX as GATE_MAX_BYTES;
+/// The control schema identifier, jail-v1 §8.2.
+pub use ouro_records::records::SCHEMA_CONTROL as CONTROL_SCHEMA;
+/// The gate schema identifier, jail-v1 §8.2.
+pub use ouro_records::records::SCHEMA_GATE as GATE_SCHEMA;
 
 /// What the owner authorised.
 ///
@@ -212,6 +212,42 @@ impl Proposal {
             }
         }
         p
+    }
+}
+
+/// Compare the proposal a `prepared` message and its receipt make with the
+/// plan the owner authorised. `Ok` authorises release.
+///
+/// The `Err` carries the proposal and every mismatch. A plan that binds no
+/// identity is refused before any comparison: it would match every
+/// proposal. [`Proposal`]'s requirements set pushes the tuple past
+/// `clippy::result_large_err`'s threshold; the Err is built once per
+/// refusal, so the size is allowed rather than boxed, which would change
+/// every caller's pattern.
+#[allow(clippy::result_large_err)]
+pub fn authorise(
+    control: &Value,
+    receipt: Option<&Value>,
+    plan: &ExpectedPlan,
+) -> Result<Proposal, (Proposal, Vec<String>)> {
+    let proposal = Proposal::read(control, receipt);
+    if plan.binds_nothing() {
+        // A plan with no identity binding matches every proposal, so
+        // releasing on it proves nothing while looking like a plan check.
+        return Err((
+            proposal,
+            vec![
+                "the plan binds no attempt_id, policy_digest or argv_digest, \
+                 so it would authorise any attempt: use ExpectedPlan::bound(..)"
+                    .to_string(),
+            ],
+        ));
+    }
+    let problems = mismatches(plan, &proposal);
+    if problems.is_empty() {
+        Ok(proposal)
+    } else {
+        Err((proposal, problems))
     }
 }
 
@@ -445,14 +481,7 @@ impl<'a> GateOwner<'a> {
         }
     }
 
-    /// Compare the proposal with the plan. `Ok(())` authorises release.
-    ///
-    /// The `Err` carries the proposal and every mismatch. J5-B1 gave
-    /// [`Proposal`] a requirements set, which pushes the tuple past
-    /// `clippy::result_large_err`'s threshold; it is a test helper whose Err
-    /// is built once per refusal, so the size is allowed rather than boxed
-    /// (boxing would change every caller's pattern, including files this
-    /// slice does not own).
+    /// Compare the proposal with the plan: [`authorise`].
     #[allow(clippy::result_large_err)]
     pub fn authorise(
         &self,
@@ -460,25 +489,7 @@ impl<'a> GateOwner<'a> {
         receipt: Option<&Value>,
         plan: &ExpectedPlan,
     ) -> Result<Proposal, (Proposal, Vec<String>)> {
-        let proposal = Proposal::read(control, receipt);
-        if plan.binds_nothing() {
-            // A plan with no identity binding matches every proposal, so
-            // releasing on it proves nothing while looking like a plan check.
-            return Err((
-                proposal,
-                vec![
-                    "the plan binds no attempt_id, policy_digest or argv_digest, \
-                     so it would authorise any attempt: use ExpectedPlan::bound(..)"
-                        .to_string(),
-                ],
-            ));
-        }
-        let problems = mismatches(plan, &proposal);
-        if problems.is_empty() {
-            Ok(proposal)
-        } else {
-            Err((proposal, problems))
-        }
+        authorise(control, receipt, plan)
     }
 
     /// Write the chosen release variant and close the gate.
@@ -780,23 +791,19 @@ mod tests {
             "mismatches alone would authorise an unnamed attempt"
         );
 
+        // `authorise` itself, the function the owner calls.
         let control = serde_json::json!({"attempt_id": ID, "kind": "prepared"});
-        let refusal = refuse_unbound(&empty, &control);
+        let (_, refusal) = authorise(&control, None, &empty).unwrap_err();
         assert!(
             refusal.iter().any(|p| p.contains("binds no attempt_id")),
             "{refusal:?}"
         );
-        assert!(refuse_unbound(&partial, &control).is_empty());
-        assert!(refuse_unbound(&complete, &control).is_empty());
-    }
-
-    /// The refusal `authorise` applies, without a live channel.
-    fn refuse_unbound(plan: &ExpectedPlan, control: &Value) -> Vec<String> {
-        let _ = control;
-        if plan.binds_nothing() {
-            vec!["the plan binds no attempt_id, policy_digest or argv_digest".to_string()]
-        } else {
-            Vec::new()
-        }
+        // A bound plan is compared, not refused for binding nothing.
+        let not_refused_as_unbound = |plan: &ExpectedPlan| match authorise(&control, None, plan) {
+            Ok(_) => true,
+            Err((_, why)) => why.iter().all(|p| !p.contains("binds no")),
+        };
+        assert!(not_refused_as_unbound(&partial));
+        assert!(not_refused_as_unbound(&complete));
     }
 }

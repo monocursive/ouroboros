@@ -13,8 +13,8 @@ use std::process::{Child, Command, Output, Stdio};
 
 use serde_json::Value;
 
-pub const EXIT_EXPECTATION_FAILED: i32 = 3;
-pub const EXIT_USAGE: i32 = 2;
+pub const EXIT_EXPECTATION_FAILED: i32 = ouro_fixture::EXIT_EXPECTATION_FAILED as i32;
+pub const EXIT_USAGE: i32 = ouro_fixture::EXIT_USAGE as i32;
 
 pub const PROXY_VARS: [&str; 4] = ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"];
 

@@ -76,6 +76,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends minisign
       - name: Require a recorded tested freeze
         run: cargo run -q -p xtask -- freeze --check
+      - name: Require the recorded release evidence (K11, K27)
+        env:
+          OURO_RELEASE_EVIDENCE: '1'
+        run: cargo test --locked -p ouro-jail --test portable_release_evidence
       - name: Build the native Jail executable
         run: cargo build --locked --release -p ouro-jail
       - name: Exercise native signed installation

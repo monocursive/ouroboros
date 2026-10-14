@@ -3789,5 +3789,56 @@
         "delete": true
       }
     ]
+  },
+  {
+    "name": "an applied proxy names its TLS-only hosts",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-agent-proxy-only.json",
+    "valid": true,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "network",
+          "tls_only"
+        ],
+        "value": [
+          "api.example.com:443"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "a refusal before boundary applies nothing TLS-only",
+    "schema": "jail-receipt",
+    "base": "examples/receipt-macos-refused.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "applied",
+          "network",
+          "tls_only"
+        ],
+        "value": [
+          "example.test:443"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "an empty TLS-only set is omitted, not written",
+    "schema": "policy-snapshot",
+    "base": "fixtures/policy-snapshot.json",
+    "valid": false,
+    "changes": [
+      {
+        "path": [
+          "network",
+          "tls_only"
+        ],
+        "value": []
+      }
+    ]
   }
 ]

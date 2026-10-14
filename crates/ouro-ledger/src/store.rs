@@ -6,7 +6,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     os::{
         fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::{Path, PathBuf},
     sync::OnceLock,
@@ -22,11 +22,13 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::protocol::{
-    AppendReceipt, Chain, LedgerError, MAX_FRAME_BYTES, Peer, ReadPage, ReadRequest, Result,
-    RunRecord, VerifyReport,
+    AppendReceipt, Chain, LedgerError, MAX_FRAME_BYTES, MAX_VERIFY_LIMIT, Peer, ReadPage,
+    ReadRequest, Result, RunRecord, StoreStatus, VerifyPage, VerifyReport,
 };
 
+use crate::discovery::valid_name;
 use crate::manifest::{self, STREAM};
+use crate::schemas;
 
 mod bundle_replay;
 mod capture_pruning;
@@ -44,6 +46,8 @@ mod tail;
 mod transcript;
 
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+/// Canonical history one verify page re-reads before it yields the writer.
+const VERIFY_PAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -60,6 +64,60 @@ struct Anchor {
     labels_digest: String,
 }
 
+/// How a stream stopped being trustworthy, decided where the failure is
+/// detected rather than recovered later from its message text. Variants are
+/// ordered by severity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PoisonKind {
+    /// This writer's own interruption or uncertain persistence: the validated
+    /// prefix stands, and what follows it is missing or unacknowledged.
+    Incomplete,
+    /// Bytes or store metadata contradict anything this writer could have
+    /// produced: an integrity violation.
+    Corrupt,
+    /// The durable segment manifest does not corroborate the canonical bytes,
+    /// so even the validated prefix has no durable anchor.
+    Unanchored,
+}
+
+impl PoisonKind {
+    pub(crate) fn stream_status(self) -> &'static str {
+        match self {
+            Self::Incomplete => "incomplete",
+            Self::Corrupt | Self::Unanchored => "corrupt",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Poison {
+    pub(crate) kind: PoisonKind,
+    pub(crate) detail: String,
+}
+
+impl Poison {
+    fn new(kind: PoisonKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// The most severe finding decides: an integrity violation is never reported
+/// as a merely incomplete stream.
+pub(crate) fn poison_status(poisoned: &[Poison]) -> Option<&'static str> {
+    poisoned
+        .iter()
+        .map(|p| p.kind)
+        .max()
+        .map(PoisonKind::stream_status)
+}
+
+fn poison_details(poisoned: &[Poison]) -> Vec<String> {
+    poisoned.iter().map(|p| p.detail.clone()).collect()
+}
+
 #[cfg_attr(test, derive(Clone))]
 struct Stream {
     run: RunRecord,
@@ -70,7 +128,7 @@ struct Stream {
     last_source: Option<Value>,
     first_loss: Option<Value>,
     receipt_phase: Option<String>,
-    poisoned: Vec<String>,
+    poisoned: Vec<Poison>,
     segments: Vec<manifest::Segment>,
     active_segment: usize,
     segment_bytes: u64,
@@ -85,7 +143,7 @@ struct Stream {
 pub struct Store {
     pub(crate) retention: ouro_records::retention::LedgerRetention,
     root: PathBuf,
-    _lock: File,
+    lock: File,
     streams: BTreeMap<String, Stream>,
     preparations: BTreeMap<String, (String, String)>,
     recovery_ambiguous: bool,
@@ -93,7 +151,12 @@ pub struct Store {
     index: Option<crate::projection::Projection>,
     index_error: Option<String>,
     index_pending: BTreeMap<String, RunRecord>,
+    /// Pending journals whose background reconciliation failed, as last seen.
+    /// They are retried only once the journal changes.
+    #[cfg(target_os = "linux")]
+    pending_failures: BTreeMap<String, Option<pending_recovery::JournalSeen>>,
     segment_limit: u64,
+    verify_page_bytes: u64,
     #[cfg(test)]
     fault: Option<Fault>,
 }
@@ -127,14 +190,16 @@ pub fn private_directory(path: &Path) -> Result<()> {
         if !parent.exists() {
             private_directory(parent)?;
         }
-        fs::create_dir(path)?;
+        // Created owner-only, so it is never wider than 0700 under any umask;
+        // the explicit mode then also corrects a narrower umask.
+        fs::DirBuilder::new().mode(0o700).create(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
         File::open(parent)?.sync_all()?;
     }
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != crate::os::euid()
         || metadata.mode() & 0o077 != 0
     {
         return Err(LedgerError(format!(
@@ -157,7 +222,7 @@ fn private_file(path: &Path, create: bool, append: bool) -> Result<File> {
     let file = options.open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.uid() != crate::os::euid()
         || metadata.mode() & 0o077 != 0
         || metadata.nlink() != 1
     {
@@ -169,11 +234,36 @@ fn private_file(path: &Path, create: bool, append: bool) -> Result<File> {
     Ok(file)
 }
 
-fn valid_id(id: &str) -> bool {
-    (1..=128).contains(&id.len())
-        && id
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"_-.:".contains(&c))
+/// The exact projection bytes: canonical JSON and one LF, never published
+/// unless it satisfies the frozen run schema.
+fn projection_bytes(run: &RunRecord) -> Result<Vec<u8>> {
+    let value = serde_json::to_value(run)?;
+    validate_frozen("run", &value)?;
+    let mut bytes = canonical(&value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Whether `path` is a private file holding exactly `expected`, synchronized
+/// now. Any doubt answers false, so the caller republishes it.
+fn synced_unchanged(path: &Path, expected: &[u8]) -> bool {
+    use std::io::Read as _;
+    let Ok(file) = private_file(path, false, false) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    (&file)
+        .take(expected.len() as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_ok()
+        && bytes == expected
+        && file.sync_all().is_ok()
+}
+
+fn loaded<'a>(streams: &'a mut BTreeMap<String, Stream>, run_id: &str) -> &'a mut Stream {
+    streams
+        .get_mut(run_id)
+        .expect("a looked-up run id names a loaded stream")
 }
 
 fn check_run_id(id: &str) -> Result<()> {
@@ -288,113 +378,17 @@ pub(crate) fn validate_source(event: &Value, attempt_id: &str) -> Result<records
     Ok(typed)
 }
 
-fn is_digest(value: &Value) -> bool {
-    value.as_str().is_some_and(|value| {
-        value.len() == 71
-            && value.starts_with("sha256:")
-            && value[7..]
-                .bytes()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-    })
-}
-
+/// The frozen request schema states the whole plan, and the run projection
+/// embeds it by reference: any hand-written copy that drifted from it could
+/// acknowledge a preparation whose projection then refuses at every start.
 pub(crate) fn validate_payload(payload: &Value) -> Result<()> {
-    let keys = [
-        "schema",
-        "argv_digest",
-        "policy_digest",
-        "requirements",
-        "profile",
-        "jail_image_digest",
-        "io",
-        "capture",
-        "evidence",
-    ];
-    let Some(object) = payload.as_object() else {
-        return Err(LedgerError("prepare payload must be an object".into()));
-    };
-    let optional = ["owner_lifetime", "launch", "tags", "redact"];
-    crate::redaction::validate_policy(payload)?;
-    let detached = object.contains_key("owner_lifetime");
-    if keys.iter().any(|key| !object.contains_key(*key))
-        || object
-            .keys()
-            .any(|key| !keys.contains(&key.as_str()) && !optional.contains(&key.as_str()))
-        || detached
-            && (payload["owner_lifetime"] != "systemd_user_service"
-                || payload["io"]["mode"] != "batch")
-        || payload["schema"] != "ouro.ledger.request/1"
-        || !is_digest(&payload["argv_digest"])
-        || !is_digest(&payload["policy_digest"])
-        || !is_digest(&payload["jail_image_digest"])
-        || !payload["profile"].as_str().is_some_and(valid_id)
-        || !["strict", "best-effort"].contains(&payload["evidence"].as_str().unwrap_or(""))
-    {
+    validate_frozen("request", payload).map_err(|_| {
+        LedgerError("prepare only accepts the versioned digest-only request plan".into())
+    })?;
+    // JSON Schema's integer also admits 1.0; the limit is a byte count.
+    if !payload["capture"]["limit_bytes"].is_u64() {
         return Err(LedgerError(
-            "prepare only accepts the versioned digest-only request plan".into(),
-        ));
-    }
-    if payload
-        .get("launch")
-        .is_some_and(|v| !v.as_str().is_some_and(valid_id))
-    {
-        return Err(LedgerError("launch must be a bounded profile name".into()));
-    }
-    if let Some(tags) = payload.get("tags") {
-        let tags: Vec<String> = serde_json::from_value(tags.clone())?;
-        crate::discovery::validate_tags(&tags)?;
-    }
-    let requirements = payload["requirements"]
-        .as_array()
-        .ok_or_else(|| LedgerError("requirements must be an array".into()))?;
-    if requirements.len() > 64
-        || requirements
-            .iter()
-            .any(|value| !value.as_str().is_some_and(valid_id))
-    {
-        return Err(LedgerError(
-            "requirements are bounded named capabilities".into(),
-        ));
-    }
-    let mut unique = std::collections::BTreeSet::new();
-    if requirements
-        .iter()
-        .any(|value| !unique.insert(value.as_str().unwrap_or("")))
-    {
-        return Err(LedgerError("duplicate requirement".into()));
-    }
-    let io = payload["io"]
-        .as_object()
-        .ok_or_else(|| LedgerError("io must be an object".into()))?;
-    if io.len() != 2 + usize::from(io.contains_key("control"))
-        || io
-            .get("control")
-            .is_some_and(|role| role != "separate_fd" || detached)
-        || !["foreground", "batch"].contains(&payload["io"]["mode"].as_str().unwrap_or(""))
-        || payload["io"]["pty"] != false
-    {
-        return Err(LedgerError("unsupported io plan".into()));
-    }
-    let capture = payload["capture"]
-        .as_object()
-        .ok_or_else(|| LedgerError("capture must be an object".into()))?;
-    let streams = payload["capture"]["streams"]
-        .as_array()
-        .ok_or_else(|| LedgerError("capture streams must be an array".into()))?;
-    let mut unique = std::collections::BTreeSet::new();
-    if capture.len() != 2
-        || payload["capture"]["limit_bytes"]
-            .as_u64()
-            .is_none_or(|limit| limit > 16 * 1_048_576)
-        || streams.len() > 3
-        || streams.iter().any(|stream| {
-            ![Some("stdout"), Some("stderr"), Some("argv")].contains(&stream.as_str())
-                || !unique.insert(stream.as_str().unwrap_or(""))
-        })
-    {
-        return Err(LedgerError(
-            "capture only accepts unique stdout/stderr/argv selections and at most 16 MiB per stream"
-                .into(),
+            "capture limit must be a whole number of bytes".into(),
         ));
     }
     Ok(())
@@ -402,7 +396,7 @@ pub(crate) fn validate_payload(payload: &Value) -> Result<()> {
 
 fn initial_run(run_id: &str, request_id: &str, attempt_id: &str, payload: Value) -> RunRecord {
     RunRecord {
-        schema: "ouro.ledger.run/1".into(),
+        schema: schemas::RUN.into(),
         run_id: run_id.into(),
         request_id: request_id.into(),
         attempt_id: attempt_id.into(),
@@ -425,6 +419,18 @@ fn initial_run(run_id: &str, request_id: &str, attempt_id: &str, payload: Value)
     }
 }
 
+impl Drop for Store {
+    /// A child forked elsewhere in this process holds every inherited
+    /// descriptor until it execs; unlocking the shared open file releases
+    /// the writer lock for it too, so a successor never sees a phantom writer.
+    fn drop(&mut self) {
+        // SAFETY: flock takes the still-open descriptor and flags by value.
+        unsafe {
+            libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 impl Store {
     pub fn open(data: &Path) -> Result<Self> {
         Self::open_with_recovery_sync(data, File::sync_all)
@@ -438,15 +444,22 @@ impl Store {
         let root = data.join("ledger");
         private_directory(&root)?;
         let lock = private_file(&root.join("writer.lock"), true, false)?;
+        // SAFETY: flock takes the open descriptor and flags by value.
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(LedgerError(
-                "another ledger writer holds the process-lifetime lock".into(),
-            ));
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Err(LedgerError(
+                    "another ledger writer holds the process-lifetime lock".into(),
+                ));
+            }
+            return Err(LedgerError(format!(
+                "cannot take the ledger writer lock: {error}"
+            )));
         }
         let mut store = Self {
             retention: Default::default(),
             root,
-            _lock: lock,
+            lock,
             streams: BTreeMap::new(),
             preparations: BTreeMap::new(),
             recovery_ambiguous: false,
@@ -454,7 +467,10 @@ impl Store {
             index: None,
             index_error: None,
             index_pending: BTreeMap::new(),
+            #[cfg(target_os = "linux")]
+            pending_failures: BTreeMap::new(),
             segment_limit: SEGMENT_BYTES,
+            verify_page_bytes: VERIFY_PAGE_BYTES,
             #[cfg(test)]
             fault: None,
         };
@@ -496,9 +512,28 @@ impl Store {
             if stream.poisoned.is_empty() {
                 // Every verified segment was synchronized before publishing
                 // recovered receipts, including a complete unacknowledged tail.
-                store.write_projection(&stream.run)?;
+                // Unchanged files are only synchronized again: an earlier
+                // writer may have crashed between their rename and its
+                // directory sync, but rewriting them would cost every run
+                // several writes and syncs at every start.
+                let directory = store.root.join(&name);
+                let mut published = false;
+                if !synced_unchanged(&directory.join("run.json"), &projection_bytes(&stream.run)?) {
+                    store.write_projection(&stream.run)?;
+                    published = true;
+                }
                 if stream.pruned.is_none() {
-                    crate::manifest::write(&store.root.join(&name), &stream.manifest())?;
+                    let manifest = stream.manifest();
+                    if !synced_unchanged(
+                        &directory.join(manifest::NAME),
+                        &manifest::encode(&manifest)?,
+                    ) {
+                        manifest::write(&directory, &manifest)?;
+                        published = true;
+                    }
+                }
+                if !published {
+                    File::open(&directory)?.sync_all()?;
                 }
             }
             store.streams.insert(name, stream);
@@ -518,7 +553,7 @@ impl Store {
     }
 
     pub fn prepare(&mut self, request_id: &str, payload: &Value, peer: &Peer) -> Result<RunRecord> {
-        if !valid_id(request_id) {
+        if !valid_name(request_id) {
             return Err(LedgerError("prepare needs a bounded request id".into()));
         }
         validate_payload(payload)?;
@@ -551,24 +586,8 @@ impl Store {
         self.streams.insert(
             run_id.clone(),
             Stream {
-                run: run.clone(),
-                accepted_bytes: 0,
-                replay: BTreeMap::new(),
-                source_heads: BTreeMap::new(),
-                source_gaps: vec![],
-                last_source: None,
-                first_loss: None,
-                receipt_phase: None,
-                poisoned: vec![],
-                segments: vec![],
-                active_segment: 1,
-                segment_bytes: 0,
-                segment_hash: Sha256::new(),
-                replay_hash: Sha256::new(),
-                anchors: BTreeMap::new(),
-                last_activity_at: None,
-                retention_time_valid: true,
-                pruned: None,
+                run,
+                ..Stream::empty(&run_id)
             },
         );
         self.preparations
@@ -619,34 +638,17 @@ impl Store {
         peer: &Peer,
         token_id: &str,
     ) -> Result<AppendReceipt> {
-        if !valid_id(request_id)
-            || effect_id.is_some_and(|id| !valid_id(id))
+        if !valid_name(request_id)
+            || effect_id.is_some_and(|id| !valid_name(id))
             || !body.is_object()
             || !["admitted", "denied", "settled", "note", "outcome_unknown"].contains(&kind)
         {
             return Err(LedgerError("invalid owner intent".into()));
         }
-        for key in [
-            "actor",
-            "provenance",
-            "run_id",
-            "seq",
-            "prev",
-            "received_at",
-        ] {
-            if body.get(key).is_some() {
-                return Err(LedgerError(format!(
-                    "body cannot supply reserved identity {key}"
-                )));
-            }
-        }
         if self.stream(run_id)?.run.owner.as_ref() != Some(peer) {
             return Err(LedgerError(
                 "owner identity does not match the durable claim".into(),
             ));
-        }
-        if self.stream(run_id)?.pruned.is_none() {
-            validate_intent(self.stream(run_id)?, &json!({"kind":kind,"body":body}))?;
         }
         self.append(
             run_id,
@@ -733,6 +735,18 @@ impl Store {
         Ok(receipt)
     }
 
+    /// The loaded stream of a run id this writer has already looked up.
+    fn stream_mut(&mut self, run_id: &str) -> &mut Stream {
+        loaded(&mut self.streams, run_id)
+    }
+
+    /// Record why a loaded stream can no longer be trusted.
+    fn poison(&mut self, run_id: &str, kind: PoisonKind, detail: impl Into<String>) {
+        self.stream_mut(run_id)
+            .poisoned
+            .push(Poison::new(kind, detail));
+    }
+
     fn stream(&self, run_id: &str) -> Result<&Stream> {
         check_run_id(run_id)?;
         self.streams
@@ -788,15 +802,18 @@ impl Store {
                 "capture pruning is incomplete; retry GC or restart before mutations".into(),
             ));
         }
+        // Exactly the checks recovery repeats: anything acknowledged here must
+        // also be accepted from the canonical stream at the next start.
         validate_recovery(stream, &record, role)?;
         validate_transition(stream, &record)?;
+        validate_intent(stream, &record)?;
         let seq = stream
             .run
             .chain
             .head_seq
             .checked_add(1)
             .ok_or_else(|| LedgerError("sequence exhausted".into()))?;
-        record["schema"] = json!("ouro.ledger.event/1");
+        record["schema"] = json!(schemas::RECORD);
         record["run_id"] = json!(run_id);
         record["attempt_id"] = json!(stream.run.attempt_id);
         record["seq"] = json!(seq);
@@ -826,11 +843,11 @@ impl Store {
         };
         let result = self.persist(run_id, &bytes, &record, &receipt, &payload_digest);
         if let Err(error) = result {
-            self.streams
-                .get_mut(run_id)
-                .expect("known stream")
-                .poisoned
-                .push(format!("uncertain persistence: {error}"));
+            self.poison(
+                run_id,
+                PoisonKind::Incomplete,
+                format!("uncertain persistence: {error}"),
+            );
             return Err(error);
         }
         Ok(receipt)
@@ -847,7 +864,7 @@ impl Store {
         #[cfg(test)]
         let _fault_scope = crate::faults::scope(record["kind"].as_str().unwrap_or(""));
         let directory = self.root.join(run_id);
-        let stream = self.streams.get_mut(run_id).expect("known stream");
+        let stream = loaded(&mut self.streams, run_id);
         let rotate = stream.segment_bytes > 0
             && stream.segment_bytes.saturating_add(bytes.len() as u64 + 1) > self.segment_limit;
         let mut file = if rotate {
@@ -919,7 +936,7 @@ impl Store {
         file.sync_all()?;
         #[cfg(test)]
         crate::faults::hit("event.after_sync")?;
-        let stream = self.streams.get_mut(run_id).expect("known stream");
+        let stream = loaded(&mut self.streams, run_id);
         apply_record(
             stream,
             &original_payload(record),
@@ -956,7 +973,7 @@ impl Store {
     }
 
     fn write_projection(&self, run: &RunRecord) -> Result<()> {
-        validate_frozen("run", &serde_json::to_value(run)?)?;
+        let bytes = projection_bytes(run)?;
         let dir = self.root.join(&run.run_id);
         let temp = dir.join(format!(".run-{}.tmp", Uuid::new_v4().simple()));
         let mut file = OpenOptions::new()
@@ -965,16 +982,23 @@ impl Store {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&temp)?;
-        #[cfg(test)]
-        crate::faults::hit("projection.before_write")?;
-        file.write_all(&canonical(&serde_json::to_value(run)?)?)?;
-        file.write_all(b"\n")?;
-        #[cfg(test)]
-        crate::faults::hit("projection.before_sync")?;
-        file.sync_all()?;
-        #[cfg(test)]
-        crate::faults::hit("projection.before_rename")?;
-        fs::rename(temp, dir.join("run.json"))?;
+        let result = (|| -> Result<()> {
+            #[cfg(test)]
+            crate::faults::hit("projection.before_write")?;
+            file.write_all(&bytes)?;
+            #[cfg(test)]
+            crate::faults::hit("projection.before_sync")?;
+            file.sync_all()?;
+            #[cfg(test)]
+            crate::faults::hit("projection.before_rename")?;
+            fs::rename(&temp, dir.join("run.json"))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            // An unpublished temporary projection has no authority; never leak it.
+            let _ = fs::remove_file(&temp);
+        }
+        result?;
         #[cfg(test)]
         crate::faults::hit("projection.before_directory_sync")?;
         File::open(dir)?.sync_all()?;
@@ -990,7 +1014,7 @@ impl Store {
             run.outcome = Some(
                 json!({"kind":"unknown","unknown":true,"unknown_reason":"stream persistence or recovery is ambiguous"}),
             );
-            run.coverage = json!({"status":"degraded","gaps":stream.poisoned});
+            run.coverage = json!({"status":"degraded","gaps":poison_details(&stream.poisoned)});
         }
         Ok(run)
     }
@@ -1056,7 +1080,7 @@ impl Store {
                     !stream
                         .poisoned
                         .iter()
-                        .any(|problem| problem.contains("manifest"))
+                        .any(|problem| problem.kind == PoisonKind::Unanchored)
                         && stream.anchors.get(&seq).is_some_and(|anchor| {
                             anchor.bytes == bytes
                                 && anchor.digest == digest
@@ -1101,11 +1125,15 @@ impl Store {
         let mut reconciled = Vec::new();
         for id in orphans {
             if self.pending_exists(&id) {
-                // Corrupt or incomplete local evidence must never imply settlement.
-                let _ = self.reconcile_pending(&id, peer, &alive);
-                if self.stream(&id)?.run.state != "admitted"
-                    && self.stream(&id)?.run.state != "prepared"
-                {
+                // Corrupt or incomplete local evidence must never imply
+                // settlement; its refusal is recorded with the unknown outcome.
+                let result = self.reconcile_pending(&id, peer, &alive);
+                if !["prepared", "admitted"].contains(&self.stream(&id)?.run.state.as_str()) {
+                    reconciled.push(self.show(&id)?);
+                    continue;
+                }
+                if let Err(problem) = result {
+                    self.record_invalid_pending(&id, peer, &problem)?;
                     reconciled.push(self.show(&id)?);
                     continue;
                 }
@@ -1117,75 +1145,141 @@ impl Store {
         Ok(reconciled)
     }
 
-    pub fn verify(&self, run_id: Option<&str>) -> Result<Vec<VerifyReport>> {
-        let ids: Vec<_> = match run_id {
-            Some(id) => {
-                self.stream(id)?;
-                vec![id.to_owned()]
-            }
-            None => self.streams.keys().cloned().collect(),
+    /// The accepted in-memory state only: nothing is re-read from disk, so a
+    /// readiness probe never competes with live owners for the writer thread.
+    pub fn status(&self) -> StoreStatus {
+        let mut status = StoreStatus {
+            scope: "writer_accepted_state".into(),
+            runs: self.streams.len() as u32,
+            ambiguous_runs: 0,
+            incomplete_deletions: 0,
+            preparation_blocked: self.recovery_ambiguous,
         };
-        ids.iter()
-            .map(|id| {
-                if self.stream(id)?.pruned.is_some() {
-                    return self.verify_pruned(id);
-                }
-                let (stream, events) = self.load_stream_with_sync(id, &|_| Ok(()))?;
-                let mut problems = stream.poisoned.clone();
-                if stream
-                    .run
-                    .capture_history
-                    .as_ref()
-                    .is_some_and(|h| h.state == "pruning")
-                {
-                    problems.push(
-                        "capture deletion is incomplete; retry GC or restart the writer".into(),
-                    );
-                }
-                if stream.poisoned.is_empty() {
-                    let projection = (|| -> Result<Value> {
-                        use std::io::Read as _;
-                        let file =
-                            private_file(&self.root.join(id).join("run.json"), false, false)?;
-                        let mut bytes = Vec::new();
-                        file.take((4 * MAX_FRAME_BYTES + 1) as u64)
-                            .read_to_end(&mut bytes)?;
-                        if bytes.len() > 4 * MAX_FRAME_BYTES {
-                            return Err(LedgerError(
-                                "run projection exceeds its bounded read limit".into(),
-                            ));
-                        }
-                        let value: Value = serde_json::from_slice(&bytes)?;
-                        validate_frozen("run", &value)?;
-                        Ok(value)
-                    })();
-                    if projection.is_err()
-                        || projection.as_ref().is_ok_and(|value| {
-                            serde_json::to_value(&stream.run)
-                                .is_ok_and(|expected| expected != *value)
-                        })
-                    {
-                        problems.push(
-                            "run projection does not match verified canonical records".into(),
-                        );
-                    }
-                }
-                if let Some(active) = self.streams.get(id) {
-                    problems.extend(active.poisoned.clone());
-                }
-                problems.sort();
-                problems.dedup();
-                Ok(VerifyReport {
-                    run_id: id.clone(),
-                    local_consistency: problems.is_empty(),
-                    child_protection: stream.run.child_protection,
-                    coverage: stream.run.coverage,
-                    events,
-                    problems,
-                    history: None,
+        for stream in self.streams.values() {
+            status.ambiguous_runs += u32::from(!stream.poisoned.is_empty());
+            status.incomplete_deletions += u32::from(
+                [&stream.run.history, &stream.run.capture_history]
+                    .into_iter()
+                    .flatten()
+                    .any(|history| history.state == "pruning"),
+            );
+        }
+        status
+    }
+
+    /// Freshly re-read and re-hash one run, or a bounded page of runs after
+    /// `after`. A page stops at `limit` runs or before it would re-read more
+    /// than VERIFY_PAGE_BYTES of canonical history (it always verifies at
+    /// least one run), so no request holds the single writer thread for a
+    /// whole store.
+    pub fn verify_page(
+        &self,
+        run_id: Option<&str>,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<VerifyPage> {
+        if let Some(id) = run_id {
+            return Ok(VerifyPage {
+                reports: vec![self.verify_run(id)?],
+                next_after: None,
+                done: true,
+            });
+        }
+        if !(1..=MAX_VERIFY_LIMIT).contains(&limit) {
+            return Err(LedgerError(format!(
+                "verify limit must be between 1 and {MAX_VERIFY_LIMIT}"
+            )));
+        }
+        if let Some(id) = after {
+            check_run_id(id)?;
+        }
+        let lower = after.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        let mut reports: Vec<VerifyReport> = Vec::new();
+        let mut bytes = 0u64;
+        let mut next_after = None;
+        for (id, stream) in self
+            .streams
+            .range::<str, _>((lower, std::ops::Bound::Unbounded))
+        {
+            let read = bytes.saturating_add(stream.accepted_bytes);
+            if let Some(last) = reports.last()
+                && (reports.len() >= limit as usize || read > self.verify_page_bytes)
+            {
+                next_after = Some(last.run_id.clone());
+                break;
+            }
+            bytes = read;
+            reports.push(self.verify_run(id)?);
+        }
+        Ok(VerifyPage {
+            reports,
+            done: next_after.is_none(),
+            next_after,
+        })
+    }
+
+    /// Every run, page by page, as the CLI assembles it.
+    #[cfg(test)]
+    pub(crate) fn verify(&self, run_id: Option<&str>) -> Result<Vec<VerifyReport>> {
+        let mut reports = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.verify_page(run_id, after.as_deref(), MAX_VERIFY_LIMIT)?;
+            reports.extend(page.reports);
+            if page.done {
+                return Ok(reports);
+            }
+            after = page.next_after;
+        }
+    }
+
+    fn verify_run(&self, id: &str) -> Result<VerifyReport> {
+        if self.stream(id)?.pruned.is_some() {
+            return self.verify_pruned(id);
+        }
+        let (stream, events) = self.load_stream_with_sync(id, &|_| Ok(()))?;
+        let mut problems = poison_details(&stream.poisoned);
+        if stream
+            .run
+            .capture_history
+            .as_ref()
+            .is_some_and(|h| h.state == "pruning")
+        {
+            problems.push("capture deletion is incomplete; retry GC or restart the writer".into());
+        }
+        if stream.poisoned.is_empty() {
+            let projection = (|| -> Result<Value> {
+                let bytes = crate::protocol::read_bounded(
+                    private_file(&self.root.join(id).join("run.json"), false, false)?,
+                    crate::projection::MAX_RUN_BYTES as u64,
+                    "run projection exceeds its bounded read limit",
+                )?;
+                let value: Value = serde_json::from_slice(&bytes)?;
+                validate_frozen("run", &value)?;
+                Ok(value)
+            })();
+            if projection.is_err()
+                || projection.as_ref().is_ok_and(|value| {
+                    serde_json::to_value(&stream.run).is_ok_and(|expected| expected != *value)
                 })
-            })
-            .collect()
+            {
+                problems.push("run projection does not match verified canonical records".into());
+            }
+        }
+        if let Some(active) = self.streams.get(id) {
+            problems.extend(poison_details(&active.poisoned));
+        }
+        problems.sort();
+        problems.dedup();
+        Ok(VerifyReport {
+            run_id: id.into(),
+            local_consistency: problems.is_empty(),
+            child_protection: stream.run.child_protection,
+            coverage: crate::reader::coverage_summary(&stream.run.coverage),
+            events,
+            problems,
+            history: None,
+        })
     }
 
     fn load_stream_with_sync(
@@ -1198,18 +1292,20 @@ impl Store {
         let manifest = match crate::manifest::read(&directory, run_id) {
             Ok(manifest) => manifest,
             Err(error) => {
-                stream
-                    .poisoned
-                    .push(format!("invalid segment manifest: {error}"));
+                stream.poisoned.push(Poison::new(
+                    PoisonKind::Unanchored,
+                    format!("invalid segment manifest: {error}"),
+                ));
                 None
             }
         };
         let names = match manifest::names(&directory) {
             Ok(names) => names,
             Err(error) => {
-                stream
-                    .poisoned
-                    .push(format!("invalid segment layout: {error}"));
+                stream.poisoned.push(Poison::new(
+                    PoisonKind::Corrupt,
+                    format!("invalid segment layout: {error}"),
+                ));
                 return Ok((stream, 0));
             }
         };
@@ -1219,9 +1315,10 @@ impl Store {
             .is_none_or(|m| count < m.segments.len() || count > m.segments.len() + 1)
             && !(manifest.is_none() && count == 1)
         {
-            stream
-                .poisoned
-                .push("segment manifest does not authorize this segment layout".into());
+            stream.poisoned.push(Poison::new(
+                PoisonKind::Unanchored,
+                "segment manifest does not authorize this segment layout",
+            ));
         }
         let mut events = 0;
         for (index, name) in names.iter().enumerate() {
@@ -1231,9 +1328,10 @@ impl Store {
             let file = match private_file(&directory.join(name), false, false) {
                 Ok(file) => file,
                 Err(error) => {
-                    stream
-                        .poisoned
-                        .push(format!("missing or unsafe canonical segment: {error}"));
+                    stream.poisoned.push(Poison::new(
+                        PoisonKind::Corrupt,
+                        format!("missing or unsafe canonical segment: {error}"),
+                    ));
                     break;
                 }
             };
@@ -1242,9 +1340,10 @@ impl Store {
             if index + 1 < count
                 && anchor.is_none_or(|a| file.metadata().is_ok_and(|m| m.len() != a.bytes))
             {
-                stream
-                    .poisoned
-                    .push("sealed segment length differs from its manifest anchor".into());
+                stream.poisoned.push(Poison::new(
+                    PoisonKind::Unanchored,
+                    "sealed segment length differs from its manifest anchor",
+                ));
                 break;
             }
             let mut reader = BufReader::new(file);
@@ -1259,15 +1358,29 @@ impl Store {
                 if length == 0 {
                     break;
                 }
-                if length > MAX_FRAME_BYTES || bytes.last() != Some(&b'\n') {
-                    stream
-                        .poisoned
-                        .push("oversized or interrupted canonical frame; bytes retained".into());
+                // This writer never emits an oversized frame; only a crash
+                // between its write and newline leaves an unterminated tail.
+                if length > MAX_FRAME_BYTES {
+                    stream.poisoned.push(Poison::new(
+                        PoisonKind::Corrupt,
+                        "oversized canonical frame; bytes retained",
+                    ));
+                    break;
+                }
+                if bytes.last() != Some(&b'\n') {
+                    stream.poisoned.push(Poison::new(
+                        PoisonKind::Incomplete,
+                        "interrupted canonical frame; bytes retained",
+                    ));
                     break;
                 }
                 bytes.pop();
+                // Every refusal of a complete frame is an integrity violation:
+                // this writer validates the same rules before it appends.
                 if let Err(error) = stream.accept_canonical(run_id, &bytes) {
-                    stream.poisoned.push(error.to_string());
+                    stream
+                        .poisoned
+                        .push(Poison::new(PoisonKind::Corrupt, error.to_string()));
                     break;
                 }
                 events += 1;
@@ -1281,22 +1394,34 @@ impl Store {
                         || (index + 1 == m.segments.len()
                             && stream.manifest().replay_digest != m.replay_digest)
                     {
-                        stream
-                            .poisoned
-                            .push("segment manifest committed prefix mismatch".into());
+                        stream.poisoned.push(Poison::new(
+                            PoisonKind::Unanchored,
+                            "segment manifest committed prefix mismatch",
+                        ));
                         break;
                     }
                 }
             }
+            // The manifest is written only after its records are synchronized,
+            // so bytes missing below an anchor are lost acknowledged history.
             if !anchored {
-                stream
-                    .poisoned
-                    .push("canonical stream truncated before its segment manifest anchor".into());
+                stream.poisoned.push(Poison::new(
+                    PoisonKind::Unanchored,
+                    "canonical stream truncated before its segment manifest anchor",
+                ));
             }
             // Only one empty unlisted successor of a fully anchored stream can be
-            // an interrupted rotation. Never manufacture a missing committed file.
+            // an interrupted rotation, and only a lone unlisted first segment an
+            // interrupted preparation. Never manufacture a missing committed file.
             if stream.segment_bytes == 0 && (index == 0 || anchor.is_some() || index + 1 != count) {
-                stream.poisoned.push("empty canonical segment".into());
+                let kind = if index == 0 && anchor.is_none() && count == 1 {
+                    PoisonKind::Incomplete
+                } else {
+                    PoisonKind::Corrupt
+                };
+                stream
+                    .poisoned
+                    .push(Poison::new(kind, "empty canonical segment"));
             }
             if !stream.poisoned.is_empty() {
                 break;
@@ -1352,7 +1477,7 @@ impl Stream {
         let expected_schema = if decoded["kind"] == "source" {
             records::SCHEMA_EVENT
         } else {
-            "ouro.ledger.event/1"
+            schemas::RECORD
         };
         if decoded["schema"] != expected_schema
             || decoded["run_id"] != run_id
@@ -1496,7 +1621,7 @@ impl Stream {
     fn manifest(&self) -> crate::manifest::Manifest {
         let hash = |h: &Sha256| -> String { format!("sha256:{:x}", h.clone().finalize()) };
         crate::manifest::Manifest {
-            schema: "ouro.ledger.segments/2".into(),
+            schema: schemas::SEGMENTS.into(),
             run_id: self.run.run_id.clone(),
             attempt_id: self.run.attempt_id.clone(),
             segments: self.segments.clone(),
@@ -1538,26 +1663,39 @@ fn original_payload(record: &Value) -> Value {
     value
 }
 
+/// Identity the writer assigns. No intent body may supply it, so a body can
+/// never be read as the record's own provenance.
+const RESERVED_BODY_KEYS: [&str; 9] = [
+    "actor",
+    "role",
+    "provenance",
+    "run_id",
+    "attempt_id",
+    "seq",
+    "prev",
+    "received_at",
+    "token_id",
+];
+
+fn check_reserved(body: &Value, what: &str) -> Result<()> {
+    match RESERVED_BODY_KEYS
+        .iter()
+        .find(|key| body.get(**key).is_some())
+    {
+        Some(key) => Err(LedgerError(format!(
+            "{what} body cannot supply reserved identity {key}"
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn validate_intent(stream: &Stream, record: &Value) -> Result<()> {
     let kind = record["kind"].as_str().unwrap_or("");
     if !["admitted", "denied", "settled", "note", "outcome_unknown"].contains(&kind) {
         return Ok(());
     }
     let body = &record["body"];
-    for key in [
-        "actor",
-        "provenance",
-        "run_id",
-        "seq",
-        "prev",
-        "received_at",
-    ] {
-        if body.get(key).is_some() {
-            return Err(LedgerError(format!(
-                "intent body cannot supply reserved identity {key}"
-            )));
-        }
-    }
+    check_reserved(body, "intent")?;
     if kind == "note"
         && ["receipt", "coverage", "outcome", "capture"]
             .iter()
@@ -1803,9 +1941,6 @@ fn apply_record(
         "outcome_unknown" => {
             stream.run.state = "outcome_unknown".into();
             stream.run.settlement = "recorded".into();
-            stream.run.outcome = Some(
-                json!({"kind":"unknown","unknown":true,"unknown_reason":"owner reported an unresolved outcome"}),
-            );
         }
         "source" => {
             let source = record["body"]["source"].as_str().unwrap_or("");
@@ -1832,41 +1967,34 @@ fn apply_record(
     }
     // Source outcomes describe individual operations, not the terminal run.
     // Only authenticated owner/reconciliation intents update projections.
-    if matches!(
-        record["kind"].as_str(),
-        Some("admitted" | "denied" | "settled" | "outcome_unknown")
-    ) {
-        if let Some(receipt) = record["body"].get("receipt") {
+    let kind = record["kind"].as_str().unwrap_or("");
+    if matches!(kind, "admitted" | "denied" | "settled" | "outcome_unknown") {
+        let body = &record["body"];
+        if let Some(receipt) = body.get("receipt") {
             stream.run.receipts.push(receipt.clone());
             if let Some(protection) = receipt.get("child_protection").and_then(Value::as_str)
                 && (protection == "enforced" || protection == "unprotected")
             {
                 stream.run.child_protection = protection.into();
             }
-            if matches!(record["kind"].as_str(), Some("denied" | "settled")) {
+            if matches!(kind, "denied" | "settled") {
                 stream.run.outcome = receipt.get("outcome").cloned();
             }
         }
-        for field in ["outcome", "coverage", "capture"] {
-            if let Some(value) = record["body"].get(field) {
-                match field {
-                    "outcome" => stream.run.outcome = Some(value.clone()),
-                    "coverage" => stream.run.coverage = value.clone(),
-                    "capture" => stream.run.capture = value.clone(),
-                    _ => {}
-                }
-            }
+        if kind == "outcome_unknown" {
+            stream.run.outcome = Some(unknown_outcome(body.get("outcome")));
+        } else if let Some(outcome) = body.get("outcome") {
+            stream.run.outcome = Some(outcome.clone());
+        }
+        if let Some(coverage) = body.get("coverage") {
+            stream.run.coverage = coverage.clone();
+        }
+        if let Some(capture) = body.get("capture") {
+            stream.run.capture = capture.clone();
         }
     }
     // none remains unprotected regardless of an owner's requested display label.
-    if stream
-        .run
-        .payload
-        .get("jail_profile")
-        .or_else(|| stream.run.payload.get("profile"))
-        .and_then(Value::as_str)
-        == Some("none")
-    {
+    if stream.run.payload["profile"] == "none" {
         stream.run.child_protection = "unprotected".into();
     }
     if !stream.source_gaps.is_empty() {
@@ -1875,12 +2003,21 @@ fn apply_record(
         }
         stream.run.coverage["ledger"] = json!({"status":"degraded","gaps":stream.source_gaps});
     }
-    if record["kind"] == "outcome_unknown" {
-        stream.run.outcome = Some(
-            json!({"kind":"unknown","unknown":true,"unknown_reason":"owner or reconciliation reported an unresolved run outcome","observed_child_outcome":record["body"].get("outcome")}),
-        );
-    }
     Ok(())
+}
+
+/// The projection of an unresolved run. A child outcome the owner did observe
+/// stays beside the unknown; an owner's or reconciler's own unknown is not a
+/// child outcome, so its reason becomes the run's.
+fn unknown_outcome(reported: Option<&Value>) -> Value {
+    const UNRESOLVED: &str = "owner or reconciliation reported an unresolved run outcome";
+    match reported {
+        Some(child) if child["kind"] != "unknown" => json!({"kind":"unknown","unknown":true,
+            "unknown_reason":UNRESOLVED,"observed_child_outcome":child}),
+        reported => json!({"kind":"unknown","unknown":true,"unknown_reason":reported
+            .and_then(|outcome| outcome["unknown_reason"].as_str())
+            .unwrap_or(UNRESOLVED)}),
+    }
 }
 
 fn validate_recovery(stream: &Stream, record: &Value, role: &str) -> Result<()> {
@@ -1908,9 +2045,23 @@ mod tests {
     use super::*;
     mod redaction;
 
+    /// The call failed with the refusal named by `expected`, not with some
+    /// unrelated error that merely makes it fail.
+    #[track_caller]
+    pub(super) fn assert_refused<T>(result: Result<T>, expected: &str) {
+        match result {
+            Ok(_) => panic!("expected a refusal containing {expected:?}, but the call succeeded"),
+            Err(error) => assert!(
+                error.0.contains(expected),
+                "expected a refusal containing {expected:?}, got {:?}",
+                error.0
+            ),
+        }
+    }
+
     pub(super) fn peer() -> Peer {
         Peer {
-            uid: unsafe { libc::geteuid() },
+            uid: crate::os::euid(),
             pid: std::process::id(),
             birth: "fixture-birth".into(),
             boot_id: "fixture-boot".into(),
@@ -1932,7 +2083,10 @@ mod tests {
         let mut plan = payload();
         plan["owner_lifetime"] = "systemd_user_service".into();
         let run = store.prepare("detached", &plan, &peer()).unwrap();
-        assert!(store.prepare("detached", &payload(), &peer()).is_err());
+        assert_refused(
+            store.prepare("detached", &payload(), &peer()),
+            "request id already maps to a different prepare payload",
+        );
         drop(store);
         let mut store = Store::open(temp.path()).unwrap();
         assert_eq!(
@@ -1940,10 +2094,16 @@ mod tests {
             run.run_id
         );
         plan["io"]["mode"] = "foreground".into();
-        assert!(store.prepare("foreground", &plan, &peer()).is_err());
+        assert_refused(
+            store.prepare("foreground", &plan, &peer()),
+            "prepare only accepts the versioned digest-only request plan",
+        );
         plan["io"]["mode"] = "batch".into();
         plan["owner_lifetime"] = "unchecked_double_fork".into();
-        assert!(store.prepare("unproved", &plan, &peer()).is_err());
+        assert_refused(
+            store.prepare("unproved", &plan, &peer()),
+            "prepare only accepts the versioned digest-only request plan",
+        );
     }
     fn prepared(run: &RunRecord) -> Value {
         let mut receipt: Value = serde_json::from_str(include_str!(
@@ -2014,7 +2174,10 @@ mod tests {
             let mut store = Store::open(&data).unwrap();
             let result = store.reconcile_pending(&run.run_id, &peer(), &|_| true);
             if matches!(fault, Fault::PartialWrite) {
-                assert!(result.is_err());
+                assert_refused(
+                    result,
+                    "ambiguous canonical history refuses pending recovery",
+                );
                 assert!(!store.verify(None).unwrap()[0].local_consistency);
             } else {
                 let recovered = result.unwrap();
@@ -2030,6 +2193,109 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn orphan_settlement_records_why_pending_evidence_was_refused() {
+        use crate::pending::{Journal, STATE};
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let mut plan = payload();
+        plan["evidence"] = "best-effort".into();
+        let run = store.prepare("pending-refused", &plan, &peer()).unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        store
+            .append_owner(
+                &run.run_id,
+                "admission",
+                "admitted",
+                None,
+                &json!({"receipt":prepared(&run)}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        let run = store.show(&run.run_id).unwrap();
+        let directory = store.root.join(&run.run_id);
+        Journal::open(&directory)
+            .unwrap()
+            .create(&run, &peer())
+            .unwrap();
+        fs::write(directory.join(STATE), b"{\"damaged\":true}").unwrap();
+        let settled = store.settle_orphans(&peer(), |_| false).unwrap();
+        assert_eq!(settled[0].state, "outcome_unknown");
+        assert_eq!(
+            settled[0].outcome.as_ref().unwrap()["unknown_reason"],
+            "pending evidence could not be reconciled"
+        );
+        let stream = fs::read(directory.join(STREAM)).unwrap();
+        let last: Value = serde_json::from_slice(
+            stream[..stream.len() - 1]
+                .rsplit(|b| *b == b'\n')
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(last["request_id"], "reconcile:pending-invalid");
+        assert!(
+            last["body"]["problem"]
+                .as_str()
+                .is_some_and(|problem| !problem.is_empty()),
+            "{last}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreconcilable_pending_evidence_is_recorded_once_and_retried_only_after_a_change() {
+        use crate::pending::{Journal, STATE};
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let mut plan = payload();
+        plan["evidence"] = "best-effort".into();
+        let run = store.prepare("pending-invalid", &plan, &peer()).unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        store
+            .append_owner(
+                &run.run_id,
+                "admission",
+                "admitted",
+                None,
+                &json!({"receipt":prepared(&run)}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        let run = store.show(&run.run_id).unwrap();
+        let journal = store.root.join(&run.run_id).join(STATE);
+        Journal::open(&store.root.join(&run.run_id))
+            .unwrap()
+            .create(&run, &peer())
+            .unwrap();
+        fs::write(&journal, b"{\"damaged\":true}").unwrap();
+        // The fixture owner's birth identity is not this process's: it is dead.
+        store.recover_pending_orphans(&peer());
+        let recorded = store.show(&run.run_id).unwrap();
+        assert_eq!(recorded.state, "outcome_unknown");
+        assert_eq!(
+            recorded.outcome.unwrap()["unknown_reason"],
+            "pending evidence could not be reconciled"
+        );
+        assert!(journal.exists(), "the refused journal stays for inspection");
+        // Reconciliation opens (and recreates) the journal's lock file, so its
+        // absence shows an unchanged journal was not retried.
+        let lock = store.root.join(&run.run_id).join("owner-pending.lock");
+        fs::remove_file(&lock).unwrap();
+        store.recover_pending_orphans(&peer());
+        assert!(!lock.exists(), "an unchanged failed journal was retried");
+        fs::write(&journal, b"{\"damaged\":\"again\"}").unwrap();
+        store.recover_pending_orphans(&peer());
+        assert!(lock.exists(), "a changed journal must be retried");
+        assert_eq!(
+            store.show(&run.run_id).unwrap().chain,
+            recorded.chain,
+            "a terminal run gains no second unknown outcome"
+        );
+    }
+
     fn create() -> (tempfile::TempDir, Store, RunRecord) {
         let temp = tempfile::tempdir().unwrap();
         let mut store = Store::open(&temp.path().join("data")).unwrap();
@@ -2046,23 +2312,25 @@ mod tests {
         let held = store.hold(&run.run_id, "hold-1", &peer()).unwrap();
         assert_eq!(store.show(&run.run_id).unwrap().holds, ["operator"]);
         assert_eq!(store.hold(&run.run_id, "hold-1", &peer()).unwrap(), held);
-        assert!(store.release(&run.run_id, "hold-1", &peer()).is_err());
+        assert_refused(
+            store.release(&run.run_id, "hold-1", &peer()),
+            "request id conflicts with its immutable payload",
+        );
         let released = store.release(&run.run_id, "release-1", &peer()).unwrap();
         assert_eq!(released.seq, held.seq + 1);
         assert_eq!(store.hold(&run.run_id, "hold-1", &peer()).unwrap(), held);
         assert!(store.show(&run.run_id).unwrap().holds.is_empty());
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "forged",
-                    "hold",
-                    None,
-                    &json!({}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "forged",
+                "hold",
+                None,
+                &json!({}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "invalid owner intent",
         );
         let path = store.root.join(&run.run_id).join(manifest::name(2));
         let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
@@ -2146,7 +2414,10 @@ mod tests {
                     assert_eq!(&fs::read(directory.join(name)).unwrap(), bytes);
                 }
                 if matches!(fault, Fault::PartialWrite) {
-                    assert!(apply(&mut store).is_err());
+                    assert_refused(
+                        apply(&mut store),
+                        "stream is poisoned; no dependent dispatch or sequence reuse",
+                    );
                     assert!(!store.verify(None).unwrap()[0].local_consistency);
                 } else {
                     let receipt = apply(&mut store).unwrap();
@@ -2241,10 +2512,19 @@ mod tests {
         assert_eq!(second.runs.len(), 2);
         assert!(second.runs.iter().all(|r| r.run_id > first.runs[0].run_id));
         assert!(second.next_after.is_none());
-        assert!(store.gc_plan(0, None, 1).is_err());
-        assert!(store.gc_plan(u32::MAX, None, 1).is_err());
-        assert!(store.gc_plan(90, None, 101).is_err());
-        assert!(store.gc_plan(90, Some("../escape"), 1).is_err());
+        assert_refused(
+            store.gc_plan(0, None, 1),
+            "retention requires 1..36500 days",
+        );
+        assert_refused(
+            store.gc_plan(u32::MAX, None, 1),
+            "retention requires 1..36500 days",
+        );
+        assert_refused(
+            store.gc_plan(90, None, 101),
+            "GC preview requires 1..36500 retention days and 1..100 runs per page",
+        );
+        assert_refused(store.gc_plan(90, Some("../escape"), 1), "invalid run id");
         assert!(serde_json::to_vec(&plan).unwrap().len() < MAX_FRAME_BYTES);
         let path = store.root.join(&run.run_id).join(STREAM);
         let mut file = OpenOptions::new().append(true).open(path).unwrap();
@@ -2486,7 +2766,10 @@ mod tests {
                 );
             }
             if matches!(fault, Fault::GcIntentSync | Fault::GcBeforeUnlink) {
-                assert!(store.hold(&run.run_id, "during-expiry", &peer()).is_err());
+                assert_refused(
+                    store.hold(&run.run_id, "during-expiry", &peer()),
+                    "capture pruning is incomplete; retry GC or restart before mutations",
+                );
                 let _ = store.verify(None); // A verifier cannot delete the pending capture.
                 assert!(directory.join("artifacts/stdout.bin").exists());
             }
@@ -2694,7 +2977,10 @@ mod tests {
                 .0
                 .contains("pruned")
         );
-        assert!(store.hold(&run.run_id, "too-late", &peer()).is_err());
+        assert_refused(
+            store.hold(&run.run_id, "too-late", &peer()),
+            "run history was pruned; new mutations are refused",
+        );
         store.flush_index();
         drop(store);
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
@@ -2707,10 +2993,9 @@ mod tests {
         );
         let mut conflicting = run.payload.clone();
         conflicting["argv_digest"] = json!(format!("sha256:{}", "f".repeat(64)));
-        assert!(
-            recovered
-                .prepare("gc-prepare", &conflicting, &peer())
-                .is_err()
+        assert_refused(
+            recovered.prepare("gc-prepare", &conflicting, &peer()),
+            "request id already maps to a different prepare payload",
         );
         recovered.claim_owner(&run.run_id, &peer()).unwrap();
         let note = recovered
@@ -2725,31 +3010,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(note, replay["gc-note"].receipt);
-        assert!(
-            recovered
-                .append_owner(
-                    &run.run_id,
-                    "new-key",
-                    "note",
-                    Some("effect-1"),
-                    &json!({"note":"private-note-body"}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            recovered.append_owner(
+                &run.run_id,
+                "new-key",
+                "note",
+                Some("effect-1"),
+                &json!({"note":"private-note-body"}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "run history was pruned; new mutations are refused",
         );
-        assert!(
-            recovered
-                .append_owner(
-                    &run.run_id,
-                    "gc-note",
-                    "note",
-                    Some("effect-1"),
-                    &json!({"note":"changed"}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            recovered.append_owner(
+                &run.run_id,
+                "gc-note",
+                "note",
+                Some("effect-1"),
+                &json!({"note":"changed"}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "request id conflicts with its immutable payload",
         );
         source_fixture(&mut recovered, &run, "exec", 1, None);
         assert_eq!(recovered.stream(&run.run_id).unwrap().replay, replay);
@@ -2794,12 +3077,14 @@ mod tests {
                 assert!(directory.join(STREAM).exists());
             } else {
                 assert!(directory.join("gc.json").exists());
-                assert!(
-                    store
-                        .read(&read_request(&run, crate::protocol::ReadSelector::All))
-                        .is_err()
+                assert_refused(
+                    store.read(&read_request(&run, crate::protocol::ReadSelector::All)),
+                    "run history was pruned; canonical query and export are unavailable",
                 );
-                assert!(store.hold(&run.run_id, "after-decision", &peer()).is_err());
+                assert_refused(
+                    store.hold(&run.run_id, "after-decision", &peer()),
+                    "run history was pruned; new mutations are refused",
+                );
             }
             drop(store);
             let mut recovered = Store::open(&temp.path().join("data")).unwrap();
@@ -2964,7 +3249,10 @@ mod tests {
             b"restored history"
         );
         drop(store);
-        assert!(Store::open(&temp.path().join("data")).is_err());
+        assert_refused(
+            Store::open(&temp.path().join("data")),
+            "GC inventory file identity or content changed; bytes preserved",
+        );
         assert_eq!(
             fs::read(directory.join(STREAM)).unwrap(),
             b"restored history"
@@ -3281,7 +3569,7 @@ mod tests {
         assert!(store.read(&wrong).unwrap_err().0.contains("mismatch"));
         wrong = resumed.clone();
         wrong.cursor.as_mut().unwrap().replace_range(63..64, "z");
-        assert!(store.read(&wrong).is_err());
+        assert_refused(store.read(&wrong), "invalid reader cursor");
         drop(store);
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
         assert!(recovered.read(&resumed).unwrap().local_consistency);
@@ -3474,6 +3762,37 @@ mod tests {
     }
 
     #[test]
+    fn a_checkpoint_rewritten_in_place_is_validated_again() {
+        let (_temp, mut store, run) = create();
+        for n in 0..40 {
+            note(&mut store, &run, &format!("n{n}"), json!({"v":n})).unwrap();
+        }
+        let mut request = read_request(&run, crate::protocol::ReadSelector::All);
+        request.limit = 1;
+        let first = store.read(&request).unwrap();
+        request.cursor = first.next_cursor.clone();
+        let second = store.read(&request).unwrap();
+        let cursor = second.next_cursor.clone().unwrap();
+        let path = store
+            .root
+            .join("readers")
+            .join(format!("{}.json", &cursor[..32]));
+        let mut bytes = fs::read(&path).unwrap();
+        let digest = bytes.windows(7).position(|w| w == b"sha256:").unwrap();
+        bytes[digest + 7] = if bytes[digest + 7] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        fs::write(&path, &bytes).unwrap();
+        request.cursor = Some(cursor);
+        assert_refused(
+            store.read(&request),
+            "reader checkpoint is corrupt or unavailable; start a new snapshot",
+        );
+    }
+
+    #[test]
     fn corrupt_reader_checkpoint_is_isolated_bounded_and_expires() {
         let (_temp, mut store, run) = create();
         for n in 0..40 {
@@ -3502,7 +3821,10 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        assert!(store.read(&corrupt_request).is_err());
+        assert_refused(
+            store.read(&corrupt_request),
+            "reader checkpoint is corrupt or unavailable; start a new snapshot",
+        );
         for _ in 0..31 {
             let unrelated = store.read(&fresh).unwrap();
             assert!(!unrelated.done);
@@ -3512,7 +3834,10 @@ mod tests {
         assert_eq!(fs::read(&checkpoint_path).unwrap(), altered);
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 32);
         assert!(store.read(&fresh).unwrap_err().0.contains("session limit"));
-        assert!(store.read(&corrupt_request).is_err());
+        assert_refused(
+            store.read(&corrupt_request),
+            "reader checkpoint is corrupt or unavailable; start a new snapshot",
+        );
 
         File::open(&checkpoint_path)
             .unwrap()
@@ -3526,7 +3851,10 @@ mod tests {
         assert_eq!(after_expiry.snapshot, initial.snapshot);
         assert!(!checkpoint_path.exists());
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 32);
-        assert!(store.read(&corrupt_request).is_err());
+        assert_refused(
+            store.read(&corrupt_request),
+            "reader cursor expired or is unknown; start a new snapshot, do not append it to an old export",
+        );
         assert_eq!(fs::read(&canonical_path).unwrap(), original);
         assert!(store.verify(None).unwrap()[0].local_consistency);
     }
@@ -3598,6 +3926,20 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_writer_releases_its_lock_even_while_a_copy_of_its_descriptor_lives() {
+        let (temp, store, _) = create();
+        // A child forked by another thread holds a copy until it execs.
+        // SAFETY: dup takes the open descriptor by value; the copy is owned below.
+        let copy = unsafe { libc::dup(store.lock.as_raw_fd()) };
+        assert!(copy >= 0);
+        // SAFETY: dup returned a new descriptor owned only here.
+        let copy = unsafe { <File as std::os::fd::FromRawFd>::from_raw_fd(copy) };
+        drop(store);
+        Store::open(&temp.path().join("data")).unwrap();
+        drop(copy);
+    }
+
+    #[test]
     fn full_length_request_id_prepares_replays_and_recovers_without_ambiguous_state() {
         let temp = tempfile::tempdir().unwrap();
         let request_id = "x".repeat(128);
@@ -3646,7 +3988,10 @@ mod tests {
             )
             .unwrap()
         );
-        assert!(note(&mut store, &run, "stable", json!({"meaning":"changed"})).is_err());
+        assert_refused(
+            note(&mut store, &run, "stable", json!({"meaning":"changed"})),
+            "request id conflicts with its immutable payload",
+        );
         drop(store);
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
         assert_eq!(
@@ -3672,10 +4017,9 @@ mod tests {
     #[test]
     fn different_payload_cannot_rebind_prepare_or_effect_identity() {
         let (_temp, mut store, run) = create();
-        assert!(
-            store
-                .prepare("test-prepare", &json!({"different":true}), &peer())
-                .is_err()
+        assert_refused(
+            store.prepare("test-prepare", &json!({"different":true}), &peer()),
+            "prepare only accepts the versioned digest-only request plan",
         );
         store
             .append_owner(
@@ -3688,18 +4032,17 @@ mod tests {
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             .unwrap();
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "effect-second",
-                    "note",
-                    Some("effect-1"),
-                    &json!({"v":2}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "effect-second",
+                "note",
+                Some("effect-1"),
+                &json!({"v":2}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "effect id conflicts with its immutable payload",
         );
     }
 
@@ -3713,7 +4056,10 @@ mod tests {
         let broken = fs::read(&stream_path).unwrap();
         assert!(broken.len() > before.len());
         store.fault = None;
-        assert!(note(&mut store, &run, "retry", json!({})).is_err());
+        assert_refused(
+            note(&mut store, &run, "retry", json!({})),
+            "stream is poisoned; no dependent dispatch or sequence reuse",
+        );
         drop(store);
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
         assert_eq!(fs::read(&stream_path).unwrap(), broken);
@@ -3722,8 +4068,164 @@ mod tests {
             recovered.show(&run.run_id).unwrap().state,
             "outcome_unknown"
         );
-        assert!(recovered.prepare("different", &payload(), &peer()).is_err());
-        assert!(note(&mut recovered, &run, "partial", json!({"v":"half record"})).is_err());
+        assert_refused(
+            recovered.prepare("different", &payload(), &peer()),
+            "ambiguous recovery blocks new preparation; inspect verify",
+        );
+        assert_refused(
+            note(&mut recovered, &run, "partial", json!({"v":"half record"})),
+            "stream is poisoned; no dependent dispatch or sequence reuse",
+        );
+    }
+
+    /// Rewrite the canonical records and drop the segment manifest, so only the
+    /// edited records' own rules can refuse them on the next start.
+    fn rewrite_without_manifest(
+        store: &Store,
+        run: &RunRecord,
+        edit: impl FnOnce(&mut Vec<Value>),
+    ) {
+        let directory = store.root.join(&run.run_id);
+        let mut records: Vec<Value> = fs::read(directory.join(STREAM))
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        edit(&mut records);
+        let mut bytes = Vec::new();
+        for record in records {
+            bytes.extend(canonical(&record).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(directory.join(STREAM), bytes).unwrap();
+        fs::remove_file(directory.join(manifest::NAME)).unwrap();
+    }
+
+    #[test]
+    fn integrity_violations_read_as_corrupt_and_interruptions_as_incomplete() {
+        let mixed_attempt = |records: &mut Vec<Value>| {
+            records.last_mut().unwrap()["attempt_id"] =
+                json!("att_00000000-0000-4000-8000-000000000000");
+        };
+        let duplicate_request = |records: &mut Vec<Value>| {
+            let mut copy = records.last().unwrap().clone();
+            copy["seq"] = json!(copy["seq"].as_u64().unwrap() + 1);
+            copy["prev"] = json!(sha256_prefixed(
+                &canonical(records.last().unwrap()).unwrap()
+            ));
+            records.push(copy);
+        };
+        let corrupt = |problem: &str, edit: &dyn Fn(&mut Vec<Value>)| {
+            let (temp, mut store, run) = create();
+            note(&mut store, &run, "first", json!({"v":1})).unwrap();
+            rewrite_without_manifest(&store, &run, edit);
+            drop(store);
+            let mut store = Store::open(&temp.path().join("data")).unwrap();
+            assert_eq!(store.verify(None).unwrap()[0].problems, [problem]);
+            let page = store
+                .read(&read_request(&run, crate::protocol::ReadSelector::All))
+                .unwrap();
+            assert!(!page.local_consistency, "{problem}");
+            assert_eq!(page.stream_status, "corrupt", "{problem}");
+        };
+        corrupt("mixed attempt identity", &mixed_attempt);
+        corrupt(
+            "duplicate request id in canonical stream",
+            &duplicate_request,
+        );
+        let (temp, mut store, run) = create();
+        note(&mut store, &run, "first", json!({"v":1})).unwrap();
+        let path = store.root.join(&run.run_id).join(STREAM);
+        drop(store);
+        let mut torn = fs::read(&path).unwrap();
+        torn.extend_from_slice(b"{\"torn\":");
+        fs::write(&path, torn).unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        assert_eq!(
+            store.verify(None).unwrap()[0].problems,
+            ["interrupted canonical frame; bytes retained"]
+        );
+        let page = store
+            .read(&read_request(&run, crate::protocol::ReadSelector::All))
+            .unwrap();
+        assert!(!page.local_consistency);
+        assert_eq!(page.stream_status, "incomplete");
+    }
+
+    #[test]
+    fn append_refuses_every_intent_that_recovery_would_refuse() {
+        let (temp, mut store, run) = create();
+        for (forged, refusal) in [
+            (
+                json!({"kind":"note","request_id":"note","body":{"receipt":prepared(&run)}}),
+                "notes cannot replace receipt or state projections",
+            ),
+            (
+                json!({"kind":"outcome_unknown","request_id":"unknown","body":{"token_id":"x"}}),
+                "intent body cannot supply reserved identity token_id",
+            ),
+        ] {
+            let refused = store
+                .append(&run.run_id, forged, "owner", &peer(), None)
+                .unwrap_err();
+            assert!(refused.to_string().contains(refusal), "{refused}");
+        }
+        drop(store);
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        assert!(store.verify(None).unwrap()[0].local_consistency);
+    }
+
+    #[test]
+    fn verification_pages_are_bounded_by_runs_and_bytes_and_status_reads_no_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let mut ids: Vec<_> = (0..3)
+            .map(|n| {
+                store
+                    .prepare(&format!("verify-{n}"), &payload(), &peer())
+                    .unwrap()
+                    .run_id
+            })
+            .collect();
+        ids.sort();
+        for limit in [0, MAX_VERIFY_LIMIT + 1] {
+            assert_refused(
+                store.verify_page(None, None, limit),
+                "verify limit must be between 1 and 100",
+            );
+        }
+        let first = store.verify_page(None, None, 2).unwrap();
+        assert_eq!(first.reports.len(), 2);
+        assert!(!first.done);
+        assert_eq!(first.next_after.as_deref(), Some(ids[1].as_str()));
+        let last = store
+            .verify_page(None, first.next_after.as_deref(), 2)
+            .unwrap();
+        assert_eq!(last.reports[0].run_id, ids[2]);
+        assert!(last.done && last.next_after.is_none());
+        // A page re-reads at most its byte budget, but never fewer than one run.
+        store.verify_page_bytes = 1;
+        let one = store.verify_page(None, None, MAX_VERIFY_LIMIT).unwrap();
+        assert_eq!(one.reports.len(), 1);
+        assert_eq!(one.next_after.as_deref(), Some(ids[0].as_str()));
+        assert_eq!(store.verify(None).unwrap().len(), 3);
+        // Reports carry the bounded coverage summary, not raw gap payloads.
+        assert_eq!(
+            one.reports[0].coverage,
+            crate::reader::coverage_summary(&json!({"status":"unobserved"}))
+        );
+        assert!(store.status().ready());
+        assert_eq!(store.status().runs, 3);
+        // Status reflects accepted state; damage on disk waits for verify.
+        fs::write(store.root.join(&ids[0]).join(STREAM), b"damaged\n").unwrap();
+        assert!(store.status().ready());
+        assert!(!store.verify_page(Some(&ids[0]), None, 1).unwrap().reports[0].local_consistency);
+        store.fault = Some(Fault::BeforeWrite);
+        assert!(store.hold(&ids[1], "lost", &peer()).is_err());
+        let status = store.status();
+        assert_eq!(status.ambiguous_runs, 1);
+        assert!(!status.ready());
     }
 
     #[test]
@@ -3739,7 +4241,10 @@ mod tests {
             store.fault = Some(fault);
             assert!(note(&mut store, &run, "uncertain", json!({"v":1})).is_err());
             store.fault = None;
-            assert!(note(&mut store, &run, "new", json!({"v":2})).is_err());
+            assert_refused(
+                note(&mut store, &run, "new", json!({"v":2})),
+                "stream is poisoned; no dependent dispatch or sequence reuse",
+            );
             assert!(!store.verify(None).unwrap()[0].local_consistency);
             drop(store);
             let mut recovered = Store::open(&temp.path().join("data")).unwrap();
@@ -3827,19 +4332,36 @@ mod tests {
         let (_temp, mut store, run) = create();
         let mut receipt = prepared(&run);
         receipt["argv_digest"] = json!("sha256:bad");
-        assert!(
-            store
-                .append_owner(
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "admit",
+                "admitted",
+                None,
+                &json!({"receipt":receipt}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "record violates frozen jail-receipt schema",
+        );
+        // Well-formed receipts for another argv or policy reach the binding check.
+        let other = json!(format!("sha256:{}", "e".repeat(64)));
+        for path in ["/argv_digest", "/policy/digest"] {
+            let mut receipt = prepared(&run);
+            *receipt.pointer_mut(path).unwrap() = other.clone();
+            assert_refused(
+                store.append_owner(
                     &run.run_id,
                     "admit",
                     "admitted",
                     None,
                     &json!({"receipt":receipt}),
                     &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
-        );
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ),
+                "intent receipt does not match prepared policy, argv, requirements and attempt",
+            );
+        }
         let first = store
             .append_owner(
                 &run.run_id,
@@ -3865,18 +4387,17 @@ mod tests {
                 )
                 .unwrap()
         );
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "admit-again",
-                    "admitted",
-                    None,
-                    &json!({"receipt":prepared(&run)}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "admit-again",
+                "admitted",
+                None,
+                &json!({"receipt":prepared(&run)}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "admission or refusal is only valid from prepared",
         );
     }
 
@@ -3917,15 +4438,14 @@ mod tests {
         );
         let mut changed = event.clone();
         changed["fields"]["message"] = json!("conflicting source sequence");
-        assert!(
-            store
-                .append_source(
-                    &run.run_id,
-                    &changed,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_source(
+                &run.run_id,
+                &changed,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "request id conflicts with its immutable payload",
         );
         store
             .append_owner(
@@ -3949,33 +4469,109 @@ mod tests {
         let (_temp, mut store, run) = create();
         let records = store.settle_orphans(&peer(), |_| false).unwrap();
         assert_eq!(records[0].state, "outcome_unknown");
-        assert_eq!(records[0].outcome.as_ref().unwrap()["unknown"], true);
+        let outcome = records[0].outcome.as_ref().unwrap();
+        assert_eq!(outcome["unknown"], true);
+        // The reconciler's own unknown is the run's reason, not a child outcome.
+        assert!(outcome.get("observed_child_outcome").is_none(), "{outcome}");
+        assert_eq!(
+            outcome["unknown_reason"],
+            "owner birth identity is no longer live; tree termination and unrecorded effects are not inferred"
+        );
         let mut stranger = peer();
         stranger.birth = "new-process-birth".into();
-        assert!(store.claim_owner(&run.run_id, &stranger).is_err());
+        assert_refused(
+            store.claim_owner(&run.run_id, &stranger),
+            "attempt already has an owner; dead owners require reconciliation and are never restarted",
+        );
     }
 
     #[test]
-    fn none_verify_retains_unprotected_even_if_receipt_claims_enforced() {
+    fn none_cannot_claim_enforced_protection_on_admission_or_in_its_projection() {
         let temp = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let data = temp.path().join("data");
+        let mut store = Store::open(&data).unwrap();
         let mut plan = payload();
         plan["profile"] = json!("none");
         let run = store.prepare("none", &plan, &peer()).unwrap();
         store.claim_owner(&run.run_id, &peer()).unwrap();
-        assert!(
-            note(
-                &mut store,
-                &run,
-                "cannot-upgrade",
-                json!({"receipt":{"child_protection":"enforced"}})
+        let receipt = prepared(&run);
+        assert_eq!(receipt["child_protection"], "enforced");
+        let refused = store
+            .append_owner(
+                &run.run_id,
+                "admit",
+                "admitted",
+                None,
+                &json!({"receipt":receipt}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
-            .is_err()
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("none cannot claim enforced child protection"),
+            "{refused}"
+        );
+        // An unresolved outcome may still carry the jail's receipt; its label
+        // never upgrades a none run's projection.
+        store
+            .append_owner(
+                &run.run_id,
+                "unknown",
+                "outcome_unknown",
+                None,
+                &json!({"receipt":receipt}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        assert_eq!(
+            store.show(&run.run_id).unwrap().child_protection,
+            "unprotected"
         );
         assert_eq!(
             store.verify(None).unwrap()[0].child_protection,
             "unprotected"
         );
+        drop(store);
+        let store = Store::open(&data).unwrap();
+        assert_eq!(
+            store.show(&run.run_id).unwrap().child_protection,
+            "unprotected"
+        );
+    }
+
+    #[test]
+    fn recovery_poisons_an_enforced_admission_of_a_none_run() {
+        let (temp, mut store, run) = create();
+        store
+            .append_owner(
+                &run.run_id,
+                "admit",
+                "admitted",
+                None,
+                &json!({"receipt":prepared(&run)}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        // Re-chain the history as a none preparation: only recovery's own
+        // intent check can refuse the enforced admission that follows it.
+        rewrite_without_manifest(&store, &run, |records| {
+            records[0]["body"]["payload"]["profile"] = json!("none");
+            for index in 1..records.len() {
+                let prev = sha256_prefixed(&canonical(&records[index - 1]).unwrap());
+                records[index]["prev"] = json!(prev);
+            }
+        });
+        drop(store);
+        let store = Store::open(&temp.path().join("data")).unwrap();
+        assert_eq!(
+            store.verify(None).unwrap()[0].problems,
+            ["none cannot claim enforced child protection"]
+        );
+        assert_eq!(store.show(&run.run_id).unwrap().state, "outcome_unknown");
     }
 
     #[test]
@@ -3984,16 +4580,16 @@ mod tests {
         std::os::unix::fs::symlink(temp.path(), temp.path().join("link")).unwrap();
         assert!(Store::open(&temp.path().join("link")).is_err());
         let (_temp, mut store, run) = create();
-        assert!(
+        assert_refused(
             note(
                 &mut store,
                 &run,
                 "large",
-                json!({"body":"x".repeat(MAX_FRAME_BYTES)})
-            )
-            .is_err()
+                json!({"body":"x".repeat(MAX_FRAME_BYTES)}),
+            ),
+            "canonical event exceeds bounded frame limit",
         );
-        assert!(store.show("../../escape").is_err());
+        assert_refused(store.show("../../escape"), "invalid run id");
     }
 
     #[test]
@@ -4051,15 +4647,14 @@ mod tests {
             "prepared",
         ))
         .unwrap();
-        assert!(
-            store
-                .append_source(
-                    &run.run_id,
-                    &source,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_source(
+                &run.run_id,
+                &source,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "strict producer transport loss was durably recorded; stop admission and execution",
         );
         let mut source = source;
         source["source_seq"] = json!(1);
@@ -4082,15 +4677,14 @@ mod tests {
             store.show(&run.run_id).unwrap().coverage["ledger"]["status"],
             "degraded"
         );
-        assert!(
-            store
-                .append_source(
-                    &run.run_id,
-                    &source,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_source(
+                &run.run_id,
+                &source,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "record violates frozen jail-event schema",
         );
     }
 
@@ -4115,18 +4709,17 @@ mod tests {
         receipt["attempt_id"] = json!(run.attempt_id);
         let body =
             json!({"receipt":receipt,"outcome":receipt["outcome"],"coverage":receipt["coverage"]});
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "settle",
-                    "settled",
-                    None,
-                    &body,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "settle",
+                "settled",
+                None,
+                &body,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "terminal trace and receipt do not corroborate",
         );
         let receipt_digest = records::semantic::receipt_digest(&receipt).unwrap();
         let event = serde_json::to_value(records::Event::receipt_note(
@@ -4177,18 +4770,17 @@ mod tests {
             2,
             SystemTime::now(),
             2,
-            "after-settlement",
+            "after_settlement",
         ))
         .unwrap();
-        assert!(
-            store
-                .append_source(
-                    &run.run_id,
-                    &event,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_source(
+                &run.run_id,
+                &event,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "terminal run cannot ingest new observations",
         );
     }
 
@@ -4202,18 +4794,17 @@ mod tests {
         receipt["attempt_id"] = json!(run.attempt_id);
         let body =
             json!({"receipt":receipt,"outcome":receipt["outcome"],"coverage":receipt["coverage"]});
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "denied",
-                    "denied",
-                    None,
-                    &body,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "denied",
+                "denied",
+                None,
+                &body,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "terminal trace and receipt do not corroborate",
         );
         let receipt_digest = records::semantic::receipt_digest(&receipt).unwrap();
         let event = serde_json::to_value(records::Event::receipt_note(
@@ -4303,18 +4894,17 @@ mod tests {
         receipt["outcome"]["cause"] = json!("ENOENT");
         let body = json!({"receipt":receipt,"coverage":receipt["coverage"]});
         // A known exec error cannot retroactively stand in for admission.
-        assert!(
-            store
-                .append_owner(
-                    &run.run_id,
-                    "settle",
-                    "settled",
-                    None,
-                    &body,
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            store.append_owner(
+                &run.run_id,
+                "settle",
+                "settled",
+                None,
+                &body,
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "settlement requires durable admission",
         );
         store
             .append_owner(
@@ -4337,7 +4927,7 @@ mod tests {
                         None,
                         &body,
                         &peer(),
-                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     )
                     .is_err()
             );
@@ -4496,6 +5086,10 @@ mod tests {
         assert_eq!(outcome["unknown"], true);
         assert_eq!(outcome["kind"], "unknown");
         assert_eq!(outcome["observed_child_outcome"]["code"], 0);
+        assert_eq!(
+            outcome["unknown_reason"],
+            "owner or reconciliation reported an unresolved run outcome"
+        );
     }
 
     #[test]
@@ -4548,6 +5142,48 @@ mod tests {
         let recovered = Store::open(&temp.path().join("data")).unwrap();
         assert!(recovered.verify(None).unwrap()[0].local_consistency);
     }
+    #[test]
+    fn recovery_keeps_unchanged_projections_and_manifests_in_place() {
+        let (temp, store, run) = create();
+        let directory = store.root.join(&run.run_id);
+        let inode = |name: &str| fs::metadata(directory.join(name)).unwrap().ino();
+        let before = (inode("run.json"), inode(manifest::NAME));
+        drop(store);
+        let recovered = Store::open(&temp.path().join("data")).unwrap();
+        assert_eq!((inode("run.json"), inode(manifest::NAME)), before);
+        assert!(recovered.verify(None).unwrap()[0].local_consistency);
+        drop(recovered);
+        fs::write(directory.join("run.json"), b"{}\n").unwrap();
+        let recovered = Store::open(&temp.path().join("data")).unwrap();
+        assert_ne!(
+            inode("run.json"),
+            before.0,
+            "a changed projection is republished"
+        );
+        assert_eq!(inode(manifest::NAME), before.1);
+        assert!(recovered.verify(None).unwrap()[0].local_consistency);
+    }
+
+    #[test]
+    fn a_failed_projection_write_leaves_no_temporary_file() {
+        let (temp, mut store, run) = create();
+        crate::faults::arm(crate::faults::Plan {
+            kind: "note".into(),
+            point: "projection.before_rename".into(),
+            action: "error".into(),
+            marker: temp.path().join("marker"),
+        });
+        let refused = note(&mut store, &run, "unpublished", json!({"v":1}));
+        crate::faults::disarm();
+        assert!(refused.is_err());
+        let leftovers: Vec<_> = fs::read_dir(store.root.join(&run.run_id))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
     fn segment_bytes(directory: &Path) -> Vec<u8> {
         manifest::names(directory)
             .unwrap()
@@ -4607,7 +5243,10 @@ mod tests {
         assert_eq!(fs::read(directory.join(manifest::NAME)).unwrap(), anchored);
         assert_eq!(segment_bytes(&directory), canonical);
         // Request/effect identities are global, not scoped to a file.
-        assert!(note(&mut recovered, &run, "rotated-0", json!({"changed":true})).is_err());
+        assert_refused(
+            note(&mut recovered, &run, "rotated-0", json!({"changed":true})),
+            "request id conflicts with its immutable payload",
+        );
     }
 
     #[test]
@@ -4629,7 +5268,10 @@ mod tests {
             store.fault = Some(fault);
             assert!(note(&mut store, &run, "rotation-fault", json!({"v":1})).is_err());
             store.fault = None;
-            assert!(note(&mut store, &run, "different", json!({})).is_err());
+            assert_refused(
+                note(&mut store, &run, "different", json!({})),
+                "stream is poisoned; no dependent dispatch or sequence reuse",
+            );
             let second = directory.join(manifest::name(2));
             let before = fs::read(&second).unwrap();
             let original_receipt = before.strip_suffix(b"\n").map(|frame| {
@@ -4645,8 +5287,14 @@ mod tests {
             assert_eq!(fs::read(&second).unwrap(), before);
             if matches!(fault, Fault::PartialWrite) {
                 assert!(!recovered.verify(None).unwrap()[0].local_consistency);
-                assert!(note(&mut recovered, &run, "rotation-fault", json!({"v":1})).is_err());
-                assert!(recovered.prepare("new", &payload(), &peer()).is_err());
+                assert_refused(
+                    note(&mut recovered, &run, "rotation-fault", json!({"v":1})),
+                    "stream is poisoned; no dependent dispatch or sequence reuse",
+                );
+                assert_refused(
+                    recovered.prepare("new", &payload(), &peer()),
+                    "ambiguous recovery blocks new preparation; inspect verify",
+                );
                 continue;
             }
             let receipt = note(&mut recovered, &run, "rotation-fault", json!({"v":1})).unwrap();
@@ -4866,7 +5514,10 @@ mod tests {
             .unwrap();
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
         assert!(recovered.verify(None).unwrap()[0].local_consistency);
-        assert!(recovered.read(&request).is_err());
+        assert_refused(
+            recovered.read(&request),
+            "reader canonical snapshot is corrupt: identity or length changed",
+        );
     }
 
     #[test]
@@ -4963,18 +5614,17 @@ mod tests {
                 .unwrap(),
             effect
         );
-        assert!(
-            recovered
-                .append_owner(
-                    &run.run_id,
-                    "new-request",
-                    "note",
-                    Some("effect-stable"),
-                    &json!({"v":1}),
-                    &peer(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                )
-                .is_err()
+        assert_refused(
+            recovered.append_owner(
+                &run.run_id,
+                "new-request",
+                "note",
+                Some("effect-stable"),
+                &json!({"v":1}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            "effect id conflicts with its immutable payload",
         );
         for selector in [ReadSelector::Execs, ReadSelector::Hosts] {
             let (pages, _) = read_all(&mut recovered, read_request(&run, selector));

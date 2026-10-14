@@ -20,10 +20,6 @@ pub mod pipes;
 // not depend on `ouro-jail`.
 #[path = "../../../ouro-jail/src/trace/readback.rs"]
 pub mod readback;
-// The product's RFC 8785 serializer, included by path for the same reason:
-// the receipt digest a trace note carries is over these canonical bytes.
-#[path = "../../../ouro-records/src/canonical/jcs.rs"]
-pub mod jcs;
 pub mod tempdir;
 pub mod unix_probe;
 
@@ -88,10 +84,34 @@ pub fn skip_decision(live_required: bool, reason: &str) -> Result<String, String
 /// }
 /// ```
 pub fn skip_or_fail(reason: &str) {
-    match skip_decision(live_required(), reason) {
+    skip_or_fail_with(live_required(), reason);
+}
+
+/// [`skip_or_fail`] with the mode given, so both branches are testable.
+///
+/// # Panics
+/// When `live_required`: the skip is the failure.
+pub fn skip_or_fail_with(live_required: bool, reason: &str) {
+    match skip_decision(live_required, reason) {
         Ok(note) => eprintln!("{note}"),
         Err(message) => panic!("{message}"),
     }
+}
+
+/// The variable that asks the suite to check the recorded release evidence
+/// (the clean-VM and real-vendor records) against this build.
+pub const RELEASE_EVIDENCE_VAR: &str = "OURO_RELEASE_EVIDENCE";
+
+/// True when `OURO_RELEASE_EVIDENCE=1`, and nothing else.
+///
+/// The records are bound to the exact build inputs of the jail, so any
+/// source edit makes them stale until a new clean-VM run is recorded. A
+/// release gate, not a development check: the conformance driver and the
+/// release workflow set it; a plain `cargo test` skips those tests, and in
+/// conformance mode that skip is a failure like any other.
+#[must_use]
+pub fn release_evidence_requested() -> bool {
+    std::env::var(RELEASE_EVIDENCE_VAR).as_deref() == Ok("1")
 }
 
 // ------------------------------------------------------------ binary lookup
@@ -155,12 +175,6 @@ impl Drop for BuildLock {
     }
 }
 
-/// Last resort: build the package on demand.
-///
-/// This runs *inside* `cargo test`, which already holds the lock on the
-/// workspace build directory, so the nested build is given a target directory
-/// of its own. Sharing one would block forever, and sharing a build directory
-/// between trees is a known source of stale cross-tree artifacts here.
 /// A stable short key for a path, so two worktrees never share a build
 /// directory. FNV-1a, because a hash crate is not worth a dependency here.
 fn path_key(p: &Path) -> String {
@@ -173,6 +187,12 @@ fn path_key(p: &Path) -> String {
     format!("{h:016x}")
 }
 
+/// Last resort: build the package on demand.
+///
+/// This runs *inside* `cargo test`, which already holds the lock on the
+/// workspace build directory, so the nested build is given a target directory
+/// of its own. Sharing one would block forever, and sharing a build directory
+/// between trees is a known source of stale cross-tree artifacts here.
 fn build_package(package: &str, name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let release = exe.components().any(|c| c.as_os_str() == "release");
@@ -591,7 +611,7 @@ impl Jail {
                             }
                             Ok(n) => left = &left[n..],
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                std::thread::sleep(Duration::from_millis(5))
+                                ready(pipe.as_raw_fd(), libc::POLLOUT, deadline)?;
                             }
                             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                             Err(e) => return Err(e),
@@ -627,6 +647,10 @@ impl Jail {
         let stderr = child.stderr.take().map(|pipe| drain_thread(pipe, deadline));
 
         Ok(Spawned {
+            group: GroupGuard {
+                pid: libc::pid_t::try_from(child.id()).map_err(io::Error::other)?,
+                armed: true,
+            },
             deadline,
             child,
             control,
@@ -692,6 +716,43 @@ fn nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+/// A descriptor that turns readable when `pid` (an unreaped child) exits.
+#[cfg(target_os = "linux")]
+fn pidfd(pid: libc::pid_t) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: plain integers; the kernel returns a new descriptor or fails.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    let fd = RawFd::try_from(fd).ok().filter(|fd| *fd >= 0)?;
+    // SAFETY: `fd` was just returned by `pidfd_open` and nothing else owns it.
+    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pidfd(_pid: libc::pid_t) -> Option<std::os::fd::OwnedFd> {
+    None
+}
+
+/// Wait until `fd` is ready for `events` (or hung up), or `deadline` passes:
+/// the caller's next read or write then makes progress or reports why not.
+fn ready(fd: RawFd, events: libc::c_short, deadline: std::time::Instant) -> io::Result<()> {
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let ms = libc::c_int::try_from(left.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+    let mut pfd = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    // SAFETY: one live pollfd, and the count passed is 1.
+    if unsafe { libc::poll(&raw mut pfd, 1, ms) } < 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+    // A timeout returns here too; the caller's loop checks the deadline.
+    Ok(())
+}
+
 fn drain_thread<R: std::io::Read + AsRawFd + Send + 'static>(
     mut r: R,
     deadline: std::time::Instant,
@@ -711,7 +772,7 @@ fn drain_thread<R: std::io::Read + AsRawFd + Send + 'static>(
                 Ok(0) => return Ok(buf),
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5))
+                    ready(r.as_raw_fd(), libc::POLLIN, deadline)?;
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
@@ -722,6 +783,9 @@ fn drain_thread<R: std::io::Read + AsRawFd + Send + 'static>(
 
 /// A running jail with its channels attached.
 pub struct Spawned {
+    // Declared first, so it is dropped first: the jail's group is gone
+    // before its private state directory (`root`) is removed.
+    group: GroupGuard,
     deadline: std::time::Instant,
     child: Child,
     control: Option<LineReader>,
@@ -734,6 +798,41 @@ pub struct Spawned {
     root: TempDir,
     receipt: Option<PathBuf>,
     control_seen: Vec<Value>,
+}
+
+/// The jail's process group (it is spawned as the leader of its own), killed
+/// and reaped when the test drops the run without `wait` reaping it: a test
+/// that panics would otherwise leave the jail and its children running over
+/// a removed state directory.
+struct GroupGuard {
+    pid: libc::pid_t,
+    /// False once the leader was reaped: its pid, and so its group id, may
+    /// then belong to another process.
+    armed: bool,
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // SAFETY: plain integers. The leader is unreaped (`armed`), so the
+        // group id is still this run's and cannot name another group.
+        unsafe { libc::kill(-self.pid, libc::SIGKILL) };
+        // Reap the leader, with a bound: SIGKILL cannot be caught, so it
+        // ends promptly unless the kernel holds it in uninterruptible sleep.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut status = 0;
+            // SAFETY: `status` is a live int; `pid` is this process's
+            // unreaped child (std's `Child` never reaps on drop).
+            let reaped = unsafe { libc::waitpid(self.pid, &raw mut status, libc::WNOHANG) };
+            if reaped != 0 || std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 impl Spawned {
@@ -783,27 +882,25 @@ impl Spawned {
         // then EOF" case; `gate_closed_by_harness` records that it was us.
         let gate_closed_by_harness = self.gate.take().is_some();
 
+        // A pidfd turns readable when the jail exits, so the wait is an
+        // event; without one (macOS, an old kernel) it is a short poll.
+        let exit_fd = pidfd(self.group.pid);
         let status = loop {
             if let Some(status) = self.child.try_wait()? {
+                self.group.armed = false;
                 break status;
             }
             if std::time::Instant::now() >= self.deadline {
-                // SAFETY: this is the process group created for our unreaped child.
-                unsafe {
-                    libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
-                }
-                let _ = self.child.kill();
-                let reap = std::time::Instant::now() + Duration::from_secs(1);
-                while matches!(self.child.try_wait(), Ok(None)) && std::time::Instant::now() < reap
-                {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
+                // The guard kills the group and reaps the leader.
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "jail exceeded harness deadline",
                 ));
             }
-            std::thread::sleep(Duration::from_millis(5));
+            match &exit_fd {
+                Some(fd) => ready(fd.as_raw_fd(), libc::POLLIN, self.deadline)?,
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
         };
 
         let mut channels_timed_out: Vec<String> = Vec::new();
@@ -905,30 +1002,16 @@ impl Spawned {
 
         // Receipts are read once, now, so a read or parse error is a recorded
         // fact rather than a silently empty list that makes every negative
-        // assertion pass.
+        // assertion pass. The bytes are kept too, for §13.3's completeness
+        // rule: a trace ends on the note of the final receipt, which names it
+        // by the digest of its bytes. Read after exit, so the values are
+        // exactly the files' contents.
         let data_dir = self.root.path().join("data");
-        let mut receipts = Vec::new();
-        let mut receipt_errors = Vec::new();
-        collect_receipts(&data_dir, &mut receipts, &mut receipt_errors);
-        if let Some(p) = &self.receipt {
-            match std::fs::read_to_string(p) {
-                Ok(text) => push_json(&text, p, &mut receipts, &mut receipt_errors),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => receipt_errors.push(format!("{}: {e}", p.display())),
-            }
-        }
-        // The bytes too, for §13.3's completeness rule: a trace ends on the
-        // note of the final receipt, which names it by the digest of its
-        // bytes. Read after exit, so they are the files the values came from.
-        let mut receipt_files = Vec::new();
-        let mut canonical = Vec::new();
-        collect_named(&data_dir, OsStr::new("jail.json"), &mut canonical);
-        canonical.extend(self.receipt.clone());
-        for path in canonical {
-            if let Ok(bytes) = std::fs::read(&path) {
-                receipt_files.push((path, bytes));
-            }
-        }
+        let ReadReceipts {
+            values: receipts,
+            files: receipt_files,
+            errors: receipt_errors,
+        } = read_receipts(&data_dir, self.receipt.as_deref());
 
         Ok(Run {
             status,
@@ -1004,8 +1087,27 @@ impl Run {
     }
 
     /// The fixture's own report lines, parsed from stdout.
+    ///
+    /// # Panics
+    /// When a line is not JSON: the fixture prints nothing else, so such a
+    /// line is output this test did not expect, and dropping it would let
+    /// an assertion that some line is absent pass without reading it. A
+    /// test whose target prints other text says so with
+    /// [`Run::fixture_lines_lossy`].
     #[must_use]
     pub fn fixture_lines(&self) -> Vec<Value> {
+        report_lines(&self.stdout).unwrap_or_else(|line| {
+            panic!(
+                "stdout holds a line that is not a fixture report: {line:?}; \
+                 use fixture_lines_lossy if the target prints other text"
+            )
+        })
+    }
+
+    /// The report lines among stdout's lines, skipping any that are not
+    /// JSON. For a target that prints other text beside the fixture's.
+    #[must_use]
+    pub fn fixture_lines_lossy(&self) -> Vec<Value> {
         self.stdout
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
@@ -1028,14 +1130,14 @@ impl Run {
         }
     }
 
-    /// Every receipt read from the private data directory, once, at `wait`.
+    /// Every receipt read from the private data directory, once, at `wait`,
+    /// then the `--receipt` copy.
     ///
-    /// `jail.json` is read as one JSON document when it parses that way and as
-    /// NDJSON otherwise, because jail-v1 §7 fixes the file name but the J1
-    /// core slice chooses between the two encodings. A file that exists and
-    /// cannot be read or parsed panics: an unreadable receipt used to come
-    /// back as an empty list, which made "the run produced no refused receipt"
-    /// pass without reading anything.
+    /// Each file is one JSON document (jail-v1 §7: `jail.json` is the latest
+    /// receipt, atomically replaced). A file that exists and cannot be read
+    /// or parsed panics: an unreadable receipt used to come back as an empty
+    /// list, which made "the run produced no refused receipt" pass without
+    /// reading anything.
     #[must_use]
     pub fn receipts(&self) -> Vec<Value> {
         assert!(
@@ -1178,14 +1280,16 @@ impl Run {
 ///
 /// Syntax first: every line one complete frame. Then §13.3's rule: "A trace
 /// is complete only if its last frame is the `jail.receipt` note of the
-/// attempt's final receipt", so the last frame must be that note, and its
-/// phase and digest must be the ones [`receipt_note_of`] computes from the
-/// final receipt's bytes. A sink that lost evidence keeps a prefix that can
-/// end on a frame boundary; so does one that lost the final note, or a
-/// receipt rewritten after its note. Only this comparison tells them apart
-/// from a whole trace. No trace asked for is `Ok`; so is an empty trace from
-/// a run that left no receipt at all, which attempted nothing to be
-/// incomplete about.
+/// attempt's final receipt", checked by the records crate's own
+/// [`trace_ends_with`](ouro_records::records::semantic::trace_ends_with): the
+/// last frame is a wrapper `jail.receipt` note of the same attempt naming
+/// the final receipt's phase and canonical digest, and the stream's loss
+/// note agrees with the receipt's loss gaps. A sink that lost evidence keeps
+/// a prefix that can end on a frame boundary; so does one that lost the
+/// final note, or a receipt rewritten after its note. Only this comparison
+/// tells them apart from a whole trace. No trace asked for is `Ok`; so is an
+/// empty trace from a run that left no receipt at all, which attempted
+/// nothing to be incomplete about.
 pub fn trace_guard(
     readback: Option<&Readback>,
     final_receipt: Option<&[u8]>,
@@ -1219,75 +1323,66 @@ pub fn trace_guard(
              to compare it with"
         ));
     };
-    match receipt_note_of(receipt) {
-        Ok((want_phase, want_digest)) if want_phase == phase && want_digest == digest => Ok(()),
-        Ok((want_phase, want_digest)) => partial(format!(
-            "the trace ends on the {phase} note {digest}, but the final receipt is \
-             {want_phase} {want_digest}"
-        )),
-        Err(error) => partial(format!("the final receipt cannot be read: {error}")),
+    let receipt = match receipt_document(receipt) {
+        Ok(receipt) => receipt,
+        Err(error) => return partial(format!("the final receipt cannot be read: {error}")),
+    };
+    let violations = ouro_records::records::semantic::trace_ends_with(&readback.frames, &receipt);
+    if violations.is_empty() {
+        return Ok(());
     }
+    let found = receipt_note_of_value(&receipt).map_or_else(
+        |error| error,
+        |(want_phase, want_digest)| format!("the final receipt is {want_phase} {want_digest}"),
+    );
+    partial(format!(
+        "the trace ends on the {phase} note {digest}, but {found}: {}",
+        violations
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))
+}
+
+/// Every non-empty line of `stdout` as JSON, or the first that is not.
+fn report_lines(stdout: &[u8]) -> Result<Vec<Value>, String> {
+    stdout
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            serde_json::from_slice::<Value>(l)
+                .map_err(|_| String::from_utf8_lossy(l).chars().take(200).collect())
+        })
+        .collect()
+}
+
+/// A receipt file's one JSON document (jail-v1 §7: `jail.json` is the
+/// latest receipt, atomically replaced).
+fn receipt_document(bytes: &[u8]) -> Result<Value, String> {
+    serde_json::from_slice(bytes).map_err(|error| format!("not one JSON document: {error}"))
 }
 
 /// The `(phase, receipt_digest)` a `jail.receipt` note carries for a
-/// receipt file's bytes.
-///
-/// The product names a receipt by `sha256:` and the lowercase hex SHA-256 of
-/// its RFC 8785 canonical bytes (canonicalization.md), whatever layout the
-/// file uses. An NDJSON file's last document is its latest receipt.
+/// receipt file's bytes: the receipt's phase, and `sha256:` over its RFC
+/// 8785 canonical bytes (canonicalization.md, "A receipt digest"), computed
+/// by the records crate, so the file's layout does not matter.
 ///
 /// # Errors
 /// Why the bytes hold no receipt with a phase.
 pub fn receipt_note_of(bytes: &[u8]) -> Result<(String, String), String> {
-    use sha2::{Digest as _, Sha256};
-    let document: &[u8] = if serde_json::from_slice::<Value>(bytes).is_ok() {
-        bytes
-    } else {
-        bytes
-            .split(|byte| *byte == b'\n')
-            .rfind(|line| !line.iter().all(u8::is_ascii_whitespace))
-            .ok_or("an empty receipt file")?
-    };
-    let value: Value =
-        serde_json::from_slice(document).map_err(|error| format!("not JSON: {error}"))?;
-    let phase = value
+    receipt_note_of_value(&receipt_document(bytes)?)
+}
+
+fn receipt_note_of_value(receipt: &Value) -> Result<(String, String), String> {
+    let phase = receipt
         .get("phase")
         .and_then(Value::as_str)
         .ok_or("a receipt without a phase")?
         .to_owned();
-    let canonical = jcs::to_jcs(&value).map_err(|error| error.to_string())?;
-    let mut digest = String::from("sha256:");
-    for byte in Sha256::digest(canonical) {
-        digest.push_str(&format!("{byte:02x}"));
-    }
+    let digest = ouro_records::records::semantic::receipt_digest(receipt)
+        .map_err(|error| error.to_string())?;
     Ok((phase, digest))
-}
-
-/// Valid JSON with every whitespace byte outside a string removed: what
-/// `serde_json::to_vec` writes for what `to_vec_pretty` wrote.
-#[must_use]
-pub fn compact_json(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut in_string = false;
-    let mut escaped = false;
-    for &byte in bytes {
-        if in_string {
-            out.push(byte);
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-        } else if byte == b'"' {
-            in_string = true;
-            out.push(byte);
-        } else if !matches!(byte, b' ' | b'\n' | b'\r' | b'\t') {
-            out.push(byte);
-        }
-    }
-    out
 }
 
 fn collect_named(dir: &Path, name: &OsStr, out: &mut Vec<PathBuf>) {
@@ -1322,7 +1417,43 @@ pub fn channel_guard(timed_out: &[String], controls: usize, traces: usize) -> Re
     ))
 }
 
-fn collect_receipts(dir: &Path, out: &mut Vec<Value>, errors: &mut Vec<String>) {
+/// The receipts a run left, each file read once.
+struct ReadReceipts {
+    values: Vec<Value>,
+    files: Vec<(PathBuf, Vec<u8>)>,
+    errors: Vec<String>,
+}
+
+/// Every `jail.json` under `data_dir`, then the `--receipt` copy when one
+/// was written, each read once and parsed as one JSON document.
+fn read_receipts(data_dir: &Path, copy: Option<&Path>) -> ReadReceipts {
+    let mut paths = Vec::new();
+    let mut read = ReadReceipts {
+        values: Vec::new(),
+        files: Vec::new(),
+        errors: Vec::new(),
+    };
+    collect_receipts(data_dir, &mut paths, &mut read.errors);
+    paths.extend(copy.map(Path::to_path_buf));
+    for path in paths {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                match receipt_document(&bytes) {
+                    Ok(value) => read.values.push(value),
+                    Err(e) => read.errors.push(format!("{}: {e}", path.display())),
+                }
+                read.files.push((path, bytes));
+            }
+            // The copy is written only when the jail got that far.
+            Err(e) if e.kind() == io::ErrorKind::NotFound && Some(path.as_path()) == copy => {}
+            Err(e) => read.errors.push(format!("{}: {e}", path.display())),
+        }
+    }
+    read
+}
+
+/// Every `jail.json` under `dir`, in path order.
+fn collect_receipts(dir: &Path, out: &mut Vec<PathBuf>, errors: &mut Vec<String>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         // An absent data directory is not an error: a refusal before state
@@ -1333,45 +1464,13 @@ fn collect_receipts(dir: &Path, out: &mut Vec<Value>, errors: &mut Vec<String>) 
             return;
         }
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+    for path in paths {
         if path.is_dir() {
             collect_receipts(&path, out, errors);
         } else if path.file_name() == Some(OsStr::new("jail.json")) {
-            match std::fs::read_to_string(&path) {
-                Ok(text) => push_json(&text, &path, out, errors),
-                Err(e) => errors.push(format!("{}: {e}", path.display())),
-            }
-        }
-    }
-}
-
-/// One receipt file: a single JSON document, or NDJSON. A file that is
-/// neither is an error, not an empty result.
-fn push_json(text: &str, from: &Path, out: &mut Vec<Value>, errors: &mut Vec<String>) {
-    match serde_json::from_str::<Value>(text) {
-        Ok(v) => out.push(v),
-        Err(whole) => {
-            let mut lines = 0usize;
-            let mut parsed = Vec::new();
-            for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                lines += 1;
-                match serde_json::from_str::<Value>(line) {
-                    Ok(v) => parsed.push(v),
-                    Err(e) => {
-                        errors.push(format!(
-                            "{}: neither one JSON document ({whole}) nor NDJSON ({e})",
-                            from.display()
-                        ));
-                        return;
-                    }
-                }
-            }
-            if lines == 0 {
-                errors.push(format!("{}: empty receipt file", from.display()));
-                return;
-            }
-            out.extend(parsed);
+            out.push(path);
         }
     }
 }
@@ -1447,12 +1546,10 @@ mod tests {
             skip_decision(false, "bubblewrap is absent").expect("plain mode records the skip");
         assert_eq!(noted, "skipped: bubblewrap is absent");
 
-        // And the wrapper really panics on the Err branch.
-        let r = std::panic::catch_unwind(|| match skip_decision(true, "x") {
-            Ok(note) => eprintln!("{note}"),
-            Err(m) => panic!("{m}"),
-        });
-        assert!(r.is_err());
+        // And the wrapper really panics in conformance mode. (Its other
+        // branch prints a skip note, which a conformance log counts as a
+        // skipped live test, so it is not called here.)
+        assert!(std::panic::catch_unwind(|| skip_or_fail_with(true, "x")).is_err());
     }
 
     #[test]
@@ -1533,24 +1630,20 @@ mod tests {
         std::fs::create_dir_all(&attempt).unwrap();
         std::fs::write(attempt.join("jail.json"), b"{ half written").unwrap();
 
-        let mut out = Vec::new();
-        let mut errors = Vec::new();
-        collect_receipts(dir.path(), &mut out, &mut errors);
-        assert!(out.is_empty());
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("jail.json"), "{errors:?}");
+        let read = read_receipts(dir.path(), None);
+        assert!(read.values.is_empty());
+        assert_eq!(read.errors.len(), 1, "{:?}", read.errors);
+        assert!(read.errors[0].contains("jail.json"), "{:?}", read.errors);
 
         // An empty file is an error too, not zero receipts.
         std::fs::write(attempt.join("jail.json"), b"").unwrap();
-        let (mut out, mut errors) = (Vec::new(), Vec::new());
-        collect_receipts(dir.path(), &mut out, &mut errors);
+        let errors = read_receipts(dir.path(), None).errors;
         assert_eq!(errors.len(), 1, "{errors:?}");
 
         // An absent data directory is not an error: a refusal before state
         // creation leaves none.
-        let (mut out, mut errors) = (Vec::new(), Vec::new());
-        collect_receipts(&dir.path().join("nothing-here"), &mut out, &mut errors);
-        assert!(out.is_empty() && errors.is_empty());
+        let read = read_receipts(&dir.path().join("nothing-here"), None);
+        assert!(read.values.is_empty() && read.errors.is_empty());
     }
 
     #[test]
@@ -1579,12 +1672,100 @@ mod tests {
         assert!(a.data_dir().is_dir() && a.config_dir().is_dir());
     }
 
+    /// Review FX11: a run dropped without `wait` (a panicking test) takes
+    /// its jail's whole process group with it.
     #[test]
-    fn receipts_read_both_a_single_document_and_ndjson() {
+    fn dropping_a_spawned_run_kills_its_process_group() {
+        let dir = TempDir::new("ouro-harness-drop").unwrap();
+        let pid_file = dir.path().join("grandchild");
+        let spawned = Jail::with_program("/bin/sh")
+            .expect("a private harness root")
+            .args([
+                "-c",
+                &format!("sleep 30 & echo $! > {}; wait", pid_file.display()),
+            ])
+            .spawn()
+            .expect("the shell starts");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let grandchild: libc::pid_t = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|t| t.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(std::time::Instant::now() < deadline, "no grandchild");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        drop(spawned);
+        // The grandchild was in the group: it was killed. It is not ours to
+        // reap, so wait until it is gone or a zombie of its reaper.
+        let gone = |pid: libc::pid_t| {
+            // SAFETY: signal 0 only checks existence.
+            let exists = unsafe { libc::kill(pid, 0) } == 0;
+            !exists
+                || std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .is_ok_and(|stat| stat.contains(") Z "))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !gone(grandchild) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the group outlived its run"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Review FX10: a line that is not a report is not silently dropped.
+    #[test]
+    fn a_run_with_a_line_that_is_not_a_report_says_so() {
+        let run = Jail::with_program("/bin/sh")
+            .expect("a private harness root")
+            .args(["-c", r#"echo '{"op":"a"}'; echo 'not a report'"#])
+            .run()
+            .expect("the shell runs");
+        let strict =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.fixture_lines().len()));
+        assert!(strict.is_err(), "a stray line must not be dropped");
+        assert_eq!(run.fixture_lines_lossy().len(), 1);
+    }
+
+    #[test]
+    fn report_lines_refuse_a_line_that_is_not_json() {
+        assert_eq!(
+            report_lines(b"{\"op\":\"a\"}\n\n{\"op\":\"b\"}\n")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            report_lines(b"{\"op\":\"a\"}\nWARNING: something\n").unwrap_err(),
+            "WARNING: something"
+        );
+    }
+
+    #[test]
+    fn receipts_are_one_document_each_and_anything_else_is_an_error() {
         let dir = TempDir::new("ouro-receipts-test").unwrap();
         let nested = dir.path().join("attempts/att_1");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("jail.json"), r#"{"phase":"prepared"}"#).unwrap();
+        let copy = dir.path().join("copy.json");
+        std::fs::write(&copy, "{\n  \"phase\": \"settled\"\n}\n").unwrap();
+
+        let read = read_receipts(dir.path(), Some(&copy));
+        assert!(read.errors.is_empty(), "{:?}", read.errors);
+        let phases: Vec<&str> = read
+            .values
+            .iter()
+            .filter_map(|v| v.get("phase").and_then(Value::as_str))
+            .collect();
+        assert_eq!(phases, ["prepared", "settled"]);
+        assert_eq!(read.files.len(), 2);
+        assert_eq!(read.files[1].0, copy);
+
+        // A copy that was never written is not an error; NDJSON is.
         let other = dir.path().join("attempts/att_2");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(
@@ -1592,17 +1773,10 @@ mod tests {
             "{\"phase\":\"prepared\"}\n{\"phase\":\"settled\"}\n",
         )
         .unwrap();
-
-        let mut out = Vec::new();
-        let mut errors = Vec::new();
-        collect_receipts(dir.path(), &mut out, &mut errors);
-        assert!(errors.is_empty(), "{errors:?}");
-        let phases: Vec<&str> = out
-            .iter()
-            .filter_map(|v| v.get("phase").and_then(Value::as_str))
-            .collect();
-        assert_eq!(phases.len(), 3, "got {phases:?}");
-        assert!(phases.contains(&"settled"));
+        let read = read_receipts(dir.path(), Some(&dir.path().join("absent.json")));
+        assert_eq!(read.values.len(), 1, "{:?}", read.values);
+        assert_eq!(read.errors.len(), 1, "{:?}", read.errors);
+        assert!(read.errors[0].contains("att_2"), "{:?}", read.errors);
     }
 
     /// A stand-in "jail" that writes one complete frame and a torn one to the
@@ -1615,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn j4_r03_a_torn_last_trace_line_is_reported_not_a_failed_run() {
+    fn a_torn_last_trace_line_is_reported_not_a_failed_run() {
         let run = torn_trace_writer().run().expect(
             "a torn last line is a recognisable fact about the trace, not a harness failure",
         );
@@ -1703,7 +1877,6 @@ mod tests {
     /// A pretty-printed receipt and the frame naming it, as the product
     /// writes them: the note's digest is over the canonical bytes.
     fn receipt_and_note(phase: &str) -> (Vec<u8>, Vec<u8>) {
-        use sha2::{Digest as _, Sha256};
         let receipt = serde_json::json!({
             "schema": "ouro.jail.receipt/1",
             "attempt_id": "att_1",
@@ -1714,10 +1887,10 @@ mod tests {
             "nested": {"list": [1, -25, null, true, {"k": "v w"}]},
         });
         let pretty = serde_json::to_vec_pretty(&receipt).unwrap();
-        let mut digest = String::from("sha256:");
-        for byte in Sha256::digest(jcs::to_jcs(&receipt).unwrap()) {
-            digest.push_str(&format!("{byte:02x}"));
-        }
+        // The digest by its definition, independently of `receipt_digest`.
+        let digest = ouro_records::canonical::sha256_prefixed(
+            &ouro_records::canonical::to_jcs(&receipt).unwrap(),
+        );
         let note = serde_json::json!({
             "schema": "ouro.event/1",
             "attempt_id": "att_1",
@@ -1729,14 +1902,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pretty_receipt_compacts_to_the_bytes_its_digest_is_over() {
-        let value = serde_json::json!({
-            "a": [], "b": {}, "c": "x y\n\"z\" \\", "d": [1, {"e": " "}], "f": "\u{e9}"
-        });
-        assert_eq!(
-            compact_json(&serde_json::to_vec_pretty(&value).unwrap()),
-            serde_json::to_vec(&value).unwrap()
-        );
+    fn a_receipt_is_named_by_its_canonical_bytes_whatever_its_layout() {
         let (pretty, note) = receipt_and_note("settled");
         let (phase, digest) = receipt_note_of(&pretty).unwrap();
         assert_eq!(phase, "settled");
@@ -1744,12 +1910,15 @@ mod tests {
             read_frames(&note).last_receipt_note(),
             Some(("settled", digest.as_str()))
         );
-        // NDJSON: the last document is the latest receipt.
-        let mut ndjson = b"{\"phase\":\"prepared\"}\n".to_vec();
-        ndjson.extend(compact_json(&pretty));
-        ndjson.push(b'\n');
-        assert_eq!(receipt_note_of(&ndjson).unwrap(), (phase, digest));
+        let value: Value = serde_json::from_slice(&pretty).unwrap();
+        let compact = serde_json::to_vec(&value).unwrap();
+        assert_eq!(receipt_note_of(&compact).unwrap(), (phase, digest));
         assert!(receipt_note_of(b"{}").is_err(), "a receipt has a phase");
+        // jail.json is one document: NDJSON is not a receipt file.
+        let mut ndjson = b"{\"phase\":\"prepared\"}\n".to_vec();
+        ndjson.extend(compact);
+        ndjson.push(b'\n');
+        assert!(receipt_note_of(&ndjson).is_err());
     }
 
     #[test]
@@ -1784,6 +1953,14 @@ mod tests {
         // A note of another receipt: a receipt rewritten after its note, or
         // an earlier phase's note last.
         refused(&whole, Some(&enforced), "but the final receipt is enforced");
+        // The note of the right receipt, but from another attempt.
+        let other_attempt = String::from_utf8(note.clone())
+            .unwrap()
+            .replace("\"attempt_id\":\"att_1\"", "\"attempt_id\":\"att_2\"");
+        assert_ne!(other_attempt.as_bytes(), note.as_slice());
+        let mut foreign = b"{\"n\":1}\n".to_vec();
+        foreign.extend_from_slice(other_attempt.as_bytes());
+        refused(&foreign, Some(&settled), "trace_final_receipt");
         // Whitespace outside strings is not the receipt's content; inside a
         // string it is.
         let mut respaced = settled.clone();

@@ -6,6 +6,7 @@
 //! emits several lines, in the order they ran.
 
 use std::ffi::{CString, OsStr, OsString, c_char, c_int};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use serde_json::Value;
@@ -17,32 +18,12 @@ use crate::cli::{
 use crate::raw::{self, Attempt};
 use crate::report::{Emitted, Expect, OpReport, Reporter, path_value, write_all};
 
-/// A pipe whose two ends are both close-on-exec.
+/// A pipe whose two ends are both close-on-exec ([`crate::harness::pipes::cloexec_pipe`]),
+/// as raw numbers: the callers hand them across a `fork`.
 pub(crate) fn cloexec_pipe() -> Result<(c_int, c_int), std::io::Error> {
-    let mut fds = [0 as c_int; 2];
-    #[cfg(target_os = "linux")]
-    // SAFETY: `fds` is a live array of two ints, which is what `pipe2` writes.
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    #[cfg(not(target_os = "linux"))]
-    // SAFETY: as above, for `pipe`; Darwin has no `pipe2`.
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    #[cfg(not(target_os = "linux"))]
-    for fd in fds {
-        // SAFETY: `fd` was just returned by `pipe` and is owned here.
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-            let e = std::io::Error::last_os_error();
-            // SAFETY: both descriptors are owned here.
-            unsafe {
-                libc::close(fds[0]);
-                libc::close(fds[1]);
-            }
-            return Err(e);
-        }
-    }
-    Ok((fds[0], fds[1]))
+    use std::os::fd::IntoRawFd as _;
+    let (read, write) = crate::harness::pipes::cloexec_pipe()?;
+    Ok((read.into_raw_fd(), write.into_raw_fd()))
 }
 
 /// This thread's errno, read without allocating: safe to call after `fork`.
@@ -59,7 +40,11 @@ pub(crate) fn raw_errno() -> c_int {
     }
 }
 
-/// A usage error: the fixture refuses before doing anything. Exit code 2.
+/// Why a mode stopped without its result: a usage error, refused before
+/// any operation, or an operation the fixture needed for itself (a
+/// directory descriptor, a pipe, a fork, writing its result file) that
+/// failed, after its own report line where it has one. Exit code 2 either
+/// way: neither is the outcome of the operation under test.
 pub type Usage = String;
 
 /// State shared by every step of one fixture process.
@@ -70,7 +55,6 @@ pub type Usage = String;
 pub struct Session<'a> {
     pub(crate) rep: &'a Reporter,
     failed: std::cell::Cell<bool>,
-    in_script: std::cell::Cell<bool>,
 }
 
 impl<'a> Session<'a> {
@@ -79,7 +63,6 @@ impl<'a> Session<'a> {
         Session {
             rep,
             failed: std::cell::Cell::new(false),
-            in_script: std::cell::Cell::new(false),
         }
     }
 
@@ -154,11 +137,18 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
             expect,
         } => {
             let mode = parse_mode(&mode)?;
-            Ok(check(
-                rep,
-                open(&path, via, create, trunc, write, rdwr, mode),
-                &expect,
-            ))
+            // clap refuses `--write` with `--rdwr`.
+            let access = match (write, rdwr) {
+                (_, true) => Access::ReadWrite,
+                (true, false) => Access::Write,
+                (false, false) => Access::Read,
+            };
+            let flags = OpenFlags {
+                access,
+                create,
+                trunc,
+            };
+            Ok(check(rep, open(&path, via, flags, mode), &expect))
         }
         Mode::Mkdir {
             path,
@@ -172,9 +162,11 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
                 return Err("--dirfd needs --via mkdirat".to_string());
             }
             let dir = open_dirfd(rep, dirfd.as_deref())?;
-            let ok = check(rep, mkdir(&path, via, mode, dir), &expect);
-            close_dirfd(dir);
-            Ok(ok)
+            Ok(check(
+                rep,
+                mkdir(&path, via, mode, raw_fd(dir.as_ref())),
+                &expect,
+            ))
         }
         Mode::Rename {
             from,
@@ -188,12 +180,15 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
             if (dirfd.is_some() || dirfd2.is_some()) && via == RenameVia::Rename {
                 return Err("--dirfd and --dirfd2 need --via renameat or renameat2".to_string());
             }
+            // Owned: the first is closed even when the second cannot open.
             let dir = open_dirfd(rep, dirfd.as_deref())?;
             let dir2 = open_dirfd(rep, dirfd2.as_deref())?;
-            let ok = check(rep, rename(&from, &to, via, noreplace, dir, dir2), &expect);
-            close_dirfd(dir);
-            close_dirfd(dir2);
-            Ok(ok)
+            let (fd, fd2) = (raw_fd(dir.as_ref()), raw_fd(dir2.as_ref()));
+            Ok(check(
+                rep,
+                rename(&from, &to, via, noreplace, fd, fd2),
+                &expect,
+            ))
         }
         Mode::Unlink { path, via, expect } => Ok(check(rep, unlink(&path, via), &expect)),
         Mode::Rmdir { path, via, expect } => Ok(check(rep, rmdir(&path, via), &expect)),
@@ -212,14 +207,20 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
         Mode::Mknod {
             path,
             via,
-            fifo,
+            // `--fifo` only spells out the default; clap refuses it with
+            // `--regular`.
+            fifo: _,
             regular,
             mode,
             expect,
         } => {
-            let _ = fifo; // the default kind; `--regular` is what changes it
+            let kind = if regular {
+                NodeKind::Regular
+            } else {
+                NodeKind::Fifo
+            };
             let perm = parse_mode(&mode)?;
-            Ok(check(rep, mknod(&path, via, regular, perm), &expect))
+            Ok(check(rep, mknod(&path, via, kind, perm), &expect))
         }
         Mode::Truncate {
             path,
@@ -417,19 +418,19 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
             r.set("exit_code", actual);
             r.result(i64::from(actual), None);
             rep.emit(&r);
-            std::process::exit(actual);
+            std::process::exit(i32::from(actual));
         }
         Mode::Raise { signal } => raise(rep, &signal),
         Mode::Script { file } => script(session, &file),
-        Mode::Fileops { rounds, dir } => j5e::fileops(rep, rounds, &dir),
-        Mode::SpawnTree { count, argv } => j5e::spawn_tree(rep, count, &argv),
+        Mode::Fileops { rounds, dir } => crate::perf::fileops(rep, rounds, &dir),
+        Mode::SpawnTree { count, argv } => crate::perf::spawn_tree(rep, count, &argv),
         Mode::PerfLaunch {
             out,
             data_dir,
             sample_ms,
             deadline_ms,
             argv,
-        } => j5e::perf_launch(&out, data_dir.as_deref(), sample_ms, deadline_ms, &argv),
+        } => crate::perf::perf_launch(&out, data_dir.as_deref(), sample_ms, deadline_ms, &argv),
     }
 }
 
@@ -440,31 +441,55 @@ pub(crate) fn check(rep: &Reporter, emitted: Emitted, expect: &Expect) -> bool {
 
 // ---------------------------------------------------------------- filesystem
 
+/// The access an open requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+/// What an open asks for besides its path and creation mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OpenFlags {
+    pub(crate) access: Access,
+    pub(crate) create: bool,
+    pub(crate) trunc: bool,
+}
+
+impl OpenFlags {
+    /// Read-only, creating and truncating nothing.
+    pub(crate) const READ: OpenFlags = OpenFlags {
+        access: Access::Read,
+        create: false,
+        trunc: false,
+    };
+
+    fn bits(self) -> c_int {
+        let mut flags = match self.access {
+            Access::Read => libc::O_RDONLY,
+            Access::Write => libc::O_WRONLY,
+            Access::ReadWrite => libc::O_RDWR,
+        };
+        if self.create {
+            flags |= libc::O_CREAT;
+        }
+        if self.trunc {
+            flags |= libc::O_TRUNC;
+        }
+        flags
+    }
+}
+
 /// Open, and close the descriptor again. Most modes only want the result.
-fn open(
-    path: &OsStr,
-    via: OpenVia,
-    create: bool,
-    trunc: bool,
-    write: bool,
-    rdwr: bool,
-    mode: u32,
-) -> Emitted {
-    let emitted = open_keep(path, via, create, trunc, write, rdwr, mode);
+fn open(path: &OsStr, via: OpenVia, flags: OpenFlags, mode: u32) -> Emitted {
+    let emitted = open_keep(path, via, flags, mode);
     close_fd(emitted.report.ret);
     emitted
 }
 
 /// Open and hand the descriptor back in `report.ret`. The caller closes it.
-pub(crate) fn open_keep(
-    path: &OsStr,
-    via: OpenVia,
-    create: bool,
-    trunc: bool,
-    write: bool,
-    rdwr: bool,
-    mode: u32,
-) -> Emitted {
+pub(crate) fn open_keep(path: &OsStr, via: OpenVia, flags: OpenFlags, mode: u32) -> Emitted {
     let name = match via {
         OpenVia::Openat => "openat",
         OpenVia::Open => "open",
@@ -483,20 +508,7 @@ pub(crate) fn open_keep(
         return Emitted::unusable(report);
     }
 
-    let access = if rdwr {
-        libc::O_RDWR
-    } else if write {
-        libc::O_WRONLY
-    } else {
-        libc::O_RDONLY
-    };
-    let mut flags = access;
-    if create {
-        flags |= libc::O_CREAT;
-    }
-    if trunc {
-        flags |= libc::O_TRUNC;
-    }
+    let mut flags = flags.bits();
     if via == OpenVia::Creat {
         flags = libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC;
         report.set("implied_flags", true);
@@ -523,7 +535,7 @@ pub(crate) fn open_keep(
 /// the open as its own line: the descriptor is part of what the next call
 /// names, so a reader must be able to see where it came from. A read-only
 /// open is outside the closed set, so a tracer reports nothing for it.
-fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<c_int>, Usage> {
+fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<OwnedFd>, Usage> {
     let Some(dir) = dir else {
         return Ok(None);
     };
@@ -544,13 +556,16 @@ fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<c_int>, Usag
             emitted.report.errno
         ));
     }
-    Ok(Some(emitted.report.ret as c_int))
+    let fd = c_int::try_from(emitted.report.ret)
+        .map_err(|_| format!("openat returned {}, not a descriptor", emitted.report.ret))?;
+    // SAFETY: `fd` was just returned by a successful `openat` and nothing
+    // else owns it.
+    Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
 
-fn close_dirfd(fd: Option<c_int>) {
-    if let Some(fd) = fd {
-        close_fd(i64::from(fd));
-    }
+/// The number of a descriptor the caller keeps open for the call.
+fn raw_fd(fd: Option<&OwnedFd>) -> Option<c_int> {
+    fd.map(AsRawFd::as_raw_fd)
 }
 
 /// The directory a path argument is resolved against: a descriptor the
@@ -777,20 +792,18 @@ fn symlink(target: &OsStr, linkpath: &OsStr, via: SymlinkVia) -> Emitted {
 /// necessary on one platform is a lint on the other. Both cfg arms are kept
 /// here rather than at every use.
 #[cfg(target_os = "linux")]
-const fn file_type_bits(regular: bool) -> u32 {
-    if regular {
-        libc::S_IFREG
-    } else {
-        libc::S_IFIFO
+const fn file_type_bits(kind: NodeKind) -> u32 {
+    match kind {
+        NodeKind::Regular => libc::S_IFREG,
+        NodeKind::Fifo => libc::S_IFIFO,
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-const fn file_type_bits(regular: bool) -> u32 {
-    (if regular {
-        libc::S_IFREG
-    } else {
-        libc::S_IFIFO
+const fn file_type_bits(kind: NodeKind) -> u32 {
+    (match kind {
+        NodeKind::Regular => libc::S_IFREG,
+        NodeKind::Fifo => libc::S_IFIFO,
     }) as u32
 }
 
@@ -805,7 +818,14 @@ const fn file_type_mask() -> u32 {
     libc::S_IFMT as u32
 }
 
-fn mknod(path: &OsStr, via: MknodVia, regular: bool, perm: u32) -> Emitted {
+/// The kind of node `mknod` makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeKind {
+    Fifo,
+    Regular,
+}
+
+fn mknod(path: &OsStr, via: MknodVia, kind: NodeKind, perm: u32) -> Emitted {
     let name = match via {
         MknodVia::Mknod => "mknod",
         MknodVia::Mknodat => "mknodat",
@@ -825,13 +845,19 @@ fn mknod(path: &OsStr, via: MknodVia, regular: bool, perm: u32) -> Emitted {
     // The file-type bits are part of `mode`, not a separate argument. Only
     // S_IFIFO and S_IFREG are offered: S_IFCHR and S_IFBLK need CAP_MKNOD, and
     // a fixture that always fails would prove nothing.
-    let mode = file_type_bits(regular) | (perm & 0o7777);
+    let mode = file_type_bits(kind) | (perm & 0o7777);
     let dev: u64 = 0;
 
     path_value(&mut report.args, "path", path);
     report.set("mode", format!("{mode:o}"));
     report.set("dev", dev);
-    report.set("kind", if regular { "S_IFREG" } else { "S_IFIFO" });
+    report.set(
+        "kind",
+        match kind {
+            NodeKind::Regular => "S_IFREG",
+            NodeKind::Fifo => "S_IFIFO",
+        },
+    );
     report.set("mechanism", raw::mechanism());
 
     let attempt = match via {
@@ -863,7 +889,16 @@ fn truncate(path: &OsStr, length: i64) -> Emitted {
 /// attribute the first and not the second, which is the distinction this mode
 /// exists to make visible. `--expect` applies to the `ftruncate`.
 fn ftruncate(rep: &Reporter, path: &OsStr, length: i64, expect: &Expect) -> bool {
-    let opened = open_keep(path, OpenVia::Openat, false, false, false, true, 0o600);
+    let opened = open_keep(
+        path,
+        OpenVia::Openat,
+        OpenFlags {
+            access: Access::ReadWrite,
+            create: false,
+            trunc: false,
+        },
+        0o600,
+    );
     rep.emit(&opened.report);
     if opened.unusable || opened.report.ret < 0 {
         return false;
@@ -883,28 +918,10 @@ fn ftruncate(rep: &Reporter, path: &OsStr, length: i64, expect: &Expect) -> bool
 }
 
 /// Why a named syscall cannot run in this build, or `None` when it can.
+/// Why `name` cannot be called on this build (the raw layer's own list), so
+/// a mode can say so before preparing anything for it.
 fn unavailable(name: &str) -> Option<String> {
-    let legacy = matches!(
-        name,
-        "open" | "creat" | "mkdir" | "rename" | "unlink" | "rmdir" | "link" | "symlink" | "mknod"
-    );
-    if legacy && !raw::has_legacy_syscalls() {
-        return Some(format!(
-            "{name} has no syscall number on {}/{}; use the *at variant",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ));
-    }
-    // `mknodat` is here rather than in the legacy set: Darwin has no such
-    // syscall at all, while Linux has it on every architecture.
-    let linux_only = matches!(name, "openat2" | "renameat2" | "execveat" | "mknodat");
-    if linux_only && !cfg!(target_os = "linux") {
-        return Some(format!(
-            "{name} is a Linux syscall; unsupported on this platform ({})",
-            std::env::consts::OS
-        ));
-    }
-    None
+    raw::absent(name)
 }
 
 // ------------------------------------------------------------------- network
@@ -917,83 +934,30 @@ fn connect(rep: &Reporter, addr: &str, udp: bool, expect: &Expect) -> Result<boo
         )
     })?;
 
-    let (family, ty) = (
-        if sock.is_ipv4() {
-            libc::AF_INET
-        } else {
-            libc::AF_INET6
-        },
-        if udp {
-            libc::SOCK_DGRAM
-        } else {
-            libc::SOCK_STREAM
-        },
-    );
-
-    let mut sreport = OpReport::new("socket");
-    sreport.set(
-        "family",
-        if sock.is_ipv4() {
-            "AF_INET"
-        } else {
-            "AF_INET6"
-        },
-    );
-    sreport.set("type", if udp { "SOCK_DGRAM" } else { "SOCK_STREAM" });
-    // SAFETY: plain integer arguments; the call allocates a descriptor or fails.
-    let fd = unsafe { libc::socket(family, ty, 0) };
-    let serrno = if fd < 0 {
-        std::io::Error::last_os_error().raw_os_error()
+    let (domain, family) = if sock.is_ipv4() {
+        (libc::AF_INET, "AF_INET")
     } else {
-        None
+        (libc::AF_INET6, "AF_INET6")
     };
-    sreport.result(i64::from(fd), serrno);
-    rep.emit(&sreport);
-    if fd < 0 {
+    let (ty, type_name) = if udp {
+        (libc::SOCK_DGRAM, "SOCK_DGRAM")
+    } else {
+        (libc::SOCK_STREAM, "SOCK_STREAM")
+    };
+    // Through the raw layer, close-on-exec, reported like every other
+    // socket the fixture makes.
+    let Ok(fd) = crate::net::open_socket(rep, domain, family, ty, type_name, true) else {
         // Without a socket there is no connect to expect anything of.
         return Ok(false);
-    }
+    };
 
     let mut report = OpReport::new("connect");
     report.set("addr", addr);
-    report.set(
-        "family",
-        if sock.is_ipv4() {
-            "AF_INET"
-        } else {
-            "AF_INET6"
-        },
-    );
-    report.set("type", if udp { "SOCK_DGRAM" } else { "SOCK_STREAM" });
+    report.set("family", family);
+    report.set("type", type_name);
     report.set("mechanism", raw::mechanism());
-
-    let attempt = match sock {
-        std::net::SocketAddr::V4(v4) => {
-            // SAFETY: `sockaddr_in` is plain data; zeroing it is a valid value.
-            let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            sa.sin_family = libc::AF_INET as libc::sa_family_t;
-            sa.sin_port = v4.port().to_be();
-            sa.sin_addr.s_addr = u32::from_ne_bytes(v4.ip().octets());
-            raw::connect(
-                fd,
-                std::ptr::addr_of!(sa).cast::<libc::sockaddr>(),
-                size_of::<libc::sockaddr_in>() as libc::socklen_t,
-            )
-        }
-        std::net::SocketAddr::V6(v6) => {
-            // SAFETY: `sockaddr_in6` is plain data; zeroing it is a valid value.
-            let mut sa: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
-            sa.sin6_family = libc::AF_INET6 as libc::sa_family_t;
-            sa.sin6_port = v6.port().to_be();
-            sa.sin6_addr.s6_addr = v6.ip().octets();
-            sa.sin6_scope_id = v6.scope_id();
-            raw::connect(
-                fd,
-                std::ptr::addr_of!(sa).cast::<libc::sockaddr>(),
-                size_of::<libc::sockaddr_in6>() as libc::socklen_t,
-            )
-        }
-    };
+    let sa = crate::sockaddr::SockAddr::inet(sock);
+    let attempt = raw::connect(fd, sa.as_ptr(), sa.len());
     let emitted = finish(report, attempt);
     // SAFETY: `fd` is the descriptor this function created and still owns.
     unsafe { libc::close(fd) };
@@ -1146,7 +1110,7 @@ pub(crate) struct Spawned {
     /// The descriptor number the child used to report an exec failure.
     error_pipe_fd: c_int,
     /// The exec's errno when it failed; `None` once the image was replaced.
-    exec_errno: Option<c_int>,
+    pub(crate) exec_errno: Option<c_int>,
 }
 
 impl Spawned {
@@ -1199,8 +1163,9 @@ pub(crate) fn spawn_exec(img: &Image, via: ExecVia) -> Result<Spawned, Usage> {
         let _ = do_exec(img, via);
         let e = raw_errno();
         let bytes = e.to_ne_bytes();
-        // SAFETY: `bytes` is live for the call; short writes are irrelevant
-        // because the parent treats any error byte count as a failed exec.
+        // SAFETY: `bytes` is live for the call. A four-byte write to a pipe
+        // is atomic (PIPE_BUF is at least 512), so the parent reads either
+        // nothing (the image was replaced) or all four bytes.
         unsafe {
             libc::write(pw, bytes.as_ptr().cast::<libc::c_void>(), bytes.len());
             libc::_exit(127)
@@ -1236,6 +1201,13 @@ pub(crate) fn spawn_exec(img: &Image, via: ExecVia) -> Result<Spawned, Usage> {
     }
     // SAFETY: the parent owns the read end.
     unsafe { libc::close(pr) };
+    // A partial errno is a failed exec whose errno was cut: never success.
+    if got != 0 && got != buf.len() {
+        return Err(format!(
+            "the exec error pipe returned {got} of {} bytes",
+            buf.len()
+        ));
+    }
 
     Ok(Spawned {
         pid,
@@ -1686,15 +1658,19 @@ fn echo_args(rep: &Reporter, argv: &[OsString]) {
     rep.emit(&report);
 }
 
+/// How much of the pattern one write carries: a multiple of 256, so the
+/// chunks tile the stream exactly.
+const STREAM_CHUNK: usize = 64 * 1024;
+const _: () = assert!(STREAM_CHUNK.is_multiple_of(256));
+
 /// Byte `i` of the stream is `i % 256`, so every byte value including NUL
 /// appears and any truncation or re-encoding is visible.
 fn stream_bytes(rep: &Reporter, fd: c_int, count: u64, name: &str) -> bool {
-    const CHUNK: usize = 64 * 1024; // a multiple of 256, so chunks tile exactly
-    let pattern: Vec<u8> = (0..CHUNK).map(|i| (i % 256) as u8).collect();
+    let pattern = crate::bounded::pattern(STREAM_CHUNK);
     let mut left = count;
     let mut ok = true;
     while left > 0 {
-        let n = std::cmp::min(left, CHUNK as u64) as usize;
+        let n = std::cmp::min(left, STREAM_CHUNK as u64) as usize;
         if !write_all(fd, &pattern[..n]) {
             ok = false;
             break;
@@ -1750,7 +1726,7 @@ fn fd_directory() -> &'static str {
 /// Descriptor numbers the kernel says are open, or `None` when the directory
 /// could not be listed. The directory's own descriptor is excluded: it is
 /// closed before the numbers are confirmed.
-fn open_fd_numbers() -> Option<Vec<c_int>> {
+pub fn open_fd_numbers() -> Option<Vec<c_int>> {
     let entries = std::fs::read_dir(fd_directory()).ok()?;
     let mut numbers: Vec<c_int> = Vec::new();
     for entry in entries.flatten() {
@@ -1766,15 +1742,12 @@ fn open_fd_numbers() -> Option<Vec<c_int>> {
     Some(numbers)
 }
 
-fn soft_fd_limit() -> u64 {
+/// The soft descriptor limit, or `None` when `getrlimit` fails.
+fn soft_fd_limit() -> Option<u64> {
     // SAFETY: `rl` is a live rlimit struct, which is what `getrlimit` writes.
     let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
     // SAFETY: as above.
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rl) } == 0 {
-        rl.rlim_cur as u64
-    } else {
-        0
-    }
+    (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rl) } == 0).then_some(rl.rlim_cur)
 }
 
 fn describe_fd(fd: c_int) -> Option<Value> {
@@ -1784,23 +1757,7 @@ fn describe_fd(fd: c_int) -> Option<Value> {
     if flags < 0 {
         return None;
     }
-    // SAFETY: `st` is a live stat struct for an open descriptor.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: as above.
-    let kind = if unsafe { libc::fstat(fd, &raw mut st) } == 0 {
-        match st.st_mode & libc::S_IFMT {
-            libc::S_IFIFO => "fifo",
-            libc::S_IFCHR => "character",
-            libc::S_IFDIR => "directory",
-            libc::S_IFBLK => "block",
-            libc::S_IFREG => "regular",
-            libc::S_IFLNK => "symlink",
-            libc::S_IFSOCK => "socket",
-            _ => "unknown",
-        }
-    } else {
-        "unreadable"
-    };
+    let kind = crate::unix::file_kind(fd).unwrap_or("unreadable");
     let mut m = serde_json::Map::new();
     m.insert("fd".into(), Value::from(fd));
     m.insert("kind".into(), Value::from(kind));
@@ -1810,18 +1767,25 @@ fn describe_fd(fd: c_int) -> Option<Value> {
 
 fn fds(rep: &Reporter) -> bool {
     let limit = soft_fd_limit();
-    let (numbers, source, complete) = match open_fd_numbers() {
-        Some(n) => (n, fd_directory().to_string(), true),
-        None => {
-            // Fall back to probing the whole soft limit rather than a fixed
-            // slice of it, and say that is what happened.
+    let (numbers, source, complete) = match (open_fd_numbers(), limit) {
+        (Some(n), _) => (n, fd_directory().to_string(), true),
+        // Fall back to probing the whole soft limit rather than a fixed
+        // slice of it, and say that is what happened.
+        (None, Some(limit)) => {
             let cap = c_int::try_from(limit).unwrap_or(c_int::MAX);
             (
                 (0..cap).collect(),
                 format!("scan 0..{cap}"),
-                cap as u64 >= limit,
+                u64::try_from(cap).is_ok_and(|cap| cap >= limit),
             )
         }
+        // Neither the kernel's list nor the limit: nothing was scanned, and
+        // nothing may be claimed complete.
+        (None, None) => (
+            Vec::new(),
+            "none (the soft limit is unknown)".to_string(),
+            false,
+        ),
     };
 
     let open: Vec<Value> = numbers.into_iter().filter_map(describe_fd).collect();
@@ -1907,7 +1871,16 @@ fn write_mmap(rep: &Reporter, path: &OsStr) -> bool {
     const LEN: usize = 4096;
     // One open, one reported line: reopening silently would put a second
     // `openat` in a tracer's view that no report line accounts for.
-    let opened = open_keep(path, OpenVia::Openat, true, true, false, true, 0o600);
+    let opened = open_keep(
+        path,
+        OpenVia::Openat,
+        OpenFlags {
+            access: Access::ReadWrite,
+            create: true,
+            trunc: true,
+        },
+        0o600,
+    );
     rep.emit(&opened.report);
     if opened.unusable || opened.report.ret < 0 {
         return false;
@@ -2029,8 +2002,10 @@ fn script(session: &Session<'_>, file: &OsStr) -> Result<bool, Usage> {
     let steps: Vec<Vec<String>> = serde_json::from_str(&text)
         .map_err(|e| format!("script must be a JSON array of argv arrays: {e}"))?;
     let count = steps.len();
-    session.in_script.set(true);
-    let mut all_ok = true;
+    // Every step is parsed before any runs: a usage error in step 3 used to
+    // be found after steps 0..2 had already acted, and still exit 2 as if
+    // nothing had.
+    let mut parsed = Vec::with_capacity(count);
     for (i, argv) in steps.into_iter().enumerate() {
         if argv.is_empty() {
             return Err(format!("script step {i} is empty"));
@@ -2046,7 +2021,11 @@ fn script(session: &Session<'_>, file: &OsStr) -> Result<bool, Usage> {
                 count - i - 1
             ));
         }
-        all_ok &= run_in(session, step.mode)?;
+        parsed.push(step.mode);
+    }
+    let mut all_ok = true;
+    for mode in parsed {
+        all_ok &= run_in(session, mode)?;
     }
     Ok(all_ok)
 }
@@ -2141,7 +2120,7 @@ mod tests {
         // does not hide it.
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("f");
-        let e = mknod(fifo.as_os_str(), MknodVia::Mknod, false, 0o600);
+        let e = mknod(fifo.as_os_str(), MknodVia::Mknod, NodeKind::Fifo, 0o600);
         if e.unusable {
             // An architecture without the legacy number; it says so and the
             // `unavailable` tests above cover that classification.
@@ -2151,8 +2130,11 @@ mod tests {
         let mode = e.report.args.get("mode").unwrap().as_str().unwrap();
         let mode = u32::from_str_radix(mode, 8).unwrap();
         assert_eq!(mode & 0o7777, 0o600);
-        assert_eq!(mode & file_type_mask(), file_type_bits(false));
-        assert_ne!(file_type_bits(true), file_type_bits(false));
+        assert_eq!(mode & file_type_mask(), file_type_bits(NodeKind::Fifo));
+        assert_ne!(
+            file_type_bits(NodeKind::Regular),
+            file_type_bits(NodeKind::Fifo)
+        );
         assert_eq!(e.report.args.get("dev").unwrap(), 0);
         assert_eq!(e.report.args.get("kind").unwrap(), "S_IFIFO");
     }
@@ -2175,7 +2157,16 @@ mod tests {
         bytes.extend_from_slice(b"\0ignored");
         let bad = OsString::from_vec(bytes);
 
-        let e = open(&bad, OpenVia::Openat, true, false, true, false, 0o600);
+        let e = open(
+            &bad,
+            OpenVia::Openat,
+            OpenFlags {
+                access: Access::Write,
+                create: true,
+                trunc: false,
+            },
+            0o600,
+        );
         assert!(e.unusable, "a refused path must satisfy nothing");
         assert_eq!(e.report.args.get("refused").unwrap(), "interior_nul");
         assert_eq!(e.report.ret, -1);
@@ -2204,671 +2195,19 @@ mod tests {
 
     #[test]
     fn the_byte_pattern_covers_every_byte_value() {
-        let pattern: Vec<u8> = (0..512).map(|i| (i % 256) as u8).collect();
+        // The chunk `stream_bytes` writes, twice over: the stream it makes.
+        let chunk = crate::bounded::pattern(STREAM_CHUNK);
+        let stream: Vec<u8> = chunk.iter().chain(&chunk).copied().collect();
         let mut seen = [false; 256];
-        for b in &pattern[..256] {
+        for b in &stream[..256] {
             seen[*b as usize] = true;
         }
         assert!(seen.iter().all(|s| *s));
-        assert_eq!(pattern[0], 0, "NUL is in the stream");
-        assert_eq!(pattern[256], pattern[0], "chunks of 64 KiB tile exactly");
-    }
-}
-
-// The performance workloads and the per-launch launcher of
-// `cargo xtask perf` (jail-v1 §5). One module, so the whole slice is this
-// block and the two dispatch arms above.
-mod j5e {
-    use std::collections::BTreeMap;
-    use std::ffi::{OsStr, OsString, c_int};
-    use std::fs::File;
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    use std::os::unix::fs::FileExt as _;
-    use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
-
-    use serde_json::{Value, json};
-
-    use super::{Usage, close_fd, do_exec, image, raw_errno, sleep_ms, spawn_exec};
-    use crate::cli::ExecVia;
-    use crate::raw::{self, Attempt};
-    use crate::report::{OpReport, Reporter, path_value};
-
-    /// The default child of `spawn-tree`. This path exists on the
-    /// usr-merged reference host and on macOS alike.
-    pub(super) const DEFAULT_CHILD: &str = "/usr/bin/true";
-
-    /// How long `perf-launch` waits after SIGTERM before SIGKILL.
-    const KILL_GRACE: Duration = Duration::from_secs(10);
-
-    /// `CLOCK_MONOTONIC` in nanoseconds: the clock `perf-launch` and the
-    /// workloads share. Bubblewrap enters no time namespace, and the start
-    /// line names this process's one so the harness can check that.
-    pub(super) fn monotonic_ns() -> u64 {
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: `ts` is a live timespec that the call only writes.
-        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) };
-        u64::try_from(ts.tv_sec)
-            .unwrap_or(0)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(u64::try_from(ts.tv_nsec).unwrap_or(0))
-    }
-
-    /// The unified cgroup of this process, or `None` without one.
-    fn own_cgroup() -> Option<String> {
-        std::fs::read_to_string("/proc/self/cgroup")
-            .ok()?
-            .lines()
-            .find_map(|l| l.strip_prefix("0::"))
-            .map(str::to_owned)
-    }
-
-    /// `readlink /proc/self/ns/time`, or `None` without a `/proc`.
-    pub(super) fn time_namespace() -> Option<String> {
-        std::fs::read_link("/proc/self/ns/time")
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-    }
-
-    /// `getrusage(who).ru_maxrss` in KiB (Linux reports KiB, macOS bytes).
-    fn peak_rss_kib(who: c_int) -> u64 {
-        // SAFETY: a zeroed `rusage` is a valid value for the call to fill.
-        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
-        // SAFETY: `ru` is live and writable for the call.
-        if unsafe { libc::getrusage(who, &raw mut ru) } != 0 {
-            return 0;
-        }
-        maxrss_kib(&ru)
-    }
-
-    fn maxrss_kib(ru: &libc::rusage) -> u64 {
-        let raw = u64::try_from(ru.ru_maxrss).unwrap_or(0);
-        if cfg!(target_os = "linux") {
-            raw
-        } else {
-            raw / 1024
-        }
-    }
-
-    fn micros(tv: libc::timeval) -> u64 {
-        u64::try_from(tv.tv_sec)
-            .unwrap_or(0)
-            .saturating_mul(1_000_000)
-            .saturating_add(u64::try_from(tv.tv_usec).unwrap_or(0))
-    }
-
-    fn errno_name(e: c_int) -> String {
-        crate::errno::name(e).map_or_else(|| format!("errno_{e}"), ToString::to_string)
-    }
-
-    /// The first line of every workload: its own clock reading, taken
-    /// before anything else it does.
-    fn perf_start(rep: &Reporter, mode: &str) -> u64 {
-        let now = monotonic_ns();
-        let mut r = OpReport::new("perf-start");
-        r.set("mode", mode);
-        r.set("monotonic_ns", now);
-        r.set("pid", std::process::id());
-        r.set("timens", time_namespace());
-        rep.emit(&r);
-        now
-    }
-
-    fn finish_line(r: &mut OpReport, start: u64, ok: bool) {
-        r.set("start_ns", start);
-        r.set("end_ns", monotonic_ns());
-        r.set("maxrss_kib", peak_rss_kib(libc::RUSAGE_SELF));
-        r.set("children_maxrss_kib", peak_rss_kib(libc::RUSAGE_CHILDREN));
-        r.set("ok", ok);
-    }
-
-    fn succeeded(attempt: &Attempt) -> bool {
-        matches!(attempt, Attempt::Performed { ret, .. } if *ret >= 0)
-    }
-
-    fn keep_first(first: &mut Option<(&'static str, String)>, op: &'static str, a: &Attempt) {
-        if first.is_some() {
-            return;
-        }
-        let errno = match a {
-            Attempt::Performed { errno: Some(e), .. } => errno_name(*e),
-            Attempt::Performed { errno: None, .. } => "none".to_owned(),
-            Attempt::Absent(_) => "absent".to_owned(),
-        };
-        *first = Some((op, errno));
-    }
-
-    pub(super) fn fileops(rep: &Reporter, rounds: u32, dir: &OsStr) -> Result<bool, Usage> {
-        let name = |leaf: &[u8]| {
-            let mut bytes = dir.as_bytes().to_vec();
-            bytes.push(b'/');
-            bytes.extend_from_slice(leaf);
-            raw::cpath(&OsString::from_vec(bytes))
-                .map_err(|e| format!("fileops DIR cannot be a syscall argument: {}", e.reason))
-        };
-        let (a, b) = (name(b"w")?, name(b"x")?);
-        let legacy = raw::has_legacy_syscalls();
-        let (rename_via, unlink_via) = if legacy {
-            ("rename", "unlink")
-        } else {
-            ("renameat", "unlinkat")
-        };
-
-        let start = perf_start(rep, "fileops");
-        let (mut created, mut renamed, mut unlinked) = (0u32, 0u32, 0u32);
-        let mut first: Option<(&'static str, String)> = None;
-        for _ in 0..rounds {
-            let opened = raw::openat(
-                libc::AT_FDCWD,
-                a.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-                0o600,
-            );
-            if let Attempt::Performed { ret, .. } = opened
-                && ret >= 0
-            {
-                created += 1;
-                close_fd(ret);
-            } else {
-                keep_first(&mut first, "openat", &opened);
-            }
-            let moved = if legacy {
-                raw::rename(a.as_ptr(), b.as_ptr())
-            } else {
-                raw::renameat(libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr())
-            };
-            if succeeded(&moved) {
-                renamed += 1;
-            } else {
-                keep_first(&mut first, rename_via, &moved);
-            }
-            let removed = if legacy {
-                raw::unlink(b.as_ptr())
-            } else {
-                raw::unlinkat(libc::AT_FDCWD, b.as_ptr(), 0)
-            };
-            if succeeded(&removed) {
-                unlinked += 1;
-            } else {
-                keep_first(&mut first, unlink_via, &removed);
-            }
-        }
-        let ok = created == rounds && renamed == rounds && unlinked == rounds;
-        let mut r = OpReport::new("fileops");
-        r.set("rounds", rounds);
-        path_value(&mut r.args, "dir", dir);
-        r.set("open_via", "openat");
-        r.set("rename_via", rename_via);
-        r.set("unlink_via", unlink_via);
-        r.set("created", created);
-        r.set("renamed", renamed);
-        r.set("unlinked", unlinked);
-        r.set(
-            "first_error",
-            first.map_or(Value::Null, |(op, errno)| json!({"op": op, "errno": errno})),
+        assert_eq!(stream[0], 0, "NUL is in the stream");
+        assert_eq!(
+            stream,
+            crate::bounded::pattern(2 * STREAM_CHUNK),
+            "chunks tile the stream exactly"
         );
-        finish_line(&mut r, start, ok);
-        r.result(i64::from(created.min(renamed).min(unlinked)), None);
-        rep.emit(&r);
-        Ok(ok)
-    }
-
-    pub(super) fn spawn_tree(rep: &Reporter, count: u32, argv: &[OsString]) -> Result<bool, Usage> {
-        let default = [OsString::from(DEFAULT_CHILD)];
-        let argv = if argv.is_empty() { &default[..] } else { argv };
-        let img = image(argv)?;
-
-        let start = perf_start(rep, "spawn-tree");
-        let (mut forked, mut exited_zero, mut failed) = (0u32, 0u32, 0u32);
-        let mut fork_errno = None;
-        for _ in 0..count {
-            // SAFETY: this process is single-threaded; the child runs only
-            // the exec syscall and `_exit`, over an image built before.
-            let pid = unsafe { libc::fork() };
-            if pid < 0 {
-                fork_errno = Some(errno_name(raw_errno()));
-                break;
-            }
-            if pid == 0 {
-                let _ = do_exec(&img, ExecVia::Execve);
-                // SAFETY: the only correct exit from a child whose exec failed.
-                unsafe { libc::_exit(127) };
-            }
-            forked += 1;
-            let mut status: c_int = 0;
-            let waited = loop {
-                // SAFETY: `status` is live; `pid` is this process's own child.
-                let w = unsafe { libc::waitpid(pid, &raw mut status, 0) };
-                if w < 0 && raw_errno() == libc::EINTR {
-                    continue;
-                }
-                break w;
-            };
-            if waited == pid && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
-                exited_zero += 1;
-            } else {
-                failed += 1;
-            }
-        }
-        let ok = forked == count && exited_zero == count;
-        let mut r = OpReport::new("spawn-tree");
-        r.set("count", count);
-        path_value(&mut r.args, "argv0", &argv[0]);
-        r.set("forked", forked);
-        r.set("exited_zero", exited_zero);
-        r.set("failed", failed);
-        r.set("fork_errno", fork_errno);
-        finish_line(&mut r, start, ok);
-        r.result(i64::from(exited_zero), None);
-        rep.emit(&r);
-        Ok(ok)
-    }
-
-    // ------------------------------------------------------------ perf-launch
-
-    /// `VmHWM` from the text of `/proc/<pid>/status`, in KiB.
-    pub(super) fn vm_hwm_kib(status: &str) -> Option<u64> {
-        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
-        let mut words = line["VmHWM:".len()..].split_whitespace();
-        let value = words.next()?.parse().ok()?;
-        (words.next() == Some("kB")).then_some(value)
-    }
-
-    /// A cgroup counter file's single decimal value.
-    pub(super) fn counter(text: &[u8]) -> Option<u64> {
-        std::str::from_utf8(text).ok()?.trim().parse().ok()
-    }
-
-    /// What `perf-launch` samples while the launched process runs. Both
-    /// values are high-water marks, so the last sample is a lower bound of
-    /// the true peak that misses only growth after it.
-    struct Sampler {
-        interval_ms: u64,
-        pid: libc::pid_t,
-        samples: u64,
-        hwm_kib: Option<u64>,
-        data_dir: Option<PathBuf>,
-        leaf_path: Option<PathBuf>,
-        leaf_file: Option<File>,
-        leaf_peak: Option<u64>,
-        leaf_samples: u64,
-        leaf_note: Option<String>,
-    }
-
-    impl Sampler {
-        fn sample(&mut self) {
-            self.samples += 1;
-            if let Ok(text) = std::fs::read_to_string(format!("/proc/{}/status", self.pid))
-                && let Some(kib) = vm_hwm_kib(&text)
-            {
-                self.hwm_kib = Some(self.hwm_kib.map_or(kib, |h| h.max(kib)));
-            }
-            if self.leaf_path.is_none() && self.leaf_note.is_none() {
-                self.find_leaf();
-            }
-            if let Some(file) = &self.leaf_file {
-                let mut buf = [0u8; 64];
-                match file
-                    .read_at(&mut buf, 0)
-                    .ok()
-                    .and_then(|n| counter(&buf[..n]))
-                {
-                    Some(bytes) => {
-                        self.leaf_samples += 1;
-                        self.leaf_peak = Some(self.leaf_peak.map_or(bytes, |p| p.max(bytes)));
-                    }
-                    // Removed with its leaf at settlement: nothing more to read.
-                    None => self.leaf_file = None,
-                }
-            }
-        }
-
-        /// The leaf the attempt's receipt names. The receipt is replaced
-        /// atomically, so a read sees a whole one or none.
-        fn find_leaf(&mut self) {
-            let Some(data) = &self.data_dir else { return };
-            let Ok(entries) = std::fs::read_dir(data.join("attempts")) else {
-                return;
-            };
-            let dirs: Vec<PathBuf> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .collect();
-            if dirs.len() > 1 {
-                self.leaf_note = Some(format!(
-                    "{} attempt directories under the data directory: the leaf is ambiguous",
-                    dirs.len()
-                ));
-                return;
-            }
-            let Some(dir) = dirs.first() else { return };
-            let Some(receipt) = std::fs::read(dir.join("jail.json"))
-                .ok()
-                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            else {
-                return;
-            };
-            let Some(path) = receipt
-                .pointer("/lifetime/native/details/execution_cgroup/path")
-                .and_then(Value::as_str)
-            else {
-                return;
-            };
-            let path = PathBuf::from(path);
-            match File::open(path.join("memory.peak")) {
-                Ok(file) => self.leaf_file = Some(file),
-                Err(e) => self.leaf_note = Some(format!("memory.peak: {e}")),
-            }
-            self.leaf_path = Some(path);
-        }
-    }
-
-    struct Waited {
-        status: c_int,
-        rusage: libc::rusage,
-        wait_errno: Option<c_int>,
-        timed_out: bool,
-        /// `pidfd`: the exit is seen at once; `wnohang`: within one tick.
-        via: &'static str,
-    }
-
-    #[cfg(target_os = "linux")]
-    fn open_pidfd(pid: libc::pid_t) -> c_int {
-        // SAFETY: plain integers; the kernel returns a new descriptor or fails.
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-        c_int::try_from(fd).unwrap_or(-1)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn open_pidfd(_pid: libc::pid_t) -> c_int {
-        -1
-    }
-
-    /// Did the pidfd become readable (the process exited) within `ms`?
-    fn exited_within(pidfd: c_int, ms: u64) -> bool {
-        let mut p = libc::pollfd {
-            fd: pidfd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let timeout = c_int::try_from(ms).unwrap_or(c_int::MAX);
-        // SAFETY: one live pollfd for the call.
-        let n = unsafe { libc::poll(&raw mut p, 1, timeout) };
-        n > 0
-    }
-
-    fn reap(pid: libc::pid_t, flags: c_int, w: &mut Waited) -> bool {
-        loop {
-            // SAFETY: `status` and `rusage` are live and writable; `pid` is
-            // this process's own unreaped child.
-            let r = unsafe { libc::wait4(pid, &raw mut w.status, flags, &raw mut w.rusage) };
-            if r == pid {
-                return true;
-            }
-            if r < 0 && raw_errno() == libc::EINTR {
-                continue;
-            }
-            if r < 0 {
-                w.wait_errno = Some(raw_errno());
-                return true;
-            }
-            return false;
-        }
-    }
-
-    /// Wait for `pid`, sampling between wake-ups, SIGTERM at the deadline and
-    /// SIGKILL after the grace. The pidfd path never reaps early; without a
-    /// pidfd, a non-blocking `wait4` between samples does.
-    fn wait_sampling(pid: libc::pid_t, sampler: &mut Sampler, deadline_ms: u64) -> Waited {
-        let mut w = Waited {
-            status: 0,
-            // SAFETY: a zeroed `rusage` is a valid value.
-            rusage: unsafe { std::mem::zeroed() },
-            wait_errno: None,
-            timed_out: false,
-            via: "wnohang",
-        };
-        let deadline = Instant::now() + Duration::from_millis(deadline_ms);
-        let mut term_at: Option<Instant> = None;
-        let mut killed = false;
-        let pidfd = open_pidfd(pid);
-        if pidfd >= 0 {
-            w.via = "pidfd";
-        }
-        let tick = if sampler.interval_ms == 0 {
-            if pidfd >= 0 { 1000 } else { 1 }
-        } else {
-            sampler.interval_ms
-        };
-        loop {
-            if pidfd >= 0 {
-                if exited_within(pidfd, tick) {
-                    reap(pid, 0, &mut w);
-                    break;
-                }
-            } else {
-                if reap(pid, libc::WNOHANG, &mut w) {
-                    break;
-                }
-                sleep_ms(tick);
-                if reap(pid, libc::WNOHANG, &mut w) {
-                    break;
-                }
-            }
-            let now = Instant::now();
-            if term_at.is_none() && now >= deadline {
-                w.timed_out = true;
-                term_at = Some(now);
-                // SAFETY: `pid` is this process's own unreaped child.
-                unsafe { libc::kill(pid, libc::SIGTERM) };
-            }
-            if !killed && term_at.is_some_and(|at| now >= at + KILL_GRACE) {
-                killed = true;
-                // SAFETY: as above.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
-            if sampler.interval_ms > 0 {
-                sampler.sample();
-            }
-        }
-        if pidfd >= 0 {
-            // SAFETY: the pidfd was opened here and is closed once.
-            unsafe { libc::close(pidfd) };
-        }
-        w
-    }
-
-    fn state_name(state: crate::harness::TraceState) -> &'static str {
-        match state {
-            crate::harness::TraceState::Complete => "complete",
-            crate::harness::TraceState::Incomplete => "incomplete",
-            crate::harness::TraceState::Corrupt => "corrupt",
-        }
-    }
-
-    /// Counts over a trace, and whether it is a complete transcript that ends
-    /// on the note of the attempt's final receipt (`trace_guard`, §13.3).
-    pub(super) fn trace_facts(bytes: &[u8], receipt: Option<&[u8]>) -> Value {
-        let readback = crate::harness::read_frames(bytes);
-        let guard = crate::harness::trace_guard(Some(&readback), receipt).err();
-        let mut by_source: BTreeMap<String, u64> = BTreeMap::new();
-        let mut by_operation: BTreeMap<String, u64> = BTreeMap::new();
-        let mut notes: BTreeMap<String, u64> = BTreeMap::new();
-        let text = |f: &Value, k: &str| f.get(k).and_then(Value::as_str).map(str::to_owned);
-        for frame in &readback.frames {
-            let source = text(frame, "source").unwrap_or_default();
-            let operation = text(frame, "operation").unwrap_or_default();
-            if source == "wrapper" && operation == "note" {
-                let kind = frame
-                    .pointer("/fields/kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                *notes.entry(kind).or_default() += 1;
-            }
-            *by_source.entry(source).or_default() += 1;
-            *by_operation.entry(operation).or_default() += 1;
-        }
-        json!({
-            "bytes": bytes.len(),
-            "state": state_name(readback.state),
-            "frames": readback.frames.len(),
-            "guard": guard,
-            "by_source": by_source,
-            "by_operation": by_operation,
-            "notes": notes,
-        })
-    }
-
-    /// Every attempt directory the launch left, in name order.
-    fn harvest(data: &Path) -> Value {
-        let mut dirs: Vec<PathBuf> = std::fs::read_dir(data.join("attempts"))
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_dir())
-                    .collect()
-            })
-            .unwrap_or_default();
-        dirs.sort();
-        Value::Array(
-            dirs.iter()
-                .map(|dir| {
-                    let receipt = std::fs::read(dir.join("jail.json")).ok();
-                    let trace = match std::fs::read(dir.join("trace.ndjson")) {
-                        Ok(bytes) => trace_facts(&bytes, receipt.as_deref()),
-                        Err(e) => json!({ "error": e.to_string() }),
-                    };
-                    json!({
-                        "id": dir.file_name().map(|n| n.to_string_lossy().into_owned()),
-                        "dir": dir.to_string_lossy(),
-                        "receipt": receipt.is_some(),
-                        "trace": trace,
-                    })
-                })
-                .collect(),
-        )
-    }
-
-    pub(super) fn perf_launch(
-        out: &OsStr,
-        data_dir: Option<&OsStr>,
-        sample_ms: u64,
-        deadline_ms: u64,
-        argv: &[OsString],
-    ) -> Result<bool, Usage> {
-        let img = image(argv)?;
-        let out = PathBuf::from(out);
-        let data_dir = data_dir.map(PathBuf::from);
-        let timens = time_namespace();
-        let mut sampler = Sampler {
-            interval_ms: sample_ms,
-            pid: 0,
-            samples: 0,
-            hwm_kib: None,
-            data_dir: data_dir.clone(),
-            leaf_path: None,
-            leaf_file: None,
-            leaf_peak: None,
-            leaf_samples: 0,
-            leaf_note: None,
-        };
-
-        // Start: just before fork. `spawn_exec` returns once the child has
-        // exec'd (or failed to), so no sample can see this process's image.
-        let t0 = monotonic_ns();
-        let spawned = spawn_exec(&img, ExecVia::Execve)?;
-        // Once the child's exec is known to have happened (or failed).
-        let exec_ns = monotonic_ns();
-        sampler.pid = spawned.pid;
-        let waited = wait_sampling(spawned.pid, &mut sampler, deadline_ms);
-        let t1 = monotonic_ns();
-
-        let attempts = data_dir.as_deref().map(harvest);
-        let s = waited.status;
-        let exited = waited.wait_errno.is_none() && libc::WIFEXITED(s);
-        let signaled = waited.wait_errno.is_none() && libc::WIFSIGNALED(s);
-        let result = json!({
-            "schema": "ouro.fixture.perf-launch/1",
-            "argv": argv.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(),
-            "pid": spawned.pid,
-            "t0_ns": t0,
-            "exec_ns": exec_ns,
-            "t1_ns": t1,
-            "timens": timens,
-            "exec_errno": spawned.exec_errno.map(errno_name),
-            "timed_out": waited.timed_out,
-            "wait_errno": waited.wait_errno.map(errno_name),
-            "waited_via": waited.via,
-            // The cgroup this launcher runs in, which a direct target inherits.
-            "cgroup": own_cgroup(),
-            "status": {
-                "raw": s,
-                "exited": exited,
-                "code": if exited { Some(libc::WEXITSTATUS(s)) } else { None },
-                "signal": if signaled { Some(libc::WTERMSIG(s)) } else { None },
-            },
-            "rusage": {
-                "maxrss_kib": maxrss_kib(&waited.rusage),
-                "utime_us": micros(waited.rusage.ru_utime),
-                "stime_us": micros(waited.rusage.ru_stime),
-            },
-            "sampling": {
-                "interval_ms": sample_ms,
-                "samples": sampler.samples,
-                "hwm_kib": sampler.hwm_kib,
-                "leaf_path": sampler.leaf_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
-                "leaf_peak_bytes": sampler.leaf_peak,
-                "leaf_samples": sampler.leaf_samples,
-                "leaf_note": sampler.leaf_note,
-            },
-            "attempts": attempts,
-        });
-        let bytes = serde_json::to_vec_pretty(&result)
-            .map_err(|e| format!("the perf-launch result cannot be serialized: {e}"))?;
-        std::fs::write(&out, bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
-        Ok(true)
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn the_high_water_mark_is_read_in_kib_from_its_own_line() {
-            let status = "Name:\tx\nVmPeak:\t  9999 kB\nVmHWM:\t    4321 kB\nVmRSS:\t 12 kB\n";
-            assert_eq!(vm_hwm_kib(status), Some(4321));
-            assert_eq!(
-                vm_hwm_kib("VmRSS:\t 12 kB\n"),
-                None,
-                "a zombie has no VmHWM"
-            );
-            assert_eq!(
-                vm_hwm_kib("VmHWM:\t 12 MB\n"),
-                None,
-                "only kB is understood"
-            );
-            assert_eq!(vm_hwm_kib("VmHWM:\t\n"), None);
-        }
-
-        #[test]
-        fn a_counter_is_one_decimal_value() {
-            assert_eq!(counter(b"123456\n"), Some(123_456));
-            assert_eq!(counter(b"0"), Some(0));
-            assert_eq!(counter(b"max\n"), None);
-            assert_eq!(counter(b""), None);
-        }
-
-        #[test]
-        fn the_workload_clock_moves_forward() {
-            let a = monotonic_ns();
-            let b = monotonic_ns();
-            assert!(a > 0 && b >= a, "{a} {b}");
-        }
     }
 }
