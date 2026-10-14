@@ -33,12 +33,6 @@ impl OpReport {
         }
     }
 
-    #[must_use]
-    pub fn with(mut self, key: &str, value: impl Into<Value>) -> Self {
-        self.args.insert(key.to_string(), value.into());
-        self
-    }
-
     pub fn set(&mut self, key: &str, value: impl Into<Value>) {
         self.args.insert(key.to_string(), value.into());
     }

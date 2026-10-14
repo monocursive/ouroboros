@@ -1085,6 +1085,9 @@ fn connect_reports_a_real_result_and_refuses_a_name() {
     let l = lines(&out);
     assert_eq!(l[0]["op"], "socket");
     assert!(l[0]["ret"].as_i64().unwrap() >= 0);
+    // Through the raw layer, close-on-exec, like every other socket.
+    assert!(l[0]["args"]["mechanism"].is_string(), "{}", l[0]);
+    assert!(l[0]["args"]["cloexec"].is_string(), "{}", l[0]);
     assert_eq!(l[1]["op"], "connect");
     let errno = l[1]["errno"].as_str();
     assert!(
@@ -1242,6 +1245,23 @@ fn sleep_spin_and_ignore_term_report_before_they_block() {
         started.elapsed() < std::time::Duration::from_secs(20),
         "the report arrived only after the sleep"
     );
+
+    // The disposition itself, where the kernel shows it: SIGTERM's bit in
+    // SigIgn. A kill-and-look alone can look before the signal lands.
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+        let mask = status
+            .lines()
+            .find_map(|l| l.strip_prefix("SigIgn:"))
+            .map(|m| u64::from_str_radix(m.trim(), 16).unwrap())
+            .expect("a SigIgn line");
+        assert_ne!(
+            mask & (1u64 << (libc::SIGTERM - 1)),
+            0,
+            "SIGTERM is not ignored: SigIgn {mask:#x}"
+        );
+    }
 
     // SIGTERM is ignored; only SIGKILL ends it. This test kills only its own child.
     let pid = child.id() as libc::pid_t;

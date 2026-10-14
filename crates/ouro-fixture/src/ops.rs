@@ -934,83 +934,30 @@ fn connect(rep: &Reporter, addr: &str, udp: bool, expect: &Expect) -> Result<boo
         )
     })?;
 
-    let (family, ty) = (
-        if sock.is_ipv4() {
-            libc::AF_INET
-        } else {
-            libc::AF_INET6
-        },
-        if udp {
-            libc::SOCK_DGRAM
-        } else {
-            libc::SOCK_STREAM
-        },
-    );
-
-    let mut sreport = OpReport::new("socket");
-    sreport.set(
-        "family",
-        if sock.is_ipv4() {
-            "AF_INET"
-        } else {
-            "AF_INET6"
-        },
-    );
-    sreport.set("type", if udp { "SOCK_DGRAM" } else { "SOCK_STREAM" });
-    // SAFETY: plain integer arguments; the call allocates a descriptor or fails.
-    let fd = unsafe { libc::socket(family, ty, 0) };
-    let serrno = if fd < 0 {
-        std::io::Error::last_os_error().raw_os_error()
+    let (domain, family) = if sock.is_ipv4() {
+        (libc::AF_INET, "AF_INET")
     } else {
-        None
+        (libc::AF_INET6, "AF_INET6")
     };
-    sreport.result(i64::from(fd), serrno);
-    rep.emit(&sreport);
-    if fd < 0 {
+    let (ty, type_name) = if udp {
+        (libc::SOCK_DGRAM, "SOCK_DGRAM")
+    } else {
+        (libc::SOCK_STREAM, "SOCK_STREAM")
+    };
+    // Through the raw layer, close-on-exec, reported like every other
+    // socket the fixture makes.
+    let Ok(fd) = crate::net::open_socket(rep, domain, family, ty, type_name, true) else {
         // Without a socket there is no connect to expect anything of.
         return Ok(false);
-    }
+    };
 
     let mut report = OpReport::new("connect");
     report.set("addr", addr);
-    report.set(
-        "family",
-        if sock.is_ipv4() {
-            "AF_INET"
-        } else {
-            "AF_INET6"
-        },
-    );
-    report.set("type", if udp { "SOCK_DGRAM" } else { "SOCK_STREAM" });
+    report.set("family", family);
+    report.set("type", type_name);
     report.set("mechanism", raw::mechanism());
-
-    let attempt = match sock {
-        std::net::SocketAddr::V4(v4) => {
-            // SAFETY: `sockaddr_in` is plain data; zeroing it is a valid value.
-            let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-            sa.sin_family = libc::AF_INET as libc::sa_family_t;
-            sa.sin_port = v4.port().to_be();
-            sa.sin_addr.s_addr = u32::from_ne_bytes(v4.ip().octets());
-            raw::connect(
-                fd,
-                std::ptr::addr_of!(sa).cast::<libc::sockaddr>(),
-                size_of::<libc::sockaddr_in>() as libc::socklen_t,
-            )
-        }
-        std::net::SocketAddr::V6(v6) => {
-            // SAFETY: `sockaddr_in6` is plain data; zeroing it is a valid value.
-            let mut sa: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
-            sa.sin6_family = libc::AF_INET6 as libc::sa_family_t;
-            sa.sin6_port = v6.port().to_be();
-            sa.sin6_addr.s6_addr = v6.ip().octets();
-            sa.sin6_scope_id = v6.scope_id();
-            raw::connect(
-                fd,
-                std::ptr::addr_of!(sa).cast::<libc::sockaddr>(),
-                size_of::<libc::sockaddr_in6>() as libc::socklen_t,
-            )
-        }
-    };
+    let sa = crate::sockaddr::SockAddr::inet(sock);
+    let attempt = raw::connect(fd, sa.as_ptr(), sa.len());
     let emitted = finish(report, attempt);
     // SAFETY: `fd` is the descriptor this function created and still owns.
     unsafe { libc::close(fd) };

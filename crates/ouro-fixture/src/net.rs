@@ -840,13 +840,7 @@ pub struct Body {
 
 /// Count the body `head` announces. `tunnel` is a 2xx answer to CONNECT,
 /// whose "body" is the tunnel and is not read here.
-pub fn read_body(
-    fd: c_int,
-    head: &Head,
-    head_request: bool,
-    tunnel: bool,
-    deadline: Deadline,
-) -> Body {
+pub fn read_body(fd: c_int, head: &Head, tunnel: bool, deadline: Deadline) -> Body {
     let code = head.status_code;
     if tunnel {
         return Body {
@@ -856,7 +850,8 @@ pub fn read_body(
             fail: None,
         };
     }
-    if head_request || (100..200).contains(&code) || code == 204 || code == 304 {
+    // The fixture sends no HEAD request, so only the status says "no body".
+    if (100..200).contains(&code) || code == 204 || code == 304 {
         return Body {
             bytes: 0,
             framing: "none",
@@ -929,7 +924,6 @@ fn exchange(
     fd: c_int,
     request: &[u8],
     initial: Vec<u8>,
-    head_request: bool,
     connect_method: bool,
     deadline: Deadline,
     summary: &mut OpReport,
@@ -960,7 +954,7 @@ fn exchange(
     summary.set("status_line", bounded::preview(&head.status_line, 256));
     summary.set("status_code", head.status_code);
     summary.set("header_bytes", head.header_bytes);
-    let body = read_body(fd, &head, head_request, tunnel, deadline);
+    let body = read_body(fd, &head, tunnel, deadline);
     summary.set("body_bytes", body.bytes);
     summary.set("body_framing", body.framing);
     summary.set("body_complete", body.complete);
@@ -1071,7 +1065,6 @@ pub(crate) fn http_get(
         request.as_bytes(),
         Vec::new(),
         false,
-        false,
         deadline,
         &mut summary,
     );
@@ -1151,7 +1144,6 @@ pub(crate) fn http_connect(
         fd,
         request.as_bytes(),
         Vec::new(),
-        false,
         true,
         deadline,
         &mut summary,
@@ -1177,7 +1169,6 @@ pub(crate) fn http_connect(
             fd,
             request.as_bytes(),
             head.leftover,
-            false,
             false,
             deadline,
             &mut inner,
