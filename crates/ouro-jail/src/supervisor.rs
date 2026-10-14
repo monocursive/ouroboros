@@ -667,69 +667,51 @@ fn canonical_root(cwd: &Path, path: Option<&Path>, key: &str) -> Result<PathBuf,
     }
 }
 
-/// Reads an operator-owned configuration file (§6.2).
+/// Reads an operator-owned configuration file (§6.2): `config.toml` and a
+/// `--profile` policy file.
 ///
 /// `Ok(None)` means the file is absent. Every other failure is reported:
 /// silently continuing without a file the operator wrote is how a tightening
-/// disappears. Security 2026-09-27 (audit 4 B1): the operator's `config.toml`
-/// is a trusted widening layer, so the read is no-follow, bounded and
-/// identity-checked on the open descriptor (operator uid, no group/world
-/// write, one link), mirroring the project file's hardening.
+/// disappears. Security 2026-09-27 (audit 4 B1): such a file is a trusted,
+/// widening layer, so it is read like operator authority (§6.2): no-follow,
+/// a regular file, bounded ([`state::read_capped_checked`]), and judged on
+/// the open descriptor by [`operator_owned`].
 ///
 /// # Errors
 /// Returns [`ErrorCode::InvalidConfig`] for any failure other than absence.
 pub(crate) fn read_operator_file(path: &Path, key: &str) -> Result<Option<String>, JailError> {
-    // Security 2026-09-27 (audit 4 B1): the operator config is a trusted,
-    // widening layer (§6.2), so the read is as strict as the project file's:
-    // no-follow, regular file, bounded. Identity is checked on the open
-    // descriptor, so a file swapped in after any path check is refused: the
-    // operator's own uid, no group/world write, and a single link (a
-    // hardlink planted from a writable copy would otherwise carry the
-    // operator's uid and mode by construction).
-    let mut file = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(usage(key, format!("{}: {error}", path.display()))),
+    let refused = |what: String| usage(key, format!("{}: {what}", path.display()));
+    let Some(bytes) = state::read_capped_checked(path, OPERATOR_FILE_MAX, operator_owned)
+        .map_err(|error| refused(error.to_string()))?
+    else {
+        return Ok(None);
     };
-    let refused = |what: String| usage(key, format!("{} {what}", path.display()));
-    let metadata = file
-        .metadata()
-        .map_err(|error| refused(format!("cannot be inspected: {error}")))?;
-    if !metadata.is_file() {
-        return Err(refused("is not a regular file".to_owned()));
-    }
-    if metadata.len() > OPERATOR_FILE_MAX {
-        return Err(refused(format!(
-            "is {} bytes; the maximum is {OPERATOR_FILE_MAX}",
-            metadata.len()
-        )));
-    }
-    use std::os::unix::fs::MetadataExt as _;
-    if metadata.uid() != unsafe { libc::geteuid() } {
-        return Err(refused("is not owned by this operator".to_owned()));
-    }
-    if metadata.mode() & 0o022 != 0 {
-        return Err(refused(
-            "is writable by group or others; chmod it 0600 or 0644".to_owned(),
-        ));
-    }
-    if metadata.nlink() != 1 {
-        return Err(refused("has more than one hard link".to_owned()));
-    }
-    let mut bytes = Vec::new();
-    let mut capped = std::io::Read::take(&mut file, OPERATOR_FILE_MAX + 1);
-    std::io::Read::read_to_end(&mut capped, &mut bytes)
-        .map_err(|error| refused(format!("cannot be read: {error}")))?;
-    if bytes.len() as u64 > OPERATOR_FILE_MAX {
-        return Err(refused("grew past the cap while being read".to_owned()));
-    }
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|_| refused("is not UTF-8".to_owned()))
+}
+
+/// §6.2's identity rule for an operator configuration file, on the open
+/// descriptor: the operator's own uid, no group or world write (0644 is the
+/// loosest mode; unlike a directory, the private-group exception does not
+/// apply), and a single link (a hardlink planted from a writable copy would
+/// otherwise carry the operator's uid and mode by construction). A launch
+/// profile is held to 0600 by its own reader (operating.md).
+fn operator_owned(metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let refused = |what: &str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, what);
+    if metadata.uid() != state::effective_uid() {
+        return Err(refused("is not owned by this operator"));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(refused(
+            "is writable by group or others; chmod it 0600 or 0644",
+        ));
+    }
+    if metadata.nlink() != 1 {
+        return Err(refused("has more than one hard link"));
+    }
+    Ok(())
 }
 
 /// Security 2026-09-29 (audit 6 F1): refuses a trusted file an uncontained
@@ -4997,13 +4979,35 @@ mod tests {
             "a hard link refuses: {}",
             error.message
         );
-        // An honest private file reads.
+        // An honest private file reads, and so does a world-readable one:
+        // §6.2 forbids writes by others, not reads.
         let honest = root.path().join("honest.toml");
         std::fs::write(&honest, b"[jail]\n").unwrap();
-        std::fs::set_permissions(&honest, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(
-            read_operator_file(&honest, key).unwrap().as_deref(),
-            Some("[jail]\n")
+        for mode in [0o600, 0o644] {
+            std::fs::set_permissions(&honest, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(
+                read_operator_file(&honest, key).unwrap().as_deref(),
+                Some("[jail]\n"),
+                "mode {mode:o}"
+            );
+        }
+        // Group write is refused too, private group or not.
+        std::fs::set_permissions(&honest, std::fs::Permissions::from_mode(0o664)).unwrap();
+        assert!(read_operator_file(&honest, key).is_err());
+        // A directory, and a file over the bound, refuse before any byte.
+        assert!(read_operator_file(root.path(), key).is_err());
+        let big = root.path().join("big.toml");
+        std::fs::write(
+            &big,
+            vec![b'#'; usize::try_from(OPERATOR_FILE_MAX).unwrap() + 1],
+        )
+        .unwrap();
+        std::fs::set_permissions(&big, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let error = read_operator_file(&big, key).unwrap_err();
+        assert!(
+            error.message.contains("the maximum is"),
+            "{}",
+            error.message
         );
         // Absence stays absence.
         assert!(

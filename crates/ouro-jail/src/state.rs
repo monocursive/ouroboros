@@ -820,6 +820,20 @@ pub fn check_ownership(path: &Path, uid: u32, mode: u32, expected: u32) -> Resul
 /// Returns `Err(io::Error)` for a symlink, a non-regular file, an oversized
 /// file or any read failure.
 pub fn read_capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>, std::io::Error> {
+    read_capped_checked(path, cap, |_| Ok(()))
+}
+
+/// [`read_capped`], with `check` judging the open descriptor's metadata
+/// before a byte is read, so an identity rule cannot be raced by a swap of
+/// the path.
+///
+/// # Errors
+/// As [`read_capped`], and whatever `check` returns.
+pub fn read_capped_checked(
+    path: &Path,
+    cap: u64,
+    check: impl FnOnce(&std::fs::Metadata) -> std::io::Result<()>,
+) -> Result<Option<Vec<u8>>, std::io::Error> {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -842,6 +856,7 @@ pub fn read_capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>, std::io::Er
             format!("is {} bytes; the maximum is {cap}", metadata.len()),
         ));
     }
+    check(&metadata)?;
     // `O_NONBLOCK` keeps the open from hanging on a fifo; the size check above
     // bounds a regular file, and `take` bounds anything that grows under us.
     let mut bytes = Vec::new();
