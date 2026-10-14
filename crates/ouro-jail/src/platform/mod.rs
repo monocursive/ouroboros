@@ -93,7 +93,11 @@ impl ContinuousDeadline {
 // `host`, `scope` and `seccomp` describe a Linux ABI or make a portable
 // decision without calling into Linux, so they build and test on every host
 // (the Linux-only parts of `bridge`, `host` and `scope` are gated inside
-// them); every other module is gated in `platform/linux/mod.rs`.
+// them); every other module is gated in `platform/linux/mod.rs`. Off Linux
+// they are not idle: `xtask freeze` renders the filter tables and plans
+// (`freeze`, `seccomp`, `bpf`, `abi`), `version` asks whether the tables
+// cover an architecture (`seccomp`), `doctor` names its own binary (`host`),
+// and the vault's tests use the bridge's port.
 pub mod linux;
 
 /// The reason code of a capability this platform has no backend for (§3.2):
