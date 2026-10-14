@@ -522,7 +522,14 @@ fn serve_connection(mut socket: &UnixStream, peer: &Peer, sender: &mpsc::SyncSen
                 run_id,
                 after,
                 limit,
-            } => verify(sender, peer, run_id.as_deref(), after.as_deref(), limit),
+            } => verify(
+                sender,
+                peer,
+                run_id.as_deref(),
+                after.as_deref(),
+                limit,
+                VERIFY_WORK,
+            ),
             request => ask(sender, peer, response_timeout(&request), |reply| {
                 Work::Request(request, reply)
             }),
@@ -549,14 +556,17 @@ fn serve_connection(mut socket: &UnixStream, peer: &Peer, sender: &mpsc::SyncSen
 /// One fresh verification page. The writer only plans it and says whether a
 /// GC ran; the canonical history is re-read here, on this connection's
 /// thread, so owners keep their writer while a large run is verified.
+/// One fresh verification page, re-read on the connection's thread for at
+/// most `work`; what is not re-read by then is reported as not checked.
 fn verify(
     sender: &mpsc::SyncSender<Message>,
     peer: &Peer,
     run_id: Option<&str>,
     after: Option<&str>,
     limit: u32,
+    work: Duration,
 ) -> std::result::Result<Response, Unanswered> {
-    let deadline = Instant::now() + VERIFY_WORK;
+    let deadline = Instant::now() + work;
     // Asking the writer stays possible past the deadline, so a stopped
     // re-read is still reported rather than dropped.
     let wait = || {
@@ -1097,6 +1107,65 @@ mod tests {
         // The acceptor survived and serves the next connection.
         Client::connect(&data).unwrap();
         assert_eq!(STARTS.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn a_fresh_verification_stops_at_its_work_deadline_and_says_so() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let run_id = {
+            let mut store = Store::open(&data).unwrap();
+            let run = store
+                .prepare("deadline", &request_payload(), &fixture_peer())
+                .unwrap();
+            run.run_id
+        };
+        let (sender, receiver) = mpsc::sync_channel::<Message>(MAX_CONNECTIONS);
+        let writer = thread::spawn(move || {
+            let store = Store::open(&data).unwrap();
+            for message in receiver {
+                match message.work {
+                    Work::PlanVerify {
+                        run_id,
+                        after,
+                        limit,
+                        reply,
+                    } => {
+                        let _ = reply.try_send(store.plan_verify(
+                            run_id.as_deref(),
+                            after.as_deref(),
+                            limit,
+                        ));
+                    }
+                    Work::GcGeneration(reply) => {
+                        let _ = reply.try_send(store.gc_generation());
+                    }
+                    Work::Request(..) => {}
+                }
+            }
+        });
+        let response = verify(
+            &sender,
+            &fixture_peer(),
+            Some(&run_id),
+            None,
+            1,
+            Duration::ZERO,
+        );
+        drop(sender);
+        writer.join().unwrap();
+        let Ok(Response::Ok { value }) = response else {
+            panic!("the writer did not plan the page");
+        };
+        let page: VerifyPage = serde_json::from_value(value).unwrap();
+        assert!(!page.reports[0].local_consistency);
+        assert_eq!(
+            page.reports[0].problems,
+            [
+                "fresh verification stopped at its time limit after re-reading 0 canonical bytes; \
+              the rest of this run was not checked"
+            ]
+        );
     }
 
     #[test]
