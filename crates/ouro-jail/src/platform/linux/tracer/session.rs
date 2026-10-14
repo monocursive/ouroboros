@@ -1336,7 +1336,7 @@ impl Session {
             .and_then(|task| task.pending.take())
             .is_some()
         {
-            self.inflight = self.inflight.saturating_sub(1);
+            self.release_slot();
             self.summary.killed_at_entry += 1;
         }
     }
@@ -1538,14 +1538,14 @@ impl Session {
             None => (None, None),
         };
         if let Some(call) = stale {
-            self.inflight = self.inflight.saturating_sub(1);
+            self.release_slot();
             self.summary.loss.abandoned_entries += 1;
             self.gap(GapReason::EntryAbandoned, call.ops(), Some(1));
         }
         match stale_wait {
             Some(wait) if non_leader => self.restart_ended(wait),
             Some(wait) => {
-                self.inflight = self.inflight.saturating_sub(1);
+                self.release_slot();
                 self.summary.loss.restart_unresolved += 1;
                 self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
             }
@@ -1575,7 +1575,7 @@ impl Session {
             if let Some(pending) = task.pending {
                 // The entry is in hand: the gap names the call it would have
                 // reported, not an anonymous hole (§11.4).
-                self.inflight = self.inflight.saturating_sub(1);
+                self.release_slot();
                 self.summary.loss.abandoned_entries += 1;
                 self.gap(GapReason::EntryAbandoned, pending.ops(), Some(1));
             }
@@ -1628,7 +1628,7 @@ impl Session {
                 // verdict, so its entry leaves flight here: the death that
                 // follows has no call to abandon.
                 task.pending = None;
-                self.inflight = self.inflight.saturating_sub(1);
+                self.release_slot();
             }
         }
         // Security 2026-09-27 (audit 3 A1): the kernel has already installed
@@ -1920,6 +1920,14 @@ impl Session {
         )
     }
 
+    /// A call in flight left it: returned, abandoned, settled or forgotten.
+    /// Every path that takes a call out of a task's `pending` or `restart`
+    /// releases its one slot here, and only here.
+    fn release_slot(&mut self) {
+        debug_assert!(self.inflight > 0, "a slot released that was never taken");
+        self.inflight = self.inflight.saturating_sub(1);
+    }
+
     /// Whether another call may be followed to its return. When the
     /// in-flight bound is reached the entry is refused, and the gap names
     /// what that call could have been.
@@ -1983,7 +1991,7 @@ impl Session {
             // The previous entry for this thread never returned, and the gap
             // names the call it was (§11.4).
             self.summary.loss.abandoned_entries += 1;
-            self.inflight = self.inflight.saturating_sub(1);
+            self.release_slot();
             self.gap(GapReason::EntryAbandoned, ops, Some(1));
         }
         if let Some(task) = self.tasks.get_mut(&tid) {
@@ -2091,7 +2099,7 @@ impl Session {
             }
             return;
         }
-        self.inflight = self.inflight.saturating_sub(1);
+        self.release_slot();
         let mut pending = match call {
             InFlight::Closed(pending) => pending,
             InFlight::Foreign => {
@@ -2217,7 +2225,7 @@ impl Session {
         // receipt can never present a falsified snapshot as observed fact.
         // Register arguments need no re-read: the kernel consumes the saved
         // pt_regs, which this stop pair already saw.
-        if !pending.exec_confirmed && !self.arguments_stable(tid, &pending) {
+        if !self.arguments_stable(tid, &pending) {
             self.summary.loss.argument_snapshot_unstable += 1;
             self.gap(GapReason::ArgumentSnapshotUnstable, OpSet::of(op), Some(1));
             return;
@@ -2564,7 +2572,7 @@ impl Session {
                     .and_then(|task| task.restart.take())
                     .is_some()
                 {
-                    self.inflight = self.inflight.saturating_sub(1);
+                    self.release_slot();
                 }
             }
             _ => self.settle_restart(tid, Verdict::Unknown),
@@ -2583,7 +2591,7 @@ impl Session {
         match verdict {
             Verdict::Restarted => {
                 // The re-entered call is a new entry with its own slot.
-                self.inflight = self.inflight.saturating_sub(1);
+                self.release_slot();
                 self.summary.restarts += 1;
             }
             Verdict::Interrupted => {
@@ -2597,7 +2605,7 @@ impl Session {
                 self.handle_exit(tid, -i64::from(libc::EINTR));
             }
             Verdict::Unknown => {
-                self.inflight = self.inflight.saturating_sub(1);
+                self.release_slot();
                 self.summary.loss.restart_unresolved += 1;
                 self.gap(GapReason::RestartUnresolved, wait.call.ops(), Some(1));
             }
@@ -2611,7 +2619,7 @@ impl Session {
     /// a restart read from the frame, the `EINTR` the program may have seen
     /// was never observed: a gap (J4 W3, R1).
     fn restart_ended(&mut self, wait: RestartWait) {
-        self.inflight = self.inflight.saturating_sub(1);
+        self.release_slot();
         match wait.awaiting {
             Awaiting::Decision | Awaiting::Reentry { by_kernel: true } => {
                 self.summary.restarts_unfinished += 1;
@@ -2660,7 +2668,7 @@ impl Session {
         if let Some(pending) = task.pending {
             // The entry can no longer return, and the gap names the call it
             // was, because the entry is in hand (§11.4).
-            self.inflight = self.inflight.saturating_sub(1);
+            self.release_slot();
             self.summary.loss.abandoned_entries += 1;
             self.gap(GapReason::EntryAbandoned, pending.ops(), Some(1));
         }
@@ -3004,8 +3012,15 @@ impl Session {
             }
             std::thread::sleep(TERMINAL_POLL);
         }
-        if !self.pending.is_empty() {
-            self.summary.loss.lifecycle_dropped += self.pending.len() as u64;
+        // What is still undelivered is lost with the tracer: a result is a
+        // dropped result, as a full queue's is; anything else a lifecycle
+        // fact.
+        for queued in &self.pending {
+            if queued.lifecycle {
+                self.summary.loss.lifecycle_dropped += 1;
+            } else {
+                self.summary.loss.queue_dropped += 1;
+            }
         }
         self.summary
     }
@@ -3054,6 +3069,45 @@ mod tests {
             seize_and_confirm(0, || Ok(())),
             Err(TracerError::Seize { pid: 0, .. } | TracerError::UnsupportedArch)
         ));
+    }
+
+    /// What `finish` cannot deliver is counted by its kind: an undelivered
+    /// result is a dropped result, not a lifecycle fact.
+    #[test]
+    fn undelivered_events_at_the_end_are_counted_by_their_kind() {
+        // A consumer that never reads, and no children to owe.
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        let mut session = Session::new(
+            TracerConfig::default(),
+            tx,
+            Arc::default(),
+            0,
+            Box::new(Kernel::default()),
+        );
+        // The handoff takes the first; the other two stay buffered.
+        for _ in 0..3 {
+            session.emit(TracerEvent::Syscall {
+                pid: 1,
+                start_ticks: None,
+                tid: 1,
+                op: ClosedOp::Mkdir,
+                syscall: "mkdirat",
+                args: Args::default(),
+                ret: 0,
+            });
+        }
+        assert_eq!(session.pending.len(), 2);
+        // Nothing is owed, and the stop flag ends the terminal drain at once.
+        session.owed = Owed::Nothing;
+        let handles = Handles {
+            stop: Arc::new(AtomicBool::new(true)),
+            shutdown_ns: Arc::default(),
+            tid: Arc::default(),
+            handed: Arc::default(),
+        };
+        let summary = session.finish(&handles);
+        assert_eq!(summary.loss.queue_dropped, 2, "the two results");
+        assert_eq!(summary.loss.lifecycle_dropped, 1, "`Finished`");
     }
 
     /// A session whose consumer never reads: the handoff holds one event.
@@ -3237,6 +3291,7 @@ mod tests {
                 restart: None,
             },
         );
+        session.inflight += 1;
         session.handle_exit(self_pid, 3);
         assert_eq!(
             session.summary.filtered_readonly_opens, 1,
@@ -3256,6 +3311,7 @@ mod tests {
         how = libc::O_WRONLY as u64 | libc::O_CREAT as u64;
         assert_ne!(how, 0, "the raced value is what the kernel will apply");
         session.tasks.get_mut(&self_pid).unwrap().pending = Some(InFlight::Closed(pending));
+        session.inflight += 1;
         session.handle_exit(self_pid, 3);
         assert_eq!(
             session.summary.loss.argument_snapshot_unstable, 1,
