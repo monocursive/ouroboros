@@ -609,7 +609,6 @@ mod tests {
             command: None,
             shebangs,
             kernel_argv,
-            monotonic_ns: 1,
         }
     }
 
@@ -1012,7 +1011,6 @@ mod tests {
             pid,
             start_ticks: None, // J4-O
             status: 3 << 8,
-            monotonic_ns: 1,
         };
         assert_eq!(
             record(&mut audit, &target, &exit(LAUNCHER)),
@@ -1054,7 +1052,6 @@ mod tests {
             syscall: "openat",
             args: Args::default(),
             ret: 3,
-            monotonic_ns: 1,
         };
         assert_eq!(record(&mut audit, &target, &syscall), Fact::Nothing);
     }
@@ -1183,7 +1180,6 @@ mod tests {
                 ..Args::default()
             },
             ret,
-            monotonic_ns: 1,
             start_ticks: None,
         }
     }
@@ -1337,7 +1333,6 @@ mod tests {
             })),
             shebangs: Vec::new(),
             kernel_argv: None,
-            monotonic_ns: 1,
         };
         assert_eq!(
             record(&mut audit, &target, &killed(7, "git push --force", false)),

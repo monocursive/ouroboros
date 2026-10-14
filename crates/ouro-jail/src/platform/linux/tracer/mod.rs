@@ -576,7 +576,6 @@ pub enum TracerEvent {
         /// The launcher's birth identity, so a later task that is given this
         /// pid number can be told apart from it (§11.3).
         start_ticks: Option<u64>,
-        monotonic_ns: u64,
     },
     /// A new task was born and is now traced. Internal bookkeeping: §11.2
     /// keeps fork out of the public syscall audit set, so this is not an
@@ -595,7 +594,6 @@ pub enum TracerEvent {
         is_thread: bool,
         /// The new task's birth identity.
         child_start_ticks: Option<u64>,
-        monotonic_ns: u64,
     },
     /// A confirmed exec transition. Never inferred from a syscall entry.
     Exec {
@@ -667,7 +665,6 @@ pub enum TracerEvent {
         /// script confirmation then does not happen, exactly as an
         /// unreadable image does not confirm.
         kernel_argv: Option<Vec<Vec<u8>>>,
-        monotonic_ns: u64,
     },
     /// One completed closed-set call. `ret` is the signed raw return, so a
     /// failure is `-errno`.
@@ -691,7 +688,6 @@ pub enum TracerEvent {
         syscall: &'static str,
         args: Args,
         ret: i64,
-        monotonic_ns: u64,
     },
     /// A thread group that was seen to exec has died. `status` is the raw
     /// wait status, so the consumer derives code or signal from it.
@@ -700,7 +696,6 @@ pub enum TracerEvent {
         /// The birth of process `pid`. See [`TracerEvent::Syscall`].
         start_ticks: Option<u64>,
         status: i32,
-        monotonic_ns: u64,
     },
     /// A child of this process that was never a tracee has exited —
     /// bubblewrap, which lives outside the namespaces it creates, or any
@@ -1327,7 +1322,6 @@ mod tests {
             command: Some(Box::new(command)),
             shebangs: vec![Some(shebang)],
             kernel_argv: Some(kernel_argv),
-            monotonic_ns: 0,
         };
         assert!(event_bytes(&event) >= allocated + size_of::<TracerEvent>());
     }

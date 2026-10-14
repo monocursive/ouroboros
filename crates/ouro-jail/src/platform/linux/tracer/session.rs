@@ -496,7 +496,6 @@ pub(super) fn run(
     session.emit(TracerEvent::Attached {
         pid: launcher,
         start_ticks,
-        monotonic_ns: clock::boottime_ns(),
     });
     session.register(launcher);
     session.owed = Owed::toward(launcher, &*session.procfs);
@@ -1445,7 +1444,6 @@ impl Session {
             // call; a new process starts its own.
             is_thread: child_tgid == parent,
             child_start_ticks,
-            monotonic_ns: clock::boottime_ns(),
         });
     }
 
@@ -1646,7 +1644,6 @@ impl Session {
             command,
             shebangs,
             kernel_argv,
-            monotonic_ns: clock::boottime_ns(),
         });
     }
 
@@ -2254,7 +2251,6 @@ impl Session {
             syscall: pending.entry.name,
             args: pending.args,
             ret: rval,
-            monotonic_ns: clock::boottime_ns(),
         });
     }
 
@@ -2678,7 +2674,6 @@ impl Session {
             pid: task.tgid,
             start_ticks: process.birth,
             status,
-            monotonic_ns: clock::boottime_ns(),
         });
     }
 
@@ -3296,7 +3291,6 @@ mod tests {
             child,
             is_thread: false,
             child_start_ticks: None,
-            monotonic_ns: 0,
         }
     }
 
@@ -3339,7 +3333,6 @@ mod tests {
             pid: 1,
             start_ticks: None,
             status: 0,
-            monotonic_ns: 0,
         });
         let tail: Vec<&TracerEvent> = session
             .pending
@@ -3388,7 +3381,6 @@ mod tests {
             pid: 1,
             start_ticks: None,
             status: 0,
-            monotonic_ns: 0,
         });
         assert_eq!(session.summary.loss.lifecycle_dropped, dropped);
         assert!(session.pending.iter().any(|queued| matches!(
@@ -4094,7 +4086,6 @@ mod tests {
                 ..Default::default()
             },
             ret: 3,
-            monotonic_ns: 0,
         };
         session.emit(syscall());
         session.emit(syscall());
