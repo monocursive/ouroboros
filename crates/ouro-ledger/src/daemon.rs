@@ -332,7 +332,7 @@ fn read_frame_bytes(reader: &mut impl Read) -> std::io::Result<Vec<u8>> {
 
 /// The next request, or the refusal to send before closing a connection
 /// whose frames cannot be trusted. A transport error closes it silently.
-fn next_request(socket: &mut UnixStream) -> std::result::Result<Request, Option<String>> {
+fn next_request(socket: &mut impl Read) -> std::result::Result<Request, Option<String>> {
     let bytes = match read_frame_bytes(socket) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
@@ -367,13 +367,39 @@ fn transient_accept_error(error: &std::io::Error) -> bool {
     )
 }
 
+/// Refuse a connection the writer cannot serve now. A fresh socket's send
+/// buffer holds this small frame, so the acceptor never waits on a client
+/// that does not read.
+fn refuse_busy(mut socket: &UnixStream, reason: &str) {
+    let _ = socket.set_nonblocking(true);
+    let _ = write_frame(
+        &mut socket,
+        &Response::Error {
+            message: format!("writer_busy: {reason}; retry"),
+        },
+    );
+}
+
+/// A connection handler on its own thread. Starting one can fail under
+/// resource pressure, which the acceptor survives.
+type Spawn = fn(Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
+
+fn spawn_thread(handler: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+    thread::Builder::new().spawn(handler).map(drop)
+}
+
 /// Accept until a non-transient failure, which is returned. Connections past
-/// the bound are refused explicitly rather than dropped.
-fn accept_connections(listener: UnixListener, sender: mpsc::SyncSender<Message>) -> LedgerError {
+/// the bound, or whose handler cannot start, are refused explicitly rather
+/// than dropped.
+fn accept_connections(
+    listener: UnixListener,
+    sender: mpsc::SyncSender<Message>,
+    spawn: Spawn,
+) -> LedgerError {
     let count = Arc::new(AtomicUsize::new(0));
     let mut backoff = ACCEPT_BACKOFF;
     loop {
-        let mut socket = match listener.accept() {
+        let socket = match listener.accept() {
             Ok((socket, _)) => {
                 backoff = ACCEPT_BACKOFF;
                 socket
@@ -394,25 +420,29 @@ fn accept_connections(listener: UnixListener, sender: mpsc::SyncSender<Message>)
         }
         if count.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             count.fetch_sub(1, Ordering::AcqRel);
-            // A fresh socket's send buffer holds this small frame, so the
-            // acceptor never waits on a client that does not read.
-            let _ = socket.set_nonblocking(true);
-            let _ = write_frame(
-                &mut socket,
-                &Response::Error {
-                    message: format!(
-                        "writer_busy: the writer already serves {MAX_CONNECTIONS} connections; retry"
-                    ),
-                },
+            refuse_busy(
+                &socket,
+                &format!("the writer already serves {MAX_CONNECTIONS} connections"),
             );
             continue;
         }
-        let sender = sender.clone();
-        let count = count.clone();
-        thread::spawn(move || {
-            serve_connection(socket, &peer, &sender);
+        // Shared, so the connection can still be refused if its thread
+        // cannot start.
+        let socket = Arc::new(socket);
+        let handler = {
+            let (socket, sender, count) = (socket.clone(), sender.clone(), count.clone());
+            move || {
+                serve_connection(&socket, &peer, &sender);
+                count.fetch_sub(1, Ordering::AcqRel);
+            }
+        };
+        if let Err(error) = spawn(Box::new(handler)) {
             count.fetch_sub(1, Ordering::AcqRel);
-        });
+            refuse_busy(&socket, "the writer cannot start a connection handler now");
+            eprintln!("ouro-ledger: refusing a connection after {error}");
+            thread::sleep(backoff);
+            backoff = (backoff * 2).min(ACCEPT_BACKOFF_LIMIT);
+        }
     }
 }
 
@@ -442,7 +472,7 @@ fn ask<T>(
     response.recv_timeout(timeout).map_err(|_| Unanswered::Lost)
 }
 
-fn serve_connection(mut socket: UnixStream, peer: &Peer, sender: &mpsc::SyncSender<Message>) {
+fn serve_connection(mut socket: &UnixStream, peer: &Peer, sender: &mpsc::SyncSender<Message>) {
     let _ = socket.set_read_timeout(Some(TIMEOUT));
     let _ = socket.set_write_timeout(Some(TIMEOUT));
     loop {
@@ -575,7 +605,7 @@ pub fn serve(data: &Path) -> Result<()> {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     fs::File::open(store.root())?.sync_all()?;
     let (sender, receiver) = mpsc::sync_channel::<Message>(MAX_CONNECTIONS);
-    let acceptor = thread::spawn(move || accept_connections(listener, sender));
+    let acceptor = thread::spawn(move || accept_connections(listener, sender, spawn_thread));
     let mut capabilities = BTreeMap::new();
     #[cfg(target_os = "linux")]
     let recovery_peer = peer_identity(crate::os::euid(), std::process::id())?;
@@ -988,6 +1018,57 @@ mod tests {
         // The re-read covers what was accepted when the page was planned.
         assert!(report.local_consistency, "{report:?}");
         assert_eq!(report.events, u64::from(frames));
+    }
+
+    /// A private data directory with a listening writer socket.
+    fn listening(temp: &Path) -> (std::path::PathBuf, UnixListener) {
+        let data = temp.join("data");
+        crate::store::private_directory(&data.join("ledger")).unwrap();
+        let path = data.join("ledger/serve.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        (data, listener)
+    }
+
+    /// Answers every forwarded request with `value`, as a stand-in writer.
+    fn answer_requests(receiver: mpsc::Receiver<Message>, value: Value) {
+        thread::spawn(move || {
+            for message in receiver {
+                if let Work::Request(_, reply) = message.work {
+                    let _ = reply.try_send(Response::Ok {
+                        value: value.clone(),
+                    });
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_connection_whose_thread_cannot_start_is_refused_and_accepting_continues() {
+        static STARTS: AtomicUsize = AtomicUsize::new(0);
+        fn first_start_fails(handler: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+            if STARTS.fetch_add(1, Ordering::AcqRel) == 0 {
+                return Err(std::io::Error::from_raw_os_error(libc::EAGAIN));
+            }
+            spawn_thread(handler)
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (data, listener) = listening(temp.path());
+        let (sender, receiver) = mpsc::sync_channel(MAX_CONNECTIONS);
+        answer_requests(receiver, json!({"protocol":PROTOCOL_VERSION}));
+        thread::spawn(move || accept_connections(listener, sender, first_start_fails));
+        let mut refused = UnixStream::connect(data.join("ledger/serve.sock")).unwrap();
+        refused.set_read_timeout(Some(TIMEOUT)).unwrap();
+        match read_frame::<Response>(&mut refused).unwrap() {
+            Response::Error { message } => assert!(
+                message.starts_with("writer_busy: the writer cannot start a connection handler"),
+                "{message}"
+            ),
+            response => panic!("unexpected {response:?}"),
+        }
+        // The acceptor survived and serves the next connection.
+        Client::connect(&data).unwrap();
+        assert_eq!(STARTS.load(Ordering::Acquire), 2);
     }
 
     #[test]
