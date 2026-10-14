@@ -233,18 +233,40 @@ pub fn parse_operator_config(text: &str) -> Result<OperatorConfig, JailError> {
 
 /// Parses a project `ouro.toml`.
 ///
+/// The `[jail]` table is shared with `config.toml`, so the keys a project
+/// file may not carry are refused here, where the file is read, each with
+/// its exact key path: `jail.profile` and `jail.extends` would choose the
+/// base authority, which §6.3 refuses as widening, and `jail.commands` is
+/// operator-only.
+///
 /// # Errors
-/// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key or a
-/// duplicate key.
+/// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key, a
+/// duplicate key or command rules, and [`ErrorCode::PolicyWidening`] for
+/// `jail.profile` or `jail.extends`.
 pub fn parse_project_config(text: &str) -> Result<ProjectConfig, JailError> {
     let project: ProjectConfig =
         toml::from_str(text).map_err(|error| invalid("jail", error.message().to_owned()))?;
-    if project
-        .jail
-        .as_ref()
-        .is_some_and(|j| !j.commands.is_empty())
-    {
-        return Err(invalid("jail.commands", "command rules are operator-only"));
+    if let Some(jail) = &project.jail {
+        for (key, present) in [
+            ("profile", jail.profile.is_some()),
+            ("extends", jail.extends.is_some()),
+        ] {
+            if present {
+                return Err(JailError::new(
+                    ErrorCode::PolicyWidening,
+                    ErrorStage::Resolving,
+                    Remediation::Configuration,
+                    format!(
+                        "`{key}` may not appear in the project file, which can only narrow \
+                         the operator's policy"
+                    ),
+                )
+                .with_key_path(format!("jail.{key}")));
+            }
+        }
+        if !jail.commands.is_empty() {
+            return Err(invalid("jail.commands", "command rules are operator-only"));
+        }
     }
     Ok(project)
 }

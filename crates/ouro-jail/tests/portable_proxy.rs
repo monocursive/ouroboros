@@ -871,8 +871,6 @@ fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
     let cli = |grant: &str| Layer {
         origin: LayerOrigin::CommandLine,
         base_dir: None,
-        key_prefix: String::new(),
-        narrowing: false,
         delta: PolicyDelta {
             network_allow: vec![grant.to_owned()],
             ..PolicyDelta::default()

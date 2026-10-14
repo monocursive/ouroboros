@@ -85,8 +85,6 @@ impl Workspace {
             layers: vec![Layer {
                 origin: LayerOrigin::ProjectConfig("ouro.toml".to_owned()),
                 base_dir: Some(self.bytes()),
-                key_prefix: "jail.".to_owned(),
-                narrowing: true,
                 delta,
             }],
         };
@@ -647,8 +645,6 @@ fn an_operator_profile_file_may_raise_a_ceiling_like_the_cli() {
         layers: vec![Layer {
             origin: LayerOrigin::OperatorProfileFile("p".to_owned()),
             base_dir: None,
-            key_prefix: String::new(),
-            narrowing: true,
             delta: PolicyDelta {
                 limits: Ceilings {
                     wall: ceiling(32_400_000, "9h"),
@@ -794,22 +790,22 @@ fn p02_weakening_coverage_evidence_or_observation_refuses() {
     );
 }
 
+/// The refusal lives where the file is parsed, so this exercises the
+/// detection itself rather than a delta that already carries the verdict.
 #[test]
 fn p02_a_project_file_may_not_select_a_profile_or_extend_one() {
-    let workspace = Workspace::new();
     for key in ["profile", "extends"] {
-        expect_widening(
-            workspace.resolve_project(
-                ProfileName::Tool,
-                |_| {},
-                PolicyDelta {
-                    forbidden_key: Some(key.to_owned()),
-                    ..PolicyDelta::default()
-                },
-            ),
-            &format!("jail.{key}"),
+        let error = ouro_jail::config::parse_project_config(&format!("[jail]\n{key} = \"tool\"\n"))
+            .expect_err("a project file may only narrow");
+        assert_eq!(error.code, ErrorCode::PolicyWidening, "{key}");
+        assert_eq!(
+            error.key_path.as_deref(),
+            Some(format!("jail.{key}").as_str())
         );
+        assert_eq!(error.exit_code(), 125);
     }
+    ouro_jail::config::parse_project_config("[jail.limits]\nwall = \"1m\"\n")
+        .expect("narrowing keys parse");
 }
 
 // ---------------------------------------------------------------------------
@@ -957,8 +953,6 @@ fn p02_a_trusted_operator_layer_may_still_grant_and_is_recorded() {
         layers: vec![Layer {
             origin: LayerOrigin::CommandLine,
             base_dir: Some(workspace.bytes()),
-            key_prefix: String::new(),
-            narrowing: false,
             delta: read_write(&["/usr"]),
         }],
     };
@@ -1015,8 +1009,6 @@ fn p02_a_trusted_layer_is_not_held_to_the_identity_rule() {
         layers: vec![Layer {
             origin: LayerOrigin::CommandLine,
             base_dir: Some(workspace.bytes()),
-            key_prefix: String::new(),
-            narrowing: false,
             delta: read_only(&["./alias"]),
         }],
     };
@@ -1049,8 +1041,6 @@ fn a_cli_tilde_path_is_cwd_relative_not_home_relative() {
         layers: vec![Layer {
             origin: LayerOrigin::CommandLine,
             base_dir: Some(cwd),
-            key_prefix: String::new(),
-            narrowing: false,
             delta: read_write(&["~/x"]),
         }],
     };
@@ -1128,8 +1118,6 @@ fn an_operator_file_tilde_path_is_the_home_or_refuses() {
     let config = Layer {
         origin: LayerOrigin::OperatorConfig("config.toml".to_owned()),
         base_dir: Some(b"/operator/config".to_vec()),
-        key_prefix: "jail.".to_owned(),
-        narrowing: false,
         delta: read_only(&["~/tools"]),
     };
     let error = resolve(config, None).expect_err("no home, no expansion");

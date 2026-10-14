@@ -175,15 +175,11 @@ fn resolve_fixture(options: &FixtureOptions) -> Resolved {
             Layer {
                 origin: LayerOrigin::OperatorProfileFile(provenance),
                 base_dir: Some(profile_directory),
-                key_prefix: String::new(),
-                narrowing: true,
                 delta,
             },
             Layer {
                 origin: LayerOrigin::CommandLine,
                 base_dir: None,
-                key_prefix: String::new(),
-                narrowing: false,
                 delta: PolicyDelta {
                     deny_read: cli_deny,
                     ..PolicyDelta::default()

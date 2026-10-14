@@ -243,8 +243,6 @@ fn resolve_cli_path(base_dir: &[u8], raw: &[u8]) -> Result<Vec<u8>, ouro_jail::r
         layers: vec![Layer {
             origin: LayerOrigin::CommandLine,
             base_dir: Some(base_dir.to_vec()),
-            key_prefix: String::new(),
-            narrowing: false,
             delta: PolicyDelta {
                 read_write: vec![raw.to_vec()],
                 ..PolicyDelta::default()

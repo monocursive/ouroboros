@@ -36,8 +36,6 @@ fn project(delta: PolicyDelta, workspace: &str) -> Layer {
     Layer {
         origin: LayerOrigin::ProjectConfig("ouro.toml".to_owned()),
         base_dir: Some(workspace.as_bytes().to_vec()),
-        key_prefix: "jail.".to_owned(),
-        narrowing: true,
         delta,
     }
 }

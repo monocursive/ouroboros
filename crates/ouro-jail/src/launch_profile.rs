@@ -901,8 +901,6 @@ pub fn network_layer(launch: &LaunchProfile) -> Option<Layer> {
             .file_path
             .parent()
             .map(|parent| parent.as_os_str().as_bytes().to_vec()),
-        key_prefix: "launch.".to_owned(),
-        narrowing: false,
         delta: PolicyDelta {
             read_only: launch
                 .filesystem

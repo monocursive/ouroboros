@@ -734,6 +734,33 @@ impl LayerOrigin {
         matches!(self, LayerOrigin::ProjectConfig(_))
     }
 
+    /// Whether §6.3 narrowing applies: the layer may only remove authority
+    /// from what the layers before it established. A selected operator
+    /// profile file narrows its built-in base, and the workspace-root
+    /// `ouro.toml` is the contained party's own file.
+    #[must_use]
+    pub fn narrows(&self) -> bool {
+        matches!(
+            self,
+            LayerOrigin::OperatorProfileFile(_) | LayerOrigin::ProjectConfig(_)
+        )
+    }
+
+    /// The prefix of the exact key paths this layer's refusals name: a
+    /// profile file's keys are top-level, `config.toml` and `ouro.toml` keep
+    /// theirs under `[jail]`, a launch profile's are `launch.*`, and the
+    /// environment and command line name their own variables and flags.
+    #[must_use]
+    pub fn key_prefix(&self) -> &'static str {
+        match self {
+            LayerOrigin::OperatorConfig(_) | LayerOrigin::ProjectConfig(_) => "jail.",
+            LayerOrigin::LaunchProfile(_) => "launch.",
+            LayerOrigin::OperatorProfileFile(_)
+            | LayerOrigin::Environment
+            | LayerOrigin::CommandLine => "",
+        }
+    }
+
     /// A safe label for provenance records.
     #[must_use]
     pub fn label(&self) -> String {
@@ -771,21 +798,17 @@ pub struct PolicyDelta {
     pub observe: Option<ObserveMode>,
     /// `observation.evidence`.
     pub evidence: Option<EvidenceMode>,
-    /// A key this layer is forbidden to carry, already detected by the parser.
-    pub forbidden_key: Option<String>,
 }
 
-/// One configuration layer in §6.2 order.
+/// One configuration layer in §6.2 order. Whether it narrows and how its key
+/// paths are spelled follow from its origin ([`LayerOrigin::narrows`],
+/// [`LayerOrigin::key_prefix`]), so a call site cannot get them wrong.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Layer {
     /// Where it came from.
     pub origin: LayerOrigin,
     /// The directory relative paths in this layer resolve against, if any.
     pub base_dir: Option<Vec<u8>>,
-    /// The key prefix used when reporting an exact key path.
-    pub key_prefix: String,
-    /// Whether §6.3 narrowing applies to this layer.
-    pub narrowing: bool,
     /// The layer's delta.
     pub delta: PolicyDelta,
 }
@@ -1253,14 +1276,8 @@ fn apply_layer(
     grants: &mut Vec<crate::records::Grant>,
     layer: &Layer,
 ) -> Result<(), JailError> {
-    let prefix = &layer.key_prefix;
-    if let Some(key) = &layer.delta.forbidden_key {
-        return Err(refuse(
-            ErrorCode::PolicyWidening,
-            &format!("{prefix}{key}"),
-            format!("`{key}` may not appear in {}", layer.origin.label()),
-        ));
-    }
+    let prefix = layer.origin.key_prefix();
+    let narrowing = layer.origin.narrows();
 
     // Narrowing decisions compare against the authority as it was before this
     // layer, so one layer cannot bootstrap itself into wider authority.
@@ -1333,7 +1350,7 @@ fn apply_layer(
                     ));
                 }
             }
-            if layer.narrowing {
+            if narrowing {
                 let mode = base.mode_at(&reference);
                 let allowed = match kind {
                     "read_write" => mode == AccessMode::ReadWrite,
@@ -1376,7 +1393,7 @@ fn apply_layer(
 
     if let Some(coverage) = layer.delta.protected_coverage {
         let key = format!("{prefix}filesystem.protected_coverage");
-        if layer.narrowing && coverage < base.protected_coverage {
+        if narrowing && coverage < base.protected_coverage {
             return Err(refuse(
                 ErrorCode::PolicyWidening,
                 &key,
@@ -1398,7 +1415,7 @@ fn apply_layer(
 
     if let Some(mode) = layer.delta.network_mode {
         let key = format!("{prefix}network.mode");
-        if layer.narrowing && mode.authority_rank() > base.network_mode.authority_rank() {
+        if narrowing && mode.authority_rank() > base.network_mode.authority_rank() {
             return Err(refuse(
                 ErrorCode::PolicyWidening,
                 &key,
@@ -1418,9 +1435,7 @@ fn apply_layer(
         });
     }
 
-    if layer.narrowing
-        && (layer.delta.network_allow_present || !layer.delta.network_allow.is_empty())
-    {
+    if narrowing && (layer.delta.network_allow_present || !layer.delta.network_allow.is_empty()) {
         authority.network_allow.clear();
     }
     for raw in &layer.delta.network_allow {
@@ -1439,17 +1454,13 @@ fn apply_layer(
             ));
         }
         let rule = HostRule::parse(raw).map_err(|error| {
-            let code = if layer.narrowing {
+            let code = if narrowing {
                 // The subset relationship is unknown, which §6.3 refuses.
                 ErrorCode::PolicyWidening
             } else {
                 ErrorCode::InvalidConfig
             };
-            let prefix = if layer.narrowing {
-                "unknown subset: "
-            } else {
-                ""
-            };
+            let prefix = if narrowing { "unknown subset: " } else { "" };
             refuse(code, &key, format!("{prefix}{error}"))
         })?;
         if layer.origin.is_operator_grant() {
@@ -1459,7 +1470,7 @@ fn apply_layer(
                 by: "operator".to_owned(),
             });
         }
-        if layer.narrowing && !base.network_allow.iter().any(|base| base.covers(&rule)) {
+        if narrowing && !base.network_allow.iter().any(|base| base.covers(&rule)) {
             return Err(refuse(
                 ErrorCode::PolicyWidening,
                 &key,
@@ -1520,7 +1531,7 @@ fn apply_layer(
 
     if let Some(mode) = layer.delta.observe {
         let key = format!("{prefix}observation.mode");
-        if layer.narrowing && mode == ObserveMode::Off && base.observation.mode == ObserveMode::On {
+        if narrowing && mode == ObserveMode::Off && base.observation.mode == ObserveMode::On {
             return Err(refuse(
                 ErrorCode::PolicyWidening,
                 &key,
@@ -1537,7 +1548,7 @@ fn apply_layer(
 
     if let Some(evidence) = layer.delta.evidence {
         let key = format!("{prefix}observation.evidence");
-        if layer.narrowing
+        if narrowing
             && evidence == EvidenceMode::BestEffort
             && base.observation.evidence == EvidenceMode::Strict
         {
@@ -1714,6 +1725,26 @@ mod tests {
         PathRef {
             root,
             path: NativeString::Text(path.to_owned()),
+        }
+    }
+
+    /// What each §6.2 layer may do follows from where it came from: only the
+    /// operator profile file and the project file narrow, only operator
+    /// files expand `~/`, and the key prefixes match the files' own tables.
+    #[test]
+    fn layer_behaviour_follows_its_origin() {
+        let name = || "x".to_owned();
+        for (origin, narrows, prefix, home) in [
+            (LayerOrigin::OperatorProfileFile(name()), true, "", true),
+            (LayerOrigin::OperatorConfig(name()), false, "jail.", true),
+            (LayerOrigin::LaunchProfile(name()), false, "launch.", true),
+            (LayerOrigin::Environment, false, "", false),
+            (LayerOrigin::CommandLine, false, "", false),
+            (LayerOrigin::ProjectConfig(name()), true, "jail.", false),
+        ] {
+            assert_eq!(origin.narrows(), narrows, "{origin:?}");
+            assert_eq!(origin.key_prefix(), prefix, "{origin:?}");
+            assert_eq!(origin.expands_home(), home, "{origin:?}");
         }
     }
 

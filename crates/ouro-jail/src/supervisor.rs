@@ -358,8 +358,6 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
             layers.push(Layer {
                 origin: LayerOrigin::OperatorProfileFile(name.clone()),
                 base_dir,
-                key_prefix: String::new(),
-                narrowing: true,
                 delta,
             });
             (base, name)
@@ -403,8 +401,6 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
             // §6.2: apply paths relative to the file containing them, and
             // `config.toml` sits in `config_dir` itself — not its parent.
             base_dir: Some(os_bytes(&config_dir)),
-            key_prefix: "jail.".to_owned(),
-            narrowing: false,
             delta,
         });
     }
@@ -420,8 +416,6 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         layers.push(Layer {
             origin: LayerOrigin::Environment,
             base_dir: None,
-            key_prefix: String::new(),
-            narrowing: false,
             delta: PolicyDelta {
                 observe: ctx.env_settings.observe,
                 evidence: ctx.env_settings.evidence,
@@ -458,8 +452,6 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         layers.push(Layer {
             origin: LayerOrigin::CommandLine,
             base_dir: Some(os_bytes(&ctx.cwd)),
-            key_prefix: String::new(),
-            narrowing: false,
             delta: cli_delta,
         });
     }
@@ -485,24 +477,16 @@ pub fn resolve_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, JailError>
         let project = config::parse_project_config(&text)?;
         if let Some(section) = project.jail {
             config::check_schema("jail.schema", section.schema.as_deref())?;
-            let mut delta = config::delta_from_sections(
+            let delta = config::delta_from_sections(
                 "jail.",
                 &section.filesystem,
                 &section.network,
                 &section.limits,
                 &section.observation,
             )?;
-            // §6.3: `profile` and `extends` are forbidden in project config.
-            if section.profile.is_some() {
-                delta.forbidden_key = Some("profile".to_owned());
-            } else if section.extends.is_some() {
-                delta.forbidden_key = Some("extends".to_owned());
-            }
             layers.push(Layer {
                 origin: LayerOrigin::ProjectConfig("ouro.toml".to_owned()),
                 base_dir: Some(os_bytes(&workspace)),
-                key_prefix: "jail.".to_owned(),
-                narrowing: true,
                 delta,
             });
         }
