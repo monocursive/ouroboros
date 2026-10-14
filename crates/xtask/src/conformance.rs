@@ -102,13 +102,15 @@ pub fn rsh_string(target: &Target) -> String {
 }
 
 /// What the remote suite needs from the tree, as git pathspecs: the
-/// workspace, the specifications its tests read, and the benchmark scripts
-/// and fixtures the release tests run. Everything else (comparison corpora,
-/// retained results, the website, the fleet) stays local: the tree is copied
-/// on every run.
+/// workspace, the license the package test puts in every archive
+/// (`dist/package.py`), the specifications its tests read, and the benchmark
+/// scripts and fixtures the release tests run. Everything else (comparison
+/// corpora, retained results, the website, the fleet) stays local: the tree
+/// is copied on every run.
 pub const SOURCE_PATHSPECS: &[&str] = &[
     "Cargo.toml",
     "Cargo.lock",
+    "LICENSE",
     "rust-toolchain.toml",
     ".cargo",
     "crates",
@@ -3496,6 +3498,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let wanted = [
             "Cargo.toml",
             "Cargo.lock",
+            "LICENSE",
             "rust-toolchain.toml",
             ".cargo/config.toml",
             "crates/a/src/lib.rs",
