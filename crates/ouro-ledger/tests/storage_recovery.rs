@@ -481,7 +481,14 @@ fn history_lost_below_its_manifest_anchor_refuses_every_snapshot() {
         ["canonical stream truncated before its segment manifest anchor"]
     );
     // Without a durable anchor even the surviving prefix cannot be resumed.
-    assert!(store.read(&request).is_err());
+    let error = store
+        .read(&request)
+        .expect_err("no resume without an anchor")
+        .to_string();
+    assert!(
+        error.contains("canonical snapshot was truncated"),
+        "{error}"
+    );
     request.cursor = None;
     assert_eq!(store.read(&request).unwrap().stream_status, "corrupt");
 }
