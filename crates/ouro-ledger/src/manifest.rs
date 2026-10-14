@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    faults::{self, Point, Replaced, Step},
     protocol::{LedgerError, Result, read_bounded, sha256_digest},
     schemas,
 };
@@ -182,17 +183,16 @@ pub(crate) fn write(directory: &Path, manifest: &Manifest) -> Result<()> {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&temp)?;
-        #[cfg(test)]
-        crate::faults::hit("manifest.before_write")?;
+        faults::hit(Point::Replace(Replaced::Manifest, Step::BeforeWrite))?;
         file.write_all(&bytes)?;
-        #[cfg(test)]
-        crate::faults::hit("manifest.before_sync")?;
+        faults::hit(Point::Replace(Replaced::Manifest, Step::BeforeSync))?;
         file.sync_all()?;
-        #[cfg(test)]
-        crate::faults::hit("manifest.before_rename")?;
+        faults::hit(Point::Replace(Replaced::Manifest, Step::BeforeRename))?;
         fs::rename(&temp, &target)?;
-        #[cfg(test)]
-        crate::faults::hit("manifest.before_directory_sync")?;
+        faults::hit(Point::Replace(
+            Replaced::Manifest,
+            Step::BeforeDirectorySync,
+        ))?;
         File::open(directory)?.sync_all()?;
         Ok(())
     })();

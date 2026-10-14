@@ -27,8 +27,9 @@ manifest write/sync/rename/directory sync, and the final directory sync before
 and after completion. The native matrix adds the point immediately before a
 successful daemon reply is sent. Each case proves its hook was reached.
 
-All instrumentation is compiled under `cfg(test)` into the library test
-executable. Production binaries have no fault configuration, environment
+Production code names each fault point, but only the library test
+executable can arm one: in every other build each check is an empty inline
+function. Production binaries have no fault configuration, environment
 switch or fault IPC request. Native cases use the production ledger launch
 owner and jail, then restart the production writer before replay. The test
 worker is a subprocess mode of the crash test; no test is marked ignored.

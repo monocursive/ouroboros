@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    faults::{self, Plan},
+    faults::{self, Plan, Point, Replaced, Scope, Step},
     store::Store,
 };
 use ouro_records::records;
@@ -14,28 +14,28 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-const SAVE_POINTS: [&str; 8] = [
-    "snapshot.before_temp_unlink",
-    "snapshot.before_open",
-    "snapshot.before_write",
-    "snapshot.partial_write",
-    "snapshot.before_file_sync",
-    "snapshot.before_rename",
-    "snapshot.before_directory_sync",
-    "snapshot.after_directory_sync",
+const SAVE_POINTS: [Point; 8] = [
+    Point::Replace(Replaced::Journal, Step::BeforeTempUnlink),
+    Point::Replace(Replaced::Journal, Step::BeforeOpen),
+    Point::Replace(Replaced::Journal, Step::BeforeWrite),
+    Point::Replace(Replaced::Journal, Step::PartialWrite),
+    Point::Replace(Replaced::Journal, Step::BeforeSync),
+    Point::Replace(Replaced::Journal, Step::BeforeRename),
+    Point::Replace(Replaced::Journal, Step::BeforeDirectorySync),
+    Point::Replace(Replaced::Journal, Step::AfterDirectorySync),
 ];
-const REMOVE_POINTS: [&str; 4] = [
-    "cleanup.before_temp_unlink",
-    "cleanup.before_state_unlink",
-    "cleanup.before_directory_sync",
-    "cleanup.after_directory_sync",
+const REMOVE_POINTS: [Point; 4] = [
+    Point::CleanupBeforeTempUnlink,
+    Point::CleanupBeforeStateUnlink,
+    Point::CleanupBeforeDirectorySync,
+    Point::CleanupAfterDirectorySync,
 ];
-const SAVE_KINDS: [&str; 5] = [
-    "pending.create",
-    "pending.outage",
-    "pending.source",
-    "pending.completion",
-    "pending.clear",
+const SAVE_KINDS: [Scope; 5] = [
+    Scope::PendingCreate,
+    Scope::PendingOutage,
+    Scope::PendingSource,
+    Scope::PendingCompletion,
+    Scope::PendingClear,
 ];
 const WORKER_ENV: &str = "OURO_PENDING_TEST_WORKER";
 const WORKER: &str =
@@ -54,18 +54,18 @@ fn completion(run: &RunRecord) -> Completion {
         control,
     }
 }
-fn setup(kind: &str) -> (tempfile::TempDir, Store, RunRecord) {
+fn setup(kind: Scope) -> (tempfile::TempDir, Store, RunRecord) {
     let (temp, store, run) = tests::fixture("best-effort", true);
     let dir = store.root().join(&run.run_id);
     let journal = Journal::open(&dir).unwrap();
     let mut state = journal.read(&run).unwrap();
     match kind {
-        "pending.create" => fs::remove_file(dir.join(STATE)).unwrap(),
-        "pending.source" | "pending.clear" => {
+        Scope::PendingCreate => fs::remove_file(dir.join(STATE)).unwrap(),
+        Scope::PendingSource | Scope::PendingClear => {
             state.push(tests::event(&run, 1)).unwrap();
             journal.save(&state).unwrap();
         }
-        "pending.completion" | "pending.remove" => {
+        Scope::PendingCompletion | Scope::PendingRemove => {
             let done = completion(&run);
             state
                 .push(
@@ -80,55 +80,58 @@ fn setup(kind: &str) -> (tempfile::TempDir, Store, RunRecord) {
                     .unwrap(),
                 )
                 .unwrap();
-            if kind == "pending.remove" {
+            if kind == Scope::PendingRemove {
                 state.completion = Some(done);
             }
             journal.save(&state).unwrap();
         }
-        "pending.outage" => {}
+        Scope::PendingOutage => {}
         _ => unreachable!(),
     }
     fs::write(dir.join(NEXT), b"stale temporary evidence has no authority").unwrap();
     drop(journal);
     (temp, store, run)
 }
-fn perform(store: &mut Store, run: &RunRecord, kind: &str) -> Result<()> {
+fn perform(store: &mut Store, run: &RunRecord, kind: Scope) -> Result<()> {
     let owner = run.owner.as_ref().unwrap();
-    if kind == "pending.clear" || kind == "pending.remove" {
+    if kind == Scope::PendingClear || kind == Scope::PendingRemove {
         return store
             .reconcile_pending(&run.run_id, owner, &|_| true)
             .map(|_| ());
     }
     let journal = Journal::open(&store.root().join(&run.run_id))?;
-    if kind == "pending.create" {
+    if kind == Scope::PendingCreate {
         return journal.create(run, owner);
     }
     let mut state = journal.read(run)?;
     match kind {
-        "pending.outage" => state.outage()?,
-        "pending.source" => state.push(tests::event(run, 2))?,
-        "pending.completion" => state.completion = Some(completion(run)),
+        Scope::PendingOutage => state.outage()?,
+        Scope::PendingSource => state.push(tests::event(run, 2))?,
+        Scope::PendingCompletion => state.completion = Some(completion(run)),
         _ => unreachable!(),
     }
     journal.save(&state)
 }
-fn cases() -> impl Iterator<Item = (&'static str, &'static str)> {
+fn cases() -> impl Iterator<Item = (Scope, Point)> {
     SAVE_KINDS
         .into_iter()
         .flat_map(|kind| SAVE_POINTS.into_iter().map(move |point| (kind, point)))
         .chain(
             REMOVE_POINTS
                 .into_iter()
-                .map(|point| ("pending.remove", point)),
+                .map(|point| (Scope::PendingRemove, point)),
         )
 }
-fn published(point: &str) -> bool {
+fn published(point: Point) -> bool {
     matches!(
         point,
-        "snapshot.before_directory_sync" | "snapshot.after_directory_sync"
+        Point::Replace(
+            Replaced::Journal,
+            Step::BeforeDirectorySync | Step::AfterDirectorySync
+        )
     )
 }
-fn recover(data: &Path, run: &RunRecord, kind: &str, point: &str, before: &[u8]) {
+fn recover(data: &Path, run: &RunRecord, kind: Scope, point: Point, before: &[u8]) {
     let mut store = Store::open(data).unwrap();
     let events = store.root().join(&run.run_id).join("events-0001.ndjson");
     assert!(fs::read(&events).unwrap().starts_with(before));
@@ -138,13 +141,16 @@ fn recover(data: &Path, run: &RunRecord, kind: &str, point: &str, before: &[u8])
     let _ = store.reconcile_pending(&run.run_id, owner, &|_| false);
     store.settle_orphans(owner, |_| false).unwrap();
     let recovered = store.show(&run.run_id).unwrap();
-    let expected = if kind == "pending.remove" || (kind == "pending.completion" && published(point))
-    {
-        "settled"
-    } else {
-        "outcome_unknown"
-    };
-    assert_eq!(recovered.state, expected, "{kind}/{point}: {recovered:?}");
+    let expected =
+        if kind == Scope::PendingRemove || (kind == Scope::PendingCompletion && published(point)) {
+            "settled"
+        } else {
+            "outcome_unknown"
+        };
+    assert_eq!(
+        recovered.state, expected,
+        "{kind:?}/{point:?}: {recovered:?}"
+    );
     let accepted = fs::read(&events).unwrap();
     assert!(accepted.starts_with(before));
     let _ = store.reconcile_pending(&run.run_id, owner, &|_| false);
@@ -152,7 +158,7 @@ fn recover(data: &Path, run: &RunRecord, kind: &str, point: &str, before: &[u8])
     assert_eq!(
         fs::read(&events).unwrap(),
         accepted,
-        "recovery duplicated history: {kind}/{point}"
+        "recovery duplicated history: {kind:?}/{point:?}"
     );
     assert_eq!(store.runs().len(), 1);
     assert_eq!(store.runs()[0].attempt_id, run.attempt_id);
@@ -167,17 +173,19 @@ fn journal_io_error_matrix_preserves_previous_or_complete_replacements() {
         let old = fs::read(dir.join(STATE)).unwrap_or_default();
         let canonical = fs::read(dir.join("events-0001.ndjson")).unwrap();
         let marker = temp.path().join("fault");
-        faults::arm(Plan {
-            kind: kind.into(),
-            point: point.into(),
-            action: "error".into(),
-            marker: marker.clone(),
-        });
-        assert!(perform(&mut store, &run, kind).is_err(), "{kind}/{point}");
+        faults::arm(Plan::error(kind, point, marker.clone()));
+        assert!(
+            perform(&mut store, &run, kind).is_err(),
+            "{kind:?}/{point:?}"
+        );
         faults::disarm();
-        assert!(marker.exists(), "hook was not reached: {kind}/{point}");
-        if kind != "pending.remove" && !published(point) {
-            assert_eq!(fs::read(dir.join(STATE)).unwrap(), old, "{kind}/{point}");
+        assert!(marker.exists(), "hook was not reached: {kind:?}/{point:?}");
+        if kind != Scope::PendingRemove && !published(point) {
+            assert_eq!(
+                fs::read(dir.join(STATE)).unwrap(),
+                old,
+                "{kind:?}/{point:?}"
+            );
         }
         drop(store);
         recover(&temp.path().join("data"), &run, kind, point, &canonical);
@@ -186,19 +194,17 @@ fn journal_io_error_matrix_preserves_previous_or_complete_replacements() {
 
 #[test]
 fn recovery_sync_errors_do_not_import_or_acknowledge_a_complete_journal() {
-    for point in ["read.before_file_sync", "read.before_directory_sync"] {
-        let (temp, mut store, run) = setup("pending.remove");
+    for point in [
+        Point::JournalReadBeforeFileSync,
+        Point::JournalReadBeforeDirectorySync,
+    ] {
+        let (temp, mut store, run) = setup(Scope::PendingRemove);
         let dir = store.root().join(&run.run_id);
         let canonical = fs::read(dir.join("events-0001.ndjson")).unwrap();
         let pending = fs::read(dir.join(STATE)).unwrap();
         for attempt in 0..2 {
             let marker = temp.path().join(format!("fault-{attempt}"));
-            faults::arm(Plan {
-                kind: "pending.read".into(),
-                point: point.into(),
-                action: "error".into(),
-                marker: marker.clone(),
-            });
+            faults::arm(Plan::error(Scope::PendingRead, point, marker.clone()));
             assert!(
                 store
                     .reconcile_pending(&run.run_id, run.owner.as_ref().unwrap(), &|_| false)
@@ -213,7 +219,7 @@ fn recovery_sync_errors_do_not_import_or_acknowledge_a_complete_journal() {
         recover(
             &temp.path().join("data"),
             &run,
-            "pending.remove",
+            Scope::PendingRemove,
             point,
             &canonical,
         );
@@ -222,7 +228,7 @@ fn recovery_sync_errors_do_not_import_or_acknowledge_a_complete_journal() {
 
 #[test]
 fn cleanup_keeps_the_same_mutex_inode_for_future_openers() {
-    let (_temp, store, run) = setup("pending.outage");
+    let (_temp, store, run) = setup(Scope::PendingOutage);
     let dir = store.root().join(&run.run_id);
     let old_lock = File::open(dir.join(LOCK)).unwrap();
     let journal = Journal::open(&dir).unwrap();
@@ -240,7 +246,7 @@ fn cleanup_keeps_the_same_mutex_inode_for_future_openers() {
 
 #[test]
 fn a_dropped_journal_unlocks_even_while_a_copy_of_its_descriptor_lives() {
-    let (_temp, store, run) = setup("pending.outage");
+    let (_temp, store, run) = setup(Scope::PendingOutage);
     let dir = store.root().join(&run.run_id);
     let journal = Journal::open(&dir).unwrap();
     // A child forked by another thread holds a copy until it execs.
@@ -314,9 +320,9 @@ fn dispatch_worker(config: Value) {
     let mut store = Store::open(data).unwrap();
     let run = store.runs().remove(0);
     let plan: Plan = serde_json::from_value(config["plan"].clone()).unwrap();
-    let kind = plan.kind.clone();
+    let kind = plan.scope.expect("a matrix plan names its operation");
     faults::arm(plan);
-    perform(&mut store, &run, &kind).unwrap();
+    perform(&mut store, &run, kind).unwrap();
     panic!("worker missed its SIGKILL hook");
 }
 
@@ -333,12 +339,8 @@ fn journal_sigkill_matrix_preserves_pending_and_canonical_history() {
         let old = fs::read(dir.join(STATE)).unwrap_or_default();
         let canonical = fs::read(dir.join("events-0001.ndjson")).unwrap();
         drop(store);
-        let plan = Plan {
-            kind: kind.into(),
-            point: point.into(),
-            action: "kill".into(),
-            marker: temp.path().join("fault"),
-        };
+        let marker = temp.path().join("fault");
+        let plan = Plan::kill(kind, point, marker.clone());
         let mut process = Process::spawn(
             &mut worker(json!({"data":data,"plan":plan})),
             temp.path().join("worker.log"),
@@ -346,12 +348,16 @@ fn journal_sigkill_matrix_preserves_pending_and_canonical_history() {
         assert_eq!(
             process.finish().signal(),
             Some(libc::SIGKILL),
-            "{kind}/{point}: {}",
+            "{kind:?}/{point:?}: {}",
             fs::read_to_string(&process.log).unwrap()
         );
-        assert!(plan.marker.exists());
-        if kind != "pending.remove" && !published(point) {
-            assert_eq!(fs::read(dir.join(STATE)).unwrap(), old, "{kind}/{point}");
+        assert!(marker.exists());
+        if kind != Scope::PendingRemove && !published(point) {
+            assert_eq!(
+                fs::read(dir.join(STATE)).unwrap(),
+                old,
+                "{kind:?}/{point:?}"
+            );
         }
         recover(&data, &run, kind, point, &canonical);
     }

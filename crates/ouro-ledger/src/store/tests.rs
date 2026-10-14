@@ -1,4 +1,5 @@
 use super::*;
+use crate::faults::{Plan, Point, Replaced, Scope, Step};
 mod redaction;
 
 /// The call failed with the refusal named by `expected`, not with some
@@ -74,12 +75,12 @@ fn prepared(run: &RunRecord) -> Value {
 fn pending_recovery_keeps_the_journal_through_canonical_persistence_failures() {
     use crate::pending::Journal;
     for fault in [
-        Fault::BeforeWrite,
-        Fault::PartialWrite,
-        Fault::EventSync,
-        Fault::Projection,
-        Fault::Manifest,
-        Fault::DirectorySync,
+        Point::EventBeforeWrite,
+        Point::EventPartialWrite,
+        Point::EventBeforeSync,
+        Point::Replace(Replaced::Projection, Step::BeforeWrite),
+        Point::Replace(Replaced::Manifest, Step::BeforeWrite),
+        Point::AppendBeforeDirectorySync,
     ] {
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path().join("data");
@@ -119,17 +120,18 @@ fn pending_recovery_keeps_the_journal_through_canonical_persistence_failures() {
         journal.save(&pending).unwrap();
         let before = fs::read(dir.join("owner-pending.json")).unwrap();
         drop(journal);
-        store.fault = Some(fault);
+        faults::arm(Plan::fail(fault));
         assert!(
             store
                 .reconcile_pending(&run.run_id, &peer(), &|_| true)
                 .is_err()
         );
+        faults::disarm();
         assert_eq!(fs::read(dir.join("owner-pending.json")).unwrap(), before);
         drop(store);
         let mut store = Store::open(&data).unwrap();
         let result = store.reconcile_pending(&run.run_id, &peer(), &|_| true);
-        if matches!(fault, Fault::PartialWrite) {
+        if matches!(fault, Point::EventPartialWrite) {
             assert_refused(
                 result,
                 "ambiguous canonical history refuses pending recovery",
@@ -376,14 +378,14 @@ fn retention_holds_replay_without_reapplying_an_old_intent_after_release() {
 fn retention_faults_preserve_history_and_recover_one_original_receipt() {
     for release in [false, true] {
         for fault in [
-            Fault::BeforeWrite,
-            Fault::RotationCreated,
-            Fault::RotationSynced,
-            Fault::PartialWrite,
-            Fault::EventSync,
-            Fault::Projection,
-            Fault::Manifest,
-            Fault::DirectorySync,
+            Point::EventBeforeWrite,
+            Point::RotationCreated,
+            Point::RotationSynced,
+            Point::EventPartialWrite,
+            Point::EventBeforeSync,
+            Point::Replace(Replaced::Projection, Step::BeforeWrite),
+            Point::Replace(Replaced::Manifest, Step::BeforeWrite),
+            Point::AppendBeforeDirectorySync,
         ] {
             let (temp, mut store, run) = create();
             if release {
@@ -391,7 +393,7 @@ fn retention_faults_preserve_history_and_recover_one_original_receipt() {
             }
             store.segment_limit = 1;
             let before = store.show(&run.run_id).unwrap().chain.head_seq;
-            store.fault = Some(fault);
+            faults::arm(Plan::fail(fault));
             let apply = |store: &mut Store| {
                 if release {
                     store.release(&run.run_id, "retry", &peer())
@@ -400,7 +402,7 @@ fn retention_faults_preserve_history_and_recover_one_original_receipt() {
                 }
             };
             assert!(apply(&mut store).is_err());
-            store.fault = None;
+            faults::disarm();
             assert!(
                 apply(&mut store).is_err(),
                 "uncertain writes cannot acknowledge before restart"
@@ -419,7 +421,7 @@ fn retention_faults_preserve_history_and_recover_one_original_receipt() {
             for (name, bytes) in &history {
                 assert_eq!(&fs::read(directory.join(name)).unwrap(), bytes);
             }
-            if matches!(fault, Fault::PartialWrite) {
+            if matches!(fault, Point::EventPartialWrite) {
                 assert_refused(
                     apply(&mut store),
                     "stream is poisoned; no dependent dispatch or sequence reuse",
@@ -738,14 +740,14 @@ fn capture_expiry_preserves_canonical_bytes_queries_replays_and_later_history_gc
 #[test]
 fn capture_expiry_recovers_each_deletion_boundary_and_never_removes_history() {
     for fault in [
-        Fault::GcIntentWrite,
-        Fault::GcIntentSync,
-        Fault::GcBeforeUnlink,
-        Fault::GcAfterUnlink,
-        Fault::GcDirectorySync,
-        Fault::GcCompletion,
-        Fault::GcCompletionSync,
-        Fault::GcProjection,
+        Point::GcIntentWrite,
+        Point::GcIntentSync,
+        Point::GcBeforeUnlink,
+        Point::GcAfterUnlink,
+        Point::GcDirectorySync,
+        Point::GcCompletion,
+        Point::GcCompletionSync,
+        Point::GcProjection,
     ] {
         let (temp, mut store, run) =
             gc_fixture_captures(&[("stdout", b"private-capture"), ("stderr", b"second")]);
@@ -755,21 +757,22 @@ fn capture_expiry_recovers_each_deletion_boundary_and_never_removes_history() {
             .iter()
             .map(|n| fs::read(directory.join(n)).unwrap())
             .collect();
-        store.fault = Some(fault);
+        faults::arm(Plan::fail(fault));
         let result = store
             .gc_policy_at(capture_policy(), None, 100, &peer(), gc_future())
             .unwrap();
+        faults::disarm();
         assert_eq!(result.failed.len(), 1);
         if matches!(
             fault,
-            Fault::GcIntentWrite | Fault::GcIntentSync | Fault::GcBeforeUnlink
+            Point::GcIntentWrite | Point::GcIntentSync | Point::GcBeforeUnlink
         ) {
             assert_eq!(
                 fs::read(directory.join("artifacts/stdout.bin")).unwrap(),
                 b"private-capture"
             );
         }
-        if matches!(fault, Fault::GcIntentSync | Fault::GcBeforeUnlink) {
+        if matches!(fault, Point::GcIntentSync | Point::GcBeforeUnlink) {
             assert_refused(
                 store.hold(&run.run_id, "during-expiry", &peer()),
                 "capture pruning is incomplete; retry GC or restart before mutations",
@@ -806,7 +809,7 @@ fn capture_expiry_refuses_changed_reappearing_or_unanchored_files() {
     ] {
         let (temp, mut store, run) = gc_fixture();
         let directory = store.root.join(&run.run_id);
-        store.fault = Some(Fault::GcBeforeUnlink);
+        faults::arm(Plan::fail(Point::GcBeforeUnlink));
         assert_eq!(
             store
                 .gc_policy_at(capture_policy(), None, 100, &peer(), gc_future())
@@ -815,7 +818,7 @@ fn capture_expiry_refuses_changed_reappearing_or_unanchored_files() {
                 .len(),
             1
         );
-        store.fault = None;
+        faults::disarm();
         let path = directory.join("artifacts/stdout.bin");
         match mode {
             "changed" => fs::write(&path, b"changed-capture").unwrap(),
@@ -1058,24 +1061,25 @@ fn gc_prunes_segments_and_captures_but_preserves_replays_effects_and_none_labels
 #[test]
 fn gc_recovers_every_deletion_boundary_without_losing_replay_or_chain_anchors() {
     for fault in [
-        Fault::GcIntentWrite,
-        Fault::GcIntentSync,
-        Fault::GcBeforeUnlink,
-        Fault::GcAfterUnlink,
-        Fault::GcDirectorySync,
-        Fault::GcCompletion,
-        Fault::GcCompletionSync,
-        Fault::GcProjection,
+        Point::GcIntentWrite,
+        Point::GcIntentSync,
+        Point::GcBeforeUnlink,
+        Point::GcAfterUnlink,
+        Point::GcDirectorySync,
+        Point::GcCompletion,
+        Point::GcCompletionSync,
+        Point::GcProjection,
     ] {
         let (temp, mut store, run) = gc_fixture();
         let replay = store.stream(&run.run_id).unwrap().replay.clone();
         let directory = store.root.join(&run.run_id);
         let manifest = fs::read(directory.join("segments.json")).unwrap();
-        store.fault = Some(fault);
+        faults::arm(Plan::fail(fault));
         let failed = store.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
+        faults::disarm();
         assert_eq!(failed.failed.len(), 1);
         assert!(failed.pruned.is_empty());
-        if matches!(fault, Fault::GcIntentWrite) {
+        if matches!(fault, Point::GcIntentWrite) {
             assert!(!directory.join("gc.json").exists());
             assert!(directory.join(STREAM).exists());
         } else {
@@ -1111,7 +1115,7 @@ fn gc_revalidates_bytes_and_refuses_changed_files_or_symlinked_capture_directori
         private_directory(&outside).unwrap();
         fs::write(outside.join("stdout.bin"), b"must be kept").unwrap();
         if mode != "canonical" {
-            store.fault = Some(Fault::GcBeforeUnlink);
+            faults::arm(Plan::fail(Point::GcBeforeUnlink));
             assert_eq!(
                 store
                     .gc_at(1, None, 100, &peer(), gc_future())
@@ -1120,7 +1124,7 @@ fn gc_revalidates_bytes_and_refuses_changed_files_or_symlinked_capture_directori
                     .len(),
                 1
             );
-            store.fault = None;
+            faults::disarm();
         }
         match mode {
             "canonical" => {
@@ -1734,7 +1738,7 @@ fn durable_reader_sync_failure_refuses_retries_until_recovery_barrier_succeeds()
         .join(format!("{}.json", &cursor[..32]));
     let initial_checkpoint = fs::read(&checkpoint_path).unwrap();
 
-    store.readers.fail_directory_sync = true;
+    faults::arm(Plan::fail(Point::ReaderDirectorySync));
     assert!(store.read(&request).is_err());
     let failed_checkpoint = fs::read(&checkpoint_path).unwrap();
     assert_ne!(failed_checkpoint, initial_checkpoint);
@@ -1744,7 +1748,7 @@ fn durable_reader_sync_failure_refuses_retries_until_recovery_barrier_succeeds()
     assert_eq!(fs::read(&checkpoint_path).unwrap(), failed_checkpoint);
     assert_eq!(fs::read_to_string(&canonical_path).unwrap(), original);
 
-    store.readers.fail_directory_sync = false;
+    faults::disarm();
     let second = store.read(&request).unwrap();
     assert_eq!(
         json!(digest(&serde_json::to_value(&second).unwrap()).unwrap()),
@@ -2051,11 +2055,11 @@ fn interrupted_write_is_retained_poisoned_and_never_truncated_on_recovery() {
     let (temp, mut store, run) = create();
     let stream_path = store.root.join(&run.run_id).join(STREAM);
     let before = fs::read(&stream_path).unwrap();
-    store.fault = Some(Fault::PartialWrite);
+    faults::arm(Plan::fail(Point::EventPartialWrite));
     assert!(note(&mut store, &run, "partial", json!({"v":"half record"})).is_err());
     let broken = fs::read(&stream_path).unwrap();
     assert!(broken.len() > before.len());
-    store.fault = None;
+    faults::disarm();
     assert_refused(
         note(&mut store, &run, "retry", json!({})),
         "stream is poisoned; no dependent dispatch or sequence reuse",
@@ -2236,8 +2240,9 @@ fn verification_pages_are_bounded_by_runs_and_bytes_and_status_reads_no_history(
     fs::write(store.root.join(&ids[0]).join(STREAM), b"damaged\n").unwrap();
     assert!(store.status().ready());
     assert!(!store.verify_page(Some(&ids[0]), None, 1).unwrap().reports[0].local_consistency);
-    store.fault = Some(Fault::BeforeWrite);
+    faults::arm(Plan::fail(Point::EventBeforeWrite));
     assert!(store.hold(&ids[1], "lost", &peer()).is_err());
+    faults::disarm();
     let status = store.status();
     assert_eq!(status.ambiguous_runs, 1);
     assert!(!status.ready());
@@ -2246,16 +2251,16 @@ fn verification_pages_are_bounded_by_runs_and_bytes_and_status_reads_no_history(
 #[test]
 fn every_persistence_failure_stops_acknowledgements_until_recovery() {
     for fault in [
-        Fault::BeforeWrite,
-        Fault::EventSync,
-        Fault::Projection,
-        Fault::Manifest,
-        Fault::DirectorySync,
+        Point::EventBeforeWrite,
+        Point::EventBeforeSync,
+        Point::Replace(Replaced::Projection, Step::BeforeWrite),
+        Point::Replace(Replaced::Manifest, Step::BeforeWrite),
+        Point::AppendBeforeDirectorySync,
     ] {
         let (temp, mut store, run) = create();
-        store.fault = Some(fault);
+        faults::arm(Plan::fail(fault));
         assert!(note(&mut store, &run, "uncertain", json!({"v":1})).is_err());
-        store.fault = None;
+        faults::disarm();
         assert_refused(
             note(&mut store, &run, "new", json!({"v":2})),
             "stream is poisoned; no dependent dispatch or sequence reuse",
@@ -2278,9 +2283,10 @@ fn recovery_sync_failure_cannot_publish_or_acknowledge_an_unflushed_tail() {
     let projection_path = directory.join("run.json");
     let old_manifest = fs::read(&manifest_path).unwrap();
     let old_projection = fs::read(&projection_path).unwrap();
-    store.fault = Some(Fault::EventSync);
+    faults::arm(Plan::fail(Point::EventBeforeSync));
     let body = json!({"v":"written without successful sync"});
     assert!(note(&mut store, &run, "unflushed", body.clone()).is_err());
+    faults::disarm();
     let unflushed = fs::read(&stream_path).unwrap();
     let last_frame = unflushed
         .split(|byte| *byte == b'\n')
@@ -3180,14 +3186,13 @@ fn recovery_keeps_unchanged_projections_and_manifests_in_place() {
 #[test]
 fn a_failed_projection_write_leaves_no_temporary_file() {
     let (temp, mut store, run) = create();
-    crate::faults::arm(crate::faults::Plan {
-        kind: "note".into(),
-        point: "projection.before_rename".into(),
-        action: "error".into(),
-        marker: temp.path().join("marker"),
-    });
+    faults::arm(Plan::error(
+        Scope::Note,
+        Point::Replace(Replaced::Projection, Step::BeforeRename),
+        temp.path().join("marker"),
+    ));
     let refused = note(&mut store, &run, "unpublished", json!({"v":1}));
-    crate::faults::disarm();
+    faults::disarm();
     assert!(refused.is_err());
     let leftovers: Vec<_> = fs::read_dir(store.root.join(&run.run_id))
         .unwrap()
@@ -3265,22 +3270,22 @@ fn rotation_preserves_exact_export_global_chain_and_original_replay_after_restar
 #[test]
 fn rotation_failure_boundaries_never_duplicate_or_truncate_history() {
     for fault in [
-        Fault::RotationCreated,
-        Fault::RotationSynced,
-        Fault::BeforeWrite,
-        Fault::PartialWrite,
-        Fault::EventSync,
-        Fault::Projection,
-        Fault::Manifest,
-        Fault::DirectorySync,
+        Point::RotationCreated,
+        Point::RotationSynced,
+        Point::EventBeforeWrite,
+        Point::EventPartialWrite,
+        Point::EventBeforeSync,
+        Point::Replace(Replaced::Projection, Step::BeforeWrite),
+        Point::Replace(Replaced::Manifest, Step::BeforeWrite),
+        Point::AppendBeforeDirectorySync,
     ] {
         let (temp, mut store, run) = create();
         store.segment_limit = 1;
         let directory = store.root.join(&run.run_id);
         let first = fs::read(directory.join(STREAM)).unwrap();
-        store.fault = Some(fault);
+        faults::arm(Plan::fail(fault));
         assert!(note(&mut store, &run, "rotation-fault", json!({"v":1})).is_err());
-        store.fault = None;
+        faults::disarm();
         assert_refused(
             note(&mut store, &run, "different", json!({})),
             "stream is poisoned; no dependent dispatch or sequence reuse",
@@ -3298,7 +3303,7 @@ fn rotation_failure_boundaries_never_duplicate_or_truncate_history() {
         let mut recovered = Store::open(&temp.path().join("data")).unwrap();
         assert_eq!(fs::read(directory.join(STREAM)).unwrap(), first);
         assert_eq!(fs::read(&second).unwrap(), before);
-        if matches!(fault, Fault::PartialWrite) {
+        if matches!(fault, Point::EventPartialWrite) {
             assert!(!recovered.verify(None).unwrap()[0].local_consistency);
             assert_refused(
                 note(&mut recovered, &run, "rotation-fault", json!({"v":1})),
@@ -3338,8 +3343,9 @@ fn rotation_recovery_syncs_each_segment_before_publishing_promoted_metadata() {
     let directory = store.root.join(&run.run_id);
     note(&mut store, &run, "sealed", json!({})).unwrap();
     let old = fs::read(directory.join(manifest::NAME)).unwrap();
-    store.fault = Some(Fault::EventSync);
+    faults::arm(Plan::fail(Point::EventBeforeSync));
     assert!(note(&mut store, &run, "tail", json!({})).is_err());
+    faults::disarm();
     let before = segment_bytes(&directory);
     drop(store);
     for failing_segment in 1..=3 {

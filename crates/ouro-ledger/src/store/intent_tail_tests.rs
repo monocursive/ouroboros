@@ -1,4 +1,5 @@
 use super::*;
+use crate::faults::{Plan, Point, Replaced, Step};
 use crate::protocol::{OperatorIntent, READ_CHUNK_BYTES, TailRequest};
 
 fn peer() -> Peer {
@@ -162,27 +163,27 @@ fn operator_forgery_conflicts_and_unadmitted_settlement_refuse() {
 #[test]
 fn operator_append_faults_recover_exactly_once_or_preserve_ambiguity() {
     for fault in [
-        Fault::BeforeWrite,
-        Fault::RotationCreated,
-        Fault::RotationSynced,
-        Fault::PartialWrite,
-        Fault::EventSync,
-        Fault::Projection,
-        Fault::Manifest,
-        Fault::DirectorySync,
+        Point::EventBeforeWrite,
+        Point::RotationCreated,
+        Point::RotationSynced,
+        Point::EventPartialWrite,
+        Point::EventBeforeSync,
+        Point::Replace(Replaced::Projection, Step::BeforeWrite),
+        Point::Replace(Replaced::Manifest, Step::BeforeWrite),
+        Point::AppendBeforeDirectorySync,
     ] {
         let (temp, mut store, run) = create();
         store.segment_limit = 1;
         let request = intent(&run, "retry", "admitted", Some("external-effect"));
-        store.fault = Some(fault);
+        faults::arm(Plan::fail(fault));
         assert!(store.append_operator(&request, &peer()).is_err());
-        store.fault = None;
+        faults::disarm();
         assert!(store.append_operator(&request, &peer()).is_err());
         let original = bytes(&store, &run);
         drop(store);
         let mut store = Store::open(&temp.path().join("data")).unwrap();
         assert_eq!(bytes(&store, &run), original);
-        if matches!(fault, Fault::PartialWrite) {
+        if matches!(fault, Point::EventPartialWrite) {
             assert!(store.append_operator(&request, &peer()).is_err());
             assert!(
                 store

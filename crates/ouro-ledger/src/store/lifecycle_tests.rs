@@ -1,6 +1,6 @@
 //! Exercise real persistence operations in a test-only instrumented writer.
 use super::*;
-use crate::faults::{self, Plan};
+use crate::faults::{self, Plan, Point, Replaced, Scope, Step};
 use std::{
     os::unix::process::ExitStatusExt as _,
     process::{Child, Command, ExitStatus, Stdio},
@@ -8,22 +8,28 @@ use std::{
     time::{Duration, Instant},
 };
 
-const KINDS: [&str; 5] = ["prepared", "owner_claimed", "admitted", "source", "settled"];
-const POINTS: [&str; 14] = [
-    "event.before_write",
-    "event.partial_write",
-    "event.before_sync",
-    "event.after_sync",
-    "projection.before_write",
-    "projection.before_sync",
-    "projection.before_rename",
-    "projection.before_directory_sync",
-    "manifest.before_write",
-    "manifest.before_sync",
-    "manifest.before_rename",
-    "manifest.before_directory_sync",
-    "append.before_directory_sync",
-    "append.after_directory_sync",
+const KINDS: [Scope; 5] = [
+    Scope::Prepared,
+    Scope::OwnerClaimed,
+    Scope::Admitted,
+    Scope::Source,
+    Scope::Settled,
+];
+const POINTS: [Point; 14] = [
+    Point::EventBeforeWrite,
+    Point::EventPartialWrite,
+    Point::EventBeforeSync,
+    Point::EventAfterSync,
+    Point::Replace(Replaced::Projection, Step::BeforeWrite),
+    Point::Replace(Replaced::Projection, Step::BeforeSync),
+    Point::Replace(Replaced::Projection, Step::BeforeRename),
+    Point::Replace(Replaced::Projection, Step::BeforeDirectorySync),
+    Point::Replace(Replaced::Manifest, Step::BeforeWrite),
+    Point::Replace(Replaced::Manifest, Step::BeforeSync),
+    Point::Replace(Replaced::Manifest, Step::BeforeRename),
+    Point::Replace(Replaced::Manifest, Step::BeforeDirectorySync),
+    Point::AppendBeforeDirectorySync,
+    Point::AppendAfterDirectorySync,
 ];
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const WORKER: &str = "store::lifecycle_tests::sigkill_at_every_lifecycle_boundary_preserves_identity_and_canonical_bytes";
@@ -54,25 +60,25 @@ fn receipt(run: &RunRecord, final_receipt: bool) -> Value {
     receipt["attempt_id"] = json!(run.attempt_id);
     receipt
 }
-fn perform(store: &mut Store, kind: &str) -> Result<()> {
-    if kind == "prepared" {
+fn perform(store: &mut Store, kind: Scope) -> Result<()> {
+    if kind == Scope::Prepared {
         return store.prepare("matrix", &payload(), &peer()).map(|_| ());
     }
     let run = store.runs().into_iter().next().unwrap();
     match kind {
-        "owner_claimed" => store.claim_owner(&run.run_id, &peer()),
-        "admitted" => store
+        Scope::OwnerClaimed => store.claim_owner(&run.run_id, &peer()),
+        Scope::Admitted => store
             .append_owner(
                 &run.run_id,
                 "admit",
-                kind,
+                "admitted",
                 None,
                 &json!({"receipt":receipt(&run, false)}),
                 &peer(),
                 TOKEN,
             )
             .map(|_| ()),
-        "source" => store
+        Scope::Source => store
             .append_source(
                 &run.run_id,
                 &serde_json::to_value(records::Event::lifecycle_note(
@@ -87,20 +93,20 @@ fn perform(store: &mut Store, kind: &str) -> Result<()> {
                 TOKEN,
             )
             .map(|_| ()),
-        "settled" => {
+        Scope::Settled => {
             let receipt = receipt(&run, true);
-            store.append_owner(&run.run_id, "settle", kind, None, &json!({"receipt":receipt,"outcome":receipt["outcome"],"coverage":receipt["coverage"]}), &peer(), TOKEN).map(|_| ())
+            store.append_owner(&run.run_id, "settle", "settled", None, &json!({"receipt":receipt,"outcome":receipt["outcome"],"coverage":receipt["coverage"]}), &peer(), TOKEN).map(|_| ())
         }
         _ => panic!("unexpected matrix operation"),
     }
 }
-fn setup(data: &Path, kind: &str) -> Store {
+fn setup(data: &Path, kind: Scope) -> Store {
     let mut store = Store::open(data).unwrap();
     for prerequisite in KINDS {
         if prerequisite == kind {
             break;
         }
-        if prerequisite == "source" {
+        if prerequisite == Scope::Source {
             let run = store.runs().remove(0);
             let digest = records::semantic::receipt_digest(&receipt(&run, true)).unwrap();
             let event = serde_json::to_value(records::Event::receipt_note(
@@ -125,45 +131,49 @@ fn canonical(store: &Store) -> Vec<u8> {
     let run = store.runs().remove(0);
     fs::read(store.root().join(run.run_id).join("events-0001.ndjson")).unwrap()
 }
-fn check_recovery(data: &Path, kind: &str, point: &str, before: &[u8]) {
+fn check_recovery(data: &Path, kind: Scope, point: Point, before: &[u8]) {
     let mut store = Store::open(data).unwrap();
     assert_eq!(
         canonical(&store),
         before,
-        "recovery must retain every canonical byte: {kind}/{point}"
+        "recovery must retain every canonical byte: {kind:?}/{point:?}"
     );
     let run = store.runs().remove(0);
-    let partial =
-        point == "event.partial_write" || (kind == "prepared" && point == "event.before_write");
+    let partial = point == Point::EventPartialWrite
+        || (kind == Scope::Prepared && point == Point::EventBeforeWrite);
     if partial {
         assert!(
             !store.stream(&run.run_id).unwrap().poisoned.is_empty(),
-            "{kind}/{point}"
+            "{kind:?}/{point:?}"
         );
         assert!(
             perform(&mut store, kind).is_err(),
-            "ambiguous prefix must not acknowledge: {kind}/{point}"
+            "ambiguous prefix must not acknowledge: {kind:?}/{point:?}"
         );
         assert_eq!(canonical(&store), before);
         return;
     }
     assert!(
         store.stream(&run.run_id).unwrap().poisoned.is_empty(),
-        "{kind}/{point}"
+        "{kind:?}/{point:?}"
     );
     let head = run.chain.head_seq;
     perform(&mut store, kind).unwrap();
-    let expected = head + u64::from(point == "event.before_write");
-    assert_eq!(store.runs()[0].chain.head_seq, expected, "{kind}/{point}");
+    let expected = head + u64::from(point == Point::EventBeforeWrite);
+    assert_eq!(
+        store.runs()[0].chain.head_seq,
+        expected,
+        "{kind:?}/{point:?}"
+    );
     let accepted = canonical(&store);
     perform(&mut store, kind).unwrap();
     assert_eq!(
         canonical(&store),
         accepted,
-        "retry must not duplicate {kind}/{point}"
+        "retry must not duplicate {kind:?}/{point:?}"
     );
     assert_eq!(store.runs()[0].chain.head_seq, expected);
-    if point != "event.before_write" {
+    if point != Point::EventBeforeWrite {
         assert_eq!(accepted, before);
     }
 }
@@ -176,22 +186,17 @@ fn io_errors_at_every_lifecycle_boundary_refuse_ack_until_recovery() {
             let data = temp.path().join("data");
             let mut store = setup(&data, kind);
             let marker = temp.path().join("fault");
-            faults::arm(Plan {
-                kind: kind.into(),
-                point: point.into(),
-                action: "error".into(),
-                marker: marker.clone(),
-            });
+            faults::arm(Plan::error(kind, point, marker.clone()));
             assert!(
                 perform(&mut store, kind).is_err(),
-                "fault did not refuse {kind}/{point}"
+                "fault did not refuse {kind:?}/{point:?}"
             );
             faults::disarm();
-            assert!(marker.exists(), "hook was not reached: {kind}/{point}");
+            assert!(marker.exists(), "hook was not reached: {kind:?}/{point:?}");
             let bytes = canonical(&store);
             assert!(
                 perform(&mut store, kind).is_err(),
-                "live poisoned retry acknowledged {kind}/{point}"
+                "live poisoned retry acknowledged {kind:?}/{point:?}"
             );
             assert_eq!(canonical(&store), bytes);
             drop(store);
@@ -260,9 +265,9 @@ fn fault_worker() {
         crate::daemon::serve(data).unwrap();
     } else {
         let mut store = Store::open(data).unwrap();
-        let kind = plan.kind.clone();
+        let kind = plan.scope.expect("a matrix plan names its operation");
         faults::arm(plan);
-        perform(&mut store, &kind).unwrap();
+        perform(&mut store, kind).unwrap();
     }
     panic!("worker did not reach its SIGKILL hook");
 }
@@ -280,12 +285,8 @@ fn sigkill_at_every_lifecycle_boundary_preserves_identity_and_canonical_bytes() 
             let temp = tempfile::tempdir().unwrap();
             let data = temp.path().join("data");
             drop(setup(&data, kind));
-            let plan = Plan {
-                kind: kind.into(),
-                point: point.into(),
-                action: "kill".into(),
-                marker: temp.path().join("fault"),
-            };
+            let marker = temp.path().join("fault");
+            let plan = Plan::kill(kind, point, marker.clone());
             let mut process = Process::spawn(
                 &mut worker("store", &data, &plan),
                 temp.path().join("worker.log"),
@@ -293,10 +294,10 @@ fn sigkill_at_every_lifecycle_boundary_preserves_identity_and_canonical_bytes() 
             assert_eq!(
                 process.finish().signal(),
                 Some(libc::SIGKILL),
-                "{kind}/{point}: {}",
+                "{kind:?}/{point:?}: {}",
                 fs::read_to_string(&process.log).unwrap()
             );
-            assert!(plan.marker.exists(), "hook not reached: {kind}/{point}");
+            assert!(marker.exists(), "hook not reached: {kind:?}/{point:?}");
             let root = data.join("ledger");
             let run_dir = fs::read_dir(&root)
                 .unwrap()

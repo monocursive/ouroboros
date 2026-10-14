@@ -5,6 +5,7 @@ use std::{ffi::CString, io::Read, os::fd::FromRawFd};
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::faults::{self, Point};
 use crate::protocol::{GcFailure, GcReceipt, GcResult, PrunedHistory};
 
 const ANCHOR: &str = "gc.json";
@@ -551,10 +552,7 @@ impl Store {
                 let stream = self.stream_mut(id);
                 stream.run = retained.projection(true)?;
                 let run = stream.run.clone();
-                #[cfg(test)]
-                if matches!(self.fault, Some(Fault::GcProjection)) {
-                    return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
-                }
+                faults::hit(Point::GcProjection)?;
                 self.write_projection(&run)?;
                 if self.index.is_some() {
                     self.index_pending.insert(id.clone(), run);
@@ -643,10 +641,7 @@ impl Store {
         };
         retained.validate(&root, id)?;
         retained.check_remaining(&root, false)?;
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::GcIntentWrite)) {
-            return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
-        }
+        faults::hit(Point::GcIntentWrite)?;
         let value = serde_json::to_value(Envelope {
             digest: retained.digest()?,
             retained: retained.clone(),
@@ -664,10 +659,7 @@ impl Store {
         stream.run = retained.projection(false)?;
         // Expired in-memory sessions must release descriptors as well as pins.
         self.readers.forget_run(id);
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::GcIntentSync)) {
-            return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-        }
+        faults::hit(Point::GcIntentSync)?;
         Ok(retained)
     }
 
@@ -689,37 +681,22 @@ impl Store {
                 if !exists {
                     continue;
                 }
-                #[cfg(test)]
-                if matches!(self.fault, Some(Fault::GcBeforeUnlink)) {
-                    return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-                }
+                faults::hit(Point::GcBeforeUnlink)?;
                 // SAFETY: delete only this verified basename in its still-pinned parent directory.
                 if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
                     return Err(std::io::Error::last_os_error().into());
                 }
-                #[cfg(test)]
-                if matches!(self.fault, Some(Fault::GcAfterUnlink)) {
-                    return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-                }
+                faults::hit(Point::GcAfterUnlink)?;
                 parent.sync_all()?;
-                #[cfg(test)]
-                if matches!(self.fault, Some(Fault::GcDirectorySync)) {
-                    return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-                }
+                faults::hit(Point::GcDirectorySync)?;
             }
             // Sync both namespaces even if a preceding unlink survived a crash.
             directory(&root.join("artifacts"))?.sync_all()?;
             directory(&root)?.sync_all()?;
-            #[cfg(test)]
-            if matches!(self.fault, Some(Fault::GcCompletion)) {
-                return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-            }
+            faults::hit(Point::GcCompletion)?;
         }
         publish(&root, DONE, &retained.completion()?, 1024)?;
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::GcCompletionSync)) {
-            return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-        }
+        faults::hit(Point::GcCompletionSync)?;
         Ok(())
     }
 

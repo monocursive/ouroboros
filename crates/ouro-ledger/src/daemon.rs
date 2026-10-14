@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
+    faults,
     protocol::{
         AppendReceipt, CatalogPage, CatalogRequest, ClaimedOwner, DEFAULT_VERIFY_LIMIT,
         DiscoveryPage, DiscoveryRequest, GcPlan, GcResult, LedgerError, MAX_CONNECTIONS,
@@ -644,16 +645,14 @@ pub fn serve(data: &Path) -> Result<()> {
         };
         match message.work {
             Work::Request(request, reply) => {
-                #[cfg(test)]
-                let _fault_scope = crate::faults::scope(crate::faults::request_kind(&request));
+                let _scope = faults::enter(|| faults::Scope::of_request(&request));
                 let response = match dispatch(&mut store, &mut capabilities, request, &message.peer)
                 {
                     Ok(value) => Response::Ok { value },
                     Err(error) => Response::Error { message: error.0 },
                 };
-                #[cfg(test)]
                 if matches!(response, Response::Ok { .. }) {
-                    crate::faults::hit("reply.before_send")?;
+                    faults::hit(faults::Point::ReplyBeforeSend)?;
                 }
                 // A dropped reply never rolls back a persisted request or its receipt.
                 let _ = reply.try_send(response);

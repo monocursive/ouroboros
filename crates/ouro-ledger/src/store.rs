@@ -27,6 +27,7 @@ use crate::protocol::{
 };
 
 use crate::discovery::valid_name;
+use crate::faults::{self, Point, Replaced, Step};
 use crate::manifest::{self, STREAM};
 use crate::schemas;
 
@@ -163,29 +164,6 @@ pub struct Store {
     /// Advances whenever a GC may remove or rewrite run files, so a verifier
     /// reading off the writer thread can tell a GC race from damage.
     gc_generation: u64,
-    #[cfg(test)]
-    fault: Option<Fault>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy)]
-enum Fault {
-    BeforeWrite,
-    RotationCreated,
-    RotationSynced,
-    PartialWrite,
-    EventSync,
-    Projection,
-    Manifest,
-    DirectorySync,
-    GcIntentWrite,
-    GcIntentSync,
-    GcBeforeUnlink,
-    GcAfterUnlink,
-    GcDirectorySync,
-    GcCompletion,
-    GcCompletionSync,
-    GcProjection,
 }
 
 pub fn private_directory(path: &Path) -> Result<()> {
@@ -478,8 +456,6 @@ impl Store {
             segment_limit: SEGMENT_BYTES,
             verify_page_bytes: VERIFY_PAGE_BYTES,
             gc_generation: 0,
-            #[cfg(test)]
-            fault: None,
         };
         for entry in fs::read_dir(&store.root)? {
             let entry = entry?;
@@ -868,8 +844,7 @@ impl Store {
         receipt: &AppendReceipt,
         payload_digest: &str,
     ) -> Result<()> {
-        #[cfg(test)]
-        let _fault_scope = crate::faults::scope(record["kind"].as_str().unwrap_or(""));
+        let _scope = faults::enter(|| faults::Scope::of_record(record["kind"].as_str()?));
         let directory = self.root.join(run_id);
         let stream = loaded(&mut self.streams, run_id);
         let rotate = stream.segment_bytes > 0
@@ -889,16 +864,10 @@ impl Store {
                 .mode(0o600)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
                 .open(directory.join(manifest::name(next)))?;
-            #[cfg(test)]
-            if matches!(self.fault, Some(Fault::RotationCreated)) {
-                return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-            }
+            faults::hit(Point::RotationCreated)?;
             file.sync_all()?;
             File::open(&directory)?.sync_all()?;
-            #[cfg(test)]
-            if matches!(self.fault, Some(Fault::RotationSynced)) {
-                return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-            }
+            faults::hit(Point::RotationSynced)?;
             stream.begin_segment(next);
             file
         } else {
@@ -913,36 +882,13 @@ impl Store {
                 "active segment length changed before append".into(),
             ));
         }
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::BeforeWrite)) {
-            return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
-        }
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::PartialWrite)) {
-            file.write_all(&bytes[..bytes.len() / 2])?;
-            file.sync_all()?;
-            return Err(std::io::Error::from_raw_os_error(libc::EINTR).into());
-        }
-        #[cfg(test)]
-        {
-            crate::faults::hit("event.before_write")?;
-            if crate::faults::active("event.partial_write") {
-                file.write_all(&bytes[..bytes.len() / 2])?;
-                file.sync_all()?;
-                crate::faults::hit("event.partial_write")?;
-            }
-        }
+        faults::hit(Point::EventBeforeWrite)?;
+        faults::partial_write(Point::EventPartialWrite, &mut file, bytes)?;
         file.write_all(bytes)?;
         file.write_all(b"\n")?;
-        #[cfg(test)]
-        crate::faults::hit("event.before_sync")?;
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::EventSync)) {
-            return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-        }
+        faults::hit(Point::EventBeforeSync)?;
         file.sync_all()?;
-        #[cfg(test)]
-        crate::faults::hit("event.after_sync")?;
+        faults::hit(Point::EventAfterSync)?;
         let stream = loaded(&mut self.streams, run_id);
         apply_record(
             stream,
@@ -954,25 +900,11 @@ impl Store {
         stream.hash_record(bytes, record, receipt, payload_digest)?;
         let run = stream.run.clone();
         let manifest = stream.manifest();
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::Projection)) {
-            return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
-        }
         self.write_projection(&run)?;
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::Manifest)) {
-            return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
-        }
         crate::manifest::write(&self.root.join(run_id), &manifest)?;
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::DirectorySync)) {
-            return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-        }
-        #[cfg(test)]
-        crate::faults::hit("append.before_directory_sync")?;
+        faults::hit(Point::AppendBeforeDirectorySync)?;
         File::open(self.root.join(run_id))?.sync_all()?;
-        #[cfg(test)]
-        crate::faults::hit("append.after_directory_sync")?;
+        faults::hit(Point::AppendAfterDirectorySync)?;
         if self.index.is_some() {
             self.index_pending.insert(run_id.into(), run);
         }
@@ -990,14 +922,11 @@ impl Store {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&temp)?;
         let result = (|| -> Result<()> {
-            #[cfg(test)]
-            crate::faults::hit("projection.before_write")?;
+            faults::hit(Point::Replace(Replaced::Projection, Step::BeforeWrite))?;
             file.write_all(&bytes)?;
-            #[cfg(test)]
-            crate::faults::hit("projection.before_sync")?;
+            faults::hit(Point::Replace(Replaced::Projection, Step::BeforeSync))?;
             file.sync_all()?;
-            #[cfg(test)]
-            crate::faults::hit("projection.before_rename")?;
+            faults::hit(Point::Replace(Replaced::Projection, Step::BeforeRename))?;
             fs::rename(&temp, dir.join("run.json"))?;
             Ok(())
         })();
@@ -1006,8 +935,10 @@ impl Store {
             let _ = fs::remove_file(&temp);
         }
         result?;
-        #[cfg(test)]
-        crate::faults::hit("projection.before_directory_sync")?;
+        faults::hit(Point::Replace(
+            Replaced::Projection,
+            Step::BeforeDirectorySync,
+        ))?;
         File::open(dir)?.sync_all()?;
         Ok(())
     }

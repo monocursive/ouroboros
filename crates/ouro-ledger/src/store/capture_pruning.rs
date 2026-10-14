@@ -4,6 +4,7 @@ use super::pruning::{
     RemovedFile, check_member, directory, file_hash, member, publish, read_json, safe_file,
 };
 use super::*;
+use crate::faults::{self, Point};
 use crate::protocol::{CaptureGcReceipt, PrunedHistory};
 use serde::{Deserialize, Serialize};
 
@@ -289,10 +290,7 @@ impl Store {
                     files,
                 };
                 r.check_files(&root, false)?;
-                #[cfg(test)]
-                if matches!(self.fault, Some(Fault::GcIntentWrite)) {
-                    return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
-                }
+                faults::hit(Point::GcIntentWrite)?;
                 let value = serde_json::to_value(Envelope {
                     digest: r.digest()?,
                     retained: r.clone(),
@@ -308,10 +306,7 @@ impl Store {
                 let stream = self.stream_mut(id);
                 stream.run.capture = r.capture(false);
                 stream.run.capture_history = Some(r.history(false)?);
-                #[cfg(test)]
-                if matches!(self.fault, Some(Fault::GcIntentSync)) {
-                    return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-                }
+                faults::hit(Point::GcIntentSync)?;
                 r
             }
         };
@@ -320,10 +315,7 @@ impl Store {
         stream.run.capture = retained.capture(true);
         stream.run.capture_history = Some(retained.history(true)?);
         let run = stream.run.clone();
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::GcProjection)) {
-            return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
-        }
+        faults::hit(Point::GcProjection)?;
         self.write_projection(&run)?;
         if self.index.is_some() {
             self.index_pending.insert(id.into(), run);
@@ -348,36 +340,21 @@ impl Store {
                 if !exists {
                     continue;
                 }
-                #[cfg(test)]
-                if matches!(self.fault, Some(Fault::GcBeforeUnlink)) {
-                    return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-                }
+                faults::hit(Point::GcBeforeUnlink)?;
                 // SAFETY: only the verified basename in the pinned parent is removed.
                 if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
                     return Err(std::io::Error::last_os_error().into());
                 }
-                #[cfg(test)]
-                if matches!(self.fault, Some(Fault::GcAfterUnlink)) {
-                    return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-                }
+                faults::hit(Point::GcAfterUnlink)?;
                 parent.sync_all()?;
-                #[cfg(test)]
-                if matches!(self.fault, Some(Fault::GcDirectorySync)) {
-                    return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-                }
+                faults::hit(Point::GcDirectorySync)?;
             }
             directory(&root.join("artifacts"))?.sync_all()?;
             directory(&root)?.sync_all()?;
-            #[cfg(test)]
-            if matches!(self.fault, Some(Fault::GcCompletion)) {
-                return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-            }
+            faults::hit(Point::GcCompletion)?;
         }
         publish(&root, DONE, &r.completion()?, 1024)?;
-        #[cfg(test)]
-        if matches!(self.fault, Some(Fault::GcCompletionSync)) {
-            return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
-        }
+        faults::hit(Point::GcCompletionSync)?;
         Ok(())
     }
 }

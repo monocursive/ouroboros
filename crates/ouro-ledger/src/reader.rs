@@ -37,8 +37,6 @@ pub(crate) struct Readers {
     parsed: BTreeMap<String, (Seen, Checkpoint)>,
     /// The checkpoint directory's entry is durable in its parent.
     directory_synced: bool,
-    #[cfg(test)]
-    pub(crate) fail_directory_sync: bool,
 }
 
 /// A checkpoint file's identity and change times; any rewrite changes it.
@@ -592,13 +590,8 @@ impl Readers {
         ),
     ) -> Result<ReadPage> {
         let (accepted, accepted_snapshot) = proofs;
-        #[cfg(test)]
-        let fail_directory_sync = self.fail_directory_sync;
         let sync_directory = |file: &File| {
-            #[cfg(test)]
-            if fail_directory_sync {
-                return Err(std::io::Error::from_raw_os_error(libc::EIO));
-            }
+            crate::faults::hit(crate::faults::Point::ReaderDirectorySync)?;
             file.sync_all()
         };
         validate_request(request)?;

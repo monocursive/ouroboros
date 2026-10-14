@@ -114,12 +114,12 @@ fn real_launch_gate_survives_admission_settlement_and_lost_reply_crashes() {
         "build the production ledger binary before the native matrix"
     );
     for evidence in ["strict", "best-effort"] {
-        let cases = ["admitted", "settled"]
+        let cases = [Scope::Admitted, Scope::Settled]
             .into_iter()
             .flat_map(|kind| POINTS.into_iter().map(move |point| (kind, point)))
-            .chain(KINDS.into_iter().map(|kind| (kind, "reply.before_send")));
+            .chain(KINDS.into_iter().map(|kind| (kind, Point::ReplyBeforeSend)));
         for (kind, point) in cases {
-            let case = format!("{evidence}/{kind}/{point}");
+            let case = format!("{evidence}/{kind:?}/{point:?}");
             let temp = tempfile::Builder::new()
                 .permissions(fs::Permissions::from_mode(0o700))
                 .tempdir()
@@ -131,12 +131,8 @@ fn real_launch_gate_survives_admission_settlement_and_lost_reply_crashes() {
             fs::create_dir(root.join("workspace")).unwrap();
             fs::copy(&jail, root.join("ouro-jail")).unwrap();
             fs::set_permissions(root.join("ouro-jail"), fs::Permissions::from_mode(0o700)).unwrap();
-            let plan = Plan {
-                kind: kind.into(),
-                point: point.into(),
-                action: "kill".into(),
-                marker: root.join("fault"),
-            };
+            let marker = root.join("fault");
+            let plan = Plan::kill(kind, point, marker.clone());
             let mut writer = Process::spawn(
                 worker("daemon", &data, &plan).env("OURO_CONFIG_DIR", root.join("config")),
                 root.join("writer.log"),
@@ -152,25 +148,22 @@ fn real_launch_gate_survives_admission_settlement_and_lost_reply_crashes() {
                 fs::read_to_string(&writer.log).unwrap(),
                 fs::read_to_string(&launch.log).unwrap()
             );
-            assert!(
-                plan.marker.exists(),
-                "{case}: requested hook was never reached"
-            );
+            assert!(marker.exists(), "{case}: requested hook was never reached");
             let before = executions(root);
             match kind {
-                "prepared" | "owner_claimed" | "admitted" => assert!(
+                Scope::Prepared | Scope::OwnerClaimed | Scope::Admitted => assert!(
                     before.is_empty(),
                     "gate opened without acknowledgement: {case}"
                 ),
-                "settled" => assert_eq!(before, b"x", "{case}"),
-                "source" => assert!(before.len() <= 1, "{case}"),
+                Scope::Settled => assert_eq!(before, b"x", "{case}"),
+                Scope::Source => assert!(before.len() <= 1, "{case}"),
                 _ => unreachable!(),
             }
             let store = Store::open(&data).unwrap();
             let run = store.runs().remove(0);
             let bytes = canonical(&store);
             drop(store);
-            if !matches!(kind, "prepared" | "owner_claimed") {
+            if !matches!(kind, Scope::Prepared | Scope::OwnerClaimed) {
                 stopped(&data, &run);
             }
             let mut restart = Command::new(&ledger);
@@ -184,9 +177,9 @@ fn real_launch_gate_survives_admission_settlement_and_lost_reply_crashes() {
             let mut client = Client::connect(&data).unwrap();
             client.settle_orphans().unwrap();
             let recovered = client.show(&run.run_id).unwrap();
-            if kind == "settled" {
-                let expected = if point == "event.partial_write"
-                    || (point == "event.before_write" && evidence == "strict")
+            if kind == Scope::Settled {
+                let expected = if point == Point::EventPartialWrite
+                    || (point == Point::EventBeforeWrite && evidence == "strict")
                 {
                     "outcome_unknown"
                 } else {
@@ -199,7 +192,7 @@ fn real_launch_gate_survives_admission_settlement_and_lost_reply_crashes() {
             replay.finish();
             assert_eq!(
                 executions(root),
-                if kind == "prepared" {
+                if kind == Scope::Prepared {
                     b"x".to_vec()
                 } else {
                     before
@@ -222,7 +215,7 @@ fn real_launch_gate_survives_admission_settlement_and_lost_reply_crashes() {
                 after.starts_with(&bytes),
                 "canonical history was rewritten: {case}"
             );
-            if point == "event.partial_write" {
+            if point == Point::EventPartialWrite {
                 assert_eq!(after, bytes, "poisoned stream was extended: {case}");
             }
             eprintln!("lifecycle launch case passed: {case}");

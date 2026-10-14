@@ -175,7 +175,6 @@ impl Target {
             }
             TargetKind::Stream { layout, projection } => (layout, projection),
         };
-        #[cfg(test)]
         let proceed = &mut || {
             crate::faults::verify_frame();
             proceed()

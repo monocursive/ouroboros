@@ -1,5 +1,8 @@
 //! Bounded owner journal. This is pending evidence, never a second canonical writer.
-use crate::protocol::{LedgerError, MAX_FRAME_BYTES, Peer, Result, RunRecord, read_bounded};
+use crate::{
+    faults::{self, Point, Replaced, Scope, Step},
+    protocol::{LedgerError, MAX_FRAME_BYTES, Peer, Result, RunRecord, read_bounded},
+};
 use ouro_records::canonical::{sha256_prefixed, to_jcs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +31,11 @@ pub(crate) const STATE: &str = text(STATE_NAME);
 const NEXT: &str = text(NEXT_NAME);
 #[cfg(test)]
 const LOCK: &str = text(LOCK_NAME);
+
+/// A step of replacing the journal snapshot.
+const fn snapshot(step: Step) -> Point {
+    Point::Replace(Replaced::Journal, step)
+}
 
 const fn text(name: &'static CStr) -> &'static str {
     match name.to_str() {
@@ -150,8 +158,7 @@ impl Journal {
     }
     #[cfg(any(target_os = "linux", test))]
     pub fn create(&self, run: &RunRecord, owner: &Peer) -> Result<()> {
-        #[cfg(test)]
-        let _scope = crate::faults::scope("pending.create");
+        let _scope = faults::enter(|| Some(Scope::PendingCreate));
         // Creation must never overwrite pending evidence from an earlier owner.
         let _initial = Self::file(
             &self.dir,
@@ -174,8 +181,7 @@ impl Journal {
         })
     }
     pub fn read(&self, run: &RunRecord) -> Result<State> {
-        #[cfg(test)]
-        let _scope = crate::faults::scope("pending.read");
+        let _scope = faults::enter(|| Some(Scope::PendingRead));
         let mut file = Self::file(&self.dir, STATE_NAME, libc::O_RDONLY)?;
         if file.metadata()?.len() > JOURNAL_BYTES as u64 {
             return Err(invalid("size limit exceeded"));
@@ -206,24 +212,23 @@ impl Journal {
         // A complete replacement can survive an interrupted save without its
         // acknowledgement. Validate it, then establish durability before any
         // caller imports, clears or acknowledges that pending evidence.
-        #[cfg(test)]
-        crate::faults::hit("read.before_file_sync")?;
+        faults::hit(Point::JournalReadBeforeFileSync)?;
         file.sync_all()?;
-        #[cfg(test)]
-        crate::faults::hit("read.before_directory_sync")?;
+        faults::hit(Point::JournalReadBeforeDirectorySync)?;
         self.dir.sync_all()?;
         Ok(s)
     }
     pub fn save(&self, state: &State) -> Result<()> {
-        #[cfg(test)]
-        let _scope = crate::faults::scope(if state.completion.is_some() {
-            "pending.completion"
-        } else if !state.active {
-            "pending.clear"
-        } else if state.pending().is_empty() {
-            "pending.outage"
-        } else {
-            "pending.source"
+        let _scope = faults::enter(|| {
+            Some(if state.completion.is_some() {
+                Scope::PendingCompletion
+            } else if !state.active {
+                Scope::PendingClear
+            } else if state.pending().is_empty() {
+                Scope::PendingOutage
+            } else {
+                Scope::PendingSource
+            })
         });
         self.replace(state)
     }
@@ -235,31 +240,20 @@ impl Journal {
             return Err(invalid("size limit exceeded"));
         }
         // A stale replacement from an interrupted write has no authority.
-        #[cfg(test)]
-        crate::faults::hit("snapshot.before_temp_unlink")?;
+        faults::hit(snapshot(Step::BeforeTempUnlink))?;
         self.unlink(NEXT_NAME)?;
-        #[cfg(test)]
-        crate::faults::hit("snapshot.before_open")?;
+        faults::hit(snapshot(Step::BeforeOpen))?;
         let mut next = Self::file(
             &self.dir,
             NEXT_NAME,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         )?;
-        #[cfg(test)]
-        {
-            crate::faults::hit("snapshot.before_write")?;
-            if crate::faults::active("snapshot.partial_write") {
-                next.write_all(&bytes[..bytes.len() / 2])?;
-                next.sync_all()?;
-                crate::faults::hit("snapshot.partial_write")?;
-            }
-        }
+        faults::hit(snapshot(Step::BeforeWrite))?;
+        faults::partial_write(snapshot(Step::PartialWrite), &mut next, &bytes)?;
         next.write_all(&bytes)?;
-        #[cfg(test)]
-        crate::faults::hit("snapshot.before_file_sync")?;
+        faults::hit(snapshot(Step::BeforeSync))?;
         next.sync_all()?;
-        #[cfg(test)]
-        crate::faults::hit("snapshot.before_rename")?;
+        faults::hit(snapshot(Step::BeforeRename))?;
         // SAFETY: both names are static NUL-terminated members of the one
         // directory descriptor, which stays open through the call.
         if unsafe {
@@ -273,11 +267,9 @@ impl Journal {
         {
             return Err(std::io::Error::last_os_error().into());
         }
-        #[cfg(test)]
-        crate::faults::hit("snapshot.before_directory_sync")?;
+        faults::hit(snapshot(Step::BeforeDirectorySync))?;
         self.dir.sync_all()?;
-        #[cfg(test)]
-        crate::faults::hit("snapshot.after_directory_sync")?;
+        faults::hit(snapshot(Step::AfterDirectorySync))?;
         Ok(())
     }
     fn unlink(&self, name: &CStr) -> Result<()> {
@@ -292,21 +284,16 @@ impl Journal {
         Ok(())
     }
     pub fn remove(self) -> Result<()> {
-        #[cfg(test)]
-        let _scope = crate::faults::scope("pending.remove");
-        #[cfg(test)]
-        crate::faults::hit("cleanup.before_temp_unlink")?;
+        let _scope = faults::enter(|| Some(Scope::PendingRemove));
+        faults::hit(Point::CleanupBeforeTempUnlink)?;
         self.unlink(NEXT_NAME)?;
-        #[cfg(test)]
-        crate::faults::hit("cleanup.before_state_unlink")?;
+        faults::hit(Point::CleanupBeforeStateUnlink)?;
         self.unlink(STATE_NAME)?;
         // Keep the mutex inode for the lifetime of the run directory. Unlinking
         // a held flock lets another opener lock a different inode concurrently.
-        #[cfg(test)]
-        crate::faults::hit("cleanup.before_directory_sync")?;
+        faults::hit(Point::CleanupBeforeDirectorySync)?;
         self.dir.sync_all()?;
-        #[cfg(test)]
-        crate::faults::hit("cleanup.after_directory_sync")?;
+        faults::hit(Point::CleanupAfterDirectorySync)?;
         Ok(())
     }
 }

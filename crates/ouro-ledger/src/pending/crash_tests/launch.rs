@@ -19,8 +19,8 @@ fn binary(name: &str, variable: &str) -> PathBuf {
                 .join(name)
         })
 }
-fn options(root: &Path, kind: &str) -> RunOptions {
-    let script = if matches!(kind, "pending.outage" | "pending.source") {
+fn options(root: &Path, kind: Scope) -> RunOptions {
+    let script = if matches!(kind, Scope::PendingOutage | Scope::PendingSource) {
         "printf x >> executions; touch started; while test ! -f release; do sleep 0.02; done"
     } else {
         "printf x >> executions"
@@ -57,9 +57,9 @@ fn options(root: &Path, kind: &str) -> RunOptions {
 pub(super) fn owner_worker(config: Value) {
     let root = Path::new(config["root"].as_str().unwrap());
     let plan: Plan = serde_json::from_value(config["plan"].clone()).unwrap();
-    let opts = options(root, &plan.kind);
-    let marker = plan.marker.clone();
-    let action = plan.action.clone();
+    let opts = options(root, plan.scope.expect("a matrix plan names its operation"));
+    let marker = plan.marker.clone().expect("a matrix plan marks its point");
+    let action = plan.action;
     faults::arm(plan);
     let result = runner::run(&opts);
     assert!(
@@ -67,7 +67,10 @@ pub(super) fn owner_worker(config: Value) {
         "owner never reached fault: {}",
         result.err().map(|e| e.to_string()).unwrap_or_default()
     );
-    assert_eq!(action, "error", "owner survived its kill hook");
+    assert!(
+        matches!(action, faults::Action::Error(_)),
+        "owner survived its kill hook"
+    );
     assert!(
         result.is_err(),
         "local I/O failure must not return a successful launch result"
@@ -142,7 +145,7 @@ fn stopped(root: &Path, run: &RunRecord) {
         thread::sleep(Duration::from_millis(10));
     }
 }
-fn replay(ledger: &Path, root: &Path, kind: &str) -> Command {
+fn replay(ledger: &Path, root: &Path, kind: Scope) -> Command {
     let opts = options(root, kind);
     let mut command = Command::new(ledger);
     command
@@ -193,8 +196,8 @@ fn real_owner_journal_crashes_never_bypass_admission_or_repeat_execution() {
         "build the production ledger before this matrix"
     );
     for action in ["error", "kill"] {
-        for (kind, point) in cases().filter(|(kind, _)| *kind != "pending.clear") {
-            let case = format!("{action}/{kind}/{point}");
+        for (kind, point) in cases().filter(|(kind, _)| *kind != Scope::PendingClear) {
+            let case = format!("{action}/{kind:?}/{point:?}");
             let temp = tempfile::Builder::new()
                 .permissions(fs::Permissions::from_mode(0o700))
                 .tempdir()
@@ -206,16 +209,16 @@ fn real_owner_journal_crashes_never_bypass_admission_or_repeat_execution() {
             fs::copy(&jail, root.join("ouro-jail")).unwrap();
             fs::set_permissions(root.join("ouro-jail"), fs::Permissions::from_mode(0o700)).unwrap();
             let mut daemon = writer(&ledger, root, "writer");
-            let plan = Plan {
-                kind: kind.into(),
-                point: point.into(),
-                action: action.into(),
-                marker: root.join("fault"),
+            let marker = root.join("fault");
+            let plan = if action == "kill" {
+                Plan::kill(kind, point, marker.clone())
+            } else {
+                Plan::error(kind, point, marker.clone())
             };
             let mut command = worker(json!({"mode":"owner","root":root,"plan":plan}));
             command.env("OURO_CONFIG_DIR", root.join("config"));
             let mut owner = Process::spawn(&mut command, root.join("owner.log"));
-            let outage = matches!(kind, "pending.outage" | "pending.source");
+            let outage = matches!(kind, Scope::PendingOutage | Scope::PendingSource);
             if outage {
                 wait_for(&mut owner, || root.join("workspace/started").exists());
                 let run = Client::connect(&root.join("data"))
@@ -224,16 +227,16 @@ fn real_owner_journal_crashes_never_bypass_admission_or_repeat_execution() {
                     .unwrap()
                     .remove(0);
                 daemon.kill();
-                if kind == "pending.source" {
+                if kind == Scope::PendingSource {
                     let pending = root.join("data/ledger").join(&run.run_id).join(STATE);
                     wait_for(&mut owner, || {
-                        plan.marker.exists()
+                        marker.exists()
                             || fs::read(&pending)
                                 .ok()
                                 .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
                                 .is_some_and(|v| v["state"]["active"] == true)
                     });
-                    if !plan.marker.exists() {
+                    if !marker.exists() {
                         fs::write(root.join("workspace/release"), b"").unwrap();
                     }
                 }
@@ -253,7 +256,7 @@ fn real_owner_journal_crashes_never_bypass_admission_or_repeat_execution() {
                     fs::read_to_string(&owner.log).unwrap()
                 );
             }
-            assert!(plan.marker.exists(), "{case}");
+            assert!(marker.exists(), "{case}");
             if !outage {
                 daemon.kill();
             }
@@ -266,7 +269,7 @@ fn real_owner_journal_crashes_never_bypass_admission_or_repeat_execution() {
             let executions = fs::read(root.join("workspace/executions")).unwrap_or_default();
             assert_eq!(
                 executions,
-                if kind == "pending.create" {
+                if kind == Scope::PendingCreate {
                     b"".as_slice()
                 } else {
                     b"x".as_slice()
@@ -277,8 +280,8 @@ fn real_owner_journal_crashes_never_bypass_admission_or_repeat_execution() {
             let mut client = Client::connect(&root.join("data")).unwrap();
             client.settle_orphans().unwrap();
             let recovered = client.show(&run.run_id).unwrap();
-            let expected = if kind == "pending.remove"
-                || (kind == "pending.completion" && action == "kill" && published(point))
+            let expected = if kind == Scope::PendingRemove
+                || (kind == Scope::PendingCompletion && action == "kill" && published(point))
             {
                 "settled"
             } else {
