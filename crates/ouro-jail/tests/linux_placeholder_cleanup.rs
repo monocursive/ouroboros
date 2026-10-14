@@ -81,3 +81,60 @@ fn a_refusal_after_the_placeholders_were_made_removes_them() {
         );
     }
 }
+
+/// Attempted, live: a `tool` run over a workspace holding 1100 nested `.git`
+/// directories, each bound read-only, which together pass the 1024 rows a
+/// receipt's mount table records. Verdict: refused before anything is
+/// spawned, as a configuration (`invalid_config`, remediation
+/// `configuration`) that names the protected segments and the bound, never
+/// as a host that cannot read its own mount table; the target never ran,
+/// and the root placeholders the preparation made are gone.
+#[test]
+fn a_workspace_past_the_receipt_mount_bound_is_refused_as_configuration() {
+    if !common::live() {
+        return;
+    }
+    let jail = Jail::new().unwrap();
+    let workspace = jail.root().join("workspace");
+    for index in 0..1100 {
+        private_dir(&workspace.join(format!("r{index}/.git")));
+    }
+    let marker = workspace.join("target-ran");
+    let run = jail
+        .arg("run")
+        .arg("--profile")
+        .arg("tool")
+        .arg("--workspace")
+        .arg(&workspace)
+        .receipt()
+        .target([
+            OsString::from("/usr/bin/touch"),
+            marker.clone().into_os_string(),
+        ])
+        .run()
+        .unwrap();
+    assert_eq!(run.code(), Some(2), "{}", run.stderr_text());
+    assert!(!marker.exists(), "the target ran");
+    let receipt = common::checked_receipt(
+        run.receipt_phase("refused")
+            .expect("a refusal writes a final receipt"),
+    );
+    let error = &receipt["errors"][0];
+    assert_eq!(error["code"], "invalid_config", "{receipt:#}");
+    assert_eq!(error["remediation_category"], "configuration");
+    let message = error["message"].as_str().unwrap();
+    // The 1100 nested `.git`, and `.git` and `.ouroboros` at the root of the
+    // workspace and of the managed scratch, held by placeholders.
+    assert!(
+        message.contains("holds 1104 protected segments")
+            && message.contains("would hold at least")
+            && message.contains("1024"),
+        "{message}"
+    );
+    for literal in [".git", ".ouroboros"] {
+        assert!(
+            !workspace.join(literal).exists(),
+            "the refused run left its {literal} placeholder in the workspace"
+        );
+    }
+}

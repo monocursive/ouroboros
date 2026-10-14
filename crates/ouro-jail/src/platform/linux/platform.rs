@@ -1228,6 +1228,11 @@ impl Boundary {
             )
         })?;
 
+        refuse_unrecordable_mounts(
+            &bplan,
+            scan.segments.len(),
+            skipped_protected_names(&scan).len(),
+        )?;
         let rendered = bplan.render().map_err(|err| {
             error(
                 ErrorCode::InvalidConfig,
@@ -1915,6 +1920,7 @@ impl Boundary {
                 });
             }
         }
+        let mounts = recordable_mounts(mounts)?;
         Ok(Applied {
             filesystem: Some(AppliedFilesystem {
                 mechanism: "bubblewrap-binds".to_owned(),
@@ -3001,10 +3007,65 @@ fn skipped_protected_names(scan: &jfs::ProtectedScan) -> Vec<String> {
         .collect()
 }
 
-/// The most rows a receipt's mount table records. A boundary with more is
+/// The most rows a receipt's mount table records: the receipt schema's
+/// `maxItems` for `applied.filesystem.mounts`. A boundary with more is
 /// refused rather than recorded in part: a shortened table would still read
 /// as the child's whole view (§13.2).
 const MOUNT_TABLE_ROWS_MAX: usize = 1024;
+
+/// Refuses, before anything is spawned, a plan whose mount table no receipt
+/// can record. Every protected segment the walk found (`segments`) is one
+/// read-only bind of the plan, so a workspace holding about a thousand
+/// `.git` directories passes the bound on its own: a configuration to
+/// narrow, not a host to repair. The count is the plan's lower bound
+/// ([`BwrapPlan::mount_rows_at_least`]) plus the `hidden` row of each
+/// protected name the walk would not follow; [`recordable_mounts`] still
+/// refuses what the host's own mounts add after the spawn.
+fn refuse_unrecordable_mounts(
+    plan: &BwrapPlan,
+    segments: usize,
+    hidden: usize,
+) -> Result<(), JailError> {
+    let rows = plan.mount_rows_at_least() + hidden;
+    if rows <= MOUNT_TABLE_ROWS_MAX {
+        return Ok(());
+    }
+    Err(error(
+        ErrorCode::InvalidConfig,
+        ErrorStage::Preparing,
+        Remediation::Configuration,
+        format!(
+            "the workspace holds {} protected segments, each bound read-only, so the boundary \
+             would hold at least {rows} mounts, more than the {MOUNT_TABLE_ROWS_MAX} a receipt's \
+             mount table records; run over a narrower workspace",
+            segments + plan.placeholders.len() + hidden
+        ),
+    ))
+}
+
+/// The rows a receipt records, whole or not at all (§13.2). The plan's own
+/// rows were bounded before the spawn ([`refuse_unrecordable_mounts`]); what
+/// can still pass the bound here is what the host mounted beneath a path
+/// the plan binds, since each bind brings those mounts along.
+///
+/// # Errors
+/// A configuration refusal naming the count and the bound.
+fn recordable_mounts(mounts: Vec<AppliedMount>) -> Result<Vec<AppliedMount>, JailError> {
+    if mounts.len() <= MOUNT_TABLE_ROWS_MAX {
+        return Ok(mounts);
+    }
+    Err(error(
+        ErrorCode::InvalidConfig,
+        ErrorStage::Preparing,
+        Remediation::Configuration,
+        format!(
+            "the boundary holds {} mounts, more than the {MOUNT_TABLE_ROWS_MAX} a receipt's \
+             mount table records: the plan's own and the host's mounts beneath the paths it \
+             binds; run over a narrower workspace or fewer grants",
+            mounts.len()
+        ),
+    ))
+}
 
 /// The mount table the launcher actually sees, from `/proc/<pid>/mountinfo`
 /// read as bytes (P01.8): one mount point that is not UTF-8 must not cost
@@ -3022,8 +3083,8 @@ fn read_mount_table(pid: libc::pid_t) -> std::io::Result<Vec<AppliedMount>> {
 ///
 /// # Errors
 /// [`std::io::ErrorKind::InvalidData`] for a row without a mount point and
-/// options, a mount point holding a NUL, or more than
-/// [`MOUNT_TABLE_ROWS_MAX`] rows: the table is read whole or not at all.
+/// options, or a mount point holding a NUL: the table is read whole or not
+/// at all.
 fn parse_mount_table(raw: &[u8]) -> std::io::Result<Vec<AppliedMount>> {
     let invalid = |what: String| std::io::Error::new(std::io::ErrorKind::InvalidData, what);
     let mut out = Vec::new();
@@ -3051,12 +3112,6 @@ fn parse_mount_table(raw: &[u8]) -> std::io::Result<Vec<AppliedMount>> {
         };
         let native = NativeString::from_bytes(decode_mountinfo_path(point))
             .map_err(|_| invalid("a mount point holds a NUL byte".to_owned()))?;
-        if out.len() == MOUNT_TABLE_ROWS_MAX {
-            return Err(invalid(format!(
-                "the boundary has more than {MOUNT_TABLE_ROWS_MAX} mounts, more than a \
-                 receipt records"
-            )));
-        }
         out.push(AppliedMount {
             path: native,
             mode: mode.to_owned(),
@@ -5718,8 +5773,9 @@ mod tests {
         );
     }
 
-    /// The table is read whole or not at all: a row the parser cannot read,
-    /// or more rows than a receipt records, refuses instead of shortening.
+    /// The table is read whole or not at all: a row the parser cannot read
+    /// refuses, and so does a table with more rows than a receipt records,
+    /// as a configuration to narrow rather than a host to repair.
     #[test]
     fn a_mount_table_is_never_recorded_in_part() {
         assert!(parse_mount_table(b"22 1 0:1 / / ro - tmpfs tmpfs ro\n\n").is_ok());
@@ -5727,13 +5783,59 @@ mod tests {
         assert!(parse_mount_table(b"22 1 0:1 / /a\\000b ro - tmpfs t ro\n").is_err());
         let row = |index: usize| format!("{index} 1 0:1 / /m{index} ro - tmpfs tmpfs ro\n");
         let full: String = (0..MOUNT_TABLE_ROWS_MAX).map(row).collect();
-        assert_eq!(
-            parse_mount_table(full.as_bytes()).unwrap().len(),
-            MOUNT_TABLE_ROWS_MAX
+        let full = parse_mount_table(full.as_bytes()).unwrap();
+        assert_eq!(full.len(), MOUNT_TABLE_ROWS_MAX);
+        let mut over = full.clone();
+        over.push(full[0].clone());
+        assert_eq!(recordable_mounts(full).unwrap().len(), MOUNT_TABLE_ROWS_MAX);
+        let error = recordable_mounts(over).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.remediation, Remediation::Configuration);
+        assert!(error.message.contains("1025 mounts"), "{}", error.message);
+    }
+
+    /// A workspace with about a thousand protected segments passes the bound
+    /// on the plan's own rows: refused before anything is spawned, as a
+    /// configuration, naming the segments and the bound. A protected name the
+    /// walk would not follow costs a `hidden` row and counts too.
+    #[test]
+    fn a_plan_past_the_receipt_mount_bound_refuses_before_the_spawn() {
+        let mut plan = BwrapPlan::tool(
+            Path::new("/work"),
+            Path::new("/scratch"),
+            Path::new("/opt/ouro-jail"),
         );
-        let over = format!("{full}{}", row(MOUNT_TABLE_ROWS_MAX));
-        let error = parse_mount_table(over.as_bytes()).unwrap_err();
-        assert!(error.to_string().contains("more than"), "{error}");
+        let fixed = plan.mount_rows_at_least();
+        // As `prepare_mounts` binds each segment the walk found.
+        let protect = |plan: &mut BwrapPlan, count: usize| {
+            plan.extra_ro_binds = (0..count)
+                .map(|index| {
+                    let path = PathBuf::from(format!("/work/r{index}/.git"));
+                    (path.clone(), path)
+                })
+                .collect();
+        };
+        let at_bound = MOUNT_TABLE_ROWS_MAX - fixed;
+        protect(&mut plan, at_bound);
+        assert_eq!(plan.mount_rows_at_least(), MOUNT_TABLE_ROWS_MAX);
+        super::refuse_unrecordable_mounts(&plan, at_bound, 0).unwrap();
+        let error = super::refuse_unrecordable_mounts(&plan, at_bound, 1).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+
+        protect(&mut plan, 1100);
+        let error = super::refuse_unrecordable_mounts(&plan, 1100, 0).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.stage, ErrorStage::Preparing);
+        assert_eq!(error.remediation, Remediation::Configuration);
+        assert!(
+            error.message.contains("1100 protected segments")
+                && error
+                    .message
+                    .contains(&format!("at least {} mounts", fixed + 1100))
+                && error.message.contains("1024"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
