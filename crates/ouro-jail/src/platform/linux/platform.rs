@@ -1242,7 +1242,8 @@ impl Boundary {
 
         refuse_unrecordable_mounts(
             &bplan,
-            scan.segments.len(),
+            0,
+            scan.segments.len() + bplan.placeholders.len(),
             skipped_protected_names(&scan).len(),
         )?;
         let rendered = bplan.render().map_err(|err| {
@@ -3097,20 +3098,23 @@ fn skipped_protected_names(scan: &jfs::ProtectedScan) -> Vec<String> {
 /// as the child's whole view (§13.2).
 const MOUNT_TABLE_ROWS_MAX: usize = 1024;
 
-/// Refuses, before anything is spawned, a plan whose mount table no receipt
-/// can record. Every protected segment the walk found (`segments`) is one
-/// read-only bind of the plan, so a workspace holding about a thousand
-/// `.git` directories passes the bound on its own: a configuration to
-/// narrow, not a host to repair. The count is the plan's lower bound
-/// ([`BwrapPlan::mount_rows_at_least`]) plus the `hidden` row of each
-/// protected name the walk would not follow; [`recordable_mounts`] still
-/// refuses what the host's own mounts add after the spawn.
+/// Refuses, before anything is spawned (and before the protected segments are
+/// pinned), a plan whose mount table no receipt can record. Every protected
+/// segment the walk found, and every placeholder, is one read-only bind, so a
+/// workspace holding about a thousand `.git` directories passes the bound on
+/// its own: a configuration to narrow, not a host to repair. The count is the
+/// plan's lower bound ([`BwrapPlan::mount_rows_at_least`]) plus the `pending`
+/// binds not yet in the plan, plus the `hidden` row of each protected name
+/// the walk would not follow; `protected` is how many segments and
+/// placeholders there are in all. [`recordable_mounts`] still refuses what
+/// the host's own mounts add after the spawn.
 fn refuse_unrecordable_mounts(
     plan: &BwrapPlan,
-    segments: usize,
+    pending: usize,
+    protected: usize,
     hidden: usize,
 ) -> Result<(), JailError> {
-    let rows = plan.mount_rows_at_least() + hidden;
+    let rows = plan.mount_rows_at_least() + pending + hidden;
     if rows <= MOUNT_TABLE_ROWS_MAX {
         return Ok(());
     }
@@ -3123,9 +3127,69 @@ fn refuse_unrecordable_mounts(
              segments, each bound read-only, so the boundary would hold at least {rows} mounts, \
              more than the {MOUNT_TABLE_ROWS_MAX} a receipt's mount table records; run over a \
              narrower workspace",
-            segments + plan.placeholders.len() + hidden
+            protected + hidden
         ),
     ))
+}
+
+/// Descriptors the boundary opens beside its mount sources before the spawn
+/// (pipes, the backend's pidfd, the status and argument channels).
+const MOUNT_DESCRIPTOR_HEADROOM: u64 = 64;
+
+/// Makes room for `needed` more descriptors before they are opened, raising
+/// the soft `RLIMIT_NOFILE` to the hard limit when the soft one is short
+/// (only this process and its children, within what the operator allows).
+/// A workspace whose mounts need more than even the hard limit allows is
+/// refused as a configuration naming the count and the limits, never left
+/// to fail half-way with `EMFILE`.
+///
+/// # Errors
+/// That refusal, or a limit that cannot be read.
+fn reserve_mount_descriptors(needed: usize, protected: usize) -> Result<(), JailError> {
+    let unreadable = |err: std::io::Error| {
+        preparing(
+            ErrorCode::BackendUnavailable,
+            format!("the descriptor limit cannot be read: {err}"),
+        )
+    };
+    let needed = u64::try_from(needed)
+        .unwrap_or(u64::MAX)
+        .saturating_add(MOUNT_DESCRIPTOR_HEADROOM);
+    let open = || {
+        crate::proxy::open_descriptor_count()
+            .map(|open| u64::try_from(open).unwrap_or(u64::MAX))
+            .map_err(unreadable)
+    };
+    let (soft, hard) = crate::proxy::nofile_limits().map_err(unreadable)?;
+    if descriptor_shortfall(needed, open()?, soft, hard, protected).is_none() {
+        return Ok(());
+    }
+    let (soft, hard) = crate::proxy::raise_nofile_soft_to_hard().map_err(unreadable)?;
+    descriptor_shortfall(needed, open()?, soft, hard, protected).map_or(Ok(()), Err)
+}
+
+/// The refusal for `needed` more descriptors with `open` already open under
+/// the `soft` and `hard` limits, or `None` when they fit.
+fn descriptor_shortfall(
+    needed: u64,
+    open: u64,
+    soft: u64,
+    hard: u64,
+    protected: usize,
+) -> Option<JailError> {
+    (open.saturating_add(needed) > soft).then(|| {
+        error(
+            ErrorCode::InvalidConfig,
+            ErrorStage::Preparing,
+            Remediation::Configuration,
+            format!(
+                "binding the {protected} protected segments and the other mounts read-only takes \
+                 {needed} more descriptors with {open} already open, more than RLIMIT_NOFILE \
+                 allows (soft {soft}, hard {hard}); raise the limit or run over a narrower \
+                 workspace"
+            ),
+        )
+    })
 }
 
 /// The rows a receipt records, whole or not at all (§13.2). The plan's own
@@ -3702,8 +3766,10 @@ fn prepare_mounts(
         entries_seen: 0,
         max_depth_seen: 0,
     };
-    // Every refusal below drops the set, which removes what it created.
-    let mut placeholders = PlaceholderSet::default();
+    // Every writable root is scanned before anything in it is pinned, so the
+    // mounts the scans add are counted against the receipt's bound, and the
+    // descriptors their pins take are reserved, before one is opened.
+    let mut scans = Vec::new();
     for (root_index, (source, destination)) in roots.iter().enumerate() {
         let pin = jfs::PinnedPath::open(source).map_err(failure)?;
         if !pin.is_dir().map_err(failure)? {
@@ -3714,13 +3780,14 @@ fn prepare_mounts(
             pins.insert(source.clone(), pin);
             continue;
         }
-        let mut scan = jfs::scan_pinned(
+        let seen_before = aggregate.entries_seen;
+        let scan = jfs::scan_pinned(
             &pin,
             names,
             jfs::ScanLimits {
                 max_entries: jfs::ScanLimits::DEFAULT
                     .max_entries
-                    .saturating_sub(aggregate.entries_seen),
+                    .saturating_sub(seen_before),
                 ..jfs::ScanLimits::DEFAULT
             },
         )
@@ -3732,6 +3799,30 @@ fn prepare_mounts(
                 "existing_and_root coverage cannot cover protected symlinks",
             ));
         }
+        aggregate.entries_seen += scan.entries_seen;
+        scans.push((root_index, source, destination, seen_before, scan));
+    }
+    let segments: usize = scans.iter().map(|(.., scan)| scan.segments.len()).sum();
+    let holders: usize = scans
+        .iter()
+        .map(|(.., scan)| scan.absent_root_literals().len())
+        .sum();
+    let hidden: usize = scans
+        .iter()
+        .map(|(.., scan)| scan.skipped_symlinks.len())
+        .sum();
+    refuse_unrecordable_mounts(
+        plan,
+        segments + holders,
+        segments + holders + plan.placeholders.len(),
+        hidden,
+    )?;
+    // A pin per segment; a placeholder holds its own handle and its holder.
+    reserve_mount_descriptors(segments + 2 * holders, segments + holders)?;
+
+    // Every refusal below drops the set, which removes what it created.
+    let mut placeholders = PlaceholderSet::default();
+    for (root_index, source, destination, seen_before, mut scan) in scans {
         for segment in &scan.segments {
             let pinned = jfs::PinnedPath::open(&segment.path).map_err(failure)?;
             if pinned.identity() != (segment.dev, segment.ino) {
@@ -3781,7 +3872,7 @@ fn prepare_mounts(
                     // first scan at the cap would trip.
                     max_entries: jfs::ScanLimits::DEFAULT
                         .max_entries
-                        .saturating_sub(aggregate.entries_seen)
+                        .saturating_sub(seen_before)
                         .saturating_add(scan.absent_root_literals().len()),
                     ..jfs::ScanLimits::DEFAULT
                 },
@@ -3818,7 +3909,6 @@ fn prepare_mounts(
             scan.directories = checked.directories;
         }
         aggregate.directories.extend(scan.directories);
-        aggregate.entries_seen += scan.entries_seen;
         aggregate.max_depth_seen = aggregate.max_depth_seen.max(scan.max_depth_seen);
         aggregate.segments.extend(scan.segments);
         aggregate.skipped_symlinks.extend(scan.skipped_symlinks);
@@ -3827,6 +3917,22 @@ fn prepare_mounts(
     // alias of a protected source after applying its protection.
     let mut fds = Vec::new();
     let mut rows = plan.mount_table();
+    // One duplicate per row bubblewrap binds from a descriptor, and a pin
+    // per source not pinned yet.
+    let prepared = rows
+        .iter()
+        .filter(|row| row.kind.preparation() != bwrap::MountPreparation::Nothing)
+        .count();
+    let unpinned: std::collections::BTreeSet<&OsString> = rows
+        .iter()
+        .filter(|row| row.kind.preparation() == bwrap::MountPreparation::PinSource)
+        .filter_map(|row| row.source.as_ref())
+        .filter(|source| !pins.contains_key(Path::new(source)))
+        .collect();
+    reserve_mount_descriptors(
+        prepared + unpinned.len(),
+        aggregate.segments.len() + plan.placeholders.len(),
+    )?;
     for row in &mut rows {
         let source = match row.kind.preparation() {
             bwrap::MountPreparation::Nothing => continue,
@@ -5924,12 +6030,12 @@ mod tests {
         let at_bound = MOUNT_TABLE_ROWS_MAX - fixed;
         protect(&mut plan, at_bound);
         assert_eq!(plan.mount_rows_at_least(), MOUNT_TABLE_ROWS_MAX);
-        super::refuse_unrecordable_mounts(&plan, at_bound, 0).unwrap();
-        let error = super::refuse_unrecordable_mounts(&plan, at_bound, 1).unwrap_err();
+        super::refuse_unrecordable_mounts(&plan, 0, at_bound, 0).unwrap();
+        let error = super::refuse_unrecordable_mounts(&plan, 0, at_bound, 1).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfig);
 
         protect(&mut plan, 1100);
-        let error = super::refuse_unrecordable_mounts(&plan, 1100, 0).unwrap_err();
+        let error = super::refuse_unrecordable_mounts(&plan, 0, 1100, 0).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidConfig);
         assert_eq!(error.stage, ErrorStage::Preparing);
         assert_eq!(error.remediation, Remediation::Configuration);
@@ -5942,6 +6048,27 @@ mod tests {
             "{}",
             error.message
         );
+    }
+
+    /// Pinning a workspace's protected segments either fits the descriptor
+    /// limit or is refused as a configuration naming the count and the
+    /// limits, never left to fail with `EMFILE` as a host problem.
+    #[test]
+    fn a_descriptor_budget_that_does_not_fit_is_a_configuration() {
+        assert!(super::descriptor_shortfall(900, 100, 1024, 1024, 890).is_none());
+        let error = super::descriptor_shortfall(1900, 100, 1024, 1024, 990).unwrap();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.stage, ErrorStage::Preparing);
+        assert_eq!(error.remediation, Remediation::Configuration);
+        assert!(
+            error.message.contains("990 protected segments")
+                && error.message.contains("1900 more descriptors")
+                && error.message.contains("soft 1024, hard 1024"),
+            "{}",
+            error.message
+        );
+        // Within this process's own limit a modest budget is reserved.
+        super::reserve_mount_descriptors(16, 1).unwrap();
     }
 
     #[test]
