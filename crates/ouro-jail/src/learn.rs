@@ -3,7 +3,7 @@
 use crate::{
     cli::{LearnArgs, RunArgs},
     journal,
-    records::{Decision, Event, EventSource, EvidenceMode, ObserveMode},
+    records::{Decision, Event, EventSource},
     supervisor::{self, Context},
 };
 use serde::Serialize;

@@ -5408,7 +5408,7 @@ mod tests {
             args: Args {
                 command: Some(Box::new(crate::commands::Hit {
                     pattern: "git push".to_owned(),
-                    digest: String::new(),
+                    digest: None,
                     forbidden: true,
                 })),
                 ..Args::default()
@@ -5461,7 +5461,9 @@ mod tests {
                 commands: crate::commands::Rules {
                     deny: vec!["git push".into()],
                     forbid: Vec::new(),
-                },
+                }
+                .compile()
+                .unwrap(),
                 ..TracerConfig::default()
             },
             Kernel {
