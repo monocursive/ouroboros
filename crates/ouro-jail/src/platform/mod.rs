@@ -100,6 +100,15 @@ impl ContinuousDeadline {
 // and the vault's tests use the bridge's port.
 pub mod linux;
 
+/// The most bytes a boundary's mount table may take in a receipt, measured
+/// as `serde_json::to_vec_pretty` renders the rows (their place in the
+/// receipt adds a few bytes of indentation per row, which the supervisor's
+/// receipt reserve covers). A quarter of the bound every reader holds a
+/// receipt to (`cleanup::RECEIPT_MAX`): the row count alone does not bound a
+/// table whose paths are long, escaped six bytes for one (control
+/// characters) or base64-encoded (paths that are not UTF-8).
+pub const MOUNT_TABLE_BYTES_MAX: u64 = 1024 * 1024;
+
 /// The reason code of a capability this platform has no backend for (§3.2):
 /// a fact about the implementation, never a measurement of the host.
 pub const REASON_UNSUPPORTED_PLATFORM: &str = "unsupported_platform";
@@ -466,6 +475,10 @@ pub trait PreparedExecution {
     /// and limit scopes", which only the platform knows, so an executing
     /// platform reports them. The default, `None`, leaves the supervisor's
     /// own view: nothing applied but the wall ceiling it records itself.
+    ///
+    /// A mount table is reported whole and within
+    /// [`MOUNT_TABLE_BYTES_MAX`]; a boundary whose table is larger is refused
+    /// while it is prepared, never reported in part.
     fn applied(&self) -> Option<crate::records::Applied> {
         None
     }

@@ -7,6 +7,7 @@ use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::platform::MOUNT_TABLE_BYTES_MAX;
 use crate::policy::{EnvValue, PathRef, PolicySnapshot, ProfileName, ProtectedCoverage, RootToken};
 use crate::records::{AppliedMount, ErrorCode, ErrorStage, JailError, NativeString, Remediation};
 use crate::state::mountinfo;
@@ -202,27 +203,49 @@ pub(super) fn descriptor_shortfall(
 }
 
 /// The rows a receipt records, whole or not at all (§13.2). The plan's own
-/// rows were bounded before the spawn ([`refuse_unrecordable_mounts`]); what
-/// can still pass the bound here is what the host mounted beneath a path
-/// the plan binds, since each bind brings those mounts along.
+/// rows were counted before the spawn ([`refuse_unrecordable_mounts`]); what
+/// can still pass the count here is what the host mounted beneath a path
+/// the plan binds, since each bind brings those mounts along. The rows'
+/// bytes are bounded here, on the table as it is ([`MOUNT_TABLE_BYTES_MAX`]):
+/// a few hundred protected segments under a long or escaped path pass it
+/// well inside the row count. The refusal comes while the boundary is
+/// prepared, before the supervisor records any of it, so the refused receipt
+/// stays within its own bound.
 ///
 /// # Errors
-/// A configuration refusal naming the count and the bound.
+/// A configuration refusal naming the count or the size, and the bound.
 pub(super) fn recordable_mounts(mounts: Vec<AppliedMount>) -> Result<Vec<AppliedMount>, JailError> {
-    if mounts.len() <= MOUNT_TABLE_ROWS_MAX {
-        return Ok(mounts);
+    if mounts.len() > MOUNT_TABLE_ROWS_MAX {
+        return Err(error(
+            ErrorCode::InvalidConfig,
+            ErrorStage::Preparing,
+            Remediation::Configuration,
+            format!(
+                "the boundary holds {} mounts, more than the {MOUNT_TABLE_ROWS_MAX} a receipt's \
+                 mount table records: the plan's own and the host's mounts beneath the paths \
+                 it binds; run over a narrower workspace or fewer grants",
+                mounts.len()
+            ),
+        ));
     }
-    Err(error(
-        ErrorCode::InvalidConfig,
-        ErrorStage::Preparing,
-        Remediation::Configuration,
-        format!(
-            "the boundary holds {} mounts, more than the {MOUNT_TABLE_ROWS_MAX} a receipt's \
-             mount table records: the plan's own and the host's mounts beneath the paths it \
-             binds; run over a narrower workspace or fewer grants",
-            mounts.len()
-        ),
-    ))
+    let bytes = serde_json::to_vec_pretty(&mounts).map_or(u64::MAX, |bytes| {
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+    });
+    if bytes > MOUNT_TABLE_BYTES_MAX {
+        return Err(error(
+            ErrorCode::InvalidConfig,
+            ErrorStage::Preparing,
+            Remediation::Configuration,
+            format!(
+                "the boundary's {} mounts take {bytes} bytes of a receipt, more than the \
+                 {MOUNT_TABLE_BYTES_MAX} its mount table may take: their paths are long, or \
+                 hold characters a receipt must escape or encode; run over a narrower \
+                 workspace or one at a shorter path",
+                mounts.len()
+            ),
+        ));
+    }
+    Ok(mounts)
 }
 
 /// The largest `mountinfo` this module reads, the launcher's or this
@@ -1539,6 +1562,40 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InvalidConfig);
         assert_eq!(error.remediation, Remediation::Configuration);
         assert!(error.message.contains("1025 mounts"), "{}", error.message);
+    }
+
+    /// Well inside the row count, a table whose paths a receipt must escape
+    /// (a control character takes six bytes) passes the bytes a receipt's
+    /// mount table may take, and refuses as a configuration while the
+    /// boundary is prepared; at the bound it is recorded.
+    #[test]
+    fn a_mount_table_past_its_bytes_is_never_recorded() {
+        let row = |index: usize, width: usize| AppliedMount {
+            path: NativeString::Text(format!("/w/{}/{index}", "\u{1}".repeat(width))),
+            mode: "ro".to_owned(),
+        };
+        let size = |rows: &[AppliedMount]| {
+            u64::try_from(serde_json::to_vec_pretty(rows).unwrap().len()).unwrap()
+        };
+        // 250 rows of about 3.5 KiB, as many `.git` directories under a deep
+        // path: over 5 MiB once escaped.
+        let deep: Vec<AppliedMount> = (0..250).map(|index| row(index, 3500)).collect();
+        assert!(size(&deep) > 5 * 1024 * 1024);
+        let error = recordable_mounts(deep).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.stage, ErrorStage::Preparing);
+        assert!(
+            error.message.contains("250 mounts take"),
+            "{}",
+            error.message
+        );
+        // The widest table of the same rows that still fits is recorded.
+        let mut fitting: Vec<AppliedMount> = Vec::new();
+        while size(&fitting) <= MOUNT_TABLE_BYTES_MAX {
+            fitting.push(row(fitting.len(), 3500));
+        }
+        fitting.pop();
+        assert!(recordable_mounts(fitting).is_ok());
     }
 
     /// A workspace with about a thousand protected segments passes the bound

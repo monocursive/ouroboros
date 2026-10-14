@@ -36,7 +36,8 @@ use crate::lifecycle::{Integrity, TreeEnd};
 use crate::network::NetworkMode;
 use crate::observer::CoverageClass;
 use crate::platform::{
-    BoundaryIdentity, ContinuousDeadline, PlanRequest, Platform, StopReason, Teardown,
+    BoundaryIdentity, ContinuousDeadline, MOUNT_TABLE_BYTES_MAX, PlanRequest, Platform, StopReason,
+    Teardown,
 };
 use crate::policy::{
     self, CredentialMode, Layer, LayerOrigin, LimitKey, PolicyDelta, ProfileName, ResolveInputs,
@@ -322,9 +323,10 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
     Ok(plan)
 }
 
-/// What a run adds to a receipt beyond what its plan fixes: its errors, the
-/// boundary's native identities and process, the environment names, and the
-/// rest of the applied group the platform reports.
+/// What a run adds to a receipt beyond what its plan fixes and the mount
+/// table: its errors, the boundary's native identities and process, the
+/// environment names, the rest of the applied group the platform reports,
+/// and the indentation the mount table's rows take in the receipt.
 const RECEIPT_RESERVE: u64 = 512 * 1024;
 
 /// §7 and I01: the records of this plan's attempt stay within the bound
@@ -335,9 +337,10 @@ const RECEIPT_RESERVE: u64 = 512 * 1024;
 ///
 /// `policy.json` is known exactly. The receipt is not built yet, so its size
 /// is projected from what the plan fixes: the refused receipt the attempt
-/// would start from (it carries the operator grants), the filesystem policy
-/// once more for the mount table the platform reports from it, and
-/// [`RECEIPT_RESERVE`] for what a run adds.
+/// would start from (it carries the operator grants), the most a boundary's
+/// mount table may take ([`MOUNT_TABLE_BYTES_MAX`], which the platform
+/// enforces while it prepares the boundary, before any of it is recorded),
+/// and [`RECEIPT_RESERVE`] for what a run adds.
 ///
 /// # Errors
 /// [`ErrorCode::InvalidConfig`] when either would be past the bound.
@@ -356,7 +359,7 @@ fn check_record_bounds(ctx: &Context, plan: &Plan) -> Result<(), JailError> {
         Some(crate::canonical::argv_digest(&[])),
     );
     let receipt = pretty_len(&start.receipt(Phase::Refused))
-        .saturating_add(pretty_len(&plan.resolved.snapshot.filesystem))
+        .saturating_add(MOUNT_TABLE_BYTES_MAX)
         .saturating_add(RECEIPT_RESERVE);
     let bound = cleanup::RECEIPT_MAX;
     if envelope <= bound && receipt <= bound {

@@ -99,11 +99,11 @@ fn an_enforced_receipt_past_the_bound_stops_the_run() {
 #[test]
 fn a_policy_too_large_to_record_is_refused_before_any_claim() {
     let (_root, root_path, workspace) = roots();
-    // 100 read-only grants of about 24 KiB each: the receipt carries each
-    // grant, and the mount table each path again.
+    // 130 read-only grants of about 24 KiB each: the receipt carries each
+    // grant, beside the room its mount table and the run may take.
     let deep = vec!["d".repeat(200); 120].join("/");
     let mut selection = vec!["--workspace".to_owned(), workspace.display().to_string()];
-    for index in 0..100 {
+    for index in 0..130 {
         selection.push("--ro".to_owned());
         selection.push(format!("{}/elsewhere/{deep}/{index}", root_path.display()));
     }
