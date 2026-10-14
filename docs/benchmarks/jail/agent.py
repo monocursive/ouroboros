@@ -15,6 +15,9 @@ import tempfile
 import time
 import tomllib
 
+if not __debug__:
+    raise SystemExit('agent.py must not run with python -O: its assert statements are its checks')
+
 parser=argparse.ArgumentParser()
 parser.add_argument('--binary',type=pathlib.Path,required=True)
 parser.add_argument('--agent',type=pathlib.Path,required=True)

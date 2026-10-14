@@ -12,6 +12,9 @@ import subprocess
 import tempfile
 import time
 
+if not __debug__:
+    raise SystemExit('bench.py must not run with python -O: its assert statements are its checks')
+
 parser=argparse.ArgumentParser()
 parser.add_argument('--binary',type=pathlib.Path,required=True)
 parser.add_argument('--out',type=pathlib.Path,required=True)

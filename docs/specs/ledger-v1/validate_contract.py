@@ -15,6 +15,17 @@ from pathlib import Path
 
 import rfc8785
 
+if not __debug__:
+    raise SystemExit("validate_contract.py must not run with python -O: it is a CI gate")
+
+
+def check(condition, *detail):
+    """Fail the contract check. Unlike `assert`, python -O cannot remove it;
+    unlike an assert message, detail is evaluated even when the check holds."""
+    if not condition:
+        raise AssertionError(*detail)
+
+
 ROOT = Path(__file__).resolve().parent
 freeze_spec = importlib.util.spec_from_file_location("ledger_freeze", ROOT / "freeze.py")
 freeze = importlib.util.module_from_spec(freeze_spec)
@@ -34,7 +45,7 @@ def digest(record):
 
 
 def expect_invalid(validator, instance, label):
-    assert not validator.is_valid(instance), f"invalid fixture accepted: {label}"
+    check(not validator.is_valid(instance), f"invalid fixture accepted: {label}")
 
 
 def operator_tail_fixtures(validators):
@@ -42,7 +53,7 @@ def operator_tail_fixtures(validators):
     record = read("operator-intent.json")
     validators["append-request"].validate(request)
     validators["record"].validate(record)
-    assert record["body"]["fields"] == request["intent"]["body"]
+    check(record["body"]["fields"] == request["intent"]["body"])
     for role in ["owner", "producer"]:
         altered = copy.deepcopy(record)
         altered["provenance"]["role"] = role
@@ -62,9 +73,9 @@ def operator_tail_fixtures(validators):
     page = read("tail-page.json")
     validators["tail"].validate(page)
     validators["tail-request"].validate({"run_id":page["run_id"], "cursor":page["next_cursor"]})
-    assert len(page["ndjson"].encode()) <= 65536
-    assert page["head"]["head_digest"] == digest(record)
-    assert page["ndjson"].encode() == rfc8785.dumps(record) + b"\n"
+    check(len(page["ndjson"].encode()) <= 65536)
+    check(page["head"]["head_digest"] == digest(record))
+    check(page["ndjson"].encode() == rfc8785.dumps(record) + b"\n")
     altered = copy.deepcopy(page)
     altered["next_cursor"] = None
     expect_invalid(validators["tail"], altered, "caught-up tail loses resume position")
@@ -73,11 +84,11 @@ def operator_tail_fixtures(validators):
 def target_comparison_fixtures(validators):
     report = read("diff-target-page.json")
     validators["diff"].validate(report)
-    assert report["mode"] == "target_counts" and report["total_changes"] == 2
-    assert report["target_scope"]["exec"] == ["proc.exec"]
-    assert report["classes"]["net"]["left_reason"] == "target_comparison_unsupported"
-    assert json.loads(report["next_after"])["mode"] == "target_counts"
-    assert report["changes"][0]["observation"]["target"]["path_basis"] == "argument_snapshot"
+    check(report["mode"] == "target_counts" and report["total_changes"] == 2)
+    check(report["target_scope"]["exec"] == ["proc.exec"])
+    check(report["classes"]["net"]["left_reason"] == "target_comparison_unsupported")
+    check(json.loads(report["next_after"])["mode"] == "target_counts")
+    check(report["changes"][0]["observation"]["target"]["path_basis"] == "argument_snapshot")
     for key in ["target_scope"]:
         altered = copy.deepcopy(report)
         del altered[key]
@@ -112,14 +123,14 @@ def discovery_fixtures(validators):
                            ("catalog-request", catalog_request),
                            ("discovery-request", discovery_request)]:
         validators[name].validate(instance)
-    assert catalog["snapshot"] == discovery["catalog_snapshot"]
-    assert catalog["runs"][0] == discovery["run"]
-    assert discovery["page"]["snapshot"] == discovery["run"]["chain"]
-    assert discovery["page"]["run_id"] == discovery["run"]["run_id"]
-    assert discovery["page"]["child_protection"] == discovery["run"]["child_protection"]
-    assert discovery["page"]["records"][0]["provenance"]["role"] == "producer"
-    assert json.loads(catalog["next_after"])["snapshot"] == catalog["snapshot"]
-    assert json.loads(discovery["next_after"])["snapshot"] == catalog["snapshot"]
+    check(catalog["snapshot"] == discovery["catalog_snapshot"])
+    check(catalog["runs"][0] == discovery["run"])
+    check(discovery["page"]["snapshot"] == discovery["run"]["chain"])
+    check(discovery["page"]["run_id"] == discovery["run"]["run_id"])
+    check(discovery["page"]["child_protection"] == discovery["run"]["child_protection"])
+    check(discovery["page"]["records"][0]["provenance"]["role"] == "producer")
+    check(json.loads(catalog["next_after"])["snapshot"] == catalog["snapshot"])
+    check(json.loads(discovery["next_after"])["snapshot"] == catalog["snapshot"])
     for name, original, filter_key, maximum in [
             ("catalog-request", catalog_request, "filter", 100),
             ("discovery-request", discovery_request, "runs", 1000)]:
@@ -168,18 +179,18 @@ def reader_fixtures(validators, records, run):
                            ("read", unobserved), ("read", incomplete),
                            ("export", finished), ("export", checkpoint)]:
         validators[name].validate(instance)
-    assert page["records"] == [records[4]], "reader altered stored source attribution"
-    assert page["snapshot"] == finished["snapshot"] == checkpoint["snapshot"] == run["chain"]
-    assert page["child_protection"] == run["child_protection"]
-    assert len(page["ndjson"].encode("utf-8")) <= 65536
-    assert sum(len(rfc8785.dumps(record)) + 1 for record in page["records"]) <= 131072
+    check(page["records"] == [records[4]], "reader altered stored source attribution")
+    check(page["snapshot"] == finished["snapshot"] == checkpoint["snapshot"] == run["chain"])
+    check(page["child_protection"] == run["child_protection"])
+    check(len(page["ndjson"].encode("utf-8")) <= 65536)
+    check(sum(len(rfc8785.dumps(record)) + 1 for record in page["records"]) <= 131072)
     canonical_bytes = (ROOT / "fixtures/exec-failure-records.ndjson").read_bytes()
-    assert finished["bytes_written"] == len(canonical_bytes)
-    assert checkpoint["bytes_written"] == len(canonical_bytes.splitlines(keepends=True)[0])
-    assert unobserved["records"] == [] and unobserved["coverage"]["selection_status"] == "unobserved"
-    assert unobserved["child_protection"] == "unprotected"
-    assert incomplete["records"] == page["records"] and not incomplete["local_consistency"]
-    assert incomplete["stream_status"] == "incomplete" and incomplete["problems"]
+    check(finished["bytes_written"] == len(canonical_bytes))
+    check(checkpoint["bytes_written"] == len(canonical_bytes.splitlines(keepends=True)[0]))
+    check(unobserved["records"] == [] and unobserved["coverage"]["selection_status"] == "unobserved")
+    check(unobserved["child_protection"] == "unprotected")
+    check(incomplete["records"] == page["records"] and not incomplete["local_consistency"])
+    check(incomplete["stream_status"] == "incomplete" and incomplete["problems"])
 
     for limit in [0, 1001]:
         altered = copy.deepcopy(request)
@@ -320,14 +331,14 @@ def bundle_fixtures(validators):
     events = (ROOT / "fixtures" / "bundle-events.ndjson").read_bytes()
     members = {item["name"]: item for item in manifest["files"]}
     for name, data in [("events.ndjson", events), ("receipts.json", rfc8785.dumps(manifest["run"]["receipts"]) + b"\n")]:
-        assert members[name]["bytes"] == len(data)
-        assert members[name]["digest"] == "sha256:" + hashlib.sha256(data).hexdigest()
+        check(members[name]["bytes"] == len(data))
+        check(members[name]["digest"] == "sha256:" + hashlib.sha256(data).hexdigest())
     for line in events.splitlines():
         record = json.loads(line)
         validators["record"].validate(record)
-        assert rfc8785.dumps(record) == line
-    assert report["snapshot"] == manifest["run"]["chain"]
-    assert report["manifest_digest"] == "sha256:" + hashlib.sha256(rfc8785.dumps(manifest) + b"\n").hexdigest()
+        check(rfc8785.dumps(record) == line)
+    check(report["snapshot"] == manifest["run"]["chain"])
+    check(report["manifest_digest"] == "sha256:" + hashlib.sha256(rfc8785.dumps(manifest) + b"\n").hexdigest())
     for key, value in [("authenticity", "signed"), ("capture_digest_basis", "launch_time")]:
         altered = copy.deepcopy(manifest)
         altered[key] = value
@@ -358,16 +369,16 @@ def signed_bundle_fixtures(validators):
                         ("signer", public), ("bundle-verification-v2", trusted),
                         ("bundle-verification-v2", untrusted)]:
         validators[name].validate(value)
-    assert trusted["signature"]["trust"] == "pinned"
-    assert untrusted["signature"]["trust"] == "untrusted"
-    assert trusted["external_custody"] is False
+    check(trusted["signature"]["trust"] == "pinned")
+    check(untrusted["signature"]["trust"] == "untrusted")
+    check(trusted["external_custody"] is False)
     expected = "sha256:" + hashlib.sha256(rfc8785.dumps(manifest) + b"\n").hexdigest()
-    assert envelope["manifest_digest"] == trusted["manifest_digest"] == expected
-    assert envelope["public_key"] == public["public_key"] == trusted["signature"]["public_key"]
-    assert envelope["key_id"] == public["key_id"] == "sha256:" + hashlib.sha256(bytes.fromhex(public["public_key"])).hexdigest()
+    check(envelope["manifest_digest"] == trusted["manifest_digest"] == expected)
+    check(envelope["public_key"] == public["public_key"] == trusted["signature"]["public_key"])
+    check(envelope["key_id"] == public["key_id"] == "sha256:" + hashlib.sha256(bytes.fromhex(public["public_key"])).hexdigest())
     events = (ROOT / "fixtures" / "bundle-v2-events.ndjson").read_bytes()
     member = next(f for f in manifest["files"] if f["name"] == "events.ndjson")
-    assert member["digest"] == "sha256:" + hashlib.sha256(events).hexdigest()
+    check(member["digest"] == "sha256:" + hashlib.sha256(events).hexdigest())
     for line in events.splitlines():
         validators["record"].validate(json.loads(line))
     altered = copy.deepcopy(manifest)
@@ -416,7 +427,7 @@ def main():
     print(f"ledger milestone-2 contract freeze: {freeze.check()} files match")
     jail_schemas = jail.load_schemas(JAIL)
     ledger_schemas = jail.load_schemas(ROOT)
-    assert not set(jail_schemas) & set(ledger_schemas)
+    check(not set(jail_schemas) & set(ledger_schemas))
     validators = jail.build_validators(jail_schemas | ledger_schemas)
     operator_tail_fixtures(validators)
     discovery_fixtures(validators)
@@ -443,13 +454,13 @@ def main():
     comparison = read("diff-page.json")
     validators["query"].validate(query)
     validators["diff"].validate(comparison)
-    assert query["pages"][0]["run_id"] != query["pages"][1]["run_id"]
-    assert comparison["mode"] == "event_counts" and comparison["total_changes"] == 2
-    assert comparison["comparison_status"] == "partial"
-    assert comparison["classes"]["proxy.net"]["left_reason"] == "unobserved"
+    check(query["pages"][0]["run_id"] != query["pages"][1]["run_id"])
+    check(comparison["mode"] == "event_counts" and comparison["total_changes"] == 2)
+    check(comparison["comparison_status"] == "partial")
+    check(comparison["classes"]["proxy.net"]["left_reason"] == "unobserved")
     position = json.loads(comparison["next_after"])
-    assert position["left_head"] == comparison["left"]["snapshot"]
-    assert position["right_head"] == comparison["right"]["snapshot"]
+    check(position["left_head"] == comparison["left"]["snapshot"])
+    check(position["right_head"] == comparison["right"]["snapshot"])
     altered = copy.deepcopy(comparison)
     altered["right"]["child_protection"] = "unprotected"
     validators["diff"].validate(altered)
@@ -541,23 +552,23 @@ def main():
     # Source composition preserves every value in the frozen producer envelope.
     writer_keys = {"run_id", "seq", "prev", "received_at", "provenance", "kind", "request_id"}
     recovered_source = {k: v for k, v in canonical_source.items() if k not in writer_keys}
-    assert recovered_source == source
+    check(recovered_source == source)
     validators["jail-event"].validate(recovered_source)
-    assert ledger_schemas["source"]["$defs"] == jail_schemas["event"]["$defs"] | jail_schemas["jail-event"].get("$defs", {})
+    check(ledger_schemas["source"]["$defs"] == jail_schemas["event"]["$defs"] | jail_schemas["jail-event"].get("$defs", {}))
     for key, value in jail_schemas["event"]["properties"].items():
-        assert ledger_schemas["source"]["properties"][key] == value, f"source property drift: {key}"
-    assert ledger_schemas["source"]["allOf"] == jail_schemas["event"]["allOf"] + jail_schemas["jail-event"]["allOf"][1:]
+        check(ledger_schemas["source"]["properties"][key] == value, f"source property drift: {key}")
+    check(ledger_schemas["source"]["allOf"] == jail_schemas["event"]["allOf"] + jail_schemas["jail-event"]["allOf"][1:])
 
     records = [prepared, owner, canonical_source]
     bytes_expected = b"".join(rfc8785.dumps(record) + b"\n" for record in records)
-    assert (ROOT / "fixtures/records.ndjson").read_bytes() == bytes_expected
+    check((ROOT / "fixtures/records.ndjson").read_bytes() == bytes_expected)
     previous = None
     for seq, record in enumerate(records, 1):
-        assert record["seq"] == seq and record["prev"] == previous
-        assert record["run_id"] == run["run_id"] and record["attempt_id"] == run["attempt_id"]
+        check(record["seq"] == seq and record["prev"] == previous)
+        check(record["run_id"] == run["run_id"] and record["attempt_id"] == run["attempt_id"])
         previous = digest(record)
-    assert run["chain"] == {"head_seq": len(records), "head_digest": previous}
-    assert read("digests.json") == {"prepared": digest(prepared), "owner": digest(owner), "canonical_source": digest(canonical_source)}
+    check(run["chain"] == {"head_seq": len(records), "head_digest": previous})
+    check(read("digests.json") == {"prepared": digest(prepared), "owner": digest(owner), "canonical_source": digest(canonical_source)})
 
     # A manifest anchors canonical bytes and ordered immutable replay receipts.
     replay_hash = hashlib.sha256()
@@ -612,26 +623,26 @@ def main():
     validators["record"].validate(failure)
     validators["run"].validate(failure_run)
     failure_records = [json.loads(line) for line in (ROOT / "fixtures/exec-failure-records.ndjson").read_text().splitlines()]
-    assert (ROOT / "fixtures/exec-failure-records.ndjson").read_bytes() == b"".join(rfc8785.dumps(record) + b"\n" for record in failure_records)
+    check((ROOT / "fixtures/exec-failure-records.ndjson").read_bytes() == b"".join(rfc8785.dumps(record) + b"\n" for record in failure_records))
     previous = None
     trace = []
     for seq, record in enumerate(failure_records, 1):
         validators["record"].validate(record)
-        assert record["seq"] == seq and record["prev"] == previous
-        assert record["run_id"] == failure_run["run_id"] and record["attempt_id"] == failure_run["attempt_id"]
+        check(record["seq"] == seq and record["prev"] == previous)
+        check(record["run_id"] == failure_run["run_id"] and record["attempt_id"] == failure_run["attempt_id"])
         previous = digest(record)
         if record["kind"] == "source":
             trace.append({k: v for k, v in record.items() if k not in writer_keys})
-    assert failure_records[-1] == failure
+    check(failure_records[-1] == failure)
     pruning_fixtures(validators, failure_run, failure_records)
-    assert failure_run["chain"] == {"head_seq": len(failure_records), "head_digest": previous}
+    check(failure_run["chain"] == {"head_seq": len(failure_records), "head_digest": previous})
     receipt = failure["body"]["receipt"]
-    assert receipt["phase"] == "refused" and receipt["outcome"]["kind"] == "exec_error"
-    assert failure_run["state"] == "settled" and failure_run["outcome"] == receipt["outcome"]
-    assert failure["body"]["receipt_digest"] == digest(receipt)
-    assert not jail.semantic_receipt(receipt)
-    assert not jail.semantic_trace(trace)
-    assert not jail.trace_ends_with(trace, receipt)
+    check(receipt["phase"] == "refused" and receipt["outcome"]["kind"] == "exec_error")
+    check(failure_run["state"] == "settled" and failure_run["outcome"] == receipt["outcome"])
+    check(failure["body"]["receipt_digest"] == digest(receipt))
+    check(not jail.semantic_receipt(receipt))
+    check(not jail.semantic_trace(trace))
+    check(not jail.trace_ends_with(trace, receipt))
     reader_fixtures(validators, failure_records, failure_run)
     for label, path, value in [
         ("generic admitted refusal", ["outcome", "kind"], "refused"),
@@ -690,7 +701,7 @@ def main():
     expect_invalid(validators["record"], altered, "path escape")
     altered = copy.deepcopy(canonical_source)
     altered["fields"]["transition"] = "changed"
-    assert digest(altered) != digest(canonical_source)
+    check(digest(altered) != digest(canonical_source))
     recovered = copy.deepcopy(canonical_source)
     recovered["provenance"].update(role="recovery", token_id=None)
     validators["source"].validate(recovered)

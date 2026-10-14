@@ -14,6 +14,9 @@ import shutil
 import subprocess
 import tempfile
 
+if not __debug__:
+    raise SystemExit('opencode_tools.py must not run with python -O: its assert statements are its checks')
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

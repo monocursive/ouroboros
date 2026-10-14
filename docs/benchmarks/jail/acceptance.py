@@ -15,6 +15,9 @@ import threading
 import time
 import tomllib
 
+if not __debug__:
+    raise SystemExit('acceptance.py must not run with python -O: its assert statements are its checks')
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', type=pathlib.Path, required=True)
 parser.add_argument('--out', type=pathlib.Path, required=True)

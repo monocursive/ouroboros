@@ -17,6 +17,9 @@ import time
 
 from macos_native import json_lines, signal_token, snapshot, wait_until
 
+if not __debug__:
+    raise SystemExit('macos_es.py must not run with python -O: its assert statements are its checks')
+
 HERE = Path(__file__).resolve().parent
 BUNDLE_ID = "com.monocursive.ouroboros.jail"
 ENTITLEMENT = "com.apple.developer.endpoint-security.client"

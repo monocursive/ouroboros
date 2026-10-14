@@ -22,6 +22,9 @@ import tempfile
 import time
 import uuid
 
+if not __debug__:
+    raise SystemExit('macos_native.py must not run with python -O: its assert statements are its checks')
+
 
 class AuditToken(ctypes.Structure):
     _fields_ = [("val", ctypes.c_uint32 * 8)]

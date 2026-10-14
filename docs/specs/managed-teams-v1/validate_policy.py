@@ -11,6 +11,9 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
 
+if not __debug__:
+    raise SystemExit('validate_policy.py must not run with python -O: its assert statements are its checks')
+
 ROOT = Path(__file__).resolve().parent
 SAFE_INTEGER = 9_007_199_254_740_991
 

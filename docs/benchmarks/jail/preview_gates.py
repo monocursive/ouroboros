@@ -14,6 +14,9 @@ import threading
 import time
 import tomllib
 
+if not __debug__:
+    raise SystemExit('preview_gates.py must not run with python -O: its assert statements are its checks')
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

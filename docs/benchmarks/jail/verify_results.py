@@ -9,6 +9,9 @@ from pathlib import Path
 import runpy
 import tomllib
 
+if not __debug__:
+    raise SystemExit('verify_results.py must not run with python -O: its assert statements are its checks')
+
 root = Path(__file__).resolve().parent
 contract = runpy.run_path(str(root.parents[1]/'specs/jail-v1/validate_contract.py'))
 validators = contract['build_validators'](contract['load_schemas'](contract['ROOT']))

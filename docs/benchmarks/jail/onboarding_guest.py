@@ -15,6 +15,9 @@ import tarfile
 import time
 import tomllib
 
+if not __debug__:
+    raise SystemExit('onboarding_guest.py must not run with python -O: its assert statements are its checks')
+
 
 PROFILES = ['codex', 'claude', 'opencode', 'cursor', 'aider', 'goose', 'gemini',
             'amp', 'cline', 'copilot', 'kilo', 'auggie', 'droid', 'pi']

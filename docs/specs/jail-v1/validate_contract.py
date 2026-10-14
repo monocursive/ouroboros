@@ -34,6 +34,17 @@ from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 from jsonschema import validators as jsonschema_validators
 from referencing import Registry, Resource
 
+if not __debug__:
+    raise SystemExit("validate_contract.py must not run with python -O: it is a CI gate")
+
+
+def check(condition, *detail):
+    """Fail the contract check. Unlike `assert`, python -O cannot remove it;
+    unlike an assert message, detail is evaluated even when the check holds."""
+    if not condition:
+        raise AssertionError(*detail)
+
+
 ROOT = Path(__file__).resolve().parent
 DECIMAL = re.compile(r"(0|[1-9][0-9]*)\Z")
 
@@ -58,8 +69,8 @@ def load_schemas(root):
     for file in sorted(root.glob("*.schema.json")):
         schema = json.loads(file.read_text())
         identifier = schema["$id"]
-        assert identifier not in owners, (
-            f"{file.name} declares {identifier}, already declared by {owners[identifier]}")
+        check(identifier not in owners,
+              f"{file.name} declares {identifier}, already declared by {owners.get(identifier)}")
         owners[identifier] = file.name
         schemas[file.stem.removesuffix(".schema")] = schema
     return schemas
@@ -84,18 +95,18 @@ def native_bytes(value):
     if isinstance(value, str):
         raw = value.encode("utf-8", errors="strict")
     else:
-        assert set(value) == {"encoding", "data"}
-        assert value["encoding"] == "base64"
-        assert isinstance(value["data"], str), "a byte object's data is not a string"
+        check(set(value) == {"encoding", "data"})
+        check(value["encoding"] == "base64")
+        check(isinstance(value["data"], str), "a byte object's data is not a string")
         raw = base64.b64decode(value["data"], validate=True)
-        assert base64.b64encode(raw).decode() == value["data"]
+        check(base64.b64encode(raw).decode() == value["data"])
         try:
             raw.decode("utf-8", errors="strict")
         except UnicodeDecodeError:
             pass
         else:
             raise AssertionError("UTF-8 bytes must use the JSON string form")
-    assert b"\0" not in raw, "native value contains NUL"
+    check(b"\0" not in raw, "native value contains NUL")
     return raw
 
 
@@ -295,7 +306,7 @@ def semantic_control(messages):
 
 
 def assert_clean(found, what):
-    assert not found, (what, found)
+    check(not found, (what, found))
 
 
 def apply(record, change):
@@ -325,7 +336,7 @@ def check_semantic_corpus(validators):
         instances = [record] if case["check"] == "receipt" else record
         for instance in instances:
             errors = [e.message for e in validators[schema_of[case["check"]]].iter_errors(instance)]
-            assert not errors, (case["name"], "the schema must accept it", errors)
+            check(not errors, (case["name"], "the schema must accept it", errors))
         if case["check"] == "receipt":
             found = semantic_receipt(record)
         elif case["check"] == "trace":
@@ -335,10 +346,10 @@ def check_semantic_corpus(validators):
         else:
             found = semantic_control(record)
         expected = set(case["violations"])
-        assert {rule for rule, _, _ in found} == expected, (case["name"], found)
+        check({rule for rule, _, _ in found} == expected, (case["name"], found))
         named |= expected
         positive += not expected
-    assert positive and named == rules, ("every rule has a negative case", rules - named, named - rules)
+    check(positive and named == rules, ("every rule has a negative case", rules - named, named - rules))
     return len(corpus["cases"])
 
 
@@ -376,7 +387,7 @@ def check_gate_frames(validators):
         else:
             payload = base64.b64decode(case["frame_base64"], validate=True)
         result = parse_release(payload, corpus["expect"], validators["jail-gate"])
-        assert result == case["result"], (case["name"], result)
+        check(result == case["result"], (case["name"], result))
     return len(corpus["cases"])
 
 
@@ -400,29 +411,29 @@ def check_loader_refuses_duplicate_ids():
 
 def check_frozen(schemas):
     manifest = tomllib.loads((ROOT / "frozen-schemas.toml").read_text())
-    assert manifest["schema"] == "ouro.jail.frozen-schemas/1"
+    check(manifest["schema"] == "ouro.jail.frozen-schemas/1")
     frozen = {entry["file"]: entry for entry in manifest["frozen"]}
     unfrozen = {entry["file"] for entry in manifest.get("unfrozen", [])}
     for file in sorted(ROOT.glob("*.schema.json")):
-        assert file.name in frozen or file.name in unfrozen, f"{file.name} is neither frozen nor unfrozen"
+        check(file.name in frozen or file.name in unfrozen, f"{file.name} is neither frozen nor unfrozen")
     for name, entry in frozen.items():
         raw = (ROOT / name).read_bytes()
         schema = json.loads(raw)
         actual = hashlib.sha256(raw).hexdigest()
-        assert schema["$id"] == entry["id"], f"{name} declares {schema['$id']}, frozen as {entry['id']}"
-        assert actual == entry["sha256"], (
-            f"{name} changed under its frozen identifier {entry['id']} (sha256 {actual}); "
-            "a breaking change needs a new identifier (jail-v1 §13)")
-        assert "draft" not in schema["title"].lower(), f"{name} is frozen but titled {schema['title']!r}"
+        check(schema["$id"] == entry["id"], f"{name} declares {schema['$id']}, frozen as {entry['id']}")
+        check(actual == entry["sha256"],
+              f"{name} changed under its frozen identifier {entry['id']} (sha256 {actual}); "
+              "a breaking change needs a new identifier (jail-v1 §13)")
+        check("draft" not in schema["title"].lower(), f"{name} is frozen but titled {schema['title']!r}")
     # The artifacts behind the identifiers no schema states (review item 10).
     artifacts = manifest["frozen_artifact"]
-    assert artifacts, "the freeze lists its artifacts"
+    check(artifacts, "the freeze lists its artifacts")
     for entry in artifacts:
         actual = hashlib.sha256((ROOT / entry["file"]).read_bytes()).hexdigest()
-        assert entry["identifiers"], f"{entry['file']} names the identifiers it defines"
-        assert actual == entry["sha256"], (
-            f"{entry['file']} changed under its frozen identifiers {entry['identifiers']} "
-            f"(sha256 {actual}); a change needs a new identifier (jail-v1 §13)")
+        check(entry["identifiers"], f"{entry['file']} names the identifiers it defines")
+        check(actual == entry["sha256"],
+              f"{entry['file']} changed under its frozen identifiers {entry['identifiers']} "
+              f"(sha256 {actual}); a change needs a new identifier (jail-v1 §13)")
     return len(frozen) + len(artifacts)
 
 
@@ -447,7 +458,7 @@ def check_policy_sets(value):
             check_policy_sets(nested)
     elif isinstance(value, list):
         encoded = [rfc8785.dumps(item) for item in value]
-        assert encoded == sorted(set(encoded)), "noncanonical policy set"
+        check(encoded == sorted(set(encoded)), "noncanonical policy set")
         for item in value:
             check_policy_sets(item)
 
@@ -459,42 +470,42 @@ def check_canonical_fixtures(validators):
     check_policy_sets(snapshot)
     for ceiling in snapshot["limits"].values():
         if ceiling is not None:
-            assert 0 < int(ceiling["value"]) <= 2**64 - 1
+            check(0 < int(ceiling["value"]) <= 2**64 - 1)
     expected = read("fixtures/digests.json")
     canonical = (ROOT / "fixtures/policy.jcs").read_bytes()
-    assert canonical == rfc8785.dumps(snapshot)
-    assert not canonical.endswith(b"\n")
-    assert policy_hash(snapshot) == expected["policy_digest"]
-    assert argv_frame(expected["argv"]).hex() == expected["argv_preimage_hex"]
-    assert hash_bytes(argv_frame(expected["argv"])) == expected["argv_digest"]
-    assert hash_bytes(argv_frame(list(reversed(expected["argv"])))) != expected["argv_digest"]
-    assert hash_bytes(argv_frame(["ab", "c"])) != hash_bytes(argv_frame(["a", "bc"]))
-    assert hash_bytes(argv_frame([])) != hash_bytes(argv_frame([""]))
+    check(canonical == rfc8785.dumps(snapshot))
+    check(not canonical.endswith(b"\n"))
+    check(policy_hash(snapshot) == expected["policy_digest"])
+    check(argv_frame(expected["argv"]).hex() == expected["argv_preimage_hex"])
+    check(hash_bytes(argv_frame(expected["argv"])) == expected["argv_digest"])
+    check(hash_bytes(argv_frame(list(reversed(expected["argv"])))) != expected["argv_digest"])
+    check(hash_bytes(argv_frame(["ab", "c"])) != hash_bytes(argv_frame(["a", "bc"])))
+    check(hash_bytes(argv_frame([])) != hash_bytes(argv_frame([""])))
     changed = copy.deepcopy(snapshot)
     changed["limits"]["wall"]["value"] = "300001"
-    assert policy_hash(changed) != expected["policy_digest"]
+    check(policy_hash(changed) != expected["policy_digest"])
     changed = copy.deepcopy(snapshot)
     changed["environment"]["bindings"][0]["value"] = "changed"
-    assert policy_hash(changed) != expected["policy_digest"]
+    check(policy_hash(changed) != expected["policy_digest"])
     # This compares fixture declarations; it is not a production resolver.
     context = read("fixtures/canonical-context.json")
     for filename in ["canonical-input.toml", "canonical-equivalent.toml"]:
         config = tomllib.loads((ROOT / "fixtures" / filename).read_text())
-        assert config["schema"] == "ouro.jail.policy/1"
-        assert config["extends"] == snapshot["profile"]
+        check(config["schema"] == "ouro.jail.policy/1")
+        check(config["extends"] == snapshot["profile"])
         duration = re.fullmatch(r"([1-9][0-9]*)(ms|s|m|h)", config["limits"]["wall"])
         units = {"ms": 1, "s": 1000, "m": 60000, "h": 3600000}
-        assert str(int(duration[1]) * units[duration[2]]) == snapshot["limits"]["wall"]["value"]
-        assert str(config["limits"]["pids"]) == snapshot["limits"]["pids"]["value"]
-        assert config["observation"] == snapshot["observation"]
+        check(str(int(duration[1]) * units[duration[2]]) == snapshot["limits"]["wall"]["value"])
+        check(str(config["limits"]["pids"]) == snapshot["limits"]["pids"]["value"])
+        check(config["observation"] == snapshot["observation"])
         for key in ["read_only", "deny_read"]:
             declared = {
                 posixpath.normpath(posixpath.join(context["profile_directory"], value))
                 for value in config["filesystem"][key]
             }
             suffix = "fixtures" if key == "read_only" else "secrets"
-            assert declared == {context["workspace"] + "/" + suffix}
-            assert {"root": "workspace", "path": suffix} in snapshot["filesystem"][key]
+            check(declared == {context["workspace"] + "/" + suffix})
+            check({"root": "workspace", "path": suffix} in snapshot["filesystem"][key])
     # Base64 validity, UTF-8 uniqueness and NUL are semantic codec constraints.
     for bad in [
         {"encoding": "base64", "data": "YWJj"},
@@ -522,7 +533,7 @@ def check_network_fixtures():
     cases = read("fixtures/network-cases.json")
     for case in cases:
         try:
-            assert "%" not in case["input"]
+            check("%" not in case["input"])
             address = ipaddress.ip_address(case["input"])
             if address.version == 6 and address.ipv4_mapped:
                 address = address.ipv4_mapped
@@ -533,10 +544,10 @@ def check_network_fixtures():
                 or (address.version == 6 and address not in public_v6)
             ) else "public"
             if "normalized" in case:
-                assert str(address) == case["normalized"]
+                check(str(address) == case["normalized"])
         except (ValueError, AssertionError):
             result = "reject"
-        assert result == case["result"], (case, result)
+        check(result == case["result"], (case, result))
     return len(cases)
 
 
@@ -555,7 +566,7 @@ def main():
         kind = "jail-receipt" if file in evidence else next(
             schema for prefix, schema in prefixes.items() if file.name.startswith(prefix))
         errors = [e.message for e in validators[kind].iter_errors(record)]
-        assert not errors, (file.name, errors)
+        check(not errors, (file.name, errors))
         if kind == "jail-receipt":
             assert_clean(semantic_receipt(record), file.name)
         elif kind == "jail-event":
@@ -566,7 +577,7 @@ def main():
         for change in case["changes"]:
             record = apply(record, change)
         errors = list(validators[case["schema"]].iter_errors(record))
-        assert (not errors) == case["valid"], (case["name"], [e.message for e in errors])
+        check((not errors) == case["valid"], (case["name"], [e.message for e in errors]))
         if not errors and case["schema"] == "jail-receipt":
             assert_clean(semantic_receipt(record), case["name"])
     semantic_count = check_semantic_corpus(validators)

@@ -7,6 +7,10 @@ import signal
 import subprocess
 import tempfile
 import time
+
+if not __debug__:
+    raise SystemExit('macos_lifecycle.py must not run with python -O: its assert statements are its checks')
+
 with tempfile.TemporaryDirectory(prefix='ouro-seatbelt-probe-') as directory:
     root=pathlib.Path(directory)
     source=root/'detach.c'
