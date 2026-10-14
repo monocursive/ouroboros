@@ -46,6 +46,7 @@ use crate::records::{
 use crate::state::{self, AttemptDir, AttemptId};
 use crate::trace::{self, FdSink, FileSink, Priority, SharedTrace, TraceSink};
 
+mod amend;
 mod attempt;
 
 use attempt::Attempt;
@@ -548,8 +549,18 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
                 "command rules require contained Linux execution with --observe on",
             ));
         }
-        resolved.snapshot.commands = operator_jail.commands.clone();
-        resolved.digest = resolved.snapshot.digest()?;
+        let rules = operator_jail.commands.clone();
+        resolved.amend(
+            vec![policy::ProvenanceEntry {
+                origin: LayerOrigin::OperatorConfig("config.toml".to_owned()).label(),
+                key: "jail.commands".to_owned(),
+                detail: None,
+            }],
+            |snapshot| {
+                snapshot.commands = rules;
+                Ok(())
+            },
+        )?;
     }
     if learning {
         if profile == ProfileName::None || resolved.snapshot.platform != crate::records::Os::Linux {
@@ -561,8 +572,17 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
         if resolved.snapshot.observation.mode != crate::records::ObserveMode::On {
             return Err(usage("learn", "learning requires observation on"));
         }
-        resolved.snapshot.observation.learning = true;
-        resolved.digest = resolved.snapshot.digest()?;
+        resolved.amend(
+            vec![policy::ProvenanceEntry {
+                origin: LayerOrigin::CommandLine.label(),
+                key: "observation.learning".to_owned(),
+                detail: Some("learn".to_owned()),
+            }],
+            |snapshot| {
+                snapshot.observation.learning = true;
+                Ok(())
+            },
+        )?;
     }
     // §6.4: `build` requires an explicit memory ceiling; the baseline leaves it
     // absent so that this refuses rather than inventing one.
@@ -4104,6 +4124,97 @@ mod tests {
             "{reason}"
         );
         assert!(scratch.exists(), "the stopped tree is retained for gc");
+    }
+
+    /// A platform that only names itself: resolution asks nothing else.
+    struct LinuxIdentity;
+
+    impl Platform for LinuxIdentity {
+        fn identity(&self) -> crate::platform::PlatformIdentity {
+            crate::platform::PlatformIdentity {
+                os: Os::Linux,
+                arch: "x86_64".to_owned(),
+                kernel: "test".to_owned(),
+            }
+        }
+
+        fn probe(&self, _: &PlanRequest) -> Vec<Capability> {
+            Vec::new()
+        }
+
+        fn prepare(
+            &self,
+            _: crate::platform::PreparedPlan,
+            _: crate::platform::Sinks,
+        ) -> Result<Box<dyn crate::platform::PreparedExecution>, JailError> {
+            unreachable!("resolution prepares nothing")
+        }
+    }
+
+    /// POL-3: the operator's command rules and `learn`'s read capture change
+    /// the snapshot after resolution; the digest is the changed snapshot's
+    /// and the provenance says what changed it.
+    #[test]
+    fn post_resolution_changes_are_digested_and_say_why() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config_toml = config.join("config.toml");
+        std::fs::write(
+            &config_toml,
+            "[jail.commands]\ndeny = [\"git push --force\"]\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&config_toml, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let ctx = Context {
+            platform: Box::new(LinuxIdentity),
+            env_settings: EnvSettings {
+                config_dir: Some(config),
+                data_dir: Some(root.join("data")),
+                ..EnvSettings::default()
+            },
+            cwd: workspace.clone(),
+            home: None,
+            env_lookup: Box::new(|_| None),
+        };
+        let args = PolicyArgs {
+            workspace: Some(workspace),
+            ..PolicyArgs::default()
+        };
+        let plan = resolve_learning_plan(&ctx, &args).unwrap();
+        let resolved = &plan.resolved;
+        assert!(resolved.snapshot.observation.learning);
+        assert_eq!(resolved.snapshot.commands.deny, ["git push --force"]);
+        assert_eq!(resolved.digest, resolved.snapshot.digest().unwrap());
+        assert_eq!(
+            resolved.requirements,
+            crate::capability::requirements(&resolved.snapshot)
+        );
+        let said = |origin: &str, key: &str| {
+            resolved
+                .provenance
+                .iter()
+                .any(|entry| entry.origin == origin && entry.key == key)
+        };
+        assert!(
+            said("operator-config:config.toml", "jail.commands"),
+            "{:?}",
+            resolved.provenance
+        );
+        assert!(
+            said("cli", "observation.learning"),
+            "{:?}",
+            resolved.provenance
+        );
+        let plain = resolve_plan(&ctx, &args).unwrap();
+        assert_ne!(
+            plain.resolved.digest, resolved.digest,
+            "learning is part of the digest"
+        );
     }
 
     fn minimal_resolved(profile: ProfileName) -> Resolved {
