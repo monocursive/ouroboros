@@ -645,6 +645,30 @@ fn backend_plan_section(root: &Path) -> Result<String, String> {
     Ok(out)
 }
 
+/// The `[tested]` facts, in the order the section records them, and where
+/// each comes from in a conformance run's `doctor --json`.
+const TESTED_FACTS: [(&str, &[&str]); 15] = [
+    ("ready", &["ready"]),
+    ("platform_os", &["platform", "os"]),
+    ("platform_arch", &["platform", "arch"]),
+    ("platform_kernel", &["platform", "kernel"]),
+    ("revision", &["build", "revision"]),
+    ("dirty", &["build", "dirty"]),
+    ("rustc", &["build", "rustc"]),
+    ("target", &["build", "target"]),
+    ("opt_level", &["build", "opt_level"]),
+    ("debug_assertions", &["build", "debug_assertions"]),
+    ("inputs", &["build", "inputs"]),
+    ("ouro_jail_sha256", &["binaries", "ouro-jail", "sha256"]),
+    ("backend", &["binaries", "bwrap"]),
+    ("host", &["host"]),
+    ("supervisor_scope", &["supervisor_scope"]),
+];
+/// The `[tested]` keys that are computed when the section is written, not
+/// copied from the run.
+const VERIFICATION: &str = "verification";
+const UNKNOWN: &str = "unknown";
+
 /// The facts of a tested run that decide whether it tested this tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tested {
@@ -671,34 +695,17 @@ pub struct Tested {
 }
 
 impl Tested {
-    /// From a conformance run's `doctor --json`.
+    /// From a run's facts, as [`tested_facts`] or [`recorded_facts`] give
+    /// them.
     #[must_use]
-    pub fn from_doctor(doctor: &serde_json::Value) -> Self {
-        let text = |value: &serde_json::Value| value.as_str().map(str::to_owned);
-        Tested {
-            ready: doctor["ready"].as_bool(),
-            os: text(&doctor["platform"]["os"]),
-            arch: text(&doctor["platform"]["arch"]),
-            target: text(&doctor["build"]["target"]),
-            opt_level: text(&doctor["build"]["opt_level"]),
-            debug_assertions: doctor["build"]["debug_assertions"].as_bool(),
-            revision: text(&doctor["build"]["revision"]),
-            dirty: doctor["build"]["dirty"].as_bool(),
-            inputs: text(&doctor["build"]["inputs"]),
-            backend: doctor["binaries"]["bwrap"].is_object(),
-        }
-    }
-
-    /// From a freeze file's `[tested]` table.
-    #[must_use]
-    pub fn from_toml(tested: &toml::Value) -> Self {
+    fn from_facts(facts: &serde_json::Map<String, serde_json::Value>) -> Self {
         let text = |key: &str| {
-            tested
+            facts
                 .get(key)
-                .and_then(toml::Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         };
-        let flag = |key: &str| tested.get(key).and_then(toml::Value::as_bool);
+        let flag = |key: &str| facts.get(key).and_then(serde_json::Value::as_bool);
         Tested {
             ready: flag("ready"),
             os: text("platform_os"),
@@ -709,7 +716,128 @@ impl Tested {
             revision: text("revision"),
             dirty: flag("dirty"),
             inputs: text("inputs"),
-            backend: tested.get("backend").is_some_and(toml::Value::is_table),
+            backend: facts
+                .get("backend")
+                .is_some_and(serde_json::Value::is_object),
+        }
+    }
+}
+
+/// A conformance run's facts, keyed as `[tested]` records them; a fact the
+/// doctor did not report is null.
+fn tested_facts(doctor: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    TESTED_FACTS
+        .iter()
+        .map(|(key, path)| {
+            let value = path.iter().fold(doctor, |node, part| &node[*part]);
+            ((*key).to_owned(), value.clone())
+        })
+        .collect()
+}
+
+/// The facts a freeze file's `[tested]` table records, with every fact its
+/// `unknown` list names restored as null: the facts the section was written
+/// from, when it is what [`tested_section`] writes.
+///
+/// # Errors
+/// A key the section never holds, a fact neither recorded nor named
+/// unknown, or an unknown fact that names no place in the record.
+fn recorded_facts(
+    tested: &toml::Value,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let table = tested
+        .as_table()
+        .ok_or_else(|| "[tested] is not a table".to_owned())?;
+    for computed in [VERIFICATION, UNKNOWN] {
+        if !table.contains_key(computed) {
+            return Err(format!("the tested run has no `{computed}` list"));
+        }
+    }
+    let mut facts = serde_json::Map::new();
+    for (key, value) in table {
+        if key == VERIFICATION || key == UNKNOWN {
+            continue;
+        }
+        if !TESTED_FACTS.iter().any(|(fact, _)| fact == key) {
+            return Err(format!(
+                "the tested run records `{key}`, which `cargo xtask freeze --doctor` never writes"
+            ));
+        }
+        facts.insert(key.clone(), json_of_toml(value));
+    }
+    for path in strings(table.get(UNKNOWN), "tested.unknown")? {
+        restore_null(&mut facts, &path)?;
+    }
+    for (fact, _) in TESTED_FACTS {
+        if !facts.contains_key(fact) {
+            return Err(format!(
+                "the tested run neither records `{fact}` nor names it unknown"
+            ));
+        }
+    }
+    Ok(facts)
+}
+
+/// Put back the null that [`toml_of_json`] left out at `path` (`a.b`,
+/// `a[2]`; a key may itself hold dots, as a sysctl name does).
+fn restore_null(
+    facts: &mut serde_json::Map<String, serde_json::Value>,
+    path: &str,
+) -> Result<(), String> {
+    let nowhere = || format!("the unknown fact `{path}` names no place in the tested run");
+    let both = || format!("`{path}` is both unknown and recorded");
+    let split = path.find(['.', '[']).unwrap_or(path.len());
+    let (fact, mut rest) = path.split_at(split);
+    if !TESTED_FACTS.iter().any(|(key, _)| *key == fact) {
+        return Err(nowhere());
+    }
+    if rest.is_empty() {
+        if facts.contains_key(fact) {
+            return Err(both());
+        }
+        facts.insert(fact.to_owned(), serde_json::Value::Null);
+        return Ok(());
+    }
+    let mut node = facts.get_mut(fact).ok_or_else(nowhere)?;
+    loop {
+        if let Some(after) = rest.strip_prefix('[') {
+            let (index, tail) = after.split_once(']').ok_or_else(nowhere)?;
+            let index: usize = index.parse().map_err(|_| nowhere())?;
+            let items = node.as_array_mut().ok_or_else(nowhere)?;
+            if tail.is_empty() {
+                // Nulls are restored in the order they were left out, so
+                // each index is at most one past the items before it.
+                if index > items.len() {
+                    return Err(nowhere());
+                }
+                items.insert(index, serde_json::Value::Null);
+                return Ok(());
+            }
+            node = items.get_mut(index).ok_or_else(nowhere)?;
+            rest = tail;
+        } else if let Some(after) = rest.strip_prefix('.') {
+            let object = node.as_object_mut().ok_or_else(nowhere)?;
+            // Descend only through a prefix that names a recorded table or
+            // array; what remains is the key that was null.
+            let inner = after
+                .match_indices(['.', '['])
+                .map(|(at, _)| at)
+                .find(|&at| {
+                    object
+                        .get(&after[..at])
+                        .is_some_and(|value| value.is_object() || value.is_array())
+                });
+            let Some(at) = inner else {
+                if object.contains_key(after) {
+                    return Err(both());
+                }
+                object.insert(after.to_owned(), serde_json::Value::Null);
+                return Ok(());
+            };
+            node = object.get_mut(&after[..at]).ok_or_else(nowhere)?;
+            rest = &after[at..];
+        } else {
+            return Err(nowhere());
         }
     }
 }
@@ -921,48 +1049,32 @@ pub fn tested_section(root: &Path, doctor: &serde_json::Value) -> Result<String,
     if doctor["schema"] != "ouro.jail.doctor/1" {
         return Err("the --doctor file is not an ouro.jail.doctor/1 record".to_owned());
     }
-    let verified = validate_tested(root, &Tested::from_doctor(doctor))
-        .map_err(|problems| format!("the tested run is refused:\n  {}", problems.join("\n  ")))?;
+    render_tested(root, &tested_facts(doctor))
+        .map(|(section, _)| section)
+        .map_err(|problems| format!("the tested run is refused:\n  {}", problems.join("\n  ")))
+}
+
+/// The `[tested]` section for a run's facts, validated against the tree at
+/// `root`, and the checks it passed. Every null fact is left out and named
+/// in `unknown` by its dotted path, never written as a value.
+///
+/// # Errors
+/// Every rule the run breaks.
+fn render_tested(
+    root: &Path,
+    facts: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(String, Vec<&'static str>), Vec<String>> {
+    let verified = validate_tested(root, &Tested::from_facts(facts))?;
     let mut unknown = Vec::new();
     let mut tested = toml::map::Map::new();
-    let mut put = |key: &str, value: &serde_json::Value, unknown: &mut Vec<String>| {
-        if let Some(value) = toml_of_json(value, key, unknown) {
+    for (key, _) in TESTED_FACTS {
+        let value = facts.get(key).unwrap_or(&serde_json::Value::Null);
+        if let Some(value) = toml_of_json(value, key, &mut unknown) {
             tested.insert(key.to_owned(), value);
         }
-    };
-    put("ready", &doctor["ready"], &mut unknown);
-    put("platform_os", &doctor["platform"]["os"], &mut unknown);
-    put("platform_arch", &doctor["platform"]["arch"], &mut unknown);
-    put(
-        "platform_kernel",
-        &doctor["platform"]["kernel"],
-        &mut unknown,
-    );
-    for key in [
-        "revision",
-        "dirty",
-        "rustc",
-        "target",
-        "opt_level",
-        "debug_assertions",
-        "inputs",
-    ] {
-        put(key, &doctor["build"][key], &mut unknown);
     }
-    put(
-        "ouro_jail_sha256",
-        &doctor["binaries"]["ouro-jail"]["sha256"],
-        &mut unknown,
-    );
-    put("backend", &doctor["binaries"]["bwrap"], &mut unknown);
-    put("host", &doctor["host"], &mut unknown);
-    put(
-        "supervisor_scope",
-        &doctor["supervisor_scope"],
-        &mut unknown,
-    );
     tested.insert(
-        "verification".to_owned(),
+        VERIFICATION.to_owned(),
         toml::Value::Array(
             verified
                 .iter()
@@ -971,12 +1083,27 @@ pub fn tested_section(root: &Path, doctor: &serde_json::Value) -> Result<String,
         ),
     );
     tested.insert(
-        "unknown".to_owned(),
+        UNKNOWN.to_owned(),
         toml::Value::Array(unknown.into_iter().map(toml::Value::String).collect()),
     );
     let mut document = toml::map::Map::new();
     document.insert("tested".to_owned(), toml::Value::Table(tested));
-    toml::to_string(&toml::Value::Table(document)).map_err(|error| error.to_string())
+    let section =
+        toml::to_string(&toml::Value::Table(document)).map_err(|error| vec![error.to_string()])?;
+    Ok((section, verified))
+}
+
+/// What the file says when it records no tested run.
+const NO_TESTED_RUN: &str = "\n# No tested run is recorded: `cargo xtask freeze --doctor <run>/doctor.json`\n\
+     # records the milestone conformance run, and `cargo xtask freeze --check`\n\
+     # fails until it is.\n";
+
+/// The whole file: the tree's values and, when there is one, the tested run.
+fn compose(tree: &str, tested: Option<&str>) -> String {
+    match tested {
+        Some(section) => format!("{tree}\n{TESTED_MARKER}\n{section}"),
+        None => format!("{tree}{NO_TESTED_RUN}"),
+    }
 }
 
 /// The freeze file for the tree at `root`. With `doctor`, the tested run is
@@ -990,7 +1117,7 @@ pub fn generate(
     root: &Path,
     doctor: Option<&serde_json::Value>,
 ) -> Result<(String, Vec<String>), String> {
-    let mut text = tree_part(root)?;
+    let tree = tree_part(root)?;
     let mut notes = Vec::new();
     let tested = match doctor {
         Some(doctor) => Some(tested_section(root, doctor)?),
@@ -1001,27 +1128,15 @@ pub fn generate(
             kept
         }
     };
-    match tested {
-        Some(section) => {
-            let _ = writeln!(text, "\n{TESTED_MARKER}");
-            text.push_str(&section);
-        }
-        None => {
-            let _ = writeln!(
-                text,
-                "\n# No tested run is recorded: `cargo xtask freeze --doctor <run>/doctor.json`\n\
-                 # records the milestone conformance run, and `cargo xtask freeze --check`\n\
-                 # fails until it is."
-            );
-            notes
-                .push("no tested run is recorded (`freeze --check` fails until one is)".to_owned());
-        }
+    if tested.is_none() {
+        notes.push("no tested run is recorded (`freeze --check` fails until one is)".to_owned());
     }
-    Ok((text, notes))
+    Ok((compose(&tree, tested.as_deref()), notes))
 }
 
-/// The existing file's tested run, kept only while it still validates
-/// against the tree at `root`; otherwise dropped, with a note saying so.
+/// The existing file's tested run, rewritten from the facts it records and
+/// kept only while it still validates against the tree at `root`;
+/// otherwise dropped, with a note saying so.
 ///
 /// # Errors
 /// A tested section that is not TOML.
@@ -1031,11 +1146,14 @@ fn kept_tested(root: &Path, existing: &str) -> Result<(Option<String>, Option<St
     };
     let value: toml::Value =
         toml::from_str(section).map_err(|error| format!("the existing tested run: {error}"))?;
-    match value.get("tested").map(Tested::from_toml) {
-        Some(tested) if validate_tested(root, &tested).is_ok() => {
-            Ok((Some(section.trim_start_matches('\n').to_owned()), None))
-        }
-        _ => Ok((
+    let rendered = value
+        .get("tested")
+        .ok_or_else(|| vec!["no [tested] table".to_owned()])
+        .and_then(|tested| recorded_facts(tested).map_err(|problem| vec![problem]))
+        .and_then(|facts| render_tested(root, &facts));
+    match rendered {
+        Ok((section, _)) => Ok((Some(section), None)),
+        Err(_) => Ok((
             None,
             Some(
                 "the recorded tested run no longer validates against this tree and was \
@@ -1046,9 +1164,9 @@ fn kept_tested(root: &Path, existing: &str) -> Result<(Option<String>, Option<St
     }
 }
 
-/// `cargo xtask freeze --check`: the milestone gate. The file must be what
-/// this tree generates, and it must record a tested run that validates
-/// against this tree.
+/// `cargo xtask freeze --check`: the milestone gate. The file must be
+/// exactly what this tree generates, byte for byte, and it must record a
+/// tested run that validates against this tree.
 ///
 /// # Errors
 /// Every problem found.
@@ -1057,37 +1175,84 @@ pub fn check(root: &Path) -> Result<Vec<&'static str>, Vec<String>> {
     let existing = std::fs::read_to_string(&path)
         .map_err(|error| vec![format!("{}: {error}", path.display())])?;
     let tree = tree_part(root).map_err(|error| vec![error])?;
-    let (recorded_tree, section) = match existing.split_once(TESTED_MARKER) {
-        Some((before, after)) => (before.trim_end_matches('\n'), Some(after)),
-        None => (existing.as_str(), None),
-    };
+    check_against(root, &existing, &tree)
+}
+
+/// [`check`] of the file `existing` against this tree's values `tree`.
+///
+/// The tested run cannot be regenerated without its doctor record, so its
+/// section is rewritten from the facts it records: the checks this tree
+/// verifies and the unknown facts are recomputed, and the result must be
+/// the section as recorded. A fact added, dropped or reformatted by hand,
+/// or a stale verification list, is therefore not what the tree generates.
+fn check_against(
+    root: &Path,
+    existing: &str,
+    tree: &str,
+) -> Result<Vec<&'static str>, Vec<String>> {
+    const NOT_GENERATED: &str = "the freeze file is not what this tree generates: run `cargo xtask freeze` and review \
+         the diff";
     let mut problems = Vec::new();
-    if !recorded_tree.starts_with(tree.trim_end_matches('\n')) {
-        problems.push(
-            "the freeze file is not what this tree generates: run `cargo xtask freeze` and \
-             review the diff"
-                .to_owned(),
-        );
-    }
-    let Some(section) = section else {
+    let Some((recorded_tree, after)) = existing.split_once(TESTED_MARKER) else {
+        if existing != compose(tree, None) {
+            problems.push(NOT_GENERATED.to_owned());
+        }
         problems.push(format!(
             "no tested run is recorded ({TESTED_MARKER:?} is absent): record the milestone \
              conformance run with `cargo xtask freeze --doctor <run>/doctor.json`"
         ));
         return Err(problems);
     };
-    let tested = toml::from_str::<toml::Value>(section)
-        .map_err(|error| vec![format!("the tested run: {error}")])?;
-    let Some(tested) = tested.get("tested") else {
+    if recorded_tree.strip_suffix('\n') != Some(tree) {
+        problems.push(NOT_GENERATED.to_owned());
+    }
+    let Some(section) = after.strip_prefix('\n') else {
+        problems.push(format!("{TESTED_MARKER:?} is not on a line of its own"));
+        return Err(problems);
+    };
+    let value = match toml::from_str::<toml::Value>(section) {
+        Ok(value) => value,
+        Err(error) => {
+            problems.push(format!("the tested run: {error}"));
+            return Err(problems);
+        }
+    };
+    let Some(tested) = value.get("tested") else {
         problems.push("the tested section has no [tested] table".to_owned());
         return Err(problems);
     };
-    match validate_tested(root, &Tested::from_toml(tested)) {
-        Ok(verified) if problems.is_empty() => Ok(verified),
-        Ok(_) => Err(problems),
+    let facts = match recorded_facts(tested) {
+        Ok(facts) => facts,
+        Err(problem) => {
+            problems.push(problem);
+            return Err(problems);
+        }
+    };
+    match render_tested(root, &facts) {
         Err(more) => {
             problems.extend(more);
             Err(problems)
+        }
+        Ok((rendered, verified)) => {
+            let recorded =
+                strings(tested.get(VERIFICATION), "tested.verification").unwrap_or_default();
+            if recorded != verified {
+                problems.push(format!(
+                    "the tested run records the checks {recorded:?}, but this tree verifies \
+                     {verified:?}"
+                ));
+            } else if rendered != section {
+                problems.push(format!(
+                    "the tested section is not what `cargo xtask freeze --doctor` writes for \
+                     the facts it records (edited by hand, or its unknown list is stale): \
+                     {NOT_GENERATED}"
+                ));
+            }
+            if problems.is_empty() {
+                Ok(verified)
+            } else {
+                Err(problems)
+            }
         }
     }
 }
@@ -1408,38 +1573,8 @@ mod tests {
         );
     }
 
-    /// Review F4: regenerating without --doctor never carries a tested run
-    /// that no longer describes the tree.
-    #[test]
-    fn a_stale_tested_run_is_dropped_and_a_valid_one_kept() {
-        let dir = tree();
-        let root = dir.path();
-        let section = |inputs: &str| {
-            format!(
-                "tree values\n\n{TESTED_MARKER}\n[tested]\nready = true\nplatform_os = \"linux\"\n\
-                 platform_arch = \"x86_64\"\ntarget = \"x86_64-unknown-linux-gnu\"\n\
-                 opt_level = \"3\"\ndebug_assertions = false\n\
-                 revision = \"48a229ceaefd4985c50990b14116b6d856af0985\"\ndirty = false\n\
-                 inputs = \"{inputs}\"\n[tested.backend]\npath = \"/usr/bin/bwrap\"\n"
-            )
-        };
-        let current = build_provenance::tree_digest(root).unwrap();
-        let (kept, note) = kept_tested(root, &section(&current)).unwrap();
-        assert!(kept.is_some_and(|text| text.starts_with("[tested]")));
-        assert_eq!(note, None);
-        let (kept, note) =
-            kept_tested(root, &section(&format!("sha256:{}", "b".repeat(64)))).unwrap();
-        assert_eq!(kept, None);
-        assert!(note.is_some_and(|note| note.contains("dropped")));
-        assert_eq!(kept_tested(root, "no tested run\n").unwrap(), (None, None));
-    }
-
-    /// Review F4: the whole host object is copied, and an unknown fact is
-    /// named in `unknown`, never written as a value.
-    #[test]
-    fn a_tested_section_copies_the_host_and_names_what_was_unknown() {
-        let dir = tree();
-        let root = dir.path();
+    /// The Linux doctor example, made the clean run of the tree at `root`.
+    fn doctor_of(root: &Path) -> serde_json::Value {
         let mut doctor: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(
                 repo_root().join("docs/specs/jail-v1/examples/doctor-linux.json"),
@@ -1449,6 +1584,174 @@ mod tests {
         .expect("JSON");
         doctor["build"]["dirty"] = false.into();
         doctor["build"]["inputs"] = build_provenance::tree_digest(root).unwrap().into();
+        doctor
+    }
+
+    /// Review F4: regenerating without --doctor never carries a tested run
+    /// that no longer describes the tree.
+    #[test]
+    fn a_stale_tested_run_is_dropped_and_a_valid_one_kept() {
+        let dir = tree();
+        let root = dir.path();
+        let doctor = doctor_of(root);
+        let section = tested_section(root, &doctor).expect("a clean run is recorded");
+        let file = compose("tree values\n", Some(&section));
+        let (kept, note) = kept_tested(root, &file).unwrap();
+        assert_eq!(kept.as_deref(), Some(section.as_str()));
+        assert_eq!(note, None);
+        let mut stale = doctor;
+        stale["build"]["inputs"] = format!("sha256:{}", "b".repeat(64)).into();
+        // Recorded from a run that validated then; the tree has moved since.
+        let stale_section = section.replace(
+            stale_inputs_of(&section),
+            stale["build"]["inputs"].as_str().unwrap(),
+        );
+        let (kept, note) =
+            kept_tested(root, &compose("tree values\n", Some(&stale_section))).unwrap();
+        assert_eq!(kept, None);
+        assert!(note.is_some_and(|note| note.contains("dropped")));
+        assert_eq!(kept_tested(root, "no tested run\n").unwrap(), (None, None));
+    }
+
+    /// The `inputs = "..."` value of a rendered section.
+    fn stale_inputs_of(section: &str) -> &str {
+        let line = section
+            .lines()
+            .find_map(|line| line.strip_prefix("inputs = \""))
+            .expect("an inputs line");
+        line.strip_suffix('"').expect("a quoted value")
+    }
+
+    /// Review XT1: `freeze --check` passes only for the file this tree
+    /// generates, byte for byte; a prefix match let a file that still
+    /// recorded values the generator no longer emits pass.
+    #[test]
+    fn check_requires_exactly_the_generated_file() {
+        let dir = tree();
+        let root = dir.path();
+        let tree_values = "schema = \"x\"\n\n[[launch_profile]]\nname = \"a\"\n";
+        let section = tested_section(root, &doctor_of(root)).expect("a clean run is recorded");
+        let exact = compose(tree_values, Some(&section));
+        assert_eq!(
+            check_against(root, &exact, tree_values),
+            Ok(vec!["inputs_match_tree"])
+        );
+        let not_generated = |file: &str| {
+            let problems = check_against(root, file, tree_values).unwrap_err();
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.contains("not what this tree generates")),
+                "{problems:?}"
+            );
+        };
+        // A profile the generator no longer emits, still recorded.
+        not_generated(&compose(
+            &format!("{tree_values}\n[[launch_profile]]\nname = \"gone\"\n"),
+            Some(&section),
+        ));
+        // TOML added by hand before the marker.
+        not_generated(&exact.replacen(TESTED_MARKER, &format!("extra = 1\n{TESTED_MARKER}"), 1));
+        // A fact added, a comment, or a fact reformatted inside the section.
+        not_generated(&format!("{exact}# reviewed\n"));
+        not_generated(&exact.replace("[tested.host]\n", "[tested.host]\n# edited\n"));
+        not_generated(&exact.replace("ready = true", "ready     = true"));
+        // Without a tested run the tree part is still compared.
+        let problems = check_against(root, &compose("other\n", None), tree_values).unwrap_err();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("not what this tree generates"))
+        );
+        assert!(problems.iter().any(|p| p.contains("no tested run")));
+        assert_eq!(
+            check_against(root, &compose(tree_values, None), tree_values)
+                .unwrap_err()
+                .len(),
+            1
+        );
+    }
+
+    /// Review XT1: the recorded verification list, the unknown list and the
+    /// set of facts are compared too, not only what decides validity.
+    #[test]
+    fn check_compares_the_whole_tested_section() {
+        let dir = tree();
+        let root = dir.path();
+        let tree_values = "schema = \"x\"\n";
+        let mut doctor = doctor_of(root);
+        doctor["host"]["linger"] = serde_json::Value::Null;
+        doctor["host"]["sysctls"]["kernel.yama.ptrace_scope"] = serde_json::Value::Null;
+        doctor["host"]["cgroup"]["controllers"][1] = serde_json::Value::Null;
+        doctor["platform"]["kernel"] = serde_json::Value::Null;
+        let section = tested_section(root, &doctor).expect("a clean run is recorded");
+        let exact = compose(tree_values, Some(&section));
+        assert!(check_against(root, &exact, tree_values).is_ok(), "{exact}");
+        let refused = |file: String, why: &str| {
+            let problems = check_against(root, &file, tree_values).unwrap_err();
+            assert!(
+                problems.iter().any(|p| p.contains(why)),
+                "{why}: {problems:?}"
+            );
+        };
+        // A verification this tree does not perform (it has no .git).
+        refused(
+            exact.replace(
+                "verification = [\"inputs_match_tree\"]",
+                "verification = [\"inputs_match_tree\", \"revision_is_ancestor_of_head\"]",
+            ),
+            "this tree verifies",
+        );
+        // A fact the generator never writes.
+        refused(
+            exact.replace("ready = true\n", "ready = true\nreviewed = true\n"),
+            "never writes",
+        );
+        // A recorded fact dropped by hand.
+        refused(
+            exact.replace("rustc = ", "# rustc = "),
+            "neither records `rustc`",
+        );
+        // An unknown fact that is in fact recorded.
+        refused(
+            exact.replace("unknown = [", "unknown = [\"platform_os\", "),
+            "both unknown and recorded",
+        );
+        // An unknown fact dropped from the list. (A nested one cannot be
+        // told from a key the run never reported: only the doctor knows.)
+        refused(
+            exact.replace("\"platform_kernel\", ", ""),
+            "neither records `platform_kernel`",
+        );
+        // Restored where they were: the nulls round-trip exactly.
+        let facts =
+            recorded_facts(&toml::from_str::<toml::Value>(&section).unwrap()["tested"]).unwrap();
+        assert_eq!(facts["host"]["linger"], serde_json::Value::Null);
+        assert_eq!(
+            facts["host"]["sysctls"]["kernel.yama.ptrace_scope"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            facts["host"]["cgroup"]["controllers"],
+            doctor["host"]["cgroup"]["controllers"]
+        );
+        assert_eq!(facts["platform_kernel"], serde_json::Value::Null);
+        // An unknown fact that names nothing.
+        refused(
+            exact.replace("unknown = [", "unknown = [\"elsewhere.x\", "),
+            "names no place",
+        );
+        // A recorded fact that no longer validates.
+        refused(exact.replace("dirty = false", "dirty = true"), "dirty is");
+    }
+
+    /// Review F4: the whole host object is copied, and an unknown fact is
+    /// named in `unknown`, never written as a value.
+    #[test]
+    fn a_tested_section_copies_the_host_and_names_what_was_unknown() {
+        let dir = tree();
+        let root = dir.path();
+        let mut doctor = doctor_of(root);
         doctor["host"]["linger"] = serde_json::Value::Null;
         doctor["host"]["sysctls"]["kernel.yama.ptrace_scope"] = serde_json::Value::Null;
         let section = tested_section(root, &doctor).expect("a clean run is recorded");
