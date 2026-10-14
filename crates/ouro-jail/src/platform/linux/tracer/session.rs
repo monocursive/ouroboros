@@ -471,6 +471,25 @@ struct Pending {
     entry_argv: Option<Vec<Vec<u8>>>,
 }
 
+impl Pending {
+    /// The call of row `entry`, entered with the registers `raw` and the
+    /// arguments `args` read from them: every argument readable, nothing
+    /// confirmed and no argv judged until a step says otherwise.
+    fn new(entry: &'static Entry, args: Args, raw: [u64; 6]) -> Pending {
+        Pending {
+            entry,
+            args,
+            exec_confirmed: false,
+            path_unreadable: false,
+            path2_unreadable: false,
+            sockaddr_unreadable: false,
+            flags_unavailable: false,
+            raw,
+            entry_argv: None,
+        }
+    }
+}
+
 pub(super) fn run(
     launcher: pid_t,
     config: TracerConfig,
@@ -1904,18 +1923,15 @@ impl Session {
                 return;
             }
             let pending = Pending {
-                entry,
-                args: Args {
-                    flags: Some(flags),
-                    ..Args::default()
-                },
-                exec_confirmed: false,
-                path_unreadable: false,
-                path2_unreadable: false,
-                sockaddr_unreadable: false,
                 flags_unavailable,
-                raw: info.args,
-                entry_argv: None,
+                ..Pending::new(
+                    entry,
+                    Args {
+                        flags: Some(flags),
+                        ..Args::default()
+                    },
+                    info.args,
+                )
             };
             self.begin(tid, InFlight::Closed(pending), site);
             return;
@@ -2863,15 +2879,10 @@ impl Session {
             sockaddr_unreadable = unreadable;
         }
         Pending {
-            entry,
-            args,
-            exec_confirmed: false,
             path_unreadable,
             path2_unreadable,
             sockaddr_unreadable,
-            flags_unavailable: false,
-            raw: *raw,
-            entry_argv: None,
+            ..Pending::new(entry, args, *raw)
         }
     }
 
@@ -3098,9 +3109,174 @@ fn sockaddr_len(family: u16, declared: u64) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::EVENT_FIXED_BYTES;
+    use std::sync::mpsc::Receiver;
+    use std::sync::{Mutex, MutexGuard};
+
+    use super::super::{CandidateImage, EVENT_FIXED_BYTES};
     use super::sockaddr_len;
     use super::*;
+
+    /// `/proc` as a test scripts it. Every read answers from here, never from
+    /// the real `/proc`, and what the script does not name reads as absent.
+    #[derive(Default)]
+    struct Script {
+        /// `tid -> (tgid, start ticks)`.
+        tasks: HashMap<pid_t, (pid_t, u64)>,
+        /// The children of this process, whichever pid is asked about.
+        children: Vec<pid_t>,
+        cmdline: HashMap<pid_t, Vec<u8>>,
+        /// `/proc/<tid>/exe` links.
+        exe: HashMap<pid_t, Vec<u8>>,
+        /// `#!` lines by candidate path.
+        scripts: HashMap<Vec<u8>, ShebangImage>,
+        /// `/proc/<tid>/cwd` links.
+        cwd: HashMap<pid_t, Vec<u8>>,
+        /// `/proc/<tid>/fd/<fd>` links, with the link count of the file
+        /// each resolves to when the script gives one.
+        fds: HashMap<(pid_t, i64), (Vec<u8>, Option<u64>)>,
+        /// How many times each kind of read was made.
+        reads: HashMap<&'static str, usize>,
+    }
+
+    /// One script, shared by the session that reads it and the test that
+    /// edits it while the session runs: a recycled pid, a reaped backend.
+    #[derive(Clone, Default)]
+    struct FakeProc(Arc<Mutex<Script>>);
+
+    impl FakeProc {
+        /// With `tid`, a thread of `tgid` started at `ticks`.
+        fn task(self, tid: pid_t, tgid: pid_t, ticks: u64) -> FakeProc {
+            self.edit(|script| {
+                script.tasks.insert(tid, (tgid, ticks));
+            });
+            self
+        }
+
+        fn edit(&self, change: impl FnOnce(&mut Script)) {
+            change(&mut self.0.lock().unwrap());
+        }
+
+        /// The script, counting one read of `file`.
+        fn read(&self, file: &'static str) -> MutexGuard<'_, Script> {
+            let mut script = self.0.lock().unwrap();
+            *script.reads.entry(file).or_default() += 1;
+            script
+        }
+    }
+
+    impl ProcView for FakeProc {
+        fn tgid(&self, tid: pid_t) -> Option<pid_t> {
+            self.read("tgid").tasks.get(&tid).map(|(tgid, _)| *tgid)
+        }
+        fn start_ticks(&self, tid: pid_t) -> Option<u64> {
+            self.read("start_ticks")
+                .tasks
+                .get(&tid)
+                .map(|(_, ticks)| *ticks)
+        }
+        fn children(&self, _pid: pid_t) -> Vec<pid_t> {
+            self.read("children").children.clone()
+        }
+        fn cmdline(&self, tid: pid_t) -> Option<Vec<u8>> {
+            self.read("cmdline").cmdline.get(&tid).cloned()
+        }
+        fn kernel_image(&self, tid: pid_t, images: &[Vec<u8>]) -> Option<KernelImage> {
+            self.read("exe").exe.get(&tid).map(|path| KernelImage {
+                path: path.clone(),
+                identity: None,
+                candidates: images
+                    .iter()
+                    .map(|path| CandidateImage {
+                        path: path.clone(),
+                        identity: None,
+                    })
+                    .collect(),
+            })
+        }
+        fn script_image(&self, _tid: pid_t, candidate: &[u8]) -> Option<ShebangImage> {
+            self.read("script").scripts.get(candidate).cloned()
+        }
+        fn cwd(&self, tid: pid_t) -> Option<Vec<u8>> {
+            self.read("cwd").cwd.get(&tid).cloned()
+        }
+        fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>> {
+            self.read("fd")
+                .fds
+                .get(&(tid, fd))
+                .map(|(link, _)| link.clone())
+        }
+        fn fd_nlink(&self, tid: pid_t, fd: i64) -> Option<u64> {
+            self.read("fd_nlink")
+                .fds
+                .get(&(tid, fd))
+                .and_then(|(_, nlink)| *nlink)
+        }
+    }
+
+    /// The one way a unit test builds a session: `config`, `/proc` as
+    /// `procfs` plays it, and a handoff channel `depth` events deep whose
+    /// receiver the test reads, or drops to play a consumer that never does.
+    fn new_session(
+        config: TracerConfig,
+        procfs: impl ProcView + 'static,
+        depth: usize,
+    ) -> (Session, Receiver<TracerEvent>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(depth);
+        (
+            Session::new(config, tx, Arc::default(), 0, Box::new(procfs)),
+            rx,
+        )
+    }
+
+    /// A session over `proc` with every task it scripts registered, in tid
+    /// order, as their first stops would register them.
+    fn traced(config: TracerConfig, proc: &FakeProc) -> (Session, Receiver<TracerEvent>) {
+        let mut tids: Vec<pid_t> = proc.0.lock().unwrap().tasks.keys().copied().collect();
+        tids.sort_unstable();
+        let (mut session, rx) = new_session(config, proc.clone(), 64);
+        for tid in tids {
+            session.register(tid);
+        }
+        (session, rx)
+    }
+
+    /// A session whose consumer never reads: the handoff holds one event.
+    fn stalled_session() -> (Session, Receiver<TracerEvent>) {
+        let config = TracerConfig {
+            queue_bytes_max: 64 * 1024 * 1024,
+            ..TracerConfig::default()
+        };
+        new_session(config, FakeProc::default(), 1)
+    }
+
+    /// What `finish` is handed once the supervisor has asked the tracer to
+    /// stop: the stop flag, already set, ends the terminal drain at once.
+    fn stopped(session: &Session) -> Handles {
+        Handles {
+            stop: Arc::new(AtomicBool::new(true)),
+            shutdown_ns: Arc::default(),
+            tid: Arc::default(),
+            handed: Arc::clone(&session.handed),
+        }
+    }
+
+    /// A complete pathname snapshot.
+    fn snapshot(path: &[u8]) -> PathSnapshot {
+        PathSnapshot {
+            bytes: path.to_vec(),
+            complete: true,
+        }
+    }
+
+    /// Make `pending` the call `tid` has in flight, as its entry stop would.
+    fn plant(session: &mut Session, tid: pid_t, pending: Pending) {
+        session
+            .tasks
+            .get_mut(&tid)
+            .expect("a registered task")
+            .pending = Some(InFlight::Closed(pending));
+        session.inflight += 1;
+    }
 
     /// Shutdown signals the tracer thread with the wake signal, so a tracer
     /// whose handler could not be installed must refuse before it seizes
@@ -3130,14 +3306,7 @@ mod tests {
     #[test]
     fn undelivered_events_at_the_end_are_counted_by_their_kind() {
         // A consumer that never reads, and no children to owe.
-        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
-        let mut session = Session::new(
-            TracerConfig::default(),
-            tx,
-            Arc::default(),
-            0,
-            Box::new(Kernel::default()),
-        );
+        let (mut session, _rx) = new_session(TracerConfig::default(), FakeProc::default(), 1);
         // The handoff takes the first; the other two stay buffered.
         for _ in 0..3 {
             session.emit(TracerEvent::Syscall {
@@ -3153,28 +3322,10 @@ mod tests {
         assert_eq!(session.pending.len(), 2);
         // Nothing is owed, and the stop flag ends the terminal drain at once.
         session.owed = Owed::Nothing;
-        let handles = Handles {
-            stop: Arc::new(AtomicBool::new(true)),
-            shutdown_ns: Arc::default(),
-            tid: Arc::default(),
-            handed: Arc::default(),
-        };
+        let handles = stopped(&session);
         let summary = session.finish(&handles);
         assert_eq!(summary.loss.queue_dropped, 2, "the two results");
         assert_eq!(summary.loss.lifecycle_dropped, 1, "`Finished`");
-    }
-
-    /// A session whose consumer never reads: the handoff holds one event.
-    fn stalled_session() -> (Session, std::sync::mpsc::Receiver<TracerEvent>) {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let config = TracerConfig {
-            queue_bytes_max: 64 * 1024 * 1024,
-            ..TracerConfig::default()
-        };
-        (
-            Session::new(config, tx, Arc::default(), 0, Box::new(LiveProc)),
-            rx,
-        )
     }
 
     #[test]
@@ -3252,24 +3403,15 @@ mod tests {
         let mut raw = [0u64; 6];
         raw[1] = addr; // pathname
         raw[2] = 0; // O_RDONLY, as a register argument
-        let pending = Pending {
+        let pending = Pending::new(
             entry,
-            args: Args {
-                path: Some(PathSnapshot {
-                    bytes: b"/workspace/file.txt".to_vec(),
-                    complete: true,
-                }),
+            Args {
+                path: Some(snapshot(b"/workspace/file.txt")),
                 flags: Some(0),
                 ..Args::default()
             },
-            exec_confirmed: false,
-            path_unreadable: false,
-            path2_unreadable: false,
-            sockaddr_unreadable: false,
-            flags_unavailable: false,
             raw,
-            entry_argv: None,
-        };
+        );
         let self_pid = std::process::id() as pid_t;
         assert!(
             session.arguments_stable(self_pid, &pending),
@@ -3307,45 +3449,26 @@ mod tests {
     /// kernel reads remain an `argument_snapshot_unstable` gap.
     #[test]
     fn a_readonly_openat2_is_reverified_at_its_exit() {
-        let (mut session, rx) = stalled_session();
+        let self_pid = std::process::id() as pid_t;
+        let (mut session, rx) = traced(
+            TracerConfig::default(),
+            &FakeProc::default().task(self_pid, self_pid, 1000),
+        );
         let entry = closed_set::lookup(437).expect("openat2");
         let mut how: u64 = 0; // O_RDONLY, as the kernel would read it
         let mut raw = [0u64; 6];
         raw[1] = c"path".as_ptr() as u64;
         raw[2] = &mut how as *const u64 as u64; // struct open_how *
         raw[3] = 24; // size
-        let pending = Pending {
+        let pending = Pending::new(
             entry,
-            args: Args {
+            Args {
                 flags: Some(0),
                 ..Args::default()
             },
-            exec_confirmed: false,
-            path_unreadable: false,
-            path2_unreadable: false,
-            sockaddr_unreadable: false,
-            flags_unavailable: false,
             raw,
-            entry_argv: None,
-        };
-        let self_pid = std::process::id() as pid_t;
-        session.tasks.insert(
-            self_pid,
-            Task {
-                tgid: self_pid,
-                start_ticks: None,
-                pending: Some(InFlight::Closed(pending.clone())),
-                site: Site {
-                    arch: abi::AUDIT_ARCH,
-                    nr: 437,
-                    ip: 0,
-                    arg0: 0,
-                },
-                entry_fresh: false,
-                restart: None,
-            },
         );
-        session.inflight += 1;
+        plant(&mut session, self_pid, pending.clone());
         session.handle_exit(self_pid, 3);
         assert_eq!(
             session.summary.filtered_readonly_opens, 1,
@@ -3364,8 +3487,7 @@ mod tests {
         }
         how = libc::O_WRONLY as u64 | libc::O_CREAT as u64;
         assert_ne!(how, 0, "the raced value is what the kernel will apply");
-        session.tasks.get_mut(&self_pid).unwrap().pending = Some(InFlight::Closed(pending));
-        session.inflight += 1;
+        plant(&mut session, self_pid, pending);
         session.handle_exit(self_pid, 3);
         assert_eq!(
             session.summary.loss.argument_snapshot_unstable, 1,
@@ -3412,25 +3534,12 @@ mod tests {
     /// does not track at all.
     #[test]
     fn an_exit_with_no_entry_is_one_unmatched_exit_gap() {
-        let (mut session, rx) = stalled_session();
         // A tracked thread whose pending entry is gone: the entry was
         // never seen for this exit.
         let pid = std::process::id() as pid_t;
-        session.tasks.insert(
-            pid,
-            Task {
-                tgid: pid,
-                start_ticks: None,
-                pending: None,
-                site: Site {
-                    arch: abi::AUDIT_ARCH,
-                    nr: 257,
-                    ip: 0,
-                    arg0: 0,
-                },
-                entry_fresh: false,
-                restart: None,
-            },
+        let (mut session, rx) = traced(
+            TracerConfig::default(),
+            &FakeProc::default().task(pid, pid, 1000),
         );
         session.handle_exit(pid, 0);
         assert_eq!(
@@ -3540,12 +3649,11 @@ mod tests {
     /// and a gap still coalesced.
     #[test]
     fn j4_d6_the_byte_budget_does_not_drop_critical_facts_either() {
-        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
         let config = TracerConfig {
             queue_bytes_max: 4 * EVENT_FIXED_BYTES,
             ..TracerConfig::default()
         };
-        let mut session = Session::new(config, tx, Arc::default(), 0, Box::new(LiveProc));
+        let (mut session, _rx) = new_session(config, FakeProc::default(), 1);
         for child in 2..100 {
             session.emit(fork(child));
         }
@@ -3576,55 +3684,22 @@ mod tests {
         );
     }
 
-    /// `/proc` as a test scripts it: `tid -> (tgid, start ticks)`.
-    struct ScriptedProc(std::sync::Arc<std::sync::Mutex<HashMap<pid_t, (pid_t, u64)>>>);
-
-    impl ProcView for ScriptedProc {
-        fn tgid(&self, tid: pid_t) -> Option<pid_t> {
-            self.0.lock().unwrap().get(&tid).map(|(tgid, _)| *tgid)
-        }
-        fn start_ticks(&self, tid: pid_t) -> Option<u64> {
-            self.0.lock().unwrap().get(&tid).map(|(_, ticks)| *ticks)
-        }
-        /// A script has no children: the test binary's real ones are other
-        /// tests' business.
-        fn children(&self, _pid: pid_t) -> Vec<pid_t> {
-            Vec::new()
-        }
-    }
-
     /// A pid no real task can have (above `PID_MAX_LIMIT`), so the ptrace
     /// calls the handlers make on it fail with ESRCH and touch nothing.
     const RECYCLED: pid_t = 5_000_001;
     const WORKER: pid_t = 5_000_002;
 
+    /// Make a call of syscall `nr` on `path` the one `tid` has in flight.
     fn pend(session: &mut Session, tid: pid_t, nr: u64, path: &str) {
         let entry = closed_set::lookup(nr).expect("a closed-set row");
-        let task = session.tasks.get_mut(&tid).expect("a registered task");
-        task.pending = Some(InFlight::Closed(Pending {
-            entry,
-            args: Args {
-                path: Some(PathSnapshot {
-                    bytes: path.as_bytes().to_vec(),
-                    complete: true,
-                }),
-                ..Args::default()
-            },
-            exec_confirmed: false,
-            path_unreadable: false,
-            path2_unreadable: false,
-            sockaddr_unreadable: false,
-            flags_unavailable: false,
-            raw: [0; 6],
-            entry_argv: None,
-        }));
-        session.inflight += 1;
+        let args = Args {
+            path: Some(snapshot(path.as_bytes())),
+            ..Args::default()
+        };
+        plant(session, tid, Pending::new(entry, args, [0; 6]));
     }
 
-    fn drained(
-        rx: &std::sync::mpsc::Receiver<TracerEvent>,
-        session: &mut Session,
-    ) -> Vec<TracerEvent> {
+    fn drained(rx: &Receiver<TracerEvent>, session: &mut Session) -> Vec<TracerEvent> {
         session.flush();
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
@@ -3647,17 +3722,10 @@ mod tests {
     /// no entry in flight.
     #[test]
     fn j4_o02_recycled_tid_carries_nothing_over() {
-        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let (tx, rx) = std::sync::mpsc::sync_channel(1024);
-        let mut session = Session::new(
-            TracerConfig::default(),
-            tx,
-            Arc::default(),
-            0,
-            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
-        );
-        table.lock().unwrap().insert(RECYCLED, (RECYCLED, 1000));
-        table.lock().unwrap().insert(WORKER, (RECYCLED, 1500));
+        let proc = FakeProc::default()
+            .task(RECYCLED, RECYCLED, 1000)
+            .task(WORKER, RECYCLED, 1500);
+        let (mut session, rx) = new_session(TracerConfig::default(), proc.clone(), 1024);
         // The worker's first stop arrives before anything of its leader's:
         // the group is taken on through the worker, and is still named by
         // its leader's birth, not by the worker's own.
@@ -3681,7 +3749,9 @@ mod tests {
         session.handle_exit(RECYCLED, 0);
         session.handle_death(RECYCLED, 0);
         // Reaped: the kernel may now give the number to a new task.
-        table.lock().unwrap().insert(RECYCLED, (RECYCLED, 2000));
+        proc.edit(|script| {
+            script.tasks.insert(RECYCLED, (RECYCLED, 2000));
+        });
         session.register(RECYCLED);
         pend(
             &mut session,
@@ -3746,17 +3816,10 @@ mod tests {
     /// is a gap in every class with no count; one that failed is nothing.
     #[test]
     fn j4_s4_an_untraced_descendant_is_a_gap_and_a_failed_clone_is_not() {
-        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-        table.lock().unwrap().insert(RECYCLED, (RECYCLED, 1000));
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let mut session = Session::new(
+        let (mut session, rx) = traced(
             TracerConfig::default(),
-            tx,
-            Arc::default(),
-            0,
-            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
+            &FakeProc::default().task(RECYCLED, RECYCLED, 1000),
         );
-        session.register(RECYCLED);
         session.begin(RECYCLED, InFlight::Untraced, Site::default());
         session.handle_exit(RECYCLED, -i64::from(libc::EPERM));
         assert_eq!(session.summary.untraced_clone_refused, 1);
@@ -3881,17 +3944,10 @@ mod tests {
     /// nothing — and every one releases the slot.
     #[test]
     fn j4_o2_each_end_of_a_restart_wait_is_exact() {
-        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-        table.lock().unwrap().insert(RECYCLED, (RECYCLED, 1000));
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let mut session = Session::new(
+        let (mut session, rx) = traced(
             TracerConfig::default(),
-            tx,
-            Arc::default(),
-            0,
-            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
+            &FakeProc::default().task(RECYCLED, RECYCLED, 1000),
         );
-        session.register(RECYCLED);
 
         waiting(
             &mut session,
@@ -3965,28 +4021,6 @@ mod tests {
     }
 
     // ------------------------------------------------ J4 wave 3
-
-    fn scripted(
-        config: TracerConfig,
-        tasks: &[(pid_t, pid_t)],
-    ) -> (Session, std::sync::mpsc::Receiver<TracerEvent>) {
-        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-        for (tid, tgid) in tasks {
-            table.lock().unwrap().insert(*tid, (*tgid, 1000));
-        }
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let mut session = Session::new(
-            config,
-            tx,
-            Arc::default(),
-            0,
-            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
-        );
-        for (tid, _) in tasks {
-            session.register(*tid);
-        }
-        (session, rx)
-    }
 
     /// A handler's entry has just said "restarted": by the frame, or by the
     /// restart code alone.
@@ -4068,7 +4102,10 @@ mod tests {
             ),
         ];
         for (label, by_kernel, step, gaps, restarts, unfinished) in cases {
-            let (mut session, rx) = scripted(TracerConfig::default(), &[(RECYCLED, RECYCLED)]);
+            let (mut session, rx) = traced(
+                TracerConfig::default(),
+                &FakeProc::default().task(RECYCLED, RECYCLED, 1000),
+            );
             announced(&mut session, RECYCLED, by_kernel);
             assert_eq!(session.inflight, 1, "{label}: still in flight");
             step(&mut session);
@@ -4091,7 +4128,10 @@ mod tests {
     /// counts the call once (R2), as killed at its entry.
     #[test]
     fn j4_w3_r2_a_kill_at_a_stepped_reentry_ends_the_wait_without_a_count() {
-        let (mut session, rx) = scripted(TracerConfig::default(), &[(RECYCLED, RECYCLED)]);
+        let (mut session, rx) = traced(
+            TracerConfig::default(),
+            &FakeProc::default().task(RECYCLED, RECYCLED, 1000),
+        );
         waiting(&mut session, RECYCLED, libc::SYS_openat as u64, "/w/fifo");
         session.judge_entry_stop(RECYCLED, EntryStop::Killed);
         session.handle_death(RECYCLED, libc::SIGKILL);
@@ -4104,6 +4144,13 @@ mod tests {
     const LEADER: pid_t = 5_000_011;
     const PEER: pid_t = 5_000_012;
 
+    /// A thread group of two: its leader, and a peer thread.
+    fn leader_and_peer() -> FakeProc {
+        FakeProc::default()
+            .task(LEADER, LEADER, 1000)
+            .task(PEER, LEADER, 1000)
+    }
+
     /// J4 W3, loss review finding 1, at the session: after a non-leader
     /// exec the leader's entry is abandoned — a gap of its own classes —
     /// whether the thread that execed carried its own entry or had none
@@ -4113,8 +4160,7 @@ mod tests {
     #[test]
     fn j4_w3_a_non_leader_exec_abandons_the_leaders_entry_whatever_was_carried() {
         for carried in [false, true] {
-            let (mut session, rx) =
-                scripted(TracerConfig::default(), &[(LEADER, LEADER), (PEER, LEADER)]);
+            let (mut session, rx) = traced(TracerConfig::default(), &leader_and_peer());
             pend(&mut session, LEADER, libc::SYS_openat as u64, "/w/fifo");
             if carried {
                 pend(&mut session, PEER, libc::SYS_execve as u64, "/bin/image");
@@ -4173,8 +4219,7 @@ mod tests {
             ),
             (true, vec![]),
         ] {
-            let (mut session, rx) =
-                scripted(TracerConfig::default(), &[(LEADER, LEADER), (PEER, LEADER)]);
+            let (mut session, rx) = traced(TracerConfig::default(), &leader_and_peer());
             announced(&mut session, LEADER, by_kernel);
             session.exec_transition(LEADER, PEER);
             let events = drained(&rx, &mut session);
@@ -4189,12 +4234,12 @@ mod tests {
     /// gap of their kind; a foreign call is one call.
     #[test]
     fn j4_w3_a_refused_listener_or_untraced_clone_is_the_open_ended_gap_of_its_kind() {
-        let (mut session, rx) = scripted(
+        let (mut session, rx) = traced(
             TracerConfig {
                 inflight_max: 1,
                 ..TracerConfig::default()
             },
-            &[(LEADER, LEADER), (PEER, LEADER)],
+            &leader_and_peer(),
         );
         pend(&mut session, LEADER, libc::SYS_openat as u64, "/w/fifo");
         session.follow(PEER, InFlight::Listener, Site::default());
@@ -4218,13 +4263,12 @@ mod tests {
     /// the bytes back.
     #[test]
     fn j4_w3_the_handoff_channel_is_inside_the_byte_budget() {
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let handed = Arc::new(AtomicUsize::new(0));
         let config = TracerConfig {
             queue_bytes_max: 4 * EVENT_FIXED_BYTES,
             ..TracerConfig::default()
         };
-        let mut session = Session::new(config, tx, Arc::clone(&handed), 0, Box::new(LiveProc));
+        let (mut session, rx) = new_session(config, FakeProc::default(), 64);
+        let handed = Arc::clone(&session.handed);
         for child in 2..20 {
             session.emit(fork(child));
         }
@@ -4245,14 +4289,13 @@ mod tests {
 
     #[test]
     fn relative_syscall_cwd_counts_against_admission_and_handoff_credit() {
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let handed = Arc::new(AtomicUsize::new(0));
         let charge = EVENT_FIXED_BYTES + 512;
         let config = TracerConfig {
             queue_bytes_max: 64 * 1024 + 2 * charge,
             ..TracerConfig::default()
         };
-        let mut session = Session::new(config, tx, Arc::clone(&handed), 0, Box::new(LiveProc));
+        let (mut session, rx) = new_session(config, FakeProc::default(), 64);
+        let handed = Arc::clone(&session.handed);
         let syscall = || TracerEvent::Syscall {
             pid: 1,
             start_ticks: None,
@@ -4422,20 +4465,6 @@ mod tests {
         }
     }
 
-    fn live_session() -> (Session, std::sync::mpsc::Receiver<TracerEvent>) {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1024);
-        (
-            Session::new(
-                TracerConfig::default(),
-                tx,
-                Arc::default(),
-                0,
-                Box::new(LiveProc),
-            ),
-            rx,
-        )
-    }
-
     fn is_seccomp_stop(status: libc::c_int) -> bool {
         libc::WIFSTOPPED(status) && (status >> 16) & 0xff == sys::PTRACE_EVENT_SECCOMP
     }
@@ -4602,7 +4631,7 @@ mod tests {
         let Some(child) = Mkdirer::start(&c) else {
             return;
         };
-        let (mut session, rx) = live_session();
+        let (mut session, rx) = new_session(TracerConfig::default(), LiveProc, 1024);
         let status = child.release();
         assert!(is_seccomp_stop(status), "status {status:#x}");
         session.handle(child.pid, status);
@@ -4636,7 +4665,7 @@ mod tests {
         let Some(child) = Mkdirer::start(&c) else {
             return;
         };
-        let (mut session, rx) = live_session();
+        let (mut session, rx) = new_session(TracerConfig::default(), LiveProc, 1024);
         let status = child.release();
         assert!(is_seccomp_stop(status), "status {status:#x}");
         child.kill();
@@ -4679,7 +4708,7 @@ mod tests {
             let Some(child) = Mkdirer::start(&c) else {
                 return;
             };
-            let (mut session, rx) = live_session();
+            let (mut session, rx) = new_session(TracerConfig::default(), LiveProc, 1024);
             let status = child.release();
             assert!(is_seccomp_stop(status), "status {status:#x}");
             session.register(child.pid);
@@ -4732,7 +4761,7 @@ mod tests {
         let Some(child) = Mkdirer::start(&c) else {
             return;
         };
-        let (mut session, rx) = live_session();
+        let (mut session, rx) = new_session(TracerConfig::default(), LiveProc, 1024);
         let status = child.release();
         assert!(is_seccomp_stop(status), "status {status:#x}");
         session.handle(child.pid, status);
@@ -4796,7 +4825,7 @@ mod tests {
         let Some(child) = Mkdirer::start_open(&c) else {
             return;
         };
-        let (mut session, rx) = live_session();
+        let (mut session, rx) = new_session(TracerConfig::default(), LiveProc, 1024);
         let status = child.release();
         assert!(is_seccomp_stop(status), "the open's entry: {status:#x}");
         session.handle(child.pid, status);
@@ -4870,26 +4899,20 @@ mod tests {
     #[test]
     fn j5t_the_backend_is_owed_only_under_its_own_birth() {
         const BACKEND: pid_t = RECYCLED;
-        let table = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let mut session = Session::new(
-            TracerConfig::default(),
-            tx,
-            Arc::default(),
-            0,
-            Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
-        );
+        let proc = FakeProc::default();
+        let (mut session, rx) = new_session(TracerConfig::default(), proc.clone(), 64);
         session.owed = Owed::Backend {
             pid: BACKEND,
             birth: Some(1000),
             reaped: false,
         };
         let now_named = |birth: Option<u64>| {
-            let mut table = table.lock().unwrap();
-            match birth {
-                Some(ticks) => table.insert(BACKEND, (BACKEND, ticks)),
-                None => table.remove(&BACKEND),
-            };
+            proc.edit(|script| {
+                match birth {
+                    Some(ticks) => script.tasks.insert(BACKEND, (BACKEND, ticks)),
+                    None => script.tasks.remove(&BACKEND),
+                };
+            });
         };
 
         now_named(Some(1000));
@@ -4924,28 +4947,15 @@ mod tests {
         assert!(session.accounted_for());
 
         // The same rule decides what `finish` reports as unreaped.
-        let handles = |session: &Session| Handles {
-            stop: Arc::new(AtomicBool::new(true)),
-            shutdown_ns: Arc::default(),
-            tid: Arc::default(),
-            handed: Arc::clone(&session.handed),
-        };
         let unreaped = |birth_now: u64| {
-            let (tx, _rx) = std::sync::mpsc::sync_channel(64);
-            let mut session = Session::new(
-                TracerConfig::default(),
-                tx,
-                Arc::default(),
-                0,
-                Box::new(ScriptedProc(std::sync::Arc::clone(&table))),
-            );
+            let (mut session, _rx) = new_session(TracerConfig::default(), proc.clone(), 64);
             session.owed = Owed::Backend {
                 pid: BACKEND,
                 birth: Some(1000),
                 reaped: false,
             };
             now_named(Some(birth_now));
-            let handles = handles(&session);
+            let handles = stopped(&session);
             session.finish(&handles).unreaped_children
         };
         assert_eq!(unreaped(1000), vec![BACKEND], "its own birth: unreaped");
@@ -4964,40 +4974,26 @@ mod tests {
     /// test a live orphan, on demand.
     #[test]
     fn j5t_a_child_gained_after_the_attach_is_owed_and_a_bystander_is_not() {
-        struct Family(std::sync::Arc<std::sync::Mutex<Vec<(pid_t, u64)>>>);
-        impl ProcView for Family {
-            fn tgid(&self, tid: pid_t) -> Option<pid_t> {
-                Some(tid)
-            }
-            fn start_ticks(&self, tid: pid_t) -> Option<u64> {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|(pid, _)| *pid == tid)
-                    .map(|(_, birth)| *birth)
-            }
-            fn children(&self, _pid: pid_t) -> Vec<pid_t> {
-                self.0.lock().unwrap().iter().map(|(pid, _)| *pid).collect()
-            }
-        }
         const BYSTANDER: pid_t = RECYCLED;
         const ORPHAN: pid_t = WORKER;
-        let family = std::sync::Arc::new(std::sync::Mutex::new(vec![(BYSTANDER, 1000)]));
+        let proc = FakeProc::default();
+        // This process's children, each with its birth.
+        let set = |children: &[(pid_t, u64)]| {
+            proc.edit(|script| {
+                script.tasks = children
+                    .iter()
+                    .map(|(pid, birth)| (*pid, (*pid, *birth)))
+                    .collect();
+                script.children = children.iter().map(|(pid, _)| *pid).collect();
+            });
+        };
+        set(&[(BYSTANDER, 1000)]);
         let session = || {
-            let (tx, _) = std::sync::mpsc::sync_channel(64);
-            let mut session = Session::new(
-                TracerConfig::default(),
-                tx,
-                Arc::default(),
-                0,
-                Box::new(Family(std::sync::Arc::clone(&family))),
-            );
+            let (mut session, _) = new_session(TracerConfig::default(), proc.clone(), 64);
             session.owed = Owed::Nothing;
             session.beside = vec![(BYSTANDER, 1000)];
             session
         };
-        let set = |children: &[(pid_t, u64)]| *family.lock().unwrap() = children.to_vec();
 
         let s = session();
         assert!(s.adopted().is_empty());
@@ -5013,93 +5009,14 @@ mod tests {
         );
         assert!(!s.accounted_for());
 
-        let handles = |session: &Session| Handles {
-            stop: Arc::new(AtomicBool::new(true)),
-            shutdown_ns: Arc::default(),
-            tid: Arc::default(),
-            handed: Arc::clone(&session.handed),
-        };
         set(&[(BYSTANDER, 1000), (ORPHAN, 1500)]);
         let s = session();
-        let h = handles(&s);
+        let h = stopped(&s);
         assert_eq!(
             s.finish(&h).unreaped_children,
             vec![ORPHAN],
             "stopped first: the orphan is unreaped, the bystander is not"
         );
-    }
-
-    // The descriptor corroboration and the exec-time
-    // command re-check.
-
-    /// Plays the kernel's side of the audit-6 checks: each task's thread
-    /// group, cmdline, image link and descriptor links.
-    #[derive(Default)]
-    struct Kernel {
-        tasks: HashMap<pid_t, pid_t>,
-        cmdline: HashMap<pid_t, Vec<u8>>,
-        exe: HashMap<pid_t, Vec<u8>>,
-        fds: HashMap<(pid_t, i64), Vec<u8>>,
-        /// `#!` lines by candidate path.
-        scripts: HashMap<Vec<u8>, ShebangImage>,
-        /// How many times each `/proc` file was read, by name.
-        reads: Arc<std::sync::Mutex<HashMap<&'static str, usize>>>,
-    }
-
-    impl Kernel {
-        fn read(&self, file: &'static str) {
-            *self.reads.lock().unwrap().entry(file).or_default() += 1;
-        }
-    }
-
-    impl ProcView for Kernel {
-        fn tgid(&self, tid: pid_t) -> Option<pid_t> {
-            self.tasks.get(&tid).copied()
-        }
-        fn start_ticks(&self, tid: pid_t) -> Option<u64> {
-            self.tasks.contains_key(&tid).then_some(1000)
-        }
-        fn children(&self, _pid: pid_t) -> Vec<pid_t> {
-            Vec::new()
-        }
-        fn cmdline(&self, tid: pid_t) -> Option<Vec<u8>> {
-            self.read("cmdline");
-            self.cmdline.get(&tid).cloned()
-        }
-        fn kernel_image(&self, tid: pid_t, images: &[Vec<u8>]) -> Option<KernelImage> {
-            self.read("exe");
-            self.exe.get(&tid).map(|path| KernelImage {
-                path: path.clone(),
-                identity: None,
-                candidates: images
-                    .iter()
-                    .map(|path| super::super::CandidateImage {
-                        path: path.clone(),
-                        identity: None,
-                    })
-                    .collect(),
-            })
-        }
-        fn script_image(&self, _tid: pid_t, candidate: &[u8]) -> Option<ShebangImage> {
-            self.read("script");
-            self.scripts.get(candidate).cloned()
-        }
-        fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>> {
-            self.fds.get(&(tid, fd)).cloned()
-        }
-    }
-
-    fn kernel_session(
-        config: TracerConfig,
-        kernel: Kernel,
-    ) -> (Session, std::sync::mpsc::Receiver<TracerEvent>) {
-        let tasks: Vec<pid_t> = kernel.tasks.keys().copied().collect();
-        let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let mut session = Session::new(config, tx, Arc::default(), 0, Box::new(kernel));
-        for tid in tasks {
-            session.register(tid);
-        }
-        (session, rx)
     }
 
     #[test]
@@ -5226,37 +5143,22 @@ mod tests {
             (b"/w/public/x\0", write, b"/w/secret/x", false),
         ];
         for (path, flags, link, corroborated) in cases {
-            let (mut session, rx) = kernel_session(
-                TracerConfig::default(),
-                Kernel {
-                    tasks: [(self_pid, self_pid)].into(),
-                    fds: [((self_pid, 5), link.to_vec())].into(),
-                    ..Kernel::default()
-                },
-            );
+            let proc = FakeProc::default().task(self_pid, self_pid, 1000);
+            proc.edit(|script| {
+                script.fds.insert((self_pid, 5), (link.to_vec(), None));
+            });
+            let (mut session, rx) = traced(TracerConfig::default(), &proc);
             let mut raw = [0u64; 6];
             raw[1] = path.as_ptr() as u64;
             raw[2] = flags;
-            session.tasks.get_mut(&self_pid).unwrap().pending = Some(InFlight::Closed(Pending {
-                entry: closed_set::lookup(u64::from(crate::platform::linux::abi::nr(257, 56)))
-                    .expect("openat"),
-                args: Args {
-                    path: Some(PathSnapshot {
-                        bytes: path[..path.len() - 1].to_vec(),
-                        complete: true,
-                    }),
-                    flags: Some(flags),
-                    ..Args::default()
-                },
-                exec_confirmed: false,
-                path_unreadable: false,
-                path2_unreadable: false,
-                sockaddr_unreadable: false,
-                flags_unavailable: false,
-                raw,
-                entry_argv: None,
-            }));
-            session.inflight += 1;
+            let openat = closed_set::lookup(u64::from(crate::platform::linux::abi::nr(257, 56)))
+                .expect("openat");
+            let args = Args {
+                path: Some(snapshot(&path[..path.len() - 1])),
+                flags: Some(flags),
+                ..Args::default()
+            };
+            plant(&mut session, self_pid, Pending::new(openat, args, raw));
             session.handle_exit(self_pid, 5);
             let events = drained(&rx, &mut session);
             let delivered = events
@@ -5396,32 +5298,20 @@ mod tests {
         // No real task has this pid: the register write fails with ESRCH,
         // and the kill finds it already gone.
         const EXECER: pid_t = RECYCLED;
-        let (mut session, rx) = kernel_session(
+        let (mut session, rx) = traced(
             TracerConfig::default(),
-            Kernel {
-                tasks: [(EXECER, EXECER)].into(),
-                ..Kernel::default()
-            },
+            &FakeProc::default().task(EXECER, EXECER, 1000),
         );
-        session.tasks.get_mut(&EXECER).unwrap().pending = Some(InFlight::Closed(Pending {
-            entry: closed_set::lookup(libc::SYS_execve as u64).expect("execve"),
-            args: Args {
-                command: Some(Box::new(crate::commands::Hit {
-                    pattern: "git push".to_owned(),
-                    digest: None,
-                    forbidden: true,
-                })),
-                ..Args::default()
-            },
-            exec_confirmed: false,
-            path_unreadable: false,
-            path2_unreadable: false,
-            sockaddr_unreadable: false,
-            flags_unavailable: false,
-            raw: [0; 6],
-            entry_argv: None,
-        }));
-        session.inflight += 1;
+        let execve = closed_set::lookup(libc::SYS_execve as u64).expect("execve");
+        let args = Args {
+            command: Some(Box::new(crate::commands::Hit {
+                pattern: "git push".to_owned(),
+                digest: None,
+                forbidden: true,
+            })),
+            ..Args::default()
+        };
+        plant(&mut session, EXECER, Pending::new(execve, args, [0; 6]));
         session.handle_exit(EXECER, -i64::from(libc::ENOSYS));
         let events = drained(&rx, &mut session);
         assert_eq!(
@@ -5449,13 +5339,22 @@ mod tests {
     #[test]
     fn the_exec_evidence_is_read_once_and_carried_whole() {
         const EXECER: pid_t = RECYCLED;
-        let reads = Arc::default();
         let script = ShebangImage {
             interpreter: b"/bin/sh".to_vec(),
             argument: None,
             identity: None,
         };
-        let (mut session, rx) = kernel_session(
+        let proc = FakeProc::default().task(EXECER, EXECER, 1000);
+        proc.edit(|kernel| {
+            kernel
+                .cmdline
+                .insert(EXECER, b"/bin/sh\0/w/build.sh\0".to_vec());
+            kernel.exe.insert(EXECER, b"/usr/bin/dash".to_vec());
+            kernel
+                .scripts
+                .insert(b"/w/build.sh".to_vec(), script.clone());
+        });
+        let (mut session, rx) = traced(
             TracerConfig {
                 target: Some((EXECER, vec![b"/w/build.sh".to_vec()])),
                 commands: crate::commands::Rules {
@@ -5466,38 +5365,24 @@ mod tests {
                 .unwrap(),
                 ..TracerConfig::default()
             },
-            Kernel {
-                tasks: [(EXECER, EXECER)].into(),
-                cmdline: [(EXECER, b"/bin/sh\0/w/build.sh\0".to_vec())].into(),
-                exe: [(EXECER, b"/usr/bin/dash".to_vec())].into(),
-                scripts: [(b"/w/build.sh".to_vec(), script.clone())].into(),
-                reads: Arc::clone(&reads),
-                ..Kernel::default()
-            },
+            &proc,
         );
-        session.tasks.get_mut(&EXECER).unwrap().pending = Some(InFlight::Closed(Pending {
-            entry: closed_set::lookup(libc::SYS_execve as u64).expect("execve"),
-            args: Args {
-                path: Some(PathSnapshot {
-                    bytes: b"/w/build.sh".to_vec(),
-                    complete: true,
-                }),
-                ..Args::default()
-            },
-            exec_confirmed: false,
-            path_unreadable: false,
-            path2_unreadable: false,
-            sockaddr_unreadable: false,
-            flags_unavailable: false,
-            raw: [0; 6],
+        let execve = closed_set::lookup(libc::SYS_execve as u64).expect("execve");
+        let args = Args {
+            path: Some(snapshot(b"/w/build.sh")),
+            ..Args::default()
+        };
+        let pending = Pending {
             entry_argv: Some(vec![b"/w/build.sh".to_vec()]),
-        }));
-        session.inflight += 1;
+            ..Pending::new(execve, args, [0; 6])
+        };
+        plant(&mut session, EXECER, pending);
+        proc.edit(|kernel| kernel.reads.clear());
         session.exec_transition(EXECER, EXECER);
         assert_eq!(
-            *reads.lock().unwrap(),
+            proc.0.lock().unwrap().reads,
             HashMap::from([("exe", 1), ("cmdline", 1), ("script", 1)]),
-            "each file read once at the stop"
+            "each file read once at the stop, and nothing else read"
         );
         let events = drained(&rx, &mut session);
         let Some(TracerEvent::Exec {
@@ -5532,7 +5417,14 @@ mod tests {
     fn an_exec_the_recheck_kills_leaves_flight_with_its_event_and_no_abandoned_gap() {
         // No real task has this pid, so the SIGKILL touches nothing.
         const EXECER: pid_t = RECYCLED;
-        let (mut session, rx) = kernel_session(
+        let proc = FakeProc::default().task(EXECER, EXECER, 1000);
+        proc.edit(|kernel| {
+            kernel
+                .cmdline
+                .insert(EXECER, b"git\0push\0--force\0".to_vec());
+            kernel.exe.insert(EXECER, b"/usr/bin/git".to_vec());
+        });
+        let (mut session, rx) = traced(
             TracerConfig {
                 commands: crate::commands::Rules {
                     deny: vec!["git push --force".into()],
@@ -5542,31 +5434,18 @@ mod tests {
                 .unwrap(),
                 ..TracerConfig::default()
             },
-            Kernel {
-                tasks: [(EXECER, EXECER)].into(),
-                cmdline: [(EXECER, b"git\0push\0--force\0".to_vec())].into(),
-                exe: [(EXECER, b"/usr/bin/git".to_vec())].into(),
-                ..Kernel::default()
-            },
+            &proc,
         );
-        session.tasks.get_mut(&EXECER).unwrap().pending = Some(InFlight::Closed(Pending {
-            entry: closed_set::lookup(libc::SYS_execve as u64).expect("execve"),
-            args: Args {
-                path: Some(PathSnapshot {
-                    bytes: b"/usr/bin/git".to_vec(),
-                    complete: true,
-                }),
-                ..Args::default()
-            },
-            exec_confirmed: false,
-            path_unreadable: false,
-            path2_unreadable: false,
-            sockaddr_unreadable: false,
-            flags_unavailable: false,
-            raw: [0; 6],
+        let execve = closed_set::lookup(libc::SYS_execve as u64).expect("execve");
+        let args = Args {
+            path: Some(snapshot(b"/usr/bin/git")),
+            ..Args::default()
+        };
+        let pending = Pending {
             entry_argv: Some(vec![b"git".to_vec(), b"status".to_vec()]),
-        }));
-        session.inflight += 1;
+            ..Pending::new(execve, args, [0; 6])
+        };
+        plant(&mut session, EXECER, pending);
         session.exec_transition(EXECER, EXECER);
         assert!(session.tasks[&EXECER].pending.is_none());
         assert_eq!(session.inflight, 0);
