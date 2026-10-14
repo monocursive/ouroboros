@@ -3,14 +3,13 @@
 //! credentials' private provenance, the execution leaf, and cleanup
 //! progress.
 
-use std::path::Path;
 use std::time::SystemTime;
 
 use super::record::state_parse_failed;
 use super::{
-    AttemptDir, CredentialEntry, DIRECTORY_MODE, Decimal, Field, JailState, LeafEntry, Site,
-    VendorStateEntry, anchored, open_attempt_dir, read_attempt_state, unsafe_path,
-    update_attempt_state, write_failed,
+    AttemptDir, CredentialEntry, DIRECTORY_MODE, Decimal, Field, JailState, Site, VendorStateEntry,
+    anchored, open_attempt_dir, read_attempt_state, unsafe_path, update_attempt_state,
+    write_failed,
 };
 use crate::records::{JailError, StateCleanup};
 
@@ -242,9 +241,10 @@ pub fn record_staged_credentials(
 /// Returns [`ErrorCode::StateWriteFailed`] when jail state cannot be read or
 /// durably replaced, or the path is not UTF-8 (a cgroup path this build
 /// makes always is).
+#[cfg(target_os = "linux")]
 pub fn register_execution_leaf(
     attempt_dir: &AttemptDir,
-    path: &Path,
+    path: &std::path::Path,
     identity: Option<(u64, u64)>,
 ) -> Result<(), JailError> {
     if path.to_str().is_none() {
@@ -259,7 +259,7 @@ pub fn register_execution_leaf(
         Site::ExecutionLeaf
     };
     update_attempt_state(site, attempt_dir, |state| {
-        state.execution_cgroup = Field::Set(LeafEntry::new(path.to_path_buf(), identity));
+        state.execution_cgroup = Field::Set(super::LeafEntry::new(path.to_path_buf(), identity));
     })
 }
 

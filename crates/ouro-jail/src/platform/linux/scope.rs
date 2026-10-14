@@ -618,7 +618,9 @@ pub fn decide<H: Host>(host: &mut H, seam: SeamSetting, unit: &str) -> Outcome {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
-pub use linux::{LinuxHost, current, details, enter, recorded};
+pub(crate) use linux::current;
+#[cfg(target_os = "linux")]
+pub use linux::{details, enter};
 
 #[cfg(target_os = "linux")]
 mod linux {

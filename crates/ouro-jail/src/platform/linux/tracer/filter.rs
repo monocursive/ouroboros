@@ -60,7 +60,9 @@ use crate::platform::linux::{abi, bpf, seccomp};
 /// `unexpected_trace_stop` gap.
 pub const NARROWING_TRACE_DATA: u16 = 0x4f4a;
 
-pub use crate::platform::linux::seccomp::{CLONE_UNTRACED, SECCOMP_FILTER_FLAG_NEW_LISTENER};
+pub(crate) use crate::platform::linux::seccomp::{
+    CLONE_UNTRACED, SECCOMP_FILTER_FLAG_NEW_LISTENER,
+};
 
 /// Native `seccomp(2)`: a stop when its flags ask for a listener
 /// ([`SECCOMP_FILTER_FLAG_NEW_LISTENER`]).

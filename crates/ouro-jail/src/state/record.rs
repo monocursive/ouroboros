@@ -49,14 +49,6 @@ impl<T> Field<T> {
         }
     }
 
-    /// The value, when the field is set, to change it.
-    pub fn get_mut(&mut self) -> Option<&mut T> {
-        match self {
-            Field::Set(value) => Some(value),
-            Field::Absent | Field::Null => None,
-        }
-    }
-
     /// Whether the key is left out (it is then not written either).
     #[must_use]
     pub fn is_absent(&self) -> bool {

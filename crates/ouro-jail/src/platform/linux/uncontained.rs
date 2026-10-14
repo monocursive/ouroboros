@@ -99,11 +99,8 @@ use super::running::{
 };
 use super::sys::set_nonblocking;
 use super::tracer::{self, Tracer};
-use super::verdict::observer_verdict;
+use super::verdict::{NoneTreeInputs, none_verdict, observer_verdict};
 use super::watch;
-
-use super::verdict::none_verdict;
-pub use super::verdict::{NoneTreeInputs, none_verdict as verdict};
 
 /// The descriptor the launcher blocks reading.
 const RELEASE_FD: RawFd = super::fds::NONE_RELEASE;
@@ -1391,6 +1388,7 @@ impl Tree for Uncontained {
 
 #[cfg(test)]
 mod tests {
+    use super::none_verdict as verdict;
     use super::*;
     use crate::lifecycle::Integrity;
     use std::time::Duration;

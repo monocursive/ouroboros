@@ -21,8 +21,9 @@
 
 use super::bpf::{Asm, BpfError, Program};
 
+pub(crate) use super::abi::AUDIT_ARCH;
+pub use super::abi::TABLE_ARCH;
 use super::abi::{self, nr};
-pub use super::abi::{AUDIT_ARCH, TABLE_ARCH};
 
 /// The reason code of a capability whose syscall tables do not cover the
 /// architecture this binary was built for.
@@ -868,25 +869,12 @@ mod linux_only {
         }
         Ok(())
     }
-
-    /// Set `PR_SET_NO_NEW_PRIVS`.
-    ///
-    /// # Errors
-    ///
-    /// The raw errno from `prctl`.
-    pub fn set_no_new_privs() -> io::Result<()> {
-        // SAFETY: PR_SET_NO_NEW_PRIVS takes a single scalar argument and
-        // dereferences nothing.
-        let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
 }
 
 #[cfg(target_os = "linux")]
-pub use linux_only::{install, program_pipe, set_no_new_privs};
+pub(crate) use linux_only::install;
+#[cfg(target_os = "linux")]
+pub use linux_only::program_pipe;
 
 #[cfg(test)]
 mod tests {

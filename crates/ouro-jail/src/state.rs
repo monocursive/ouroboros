@@ -33,40 +33,46 @@ mod safety;
 mod uncontained;
 
 pub use durable::{
-    Published, ROOT_RECORDS, TempListing, TempWrite, create_exclusively_at, is_record_temp_name,
-    leftover_temp_files, leftover_temp_files_within, replace_atomically, replace_atomically_at,
+    Published, TempWrite, create_exclusively_at, leftover_temp_files, replace_atomically,
 };
+pub(crate) use durable::{is_record_temp_name, leftover_temp_files_within, replace_atomically_at};
 pub use layout::{
-    AttemptDir, AttemptId, JAIL_OWNED_NAMES, LOCK_NAME, MANAGED_DIRS, PLACEHOLDERS_NAME,
-    POLICY_NAME, RECEIPT_NAME, SCRATCH_NAME, STATE_NAME, TRACE_NAME, check_fresh_attempt,
-    config_dir, data_dir,
+    AttemptDir, AttemptId, JAIL_OWNED_NAMES, SCRATCH_NAME, check_fresh_attempt, data_dir,
 };
+pub(crate) use layout::{MANAGED_DIRS, POLICY_NAME, RECEIPT_NAME, STATE_NAME, config_dir};
 pub use lease::{Lease, LeaseProbe};
 pub use persist::{
-    ABORT_AT_SEAM, CrashPoint, Installed, PERSIST_BUDGET, Pending, PersistIo, Persister, Progress,
-    RealIo, SharedIo, Site, Stalled, TEST_SEAM_PREFIX, crash_point, current_io, install,
-    plain_decimal, test_seams, test_seams_in, with_persist_io,
+    ABORT_AT_SEAM, PersistIo, Persister, RealIo, Site, test_seams_in, with_persist_io,
 };
-pub use proxy_dir::{
-    PROXY_DIR_NAME, PROXY_SOCKET_NAME, ProxyDirRemoval, ProxySocketIdentity, create_proxy_dir,
-    create_proxy_dir_observed, gc_proxy_dir, record_proxy_socket, remove_proxy_dir,
+pub(crate) use persist::{
+    CrashPoint, Installed, Pending, Progress, Stalled, crash_point, current_io, install,
+    plain_decimal, test_seams,
 };
-pub use record::{
+#[cfg(target_os = "linux")]
+pub(crate) use proxy_dir::PROXY_SOCKET_NAME;
+pub use proxy_dir::{PROXY_DIR_NAME, ProxySocketIdentity};
+pub(crate) use proxy_dir::{
+    ProxyDirRemoval, create_proxy_dir, gc_proxy_dir, record_proxy_socket, remove_proxy_dir,
+};
+pub(crate) use record::{
     CredentialEntry, Decimal, Field, GcAction, JailState, LeafEntry, Owner, ProxyDirEntry,
     SCHEMA_STATE, STATE_FILE_MAX, SocketEntry, VendorStateEntry, read_attempt_state,
     update_attempt_state,
 };
-pub use registration::{
-    PrivateCredential, VENDOR_STATE_NAME, VendorRegistration, create_vendor_state, record_cleanup,
-    record_cleanup_at, record_staged_credentials, register_execution_leaf, vendor_registration,
+#[cfg(target_os = "linux")]
+pub(crate) use registration::register_execution_leaf;
+pub(crate) use registration::{
+    PrivateCredential, VENDOR_STATE_NAME, create_vendor_state, record_cleanup, record_cleanup_at,
+    record_staged_credentials, vendor_registration,
 };
 pub(crate) use registration::{Registration, create_registered_dir};
-pub use safety::{
-    DIRECTORY_MODE, FILE_MODE, check_ownership, check_state_ancestors, check_state_dir,
-    check_state_file, create_private_dir, effective_uid, open_attempt_dir, read_capped,
+pub(crate) use safety::{
+    DIRECTORY_MODE, FILE_MODE, check_state_file, create_private_dir, open_attempt_dir, read_capped,
     read_capped_checked, writable_by_others,
 };
-pub use uncontained::{UncontainedEpoch, uncontained_epoch, uncontained_settled_path};
+pub use safety::{check_ownership, check_state_dir, effective_uid};
+pub use uncontained::uncontained_settled_path;
+pub(crate) use uncontained::{UncontainedEpoch, uncontained_epoch};
 pub(crate) use uncontained::{UncontainedRun, ctime_of};
 
 fn unsafe_path(path: &Path, message: impl Into<String>) -> JailError {

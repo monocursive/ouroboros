@@ -24,10 +24,8 @@ mod address;
 pub mod idna;
 mod unicode;
 
-pub use address::{
-    AddressClass, AddressError, NETWORK_ADDRESSES_JSON, Prefix, is_numeric_looking, normalize,
-    parse_ipv4_strict, parse_ipv6,
-};
+pub use address::{AddressClass, NETWORK_ADDRESSES_JSON, parse_ipv6};
+pub(crate) use address::{AddressError, Prefix, is_numeric_looking, normalize, parse_ipv4_strict};
 pub use idna::IdnaError;
 
 /// The ruleset identifier the snapshot records for proxy policies.

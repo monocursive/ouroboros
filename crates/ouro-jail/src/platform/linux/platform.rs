@@ -38,10 +38,8 @@ use super::identity;
 use super::probe;
 use super::requirements::{derive, probes_for};
 
-pub use super::mounts::MOUNT_SWAP_SEAM;
 pub(crate) use super::mounts::refuse_pseudo_fs_grants;
 pub(crate) use super::mounts::{PlanPaths, plan_for};
-pub use super::verdict::{AbortInputs, TreeInputs, abort_verdict, verdict};
 
 // The fixed descriptor numbers of the backend's map and the launcher's,
 // by the names the platform uses; [`super::fds`] is the table that holds

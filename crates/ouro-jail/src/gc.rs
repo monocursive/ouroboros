@@ -44,12 +44,8 @@ mod host;
 mod view;
 mod walk;
 
-pub use decide::{CgroupStep, Decision, Facts, Next, OwnerVerdict, Retention, ScratchStep, decide};
 pub use host::{Host, HostFailure, HostIdentity, LeafProbe, LeafRecord, Liveness, OwnerRecord};
-pub use view::{
-    LeafSource, ReceiptView, RegisteredLeaf, StateView, VerifiedLeaf, parse_receipt, parse_state,
-};
-pub use walk::{FINISHED, gc, gc_with};
+pub use walk::{gc, gc_with};
 
 /// The test seam that shrinks the per-invocation entry bound (S9).
 pub const SEAM_MAX_ENTRIES: &str = "OURO_JAIL_TEST_GC_MAX_ENTRIES";

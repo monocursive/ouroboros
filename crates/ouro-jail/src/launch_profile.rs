@@ -1200,7 +1200,7 @@ pub fn check_outside_writable(launch: &LaunchProfile, roots: &[PathBuf]) -> Resu
 #[path = "../profiles/embedded.rs"]
 mod embedded;
 use embedded::bundled_fragment;
-pub use embedded::bundled_profile;
+pub(crate) use embedded::bundled_profile;
 
 #[cfg(test)]
 mod tests {

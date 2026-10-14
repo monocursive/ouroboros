@@ -42,10 +42,8 @@ pub struct LauncherFds {
 
 /// What the launcher holds between installing the filter and exec.
 pub struct LauncherSetup {
-    /// The numbers to communicate to the supervisor.
-    pub fds: LauncherFds,
-    _listener: OwnedFd,
-    _sockdiag: OwnedFd,
+    listener: OwnedFd,
+    sockdiag: OwnedFd,
 }
 
 // The launcher places both at fixed numbers
@@ -54,7 +52,7 @@ impl LauncherSetup {
     /// at the descriptor numbers the supervisor expects.
     #[must_use]
     pub fn into_fds(self) -> (OwnedFd, OwnedFd) {
-        (self._listener, self._sockdiag)
+        (self.listener, self.sockdiag)
     }
 }
 
@@ -76,18 +74,9 @@ pub fn launcher_setup() -> io::Result<LauncherSetup> {
     // target) can open one.
     let sockdiag = SockDiag::open()?;
     let listener = install_filter(FLAG_NEW_LISTENER | FLAG_WAIT_KILLABLE_RECV)?;
-    // Extract the netlink fd as an OwnedFd guard alongside its number.
-    let sockdiag_no = sockdiag.as_raw_fd();
-    // SAFETY: `sockdiag` owns the fd; we borrow its number for the handover and
-    // keep the object alive by moving it into the guard below via into_owned.
-    let sockdiag_owned = sockdiag.into_owned();
     Ok(LauncherSetup {
-        fds: LauncherFds {
-            listener: listener.as_raw_fd(),
-            sockdiag: sockdiag_no,
-        },
-        _listener: listener,
-        _sockdiag: sockdiag_owned,
+        listener,
+        sockdiag: sockdiag.into_owned(),
     })
 }
 

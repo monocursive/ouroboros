@@ -64,7 +64,7 @@ pub static MEDIATION_TEST_DELAY_MS: std::sync::atomic::AtomicU64 =
 // ---------------------------------------------------------------------------
 
 use super::bpf::Program;
-pub use super::bpf::SockFilter;
+pub(crate) use super::bpf::SockFilter;
 use super::seccomp::AF_UNIX;
 #[cfg(test)]
 use super::seccomp::{NR_SOCKET, NR_SOCKETPAIR, SD_ARCH, SD_NR, sd_arg_low};
@@ -80,7 +80,8 @@ pub const AUDIT_ARCH: u32 = super::seccomp::AUDIT_ARCH;
 
 #[cfg(test)]
 use super::seccomp::{LINUX_EPERM, X32_SYSCALL_BIT};
-pub use super::seccomp::{NR_CONNECT, SOCK_SEQPACKET, SOCK_STREAM, SOCK_TYPE_MASK};
+#[cfg(test)]
+use super::seccomp::{NR_CONNECT, SOCK_SEQPACKET, SOCK_STREAM};
 
 /// The mediation filter, as a complete standalone program built with the
 /// shared assembler ([`super::bpf::Asm`]).
@@ -366,12 +367,9 @@ mod live;
 pub(super) fn path_identity(pid: libc::pid_t, path: &[u8]) -> std::io::Result<(u64, u64)> {
     live::path_identity(pid, path)
 }
+pub(crate) use live::{FLAG_NEW_LISTENER, install_program, launcher_setup, pidfd_getfd};
 #[cfg(target_os = "linux")]
-pub use live::{
-    FLAG_NEW_LISTENER, FLAG_WAIT_KILLABLE_RECV, LauncherFds, LauncherSetup, MediatorHandle,
-    PeerAuthority, install_filter, install_program, launcher_setup, pidfd_getfd, spawn,
-    take_from_launcher,
-};
+pub use live::{LauncherFds, MediatorHandle, spawn, take_from_launcher};
 
 #[cfg(test)]
 mod tests {

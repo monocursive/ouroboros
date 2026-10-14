@@ -76,11 +76,10 @@ use libc::pid_t;
 
 pub use closed_set::ClosedOp;
 pub use filter::{
-    CLONE_SYSCALL, CLONE_UNTRACED, CLONE3_SYSCALL, LISTENER_SYSCALL, NARROWING_TRACE_DATA,
-    SECCOMP_FILTER_FLAG_NEW_LISTENER, narrowing_filter, narrowing_filter_bytes,
-    narrowing_filter_digest,
+    CLONE_SYSCALL, CLONE3_SYSCALL, LISTENER_SYSCALL, NARROWING_TRACE_DATA, narrowing_filter,
+    narrowing_filter_bytes, narrowing_filter_digest,
 };
-pub use proc::{children, cmdline, descendants, nspid, ppid, start_ticks, tgid, tracer_pid};
+pub use proc::{children, cmdline, descendants, nspid, ppid, start_ticks};
 pub use table::closed_set_table;
 
 /// Nanoseconds of `CLOCK_BOOTTIME` since `epoch_boottime_ns`: the base of

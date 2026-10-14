@@ -6,7 +6,7 @@ use zeroize::Zeroizing;
 
 pub(crate) mod lifecycle;
 pub(crate) mod origin;
-pub use lifecycle::RefreshPolicy;
+pub(crate) use lifecycle::RefreshPolicy;
 
 #[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -226,6 +226,9 @@ pub struct Vault {
     monitor: lifecycle::Monitor,
 }
 impl Vault {
+    // Only the Linux `agent` boundary starts a vault and binds its CA, so
+    // elsewhere these three serve the unit tests alone.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn new(attempt: &str, secrets: Vec<Arc<Secret>>) -> Result<Self, String> {
         let mut params = rcgen::CertificateParams::new(vec![]).map_err(|e| e.to_string())?;
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -286,9 +289,11 @@ impl Vault {
             "path_bound_credentials":self.secrets.iter().filter(|s|!s.policy.paths.is_empty()).count(),
         })
     }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn ca_pem(&self) -> String {
         self.ca.pem()
     }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn environment(&self) -> Vec<(String, String)> {
         self.secrets
             .iter()
