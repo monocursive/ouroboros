@@ -40,7 +40,9 @@ use serde_json::Value;
 pub use contract::{RecordContract, hold_records_to};
 pub use gate::{ExpectedPlan, GateOwner, Proposal, Release};
 pub use http::{HttpServer, SeenRequest};
-pub use pipes::{Captured, Direction, GateWriter, LineReader, TraceCapture, TraceConsumer};
+pub use pipes::{
+    Captured, Direction, GateWriter, LineReader, TraceCapture, TraceConsumer, TraceHold,
+};
 pub use readback::{Readback, TraceState, read_frames};
 pub use tempdir::TempDir;
 pub use unix_probe::{ProbeKind, UnixProbe};
@@ -664,7 +666,7 @@ impl Jail {
                 }
                 Kind::Gate => gate = Some(GateWriter::new(fd)),
                 Kind::Trace => {
-                    trace_capture = Some(TraceCapture::new(fd, trace_consumer, deadline));
+                    trace_capture = Some(TraceCapture::new(fd, trace_consumer.clone(), deadline));
                 }
             }
         }
@@ -1972,6 +1974,44 @@ mod tests {
         let readback = run.trace_readback.as_ref().expect("a trace was requested");
         assert_eq!(readback.state, TraceState::Complete);
         assert_eq!(readback.frames.len(), 2);
+    }
+
+    /// A held consumer takes nothing until the test releases it: a writer
+    /// with more than the pipe holds stays blocked (its marker absent) while
+    /// the hold reports what the pipe holds, and after the release every
+    /// byte arrives.
+    #[test]
+    fn a_held_consumer_reads_nothing_until_it_is_released() {
+        let dir = crate::harness::TempDir::new("ouro-harness-held").unwrap();
+        let marker = dir.path().join("written");
+        let frames = 1200; // 1200 frames of 101 bytes: more than a 64 KiB pipe.
+        let script = format!(
+            r#"i=0; while [ $i -lt {frames} ]; do printf '{{"pad":"%090d"}}\n' $i; i=$((i+1)); done >&"$2"; : > '{}'"#,
+            marker.display()
+        );
+        let hold = TraceHold::new();
+        let spawned = Jail::with_program("/bin/sh")
+            .expect("a private harness root")
+            .args(["-c", &script, "sh"])
+            .trace_consumer(TraceConsumer::Held(hold.clone()))
+            .spawn()
+            .expect("the stand-in starts");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !marker.exists(),
+            "the writer finished, so something read the held pipe"
+        );
+        assert!(
+            hold.buffered().is_some_and(|bytes| bytes >= 4096),
+            "the hold reports what the pipe holds: {:?}",
+            hold.buffered()
+        );
+        hold.release();
+        let run = spawned.wait().expect("the stand-in runs");
+        assert!(marker.exists(), "the writer never finished");
+        let readback = run.trace_readback.as_ref().expect("a trace was requested");
+        assert_eq!(readback.state, TraceState::Complete);
+        assert_eq!(readback.frames.len(), frames);
     }
 
     /// A pretty-printed receipt and the frame naming it, as the product

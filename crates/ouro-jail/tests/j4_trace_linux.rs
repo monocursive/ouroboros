@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ouro_fixture::harness::{
-    Jail, Run, TraceConsumer, TraceState, read_frames, receipt_note_of, trace_guard,
+    Jail, Release, Run, TraceConsumer, TraceState, read_frames, receipt_note_of, trace_guard,
 };
 use serde_json::Value;
 
@@ -298,28 +298,124 @@ fn j4_r03_the_wall_is_enforced_while_the_trace_is_saturated() {
     assert_recognisable(&run, "saturation under the wall");
 }
 
+/// The wall, in seconds, of the full-queue run below.
+const FULL_QUEUE_WALL_S: u64 = 5;
+
+/// Calls the full-queue run makes: each result is about 4 KB (see below), so
+/// about 1,000 of them fill the pipe and the 4 MiB queue behind it; twice
+/// that leaves no doubt the bound is reached.
+const FULL_QUEUE_OPENS: usize = 2_000;
+
+/// N3: the wall fires on time while the trace fd's queue holds the most it
+/// ever can (the 4 MiB external bound, §13.3), so every flush the
+/// supervision loop makes finds that much queued.
+///
+/// The queue fills by count, never by a race with the clock: the consumer
+/// frees a page of the pipe every 200 ms, so the sink always makes progress
+/// within its one-second deadline and the only loss it can record is the
+/// queue overflowing its bound. The target's burst ends with a marker, and
+/// the gate is released by hand, so the test knows the wall's start: the
+/// marker shows the burst (and so the overflow) came before the wall
+/// stopped the target, and the wall is timed from its own start, not from
+/// the jail's startup on a loaded host.
 #[test]
 fn j4_r03_the_wall_is_enforced_while_the_trace_queue_is_full() {
     if !live() {
         return;
     }
-    // Enough events (~630 bytes each) to fill the pipe and then the whole
-    // 4 MiB external queue behind it, so every flush the supervision loop
-    // makes finds the most bytes it can ever find queued (N3).
-    let (run, elapsed) = case("best-effort", 8_000, 30_000).run(|jail| {
-        jail.trace_consumer(TraceConsumer::Never)
-            .args(["--limit", "wall=3s"])
-    });
+    let jail = Jail::new().expect("a private jail harness");
+    let (workspace, fixture) = workspace_with_fixture(jail.root());
+    // A result names its path relative to the workspace: under a chain of
+    // long directory names, each frame is about 4 KB.
+    let mut deep = workspace.clone();
+    for level in 0..18 {
+        deep.push(format!("{level:02}{}", "d".repeat(198)));
+    }
+    std::fs::create_dir_all(&deep).expect("the deep directory");
+    let mut steps: Vec<Value> = (0..FULL_QUEUE_OPENS)
+        .map(|index| {
+            let path = deep.join(format!("f{index}"));
+            serde_json::json!(["open", path.to_str().unwrap(), "--create", "--write"])
+        })
+        .collect();
+    let produced = workspace.join("produced");
+    steps.push(serde_json::json!([
+        "open",
+        produced.to_str().unwrap(),
+        "--create",
+        "--write"
+    ]));
+    steps.push(serde_json::json!(["sleep", "30000"]));
+    let script = workspace.join("full-queue.json");
+    std::fs::write(&script, serde_json::to_vec(&steps).unwrap()).expect("the script");
+    let mut spawned = jail
+        .arg("run")
+        .arg("--workspace")
+        .arg(&workspace)
+        .args(["--evidence", "best-effort"])
+        .args(["--limit", &format!("wall={FULL_QUEUE_WALL_S}s")])
+        .control()
+        .gate()
+        .receipt()
+        .trace_consumer(TraceConsumer::Slow {
+            chunk: 4096,
+            pause: Duration::from_millis(200),
+        })
+        .timeout(Duration::from_secs(90))
+        .target([fixture.into_os_string(), "script".into(), script.into()])
+        .spawn()
+        .expect("the jail starts");
+    let attempt = spawned.owner().await_prepared().expect("prepared")["attempt_id"]
+        .as_str()
+        .expect("an attempt id")
+        .to_owned();
+    let digest = spawned.receipt_value().expect("the prepared receipt")["policy"]["digest"]
+        .as_str()
+        .expect("a policy digest")
+        .to_owned();
+    // The wall starts once the jail has read this frame: no earlier than now.
+    let released = Instant::now();
+    let released_at = std::time::SystemTime::now();
+    spawned
+        .owner()
+        .release(&Release::Valid, &attempt, &digest)
+        .expect("the release");
+    let ended = spawned
+        .owner()
+        .await_kind("settled")
+        .expect("the control channel")
+        .is_some();
+    let enforced_in = released.elapsed();
+    let run = spawned.wait().expect("the jail finishes");
+    assert!(ended, "no settled message: {}", run.stderr_text());
+    let burst = std::fs::metadata(&produced)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|done| done.duration_since(released_at).ok());
+    eprintln!("j4-trace full queue: burst done {burst:?}, settled {enforced_in:?} after release");
     let receipt = common::last_receipt(&run);
     assert_eq!(
         field(&receipt, "/outcome/cause"),
         "wall_expiry",
         "{receipt:#}"
     );
-    assert_one_loss(&receipt, "a full queue under the wall");
     assert!(
-        elapsed < Duration::from_secs(9),
-        "the wall fired late behind a full trace queue: {elapsed:?}"
+        produced.exists(),
+        "the target did not finish its burst before the {FULL_QUEUE_WALL_S} s wall \
+         stopped it, so the queue was not shown full when the wall fired"
+    );
+    assert_one_loss(&receipt, "a full queue under the wall");
+    let errors = evidence_errors(&receipt);
+    assert!(
+        errors[0].contains("trace fd queue overflowed its 4 MiB bound"),
+        "the loss was not the queue reaching its bound: {errors:#?}"
+    );
+    // The wall, the stop and settlement, whose terminal drain waits at most
+    // one more no-progress deadline. A supervisor waiting on the trace would
+    // sit here until the target's own 30 s end.
+    assert!(
+        enforced_in < Duration::from_secs(FULL_QUEUE_WALL_S + 4),
+        "the wall fired late behind a full trace queue: {enforced_in:?} after the release"
     );
     assert_recognisable(&run, "a full queue under the wall");
 }

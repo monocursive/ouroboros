@@ -11,6 +11,8 @@
 use std::ffi::c_int;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Create a pipe whose two ends are both close-on-exec.
@@ -278,7 +280,7 @@ impl Drop for LineReader {
 /// away evidence loss that must never block the supervisor; these are the
 /// consumers that exercise it. Only [`TraceConsumer::Drain`] promises the
 /// whole stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TraceConsumer {
     /// Read everything as it arrives, up to EOF. The default.
     Drain,
@@ -297,7 +299,69 @@ pub enum TraceConsumer {
         /// Pause after each read.
         pause: Duration,
     },
+    /// Read nothing until the test releases the hold, then everything as it
+    /// arrives, up to EOF. While it holds, the consumer reports how many
+    /// bytes the pipe holds ([`TraceHold::buffered`]), so the test can tell
+    /// from what it observes (a full pipe that stopped filling) when the
+    /// stall it wants has begun, rather than from how fast the host is. A
+    /// jail that exits first ends the hold too, as for
+    /// [`TraceConsumer::Never`].
+    Held(TraceHold),
 }
+
+/// The test's hold on a [`TraceConsumer::Held`] consumer.
+#[derive(Clone, Debug, Default)]
+pub struct TraceHold(Arc<HoldState>);
+
+#[derive(Debug, Default)]
+struct HoldState {
+    released: AtomicBool,
+    /// The pipe's unread bytes plus one, as last sampled; zero before the
+    /// first sample.
+    buffered: AtomicUsize,
+}
+
+impl TraceHold {
+    #[must_use]
+    pub fn new() -> TraceHold {
+        TraceHold::default()
+    }
+
+    /// Let the consumer read.
+    pub fn release(&self) {
+        self.0.released.store(true, Ordering::Release);
+    }
+
+    /// How many bytes the pipe held when the held consumer last looked
+    /// (`FIONREAD`, every 10 ms), or `None` before it first did.
+    #[must_use]
+    pub fn buffered(&self) -> Option<usize> {
+        self.0.buffered.load(Ordering::Acquire).checked_sub(1)
+    }
+
+    fn released(&self) -> bool {
+        self.0.released.load(Ordering::Acquire)
+    }
+
+    fn sample(&self, fd: &OwnedFd) {
+        let mut unread: c_int = 0;
+        // SAFETY: FIONREAD writes one int through the live pointer; the
+        // worker owns the descriptor.
+        if unsafe { libc::ioctl(fd.as_raw_fd(), libc::FIONREAD, &raw mut unread) } == 0 {
+            let unread = usize::try_from(unread).unwrap_or(0);
+            self.0.buffered.store(unread + 1, Ordering::Release);
+        }
+    }
+}
+
+/// One hold is equal only to itself (and its clones).
+impl PartialEq for TraceHold {
+    fn eq(&self, other: &TraceHold) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for TraceHold {}
 
 /// The raw bytes a [`TraceCapture`] took, and why it stopped.
 pub struct Captured {
@@ -346,6 +410,25 @@ impl TraceCapture {
                 TraceConsumer::Slow { chunk, pause } => {
                     read_until(&fd, &mut bytes, None, Some((chunk, pause)), deadline)
                 }
+                TraceConsumer::Held(hold) => loop {
+                    if hold.released() {
+                        break read_until(&fd, &mut bytes, None, None, deadline);
+                    }
+                    hold.sample(&fd);
+                    match wait_exit.recv_timeout(Duration::from_millis(10)) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if Instant::now() >= deadline {
+                                break Some(io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    "the test never released the held consumer",
+                                ));
+                            }
+                        }
+                        // The jail exited: what is left is what a consumer
+                        // that came back late would find.
+                        _ => break read_until(&fd, &mut bytes, None, None, deadline),
+                    }
+                },
             };
             // The read end closes here, which is the disconnect for
             // `CloseAfter` and plain EOF handling for the rest.

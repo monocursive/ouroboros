@@ -27,8 +27,9 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use ouro_fixture::harness::{self, HttpServer, Jail, Release, Run, TraceConsumer};
+use ouro_fixture::harness::{self, HttpServer, Jail, Release, Run, TraceConsumer, TraceHold};
 use ouro_jail::policy::ProfileName;
 use serde_json::Value;
 
@@ -435,13 +436,16 @@ fn j5_observation_off_records_pass_the_frozen_contract() {
     );
 }
 
-/// J5-C review item 15, live: a real trace transport loss. The consumer reads
-/// at most a pipeful at a time and pauses past the one-second no-progress
-/// deadline (§13.3), so the stream loses frames; best-effort lets the target
-/// finish, and the consumer comes back for the reserve notes. The loss note names the classes
-/// this `tool` attempt covers (no `proxy.net`), and the settled receipt
-/// records the same loss from the same start as a wrapper loss: the whole
-/// contract, `trace_loss_recorded` included, holds on the live records.
+/// J5-C review item 15, live: a real trace transport loss. The consumer
+/// reads nothing until the target has produced more results than the pipe
+/// holds (it leaves a marker after them), then nothing for longer than the
+/// one-second no-progress deadline (§13.3), so the stream loses frames
+/// whatever the host's load; best-effort lets the target finish, and the
+/// consumer comes back for the queued frames and the reserve notes while the
+/// target still sleeps. The loss note names the classes this `tool` attempt
+/// covers (no `proxy.net`), and the settled receipt records the same loss
+/// from the same start as a wrapper loss: the whole contract,
+/// `trace_loss_recorded` included, holds on the live records.
 #[test]
 fn j5_a_trace_loss_note_and_its_receipt_agree() {
     if !common::profile_live(ProfileName::Tool) {
@@ -449,20 +453,58 @@ fn j5_a_trace_loss_note_and_its_receipt_agree() {
     }
     let mut c = case_with(ProfileName::Tool, "best-effort", &[]);
     let base = c.base();
-    // About 80 KB of results: more than the 64 KiB pipe, so frames wait in
-    // the queue while the consumer pauses past the deadline; few enough that
-    // its next read takes the rest, loss note included, long before the
-    // target's end, so the terminal drain finds nothing queued and the final
-    // receipt note completes the stream.
-    let mut steps: Vec<Value> = (0..150)
+    // About 150 KB of results (each about 500 bytes): more than twice the
+    // 64 KiB pipe, so frames wait in the queue while nothing reads; few
+    // enough that the consumer, once released, takes the rest, loss note
+    // included, long before the target's end, so the terminal drain finds
+    // nothing queued and the final receipt note completes the stream.
+    let mut steps: Vec<Value> = (0..300)
         .map(|index| serde_json::json!(["open", format!("{base}/f{index}"), "--create", "--write"]))
         .collect();
+    let produced = c.workspace.join("produced");
+    steps.push(serde_json::json!([
+        "open",
+        produced.to_str().unwrap(),
+        "--create",
+        "--write"
+    ]));
     steps.push(serde_json::json!(["sleep", "3000"]));
-    c.jail = c.jail.trace_consumer(TraceConsumer::Slow {
-        chunk: 64 * 1024,
-        pause: std::time::Duration::from_millis(1500),
+    let hold = TraceHold::new();
+    c.jail = c.jail.trace_consumer(TraceConsumer::Held(hold.clone()));
+    // Once the marker exists every result above was produced while nothing
+    // read, more than the pipe holds. The stall the loss needs has begun
+    // when the pipe is (nearly) full and stops filling: the trace fd's queue
+    // then holds the rest and makes no progress. A full pipe of these
+    // ~500-byte frames holds at least 56 KiB (each 4 KiB page wastes less
+    // than a frame), so three quarters of the 64 KiB pipe is a safe floor.
+    // From there the consumer waits out the one-second no-progress deadline,
+    // with half a second for the supervision loop's poll (every 10 ms) that
+    // finds the stall.
+    let releaser = std::thread::spawn(move || {
+        let produced = common::within(common::SETTLE_BOUND, || produced.exists());
+        let mut level = (0, Instant::now());
+        let stalled = produced
+            && common::within(common::SETTLE_BOUND, || {
+                let now = hold.buffered().unwrap_or(0);
+                if now != level.0 {
+                    level = (now, Instant::now());
+                }
+                now >= 48 * 1024 && level.1.elapsed() >= Duration::from_millis(200)
+            });
+        if stalled {
+            std::thread::sleep(ouro_jail::trace::EXTERNAL_NO_PROGRESS + Duration::from_millis(500));
+        }
+        hold.release();
+        (produced, stalled, hold.buffered())
     });
     let run = c.run(&Value::from(steps), &Release::Valid);
+    let (produced, stalled, level) = releaser.join().expect("the releaser");
+    assert!(
+        produced && stalled,
+        "the stall never began (marker {produced}, pipe full and still {stalled} at \
+         {level:?} bytes): {}",
+        explain(&run)
+    );
     assert_eq!(
         run.code(),
         Some(0),
