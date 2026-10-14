@@ -1891,9 +1891,6 @@ fn apply_record(
         "outcome_unknown" => {
             stream.run.state = "outcome_unknown".into();
             stream.run.settlement = "recorded".into();
-            stream.run.outcome = Some(
-                json!({"kind":"unknown","unknown":true,"unknown_reason":"owner reported an unresolved outcome"}),
-            );
         }
         "source" => {
             let source = record["body"]["source"].as_str().unwrap_or("");
@@ -1920,41 +1917,34 @@ fn apply_record(
     }
     // Source outcomes describe individual operations, not the terminal run.
     // Only authenticated owner/reconciliation intents update projections.
-    if matches!(
-        record["kind"].as_str(),
-        Some("admitted" | "denied" | "settled" | "outcome_unknown")
-    ) {
-        if let Some(receipt) = record["body"].get("receipt") {
+    let kind = record["kind"].as_str().unwrap_or("");
+    if matches!(kind, "admitted" | "denied" | "settled" | "outcome_unknown") {
+        let body = &record["body"];
+        if let Some(receipt) = body.get("receipt") {
             stream.run.receipts.push(receipt.clone());
             if let Some(protection) = receipt.get("child_protection").and_then(Value::as_str)
                 && (protection == "enforced" || protection == "unprotected")
             {
                 stream.run.child_protection = protection.into();
             }
-            if matches!(record["kind"].as_str(), Some("denied" | "settled")) {
+            if matches!(kind, "denied" | "settled") {
                 stream.run.outcome = receipt.get("outcome").cloned();
             }
         }
-        for field in ["outcome", "coverage", "capture"] {
-            if let Some(value) = record["body"].get(field) {
-                match field {
-                    "outcome" => stream.run.outcome = Some(value.clone()),
-                    "coverage" => stream.run.coverage = value.clone(),
-                    "capture" => stream.run.capture = value.clone(),
-                    _ => {}
-                }
-            }
+        if kind == "outcome_unknown" {
+            stream.run.outcome = Some(unknown_outcome(body.get("outcome")));
+        } else if let Some(outcome) = body.get("outcome") {
+            stream.run.outcome = Some(outcome.clone());
+        }
+        if let Some(coverage) = body.get("coverage") {
+            stream.run.coverage = coverage.clone();
+        }
+        if let Some(capture) = body.get("capture") {
+            stream.run.capture = capture.clone();
         }
     }
     // none remains unprotected regardless of an owner's requested display label.
-    if stream
-        .run
-        .payload
-        .get("jail_profile")
-        .or_else(|| stream.run.payload.get("profile"))
-        .and_then(Value::as_str)
-        == Some("none")
-    {
+    if stream.run.payload["profile"] == "none" {
         stream.run.child_protection = "unprotected".into();
     }
     if !stream.source_gaps.is_empty() {
@@ -1963,12 +1953,21 @@ fn apply_record(
         }
         stream.run.coverage["ledger"] = json!({"status":"degraded","gaps":stream.source_gaps});
     }
-    if record["kind"] == "outcome_unknown" {
-        stream.run.outcome = Some(
-            json!({"kind":"unknown","unknown":true,"unknown_reason":"owner or reconciliation reported an unresolved run outcome","observed_child_outcome":record["body"].get("outcome")}),
-        );
-    }
     Ok(())
+}
+
+/// The projection of an unresolved run. A child outcome the owner did observe
+/// stays beside the unknown; an owner's or reconciler's own unknown is not a
+/// child outcome, so its reason becomes the run's.
+fn unknown_outcome(reported: Option<&Value>) -> Value {
+    const UNRESOLVED: &str = "owner or reconciliation reported an unresolved run outcome";
+    match reported {
+        Some(child) if child["kind"] != "unknown" => json!({"kind":"unknown","unknown":true,
+            "unknown_reason":UNRESOLVED,"observed_child_outcome":child}),
+        reported => json!({"kind":"unknown","unknown":true,"unknown_reason":reported
+            .and_then(|outcome| outcome["unknown_reason"].as_str())
+            .unwrap_or(UNRESOLVED)}),
+    }
 }
 
 fn validate_recovery(stream: &Stream, record: &Value, role: &str) -> Result<()> {
@@ -4112,7 +4111,14 @@ mod tests {
         let (_temp, mut store, run) = create();
         let records = store.settle_orphans(&peer(), |_| false).unwrap();
         assert_eq!(records[0].state, "outcome_unknown");
-        assert_eq!(records[0].outcome.as_ref().unwrap()["unknown"], true);
+        let outcome = records[0].outcome.as_ref().unwrap();
+        assert_eq!(outcome["unknown"], true);
+        // The reconciler's own unknown is the run's reason, not a child outcome.
+        assert!(outcome.get("observed_child_outcome").is_none(), "{outcome}");
+        assert_eq!(
+            outcome["unknown_reason"],
+            "owner birth identity is no longer live; tree termination and unrecorded effects are not inferred"
+        );
         let mut stranger = peer();
         stranger.birth = "new-process-birth".into();
         assert!(store.claim_owner(&run.run_id, &stranger).is_err());
@@ -4659,6 +4665,10 @@ mod tests {
         assert_eq!(outcome["unknown"], true);
         assert_eq!(outcome["kind"], "unknown");
         assert_eq!(outcome["observed_child_outcome"]["code"], 0);
+        assert_eq!(
+            outcome["unknown_reason"],
+            "owner or reconciliation reported an unresolved run outcome"
+        );
     }
 
     #[test]
