@@ -334,17 +334,22 @@ pub fn parse_ns_link(link: &str) -> Option<u64> {
 /// key is absent.
 pub fn status_field(pid: libc::pid_t, key: &str) -> io::Result<String> {
     let raw = fs::read_to_string(format!("/proc/{pid}/status"))?;
-    for line in raw.lines() {
-        if let Some(rest) = line.strip_prefix(key)
-            && let Some(value) = rest.strip_prefix(':')
-        {
-            return Ok(value.trim().to_owned());
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("no {key} line in status of {pid}"),
-    ))
+    status_value(&raw, key).map(str::to_owned).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("no {key} line in status of {pid}"),
+        )
+    })
+}
+
+/// The value of the `key:` line of a `/proc/<pid>/status` text, trimmed;
+/// `None` when there is no such line.
+#[must_use]
+pub fn status_value<'a>(status: &'a str, key: &str) -> Option<&'a str> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
+        .map(str::trim)
 }
 
 /// What one `/proc/<pid>/status` snapshot says about a process's privilege
@@ -384,12 +389,7 @@ impl Privilege {
     /// [`io::ErrorKind::InvalidData`] when `NoNewPrivs` is missing or neither
     /// `0` nor `1`, or `CapEff` is missing or not a hexadecimal mask.
     pub fn parse(status: &str) -> io::Result<Self> {
-        let field = |key: &str| {
-            status
-                .lines()
-                .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
-                .map(str::trim)
-        };
+        let field = |key: &str| status_value(status, key);
         let invalid = |what: String| io::Error::new(io::ErrorKind::InvalidData, what);
         let no_new_privs = match field("NoNewPrivs") {
             Some("1") => true,
