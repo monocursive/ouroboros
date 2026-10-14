@@ -611,7 +611,7 @@ impl Jail {
                             }
                             Ok(n) => left = &left[n..],
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                std::thread::sleep(Duration::from_millis(5))
+                                ready(pipe.as_raw_fd(), libc::POLLOUT, deadline)?;
                             }
                             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                             Err(e) => return Err(e),
@@ -716,6 +716,43 @@ fn nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+/// A descriptor that turns readable when `pid` (an unreaped child) exits.
+#[cfg(target_os = "linux")]
+fn pidfd(pid: libc::pid_t) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: plain integers; the kernel returns a new descriptor or fails.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    let fd = RawFd::try_from(fd).ok().filter(|fd| *fd >= 0)?;
+    // SAFETY: `fd` was just returned by `pidfd_open` and nothing else owns it.
+    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pidfd(_pid: libc::pid_t) -> Option<std::os::fd::OwnedFd> {
+    None
+}
+
+/// Wait until `fd` is ready for `events` (or hung up), or `deadline` passes:
+/// the caller's next read or write then makes progress or reports why not.
+fn ready(fd: RawFd, events: libc::c_short, deadline: std::time::Instant) -> io::Result<()> {
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let ms = libc::c_int::try_from(left.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+    let mut pfd = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    // SAFETY: one live pollfd, and the count passed is 1.
+    if unsafe { libc::poll(&raw mut pfd, 1, ms) } < 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+    // A timeout returns here too; the caller's loop checks the deadline.
+    Ok(())
+}
+
 fn drain_thread<R: std::io::Read + AsRawFd + Send + 'static>(
     mut r: R,
     deadline: std::time::Instant,
@@ -735,7 +772,7 @@ fn drain_thread<R: std::io::Read + AsRawFd + Send + 'static>(
                 Ok(0) => return Ok(buf),
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5))
+                    ready(r.as_raw_fd(), libc::POLLIN, deadline)?;
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
@@ -845,6 +882,9 @@ impl Spawned {
         // then EOF" case; `gate_closed_by_harness` records that it was us.
         let gate_closed_by_harness = self.gate.take().is_some();
 
+        // A pidfd turns readable when the jail exits, so the wait is an
+        // event; without one (macOS, an old kernel) it is a short poll.
+        let exit_fd = pidfd(self.group.pid);
         let status = loop {
             if let Some(status) = self.child.try_wait()? {
                 self.group.armed = false;
@@ -857,7 +897,10 @@ impl Spawned {
                     "jail exceeded harness deadline",
                 ));
             }
-            std::thread::sleep(Duration::from_millis(5));
+            match &exit_fd {
+                Some(fd) => ready(fd.as_raw_fd(), libc::POLLIN, self.deadline)?,
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
         };
 
         let mut channels_timed_out: Vec<String> = Vec::new();
