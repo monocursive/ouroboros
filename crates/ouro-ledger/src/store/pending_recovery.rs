@@ -54,6 +54,18 @@ impl PendingFailure {
             Self::Refused(_, error) | Self::Other(error) => error,
         }
     }
+
+    /// A journal that could not be opened or read is the journal's doing
+    /// only when its content, identity, size or ownership is wrong. An
+    /// operating-system failure (no descriptor or memory left, an
+    /// interrupted call, a failed sync) says nothing about the journal and
+    /// may not happen again.
+    fn unreadable(error: LedgerError) -> Self {
+        match error.kind() {
+            crate::protocol::ErrorKind::Io(_) => Self::Other(error),
+            _ => Self::Refused(PendingRefusal::JournalUnreadable, error),
+        }
+    }
 }
 
 impl Store {
@@ -145,13 +157,13 @@ impl Store {
             ));
         }
         let journal = Journal::try_open(&self.run_dir(id))
-            .map_err(refused(JournalUnreadable))?
+            .map_err(PendingFailure::unreadable)?
             .ok_or_else(|| {
                 Other(LedgerError::refused(
                     "another process holds the pending journal's lock",
                 ))
             })?;
-        let mut state = journal.read(&run).map_err(refused(JournalUnreadable))?;
+        let mut state = journal.read(&run).map_err(PendingFailure::unreadable)?;
         if ["settled", "denied", "outcome_unknown"].contains(&run.state.as_str()) {
             journal.remove().map_err(Other)?;
             return Ok(run);
@@ -286,3 +298,6 @@ fn validate_completion(run: &RunRecord, completion: &Completion) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
