@@ -88,10 +88,34 @@ pub fn skip_decision(live_required: bool, reason: &str) -> Result<String, String
 /// }
 /// ```
 pub fn skip_or_fail(reason: &str) {
-    match skip_decision(live_required(), reason) {
+    skip_or_fail_with(live_required(), reason);
+}
+
+/// [`skip_or_fail`] with the mode given, so both branches are testable.
+///
+/// # Panics
+/// When `live_required`: the skip is the failure.
+pub fn skip_or_fail_with(live_required: bool, reason: &str) {
+    match skip_decision(live_required, reason) {
         Ok(note) => eprintln!("{note}"),
         Err(message) => panic!("{message}"),
     }
+}
+
+/// The variable that asks the suite to check the recorded release evidence
+/// (the clean-VM and real-vendor records) against this build.
+pub const RELEASE_EVIDENCE_VAR: &str = "OURO_RELEASE_EVIDENCE";
+
+/// True when `OURO_RELEASE_EVIDENCE=1`, and nothing else.
+///
+/// The records are bound to the exact build inputs of the jail, so any
+/// source edit makes them stale until a new clean-VM run is recorded. A
+/// release gate, not a development check: the conformance driver and the
+/// release workflow set it; a plain `cargo test` skips those tests, and in
+/// conformance mode that skip is a failure like any other.
+#[must_use]
+pub fn release_evidence_requested() -> bool {
+    std::env::var(RELEASE_EVIDENCE_VAR).as_deref() == Ok("1")
 }
 
 // ------------------------------------------------------------ binary lookup
@@ -1447,12 +1471,9 @@ mod tests {
             skip_decision(false, "bubblewrap is absent").expect("plain mode records the skip");
         assert_eq!(noted, "skipped: bubblewrap is absent");
 
-        // And the wrapper really panics on the Err branch.
-        let r = std::panic::catch_unwind(|| match skip_decision(true, "x") {
-            Ok(note) => eprintln!("{note}"),
-            Err(m) => panic!("{m}"),
-        });
-        assert!(r.is_err());
+        // And the wrapper really panics on the Err branch, and only there.
+        assert!(std::panic::catch_unwind(|| skip_or_fail_with(true, "x")).is_err());
+        assert!(std::panic::catch_unwind(|| skip_or_fail_with(false, "x")).is_ok());
     }
 
     #[test]

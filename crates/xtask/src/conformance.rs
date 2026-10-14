@@ -330,6 +330,9 @@ pub fn suite_unit(run_dir: &str) -> String {
 /// with its output in `test.log`.
 ///
 /// `OURO_CONFORMANCE=1` turns every live skip into a failure (jail-v1 §16).
+/// `OURO_RELEASE_EVIDENCE=1` checks the recorded clean-VM and real-vendor
+/// evidence (K11, K27) against this build: the acceptance map's verdict
+/// requires those clauses, and a plain `cargo test` skips them.
 ///
 /// One test thread, not two. The ptrace observer's thread owns every
 /// `waitpid` in its process (CONTRACT §3.5), so two tests attaching a tracer
@@ -343,7 +346,7 @@ pub fn test_command(run_dir: &str, jobs: u32, revision: &str) -> String {
         "C=$({REMOTE_RUSTUP} which cargo) && R=$({REMOTE_RUSTUP} which rustc) \
          && D=$({REMOTE_RUSTUP} which rustdoc) && \
          XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --scope --quiet --unit={} \
-         env OURO_CONFORMANCE=1 \
+         env OURO_CONFORMANCE=1 OURO_RELEASE_EVIDENCE=1 \
          OURO_JAIL_BIN=$PWD/target/release/ouro-jail \
          OURO_FIXTURE_BIN=$PWD/target/release/ouro-fixture \
          RUSTC=$R RUSTDOC=$D {} \
@@ -2107,6 +2110,10 @@ mod tests {
     fn the_test_command_forbids_skips_and_names_both_binaries() {
         let t = test_command("d", 2, REV);
         assert!(t.contains("OURO_CONFORMANCE=1"), "{t}");
+        assert!(
+            t.contains("OURO_RELEASE_EVIDENCE=1"),
+            "the verdict requires K11 and K27, whose tests skip without it: {t}"
+        );
         assert!(
             t.contains("--unit=ouro-conformance-d.scope"),
             "a driver that gives up stops exactly this scope: {t}"

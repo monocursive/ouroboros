@@ -133,8 +133,10 @@ observed subset, not all the program's needs. Nothing was adopted automatically.
 Its [negative tests](test_preview_evidence.py) reject stale inputs, an installed
 Rust toolchain, a ten-minute timeout, accepted corruption, failed vendor exit,
 changed receipt bytes, invented grants, rewritten coverage and mixed attempts.
-The [portable Rust tests](../../../crates/ouro-jail/tests/portable_release_evidence.rs)
-run the verifier with the compiled Jail input digest on every CI platform.
+The [Rust tests](../../../crates/ouro-jail/tests/portable_release_evidence.rs)
+run the verifier with the compiled Jail input digest on Linux when
+`OURO_RELEASE_EVIDENCE=1`, which the conformance driver and the release
+workflow set; a plain `cargo test` skips them.
 
 Reproduce on a new disposable VM using the verified image and a clean native
 binary with these inputs:

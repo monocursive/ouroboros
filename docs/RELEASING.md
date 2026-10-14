@@ -90,7 +90,11 @@ The signed release plan binds this scope and both native Linux targets.
 ## Prepare and validate
 
 Commit and review the release tree. Require `rust`, `contracts` and the actual
-`conformance` reference-host job to pass on that exact commit. The reference host
+`conformance` reference-host job to pass on that exact commit. Conformance runs
+the suite with `OURO_RELEASE_EVIDENCE=1`, so the recorded clean-VM and
+real-vendor evidence (K11, K27) must match this build's inputs; a source change
+since the recorded VM run needs a new one first (`onboarding_vm.py`). A plain
+`cargo test` skips those two checks. The reference host
 needs at least 4 GiB free for a release build. Record successful conformance with
 `cargo xtask freeze --doctor`, then require
 `cargo +1.98.1 run -q -p xtask -- freeze --check` to pass. A tree-only freeze,

@@ -3370,7 +3370,7 @@ tag = "portable"
 tests = [
   "ouro-jail/tests/portable_release_evidence.rs::k11_recorded_real_opencode_learning_proposes_only_evidence_supported_grants",
 ]
-note = "Replay of the recorded real OpenCode 1.18.32 learning run in the October 10 fresh VM. Current Jail build inputs, receipt bytes, coverage and every grant citation are checked. Live provider reliability and complete program needs remain experimental."
+note = "Replay of the recorded real OpenCode 1.18.32 learning run in the October 10 fresh VM. Current Jail build inputs, receipt bytes, coverage and every grant citation are checked. Live provider reliability and complete program needs remain experimental. A release gate: checked only with OURO_RELEASE_EVIDENCE=1, which the conformance driver and the release workflow set; a plain cargo test skips it, and conformance mode fails that skip."
 
 # ------------------------------------------------------------------ K12
 
@@ -3659,7 +3659,7 @@ tag = "portable"
 tests = [
   "ouro-jail/tests/portable_release_evidence.rs::k27_clean_vm_install_true_and_real_opencode_finish_within_ten_minutes",
 ]
-note = "Recorded real fresh Ubuntu 26.04 VM under QEMU TCG: 62.2 seconds including signed installation and agent download. Replay checks current Jail inputs, clean native build, fresh overlay, no Rust, true and opencode settlement, and corrupted archive/signature refusal. This is recorded onboarding evidence, not a new live VM in each cargo test."
+note = "Recorded real fresh Ubuntu 26.04 VM under QEMU TCG: 62.2 seconds including signed installation and agent download. Replay checks current Jail inputs, clean native build, fresh overlay, no Rust, true and opencode settlement, and corrupted archive/signature refusal. This is recorded onboarding evidence, not a new live VM in each cargo test. A release gate: checked only with OURO_RELEASE_EVIDENCE=1, which the conformance driver and the release workflow set; a plain cargo test skips it, and conformance mode fails that skip."
 
 # ------------------------------------------------------------------ K28
 
