@@ -123,7 +123,7 @@ fn invoke(config: &PathBuf, body: &Value) -> Result<Value, String> {
         return Err("TLS option-file path cannot contain whitespace".into());
     }
     let erl = format!(
-        "+S 2:2 -proto_dist inet_tls -start_epmd false -epmd_module Elixir.Ouroboros.Cluster.Epmd -ssl_dist_optfile {tls}"
+        "+S 2:2 -proto_dist inet_tls -start_epmd false -epmd_module Elixir.OuroFleet.Epmd -ssl_dist_optfile {tls}"
     );
     let mut child = Command::new(elixir)
         .args(["--erl", &erl, "-pa", code, script])
