@@ -368,22 +368,16 @@ mod live {
                         revents: 0,
                     },
                 ];
-                // SAFETY: two live pollfds.
-                let p = unsafe {
-                    libc::poll(pfds.as_mut_ptr(), 2, deadline.remaining_millis_capped(2000))
-                };
-                if p == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "sock_diag: dump timed out",
-                    ));
-                }
-                if p < 0 {
-                    let err = io::Error::last_os_error();
-                    if err.kind() == io::ErrorKind::Interrupted {
-                        continue;
+                match super::super::sys::poll(&mut pfds, deadline.remaining_millis_capped(2000)) {
+                    Ok(0) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "sock_diag: dump timed out",
+                        ));
                     }
-                    return Err(err);
+                    Ok(_) => {}
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(err) => return Err(err),
                 }
                 if pfds[1].revents != 0 {
                     return Err(io::Error::new(

@@ -376,13 +376,10 @@ fn worker_loop(w: &Workers) {
                 revents: 0,
             },
         ];
-        // SAFETY: `pfds` is a live two-element array; poll writes revents only.
-        let rc = unsafe { libc::poll(pfds.as_mut_ptr(), 2, POLL_TICK_MS) };
-        if rc < 0 {
-            if last_errno() == libc::EINTR {
-                continue;
-            }
-            break;
+        match crate::platform::linux::sys::poll(&mut pfds, POLL_TICK_MS) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
         }
         if pfds[1].revents != 0 {
             break; // stop requested
@@ -595,14 +592,14 @@ fn mediate_pathname(
     let Ok(root_fd) = open_o_path(&root) else {
         return (Err(libc::EACCES), "base_unopenable");
     };
-    let Ok(rel) = path_beneath_child_root(pid, root_fd.as_raw_fd(), path) else {
+    let Ok(rel) = path_beneath_child_root(pid, root_fd.as_fd(), path) else {
         return (Err(libc::EACCES), "cwd_unresolved");
     };
     // Pin the node without escaping the child's view. A path that does not
     // exist in the child's own view gets the kernel's own answer, ENOENT
     // (issue draft 13); anything that cannot be resolved at all refuses
     // closed with EACCES.
-    let node = match openat2_in_root(root_fd.as_raw_fd(), &rel) {
+    let node = match openat2_in_root(root_fd.as_fd(), &rel) {
         Ok(fd) => fd,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return (Err(libc::ENOENT), "path_absent");
@@ -723,9 +720,8 @@ fn bounded_connect(
                     revents: 0,
                 },
             ];
-            // SAFETY: live two-element pollfd array.
-            let p = unsafe { libc::poll(pfds.as_mut_ptr(), 2, CONNECT_DEADLINE_MS) };
-            if p <= 0 {
+            let polled = crate::platform::linux::sys::poll(&mut pfds, CONNECT_DEADLINE_MS);
+            if !polled.is_ok_and(|ready| ready > 0) {
                 Err(libc::ETIMEDOUT)
             } else if pfds[1].revents != 0 {
                 Err(libc::ECONNABORTED) // stop: fail closed
@@ -818,14 +814,8 @@ fn notif_recv(listener: BorrowedFd<'_>) -> io::Result<libc::seccomp_notif> {
 /// not wait. A closed or broken listener counts as pending, so the caller's
 /// RECV reports the failure instead of this hiding it.
 fn pending(listener: BorrowedFd<'_>) -> bool {
-    let mut pfd = libc::pollfd {
-        fd: listener.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one live pollfd; a zero timeout never waits.
-    let rc = unsafe { libc::poll(&raw mut pfd, 1, 0) };
-    rc > 0 && pfd.revents != 0
+    crate::platform::linux::sys::poll_one(listener, libc::POLLIN, 0)
+        .is_ok_and(|revents| revents != 0)
 }
 
 /// A pidfd whose descriptor table is the notifying thread's own.
@@ -945,8 +935,8 @@ fn open_o_path(path: &str) -> io::Result<OwnedFd> {
 /// Resolve metadata in a stopped task's filesystem view without acquiring I/O authority.
 pub(super) fn path_identity(pid: libc::pid_t, path: &[u8]) -> io::Result<(u64, u64)> {
     let root = open_o_path(&format!("/proc/{pid}/root"))?;
-    let path = path_beneath_child_root(pid, root.as_raw_fd(), path)?;
-    let fd = openat2_in_root(root.as_raw_fd(), &path)?;
+    let path = path_beneath_child_root(pid, root.as_fd(), path)?;
+    let fd = openat2_in_root(root.as_fd(), &path)?;
     let stat = fstat(fd.as_raw_fd())?;
     Ok((stat.st_dev, stat.st_ino))
 }
@@ -956,7 +946,11 @@ pub(super) fn path_identity(pid: libc::pid_t, path: &[u8]) -> io::Result<(u64, u
 /// symlinks the same root boundary as the child has. The proc links supply only
 /// a candidate prefix: reopening it beneath the pinned root and comparing both
 /// the inode and mount ID to the pinned cwd rejects stale or aliased paths.
-fn path_beneath_child_root(pid: libc::pid_t, root: RawFd, path: &[u8]) -> io::Result<Vec<u8>> {
+fn path_beneath_child_root(
+    pid: libc::pid_t,
+    root: BorrowedFd<'_>,
+    path: &[u8],
+) -> io::Result<Vec<u8>> {
     if path.first() == Some(&b'/') {
         return Ok(relative_bytes(path));
     }
@@ -972,7 +966,7 @@ fn path_beneath_child_root(pid: libc::pid_t, root: RawFd, path: &[u8]) -> io::Re
         .as_os_str()
         .as_bytes();
     let same = if prefix.is_empty() {
-        same_location(root, cwd.as_raw_fd())?
+        same_location(root.as_raw_fd(), cwd.as_raw_fd())?
     } else {
         let reopened = openat2_in_root(root, prefix)?;
         same_location(reopened.as_raw_fd(), cwd.as_raw_fd())?
@@ -991,9 +985,10 @@ fn path_beneath_child_root(pid: libc::pid_t, root: RawFd, path: &[u8]) -> io::Re
 
 fn same_location(left: RawFd, right: RawFd) -> io::Result<bool> {
     fn identity(fd: RawFd) -> io::Result<(u64, u64)> {
+        // SAFETY: statx is plain data; all-zero is a valid value.
+        let mut st: libc::statx = unsafe { std::mem::zeroed() };
         // SAFETY: `statx` writes only to the live result, and AT_EMPTY_PATH
         // describes the supplied O_PATH directory descriptor itself.
-        let mut st: libc::statx = unsafe { std::mem::zeroed() };
         let rc = unsafe {
             libc::statx(
                 fd,
@@ -1016,40 +1011,29 @@ fn same_location(left: RawFd, right: RawFd) -> io::Result<bool> {
     Ok(identity(left)? == identity(right)?)
 }
 
-/// `openat2(base, rel, O_PATH, RESOLVE_IN_ROOT|RESOLVE_NO_MAGICLINKS)`.
+/// `openat2(base, rel, O_PATH, RESOLVE_IN_ROOT|RESOLVE_NO_MAGICLINKS)`
+/// ([`fs::openat2`](crate::platform::linux::fs::openat2)).
 ///
 /// `base` is always the child's root, so `..` and absolute symlinks cannot
-/// escape the child's view (§3.4 step 3).
-fn openat2_in_root(base: RawFd, rel: &[u8]) -> io::Result<OwnedFd> {
-    let c =
-        std::ffi::CString::new(rel).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    // `open_how` is #[non_exhaustive]; build it zeroed and set the fields.
-    // SAFETY: open_how is plain data; all-zero is a valid "no flags" request.
-    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
-    how.flags = (libc::O_PATH | libc::O_CLOEXEC) as u64;
-    how.resolve = libc::RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS;
-    // SAFETY: `c` is a live NUL-terminated path; `how` is a live open_how of the
-    // size passed; openat2 returns a new fd owned here or -1.
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            base,
-            c.as_ptr(),
-            std::ptr::from_ref(&how),
-            std::mem::size_of::<libc::open_how>(),
-        )
-    };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
+/// escape the child's view (§3.4 step 3). An empty `rel` gets the kernel's
+/// own answer, `ENOENT`, which `fs::openat2` gives no empty path the chance
+/// to reach.
+fn openat2_in_root(base: BorrowedFd<'_>, rel: &[u8]) -> io::Result<OwnedFd> {
+    if rel.is_empty() {
+        return Err(io::Error::from_raw_os_error(libc::ENOENT));
     }
-    let fd = RawFd::try_from(rc).map_err(|_| io::Error::other("openat2 returned a huge fd"))?;
-    // SAFETY: `fd` was just created by openat2 and is owned here.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    crate::platform::linux::fs::openat2(
+        Some(base),
+        std::path::Path::new(std::ffi::OsStr::from_bytes(rel)),
+        libc::O_PATH | libc::O_CLOEXEC,
+        libc::RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+    )
 }
 
 fn fstat(fd: RawFd) -> io::Result<libc::stat> {
-    // SAFETY: `st` is a live, zeroed stat the syscall fills in on success.
+    // SAFETY: stat is plain data; all-zero is a valid value.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `st` is a live stat the syscall fills in on success.
     let rc = unsafe { libc::fstat(fd, std::ptr::from_mut(&mut st)) };
     if rc < 0 {
         return Err(io::Error::last_os_error());

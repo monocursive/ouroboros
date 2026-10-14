@@ -183,39 +183,6 @@ pub fn classify_identity(
     }
 }
 
-/// The buffer a password or group lookup starts with.
-#[cfg(any(test, target_os = "linux"))]
-const ENTRY_BUFFER_START: usize = 16 * 1024;
-/// The largest buffer a password or group lookup is given. A directory group
-/// with thousands of members (an LDAP or AD `docker` or `sudo`) needs far
-/// more than [`ENTRY_BUFFER_START`]; no real entry needs this much.
-#[cfg(any(test, target_os = "linux"))]
-const ENTRY_BUFFER_MAX: usize = 16 * 1024 * 1024;
-
-/// Runs a reentrant database lookup (`getpwuid_r`, `getgrgid_r`) with a
-/// buffer that doubles while the call answers `ERANGE`, up to
-/// [`ENTRY_BUFFER_MAX`].
-///
-/// `lookup` returns the call's nonzero result code as `Err`, `Ok(None)` when
-/// the database has no entry, or what it copied out of the buffer.
-///
-/// # Errors
-/// The result code of a lookup that failed for any reason but a buffer it
-/// could grow out of.
-#[cfg(any(test, target_os = "linux"))]
-fn lookup_growing<T>(
-    mut lookup: impl FnMut(&mut [u8]) -> Result<Option<T>, i32>,
-) -> Result<Option<T>, i32> {
-    let mut size = ENTRY_BUFFER_START;
-    loop {
-        let mut buffer = vec![0_u8; size];
-        match lookup(&mut buffer) {
-            Err(libc::ERANGE) if size < ENTRY_BUFFER_MAX => size *= 2,
-            other => return other,
-        }
-    }
-}
-
 /// The names of `ids`, by `lookup`. An id the database has no entry for has
 /// no name to be privileged by and is skipped; a lookup that failed makes
 /// the whole answer unknown, never a shorter list that reads as complete.
@@ -410,8 +377,8 @@ mod linux {
 
     use super::{
         APPARMOR_DIR, LINGER_DIR, SYSCTLS, SysctlRead, apparmor_profile_files, apparmor_state,
-        classify_identity, file_sha256, lookup_growing, meminfo_kib, names_of,
-        os_release_pretty_name, privileged_groups, sysctl_path, unpackaged,
+        classify_identity, file_sha256, meminfo_kib, names_of, os_release_pretty_name,
+        privileged_groups, sysctl_path, unpackaged,
     };
 
     fn read_trimmed(path: &str) -> Option<String> {
@@ -441,71 +408,21 @@ mod linux {
         })
     }
 
-    /// The user name of `uid`, from the password database; `None` when it
-    /// has no entry or cannot be read.
+    /// The user name of `uid`, from the password database
+    /// ([`crate::state::accounts`]); `None` when it has no entry or cannot be
+    /// read.
     fn user_name(uid: u32) -> Option<std::ffi::OsString> {
         use std::os::unix::ffi::OsStringExt as _;
-        lookup_growing(|buffer| {
-            // SAFETY: `passwd` is a plain C struct; all-zero is a valid value
-            // that getpwuid_r overwrites before it is read.
-            let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
-            let mut result: *mut libc::passwd = std::ptr::null_mut();
-            // SAFETY: every pointer is to a live local, the length is the
-            // buffer's own, and getpwuid_r writes only within them.
-            let rc = unsafe {
-                libc::getpwuid_r(
-                    uid,
-                    &raw mut entry,
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len(),
-                    &raw mut result,
-                )
-            };
-            if rc != 0 {
-                return Err(rc);
-            }
-            if result.is_null() || entry.pw_name.is_null() {
-                return Ok(None);
-            }
-            // SAFETY: getpwuid_r succeeded, so pw_name is a NUL-terminated
-            // string inside `buffer`, which is still alive.
-            let name = unsafe { std::ffi::CStr::from_ptr(entry.pw_name) };
-            Ok(Some(std::ffi::OsString::from_vec(name.to_bytes().to_vec())))
-        })
-        .ok()
-        .flatten()
+        let user = crate::state::accounts::user(uid).ok().flatten()?;
+        Some(std::ffi::OsString::from_vec(user.name))
     }
 
     /// The name of `gid`, from the group database: `Ok(None)` when it has
-    /// no entry, the result code when it cannot be read.
+    /// no entry, the errno when it cannot be read.
     fn group_name(gid: libc::gid_t) -> Result<Option<String>, i32> {
-        lookup_growing(|buffer| {
-            // SAFETY: `group` is a plain C struct; all-zero is valid and
-            // getgrgid_r overwrites it before it is read.
-            let mut entry: libc::group = unsafe { std::mem::zeroed() };
-            let mut result: *mut libc::group = std::ptr::null_mut();
-            // SAFETY: every pointer is to a live local, the length is the
-            // buffer's own, and getgrgid_r writes only within them.
-            let rc = unsafe {
-                libc::getgrgid_r(
-                    gid,
-                    &raw mut entry,
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len(),
-                    &raw mut result,
-                )
-            };
-            if rc != 0 {
-                return Err(rc);
-            }
-            if result.is_null() || entry.gr_name.is_null() {
-                return Ok(None);
-            }
-            // SAFETY: getgrgid_r succeeded, so gr_name is a NUL-terminated
-            // string inside `buffer`, which is still alive.
-            let name = unsafe { std::ffi::CStr::from_ptr(entry.gr_name) };
-            Ok(Some(name.to_string_lossy().into_owned()))
-        })
+        crate::state::accounts::group(gid)
+            .map(|group| group.map(|group| String::from_utf8_lossy(&group.name).into_owned()))
+            .map_err(|error| error.raw_os_error().unwrap_or(libc::EIO))
     }
 
     /// Lingering as logind records it; `null` without logind's directory or
@@ -826,37 +743,9 @@ mod tests {
     /// read makes the identity unknown instead of dropping out of the list.
     #[test]
     fn a_large_or_unreadable_group_is_never_silently_dropped() {
-        let mut sizes = Vec::new();
-        let read = lookup_growing(|buffer| {
-            sizes.push(buffer.len());
-            if buffer.len() < 256 * 1024 {
-                Err(libc::ERANGE)
-            } else {
-                Ok(Some("docker".to_owned()))
-            }
-        });
-        assert_eq!(read, Ok(Some("docker".to_owned())));
-        assert_eq!(sizes.first(), Some(&ENTRY_BUFFER_START));
-        assert_eq!(sizes.last(), Some(&(256 * 1024)));
-        // A buffer that never suffices ends at the cap, as an error.
-        let mut largest = 0;
-        let never = lookup_growing::<String>(|buffer| {
-            largest = buffer.len();
-            Err(libc::ERANGE)
-        });
-        assert_eq!(never, Err(libc::ERANGE));
-        assert_eq!(largest, ENTRY_BUFFER_MAX);
-        // Any other failure is not retried.
-        let mut calls = 0;
-        assert_eq!(
-            lookup_growing::<String>(|_| {
-                calls += 1;
-                Err(libc::EIO)
-            }),
-            Err(libc::EIO)
-        );
-        assert_eq!(calls, 1);
-
+        // The lookup itself grows its buffer on ERANGE
+        // (`state::accounts`); what an unreadable group means is this
+        // module's.
         let lookup = |gid: u32| match gid {
             27 => Ok(Some("sudo".to_owned())),
             999 => Ok(None),

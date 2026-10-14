@@ -15,7 +15,7 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
-use std::os::fd::AsRawFd as _;
+use std::os::fd::{AsFd as _, AsRawFd as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -26,7 +26,7 @@ use super::clock::Deadline;
 use super::exec::{self, Captured, FdMap};
 use super::identity::{self, NsIds, ns_ids};
 use super::seccomp;
-use super::sys::{empty_stat, errno_name, last_errno};
+use super::sys::{errno_name, last_errno, nap};
 
 pub mod agent;
 
@@ -1133,13 +1133,12 @@ fn probe_user_notification() -> ProbeResult {
     let mut got = 0usize;
     let deadline = Deadline::after(PROBE_DEADLINE);
     while got < report.len() && !deadline.expired() {
-        let mut pfd = libc::pollfd {
-            fd: read_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one live pollfd, bounded by the deadline.
-        if unsafe { libc::poll(&raw mut pfd, 1, deadline.remaining_millis_capped(100)) } <= 0 {
+        let ready = super::sys::poll_one(
+            report_r.as_fd(),
+            libc::POLLIN,
+            deadline.remaining_millis_capped(100),
+        );
+        if !ready.is_ok_and(|revents| revents != 0) {
             continue;
         }
         // SAFETY: the buffer is live and the length matches.
@@ -1279,17 +1278,6 @@ fn seize_and_release(pid: libc::pid_t) -> Result<String, String> {
         }
         nap();
     }
-}
-
-/// A 200 microsecond pause, used only where the kernel gives no descriptor to
-/// wait on. A ptrace-stop is not observable through a pidfd.
-fn nap() {
-    let ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 200_000,
-    };
-    // SAFETY: `ts` is a live timespec and the second argument may be null.
-    unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
 }
 
 /// The supervisor scope step's record (§9.3), as a row: `available` when
@@ -1468,6 +1456,7 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
             mediate: None,
             bridge: None,
             sigmask: None,
+            nofile_soft: None,
             argv: vec![
                 jail_exe.into(),
                 INSIDE_SUBCOMMAND.into(),
@@ -1494,15 +1483,22 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
             }
         };
         let measured = (|| -> io::Result<()> {
-            loop {
-                // Blocked on the `--release-fd` above, not on an earlier read.
-                if identity::blocked_in_read(pid, RELEASE_FD)? {
-                    break;
+            // Blocked on the `--release-fd` above, not on an earlier read.
+            match identity::wait_blocked_in_read(pid, RELEASE_FD, deadline, || {
+                super::watch::is_readable(pidfd.as_fd())
+            }) {
+                Ok(()) => {}
+                Err(identity::NotBlocked::Ended) => {
+                    return Err(io::Error::other(
+                        "observer launcher exited before it blocked",
+                    ));
                 }
-                if deadline.expired() {
-                    return Err(io::Error::other("observer launcher did not block"));
+                Err(timeout) => {
+                    return Err(io::Error::other(format!(
+                        "observer launcher did not block{}",
+                        timeout.detail()
+                    )));
                 }
-                nap();
             }
             let tracer = Tracer::attach(pid, TracerConfig::default()).map_err(io::Error::other)?;
             std::fs::File::from(release_w).write_all(&[1])?;
@@ -1783,9 +1779,12 @@ fn check_stat(path: &str) -> String {
     let Ok(c) = std::ffi::CString::new(path) else {
         return "invalid_path".to_owned();
     };
-    let mut st = empty_stat();
-    // SAFETY: `c` is NUL-terminated and `st` is a writable stat buffer.
-    outcome(i64::from(unsafe { libc::stat(c.as_ptr(), &raw mut st) }))
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `c` is NUL-terminated and `st` is writable storage for a stat
+    // buffer, which nothing reads: only the call's result matters.
+    outcome(i64::from(unsafe {
+        libc::stat(c.as_ptr(), st.as_mut_ptr())
+    }))
 }
 
 fn check_listdir(path: &str) -> String {
@@ -2187,7 +2186,7 @@ mod tests {
                 CapabilityScope::Tree,
             ),
         ] {
-            let capability = super::super::platform::shared::capability_from(
+            let capability = super::super::requirements::capability_from(
                 requirement,
                 probes,
                 "test",

@@ -38,21 +38,21 @@ use super::{clock::Deadline, exec, identity};
 // The descriptors each helper inherits, at fixed numbers on both sides.
 /// Where the bootstrap receives the read end of its start pipe: one
 /// [`RELEASED`] byte lets it exec the backend, anything else ends it.
-pub const START_FD: RawFd = 15;
+pub const START_FD: RawFd = super::fds::START;
 /// Pinned backend, closed atomically on successful exec.
-pub const BACKEND_FD: RawFd = 8;
+pub const BACKEND_FD: RawFd = super::fds::BACKEND;
 /// Where the watcher receives a pidfd of the supervisor that started it.
-const SUPERVISOR_PIDFD_FD: RawFd = 3;
+const SUPERVISOR_PIDFD_FD: RawFd = super::fds::WATCHER_SUPERVISOR;
 /// Where the watcher receives a pidfd of the backend it guards.
-const BACKEND_PIDFD_FD: RawFd = 4;
+const BACKEND_PIDFD_FD: RawFd = super::fds::WATCHER_BACKEND;
 /// Where the watcher receives the write end of its ready pipe, on which it
 /// writes [`RELEASED`] once it holds everything it needs.
-const READY_FD: RawFd = 5;
+const READY_FD: RawFd = super::fds::WATCHER_READY;
 /// Where the watcher receives the leaf's `cgroup.kill`, when there is a leaf.
-pub const CGROUP_KILL_FD: RawFd = 6;
+pub const CGROUP_KILL_FD: RawFd = super::fds::WATCHER_CGROUP_KILL;
 const CGROUP_KILL_ARG: &str = "--cgroup-kill-fd";
 /// Where the watcher receives the read end of its release pipe.
-pub const RELEASE_FD: RawFd = 7;
+pub const RELEASE_FD: RawFd = super::fds::WATCHER_RELEASE;
 const RELEASE_ARG: &str = "--release-fd";
 /// The byte that releases the reader of a release, ready or start pipe;
 /// end-of-file means the writer is gone.
@@ -141,7 +141,7 @@ impl Watcher {
         self.child.id()
     }
     pub fn ended(&self) -> bool {
-        readable(self.fd.as_raw_fd())
+        is_readable(self.fd.as_fd())
     }
     pub fn reap(&mut self) {
         let _ = self.child.try_wait();
@@ -169,41 +169,35 @@ impl Drop for Watcher {
     }
 }
 
-/// A pidfd is readable on process exit, including while its zombie is waiting
-/// for this supervisor's tracer thread to reap it. Only `POLLIN` says so: an
-/// invalid descriptor (`POLLNVAL`) or an error is not an exit.
+/// Whether `fd` has something to read now. A pidfd is readable on process
+/// exit, including while its zombie is waiting for this supervisor's tracer
+/// thread to reap it. Only `POLLIN` says so: an invalid descriptor
+/// (`POLLNVAL`) or an error is not an exit.
+pub fn is_readable(fd: BorrowedFd<'_>) -> bool {
+    super::sys::poll_one(fd, libc::POLLIN, 0).is_ok_and(|revents| revents & libc::POLLIN != 0)
+}
+
+/// [`is_readable`] for a caller that holds only the descriptor's number.
 pub fn readable(fd: RawFd) -> bool {
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one live pollfd; a zero timeout never waits.
-    let rc = unsafe { libc::poll(&raw mut pfd, 1, 0) };
-    rc > 0 && pfd.revents & libc::POLLIN != 0
+    // SAFETY: the caller's descriptor stays open for this call; poll only
+    // reads its state, and a number that is not open answers `POLLNVAL`,
+    // which is not readable.
+    is_readable(unsafe { BorrowedFd::borrow_raw(fd) })
 }
 
 /// Waits until `deadline` for one byte on `fd`: true only for [`RELEASED`].
 fn read_release(fd: BorrowedFd<'_>, deadline: Deadline) -> bool {
-    let mut pfd = libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
     loop {
-        // SAFETY: one live pollfd, bounded by the deadline.
-        let rc = unsafe { libc::poll(&raw mut pfd, 1, deadline.remaining_millis_capped(1000)) };
-        if rc > 0 {
-            let mut byte = 0u8;
-            // SAFETY: a one-byte read into a live byte from a descriptor the
-            // caller holds open.
-            let n = unsafe { libc::read(fd.as_raw_fd(), (&raw mut byte).cast(), 1) };
-            return n == 1 && byte == RELEASED;
-        }
-        if deadline.expired()
-            || (rc < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted)
-        {
-            return false;
+        match super::sys::poll_one(fd, libc::POLLIN, deadline.remaining_millis_capped(1000)) {
+            Ok(revents) if revents != 0 => {
+                let mut byte = 0u8;
+                // SAFETY: a one-byte read into a live byte from a descriptor
+                // the caller holds open.
+                let n = unsafe { libc::read(fd.as_raw_fd(), (&raw mut byte).cast(), 1) };
+                return n == 1 && byte == RELEASED;
+            }
+            Ok(_) if !deadline.expired() => {}
+            _ => return false,
         }
     }
 }
@@ -351,13 +345,10 @@ pub fn watcher_main(args: &[OsString]) -> ! {
             )
             .unwrap_or(0)
         });
-        // SAFETY: a live three-element pollfd array; poll writes revents only.
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 3, timeout) };
-        if rc < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            std::process::exit(125);
+        match super::sys::poll(&mut fds, timeout) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => std::process::exit(125),
         }
         if fds
             .iter()
@@ -401,10 +392,10 @@ mod tests {
     #[test]
     fn only_pollin_is_readable() {
         let (read, write) = exec::pipe().expect("pipe");
-        assert!(!readable(read.as_raw_fd()), "an empty pipe");
+        assert!(!is_readable(read.as_fd()), "an empty pipe");
         drop(write);
         assert!(
-            !readable(read.as_raw_fd()),
+            !is_readable(read.as_fd()),
             "POLLHUP alone: the writer left nothing to read"
         );
         let mut child = Command::new("/bin/sleep")
@@ -412,10 +403,10 @@ mod tests {
             .spawn()
             .expect("a child to watch");
         let pidfd = identity::pidfd_open(i32::try_from(child.id()).unwrap()).expect("pidfd");
-        assert!(!readable(pidfd.as_raw_fd()), "a live process");
+        assert!(!is_readable(pidfd.as_fd()), "a live process");
         child.kill().expect("kill the child");
         child.wait().expect("reap the child");
-        assert!(readable(pidfd.as_raw_fd()), "an exited process");
+        assert!(is_readable(pidfd.as_fd()), "an exited process");
     }
 
     #[test]

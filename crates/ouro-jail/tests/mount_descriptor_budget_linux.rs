@@ -92,7 +92,10 @@ fn nine_hundred_protected_segments_fit_a_1024_soft_descriptor_limit() {
 }
 
 /// The same 1024 soft limit with 1100 segments: the receipt's mount bound,
-/// not the descriptor limit, decides, and before anything is pinned.
+/// not the descriptor limit, decides, and before anything is pinned or any
+/// placeholder made: the refusal says so (a later check of the same bound
+/// does not), and the workspace has no placeholder for its absent root
+/// literals.
 #[test]
 fn past_the_mount_bound_the_refusal_comes_before_any_pin() {
     if !common::live() {
@@ -127,4 +130,14 @@ fn past_the_mount_bound_the_refusal_comes_before_any_pin() {
         message.contains("hold 1104 protected segments") && message.contains("1024"),
         "{message}"
     );
+    assert!(
+        message.contains("before any protected segment was pinned or any placeholder made"),
+        "not the refusal before pinning: {message}"
+    );
+    for literal in [".git", ".ouroboros"] {
+        assert!(
+            !workspace.join(literal).exists(),
+            "the refusal left a {literal} placeholder in the workspace"
+        );
+    }
 }

@@ -63,10 +63,13 @@ const FROZEN_PATHSPECS: [&str; 6] = [
 /// The evidence tables whose digests the freeze pins, by freeze key.
 /// Each table ends every program's listing with a `digest: sha256:...`
 /// line; the agent tables list the agent baseline first and the mediation
-/// filter second.
-const FILTER_TABLES: [(&str, &str, usize); 4] = [
+/// filter second. The storage tables are the baselines a storage or inode
+/// ceiling installs, with the hard-link denials.
+const FILTER_TABLES: [(&str, &str, usize); 6] = [
     ("tool", "seccomp-table-tool-x86_64.txt", 0),
+    ("tool_storage", "seccomp-table-tool-storage-x86_64.txt", 0),
     ("agent", "seccomp-table-agent-x86_64.txt", 0),
+    ("agent_storage", "seccomp-table-agent-storage-x86_64.txt", 0),
     (
         "agent_namespace",
         "seccomp-table-agent-namespace-x86_64.txt",

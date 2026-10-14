@@ -6,11 +6,14 @@
 //! than work in `pre_exec`, so that nothing but the target's own code runs
 //! after the boundary is closed.
 //!
-//! It does three things, in this order:
+//! In this order, it:
 //!
-//! 1. installs the narrowing filter, when observation is on;
-//! 2. blocks reading one byte from the release pipe;
-//! 3. `execve`s the target, searching `PATH` itself
+//! 1. under `agent`, installs the connect mediation and starts the bridge;
+//! 2. installs the narrowing filter, when observation is on;
+//! 3. blocks reading one byte from the release pipe;
+//! 4. gives the target the signal state and descriptor limit the operator
+//!    started the run with, and closes what the supervisor took;
+//! 5. `execve`s the target, searching `PATH` itself
 //!    ([`exec_candidates`]).
 //!
 //! The blocking read is the gate: until the supervisor writes that byte, no
@@ -30,7 +33,7 @@ use std::fmt;
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt as _;
 
-use super::sys::{PathError, cstring_from_os};
+use super::sys::{PathError, cstring_from_os, last_errno as errno};
 
 /// The hidden subcommand token.
 pub const SUBCOMMAND: &str = "__launch";
@@ -54,6 +57,8 @@ pub mod flag {
     pub const BRIDGE: &str = "--bridge";
     /// `--sigmask HEX`.
     pub const SIGMASK: &str = "--sigmask";
+    /// `--nofile-soft N`.
+    pub const NOFILE_SOFT: &str = "--nofile-soft";
     /// The separator before the target's argv.
     pub const SEPARATOR: &str = "--";
 }
@@ -109,6 +114,10 @@ pub struct LaunchArgs {
     /// inherited blocked SIGCHLD would otherwise be lost. `None` leaves the
     /// mask as inherited (`none`, where nothing in between changes it).
     pub sigmask: Option<u64>,
+    /// The soft `RLIMIT_NOFILE` the target gets: the operator's, which the
+    /// supervisor raised for itself to hand bubblewrap the pinned mount
+    /// sources above it. `None` leaves the limit as inherited.
+    pub nofile_soft: Option<u64>,
     /// The target's argv; element 0 is also the program to execute.
     pub argv: Vec<OsString>,
 }
@@ -145,6 +154,9 @@ impl LaunchArgs {
         if let Some(mask) = self.sigmask {
             out.extend([OsString::from(flag::SIGMASK), format!("{mask:x}").into()]);
         }
+        if let Some(soft) = self.nofile_soft {
+            out.extend([OsString::from(flag::NOFILE_SOFT), soft.to_string().into()]);
+        }
         out.push(OsString::from(flag::SEPARATOR));
         out.extend(self.argv.iter().cloned());
         out
@@ -169,6 +181,8 @@ pub enum LaunchUsage {
     BadFd(&'static str),
     /// A signal mask was not a hexadecimal number.
     BadMask(&'static str),
+    /// A limit was not a decimal number.
+    BadLimit(&'static str),
     /// An option the launcher does not know.
     UnknownOption(String),
     /// No `--` separator.
@@ -189,6 +203,7 @@ impl fmt::Display for LaunchUsage {
             Self::MissingValue(o) => write!(f, "{o} needs a value"),
             Self::BadFd(o) => write!(f, "{o} needs a non-negative descriptor number"),
             Self::BadMask(o) => write!(f, "{o} needs a hexadecimal signal mask"),
+            Self::BadLimit(o) => write!(f, "{o} needs a decimal limit"),
             Self::UnknownOption(o) => write!(f, "unknown option {o}"),
             Self::MissingSeparator => write!(f, "expected `--` before the program"),
             Self::EmptyArgv => write!(f, "no program after `--`"),
@@ -202,8 +217,8 @@ impl fmt::Display for LaunchUsage {
 impl std::error::Error for LaunchUsage {}
 
 /// Parse `--release-fd N --error-fd M [--narrow] [--read-open-fast-path]
-/// [--trace-data-fd T] [--mediate L,S] [--bridge R] [--sigmask HEX] --
-/// PROGRAM ARG...`, options in any order; [`LaunchArgs::to_argv`] writes
+/// [--trace-data-fd T] [--mediate L,S] [--bridge R] [--sigmask HEX]
+/// [--nofile-soft N] -- PROGRAM ARG...`, options in any order; [`LaunchArgs::to_argv`] writes
 /// them in this one.
 ///
 /// # Errors
@@ -218,6 +233,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
     let mut mediate: Option<(RawFd, RawFd)> = None;
     let mut bridge: Option<RawFd> = None;
     let mut sigmask: Option<u64> = None;
+    let mut nofile_soft: Option<u64> = None;
     let mut index = 0usize;
     let mut argv: Option<Vec<OsString>> = None;
 
@@ -276,6 +292,17 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
                 );
                 index += 2;
             }
+            flag::NOFILE_SOFT => {
+                let raw = args
+                    .get(index + 1)
+                    .ok_or(LaunchUsage::MissingValue(flag::NOFILE_SOFT))?;
+                nofile_soft = Some(
+                    raw.to_str()
+                        .and_then(|text| text.parse().ok())
+                        .ok_or(LaunchUsage::BadLimit(flag::NOFILE_SOFT))?,
+                );
+                index += 2;
+            }
             _ => return Err(LaunchUsage::UnknownOption(name)),
         }
     }
@@ -304,6 +331,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
         mediate,
         bridge,
         sigmask,
+        nofile_soft,
         argv,
     })
 }
@@ -346,7 +374,7 @@ fn fd_value(raw: Option<&OsString>, option: &'static str) -> Result<RawFd, Launc
 /// Everything that allocates happens before the filter is installed. After
 /// that point the only calls are `read`, `close`, `sigaction` and
 /// `sigprocmask` (with `sigemptyset` and `sigaddset` on stack data),
-/// `execve`, `faccessat`, `write` and `_exit`.
+/// `getrlimit` and `setrlimit`, `execve`, `faccessat`, `write` and `_exit`.
 pub fn launch_main(args: &[OsString]) -> ! {
     let parsed = match parse(args) {
         Ok(parsed) => parsed,
@@ -409,8 +437,7 @@ pub fn launch_main(args: &[OsString]) -> ! {
         report_and_exit(parsed.error_fd, errno, EXIT_BRIDGE_FAILED);
     }
 
-    // Audit 2026-09-25-2, S14: read this attempt's narrowing data before the
-    // filter goes in. Two bytes, already in the pipe; the descriptor closes
+    // Read this attempt's narrowing data before the filter goes in. Two bytes, already in the pipe; the descriptor closes
     // immediately after, so the value never reaches the target — and neither
     // does any argument, because the launcher's whole argv is visible in
     // `/proc/1/cmdline` from inside the sandbox.
@@ -511,6 +538,26 @@ pub fn launch_main(args: &[OsString]) -> ! {
                 }
             }
             if libc::sigprocmask(libc::SIG_SETMASK, &raw const set, std::ptr::null_mut()) != 0 {
+                report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
+            }
+        }
+    }
+
+    // The operator's descriptor limit: the supervisor raised its own soft
+    // limit to hand bubblewrap the pinned mount sources above it, and
+    // bubblewrap and this launcher inherited that. The target gets what the
+    // operator set. Lowering a soft limit under its hard one cannot fail on
+    // Linux; if it does, the target does not run with the raised one.
+    if let Some(soft) = parsed.nofile_soft {
+        // SAFETY: `limit` is plain stack data getrlimit fills and setrlimit
+        // reads; both are single async-signal-safe syscalls.
+        unsafe {
+            let mut limit: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) != 0 {
+                report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
+            }
+            limit.rlim_cur = soft.min(limit.rlim_max);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) != 0 {
                 report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
             }
         }
@@ -727,8 +774,8 @@ fn mediate(listener_fd: RawFd, sockdiag_fd: RawFd) -> Result<(), i32> {
 /// The pair's other end is placed at `report_fd` for the supervisor to take
 /// while this process is blocked; like the mediation descriptors it is not
 /// close-on-exec, and the explicit close after release keeps it from the
-/// target. A socket, unlike the pipe it replaced, cannot be reopened by a
-/// same-uid peer through `/proc/<bridge>/fd` (audit 2026-09-25-2, S2).
+/// target. A socket, unlike a pipe, cannot be reopened by a
+/// same-uid peer through `/proc/<bridge>/fd`.
 /// Refuses (`EEXIST`) if `report_fd` is already open.
 fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
     let path = CString::new(super::bwrap::JAIL_INSIDE_PATH).map_err(|_| libc::EINVAL)?;
@@ -744,7 +791,7 @@ fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
     // SAFETY: socketpair fills the two-element array it is given. A
     // `SOCK_SEQPACKET` pair, not a pipe: a same-uid target in the jail's pid
     // namespace can open `/proc/<bridge>/fd/2` on a pipe and forge report
-    // bytes into the supervisor's channel (audit 2026-09-25-2, S2), while a
+    // bytes into the supervisor's channel, while a
     // socket cannot be reopened through /proc at all, and this pair has no
     // name any address could reach. Nonblocking on both ends: a bridge whose
     // reader is slow drops a report datagram rather than stall its relays,
@@ -796,7 +843,7 @@ fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
             // Nothing above stdio: not the release or error pipe, not the
             // mediation listener, not the sock_diag socket, not the report
             // pipe's read end.
-            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) < 0 {
+            if super::sys::close_range_from(3, 0).is_err() {
                 libc::_exit(EXIT_BRIDGE_FAILED);
             }
             libc::execve(path.as_ptr(), argv.as_ptr(), envp.as_ptr());
@@ -833,7 +880,7 @@ fn spawn_bridge(report_fd: RawFd) -> Result<(), i32> {
 /// The same list as [`exec_candidates`], as raw bytes, each spelling followed
 /// by its symlink-resolved form when it exists on this host.
 ///
-/// Security 2026-09-27 (audit 3 A1): the exec confirmation now also compares
+/// The exec confirmation also compares
 /// the kernel's own image (`/proc/<tid>/exe`, every symlink followed) against
 /// this list, so a candidate's canonical form must be here too: on a
 /// merged-`/usr` host the operator's `/bin/true` spelling resolves to
@@ -852,7 +899,7 @@ pub fn exec_candidate_bytes(
     let mut out = Vec::new();
     for candidate in exec_candidates(&program, path) {
         // Resolve first, while the candidate is still borrowed: the kernel's
-        // `/proc/<tid>/exe` link names the resolved form (audit 3 A1).
+        // `/proc/<tid>/exe` link names the resolved form.
         if let Ok(resolved) = std::fs::canonicalize({
             use std::os::unix::ffi::OsStrExt as _;
             std::ffi::OsStr::from_bytes(candidate.as_bytes())
@@ -928,34 +975,10 @@ fn report_and_exit(fd: RawFd, errno: i32, code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
-/// Write `bytes` to `fd`, retrying a short or interrupted write, and give up
-/// silently on any other failure. Async-signal-safe: `write` only.
+/// Write `bytes` to `fd` ([`super::sys::write_all`]), giving up silently on a
+/// failure: there is no one left to tell. Async-signal-safe: `write` only.
 fn write_fully(fd: RawFd, bytes: &[u8]) {
-    let mut written = 0usize;
-    while written < bytes.len() {
-        // SAFETY: the pointer and length address the remaining bytes of a live
-        // stack array.
-        let n = unsafe {
-            libc::write(
-                fd,
-                bytes.as_ptr().add(written).cast::<libc::c_void>(),
-                bytes.len() - written,
-            )
-        };
-        if n <= 0 {
-            if n < 0 && errno() == libc::EINTR {
-                continue;
-            }
-            break;
-        }
-        written += n as usize;
-    }
-}
-
-fn errno() -> i32 {
-    // SAFETY: __errno_location returns a pointer to this thread's errno, valid
-    // for the thread's lifetime.
-    unsafe { *libc::__errno_location() }
+    let _ = super::sys::write_all(fd, bytes);
 }
 
 /// Decode the four bytes the launcher writes on a failed exec.
@@ -988,6 +1011,7 @@ mod tests {
             mediate: None,
             bridge: None,
             sigmask: None,
+            nofile_soft: None,
             argv: osv(&["/bin/sh", "-c", "echo --narrow"]),
         };
         let full = LaunchArgs {
@@ -997,6 +1021,7 @@ mod tests {
             mediate: Some((18, 19)),
             bridge: Some(20),
             sigmask: Some(0x0201),
+            nofile_soft: Some(1024),
             ..base.clone()
         };
         for args in [
@@ -1008,6 +1033,10 @@ mod tests {
             },
             LaunchArgs {
                 sigmask: Some(0),
+                ..base.clone()
+            },
+            LaunchArgs {
+                nofile_soft: Some(u64::MAX),
                 ..base.clone()
             },
         ] {

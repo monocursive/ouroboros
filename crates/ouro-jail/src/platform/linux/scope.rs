@@ -720,32 +720,12 @@ mod linux {
     /// Where logind records lingering: one empty file per user name.
     const LINGER_DIR: &str = "/var/lib/systemd/linger";
 
-    /// The user name of `uid`, from the password database.
+    /// The user name of `uid`, from the password database
+    /// ([`crate::state::accounts`]).
     fn user_name(uid: u32) -> Option<std::ffi::OsString> {
         use std::os::unix::ffi::OsStringExt as _;
-        let mut buffer = vec![0_u8; 16 * 1024];
-        // SAFETY: `passwd` is a plain C struct; all-zero is a valid value
-        // that getpwuid_r overwrites before it is read.
-        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
-        let mut result: *mut libc::passwd = std::ptr::null_mut();
-        // SAFETY: every pointer is to a live local, the length is the
-        // buffer's own, and getpwuid_r writes only within them.
-        let rc = unsafe {
-            libc::getpwuid_r(
-                uid,
-                &raw mut entry,
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-                &raw mut result,
-            )
-        };
-        if rc != 0 || result.is_null() || entry.pw_name.is_null() {
-            return None;
-        }
-        // SAFETY: getpwuid_r succeeded, so pw_name is a NUL-terminated
-        // string inside `buffer`, which is still alive.
-        let name = unsafe { std::ffi::CStr::from_ptr(entry.pw_name) };
-        Some(std::ffi::OsString::from_vec(name.to_bytes().to_vec()))
+        let user = crate::state::accounts::user(uid).ok().flatten()?;
+        Some(std::ffi::OsString::from_vec(user.name))
     }
 
     /// Lingering as logind records it for `uid`.
@@ -914,6 +894,7 @@ mod linux {
         /// file does not; anything else is unknown, and counts as off.
         #[test]
         fn lingering_is_read_from_loginds_record() {
+            // SAFETY: getuid takes no arguments and cannot fail.
             let uid = unsafe { libc::getuid() };
             let name = user_name(uid).expect("the test's uid has a name");
             let dir = tempfile::tempdir().unwrap();

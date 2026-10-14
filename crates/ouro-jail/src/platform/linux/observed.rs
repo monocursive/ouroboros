@@ -1,11 +1,10 @@
 //! Consuming the observer's event stream.
 //!
 //! The one place a [`TracerEvent`] becomes an audit record and, for the
-//! attempt's target, a lifecycle fact (§11). The contained boundary
-//! (`platform.rs`) and the uncontained one (`uncontained.rs`) both call it,
-//! so what counts as exec confirmation, a target exit or a coverage loss, and
-//! the gap bookkeeping when the observer stops, cannot drift apart between
-//! them. Each caller decides what a fact means for its own lifecycle.
+//! attempt's target, a lifecycle fact (§11). The run loop both boundaries
+//! drive (`running.rs`) is its one caller, so what counts as exec
+//! confirmation, a target exit or a coverage loss, and the gap bookkeeping
+//! when the observer stops, cannot drift apart between them.
 
 use std::ffi::OsString;
 use std::time::Duration;

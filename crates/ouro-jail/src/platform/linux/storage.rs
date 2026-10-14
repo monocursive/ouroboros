@@ -7,8 +7,9 @@ mod quota;
 
 use crate::policy::{LimitCeiling, LimitKey, LimitsSnapshot};
 use crate::records::AppliedLimit;
+use crate::state::mountinfo;
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStringExt;
@@ -340,11 +341,11 @@ pub(super) fn requested(limits: &LimitsSnapshot) -> bool {
 const MOUNTINFO_MAX: usize = 1024 * 1024;
 
 /// The mount points of every writable mount in `raw`, a
-/// `/proc/<pid>/mountinfo`, decoded.
+/// `/proc/<pid>/mountinfo`, parsed by [`mountinfo::rows`].
 ///
 /// A read-only mount (`ro` in the per-mount options) needs no ceiling. An
 /// idmapped writable mount would charge a quota identity this code does not
-/// see, so it refuses, as does a row with too few fields or a mount point
+/// see, so it refuses, as does a row the parser refuses or a mount point
 /// that is not an absolute path without NUL: a row that cannot be read is
 /// never a mount that was not there.
 ///
@@ -358,31 +359,19 @@ fn writable_mount_points(raw: &[u8]) -> io::Result<Vec<Vec<u8>>> {
         ));
     }
     let mut points = Vec::new();
-    for line in raw
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
-        let point = fields
-            .get(4)
-            .ok_or_else(|| io::Error::other("invalid storage mount row"))?;
-        let options = fields
-            .get(5)
-            .ok_or_else(|| io::Error::other("missing storage mount options"))?;
-        let mut options = options.split(|byte| *byte == b',');
-        if options.clone().any(|option| option == b"ro") {
+    for row in mountinfo::rows(raw, usize::MAX)? {
+        if row.has_option(b"ro") {
             continue;
         }
-        if options.any(|option| option == b"idmapped") {
+        if row.has_option(b"idmapped") {
             return Err(io::Error::other(
                 "storage ceilings do not support idmapped writable mounts",
             ));
         }
-        let point = super::platform::decode_mountinfo_path(point);
-        if !point.starts_with(b"/") || point.contains(&0) {
+        if !row.mount_point.starts_with(b"/") || row.mount_point.contains(&0) {
             return Err(io::Error::other("invalid storage mount point"));
         }
-        points.push(point);
+        points.push(row.mount_point);
     }
     Ok(points)
 }
@@ -473,7 +462,17 @@ impl Storage {
         limits: &LimitsSnapshot,
         deadline: super::clock::Deadline,
     ) -> io::Result<Self> {
-        let raw = fs::read(format!("/proc/{pid}/mountinfo"))?;
+        // One byte past the bound is enough to refuse a larger table.
+        let mut raw = Vec::new();
+        io::Read::read_to_end(
+            &mut io::Read::take(
+                File::open(format!("/proc/{pid}/mountinfo"))?,
+                u64::try_from(MOUNTINFO_MAX)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1),
+            ),
+            &mut raw,
+        )?;
         let mut volumes = BTreeMap::new();
         let mut scanned = 0;
         for point in writable_mount_points(&raw)? {
@@ -646,6 +645,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn xfs_sampling_descriptor_is_opened_once_and_survives_chmod() {

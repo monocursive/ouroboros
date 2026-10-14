@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 
 use super::clock::Deadline;
 use super::exec::run_captured;
-use super::fs::{RootSpec, exists_resolved, path_within, resolve_runtime_root};
+use super::fs::{RootSpec, exists_resolved, resolve_runtime_root};
 use super::sys::{PathError, cstring_from_os, errno_name, last_errno};
 use crate::state::anchored::{Dir, Kind, Name, fstat};
 
@@ -814,11 +814,13 @@ pub struct BwrapPlan {
     pub(crate) bounded_storage: bool,
     /// Environment to set after `--clearenv`.
     pub(crate) env: Vec<(OsString, OsString)>,
-    /// Existing protected segments, each bound read-only over itself. A pin
+    /// Protected segments bound read-only over themselves, for a caller that
+    /// builds a plan without the mount preparation (the mechanisms suite).
+    /// A run's segments are not here: the preparation pins each one and
+    /// binds it into [`BwrapPlan::extra_ro_binds`], at its destination
+    /// inside the sandbox, which for the scratch is not its host path. A pin
     /// whose `O_PATH` handle was handed to the spawn map is bound by
-    /// descriptor (`--ro-bind-fd`), which cannot be redirected by a path
-    /// swap between validation and mount (§9.1); the rest are bound by path
-    /// and re-verified at handoff.
+    /// descriptor (`--ro-bind-fd`); the rest are bound by path.
     pub(crate) protected: Vec<ProtectedBind>,
     /// Extra read-only binds with a destination of their own, used by the
     /// doctor probes and by operator `--ro` grants (§6.1).
@@ -951,11 +953,29 @@ impl fmt::Display for PlanError {
 /// socket its bridge connects through. Such a mask never narrows the child's
 /// authority; it attacks the next run's plumbing, so both the policy layer
 /// and this renderer refuse it.
+///
+/// The comparison is by path component, so `/run//ouro`, `/run/./ouro` and
+/// `///run` are the paths they name. A `..` component cannot be placed
+/// without resolving it, so a mask holding one is refused as if it reached
+/// the plumbing.
 fn shadows_plumbing(path: &Path) -> bool {
-    const PLUMBING: &[u8] = b"/run/ouro";
-    let bytes = path.as_os_str().as_bytes();
-    let root = !bytes.is_empty() && bytes.iter().all(|byte| *byte == b'/');
-    root || path_within(PLUMBING, bytes) || path_within(bytes, PLUMBING)
+    use std::path::Component;
+    let plumbing = [
+        Component::RootDir,
+        Component::Normal(OsStr::new("run")),
+        Component::Normal(OsStr::new("ouro")),
+    ];
+    let components: Vec<Component<'_>> = path.components().collect();
+    if components.is_empty() {
+        return false;
+    }
+    if components.contains(&Component::ParentDir) {
+        return true;
+    }
+    // One is a prefix of the other: the mask covers the plumbing, or lies
+    // beneath it.
+    let shared = components.len().min(plumbing.len());
+    components[..shared] == plumbing[..shared]
 }
 
 impl std::error::Error for PlanError {}
@@ -1460,6 +1480,12 @@ pub struct BwrapStatus {
     pub child_pid: Option<libc::pid_t>,
     /// Exit code of the inner command, when reported.
     pub exit_code: Option<i32>,
+    /// The pid namespace bubblewrap created, by inode, when reported.
+    pub pid_namespace: Option<u64>,
+    /// The mount namespace bubblewrap created, by inode, when reported.
+    pub mnt_namespace: Option<u64>,
+    /// The network namespace bubblewrap created, by inode, when reported.
+    pub net_namespace: Option<u64>,
 }
 
 /// Parse bubblewrap's JSON status stream: a sequence of objects, read as
@@ -1483,6 +1509,10 @@ pub fn parse_json_status(raw: &str) -> BwrapStatus {
         status.exit_code = status
             .exit_code
             .or_else(|| integer("exit-code").and_then(|v| i32::try_from(v).ok()));
+        let inode = |key: &str| document.get(key).and_then(serde_json::Value::as_u64);
+        status.pid_namespace = status.pid_namespace.or_else(|| inode("pid-namespace"));
+        status.mnt_namespace = status.mnt_namespace.or_else(|| inode("mnt-namespace"));
+        status.net_namespace = status.net_namespace.or_else(|| inode("net-namespace"));
     }
     status
 }
@@ -1546,14 +1576,23 @@ mod tests {
 
     #[test]
     fn json_status_documents_parse() {
-        let raw = r#"{"child-pid": 12574, "mnt-namespace": 4026533229}
+        let raw = r#"{"child-pid": 12574, "mnt-namespace": 4026533229, "net-namespace": 4026533231, "pid-namespace": 4026533230}
 {"exit-code": 7}"#;
         assert_eq!(
             parse_json_status(raw),
             BwrapStatus {
                 child_pid: Some(12574),
                 exit_code: Some(7),
+                pid_namespace: Some(4_026_533_230),
+                mnt_namespace: Some(4_026_533_229),
+                net_namespace: Some(4_026_533_231),
             }
+        );
+        // A namespace that is not reported, or not as an inode number, is
+        // not one: nothing is compared against it.
+        assert_eq!(
+            parse_json_status(r#"{"child-pid": 1, "pid-namespace": "4026533230"}"#).pid_namespace,
+            None
         );
         assert_eq!(parse_json_status("{}"), BwrapStatus::default());
         // A status still being written: the cut-short object is not read in
@@ -1562,7 +1601,7 @@ mod tests {
             parse_json_status("{\"child-pid\": 12574}\n{\"exit-code\": 1"),
             BwrapStatus {
                 child_pid: Some(12574),
-                exit_code: None,
+                ..BwrapStatus::default()
             }
         );
         assert_eq!(
@@ -1667,6 +1706,7 @@ mod tests {
             mediate: None,
             bridge: None,
             sigmask: None,
+            nofile_soft: None,
             argv: vec![OsString::from("/bin/true")],
         }
         .command_line(OsStr::new(JAIL_INSIDE_PATH));
@@ -1740,12 +1780,18 @@ mod tests {
         for path in [
             "/",
             "//",
+            "///run",
+            "/./run",
             "/run",
             "/run/",
+            "/run//ouro",
+            "/run/./ouro",
             "/run/ouro",
             "/run/ouro/",
             "/run/ouro/jail",
             "/run/ouro/proxy/x.sock",
+            "/run/ouro/../ouro",
+            "/tmp/../run",
         ] {
             let mut plan = sample_plan();
             plan.masked.push(path.into());

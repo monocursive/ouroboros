@@ -758,7 +758,7 @@ clause = "A missing root-level .ouroboros is protected"
 tag = "live-lib"
 tests = [
   "ouro-jail/tests/linux_mechanisms.rs::the_tool_profile_grants_what_it_says_and_nothing_else",
-  "ouro-jail/src/lib.rs::platform::linux::platform::tests::a_missing_root_ouroboros_gets_a_real_placeholder_from_the_scan",
+  "ouro-jail/src/lib.rs::platform::linux::mounts::tests::a_missing_root_ouroboros_gets_a_real_placeholder_from_the_scan",
 ]
 note = "Through the product's tool plan below the command line, and through the product's own scan/placeholder path (prepare_mounts): the scan reports the absent root literal, the holder is created under the attempt's placeholder directory, the placeholder object exists at the root, and removal takes it away."
 
@@ -840,7 +840,7 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::f04_a_source_identity_swap_at_the_mount_handoff_refuses",
 ]
-note = "A real workspace-source swap between pinning and the mount handoff (the OURO_JAIL_TEST_MOUNT_SWAP rendezvous seam opens the window; the rename is real) makes pin.verify refuse before exec, no marker, refused receipt claiming no boundary. Enforcement: the pin.verify() refusal loop in platform.rs; iterating no pins reddens it."
+note = "A real workspace-source swap between pinning and the mount handoff (the OURO_JAIL_TEST_MOUNT_SWAP rendezvous seam opens the window; the rename is real) makes pin.verify refuse before exec, no marker, refused receipt claiming no boundary. Enforcement: the pin.verify() refusal loop in boundary.rs; iterating no pins reddens it."
 
 [[clause]]
 id = "F04.3"
@@ -1060,7 +1060,7 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::s04_agent_and_build_refuse_every_io_uring_interface",
 ]
-note = "build shares the tool filter (inferred, platform.rs). Owned by J5-B2."
+note = "build shares the tool filter (inferred, boundary.rs). Owned by J5-B2."
 
 [[clause]]
 id = "S04.4"
@@ -2594,7 +2594,7 @@ tag = "recorded-limit"
 tests = [
   "ouro-jail/tests/conformance_j3_none.rs::r05_clean_none_evidence_stays_unprotected",
   "ouro-jail/tests/conformance_j3_none.rs::none_gate_closed_refuses_after_a_verified_teardown",
-  "ouro-jail/src/lib.rs::platform::linux::uncontained::tests::a_clean_none_tree_is_empty_only_in_the_registered_scope",
+  "ouro-jail/src/lib.rs::platform::linux::verdict::tests::a_clean_none_tree_is_empty_only_in_the_registered_scope",
 ]
 limit = "docs/specs/jail-v1/j5-authority.md § Known gaps: A test cannot migrate a descendant out of the registered cgroup without the supervisor being able to see it: an unseen migration is a race jail-v1 §9.3 declines to promise to detect."
 note = "R06's THIRD sentence, 'an unobserved migrated descendant is not certified dead by registered-boundary verification', is not producible as a deterministic live fixture on the stock host: with observation off the subreaper + zombie-cgroup checks detect every escape, and the genuinely-unseen case is a race §9.3 explicitly declines to promise. It is proved by the honest scope label on the verified path: tree_empty=true is recorded with verification_scope=registered_boundary, which by §9.3 does not certify processes outside the identity-checked cgroup dead. The listed tests assert that label (and the unit test the verdict)."
@@ -3287,7 +3287,7 @@ gate = "K06"
 clause = "An unreadable or unparseable resolv.conf ships an empty file and records the failure instead of host bytes"
 tag = "simulated"
 tests = [
-  "ouro-jail/src/lib.rs::platform::linux::platform::tests::resolver_sanitizer_never_falls_back_to_host_bytes",
+  "ouro-jail/src/lib.rs::platform::linux::mounts::tests::resolver_sanitizer_never_falls_back_to_host_bytes",
 ]
 
 # ------------------------------------------------------------------ K07

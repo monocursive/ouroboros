@@ -9,7 +9,7 @@
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd as _, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
@@ -339,7 +339,7 @@ pub(crate) fn spawn_bootstrap(
         status: None,
     };
     drop(error_write);
-    let result = exec_handshake(error_read.as_raw_fd(), deadline);
+    let result = exec_handshake(error_read.as_fd(), deadline);
     if let Err(error) = result {
         child.kill_and_reap();
         return Err(error);
@@ -372,14 +372,14 @@ unsafe fn report_failure_and_exit(descriptor: RawFd, errno: i32) -> ! {
     unsafe { libc::_exit(crate::platform::linux::launch::EXIT_INTERNAL) }
 }
 
-fn exec_handshake(descriptor: RawFd, deadline: Deadline) -> io::Result<()> {
+fn exec_handshake(descriptor: BorrowedFd<'_>, deadline: Deadline) -> io::Result<()> {
     let mut bytes = [0u8; 4];
     let mut received = 0;
     loop {
         // SAFETY: the unread suffix of the errno buffer is writable.
         let result = unsafe {
             libc::read(
-                descriptor,
+                descriptor.as_raw_fd(),
                 bytes[received..].as_mut_ptr().cast(),
                 bytes.len() - received,
             )
@@ -416,16 +416,11 @@ fn exec_handshake(descriptor: RawFd, deadline: Deadline) -> io::Result<()> {
                 "bootstrap exec did not complete before preparation deadline",
             ));
         }
-        let mut poll = libc::pollfd {
-            fd: descriptor,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one live pollfd, with the existing BOOTTIME budget.
-        let result = unsafe { libc::poll(&raw mut poll, 1, deadline.remaining_millis_capped(100)) };
-        if result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-            return Err(io::Error::last_os_error());
-        }
+        crate::platform::linux::sys::poll_one(
+            descriptor,
+            libc::POLLIN,
+            deadline.remaining_millis_capped(100),
+        )?;
     }
 }
 
@@ -463,9 +458,8 @@ mod tests {
         }
     }
 
-    fn nonblocking(fd: RawFd) {
-        // SAFETY: the test owns the descriptor and passes only scalar flags.
-        assert!(unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } >= 0);
+    fn nonblocking(fd: BorrowedFd<'_>) {
+        crate::platform::linux::sys::set_nonblocking(fd).unwrap();
     }
 
     #[test]
@@ -511,7 +505,7 @@ mod tests {
             return;
         }
         leaf.verify_member(child.0.id() as i32).unwrap();
-        nonblocking(report.as_raw_fd());
+        nonblocking(report.as_fd());
         let mut file = std::fs::File::from(report);
         let mut bytes = Vec::new();
         let deadline = Deadline::after(Duration::from_secs(5));
@@ -609,13 +603,13 @@ mod tests {
     fn exec_handshake_rejects_a_partial_errno_and_honors_its_deadline() {
         let (read, write) = pipe().unwrap();
         std::fs::File::from(write).write_all(&[1, 2]).unwrap();
-        nonblocking(read.as_raw_fd());
+        nonblocking(read.as_fd());
         let error =
-            exec_handshake(read.as_raw_fd(), Deadline::after(Duration::from_secs(1))).unwrap_err();
+            exec_handshake(read.as_fd(), Deadline::after(Duration::from_secs(1))).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         let (read, _write) = pipe().unwrap();
-        nonblocking(read.as_raw_fd());
-        let error = exec_handshake(read.as_raw_fd(), Deadline::after(Duration::ZERO)).unwrap_err();
+        nonblocking(read.as_fd());
+        let error = exec_handshake(read.as_fd(), Deadline::after(Duration::ZERO)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 

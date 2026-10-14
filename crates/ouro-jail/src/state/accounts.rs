@@ -13,8 +13,11 @@ use std::sync::Mutex;
 
 /// The first buffer a lookup tries.
 const BUFFER_START: usize = 16 * 1024;
-/// The largest buffer a lookup grows to before it fails with `ERANGE`.
-pub const BUFFER_MAX: usize = 4 * 1024 * 1024;
+/// The largest buffer a lookup grows to before it fails with `ERANGE`. A
+/// directory group with thousands of members (an LDAP or AD `docker` or
+/// `sudo`) needs far more than [`BUFFER_START`]; no real entry needs this
+/// much.
+pub const BUFFER_MAX: usize = 16 * 1024 * 1024;
 
 /// An account of the user database.
 #[derive(Clone, PartialEq, Eq, Debug)]

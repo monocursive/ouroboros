@@ -334,17 +334,22 @@ pub fn parse_ns_link(link: &str) -> Option<u64> {
 /// key is absent.
 pub fn status_field(pid: libc::pid_t, key: &str) -> io::Result<String> {
     let raw = fs::read_to_string(format!("/proc/{pid}/status"))?;
-    for line in raw.lines() {
-        if let Some(rest) = line.strip_prefix(key)
-            && let Some(value) = rest.strip_prefix(':')
-        {
-            return Ok(value.trim().to_owned());
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("no {key} line in status of {pid}"),
-    ))
+    status_value(&raw, key).map(str::to_owned).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("no {key} line in status of {pid}"),
+        )
+    })
+}
+
+/// The value of the `key:` line of a `/proc/<pid>/status` text, trimmed;
+/// `None` when there is no such line.
+#[must_use]
+pub fn status_value<'a>(status: &'a str, key: &str) -> Option<&'a str> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
+        .map(str::trim)
 }
 
 /// What one `/proc/<pid>/status` snapshot says about a process's privilege
@@ -384,12 +389,7 @@ impl Privilege {
     /// [`io::ErrorKind::InvalidData`] when `NoNewPrivs` is missing or neither
     /// `0` nor `1`, or `CapEff` is missing or not a hexadecimal mask.
     pub fn parse(status: &str) -> io::Result<Self> {
-        let field = |key: &str| {
-            status
-                .lines()
-                .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
-                .map(str::trim)
-        };
+        let field = |key: &str| status_value(status, key);
         let invalid = |what: String| io::Error::new(io::ErrorKind::InvalidData, what);
         let no_new_privs = match field("NoNewPrivs") {
             Some("1") => true,
@@ -431,6 +431,64 @@ pub fn blocked_in_read(pid: libc::pid_t, fd: RawFd) -> io::Result<bool> {
     ))
 }
 
+/// Why a launcher was not seen blocked on its release descriptor.
+#[derive(Debug)]
+pub enum NotBlocked {
+    /// The launcher, or what holds it, ended first.
+    Ended,
+    /// The deadline passed first; the last read of `/proc/<pid>/syscall`,
+    /// when that read failed.
+    TimedOut(Option<io::Error>),
+}
+
+impl NotBlocked {
+    /// What the timeout's refusal adds to its message: why the syscall could
+    /// not be read, when it could not.
+    #[must_use]
+    pub fn detail(&self) -> String {
+        match self {
+            NotBlocked::TimedOut(Some(error)) => {
+                format!(" (its syscall could not be read: {error})")
+            }
+            NotBlocked::TimedOut(None) | NotBlocked::Ended => String::new(),
+        }
+    }
+}
+
+/// Waits until `pid` is blocked in `read(2)` on `fd`: the gate every
+/// launcher passes before the observer may attach and the release may be
+/// written, the one place it is checked. Read from `/proc/<pid>/syscall`
+/// with the descriptor ([`blocked_in_read`]): the launcher reads its
+/// trace-data descriptor before it blocks, and that read is not the gate. A
+/// read of the file that fails is not "blocked"; it is asked again, and the
+/// last failure is reported with the timeout. `ended` is asked between
+/// reads, before the deadline: the launcher's end is the more telling
+/// cause.
+///
+/// # Errors
+/// [`NotBlocked`].
+pub fn wait_blocked_in_read(
+    pid: libc::pid_t,
+    fd: RawFd,
+    deadline: super::clock::Deadline,
+    mut ended: impl FnMut() -> bool,
+) -> Result<(), NotBlocked> {
+    loop {
+        let unreadable = match blocked_in_read(pid, fd) {
+            Ok(true) => return Ok(()),
+            Ok(false) => None,
+            Err(error) => Some(error),
+        };
+        if ended() {
+            return Err(NotBlocked::Ended);
+        }
+        if deadline.expired() {
+            return Err(NotBlocked::TimedOut(unreadable));
+        }
+        super::sys::nap();
+    }
+}
+
 /// Whether a `/proc/<pid>/syscall` line (the number, then the arguments in
 /// hexadecimal) is a `read(2)` on `fd`.
 #[must_use]
@@ -445,6 +503,27 @@ pub fn parse_blocked_in_read(raw: &str, fd: RawFd) -> bool {
             .and_then(|arg| arg.strip_prefix("0x"))
             .and_then(|hex| i64::from_str_radix(hex, 16).ok())
             == Some(i64::from(fd))
+}
+
+/// The environment names the launcher actually has, read from `/proc`.
+///
+/// I09: names only, never values.
+///
+/// # Errors
+/// The read's error: an unreadable environment is not an empty one.
+pub fn read_environment_names(pid: libc::pid_t) -> std::io::Result<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/environ"))?;
+    let mut names: Vec<String> = raw
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let at = entry.iter().position(|byte| *byte == b'=')?;
+            Some(String::from_utf8_lossy(&entry[..at]).into_owned())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -540,6 +619,36 @@ mod tests {
         }
         let own = Privilege::read(std::process::id().cast_signed()).unwrap();
         assert!(own.seccomp.is_some(), "{own:?}");
+    }
+
+    /// The gate passes only on a read of the named descriptor; any other
+    /// state waits out the deadline, and the launcher's end ends the wait
+    /// first.
+    #[test]
+    fn the_launcher_gate_waits_for_a_read_on_its_own_descriptor() {
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+        let mut reader = Command::new("/bin/sh")
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = libc::pid_t::try_from(reader.id()).unwrap();
+        let soon = || super::super::clock::Deadline::after(Duration::from_secs(10));
+        assert!(wait_blocked_in_read(pid, 0, soon(), || false).is_ok());
+        let started = std::time::Instant::now();
+        let brief = super::super::clock::Deadline::after(Duration::from_millis(50));
+        assert!(matches!(
+            wait_blocked_in_read(pid, 7, brief, || false),
+            Err(NotBlocked::TimedOut(None))
+        ));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(matches!(
+            wait_blocked_in_read(pid, 7, soon(), || true),
+            Err(NotBlocked::Ended)
+        ));
+        drop(reader.stdin.take());
+        reader.wait().unwrap();
     }
 
     #[test]

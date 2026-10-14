@@ -14,7 +14,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd as _, OwnedFd,
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::sys::{PathError, cstring_from_path, empty_stat, errno_name, last_errno};
+use super::sys::{PathError, cstring_from_path, errno_name, last_errno};
 use crate::state::anchored::{Dir, Kind, Name, Stat, fstat};
 
 /// The two path segments the `tool` profile protects (north-star §4.4).
@@ -352,7 +352,7 @@ fn scan_directory(
     };
     walk(root_dir, root, b"", 1, names, &mut state)?;
 
-    // Audit 2026-10-08 M5: only single-component names are root literals —
+    // Only single-component names are root literals —
     // a multi-component name like `.git/hooks` protects what exists and
     // claims nothing for a path that does not (§4.4: a segment created
     // later is outside the claim either way).
@@ -550,7 +550,7 @@ fn classify_entry<'n>(
     ordinary_hint_safe: bool,
 ) -> Result<EntryAction<'n>, ScanError> {
     // A single-component name matches any directory entry; a
-    // multi-component name (audit 2026-10-08 M5) matches the entry's whole
+    // multi-component name matches the entry's whole
     // path beneath the writable root, so `.git/hooks` protects a nested
     // hooks directory while `.git` itself stays writable. A multi-component
     // name never matches at the root: it is not a root literal and a
@@ -592,7 +592,7 @@ fn classify_entry<'n>(
     }
     // A symlink on the path *to* a deeper protected name hides whatever
     // lives behind it, so `existing_and_root` cannot claim coverage it could
-    // not see (audit 2026-10-08 M5): a `.git` symlink while `.git/hooks` is
+    // not see: a `.git` symlink while `.git/hooks` is
     // protected is recorded like a protected symlink.
     if meta.kind == Kind::Symlink
         && names.iter().any(|literal| {
@@ -672,9 +672,10 @@ fn stable_regular_file_hints(dir: &Dir, stamp: &DirectoryStamp) -> bool {
 }
 
 /// One `readdir` entry: its name and the type `readdir` reported for it.
-struct DirectoryEntry {
-    name: CString,
-    kind: u8,
+pub(super) struct DirectoryEntry {
+    pub(super) name: CString,
+    /// The `d_type` `readdir` reported.
+    pub(super) kind: u8,
 }
 
 /// The kind and identity a no-follow stat of one entry found.
@@ -690,21 +691,23 @@ struct EntryMeta {
 /// flag to every call: the walk stats up to [`ScanLimits::DEFAULT`] entries
 /// and needs only kind and identity.
 fn stat_entry(dir: &Dir, name: &CStr) -> Result<EntryMeta, i32> {
-    let mut st = empty_stat();
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: the directory descriptor is live, `name` is NUL-terminated and
-    // valid for the call, `st` is a writable stat buffer, and
+    // valid for the call, `st` is writable storage for a stat buffer, and
     // AT_SYMLINK_NOFOLLOW stats the entry itself.
     let rc = unsafe {
         libc::fstatat(
             dir.as_fd().as_raw_fd(),
             name.as_ptr(),
-            &raw mut st,
+            st.as_mut_ptr(),
             libc::AT_SYMLINK_NOFOLLOW,
         )
     };
     if rc != 0 {
         return Err(last_errno());
     }
+    // SAFETY: fstatat returned 0, so it filled the buffer.
+    let st = unsafe { st.assume_init() };
     let mode = st.st_mode & libc::S_IFMT;
     Ok(EntryMeta {
         kind: if mode == libc::S_IFDIR {
@@ -726,7 +729,7 @@ fn stat_entry(dir: &Dir, name: &CStr) -> Result<EntryMeta, i32> {
 ///
 /// [`Dir::names`] reads names alone; the walk needs the type as well, which
 /// is what lets it skip an ordinary file without a stat.
-fn read_entries(dir: &Dir, remaining: usize) -> Result<Vec<DirectoryEntry>, i32> {
+pub(super) fn read_entries(dir: &Dir, remaining: usize) -> Result<Vec<DirectoryEntry>, i32> {
     // `fdopendir` takes ownership of the descriptor it is given, so it gets a
     // duplicate; a duplicate shares the file offset, so the stream is
     // rewound before reading.
@@ -748,8 +751,7 @@ fn read_entries(dir: &Dir, remaining: usize) -> Result<Vec<DirectoryEntry>, i32>
     let mut out = Vec::new();
     let mut result = Ok(());
     loop {
-        // SAFETY: errno is this thread's own.
-        unsafe { *libc::__errno_location() = 0 };
+        super::sys::clear_errno();
         // SAFETY: `dirp` is live; the entry it returns stays valid until the
         // next call on this stream.
         let entry = unsafe { libc::readdir(dirp) };
@@ -914,6 +916,22 @@ impl PinnedPath {
     /// or `fstat`, or `InvalidInput` for an unusable path.
     pub fn open(path: &Path) -> Result<Self, io::Error> {
         let fd = open_no_symlinks(path)?;
+        let stat = fstat(fd.as_fd())?;
+        Ok(Self {
+            fd,
+            path: path.to_owned(),
+            stat,
+        })
+    }
+
+    /// Pin an object this process holds already, under the path that names
+    /// it: the bind takes that object, and [`PinnedPath::verify`] checks the
+    /// path still names it.
+    ///
+    /// # Errors
+    ///
+    /// The errno from `fstat`.
+    pub fn adopt(fd: OwnedFd, path: &Path) -> Result<Self, io::Error> {
         let stat = fstat(fd.as_fd())?;
         Ok(Self {
             fd,
