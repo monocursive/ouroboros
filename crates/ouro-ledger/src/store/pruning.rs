@@ -557,7 +557,7 @@ impl Store {
                     self.begin_pruning(id, retain_days, &plan.evaluated_at, &plan.cutoff, peer)?
                 };
                 self.finish_pruning(id, &retained)?;
-                let stream = self.streams.get_mut(id).expect("known retained run");
+                let stream = self.stream_mut(id);
                 stream.run = retained.projection(true)?;
                 let run = stream.run.clone();
                 #[cfg(test)]
@@ -661,17 +661,14 @@ impl Store {
             retained: retained.clone(),
         })?;
         if let Err(error) = publish(&root, ANCHOR, &value, MAX_ANCHOR) {
-            self.streams
-                .get_mut(id)
-                .expect("known run")
-                .poisoned
-                .push(Poison::new(
-                    PoisonKind::Incomplete,
-                    "GC publication is uncertain; restart required",
-                ));
+            self.poison(
+                id,
+                PoisonKind::Incomplete,
+                "GC publication is uncertain; restart required",
+            );
             return Err(error);
         }
-        let stream = self.streams.get_mut(id).expect("known run");
+        let stream = self.stream_mut(id);
         stream.pruned = Some(retained.clone());
         stream.run = retained.projection(false)?;
         // Expired in-memory sessions must release descriptors as well as pins.
@@ -737,30 +734,17 @@ impl Store {
 
     pub(super) fn restore_pruned(&self, id: &str, retained: Retained) -> Result<Stream> {
         self.finish_pruning(id, &retained)?;
-        let run = retained.projection(true)?;
         Ok(Stream {
-            run,
-            accepted_bytes: 0,
+            run: retained.projection(true)?,
             replay: retained.replay.clone(),
-            source_heads: BTreeMap::new(),
             source_gaps: if retained.strict_source_loss {
                 vec![json!({"reason":"retained_source_loss"})]
             } else {
                 vec![]
             },
-            last_source: None,
-            first_loss: None,
-            receipt_phase: None,
-            poisoned: vec![],
-            segments: vec![],
-            active_segment: 1,
-            segment_bytes: 0,
-            segment_hash: Sha256::new(),
-            replay_hash: Sha256::new(),
-            anchors: BTreeMap::new(),
             last_activity_at: Some(retained.last_activity_at.clone()),
-            retention_time_valid: true,
             pruned: Some(retained),
+            ..Stream::empty(id)
         })
     }
 

@@ -163,6 +163,17 @@ pub(crate) fn read(directory: &Path, run_id: &str) -> Result<Option<Manifest>> {
     Ok(Some(manifest))
 }
 
+/// The exact published bytes: canonical JSON and one LF, within the bound.
+pub(crate) fn encode(manifest: &Manifest) -> Result<Vec<u8>> {
+    let mut bytes =
+        to_jcs(&serde_json::to_value(manifest)?).map_err(|e| LedgerError(e.to_string()))?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(LedgerError("segment manifest exceeds bounded size".into()));
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn write(directory: &Path, manifest: &Manifest) -> Result<()> {
     let target = directory.join(NAME);
     match fs::symlink_metadata(&target) {
@@ -172,10 +183,7 @@ pub(crate) fn write(directory: &Path, manifest: &Manifest) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    let bytes = to_jcs(&serde_json::to_value(manifest)?).map_err(|e| LedgerError(e.to_string()))?;
-    if bytes.len() as u64 + 1 > MAX_BYTES {
-        return Err(LedgerError("segment manifest exceeds bounded size".into()));
-    }
+    let bytes = encode(manifest)?;
     let temp = directory.join(format!(".segments-{}.tmp", Uuid::new_v4().simple()));
     let result = (|| -> Result<()> {
         let mut file = OpenOptions::new()
@@ -187,7 +195,6 @@ pub(crate) fn write(directory: &Path, manifest: &Manifest) -> Result<()> {
         #[cfg(test)]
         crate::faults::hit("manifest.before_write")?;
         file.write_all(&bytes)?;
-        file.write_all(b"\n")?;
         #[cfg(test)]
         crate::faults::hit("manifest.before_sync")?;
         file.sync_all()?;

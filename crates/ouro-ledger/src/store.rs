@@ -6,7 +6,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     os::{
         fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::{Path, PathBuf},
     sync::OnceLock,
@@ -189,7 +189,9 @@ pub fn private_directory(path: &Path) -> Result<()> {
         if !parent.exists() {
             private_directory(parent)?;
         }
-        fs::create_dir(path)?;
+        // Created owner-only, so it is never wider than 0700 under any umask;
+        // the explicit mode then also corrects a narrower umask.
+        fs::DirBuilder::new().mode(0o700).create(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
         File::open(parent)?.sync_all()?;
     }
@@ -229,6 +231,38 @@ fn private_file(path: &Path, create: bool, append: bool) -> Result<File> {
         )));
     }
     Ok(file)
+}
+
+/// The exact projection bytes: canonical JSON and one LF, never published
+/// unless it satisfies the frozen run schema.
+fn projection_bytes(run: &RunRecord) -> Result<Vec<u8>> {
+    let value = serde_json::to_value(run)?;
+    validate_frozen("run", &value)?;
+    let mut bytes = canonical(&value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Whether `path` is a private file holding exactly `expected`, synchronized
+/// now. Any doubt answers false, so the caller republishes it.
+fn synced_unchanged(path: &Path, expected: &[u8]) -> bool {
+    use std::io::Read as _;
+    let Ok(file) = private_file(path, false, false) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    (&file)
+        .take(expected.len() as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_ok()
+        && bytes == expected
+        && file.sync_all().is_ok()
+}
+
+fn loaded<'a>(streams: &'a mut BTreeMap<String, Stream>, run_id: &str) -> &'a mut Stream {
+    streams
+        .get_mut(run_id)
+        .expect("a looked-up run id names a loaded stream")
 }
 
 fn valid_id(id: &str) -> bool {
@@ -484,9 +518,28 @@ impl Store {
             if stream.poisoned.is_empty() {
                 // Every verified segment was synchronized before publishing
                 // recovered receipts, including a complete unacknowledged tail.
-                store.write_projection(&stream.run)?;
+                // Unchanged files are only synchronized again: an earlier
+                // writer may have crashed between their rename and its
+                // directory sync, but rewriting them would cost every run
+                // several writes and syncs at every start.
+                let directory = store.root.join(&name);
+                let mut published = false;
+                if !synced_unchanged(&directory.join("run.json"), &projection_bytes(&stream.run)?) {
+                    store.write_projection(&stream.run)?;
+                    published = true;
+                }
                 if stream.pruned.is_none() {
-                    crate::manifest::write(&store.root.join(&name), &stream.manifest())?;
+                    let manifest = stream.manifest();
+                    if !synced_unchanged(
+                        &directory.join(manifest::NAME),
+                        &manifest::encode(&manifest)?,
+                    ) {
+                        manifest::write(&directory, &manifest)?;
+                        published = true;
+                    }
+                }
+                if !published {
+                    File::open(&directory)?.sync_all()?;
                 }
             }
             store.streams.insert(name, stream);
@@ -539,24 +592,8 @@ impl Store {
         self.streams.insert(
             run_id.clone(),
             Stream {
-                run: run.clone(),
-                accepted_bytes: 0,
-                replay: BTreeMap::new(),
-                source_heads: BTreeMap::new(),
-                source_gaps: vec![],
-                last_source: None,
-                first_loss: None,
-                receipt_phase: None,
-                poisoned: vec![],
-                segments: vec![],
-                active_segment: 1,
-                segment_bytes: 0,
-                segment_hash: Sha256::new(),
-                replay_hash: Sha256::new(),
-                anchors: BTreeMap::new(),
-                last_activity_at: None,
-                retention_time_valid: true,
-                pruned: None,
+                run,
+                ..Stream::empty(&run_id)
             },
         );
         self.preparations
@@ -704,6 +741,18 @@ impl Store {
         Ok(receipt)
     }
 
+    /// The loaded stream of a run id this writer has already looked up.
+    fn stream_mut(&mut self, run_id: &str) -> &mut Stream {
+        loaded(&mut self.streams, run_id)
+    }
+
+    /// Record why a loaded stream can no longer be trusted.
+    fn poison(&mut self, run_id: &str, kind: PoisonKind, detail: impl Into<String>) {
+        self.stream_mut(run_id)
+            .poisoned
+            .push(Poison::new(kind, detail));
+    }
+
     fn stream(&self, run_id: &str) -> Result<&Stream> {
         check_run_id(run_id)?;
         self.streams
@@ -800,14 +849,11 @@ impl Store {
         };
         let result = self.persist(run_id, &bytes, &record, &receipt, &payload_digest);
         if let Err(error) = result {
-            self.streams
-                .get_mut(run_id)
-                .expect("known stream")
-                .poisoned
-                .push(Poison::new(
-                    PoisonKind::Incomplete,
-                    format!("uncertain persistence: {error}"),
-                ));
+            self.poison(
+                run_id,
+                PoisonKind::Incomplete,
+                format!("uncertain persistence: {error}"),
+            );
             return Err(error);
         }
         Ok(receipt)
@@ -824,7 +870,7 @@ impl Store {
         #[cfg(test)]
         let _fault_scope = crate::faults::scope(record["kind"].as_str().unwrap_or(""));
         let directory = self.root.join(run_id);
-        let stream = self.streams.get_mut(run_id).expect("known stream");
+        let stream = loaded(&mut self.streams, run_id);
         let rotate = stream.segment_bytes > 0
             && stream.segment_bytes.saturating_add(bytes.len() as u64 + 1) > self.segment_limit;
         let mut file = if rotate {
@@ -896,7 +942,7 @@ impl Store {
         file.sync_all()?;
         #[cfg(test)]
         crate::faults::hit("event.after_sync")?;
-        let stream = self.streams.get_mut(run_id).expect("known stream");
+        let stream = loaded(&mut self.streams, run_id);
         apply_record(
             stream,
             &original_payload(record),
@@ -933,7 +979,7 @@ impl Store {
     }
 
     fn write_projection(&self, run: &RunRecord) -> Result<()> {
-        validate_frozen("run", &serde_json::to_value(run)?)?;
+        let bytes = projection_bytes(run)?;
         let dir = self.root.join(&run.run_id);
         let temp = dir.join(format!(".run-{}.tmp", Uuid::new_v4().simple()));
         let mut file = OpenOptions::new()
@@ -942,16 +988,23 @@ impl Store {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&temp)?;
-        #[cfg(test)]
-        crate::faults::hit("projection.before_write")?;
-        file.write_all(&canonical(&serde_json::to_value(run)?)?)?;
-        file.write_all(b"\n")?;
-        #[cfg(test)]
-        crate::faults::hit("projection.before_sync")?;
-        file.sync_all()?;
-        #[cfg(test)]
-        crate::faults::hit("projection.before_rename")?;
-        fs::rename(temp, dir.join("run.json"))?;
+        let result = (|| -> Result<()> {
+            #[cfg(test)]
+            crate::faults::hit("projection.before_write")?;
+            file.write_all(&bytes)?;
+            #[cfg(test)]
+            crate::faults::hit("projection.before_sync")?;
+            file.sync_all()?;
+            #[cfg(test)]
+            crate::faults::hit("projection.before_rename")?;
+            fs::rename(&temp, dir.join("run.json"))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            // An unpublished temporary projection has no authority; never leak it.
+            let _ = fs::remove_file(&temp);
+        }
+        result?;
         #[cfg(test)]
         crate::faults::hit("projection.before_directory_sync")?;
         File::open(dir)?.sync_all()?;
@@ -5012,6 +5065,48 @@ mod tests {
         let recovered = Store::open(&temp.path().join("data")).unwrap();
         assert!(recovered.verify(None).unwrap()[0].local_consistency);
     }
+    #[test]
+    fn recovery_keeps_unchanged_projections_and_manifests_in_place() {
+        let (temp, store, run) = create();
+        let directory = store.root.join(&run.run_id);
+        let inode = |name: &str| fs::metadata(directory.join(name)).unwrap().ino();
+        let before = (inode("run.json"), inode(manifest::NAME));
+        drop(store);
+        let recovered = Store::open(&temp.path().join("data")).unwrap();
+        assert_eq!((inode("run.json"), inode(manifest::NAME)), before);
+        assert!(recovered.verify(None).unwrap()[0].local_consistency);
+        drop(recovered);
+        fs::write(directory.join("run.json"), b"{}\n").unwrap();
+        let recovered = Store::open(&temp.path().join("data")).unwrap();
+        assert_ne!(
+            inode("run.json"),
+            before.0,
+            "a changed projection is republished"
+        );
+        assert_eq!(inode(manifest::NAME), before.1);
+        assert!(recovered.verify(None).unwrap()[0].local_consistency);
+    }
+
+    #[test]
+    fn a_failed_projection_write_leaves_no_temporary_file() {
+        let (temp, mut store, run) = create();
+        crate::faults::arm(crate::faults::Plan {
+            kind: "note".into(),
+            point: "projection.before_rename".into(),
+            action: "error".into(),
+            marker: temp.path().join("marker"),
+        });
+        let refused = note(&mut store, &run, "unpublished", json!({"v":1}));
+        crate::faults::disarm();
+        assert!(refused.is_err());
+        let leftovers: Vec<_> = fs::read_dir(store.root.join(&run.run_id))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
     fn segment_bytes(directory: &Path) -> Vec<u8> {
         manifest::names(directory)
             .unwrap()

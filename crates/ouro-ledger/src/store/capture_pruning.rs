@@ -298,17 +298,14 @@ impl Store {
                     retained: r.clone(),
                 })?;
                 if let Err(e) = publish(&root, ANCHOR, &value, MAX_ANCHOR) {
-                    self.streams
-                        .get_mut(id)
-                        .expect("known run")
-                        .poisoned
-                        .push(Poison::new(
-                            PoisonKind::Incomplete,
-                            "uncertain capture GC publication; restart required",
-                        ));
+                    self.poison(
+                        id,
+                        PoisonKind::Incomplete,
+                        "uncertain capture GC publication; restart required",
+                    );
                     return Err(e);
                 }
-                let stream = self.streams.get_mut(id).expect("known run");
+                let stream = self.stream_mut(id);
                 stream.run.capture = r.capture(false);
                 stream.run.capture_history = Some(r.history(false)?);
                 #[cfg(test)]
@@ -319,7 +316,7 @@ impl Store {
             }
         };
         self.finish_capture_pruning(id, &retained)?;
-        let stream = self.streams.get_mut(id).expect("known run");
+        let stream = self.stream_mut(id);
         stream.run.capture = retained.capture(true);
         stream.run.capture_history = Some(retained.history(true)?);
         let run = stream.run.clone();
