@@ -188,10 +188,10 @@ impl Spawned {
 /// Fork, exec IMG in the child, and return once the exec has happened or
 /// failed. Never waits for the child to exit.
 pub(crate) fn spawn_exec(img: &Image, via: ExecVia) -> Result<Spawned, Stop> {
-    // Both ends are close-on-exec. The write end MUST be: it used to survive
-    // the target's `execve`, which handed a harness-private descriptor to the
-    // target (the thing X06 rules out) and made the parent's read wait for
-    // every descendant to die instead of for the exec.
+    // Both ends are close-on-exec. The write end must be: surviving the
+    // target's `execve` would hand a harness-private descriptor to the target
+    // (the thing X06 rules out) and make the parent's read wait for every
+    // descendant to die instead of for the exec.
     let (pr, pw) = cloexec_pipe()
         .map_err(|e| Stop::Failed(format!("could not create the exec error pipe: {e}")))?;
 

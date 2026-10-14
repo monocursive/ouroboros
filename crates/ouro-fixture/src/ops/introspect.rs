@@ -108,9 +108,9 @@ fn env_names(rep: &Reporter) {
 /// The kernel's own list of this process's open descriptors.
 ///
 /// `/proc/self/fd` on Linux and `/dev/fd` on Darwin are the authoritative
-/// enumerations. Probing a range instead used to stop at 4096, so a leaked
-/// descriptor numbered above that was invisible and X06 ("no private
-/// authority reaches it") could pass with the leak in place.
+/// enumerations. Probing a range instead stops somewhere (4096, say), and a
+/// leaked descriptor numbered above it is invisible: X06 ("no private
+/// authority reaches it") would pass with the leak in place.
 fn fd_directory() -> &'static str {
     if cfg!(target_os = "linux") {
         "/proc/self/fd"
