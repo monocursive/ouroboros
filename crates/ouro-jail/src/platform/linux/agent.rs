@@ -246,7 +246,9 @@ pub struct AgentNet {
     trace: Option<SharedTrace>,
     variant: AgentVariant,
     nested: (ProbeStatus, String),
-    baseline_digest: String,
+    /// The baseline filter bubblewrap installs, built once: the program the
+    /// receipt names is the program that runs.
+    baseline: super::bpf::Program,
     mediation_digest: String,
     allowed_hosts: Vec<String>,
     rules: Rules,
@@ -291,12 +293,13 @@ impl Drop for AgentNet {
 }
 
 impl AgentNet {
-    /// Step 1: the variant, the proxy socket and its pin. Runs before the
+    /// Step 1: the variant, its baseline filter (with the storage rules when
+    /// `bounded_storage`), the proxy socket and its pin. Runs before the
     /// backend starts.
     ///
     /// # Errors
-    /// A refusal naming the proxy when its rules, socket or pin cannot be
-    /// established.
+    /// A refusal naming the syscall filter or the proxy when the filter, the
+    /// rules, the socket or the pin cannot be established.
     pub fn prepare(
         attempt_id: &str,
         trace: Option<SharedTrace>,
@@ -304,15 +307,15 @@ impl AgentNet {
         handoff: &ProxyDirHandoff,
         jail_exe: &Path,
         bwrap: &Path,
+        bounded_storage: bool,
     ) -> Result<AgentNet, JailError> {
         // §9.2: probe the real nesting sequence and record it; its result
         // picks the baseline, and "unavailable" never refuses `agent`.
         let nested = probe::run_one("nested_user_namespace", jail_exe, bwrap);
         let variant =
             AgentVariant::for_nested_user_namespace(nested.status == ProbeStatus::Available);
-        let baseline_digest = seccomp::agent_baseline(variant)
-            .map_err(|error| refusal("syscall filter", error))?
-            .digest();
+        let baseline = seccomp::agent_baseline_with_storage(variant, bounded_storage)
+            .map_err(|error| refusal("syscall filter", error))?;
         let mediation_digest = unixpeer::filter_digest();
 
         let rules = snapshot
@@ -349,7 +352,7 @@ impl AgentNet {
             trace: trace.clone(),
             variant,
             nested: (nested.status, nested.evidence),
-            baseline_digest,
+            baseline,
             mediation_digest,
             allowed_hosts: snapshot.network.allow.clone(),
             rules,
@@ -899,7 +902,7 @@ impl AgentNet {
         );
         agent.insert(
             "baseline_filter_digest".to_owned(),
-            Value::from(self.baseline_digest.clone()),
+            Value::from(self.baseline.digest()),
         );
         agent.insert(
             "mediation_filter_digest".to_owned(),
@@ -963,10 +966,11 @@ impl AgentNet {
         }
     }
 
-    /// The baseline's digest, for `applied.syscalls`.
+    /// The baseline filter bubblewrap installs: the one whose digest
+    /// [`AgentNet::details`] names.
     #[must_use]
-    pub fn baseline_digest(&self) -> &str {
-        &self.baseline_digest
+    pub fn baseline(&self) -> &super::bpf::Program {
+        &self.baseline
     }
 }
 

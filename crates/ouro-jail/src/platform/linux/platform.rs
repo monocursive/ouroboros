@@ -919,6 +919,7 @@ impl Boundary {
                 handoff,
                 &exe,
                 bwrap_path,
+                bplan.bounded_storage,
             )?;
             bplan.proxy_dir = Some(agent.dir_path().to_path_buf());
             bplan.proxy_dir_fd = Some(super::agent::PROXY_DIR_FD);
@@ -1125,8 +1126,8 @@ impl Boundary {
             view.fd = Some(credential_base + index as RawFd);
         }
 
-        // `agent` loads its own baseline, in the variant the
-        // measured nested-namespace capability selected (§9.2)
+        // A storage ceiling rests on a filter that denies new mounts, which
+        // the `NamespaceInner` agent variant permits.
         if bplan.bounded_storage
             && agent
                 .as_ref()
@@ -1137,18 +1138,18 @@ impl Boundary {
                 "storage ceilings require a profile that cannot create new mounts",
             ));
         }
+        // `agent` installs the baseline its network built once, in the variant
+        // the measured nested-namespace capability selected (§9.2), so the
+        // digest its receipt detail names is the digest of what runs.
         let filter = match agent.as_ref() {
-            Some(agent) => {
-                seccomp::agent_baseline_with_storage(agent.variant(), bplan.bounded_storage)
-            }
-            None => seccomp::tool_baseline_with_storage(bplan.bounded_storage),
-        }
-        .map_err(|err| {
-            preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the syscall filter could not be built: {err}"),
-            )
-        })?;
+            Some(agent) => agent.baseline().clone(),
+            None => seccomp::tool_baseline_with_storage(bplan.bounded_storage).map_err(|err| {
+                preparing(
+                    ErrorCode::BackendUnavailable,
+                    format!("the syscall filter could not be built: {err}"),
+                )
+            })?,
+        };
         let filter_digest = filter.digest();
 
         let target: Vec<OsString> = plan
@@ -5794,6 +5795,62 @@ mod tests {
             super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&moved)).is_err()
         );
     }
+    /// A storage ceiling adds the hard-link denials to the `agent` baseline
+    /// bubblewrap installs. The receipt's agent detail names that program —
+    /// the one `applied.syscalls.digest` names — never the plain baseline,
+    /// which does not run.
+    #[test]
+    fn the_agent_detail_names_the_installed_baseline_with_its_storage_rules() {
+        use super::super::agent::AgentNet;
+        use super::super::seccomp::{AgentVariant, agent_baseline_with_storage};
+        let snapshot = plan_for(ProfileName::Agent, false).snapshot;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        for bounded_storage in [false, true] {
+            let proxy = root.join(format!("proxy-{bounded_storage}"));
+            std::fs::create_dir(&proxy).unwrap();
+            let dir = crate::state::anchored::Dir::open_trusted(&proxy).unwrap();
+            let identity = dir.stat().unwrap().identity();
+            let handoff = crate::platform::ProxyDirHandoff {
+                host_path: proxy,
+                fd: std::sync::Arc::new(dir.into_fd()),
+                identity,
+                socket: std::sync::Arc::new(std::sync::OnceLock::new()),
+            };
+            // A relative backend is never executed, so nesting measures
+            // unavailable and the variant is the unprivileged one.
+            let agent = AgentNet::prepare(
+                "att_00000000-0000-4000-8000-000000000001",
+                None,
+                &snapshot,
+                &handoff,
+                Path::new("/nonexistent/ouro-jail"),
+                Path::new("bwrap"),
+                bounded_storage,
+            )
+            .unwrap();
+            assert_eq!(agent.variant(), AgentVariant::UnprivilegedInner);
+            let installed =
+                agent_baseline_with_storage(AgentVariant::UnprivilegedInner, bounded_storage)
+                    .unwrap();
+            assert_eq!(agent.baseline(), &installed);
+            assert_eq!(
+                agent.details().0["baseline_filter_digest"],
+                installed.digest().as_str(),
+                "storage {bounded_storage}"
+            );
+        }
+        assert_ne!(
+            agent_baseline_with_storage(AgentVariant::UnprivilegedInner, true)
+                .unwrap()
+                .digest(),
+            agent_baseline_with_storage(AgentVariant::UnprivilegedInner, false)
+                .unwrap()
+                .digest(),
+            "the storage rules change the installed program"
+        );
+    }
+
     #[test]
     fn an_abort_is_verified_only_by_every_settlement_fact() {
         use super::{AbortInputs, abort_verdict};
