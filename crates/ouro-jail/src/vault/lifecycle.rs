@@ -140,6 +140,9 @@ pub(super) struct Runtime {
     exchange: Mutex<()>,
     audit: Mutex<Option<(String, Audit)>>,
     early_notes: Mutex<Vec<(u64, &'static str)>>,
+    /// The step the last refusal failed at, when it names one (see
+    /// [`Runtime::failed`]); [`Runtime::source`] puts it in staging's
+    /// refusal.
     last_error: Mutex<Option<&'static str>>,
 }
 impl Runtime {
@@ -171,6 +174,13 @@ impl Runtime {
             ..Self::static_value(Zeroizing::new(Vec::new()))
         };
         result.current().map_err(|_| {
+            // A step that names its failure recorded it: a source read or
+            // update (`source_unavailable`, `source_not_private`, ...) or a
+            // refresh step (`issuer_http_401`, `source_commit_failed`, ...).
+            // `source_refused` is a source read whole whose content is no
+            // credential: an invalid value, a malformed or revoked token
+            // document, or a refresh left pending, which needs
+            // reauthorization.
             format!(
                 "vault source unavailable, invalid, revoked or refresh failed ({})",
                 lock(&result.last_error).unwrap_or("source_refused")
@@ -221,7 +231,7 @@ impl Runtime {
             return Ok((state.value.clone(), state.generation));
         };
         let (raw, mut epoch) = read_vault_source_version(path, forbidden, SOURCE_MAX)
-            .map_err(|_| self.deny(Reason::CredentialRevoked))?;
+            .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
         let value = if let Some(policy) = &self.refresh {
             let doc: Document =
                 serde_json::from_slice(&raw).map_err(|_| self.deny(Reason::CredentialRevoked))?;
@@ -250,13 +260,13 @@ impl Runtime {
                 // source CAS + flock and observe the persisted pending marker.
                 let _guard = lock(&self.exchange);
                 let fresh = read_vault_source(path, forbidden, SOURCE_MAX)
-                    .map_err(|_| self.deny(Reason::CredentialRevoked))?;
+                    .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
                 if fresh.as_slice() != raw.as_slice() {
                     return Err(Reason::CredentialUnavailable);
                 }
                 let value = self.exchange_token(policy, path, forbidden, raw, epoch, doc)?;
                 let (_, current) = read_vault_source_version(path, forbidden, SOURCE_MAX)
-                    .map_err(|_| self.deny(Reason::CredentialRevoked))?;
+                    .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
                 epoch = current;
                 value
             } else {
@@ -352,9 +362,9 @@ impl Runtime {
         doc.refresh_pending = true;
         let pending = encode(doc)?;
         update_vault_source(path, forbidden, raw, identity, &pending)
-            .map_err(|_| self.deny(Reason::CredentialUnavailable))?;
+            .map_err(|code| self.deny(self.failed(code, Reason::CredentialUnavailable)))?;
         let (confirmed, pending_epoch) = read_vault_source_version(path, forbidden, SOURCE_MAX)
-            .map_err(|_| self.deny(Reason::CredentialRevoked))?;
+            .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
         if confirmed.as_slice() != pending.as_slice() || pending_epoch.identity() != identity {
             return Err(self.deny(Reason::CredentialRevoked));
         }
@@ -478,7 +488,8 @@ impl Runtime {
         *lock(&self.last_error) = None;
         Ok(Zeroizing::new(doc.access_token.0.as_bytes().to_vec()))
     }
-    /// Records `label` as the refresh's last error and returns `reason`.
+    /// Records `label` as the step the last refusal failed at, and returns
+    /// `reason`.
     fn failed(&self, label: &'static str, reason: Reason) -> Reason {
         *lock(&self.last_error) = Some(label);
         reason
@@ -878,6 +889,28 @@ mod tests {
         assert!(runtime.current().is_err());
         fs::remove_file(std::ffi::OsStr::from_bytes(&path)).unwrap();
         assert!(runtime.current().is_err());
+    }
+    /// Staging's refusal names why the source was refused, where the
+    /// read says, rather than one catch-all.
+    #[test]
+    fn a_refused_source_names_its_reason() {
+        let refused = |path: Vec<u8>| match Runtime::source(path, vec![], None) {
+            Ok(_) => panic!("the source must be refused"),
+            Err(error) => error,
+        };
+        let (_dir, path) = file(b"key");
+        let source = std::ffi::OsStr::from_bytes(&path);
+        fs::set_permissions(source, fs::Permissions::from_mode(0o640)).unwrap();
+        let error = refused(path.clone());
+        assert!(error.contains("(source_not_private)"), "{error}");
+        fs::remove_file(source).unwrap();
+        let error = refused(path.clone());
+        assert!(error.contains("(source_unavailable)"), "{error}");
+        // Read whole, but no credential: the content has no code of its own.
+        fs::write(source, b"line\nbreak").unwrap();
+        fs::set_permissions(source, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = refused(path);
+        assert!(error.contains("(source_refused)"), "{error}");
     }
     #[cfg(target_os = "linux")]
     #[test]
