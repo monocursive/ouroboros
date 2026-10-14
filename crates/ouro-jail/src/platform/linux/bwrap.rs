@@ -438,7 +438,7 @@ impl Placeholder {
             Err(error) => return PlaceholderOutcome::KeptError(path, errno_of(&error)),
         }
         match entry.names(1) {
-            Ok(names) if names.is_empty() => {}
+            Ok(listing) if listing.names.is_empty() => {}
             Ok(_) => return PlaceholderOutcome::KeptNotEmpty(path),
             Err(error) => return PlaceholderOutcome::KeptError(path, errno_of(&error)),
         }
