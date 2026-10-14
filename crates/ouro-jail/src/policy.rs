@@ -16,7 +16,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use serde::{Deserialize, Serialize};
 
 use crate::canonical;
-use crate::network::{HostRule, NetworkMode};
+use crate::network::{HostRule, HostRuleError, NetworkMode, Rules};
 use crate::records::{
     ErrorCode, ErrorStage, EvidenceMode, JailError, NativeString, ObserveMode, Os, Remediation,
     SCHEMA_NETWORK, SCHEMA_POLICY_SNAPSHOT,
@@ -233,6 +233,26 @@ pub struct NetworkSnapshot {
     pub ruleset: Option<String>,
     /// Canonical IPv6 CIDRs from the host manifest.
     pub translation_prefixes: Vec<String>,
+    /// The typed rules `allow` spells, for the proxy. Not serialized and so
+    /// not digest input: the canonical spelling always writes the port, so it
+    /// cannot say whether a grant named it, and the proxy enforces exactly
+    /// that bit (plaintext HTTP needs an explicit port, audit 2026-10-08
+    /// L21). Two policies that differ only in it share a digest.
+    #[serde(skip)]
+    pub rules: Vec<HostRule>,
+}
+
+impl NetworkSnapshot {
+    /// The rules the `agent` proxy enforces: the typed allow rules, which
+    /// keep whether each grant named its port, and the translation prefixes.
+    /// Re-parsing `allow` would turn every omitted-port grant explicit.
+    ///
+    /// # Errors
+    /// [`HostRuleError::Malformed`] when a translation prefix is not an IPv6
+    /// CIDR.
+    pub fn proxy_rules(&self) -> Result<Rules, HostRuleError> {
+        Rules::new(self.rules.clone(), &self.translation_prefixes)
+    }
 }
 
 /// One ceiling in the snapshot: decimal string plus whether it is required.
@@ -344,8 +364,10 @@ pub struct LaunchSnapshot {
 
 /// The canonical resolved policy snapshot (`ouro.jail.policy-snapshot/1`).
 ///
-/// This is the complete digest input. It carries no provenance, no capability
-/// measurement, no attempt id and no chosen backend (canonicalization.md).
+/// Its serialized form is the complete digest input. It carries no
+/// provenance, no capability measurement, no attempt id and no chosen backend
+/// (canonicalization.md). The one unserialized field,
+/// [`NetworkSnapshot::rules`], says what it cannot.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct PolicySnapshot {
     /// Optional operator argv accident filters.
@@ -1481,7 +1503,7 @@ fn apply_layer(
                 ),
             ));
         }
-        let rules = HostRule::parse(raw).map_err(|error| {
+        let rule = HostRule::parse(raw).map_err(|error| {
             let code = if layer.narrowing {
                 // The subset relationship is unknown, which §6.3 refuses.
                 ErrorCode::PolicyWidening
@@ -1495,27 +1517,30 @@ fn apply_layer(
             };
             refuse(code, &key, format!("{prefix}{error}"))
         })?;
-        for rule in rules {
-            if layer.origin.is_operator_grant() {
-                grants.push(crate::records::Grant {
-                    kind: "allow_host".to_owned(),
-                    value: NativeString::Text(rule.canonical()),
-                    by: "operator".to_owned(),
-                });
-            }
-            if layer.narrowing && !base.network_allow.iter().any(|base| base.covers(&rule)) {
-                return Err(refuse(
-                    ErrorCode::PolicyWidening,
-                    &key,
-                    format!(
-                        "{} adds the host grant `{}`, which no base rule covers",
-                        layer.origin.label(),
-                        rule.canonical()
-                    ),
-                ));
-            }
-            authority.network_allow.push(rule);
+        if layer.origin.is_operator_grant() {
+            grants.push(crate::records::Grant {
+                kind: "allow_host".to_owned(),
+                value: NativeString::Text(rule.canonical()),
+                by: "operator".to_owned(),
+            });
         }
+        if layer.narrowing && !base.network_allow.iter().any(|base| base.covers(&rule)) {
+            return Err(refuse(
+                ErrorCode::PolicyWidening,
+                &key,
+                format!(
+                    "{} adds the host grant `{}`{}, which no base rule covers",
+                    layer.origin.label(),
+                    rule.canonical(),
+                    if rule.explicit_port {
+                        " with an explicit port (which admits plaintext HTTP)"
+                    } else {
+                        ""
+                    }
+                ),
+            ));
+        }
+        authority.network_allow.push(rule);
         provenance.push(ProvenanceEntry {
             origin: layer.origin.label(),
             key,
@@ -1664,6 +1689,11 @@ fn build_snapshot(
             ruleset: proxy.then(|| SCHEMA_NETWORK.to_owned()),
             translation_prefixes: if proxy {
                 inputs.translation_prefixes.clone()
+            } else {
+                Vec::new()
+            },
+            rules: if proxy {
+                authority.network_allow.clone()
             } else {
                 Vec::new()
             },

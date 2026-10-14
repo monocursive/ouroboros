@@ -834,6 +834,125 @@ fn n03_plaintext_http_requires_a_grant_that_named_its_port() {
     harness.stop(WAIT);
 }
 
+/// L21 through resolution: the `agent` proxy enforces the typed rules the
+/// resolver produced, not a re-parse of the snapshot's canonical strings,
+/// which always write the port. A host-only grant, from the command line or
+/// from a launch profile, refuses plaintext HTTP to port 443 before
+/// resolving and still lets CONNECT past the host rule; an explicit `:443`
+/// grant passes both. (Past the host rule the loopback answer is a
+/// forbidden address, which proves the rule let the request through.)
+#[test]
+fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
+    use ouro_jail::launch_profile;
+    use ouro_jail::policy::{
+        Layer, LayerOrigin, PolicyDelta, ProfileName, ResolveInputs, ScratchRoot,
+    };
+    use ouro_jail::records::Os;
+
+    let resolve = |layer: Layer| -> Rules {
+        let inputs = ResolveInputs {
+            platform: Os::Linux,
+            base_profile: ProfileName::Agent,
+            policy_name: "agent".to_owned(),
+            baseline: ouro_jail::profiles::baseline(ProfileName::Agent, Os::Linux, &|_| None),
+            workspace: b"/work".to_vec(),
+            scratch: ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: None,
+            translation_prefixes: Vec::new(),
+            layers: vec![layer],
+        };
+        let snapshot = ouro_jail::policy::resolve(&inputs)
+            .expect("the policy resolves")
+            .snapshot;
+        assert_eq!(snapshot.network.allow, ["fixture.test:443"]);
+        snapshot.network.proxy_rules().expect("the rules build")
+    };
+    let cli = |grant: &str| Layer {
+        origin: LayerOrigin::CommandLine,
+        base_dir: None,
+        key_prefix: String::new(),
+        narrowing: false,
+        delta: PolicyDelta {
+            network_allow: vec![grant.to_owned()],
+            ..PolicyDelta::default()
+        },
+    };
+    let profile = launch_profile::parse(
+        "name = \"demo\"\njail = \"agent\"\n[network]\nallow = [\"fixture.test\"]\n",
+        "demo",
+        b"/operator/config/launch",
+        None,
+    )
+    .expect("the launch profile parses");
+    let launch = launch_profile::network_layer(&profile).expect("a network layer");
+
+    for (label, rules, plaintext) in [
+        (
+            "--allow-host fixture.test",
+            resolve(cli("fixture.test")),
+            false,
+        ),
+        ("launch allow fixture.test", resolve(launch), false),
+        (
+            "--allow-host fixture.test:443",
+            resolve(cli("fixture.test:443")),
+            true,
+        ),
+    ] {
+        let resolver = fixtures("fixture.test", &["127.0.0.1"]);
+        let dir = tempfile::tempdir().expect("a private temporary directory");
+        let path = dir.path().join("proxy.sock");
+        let sink = Arc::new(Sink::default());
+        let handle = proxy::start(
+            ProxyConfig {
+                listener: UnixListener::bind(&path).expect("binds the proxy socket"),
+                rules,
+                budgets: Budgets::default(),
+                resolver: Arc::clone(&resolver) as Arc<dyn Resolver + Send + Sync>,
+            },
+            Arc::clone(&sink) as Arc<dyn ProxySink>,
+        )
+        .expect("the proxy starts");
+        let harness = Harness {
+            _dir: dir,
+            path,
+            handle,
+            sink,
+        };
+        let plain = refused(
+            &harness,
+            "GET http://fixture.test:443/ HTTP/1.1\r\nHost: fixture.test:443\r\n\r\n",
+        );
+        if plaintext {
+            assert_eq!(
+                (plain.0, plain.1.as_str()),
+                (403, "forbidden_address"),
+                "{label}"
+            );
+            assert_eq!(resolver.calls("fixture.test"), 1, "{label}");
+        } else {
+            assert_eq!(
+                (plain.0, plain.1.as_str()),
+                (403, "host_not_allowed"),
+                "{label}"
+            );
+            assert_eq!(
+                resolver.calls("fixture.test"),
+                0,
+                "{label}: refused before resolution"
+            );
+        }
+        let tunnel = refused(&harness, &connect_request("fixture.test:443"));
+        assert_eq!(
+            (tunnel.0, tunnel.1.as_str()),
+            (403, "forbidden_address"),
+            "{label}: CONNECT passes the host rule"
+        );
+        harness.stop(WAIT);
+    }
+}
+
 #[test]
 fn n03_numeric_requests_need_an_exact_grant_and_are_never_resolved() {
     let (listener, port) = loopback();

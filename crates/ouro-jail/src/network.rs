@@ -31,7 +31,7 @@ pub use address::{
 pub use idna::IdnaError;
 
 /// The ruleset identifier the snapshot records for proxy policies.
-pub const RULESET: &str = "ouro.jail.network/1";
+pub const RULESET: &str = crate::records::SCHEMA_NETWORK;
 
 /// The Unicode version of the IDNA tables.
 pub const IDNA_UNICODE_VERSION: &str = unicode::UNICODE_VERSION;
@@ -294,16 +294,19 @@ pub enum HostPattern {
     Address(IpAddr),
 }
 
-/// One canonical allow rule: a host pattern and an explicit port.
+/// One allow rule: a host pattern, a destination port, and whether the grant
+/// named that port.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct HostRule {
     /// The host pattern.
     pub pattern: HostPattern,
-    /// The explicit destination port.
+    /// The destination port.
     pub port: u16,
     /// Whether the grant named the port itself, rather than the §10
     /// omitted-port expansion to 443. Plaintext HTTP requires an explicit
-    /// port (audit 2026-10-08 L21): an omitted port is the TLS shape.
+    /// port (audit 2026-10-08 L21): an omitted port is the TLS shape. The
+    /// canonical spelling always writes the port, so this bit survives only
+    /// in the typed rule, never in [`HostRule::canonical`].
     pub explicit_port: bool,
 }
 
@@ -315,13 +318,13 @@ impl HostRule {
     /// Parses one `HOST[:PORT]` rule (`[IPV6][:PORT]`, or a bare IPv6 address
     /// without a port).
     ///
-    /// An omitted port means port 443; other ports require explicit entries
-    /// (§10). The result is sorted so that a rule set has one canonical order.
+    /// An omitted port means port 443 and leaves [`HostRule::explicit_port`]
+    /// false; other ports require explicit entries (§10).
     ///
     /// # Errors
     /// Returns [`HostRuleError`] for any rule `ouro.jail.network/1` cannot
     /// normalize, including the unspecified address, which is no destination.
-    pub fn parse(raw: &str) -> Result<Vec<HostRule>, HostRuleError> {
+    pub fn parse(raw: &str) -> Result<HostRule, HostRuleError> {
         if raw.is_empty() {
             return Err(HostRuleError::Malformed("the rule is empty"));
         }
@@ -373,23 +376,17 @@ impl HostRule {
                 "the unspecified address is not a destination",
             ));
         }
-        Ok(match port {
-            Some(port) => vec![HostRule {
-                pattern,
-                port,
-                explicit_port: true,
-            }],
-            None => vec![HostRule {
-                pattern,
-                port: 443,
-                explicit_port: false,
-            }],
+        Ok(HostRule {
+            pattern,
+            port: port.unwrap_or(443),
+            explicit_port: port.is_some(),
         })
     }
 
     /// The canonical `host:port` spelling recorded in the snapshot: lowercase
     /// ASCII names, `*.` for a wildcard, IPv4 dotted quad, IPv6 RFC 5952 form
-    /// in brackets, and always an explicit decimal port.
+    /// in brackets, and always an explicit decimal port. Parsing it back
+    /// therefore yields an explicit-port rule whatever the grant said.
     #[must_use]
     pub fn canonical(&self) -> String {
         match &self.pattern {
@@ -407,10 +404,12 @@ impl HostRule {
     /// apex and never a different domain that merely shares a string suffix
     /// (§6.3: "A host wildcard is a set of DNS labels, not an arbitrary string
     /// suffix"). An address rule covers only the same address; no name rule
-    /// covers an address and no address rule covers a name.
+    /// covers an address and no address rule covers a name. An omitted-port
+    /// rule never covers an explicit one: the explicit rule also admits
+    /// plaintext HTTP, which the omitted-port expansion does not (L21).
     #[must_use]
     pub fn covers(&self, other: &HostRule) -> bool {
-        if self.port != other.port {
+        if self.port != other.port || (other.explicit_port && !self.explicit_port) {
             return false;
         }
         match (&self.pattern, &other.pattern) {
@@ -497,7 +496,13 @@ impl Rules {
         Ok(Rules { allow, translation })
     }
 
-    /// Builds rules from the snapshot's `network.allow` strings.
+    /// Builds rules from grant spellings, as an operator writes them.
+    ///
+    /// Not for the snapshot's canonical `network.allow`: a canonical rule
+    /// always writes its port, so every omitted-port grant would come back
+    /// explicit and admit plaintext HTTP (L21). The resolved snapshot hands
+    /// the proxy its typed rules instead
+    /// ([`crate::policy::NetworkSnapshot::proxy_rules`]).
     ///
     /// # Errors
     /// Returns [`HostRuleError`] for any entry that does not parse.
@@ -505,10 +510,10 @@ impl Rules {
         allow: &[String],
         translation_prefixes: &[String],
     ) -> Result<Rules, HostRuleError> {
-        let mut rules = Vec::new();
-        for entry in allow {
-            rules.extend(HostRule::parse(entry)?);
-        }
+        let rules = allow
+            .iter()
+            .map(|entry| HostRule::parse(entry))
+            .collect::<Result<Vec<_>, _>>()?;
         Rules::new(rules, translation_prefixes)
     }
 
@@ -602,16 +607,28 @@ mod tests {
     use super::*;
 
     fn rule(raw: &str) -> HostRule {
-        let mut rules = HostRule::parse(raw).expect("parses");
-        assert_eq!(rules.len(), 1, "expected one rule for {raw}");
-        rules.remove(0)
+        HostRule::parse(raw).expect("parses")
     }
 
     #[test]
     fn an_omitted_port_allows_only_tls_port() {
-        let rules = HostRule::parse("example.com").expect("parses");
-        let canonical: Vec<String> = rules.iter().map(HostRule::canonical).collect();
-        assert_eq!(canonical, vec!["example.com:443"]);
+        let omitted = rule("example.com");
+        assert_eq!(omitted.canonical(), "example.com:443");
+        assert!(!omitted.explicit_port);
+        assert!(rule("example.com:443").explicit_port);
+    }
+
+    /// L21: an omitted-port grant is the TLS shape, so it cannot cover an
+    /// explicit grant of the same port, which also admits plaintext HTTP.
+    /// The other direction narrows and is covered.
+    #[test]
+    fn an_omitted_port_never_covers_an_explicit_one() {
+        assert!(!rule("example.com").covers(&rule("example.com:443")));
+        assert!(rule("example.com:443").covers(&rule("example.com")));
+        assert!(rule("example.com").covers(&rule("example.com")));
+        assert!(!rule("*.example.com").covers(&rule("a.example.com:443")));
+        assert!(rule("*.example.com:443").covers(&rule("a.example.com")));
+        assert!(!rule("[2001:db8::1]").covers(&rule("[2001:db8::1]:443")));
     }
 
     #[test]
@@ -645,12 +662,7 @@ mod tests {
             "127.0.0.1:8080"
         );
         assert_eq!(rule("[2001:DB8::1]:443").canonical(), "[2001:db8::1]:443");
-        let bare: Vec<String> = HostRule::parse("2001:db8::1")
-            .expect("parses")
-            .iter()
-            .map(HostRule::canonical)
-            .collect();
-        assert_eq!(bare, vec!["[2001:db8::1]:443"]);
+        assert_eq!(rule("2001:db8::1").canonical(), "[2001:db8::1]:443");
     }
 
     #[test]

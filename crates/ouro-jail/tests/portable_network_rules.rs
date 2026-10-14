@@ -175,9 +175,8 @@ fn n03_mapped_ipv6_normalizes_before_classification_and_grants() {
     assert_eq!(
         HostRule::parse("[::ffff:127.0.0.1]:8080")
             .expect("parses")
-            .first()
-            .map(HostRule::canonical),
-        Some("127.0.0.1:8080".to_owned())
+            .canonical(),
+        "127.0.0.1:8080"
     );
     // A mapped resolver answer meets the IPv4 grant after normalization.
     assert_eq!(
@@ -368,16 +367,20 @@ fn n03_wildcards_match_labels_beneath_never_the_apex() {
 fn n03_idna_names_narrow_like_their_a_labels() {
     // Policy comparison and the proxy use this one normalization, so a
     // U-label narrowing a wildcard is compared by its A-label (§6.3).
-    let base = &HostRule::parse("*.example.com:443").expect("parses")[0];
-    let narrowed = &HostRule::parse("BÜCHER.Example.COM:443").expect("parses")[0];
+    let base = &HostRule::parse("*.example.com:443").expect("parses");
+    let narrowed = &HostRule::parse("BÜCHER.Example.COM:443").expect("parses");
     assert_eq!(narrowed.canonical(), "xn--bcher-kva.example.com:443");
     assert!(base.covers(narrowed));
-    let other = &HostRule::parse("bücher.example.net:443").expect("parses")[0];
+    let other = &HostRule::parse("bücher.example.net:443").expect("parses");
     assert!(!base.covers(other));
     // An address rule is covered only by the same address rule.
-    let address = &HostRule::parse("[::ffff:127.0.0.1]:443").expect("parses")[0];
+    let address = &HostRule::parse("[::ffff:127.0.0.1]:443").expect("parses");
     assert!(!base.covers(address));
-    assert!(HostRule::parse("127.0.0.1:443").expect("parses")[0].covers(address));
+    assert!(
+        HostRule::parse("127.0.0.1:443")
+            .expect("parses")
+            .covers(address)
+    );
 }
 
 #[test]
@@ -401,8 +404,7 @@ fn n03_omitted_ports_mean_443_and_nondefault_ports_are_exact() {
 #[test]
 fn n03_network_rules_md_idna_examples() {
     let canonical = |raw: &str| -> Result<String, HostRuleError> {
-        HostRule::parse(&format!("{raw}:443"))
-            .map(|rules| rules.first().map(HostRule::canonical).unwrap_or_default())
+        HostRule::parse(&format!("{raw}:443")).map(|rule| rule.canonical())
     };
     assert_eq!(
         canonical("BÜCHER.example.").as_deref(),
@@ -658,13 +660,7 @@ fn n03_request_authorities_refuse_userinfo_escapes_zones_and_unbracketed_ipv6() 
 
 #[test]
 fn n03_canonical_ipv6_rules_use_rfc_5952() {
-    let canonical = |raw: &str| {
-        HostRule::parse(raw)
-            .expect("parses")
-            .first()
-            .map(HostRule::canonical)
-            .unwrap_or_default()
-    };
+    let canonical = |raw: &str| HostRule::parse(raw).expect("parses").canonical();
     assert_eq!(
         canonical("[2001:0DB8:0:0:1:0:0:1]:443"),
         "[2001:db8::1:0:0:1]:443"

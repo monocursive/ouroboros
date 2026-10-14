@@ -315,11 +315,10 @@ impl AgentNet {
             .digest();
         let mediation_digest = unixpeer::filter_digest();
 
-        let rules = Rules::from_strings(
-            &snapshot.network.allow,
-            &snapshot.network.translation_prefixes,
-        )
-        .map_err(|error| refusal("proxy", format!("its rules do not parse: {error}")))?;
+        let rules = snapshot
+            .network
+            .proxy_rules()
+            .map_err(|error| refusal("proxy", format!("its rules do not parse: {error}")))?;
 
         let dir = Arc::clone(&handoff.fd);
         let stat = crate::state::anchored::fstat(dir.as_fd())

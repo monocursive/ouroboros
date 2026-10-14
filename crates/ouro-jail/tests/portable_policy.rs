@@ -146,7 +146,7 @@ fn project_host_narrowing_replaces_the_base_set_including_empty() {
             .resolve_project(
                 ProfileName::Agent,
                 |base| {
-                    base.network_allow = HostRule::parse("*.example.com:443").unwrap();
+                    base.network_allow = vec![HostRule::parse("*.example.com:443").unwrap()];
                 },
                 PolicyDelta {
                     network_allow: allow.clone(),
@@ -161,12 +161,61 @@ fn project_host_narrowing_replaces_the_base_set_including_empty() {
         .resolve_project(
             ProfileName::Agent,
             |base| {
-                base.network_allow = HostRule::parse("*.example.com:443").unwrap();
+                base.network_allow = vec![HostRule::parse("*.example.com:443").unwrap()];
             },
             PolicyDelta::default(),
         )
         .unwrap();
     assert_eq!(resolved.snapshot.network.allow, vec!["*.example.com:443"]);
+}
+
+/// L21: a project file may narrow an explicit-port grant to the TLS shape,
+/// but not the reverse. `api.example.com:443` admits plaintext HTTP to port
+/// 443 and the omitted-port base `api.example.com` does not, so naming the
+/// port widens even though both spell `api.example.com:443` canonically.
+/// The typed rules keep the difference all the way to the proxy.
+#[test]
+fn project_host_narrowing_cannot_name_a_port_the_base_omitted() {
+    let workspace = Workspace::new();
+    let narrow = |base: &str, allow: &str| {
+        let base = HostRule::parse(base).unwrap();
+        workspace.resolve_project(
+            ProfileName::Agent,
+            |baseline| baseline.network_allow = vec![base],
+            PolicyDelta {
+                network_allow: vec![allow.to_owned()],
+                network_allow_present: true,
+                ..PolicyDelta::default()
+            },
+        )
+    };
+    expect_widening(
+        narrow("api.example.com", "api.example.com:443"),
+        "jail.network.allow",
+    );
+    expect_widening(
+        narrow("*.example.com", "api.example.com:443"),
+        "jail.network.allow",
+    );
+    for (base, allow, explicit) in [
+        ("api.example.com:443", "api.example.com", false),
+        ("api.example.com:443", "api.example.com:443", true),
+        ("api.example.com", "api.example.com", false),
+    ] {
+        let resolved = narrow(base, allow).expect("narrows");
+        assert_eq!(resolved.snapshot.network.allow, ["api.example.com:443"]);
+        assert_eq!(
+            resolved
+                .snapshot
+                .network
+                .rules
+                .iter()
+                .map(|rule| rule.explicit_port)
+                .collect::<Vec<_>>(),
+            [explicit],
+            "{base} narrowed by {allow}"
+        );
+    }
 }
 
 fn read_only(paths: &[&str]) -> PolicyDelta {
@@ -464,7 +513,7 @@ fn p02_path_prefix_confusion_refuses() {
 fn p02_adding_a_host_grant_refuses_and_wildcards_are_label_sets() {
     let workspace = Workspace::new();
     let agent_base = |baseline: &mut ProfileBaseline| {
-        baseline.network_allow = HostRule::parse("*.example.com:443").expect("parses");
+        baseline.network_allow = vec![HostRule::parse("*.example.com:443").expect("parses")];
     };
     for host in ["notexample.com:443", "example.com:443", "other.net:443"] {
         expect_widening(
@@ -504,7 +553,8 @@ fn p02_a_host_the_ruleset_cannot_normalize_refuses_as_an_unknown_subset() {
         .resolve_project(
             ProfileName::Agent,
             |baseline| {
-                baseline.network_allow = HostRule::parse("*.example.com:443").expect("parses");
+                baseline.network_allow =
+                    vec![HostRule::parse("*.example.com:443").expect("parses")];
             },
             PolicyDelta {
                 // IDNA now maps `bücher`; a malformed A-label is
@@ -830,7 +880,8 @@ fn p02_every_narrowing_category_is_allowed() {
         .resolve_project(
             ProfileName::Agent,
             |baseline| {
-                baseline.network_allow = HostRule::parse("*.example.com:443").expect("parses");
+                baseline.network_allow =
+                    vec![HostRule::parse("*.example.com:443").expect("parses")];
             },
             PolicyDelta {
                 network_mode: Some(NetworkMode::None),
