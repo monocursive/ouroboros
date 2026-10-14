@@ -4157,8 +4157,35 @@ Unrelated prose.
         assert!(missing.is_empty(), "{missing:#?}");
     }
 
-    /// Find `fn <name>(` in the file the id names (integration tests) or in
-    /// the module file its path names (unit tests).
+    /// Whether `text` defines `fn <name>(` as a test: a `#[test]` among the
+    /// attributes and doc lines right above it. A helper of the same name
+    /// is not the test the map cites.
+    fn defines_test(text: &str, name: &str) -> bool {
+        let needle = format!("fn {name}(");
+        let lines: Vec<&str> = text.lines().collect();
+        lines.iter().enumerate().any(|(at, line)| {
+            line.trim_start().starts_with(&needle)
+                && lines[..at]
+                    .iter()
+                    .rev()
+                    .map(|l| l.trim())
+                    // The item above ends the attribute block.
+                    .take_while(|l| !l.ends_with('}') && !l.ends_with(';') && !l.ends_with('{'))
+                    .any(|l| l == "#[test]")
+        })
+    }
+
+    #[test]
+    fn a_cited_test_must_be_a_test() {
+        let text = "fn helper() {}\n\n/// Doc.\n#[test]\n#[should_panic(\n    expected = \"x\"\n)]\nfn real() {}\n";
+        assert!(defines_test(text, "real"));
+        assert!(!defines_test(text, "helper"));
+        assert!(!defines_test("#[test]\nfn a() {}\nfn b() {}\n", "b"));
+        assert!(!defines_test(text, "absent"));
+    }
+
+    /// Find `#[test] fn <name>(` in the file the id names (integration
+    /// tests) or in the module file its path names (unit tests).
     fn test_exists(root: &std::path::Path, id: &str) -> bool {
         let Some((binary, name)) = id.split_once("::") else {
             return false;
@@ -4175,10 +4202,9 @@ Unrelated prose.
         }
         let segments: Vec<&str> = name.split("::").collect();
         let (fn_name, modules) = segments.split_last().unwrap();
-        let needle = format!("fn {fn_name}(");
         let read = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap_or_default();
         if source.starts_with("tests/") || source.starts_with("src/bin/") {
-            return read(crate_dir.join(source)).contains(&needle);
+            return defines_test(&read(crate_dir.join(source)), fn_name);
         }
         // A unit test: the longest module path prefix that names a file.
         let src = crate_dir.join("src");
@@ -4194,7 +4220,7 @@ Unrelated prose.
             };
             for file in candidates {
                 if file.is_file() {
-                    return read(file).contains(&needle);
+                    return defines_test(&read(file), fn_name);
                 }
             }
         }

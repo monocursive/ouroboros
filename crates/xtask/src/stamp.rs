@@ -1,29 +1,21 @@
-//! A UTC stamp without a date crate.
+//! UTC stamps for run directories and reports.
 //!
-//! The J1 dependency policy bans `chrono` and `time`, and the driver needs one
-//! sortable directory name per run. Days-to-civil is Howard Hinnant's
-//! algorithm, which is exact for the proleptic Gregorian calendar.
+//! The dependency policy bans a date crate; the records crate already
+//! formats RFC 3339 from Unix seconds (`rfc3339_utc_from_unix`), and the
+//! sortable directory stamp is that text without its separators.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `YYYYmmddTHHMMSSZ` for a Unix timestamp in seconds.
 #[must_use]
 pub fn utc_stamp_from_unix(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    format!("{y:04}{m:02}{d:02}T{hh:02}{mm:02}{ss:02}Z")
+    rfc3339_from_unix(secs).replace(['-', ':'], "")
 }
 
 /// `YYYY-mm-ddTHH:MM:SSZ`, the RFC 3339 form, for report text.
 #[must_use]
 pub fn rfc3339_from_unix(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+    ouro_jail::records::rfc3339_utc_from_unix(secs)
 }
 
 /// The current UTC stamp.
@@ -39,19 +31,6 @@ pub fn unix_now() -> i64 {
         Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
         Err(e) => -i64::try_from(e.duration().as_secs()).unwrap_or(i64::MAX),
     }
-}
-
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 #[cfg(test)]

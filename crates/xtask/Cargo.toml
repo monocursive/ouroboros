@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Repository tasks for ouro-jail: the I02 vendor-name scan and the conformance driver."
+description = "Repository tasks: the I02 scan, the conformance driver and gate verdict, the freeze file and the performance harness."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -13,8 +13,8 @@ workspace = true
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# J5-D: the freeze file hashes Cargo.lock and the evidence tables, and pins
-# the jail's own renderings of its baselines and backend plans.
+# The freeze file hashes Cargo.lock and the evidence tables, and pins the
+# jail's own renderings of its baselines and backend plans.
 sha2 = "0.10.9"
 ouro-jail = { path = "../ouro-jail" }
 # `perf` reads the fixture's perf-launch result through the type that writes
@@ -23,5 +23,5 @@ ouro-fixture = { path = "../ouro-fixture" }
 toml = "0.8"
 
 [dev-dependencies]
-# J5-D: the freeze tests build throwaway trees and repositories.
+# Tests build throwaway trees and repositories.
 tempfile = "3.27.0"

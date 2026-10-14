@@ -27,9 +27,13 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::proc::git_bytes;
+use crate::util::{sha256_hex, toml_string as quote};
 
 // The build-input digest rule `build.rs` applies, so a tested binary's
-// `inputs` can be recomputed from the tree and from a commit.
+// `inputs` can be recomputed from the tree and from a commit. The jail
+// compiles this file into its build script and its binary, not its library,
+// so it is included by path; the parts this crate does not call are unused
+// here.
 #[allow(dead_code)]
 #[path = "../../ouro-jail/src/build_provenance.rs"]
 mod build_provenance;
@@ -75,36 +79,15 @@ const EVIDENCE: &str = "docs/specs/jail-v1/evidence";
 const LAUNCH_DIR: &str = "crates/ouro-jail/profiles/launch";
 const FROZEN_SCHEMAS: &str = "docs/specs/jail-v1/frozen-schemas.toml";
 
-/// The Rust constants that are the contained mount baselines, by freeze
-/// key: `(key, source file, constant name)`.
-const MOUNT_CONSTANTS: [(&str, &str, &str); 4] = [
-    (
-        "linux_runtime_roots",
-        "crates/ouro-jail/src/profiles.rs",
-        "LINUX_RUNTIME_ROOTS",
-    ),
-    (
-        "protected_segments",
-        "crates/ouro-jail/src/profiles.rs",
-        "PROTECTED_SEGMENTS",
-    ),
-    (
-        "backend_runtime_roots",
-        "crates/ouro-jail/src/platform/linux/bwrap.rs",
-        "RUNTIME_ROOTS",
-    ),
-    (
-        "backend_etc_paths",
-        "crates/ouro-jail/src/platform/linux/bwrap.rs",
-        "ETC_PATHS",
-    ),
-];
+/// Where the backend's mount constants are written, for the freeze file's
+/// comments and, off Linux, for reading them (see [`backend_list`]).
+const BWRAP_SOURCE: &str = "crates/ouro-jail/src/platform/linux/bwrap.rs";
+/// The comment that opens the manifests' section, after the backend plans.
+const MANIFESTS_HEADING: &str = "\n# Every Cargo manifest's";
 
 fn read(root: &Path, relative: &str) -> Result<String, String> {
     std::fs::read_to_string(root.join(relative)).map_err(|error| format!("{relative}: {error}"))
 }
-
-use crate::util::{sha256_hex, toml_string as quote};
 
 fn quote_list(items: &[String]) -> String {
     let quoted: Vec<String> = items.iter().map(|item| quote(item)).collect();
@@ -130,6 +113,7 @@ pub fn nth_digest(table: &str, n: usize) -> Option<String> {
 /// The string literals of a `const NAME: ... = [ ... ];` (or `&[ ... ]`) in
 /// Rust source. The constants the freeze pins are flat lists of plain
 /// string literals; anything else is an error, not a guess.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn const_string_list(source: &str, name: &str) -> Result<Vec<String>, String> {
     let marker = format!("const {name}:");
     let start = source
@@ -339,9 +323,34 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
         "\n# The contained mount baselines: what every contained profile mounts"
     );
     let _ = writeln!(w, "[mounts]");
-    for (key, file, name) in MOUNT_CONSTANTS {
-        let values = const_string_list(&read(root, file)?, name)
-            .map_err(|error| format!("{file}: {error}"))?;
+    let owned = |list: &[&str]| list.iter().map(|item| (*item).to_owned()).collect();
+    let mounts: [(&str, &str, &str, Vec<String>); 4] = [
+        (
+            "linux_runtime_roots",
+            "crates/ouro-jail/src/profiles.rs",
+            "LINUX_RUNTIME_ROOTS",
+            owned(ouro_jail::profiles::LINUX_RUNTIME_ROOTS),
+        ),
+        (
+            "protected_segments",
+            "crates/ouro-jail/src/profiles.rs",
+            "PROTECTED_SEGMENTS",
+            owned(ouro_jail::profiles::PROTECTED_SEGMENTS),
+        ),
+        (
+            "backend_runtime_roots",
+            BWRAP_SOURCE,
+            "RUNTIME_ROOTS",
+            backend_list(root, "RUNTIME_ROOTS")?,
+        ),
+        (
+            "backend_etc_paths",
+            BWRAP_SOURCE,
+            "ETC_PATHS",
+            backend_list(root, "ETC_PATHS")?,
+        ),
+    ];
+    for (key, file, name, values) in mounts {
         let _ = writeln!(w, "# {file} {name}");
         let _ = writeln!(w, "{key} = {}", quote_list(&values));
     }
@@ -480,7 +489,7 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
     // Every manifest's profiles, dependency selections and features (F14).
     let _ = writeln!(
         w,
-        "\n# Every Cargo manifest's [profile.*], dependency tables (versions, features,\n\
+        "{MANIFESTS_HEADING} [profile.*], dependency tables (versions, features,\n\
          # default-features) and [features], as canonical JSON"
     );
     for file in manifests(root)? {
@@ -521,6 +530,29 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
     }
 
     Ok(out)
+}
+
+/// One of the backend's mount constants (`RUNTIME_ROOTS`, `ETC_PATHS`). They
+/// exist only where the backend does: on Linux they are read as the values
+/// they are; elsewhere they are read from the source, and anything but a
+/// flat list of string literals is an error (a Linux test checks that this
+/// reading is the constants').
+fn backend_list(root: &Path, name: &str) -> Result<Vec<String>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use ouro_jail::platform::linux::bwrap::{ETC_PATHS, RUNTIME_ROOTS};
+        let _ = root;
+        match name {
+            "RUNTIME_ROOTS" => Ok(RUNTIME_ROOTS.iter().map(|p| (*p).to_owned()).collect()),
+            "ETC_PATHS" => Ok(ETC_PATHS.iter().map(|p| (*p).to_owned()).collect()),
+            other => Err(format!("{BWRAP_SOURCE} has no mount constant {other}")),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        const_string_list(&read(root, BWRAP_SOURCE)?, name)
+            .map_err(|error| format!("{BWRAP_SOURCE}: {error}"))
+    }
 }
 
 /// A TOML multi-line literal string, for a multi-line rendering whose
@@ -608,6 +640,7 @@ fn backend_plan_section(root: &Path) -> Result<String, String> {
     let mut out = String::new();
     #[cfg(target_os = "linux")]
     {
+        let _ = root;
         let plans = ouro_jail::platform::linux::freeze::backend_plans()?;
         for (profile, argv) in plans {
             let _ = writeln!(out, "\n[[backend_plan]]");
@@ -623,7 +656,7 @@ fn backend_plan_section(root: &Path) -> Result<String, String> {
     {
         let existing = std::fs::read_to_string(root.join(FREEZE_PATH)).unwrap_or_default();
         let start = existing.find("\n[[backend_plan]]");
-        let end = existing.find("\n# Every Cargo manifest's");
+        let end = existing.find(MANIFESTS_HEADING);
         match (start, end) {
             (Some(start), Some(end)) if start < end => out.push_str(&existing[start..end]),
             _ => {
@@ -635,7 +668,6 @@ fn backend_plan_section(root: &Path) -> Result<String, String> {
             }
         }
     }
-    let _ = root;
     Ok(out)
 }
 
@@ -1292,6 +1324,21 @@ mod tests {
         assert!(const_string_list(source, "C").is_err(), "empty");
         assert!(const_string_list(source, "D").is_err(), "not a literal");
         assert!(const_string_list(source, "E").is_err(), "absent");
+    }
+
+    /// Off Linux the backend's lists are read from the source: that reading
+    /// must be exactly the constants the Linux build uses.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_backend_lists_read_from_source_are_the_constants() {
+        let source = read(&repo_root(), BWRAP_SOURCE).unwrap();
+        for name in ["RUNTIME_ROOTS", "ETC_PATHS"] {
+            assert_eq!(
+                const_string_list(&source, name).unwrap(),
+                backend_list(&repo_root(), name).unwrap(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

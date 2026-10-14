@@ -2593,7 +2593,7 @@ mod tests {
         }
     }
 
-    const GOOD_DOCTOR: &str = r#"{"capabilities":[{"name":"bwrap_present","status":"available"}],"build":{"revision":"0123456789abcdef0123456789abcdef01234567","dirty":false,"opt_level":"3","debug_assertions":false}}"#;
+    const GOOD_DOCTOR: &str = r#"{"capabilities":[{"name":"bwrap_present","status":"available","scope":"host","mechanism":null,"reason_code":null,"measured_at":null,"evidence_ref":null}],"build":{"revision":"0123456789abcdef0123456789abcdef01234567","dirty":false,"opt_level":"3","debug_assertions":false}}"#;
     /// A suite log that satisfies [`MINI_MAP`]: the PATH line, then one
     /// library binary and the one mapped test.
     const GOOD_LOG: &str = "\
