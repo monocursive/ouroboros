@@ -1091,7 +1091,10 @@ fn an_operator_file_tilde_path_is_the_home_or_refuses() {
     let profile = ouro_jail::launch_profile::parse(
         "name = \"demo\"\njail = \"agent\"\n[filesystem]\nread_only = [\"~/tools\"]\n",
         "demo",
-        b"/operator/config/launch",
+        ouro_jail::launch_profile::LaunchSource::OperatorFile {
+            path: std::path::PathBuf::from("/operator/config/launch/demo.toml"),
+            chain: Vec::new(),
+        },
         Some(b"/home/op"),
     )
     .expect("parses");

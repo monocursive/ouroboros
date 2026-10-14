@@ -207,13 +207,53 @@ struct LaunchNetwork {
     allow: Vec<String>,
 }
 
+/// Where a launch profile's text came from.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum LaunchSource {
+    /// Embedded starter data, used when no operator file of that name exists.
+    /// It has no directory of its own, so a relative path in it refuses.
+    Bundled,
+    /// `<config-dir>/launch/<name>.toml`, reached by [`load`]'s no-follow
+    /// walk.
+    OperatorFile {
+        /// The canonical path of the file, for diagnostics, the lexical
+        /// check and resolving its relative paths.
+        path: PathBuf,
+        /// The identities of every directory from `/` to the file, then the
+        /// file itself, for [`check_outside_writable`].
+        chain: Vec<(u64, u64)>,
+    },
+}
+
+impl LaunchSource {
+    /// The spelling provenance and `doctor` record: `bundled` or
+    /// `operator file`.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LaunchSource::Bundled => "bundled",
+            LaunchSource::OperatorFile { .. } => "operator file",
+        }
+    }
+
+    /// The directory a relative path in the profile resolves against: the
+    /// file's own directory, or none for bundled data.
+    #[must_use]
+    pub fn directory(&self) -> Option<&Path> {
+        match self {
+            LaunchSource::Bundled => None,
+            LaunchSource::OperatorFile { path, .. } => path.parent(),
+        }
+    }
+}
+
 /// One resolved launch profile.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LaunchProfile {
     /// The profile name, equal to the file stem.
     pub name: String,
-    /// Embedded data or an explicitly loaded operator file.
-    pub resolution: String,
+    /// Embedded data or an operator file, with its identity chain.
+    pub source: LaunchSource,
     /// Data-only fragments included in this profile.
     pub bundles: Vec<String>,
     /// Explicit filesystem additions from the profile and fragments.
@@ -232,10 +272,6 @@ pub struct LaunchProfile {
     pub credentials: Vec<CredentialDecl>,
     /// Raw `network.allow` rules, parsed by the policy layer.
     pub network_allow: Vec<String>,
-    /// The identities of every directory from `/` to the file, then the file.
-    pub file_chain: Vec<(u64, u64)>,
-    /// The canonical path of the file, for diagnostics and the lexical check.
-    pub file_path: PathBuf,
 }
 
 impl LaunchProfile {
@@ -275,13 +311,13 @@ fn native(bytes: Vec<u8>, key: &str) -> Result<NativeString, JailError> {
 /// resolution cannot disagree.
 fn credential_source(
     raw: &str,
-    base_dir: &[u8],
+    base_dir: Option<&[u8]>,
     home: Option<&[u8]>,
     key: &str,
 ) -> Result<Vec<u8>, JailError> {
     use crate::policy::path::{self, Refusal};
     let normalized = path::expand_home(raw.as_bytes(), home)
-        .and_then(|expanded| path::normalize(Some(base_dir), &expanded))
+        .and_then(|expanded| path::normalize(base_dir, &expanded))
         .map_err(|refusal| {
             invalid(
                 key,
@@ -348,8 +384,9 @@ fn is_prefix(shorter: &[Vec<u8>], longer: &[Vec<u8>]) -> bool {
 
 /// Parses and validates one launch file's text (§12).
 ///
-/// `base_dir` is the directory holding the file (relative sources resolve
-/// against it) and `home` the operator home for a leading `~/`.
+/// `source` is where the text came from: relative sources resolve against
+/// an operator file's directory and refuse in bundled data. `home` is the
+/// operator home for a leading `~/`.
 ///
 /// # Errors
 /// [`ErrorCode::InvalidConfig`] with the exact key path for every grammar or
@@ -357,9 +394,12 @@ fn is_prefix(shorter: &[Vec<u8>], longer: &[Vec<u8>]) -> bool {
 pub fn parse(
     text: &str,
     expected_name: &str,
-    base_dir: &[u8],
+    source: LaunchSource,
     home: Option<&[u8]>,
 ) -> Result<LaunchProfile, JailError> {
+    let base_dir = source
+        .directory()
+        .map(|directory| directory.as_os_str().as_bytes().to_vec());
     let mut file: LaunchFile = toml::from_str(text)
         .map_err(|error| invalid("launch", format!("launch profile: {}", error.message())))?;
     // Launch profiles are a widening layer (the launch `network_layer`
@@ -608,7 +648,7 @@ pub fn parse(
         destinations.push((id.clone(), dest));
 
         let source_key = format!("{key}.source");
-        let source = credential_source(&entry.source, base_dir, home, &source_key)?;
+        let source = credential_source(&entry.source, base_dir.as_deref(), home, &source_key)?;
         credentials.push(CredentialDecl {
             id: id.clone(),
             source: native(source, &source_key)?,
@@ -620,7 +660,7 @@ pub fn parse(
 
     Ok(LaunchProfile {
         name: file.name,
-        resolution: "operator file".into(),
+        source,
         bundles: file.bundles,
         filesystem: file.filesystem,
         jail,
@@ -633,8 +673,6 @@ pub fn parse(
             .network
             .map(|network| network.allow)
             .unwrap_or_default(),
-        file_chain: Vec::new(),
-        file_path: PathBuf::new(),
     })
 }
 
@@ -682,14 +720,12 @@ pub fn load(
     match operator_path.symlink_metadata() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Some(text) = bundled_profile(name) {
-                let mut profile = parse(
+                return parse(
                     text,
                     name,
-                    config_dir.as_os_str().as_bytes(),
+                    LaunchSource::Bundled,
                     home.map(|h| h.as_os_str().as_bytes()),
-                )?;
-                profile.resolution = "bundled".into();
-                return Ok(profile);
+                );
             }
         }
         Err(e) => return Err(unsafe_launch(e.to_string())),
@@ -808,15 +844,15 @@ pub fn load(
         .map_err(|_| unsafe_launch(format!("{} is not UTF-8", file_path.display())))?;
     chain.push(opened.identity());
 
-    let mut profile = parse(
+    parse(
         &text,
         name,
-        directory.as_os_str().as_bytes(),
+        LaunchSource::OperatorFile {
+            path: file_path,
+            chain,
+        },
         home.map(|home| home.as_os_str().as_bytes()),
-    )?;
-    profile.file_chain = chain;
-    profile.file_path = file_path;
-    Ok(profile)
+    )
 }
 
 fn check_launch_directory(stat: &anchored::Stat, path: &Path) -> Result<(), JailError> {
@@ -898,9 +934,9 @@ pub fn network_layer(launch: &LaunchProfile) -> Option<Layer> {
     Some(Layer {
         origin: LayerOrigin::LaunchProfile(launch.name.clone()),
         base_dir: launch
-            .file_path
-            .parent()
-            .map(|parent| parent.as_os_str().as_bytes().to_vec()),
+            .source
+            .directory()
+            .map(|directory| directory.as_os_str().as_bytes().to_vec()),
         delta: PolicyDelta {
             read_only: launch
                 .filesystem
@@ -938,13 +974,12 @@ pub fn apply(mut resolved: Resolved, launch: &LaunchProfile) -> Result<Resolved,
     resolved.provenance.push(ProvenanceEntry {
         origin: origin.clone(),
         key: "launch.resolution".into(),
-        detail: Some(
-            if launch.resolution == "operator file" && bundled_profile(&launch.name).is_some() {
-                "operator file (shadows bundled)".into()
-            } else {
-                launch.resolution.clone()
-            },
-        ),
+        detail: Some(match &launch.source {
+            LaunchSource::OperatorFile { .. } if bundled_profile(&launch.name).is_some() => {
+                "operator file (shadows bundled)".to_owned()
+            }
+            source => source.as_str().to_owned(),
+        }),
     });
     for bundle in &launch.bundles {
         resolved.provenance.push(ProvenanceEntry {
@@ -1038,34 +1073,31 @@ pub fn apply(mut resolved: Resolved, launch: &LaunchProfile) -> Result<Resolved,
 /// # Errors
 /// [`ErrorCode::InvalidConfig`] at key `--launch`.
 pub fn check_outside_writable(launch: &LaunchProfile, roots: &[PathBuf]) -> Result<(), JailError> {
-    if launch.resolution == "bundled" {
+    let LaunchSource::OperatorFile { path, chain } = &launch.source else {
+        // Embedded data is part of the binary: no grant can contain it.
         return Ok(());
-    }
+    };
     let forbidden = crate::state::mount_alias::forbidden_identities(roots)
         .map_err(|error| unsafe_launch(format!("writable grants cannot be inspected: {error}")))?;
     for root in roots {
         let lexical = std::fs::canonicalize(root)
             .ok()
-            .is_some_and(|canonical| launch.file_path.starts_with(canonical));
+            .is_some_and(|canonical| path.starts_with(canonical));
         if lexical {
             return Err(unsafe_launch(format!(
                 "the launch profile {} lies inside the child-visible grant {}; the contained \
                  party could rewrite its own authority (the workspace defaults to the \
                  current directory; run from the project directory or pass --workspace)",
-                launch.file_path.display(),
+                path.display(),
                 root.display()
             )));
         }
     }
-    if launch
-        .file_chain
-        .iter()
-        .any(|identity| forbidden.contains(identity))
-    {
+    if chain.iter().any(|identity| forbidden.contains(identity)) {
         return Err(unsafe_launch(format!(
             "the launch profile {} lies inside a child-visible writable grant, possibly through \
              a bind mount; the contained party could rewrite its own authority",
-            launch.file_path.display()
+            path.display()
         )));
     }
     Ok(())
@@ -1080,14 +1112,20 @@ pub use embedded::bundled_profile;
 mod tests {
     use super::*;
 
-    const BASE: &[u8] = b"/operator/config/launch";
+    /// An operator file at `/operator/config/launch/demo.toml`.
+    fn operator_file() -> LaunchSource {
+        LaunchSource::OperatorFile {
+            path: PathBuf::from("/operator/config/launch/demo.toml"),
+            chain: Vec::new(),
+        }
+    }
 
     fn parse_ok(text: &str) -> LaunchProfile {
-        parse(text, "demo", BASE, Some(b"/home/op")).expect("valid launch profile")
+        parse(text, "demo", operator_file(), Some(b"/home/op")).expect("valid launch profile")
     }
 
     fn parse_err(text: &str) -> JailError {
-        match parse(text, "demo", BASE, Some(b"/home/op")) {
+        match parse(text, "demo", operator_file(), Some(b"/home/op")) {
             Ok(profile) => panic!("expected a refusal, got {profile:?}"),
             Err(error) => error,
         }
@@ -1352,6 +1390,29 @@ allow = ["api.example.com:443"]
         assert_eq!(profile.network_allow, vec!["api.example.com:443"]);
     }
 
+    /// Where the text came from is part of the parse, never patched in
+    /// afterwards: an operator file's relative source resolves against the
+    /// file's own directory, and bundled data, which has no directory,
+    /// refuses one instead of borrowing some other directory.
+    #[test]
+    fn a_relative_source_needs_an_operator_file() {
+        let text = "name = \"demo\"\njail = \"agent\"\n[credentials.cfg]\nsource = \"cfg.toml\"\n\
+                    dest = \"cfg.toml\"\nmode = \"bind_ro\"\n";
+        let profile = parse_ok(text);
+        assert_eq!(profile.source.as_str(), "operator file");
+        assert_eq!(
+            profile.credentials[0].source.as_bytes(),
+            b"/operator/config/launch/cfg.toml"
+        );
+        let error = parse(text, "demo", LaunchSource::Bundled, Some(b"/home/op"))
+            .expect_err("bundled data has no directory");
+        assert_eq!(
+            error.key_path.as_deref(),
+            Some("launch.credentials.cfg.source")
+        );
+        assert_eq!(LaunchSource::Bundled.as_str(), "bundled");
+    }
+
     #[test]
     fn every_loader_and_backend_name_refuses() {
         for name in [
@@ -1493,7 +1554,8 @@ allow = ["api.example.com:443"]
             let path = entry.expect("an entry").path();
             let stem = path.file_stem().and_then(OsStr::to_str).expect("a name");
             let text = std::fs::read_to_string(&path).expect("readable");
-            let profile = parse(&text, stem, BASE, Some(b"/home/op")).expect("parses");
+            let profile =
+                parse(&text, stem, LaunchSource::Bundled, Some(b"/home/op")).expect("parses");
             for rule in &profile.network_allow {
                 let parsed = crate::network::HostRule::parse(rule).expect("a host rule");
                 assert!(!parsed.explicit_port, "{stem}: `{rule}` names a port");

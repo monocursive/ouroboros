@@ -596,9 +596,13 @@ fn i02_the_bundled_profiles_are_valid_experimental_data_for_the_agent_jail() {
             "{name} must say it is experimental"
         );
         let stem = name.strip_suffix(".toml").unwrap();
-        let profile =
-            launch_profile::parse(&text, stem, b"/operator/config/launch", Some(b"/home/op"))
-                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let profile = launch_profile::parse(
+            &text,
+            stem,
+            launch_profile::LaunchSource::Bundled,
+            Some(b"/home/op"),
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error:?}"));
         assert_eq!(profile.jail, ProfileName::Agent, "{name}");
         assert!(profile.needs_vendor_state(), "{name}");
         for credential in &profile.credentials {

@@ -879,7 +879,10 @@ fn n03_a_resolved_omitted_port_grant_reaches_the_proxy_as_tls_only() {
     let profile = launch_profile::parse(
         "name = \"demo\"\njail = \"agent\"\n[network]\nallow = [\"fixture.test\"]\n",
         "demo",
-        b"/operator/config/launch",
+        ouro_jail::launch_profile::LaunchSource::OperatorFile {
+            path: std::path::PathBuf::from("/operator/config/launch/demo.toml"),
+            chain: Vec::new(),
+        },
         None,
     )
     .expect("the launch profile parses");
