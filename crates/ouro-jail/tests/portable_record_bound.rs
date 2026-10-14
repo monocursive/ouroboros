@@ -191,7 +191,7 @@ fn a_refusal_past_the_bound_cuts_the_oversized_message_and_is_recorded() {
     assert_eq!(codes, ["evidence_lost", "exec_failed"], "{codes:?}");
     let cut = &receipt.errors[0].message;
     assert!(
-        cut.ends_with("the whole message was reported on stderr]"),
+        cut.ends_with("the run that wrote this receipt prints the whole message on stderr]"),
         "{}",
         &cut[cut.len().saturating_sub(160)..]
     );
@@ -213,4 +213,56 @@ fn a_refusal_past_the_bound_cuts_the_oversized_message_and_is_recorded() {
                 error.instance_path()
             )
         });
+}
+
+/// Every receipt lists at most 128 errors, whatever its phase: a settled
+/// run that raised more omits the oldest from its receipt, marks the first
+/// it keeps, and names on stderr every error the receipt does not hold as
+/// it was raised (the report's own error aside).
+#[test]
+fn a_settled_receipt_past_128_errors_leaves_what_it_omits_to_stderr() {
+    let (_root, root_path, workspace) = roots();
+    let losses = (0..130).map(|index| RunEvent::EvidenceLost {
+        reason: format!("loss {index}"),
+        after_target_end: false,
+    });
+    let mut platform = sim::ScriptedPlatform::new("bound simulation", sim::namespace_boundary())
+        .events(losses.chain([RunEvent::ExecConfirmed]));
+    platform.applied = Some(sim::contained_applied("none"));
+    let cli::Command::Run(args) = command(&[
+        "run".to_owned(),
+        "--evidence".to_owned(),
+        "best-effort".to_owned(),
+        "--workspace".to_owned(),
+        workspace.display().to_string(),
+        "--".to_owned(),
+        "simulated-target".to_owned(),
+    ]) else {
+        unreachable!()
+    };
+    let report = supervisor::run(&context(platform, &root_path, &workspace), &args);
+    let receipt = report.receipt.as_ref().expect("a settled receipt");
+    assert_eq!(receipt.phase, Phase::Settled, "{:?}", report.error);
+    assert_eq!(receipt.errors.len(), 128);
+    assert!(
+        receipt.errors[0]
+            .message
+            .starts_with("[2 other error(s) omitted"),
+        "{}",
+        receipt.errors[0].message
+    );
+    assert_eq!(
+        report.error.as_ref().map(|error| error.message.as_str()),
+        Some("loss 0"),
+        "the first cause is the report's error"
+    );
+    let stderr: Vec<&str> = report
+        .unrecorded
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    assert_eq!(stderr, ["loss 1", "loss 2"], "omitted, then marked");
+    let bytes = std::fs::read(report.receipt_path.unwrap()).unwrap();
+    let on_disk: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(on_disk["errors"].as_array().map(Vec::len), Some(128));
 }

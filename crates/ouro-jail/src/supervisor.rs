@@ -112,10 +112,10 @@ pub struct RunReport {
     /// J4 W3, P5: errors this attempt raised that the receipt on disk does
     /// not hold as they were raised and that `error` and `trace_error` do
     /// not name (a terminal receipt that failed to persist, and whatever it
-    /// would have recorded; an error a refused receipt holds cut or omitted
-    /// to fit the reader bound), in the order they were raised. The caller
-    /// prints each one on stderr whole: an error that cannot reach the
-    /// receipt still reaches the operator.
+    /// would have recorded; an error a refused receipt holds cut to fit the
+    /// byte bound; an error any receipt omits past its 128), in the order
+    /// they were raised. The caller prints each one on stderr whole: an
+    /// error that cannot reach the receipt still reaches the operator.
     pub unrecorded: Vec<crate::records::ErrorObject>,
 }
 
@@ -2144,26 +2144,22 @@ fn persistence_failed_after(
 
 /// J4 W3, P5: the errors of this attempt that the receipt on disk does not
 /// hold as they were raised and that the report does not already name
-/// (`printed`: its `error` and `trace_error`), in the order they were
-/// raised. `errors[]` only grows and is never fitted itself; the latest
-/// durable receipt holds a prefix of it as raised ([`Journal::durable`]),
-/// and everything after that prefix (cut or omitted by
-/// [`fit_refused_receipt`], or raised later) is what it lacks.
+/// (`printed`: its `error` and `trace_error`, each accounting for one), in
+/// the order they were raised. `errors[]` only grows and is never fitted
+/// itself; the latest durable receipt holds a prefix of it as raised
+/// ([`Journal::durable`]), and everything after that prefix (cut or omitted
+/// by [`render_receipt`], or raised later) is what it lacks.
 fn unrecorded(
     record: &AttemptRecord,
     journal: &Journal,
     printed: &[Option<&JailError>],
 ) -> Vec<crate::records::ErrorObject> {
-    let printed: Vec<crate::records::ErrorObject> = printed
-        .iter()
-        .flatten()
-        .map(|error| error.to_object())
-        .collect();
+    let mut printed = printed_objects(printed);
     record
         .errors
         .iter()
         .skip(journal.durable_errors)
-        .filter(|error| !printed.contains(error))
+        .filter(|error| !take_one(&mut printed, error))
         .cloned()
         .collect()
 }
@@ -2173,6 +2169,9 @@ fn unrecorded(
 struct InFlight {
     pending: state::Pending<Result<(), JailError>>,
     receipt: Receipt,
+    /// How many of the attempt's errors, from the first, `receipt` holds as
+    /// they were raised ([`held_verbatim`]).
+    held: usize,
     ack: Option<ControlKind>,
 }
 
@@ -2195,7 +2194,8 @@ fn submit_receipt(
         degrade_trace_coverage(record, journal);
     }
     record.updated_at = SystemTime::now();
-    let receipt = record.receipt(phase);
+    let receipt = render_receipt(record, phase);
+    let held = held_verbatim(&record.errors, &receipt.errors);
     let bytes = cleanup::record_bytes(
         "receipt",
         &receipt,
@@ -2215,6 +2215,7 @@ fn submit_receipt(
     Ok(InFlight {
         pending,
         receipt,
+        held,
         ack: None,
     })
 }
@@ -2265,9 +2266,7 @@ fn stalled_error(stalled: state::Stalled) -> JailError {
 }
 
 fn acknowledge(done: &InFlight, control: Option<&mut ControlSink>, journal: &mut Journal) {
-    // The worker writes receipts as rendered: each holds every error raised
-    // before it.
-    journal.receipt(&done.receipt, false, done.receipt.errors.len());
+    journal.receipt(&done.receipt, false, done.held);
     if let Some(kind) = done.ack {
         send_control(control, kind, &done.receipt);
     }
@@ -2839,10 +2838,7 @@ pub fn write_receipt_at(
     io: &dyn state::PersistIo,
 ) -> Result<Receipt, JailError> {
     record.updated_at = SystemTime::now();
-    let mut receipt = record.receipt(phase);
-    if phase == Phase::Refused {
-        fit_refused_receipt(&mut receipt);
-    }
+    let receipt = render_receipt(record, phase);
     let bytes = cleanup::record_bytes(
         "receipt",
         &receipt,
@@ -2910,35 +2906,49 @@ fn persist_noted(
 /// `errors`.
 const RECEIPT_ERRORS_MAX: usize = 128;
 
+/// The most gaps a receipt lists, in `observer.gaps` and in each coverage
+/// class: the receipt schema's `maxItems` for them.
+const RECEIPT_GAPS_MAX: usize = 128;
+
 /// The least a message cut to fit a refused receipt keeps of its text.
 const MESSAGE_KEPT_MIN: usize = 256;
 
 /// The most bytes the note that ends a cut message takes.
 const CUT_NOTE_MAX: usize = 192;
 
-/// What a refused receipt never omits to stay within [`RECEIPT_ERRORS_MAX`]
-/// while anything else is left to omit: what says evidence was lost or the
-/// tree's end is unknown. (Nor the refusal itself, the outcome's error.)
+/// What a receipt never omits to stay within [`RECEIPT_ERRORS_MAX`] while
+/// anything else is left to omit: what says evidence was lost or the tree's
+/// end is unknown. (Nor the outcome's error, a refusal's cause.)
 const ERRORS_KEPT_WHOLE: [ErrorCode; 2] = [ErrorCode::EvidenceLost, ErrorCode::TreeUnknown];
+
+/// The receipt for `phase` as it is written: every list within the item
+/// bound the schema sets for it, whatever the phase, and a refused receipt
+/// fitted to the byte bound too ([`fit_refused_receipt`]).
+fn render_receipt(record: &AttemptRecord, phase: Phase) -> Receipt {
+    let mut receipt = record.receipt(phase);
+    omit_past_the_item_bound(&mut receipt);
+    coalesce_gaps_past_the_item_bound(&mut receipt);
+    if phase == Phase::Refused {
+        fit_refused_receipt(&mut receipt);
+    }
+    receipt
+}
 
 /// Fits a refused receipt, as it is rendered, to the bound every writer
 /// writes within ([`cleanup::RECEIPT_WRITE_MAX`]), so a claimed attempt
-/// still ends with a receipt (I01). The attempt's own
-/// `errors[]` is left whole: whatever the receipt holds cut or not at all
-/// reaches stderr through the report ([`not_held`], [`unrecorded`]).
+/// still ends with a receipt (I01). The attempt's own `errors[]` is left
+/// whole: whatever the receipt holds cut or not at all reaches stderr
+/// through the report ([`not_held`], [`unrecorded`]).
 ///
-/// - Past [`RECEIPT_ERRORS_MAX`] errors (the schema's bound) the oldest are
-///   omitted, those in [`ERRORS_KEPT_WHOLE`] and the refusal last, and the
-///   first error kept says how many were.
-/// - Past that bound the longest messages, in
-///   `errors[]` and in the outcome's error, are cut, each to no less than
-///   [`MESSAGE_KEPT_MIN`] bytes and each saying how much it lost. No error is
-///   omitted for its size.
+/// Past the bound the longest messages, in `errors[]` and in the outcome's
+/// error, are cut, each to no less than [`MESSAGE_KEPT_MIN`] bytes and each
+/// saying how much it lost. No error is omitted for its size (past
+/// [`RECEIPT_ERRORS_MAX`], whatever the phase, see
+/// [`omit_past_the_item_bound`]).
 ///
 /// A receipt still past the bound (its other groups alone are) is left as
 /// it is, and its write refuses.
 fn fit_refused_receipt(receipt: &mut Receipt) {
-    omit_past_the_item_bound(receipt);
     let bound = cleanup::RECEIPT_WRITE_MAX;
     let length = |receipt: &Receipt| {
         serde_json::to_vec_pretty(receipt).map_or(u64::MAX, |bytes| {
@@ -2966,8 +2976,9 @@ fn fit_refused_receipt(receipt: &mut Receipt) {
     }
 }
 
-/// Omits the oldest errors past [`RECEIPT_ERRORS_MAX`], and says so in the
-/// first error kept.
+/// Past [`RECEIPT_ERRORS_MAX`] errors (the schema's bound) omits the
+/// oldest, those in [`ERRORS_KEPT_WHOLE`] and the outcome's error last, and
+/// says how many in the first error kept.
 fn omit_past_the_item_bound(receipt: &mut Receipt) {
     let excess = receipt.errors.len().saturating_sub(RECEIPT_ERRORS_MAX);
     if excess == 0 {
@@ -2994,9 +3005,92 @@ fn omit_past_the_item_bound(receipt: &mut Receipt) {
     if let Some(first) = receipt.errors.first_mut() {
         first.message = format!(
             "[{omitted} other error(s) omitted: a receipt lists at most {RECEIPT_ERRORS_MAX}; \
-             every error was reported on stderr] {}",
+             the run that wrote this receipt prints every error it omits on stderr] {}",
             first.message
         );
+    }
+}
+
+/// Past [`RECEIPT_GAPS_MAX`] gaps, in `observer.gaps` or in a coverage
+/// class, merges the latest into one `coalesced_losses` gap over all their
+/// classes and their whole interval, with no count, as the closed-set
+/// observer does past its own bound. A trace transport loss gap is never
+/// merged: the trace's loss note names each one (§13.3).
+fn coalesce_gaps_past_the_item_bound(receipt: &mut Receipt) {
+    let coverage = &mut receipt.coverage;
+    for gaps in [
+        &mut receipt.observer.gaps,
+        &mut coverage.exec.gaps,
+        &mut coverage.fs_write.gaps,
+        &mut coverage.fs_deny.gaps,
+        &mut coverage.net.gaps,
+        &mut coverage.limits.gaps,
+        &mut coverage.proxy_net.gaps,
+    ] {
+        coalesce_gaps(gaps);
+    }
+}
+
+fn coalesce_gaps(gaps: &mut Vec<crate::records::Gap>) {
+    use crate::records::Gap;
+    // Merging `n` gaps into one takes `n - 1` away.
+    let merge = (gaps.len() + 1).saturating_sub(RECEIPT_GAPS_MAX);
+    if merge < 2 {
+        return;
+    }
+    let mergeable = |gap: &Gap| gap.reason != trace::TRANSPORT_LOSS_REASON;
+    let Some(first) = gaps
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, gap)| mergeable(gap))
+        .nth(merge - 1)
+        .map(|(index, _)| index)
+    else {
+        return;
+    };
+    let decimal = |text: &str| text.parse::<u128>().unwrap_or(u128::MAX);
+    let mut merged: Option<Gap> = None;
+    let mut index = 0;
+    gaps.retain(|gap| {
+        let take = index >= first && mergeable(gap);
+        index += 1;
+        if take {
+            merged = Some(match merged.take() {
+                None => Gap {
+                    reason: "coalesced_losses".to_owned(),
+                    lost_count: None,
+                    ..gap.clone()
+                },
+                Some(mut into) => {
+                    into.classes.extend(gap.classes.iter().cloned());
+                    if into.source != gap.source {
+                        // Several sources' losses, merged here by the wrapper.
+                        "wrapper".clone_into(&mut into.source);
+                    }
+                    if decimal(&gap.start_ns) < decimal(&into.start_ns) {
+                        into.start_ns.clone_from(&gap.start_ns);
+                    }
+                    into.end_ns = into
+                        .end_ns
+                        .zip(gap.end_ns.clone())
+                        .map(|(left, right)| std::cmp::max_by_key(left, right, |end| decimal(end)));
+                    into
+                }
+            });
+        }
+        !take
+    });
+    if let Some(mut merged) = merged {
+        let order = |class: &String| {
+            CoverageClass::ALL
+                .iter()
+                .position(|known| known.as_str() == class)
+                .unwrap_or(usize::MAX)
+        };
+        merged.classes.sort_by_key(order);
+        merged.classes.dedup();
+        gaps.insert(first.min(gaps.len()), merged);
     }
 }
 
@@ -3013,29 +3107,49 @@ fn cut_message(message: &mut String, excess: u64) {
     }
     message.truncate(keep);
     message.push_str(&format!(
-        " [... {} bytes omitted to keep this receipt within {} bytes; the whole message was \
-         reported on stderr]",
+        " [... {} bytes omitted to keep this receipt within {} bytes; the run that wrote this \
+         receipt prints the whole message on stderr]",
         length - keep,
         cleanup::RECEIPT_WRITE_MAX
     ));
 }
 
+/// Takes one error equal to `error` out of `pool`, and says whether there
+/// was one: each error held or printed once accounts for one raised.
+fn take_one(
+    pool: &mut Vec<crate::records::ErrorObject>,
+    error: &crate::records::ErrorObject,
+) -> bool {
+    pool.iter()
+        .position(|held| held == error)
+        .map(|at| pool.swap_remove(at))
+        .is_some()
+}
+
+/// The errors the report itself names (`printed`: its `error` and
+/// `trace_error`), as objects.
+fn printed_objects(printed: &[Option<&JailError>]) -> Vec<crate::records::ErrorObject> {
+    printed
+        .iter()
+        .flatten()
+        .map(|error| error.to_object())
+        .collect()
+}
+
 /// The errors of `raised` that `receipt` does not hold as they were raised
-/// (cut, or omitted by [`fit_refused_receipt`]) and that the report does not
-/// already name (`printed`), in the order they were raised.
+/// (cut, or omitted by [`render_receipt`]) and that the report does not
+/// already name (`printed`), in the order they were raised. Counted, not
+/// matched: an error raised twice and held once is listed once.
 fn not_held(
     raised: &[crate::records::ErrorObject],
     receipt: &Receipt,
     printed: &[Option<&JailError>],
 ) -> Vec<crate::records::ErrorObject> {
-    let printed: Vec<crate::records::ErrorObject> = printed
-        .iter()
-        .flatten()
-        .map(|error| error.to_object())
-        .collect();
+    let mut held = receipt.errors.clone();
+    let mut printed = printed_objects(printed);
     raised
         .iter()
-        .filter(|error| !receipt.errors.contains(error) && !printed.contains(error))
+        .filter(|error| !take_one(&mut held, error) && !take_one(&mut printed, error))
         .cloned()
         .collect()
 }
@@ -4227,8 +4341,7 @@ mod tests {
             error_object(ErrorCode::StateWriteFailed, "cleanup".to_owned()),
         ];
         let record = refused_record(errors.clone(), 2);
-        let mut receipt = record.receipt(Phase::Refused);
-        fit_refused_receipt(&mut receipt);
+        let receipt = render_receipt(&record, Phase::Refused);
         assert!(rendered_len(&receipt) <= cleanup::RECEIPT_WRITE_MAX);
         assert_eq!(receipt.errors.len(), 4);
         assert_eq!(receipt.errors[1..], errors[1..]);
@@ -4240,7 +4353,7 @@ mod tests {
             &cut[..64]
         );
         assert!(
-            cut.ends_with("the whole message was reported on stderr]"),
+            cut.ends_with("the run that wrote this receipt prints the whole message on stderr]"),
             "{}",
             &cut[cut.len() - 160..]
         );
@@ -4252,8 +4365,7 @@ mod tests {
         );
         // A receipt within the bound is left as it was rendered.
         let small = refused_record(errors[1..].to_vec(), 1);
-        let mut receipt = small.receipt(Phase::Refused);
-        fit_refused_receipt(&mut receipt);
+        let receipt = render_receipt(&small, Phase::Refused);
         assert_eq!(receipt, small.receipt(Phase::Refused));
     }
 
@@ -4275,8 +4387,7 @@ mod tests {
             .collect();
         errors.push(error_object(ErrorCode::GateClosed, "refused".to_owned()));
         let record = refused_record(errors.clone(), 200);
-        let mut receipt = record.receipt(Phase::Refused);
-        fit_refused_receipt(&mut receipt);
+        let receipt = render_receipt(&record, Phase::Refused);
         assert_eq!(receipt.errors.len(), RECEIPT_ERRORS_MAX);
         assert!(
             receipt.errors[0]
@@ -4310,8 +4421,7 @@ mod tests {
             .collect();
         whole.push(error_object(ErrorCode::GateClosed, "refused".to_owned()));
         let record = refused_record(whole.clone(), 140);
-        let mut receipt = record.receipt(Phase::Refused);
-        fit_refused_receipt(&mut receipt);
+        let receipt = render_receipt(&record, Phase::Refused);
         assert_eq!(receipt.errors.len(), RECEIPT_ERRORS_MAX);
         assert_eq!(receipt.errors.last(), whole.last());
         assert!(receipt.errors[0].message.ends_with("unknown 13"));
@@ -4424,6 +4534,19 @@ mod tests {
         assert!(described.contains("bound"), "{described}");
     }
 
+    /// `run` arguments, with `extra` before the target.
+    fn run_args(extra: &[&str]) -> RunArgs {
+        use clap::Parser as _;
+        let mut argv = vec!["ouro-jail", "run"];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&["--", "/bin/true"]);
+        let crate::cli::Command::Run(args) = crate::cli::Cli::try_parse_from(argv).unwrap().command
+        else {
+            panic!("not run");
+        };
+        *args
+    }
+
     /// Every receipt the supervisor writes leaves `gc` the room to complete
     /// it in place (`pending` becomes `complete`, and the revision may gain
     /// a digit): one at the write bound is written and then completed within
@@ -4471,6 +4594,164 @@ mod tests {
             .expect("the refused receipt is fitted to the write bound");
         assert!(rendered_len(&receipt) <= cleanup::RECEIPT_WRITE_MAX);
         assert_eq!(completed(&mut receipt).revision, 100);
+    }
+
+    /// Submits the receipt for `phase` to `persister` and waits for it;
+    /// whether it failed.
+    fn through_the_worker(
+        persister: &state::Persister,
+        attempt_dir: &AttemptDir,
+        record: &mut AttemptRecord,
+        args: &RunArgs,
+        journal: &mut Journal,
+    ) -> bool {
+        let mut in_flight = std::collections::VecDeque::new();
+        in_flight.push_back(
+            submit_receipt(
+                persister,
+                state::Site::EnforcedReceipt,
+                attempt_dir,
+                record,
+                Phase::Enforced,
+                args,
+                journal,
+            )
+            .unwrap(),
+        );
+        settle_in_flight(&mut in_flight, true, None, journal).is_some()
+    }
+
+    /// `count` distinct errors.
+    fn errors(count: usize) -> Vec<crate::records::ErrorObject> {
+        (0..count)
+            .map(|index| error_object(ErrorCode::StdioFailed, format!("error {index}")))
+            .collect()
+    }
+
+    /// Once the worker made a receipt durable, the journal counts the errors
+    /// it holds as raised: all of them, or, past 128, none from the first,
+    /// since it omits the oldest and marks the first it keeps.
+    #[test]
+    fn the_worker_s_receipts_count_what_they_hold() {
+        let (_root, attempt_dir, _plan) = scratch_fixture();
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        record.errors = errors(2);
+        let persister = state::Persister::start().unwrap();
+        let mut journal = Journal::new("att_test", trace::shared(DrainFailure { loss: None }));
+        let args = run_args(&[]);
+        assert!(!through_the_worker(
+            &persister,
+            &attempt_dir,
+            &mut record,
+            &args,
+            &mut journal
+        ));
+        assert_eq!(journal.durable_errors, 2, "it holds both");
+        assert!(unrecorded(&record, &journal, &[]).is_empty());
+        record.errors = errors(129);
+        assert!(!through_the_worker(
+            &persister,
+            &attempt_dir,
+            &mut record,
+            &args,
+            &mut journal
+        ));
+        assert_eq!(journal.durable_errors, 0);
+        assert_eq!(unrecorded(&record, &journal, &[])[..2], record.errors[..2]);
+    }
+
+    /// An error raised twice and held once reaches stderr once: holding one
+    /// copy, or printing one, accounts for one.
+    #[test]
+    fn an_error_raised_twice_and_held_once_reaches_stderr_once() {
+        let twice = error_object(ErrorCode::StdioFailed, "twice".to_owned());
+        let mut errors = vec![twice.clone()];
+        errors.extend(
+            (1..128).map(|index| error_object(ErrorCode::StdioFailed, format!("e{index}"))),
+        );
+        errors.push(twice.clone());
+        errors.push(error_object(ErrorCode::GateClosed, "refused".to_owned()));
+        let record = refused_record(errors.clone(), 129);
+        let receipt = render_receipt(&record, Phase::Refused);
+        assert_eq!(receipt.errors.len(), RECEIPT_ERRORS_MAX);
+        assert_eq!(
+            receipt.errors.iter().filter(|held| **held == twice).count(),
+            1,
+            "the first copy and `e1` are omitted"
+        );
+        assert_eq!(
+            not_held(&record.errors, &receipt, &[None]),
+            [errors[1].clone(), errors[2].clone(), twice.clone()],
+            "`e1` omitted, `e2` marked, and one copy of `twice`"
+        );
+
+        let refusal = JailError::new(
+            ErrorCode::GateClosed,
+            ErrorStage::Prepared,
+            Remediation::InspectState,
+            "refused".to_owned(),
+        );
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        record.errors = vec![refusal.to_object(), refusal.to_object()];
+        let journal = Journal::new("att_test", trace::shared(DrainFailure { loss: None }));
+        assert_eq!(
+            unrecorded(&record, &journal, &[Some(&refusal), None]),
+            [refusal.to_object()],
+            "the report's error accounts for one"
+        );
+    }
+
+    /// Every receipt, whatever its phase, lists at most 128 errors, and
+    /// what it omits is what the report names on stderr.
+    #[test]
+    fn every_receipt_lists_at_most_128_errors() {
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        record.errors = (0..200)
+            .map(|index| error_object(ErrorCode::StdioFailed, format!("error {index}")))
+            .collect();
+        for phase in [Phase::Prepared, Phase::Enforced, Phase::Settled] {
+            let receipt = render_receipt(&record, phase);
+            assert_eq!(receipt.errors.len(), RECEIPT_ERRORS_MAX, "{phase:?}");
+            assert_eq!(not_held(&record.errors, &receipt, &[None]).len(), 73);
+        }
+    }
+
+    /// Past 128 gaps the latest are merged into one `coalesced_losses` gap
+    /// over their classes and their whole interval; a trace transport loss
+    /// gap, which the trace's loss note names, is never merged.
+    #[test]
+    fn gaps_past_the_item_bound_are_coalesced_but_never_a_transport_loss() {
+        let gap = |index: u64, class: &str, source: &str, reason: &str| crate::records::Gap {
+            classes: vec![class.to_owned()],
+            source: source.to_owned(),
+            start_ns: (index * 10).to_string(),
+            end_ns: Some((index * 10 + 5).to_string()),
+            reason: reason.to_owned(),
+            lost_count: Some(1),
+        };
+        let mut gaps: Vec<crate::records::Gap> = (0..130)
+            .map(|index| gap(index, "exec", "audit", "ring_overflow"))
+            .collect();
+        let transport = gap(129, "net", "wrapper", trace::TRANSPORT_LOSS_REASON);
+        gaps.insert(128, transport.clone());
+        gaps[129] = gap(128, "proxy.net", "proxy", "proxy_not_drained");
+        let mut receipt =
+            test_record(CoverageSummary::unobserved().to_coverage()).receipt(Phase::Settled);
+        receipt.observer.gaps = gaps.clone();
+        receipt.coverage.exec.gaps = gaps[..120].to_vec();
+        coalesce_gaps_past_the_item_bound(&mut receipt);
+        let coalesced = &receipt.observer.gaps;
+        assert_eq!(coalesced.len(), RECEIPT_GAPS_MAX);
+        assert_eq!(coalesced[..126], gaps[..126]);
+        let merged = &coalesced[126];
+        assert_eq!(merged.reason, "coalesced_losses");
+        assert_eq!(merged.classes, ["exec", "proxy.net"]);
+        assert_eq!(merged.source, "wrapper", "several sources");
+        assert_eq!(merged.start_ns, "1260");
+        assert_eq!(merged.end_ns.as_deref(), Some("1295"));
+        assert_eq!(merged.lost_count, None);
+        assert_eq!(coalesced[127], transport);
+        assert_eq!(receipt.coverage.exec.gaps, gaps[..120], "within the bound");
     }
 
     /// An unsatisfied requirement refuses with the code, remediation and

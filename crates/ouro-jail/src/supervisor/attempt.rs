@@ -892,14 +892,24 @@ impl<'a> Attempt<'a> {
             tree_error.as_ref(),
             run.outcome_error.as_ref(),
         );
+        let error = tree_error.or(run.outcome_error);
+        let trace_error = self.journal.loss.clone();
+        // What the receipt omits to stay within its item bound reaches
+        // stderr whole.
+        let unrecorded = not_held(
+            &self.record.errors,
+            &receipt,
+            &[error.as_ref(), trace_error.as_ref()],
+        );
         RunReport {
             exit_code,
             receipt: Some(receipt),
-            error: tree_error.or(run.outcome_error),
+            error,
             receipt_path: Some(self.attempt_dir.receipt_path()),
-            trace_error: self.journal.loss.clone(),
+            trace_error,
             // A bounded final drain, then an honest count.
             control_dropped: finish_control(self.control.as_mut()),
+            unrecorded,
             ..RunReport::default()
         }
     }

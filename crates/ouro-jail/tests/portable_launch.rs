@@ -1397,7 +1397,7 @@ fn an_oversized_refusal_still_cleans_up_vendor_state() {
         receipt["outcome"]["error"]["message"]
             .as_str()
             .unwrap()
-            .ends_with("the whole message was reported on stderr]")
+            .ends_with("the run that wrote this receipt prints the whole message on stderr]")
     );
 }
 

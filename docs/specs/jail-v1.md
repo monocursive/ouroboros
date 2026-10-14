@@ -733,9 +733,9 @@ Its output carries environment names, never values (canonicalization.md).
 Inspection JSON goes to stdout; diagnostics go to stderr. `run` preserves child
 stdout/stderr byte streams and has no `--json` stdout mode. An error that
 reaches no durable receipt as it was raised (a terminal receipt that failed
-to persist, and what only it would have recorded, or an error a refused
-receipt holds cut or omitted to fit, §13.2) is printed on stderr whole, one
-line per error.
+to persist, and what only it would have recorded, an error a refused
+receipt holds cut to fit, or one a receipt omits past its 128, §13.2) is
+printed on stderr whole, one line per error.
 Every byte of an error or diagnostic that comes from untrusted input — a
 project-config value, a path a child chose — has its control characters
 escaped at the write, so no value can forge a second line or drive the
@@ -2654,25 +2654,37 @@ does not bound a table whose paths are long, escaped (a control character
 takes six bytes) or base64-encoded, so a boundary whose table is larger is
 refused as `invalid_config` while it is prepared, before any of it is
 recorded, and its refused receipt carries no table. A policy too large to
-record is refused before the claim (§6.1). A `refused` receipt is fitted to
-the write bound as it is written, the pending one written before
-vendor-state removal included, so a claimed attempt always ends with one:
+record is refused before the claim (§6.1).
 
-- `errors` lists at most 128 entries (the schema's bound). Past it the oldest
-  are omitted, those coded `evidence_lost` or `tree_unknown` and the refusal
-  itself only when nothing else is left, and the first entry kept begins
-  `[N other error(s) omitted: a receipt lists at most 128; every error was
-  reported on stderr]`.
-- Past the write bound the longest messages (in `errors` and
-  `outcome.error`) are cut, each to no less than 256 bytes, and each ends
-  `[... N bytes omitted to keep this receipt within 4194048 bytes; the whole
-  message was reported on stderr]`. No error is omitted for its size.
+Every receipt, whatever its phase, is rendered within the schema's item
+bounds:
 
-Every error a `refused` receipt holds cut or not at all is printed whole on
-stderr. Any other receipt past the bound is not written: before release the
-attempt refuses with `state_write_failed`, after release a receipt handed to
-the persistence worker stops the tree for `state_write_failed`, and a
-terminal receipt leaves the last one written on disk (§7).
+- `errors` lists at most 128 entries. Past it the oldest are omitted, those
+  coded `evidence_lost` or `tree_unknown` and the outcome's error only when
+  nothing else is left, and the first entry kept begins `[N other error(s)
+  omitted: a receipt lists at most 128; the run that wrote this receipt
+  prints every error it omits on stderr]`.
+- `observer.gaps` and each coverage class's `gaps` list at most 128 entries.
+  Past it the latest are merged into one gap with reason `coalesced_losses`
+  over their classes and their whole interval, with a null count and source
+  `wrapper` when they came from more than one source; a
+  `trace_transport_loss` gap, which the trace's loss note names, is never
+  merged.
+
+A `refused` receipt is also fitted to the write bound as it is written, the
+pending one written before vendor-state removal included, so a claimed
+attempt always ends with one: past the bound the longest messages (in
+`errors` and `outcome.error`) are cut, each to no less than 256 bytes, and
+each ends `[... N bytes omitted to keep this receipt within 4194048 bytes;
+the run that wrote this receipt prints the whole message on stderr]`. No
+error is omitted for its size.
+
+The run prints whole on stderr every error its last receipt holds cut or
+not at all, counting an error raised twice as two. Any other receipt past
+the bound is not written: before release the attempt refuses with
+`state_write_failed`, after release a receipt handed to the persistence
+worker stops the tree for `state_write_failed`, and a terminal receipt
+leaves the last one written on disk (§7).
 
 Native lifetime details live under an OS-tagged object. Linux may record cgroup
 and namespace identities; macOS will define its own. `pidfd`, `/proc` paths,
