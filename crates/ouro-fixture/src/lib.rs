@@ -45,8 +45,8 @@ pub mod sockaddr;
 pub mod unix;
 
 /// Exit code when every expectation held.
-pub const EXIT_OK: i32 = 0;
+pub const EXIT_OK: u8 = 0;
 /// Exit code for a usage error, matching jail-v1 §6.4.
-pub const EXIT_USAGE: i32 = 2;
+pub const EXIT_USAGE: u8 = 2;
 /// Exit code when at least one operation did not match its `--expect`.
-pub const EXIT_EXPECTATION_FAILED: i32 = 3;
+pub const EXIT_EXPECTATION_FAILED: u8 = 3;

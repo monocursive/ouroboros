@@ -11,42 +11,14 @@
 //! harness consumes; a line that claims work was done is checked against the
 //! filesystem or the process table.
 
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::ffi::OsString;
+use std::path::Path;
+use std::process::Output;
 
 use serde_json::{Value, json};
 
-const EXIT_EXPECTATION_FAILED: i32 = 3;
-const EXIT_USAGE: i32 = 2;
-
-fn fixture() -> PathBuf {
-    ouro_fixture::harness::fixture_path()
-}
-
-fn run<S: AsRef<OsStr>>(args: &[S]) -> Output {
-    Command::new(fixture())
-        .args(args.iter().map(AsRef::as_ref))
-        .output()
-        .expect("the fixture binary must run")
-}
-
-fn lines(out: &Output) -> Vec<Value> {
-    out.stdout
-        .split(|b| *b == b'\n')
-        .filter(|l| !l.is_empty())
-        .map(|l| {
-            serde_json::from_slice(l)
-                .unwrap_or_else(|e| panic!("not a JSON line: {e}: {}", String::from_utf8_lossy(l)))
-        })
-        .collect()
-}
-
-fn code(out: &Output) -> i32 {
-    out.status
-        .code()
-        .expect("the fixture must not die on a signal")
-}
+mod common;
+use common::{EXIT_EXPECTATION_FAILED, EXIT_USAGE, code, fixture, lines, run};
 
 fn tmp() -> ouro_fixture::harness::TempDir {
     ouro_fixture::harness::TempDir::new("ouro-fixture-perf").unwrap()

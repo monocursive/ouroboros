@@ -514,7 +514,7 @@ pub enum Mode {
     /// `NSpid` line of `/proc/self/status` (Linux).
     Identity,
     /// Report, then exit with CODE.
-    Exit { code: i32 },
+    Exit { code: u8 },
     /// Report, then raise SIGNAL on self (name without `SIG`, or a number).
     Raise { signal: String },
     /// Run a JSON array of argv arrays in this one process.

@@ -15,7 +15,7 @@ fn main() -> std::process::ExitCode {
         // operation invisible while the process still exited 0.
         if let Err(e) = Reporter::check_fd(cli.report_fd) {
             eprintln!("ouro-fixture: {e}");
-            return std::process::ExitCode::from(EXIT_USAGE as u8);
+            return std::process::ExitCode::from(EXIT_USAGE);
         }
         Reporter::to_fd(cli.report_fd)
     };
@@ -26,14 +26,14 @@ fn main() -> std::process::ExitCode {
             "ouro-fixture: {} report line(s) could not be written",
             reporter.lost()
         );
-        return std::process::ExitCode::from(EXIT_EXPECTATION_FAILED as u8);
+        return std::process::ExitCode::from(EXIT_EXPECTATION_FAILED);
     }
     match outcome {
-        Ok(true) => std::process::ExitCode::from(EXIT_OK as u8),
-        Ok(false) => std::process::ExitCode::from(EXIT_EXPECTATION_FAILED as u8),
+        Ok(true) => std::process::ExitCode::from(EXIT_OK),
+        Ok(false) => std::process::ExitCode::from(EXIT_EXPECTATION_FAILED),
         Err(usage) => {
             eprintln!("ouro-fixture: {usage}");
-            std::process::ExitCode::from(EXIT_USAGE as u8)
+            std::process::ExitCode::from(EXIT_USAGE)
         }
     }
 }

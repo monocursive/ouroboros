@@ -417,7 +417,7 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
             r.set("exit_code", actual);
             r.result(i64::from(actual), None);
             rep.emit(&r);
-            std::process::exit(actual);
+            std::process::exit(i32::from(actual));
         }
         Mode::Raise { signal } => raise(rep, &signal),
         Mode::Script { file } => script(session, &file),
@@ -1770,15 +1770,12 @@ fn open_fd_numbers() -> Option<Vec<c_int>> {
     Some(numbers)
 }
 
-fn soft_fd_limit() -> u64 {
+/// The soft descriptor limit, or `None` when `getrlimit` fails.
+fn soft_fd_limit() -> Option<u64> {
     // SAFETY: `rl` is a live rlimit struct, which is what `getrlimit` writes.
     let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
     // SAFETY: as above.
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rl) } == 0 {
-        rl.rlim_cur as u64
-    } else {
-        0
-    }
+    (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rl) } == 0).then_some(rl.rlim_cur)
 }
 
 fn describe_fd(fd: c_int) -> Option<Value> {
@@ -1814,18 +1811,25 @@ fn describe_fd(fd: c_int) -> Option<Value> {
 
 fn fds(rep: &Reporter) -> bool {
     let limit = soft_fd_limit();
-    let (numbers, source, complete) = match open_fd_numbers() {
-        Some(n) => (n, fd_directory().to_string(), true),
-        None => {
-            // Fall back to probing the whole soft limit rather than a fixed
-            // slice of it, and say that is what happened.
+    let (numbers, source, complete) = match (open_fd_numbers(), limit) {
+        (Some(n), _) => (n, fd_directory().to_string(), true),
+        // Fall back to probing the whole soft limit rather than a fixed
+        // slice of it, and say that is what happened.
+        (None, Some(limit)) => {
             let cap = c_int::try_from(limit).unwrap_or(c_int::MAX);
             (
                 (0..cap).collect(),
                 format!("scan 0..{cap}"),
-                cap as u64 >= limit,
+                u64::try_from(cap).is_ok_and(|cap| cap >= limit),
             )
         }
+        // Neither the kernel's list nor the limit: nothing was scanned, and
+        // nothing may be claimed complete.
+        (None, None) => (
+            Vec::new(),
+            "none (the soft limit is unknown)".to_string(),
+            false,
+        ),
     };
 
     let open: Vec<Value> = numbers.into_iter().filter_map(describe_fd).collect();

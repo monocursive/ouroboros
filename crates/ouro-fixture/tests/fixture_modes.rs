@@ -16,12 +16,8 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
-const EXIT_EXPECTATION_FAILED: i32 = 3;
-const EXIT_USAGE: i32 = 2;
-
-fn fixture() -> std::path::PathBuf {
-    ouro_fixture::harness::fixture_path()
-}
+mod common;
+use common::{EXIT_EXPECTATION_FAILED, EXIT_USAGE, code, fixture, lines, run};
 
 /// Build an argument list from anything that is already OS bytes.
 ///
@@ -35,34 +31,10 @@ macro_rules! osargs {
     };
 }
 
-fn run<S: AsRef<OsStr>>(args: &[S]) -> Output {
-    Command::new(fixture())
-        .args(args.iter().map(AsRef::as_ref))
-        .output()
-        .expect("the fixture binary must run")
-}
-
-fn lines(out: &Output) -> Vec<Value> {
-    out.stdout
-        .split(|b| *b == b'\n')
-        .filter(|l| !l.is_empty())
-        .map(|l| {
-            serde_json::from_slice(l)
-                .unwrap_or_else(|e| panic!("not a JSON line: {e}: {}", String::from_utf8_lossy(l)))
-        })
-        .collect()
-}
-
 fn only(out: &Output) -> Value {
     let l = lines(out);
     assert_eq!(l.len(), 1, "expected one line, got {l:?}");
     l.into_iter().next().unwrap()
-}
-
-fn code(out: &Output) -> i32 {
-    out.status
-        .code()
-        .expect("the fixture must not die on a signal")
 }
 
 struct Dir(ouro_fixture::harness::TempDir);
@@ -619,6 +591,13 @@ fn exit_and_raise_produce_the_status_they_report() {
     let out = run(&osargs!["exit", "42"]);
     assert_eq!(only(&out)["args"]["code"], 42);
     assert_eq!(code(&out), 42);
+    // A code the process cannot exit with is refused, not truncated: `exit
+    // 256` used to report 256 and exit 0.
+    for unrepresentable in ["256", "-1"] {
+        let out = run(&osargs!["exit", unrepresentable]);
+        assert_eq!(code(&out), EXIT_USAGE, "exit {unrepresentable}");
+        assert!(lines(&out).is_empty(), "exit {unrepresentable}");
+    }
 
     let out = run(&osargs!["raise", "TERM"]);
     let line = only(&out);
