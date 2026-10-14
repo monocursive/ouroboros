@@ -764,6 +764,32 @@ fn gc_recovers_every_deletion_boundary_without_losing_replay_or_chain_anchors() 
 }
 
 #[test]
+fn gc_never_finishes_under_an_authority_that_changed_after_it_was_published() {
+    let (_temp, mut store, run) = gc_fixture();
+    let directory = store.root().join(&run.run_id);
+    faults::arm(Plan::fail(Point::GcBeforeUnlink));
+    let interrupted = store.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
+    faults::disarm();
+    assert_eq!(interrupted.failed.len(), 1);
+    // A well-formed, self-consistent authority, but not the one this writer
+    // published and holds: it claims a later collection time.
+    let anchor = directory.join("gc.json");
+    let mut value: Value = serde_json::from_slice(&fs::read(&anchor).unwrap()).unwrap();
+    value["retained"]["collected_at"] = json!("2099-01-01T00:00:00Z");
+    value["digest"] = json!(digest(&value["retained"]).unwrap());
+    let mut bytes = canonical(&value).unwrap();
+    bytes.push(b'\n');
+    fs::write(&anchor, bytes).unwrap();
+    let canonical_bytes = fs::read(directory.join(STREAM)).unwrap();
+    let retried = store.gc_at(1, None, 100, &peer(), gc_future()).unwrap();
+    assert!(retried.pruned.is_empty());
+    assert_eq!(retried.failed.len(), 1);
+    assert_eq!(retried.failed[0].message, "GC authority changed");
+    assert_eq!(fs::read(directory.join(STREAM)).unwrap(), canonical_bytes);
+    assert!(directory.join("artifacts/stdout.bin").exists());
+}
+
+#[test]
 fn gc_revalidates_bytes_and_refuses_changed_files_or_symlinked_capture_directories() {
     for mode in ["canonical", "capture", "symlink", "anchor"] {
         let (temp, mut store, run) = gc_fixture();
