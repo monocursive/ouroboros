@@ -2362,6 +2362,21 @@ fn r1_a_placeholder_the_run_filled_is_kept_not_removed() {
             planted.exists(),
             "the placeholder was removed although something else was inside it"
         );
+        // Reviewer (plat3): the settled receipt names the placeholder it
+        // left in the workspace, and still passes the frozen schema and the
+        // semantic rules (`common::settled` holds every record to them).
+        let receipt = common::settled(&run);
+        let details = &receipt["lifetime"]["native"]["details"];
+        let left = details["placeholders_left"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no placeholders_left in {details}"));
+        assert!(
+            left.iter().any(|entry| entry["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("/.git"))
+                && entry["reason"].is_string()),
+            "{left:?}"
+        );
         let _ = std::fs::remove_file(&planted);
         let _ = std::fs::remove_dir(&git);
     } else {
