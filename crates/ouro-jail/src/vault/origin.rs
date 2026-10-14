@@ -356,8 +356,10 @@ impl Origins {
         }
         prune(&mut table.entries);
         if table.entries.len() >= MAX_ENTRIES && !table.entries.contains_key(&key) {
-            // A receiver claims its outcome the moment it is published, so
-            // the oldest one belongs to a connection the bridge turned away.
+            // Receivers claim their outcomes as soon as they read their
+            // preamble, so the oldest one most likely belongs to a
+            // connection the bridge or the proxy turned away; at worst its
+            // connection waits out the rendezvous and goes unverified.
             let oldest = table
                 .entries
                 .iter()
