@@ -1,7 +1,9 @@
+import ast
 import base64
 import copy
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
@@ -169,12 +171,19 @@ class ProtocolMessageTests(unittest.TestCase):
 
 
 class TransportAgreementTests(unittest.TestCase):
-    """guest.py runs alone in the guest image, so it repeats the host's limits and path rule."""
+    """guest.py runs alone in the guest image: the host imports its limits and repeats its path rule."""
 
-    def test_host_and_guest_limits_agree(self):
-        for name in ('MAX_LINE', 'MAX_BYTES', 'MAX_FILE', 'MAX_FILES'):
-            with self.subTest(limit=name):
-                self.assertEqual(getattr(run, name), getattr(guest, name))
+    def test_guest_imports_only_the_standard_library(self):
+        # The image carries guest.py and nothing beside it, so the limits run.py takes
+        # from it must not come from a module the guest does not have.
+        imported = set()
+        for node in ast.walk(ast.parse(Path(guest.__file__).read_text())):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add('.' * node.level + (node.module or ''))
+        self.assertTrue(imported)
+        self.assertEqual({name for name in imported if name.split('.')[0] not in sys.stdlib_module_names}, set())
 
     def test_host_and_guest_path_verdicts_agree(self):
         root = Path('/staging')

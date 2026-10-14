@@ -193,7 +193,7 @@ def main():
     root.mkdir(parents=True, exist_ok=False)
     provenance = {'image': json.loads((args.image / 'image.json').read_text()),
                   'runner_sha256': {name: hashlib.sha256((SOURCE / name).read_bytes()).hexdigest()
-                                    for name in ('run.py', 'check.py')},
+                                    for name in ('run.py', 'guest.py', 'check.py')},
                   'requested_cases': args.cases, 'repeat': args.repeat}
     if args.executable:
         provenance['packaged_executable'] = str(args.executable.resolve())

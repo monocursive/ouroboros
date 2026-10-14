@@ -14,12 +14,10 @@ import subprocess
 import sys
 import time
 
-# guest.py repeats these limits (it is installed alone in the guest);
-# test_vm.py checks that both ends agree. MAX_LINE bounds one protocol line.
-MAX_LINE = 2 * 1024 * 1024
-MAX_BYTES = 32 * 1024 * 1024
-MAX_FILE = 512 * 1024
-MAX_FILES = 5000
+# The transport limits are guest.py's: it is installed alone in the guest, so it
+# cannot import them from here. MAX_LINE bounds one protocol line.
+from guest import MAX_BYTES, MAX_FILE, MAX_FILES, MAX_LINE
+
 EXCLUDED = {'.git', 'target', 'node_modules', '.venv', '__pycache__', '.DS_Store'}
 # Exact field types per event: `type(value) is int` keeps JSON booleans out of
 # integer fields. Fields the launcher does not read are not constrained.

@@ -13,8 +13,8 @@ import time
 
 PORT = 1024
 LEASE = 2.0
-# This file is installed alone in the guest, so the transport limits are
-# repeated from run.py; test_vm.py checks that both ends agree.
+# The transport limits live here because this file is installed alone in the
+# guest; run.py imports them, so both ends enforce the same values.
 MAX_LINE = 2 * 1024 * 1024
 MAX_BYTES = 32 * 1024 * 1024
 MAX_FILE = 512 * 1024
