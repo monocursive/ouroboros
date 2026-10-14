@@ -32,7 +32,7 @@ use crate::schemas;
 
 mod bundle_replay;
 mod capture_pruning;
-pub(crate) use bundle_replay::replay as replay_bundle;
+pub(crate) use bundle_replay::{Replayed, replay as replay_bundle};
 mod catalog;
 #[cfg(test)]
 mod intent_tail_tests;
@@ -1975,11 +1975,13 @@ fn apply_record(
     Ok(())
 }
 
-/// The projection of an unresolved run. A child outcome the owner did observe
-/// stays beside the unknown; an owner's or reconciler's own unknown is not a
-/// child outcome, so its reason becomes the run's.
+const UNRESOLVED: &str = "owner or reconciliation reported an unresolved run outcome";
+
+/// The projection of an unresolved run (run projection rule 2). A child
+/// outcome the owner did observe stays beside the unknown; an owner's or
+/// reconciler's own unknown is not a child outcome, so its reason becomes
+/// the run's.
 fn unknown_outcome(reported: Option<&Value>) -> Value {
-    const UNRESOLVED: &str = "owner or reconciliation reported an unresolved run outcome";
     match reported {
         Some(child) if child["kind"] != "unknown" => json!({"kind":"unknown","unknown":true,
             "unknown_reason":UNRESOLVED,"observed_child_outcome":child}),
