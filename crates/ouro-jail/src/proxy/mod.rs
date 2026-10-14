@@ -718,6 +718,9 @@ impl ProxyHandle {
             registry.stopping = true;
             std::mem::take(&mut registry.live)
         };
+        if let Some(vault) = &self.shared.vault {
+            vault.origins.stop();
+        }
         for closer in live.values().flatten() {
             closer.shutdown();
         }
