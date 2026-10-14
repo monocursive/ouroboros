@@ -1092,6 +1092,90 @@ fn writer_keeps_accepting_after_descriptor_exhaustion() {
     assert!(writer.0.try_wait().unwrap().is_none());
 }
 
+/// A writer whose listening socket fails for good cannot serve owners; it
+/// must exit with a failure, never as a clean shutdown.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_writer_that_can_no_longer_accept_exits_with_a_failure() {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+    let mut cli = LocalCli::new();
+    let mut writer = cli.start_writer();
+    let log = cli
+        .temp
+        .path()
+        .join(format!("serve-{}.stderr", cli.command_count));
+    let pid = writer.0.id() as libc::pid_t;
+    // SAFETY: pidfd_open takes a pid and flags by value; the writer is an
+    // unreaped child of this test, so the pid names it.
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    assert!(pidfd >= 0, "{}", std::io::Error::last_os_error());
+    // SAFETY: a successful pidfd_open returned a descriptor owned only here.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as i32) };
+    let mut listeners = 0;
+    for entry in fs::read_dir(format!("/proc/{pid}/fd")).unwrap() {
+        let target: i32 = entry
+            .unwrap()
+            .file_name()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        // SAFETY: pidfd_getfd takes descriptors and flags by value and returns
+        // a new descriptor of this process duplicating the writer's.
+        let copy = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_getfd,
+                std::os::fd::AsRawFd::as_raw_fd(&pidfd),
+                target,
+                0,
+            )
+        };
+        if copy < 0 {
+            continue;
+        }
+        // SAFETY: as above; the copy is owned only here.
+        let copy = unsafe { OwnedFd::from_raw_fd(copy as i32) };
+        let raw = std::os::fd::AsRawFd::as_raw_fd(&copy);
+        let mut listening: libc::c_int = 0;
+        let mut size = std::mem::size_of_val(&listening) as libc::socklen_t;
+        // SAFETY: the copy is open; the output pointer and length describe a live c_int.
+        let answered = unsafe {
+            libc::getsockopt(
+                raw,
+                libc::SOL_SOCKET,
+                libc::SO_ACCEPTCONN,
+                (&mut listening as *mut libc::c_int).cast(),
+                &mut size,
+            )
+        } == 0;
+        if answered && listening == 1 {
+            // Shutting down the shared listening socket makes the writer's
+            // accept fail with EINVAL, which is not transient.
+            // SAFETY: shutdown takes the open descriptor and a flag by value.
+            assert_eq!(unsafe { libc::shutdown(raw, libc::SHUT_RDWR) }, 0);
+            listeners += 1;
+        }
+    }
+    assert_eq!(listeners, 1, "the writer listens on exactly one socket");
+    let deadline = Instant::now() + WAIT_LIMIT;
+    let status = loop {
+        if let Some(status) = writer.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the writer kept running without its acceptor"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success(), "{status}");
+    let stderr = fs::read_to_string(log).unwrap();
+    assert!(
+        stderr.contains("ledger writer stopped accepting connections"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn version_needs_no_data_directory_and_freezes_only_contract_backed_schemas() {
     let output = Command::new(env!("CARGO_BIN_EXE_ouro-ledger"))

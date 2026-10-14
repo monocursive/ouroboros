@@ -4062,6 +4062,25 @@ mod tests {
     }
 
     #[test]
+    fn the_most_severe_poison_decides_a_stream_status() {
+        let poison = |kinds: &[PoisonKind]| -> Vec<Poison> {
+            kinds.iter().map(|kind| Poison::new(*kind, "x")).collect()
+        };
+        assert_eq!(poison_status(&[]), None);
+        for kinds in [
+            [PoisonKind::Incomplete, PoisonKind::Corrupt],
+            [PoisonKind::Corrupt, PoisonKind::Incomplete],
+            [PoisonKind::Incomplete, PoisonKind::Unanchored],
+        ] {
+            assert_eq!(poison_status(&poison(&kinds)), Some("corrupt"), "{kinds:?}");
+        }
+        assert_eq!(
+            poison_status(&poison(&[PoisonKind::Incomplete])),
+            Some("incomplete")
+        );
+    }
+
+    #[test]
     fn integrity_violations_read_as_corrupt_and_interruptions_as_incomplete() {
         let mixed_attempt = |records: &mut Vec<Value>| {
             records.last_mut().unwrap()["attempt_id"] =
