@@ -97,13 +97,7 @@ fn validate_path(path: &str) -> Result<(), String> {
 impl Header {
     /// An RFC 9110 token name and a printable, line-ending-free prefix.
     pub fn validate(&self) -> Result<(), String> {
-        if self.name.is_empty()
-            || self.name.len() > 64
-            || !self
-                .name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
-        {
+        if self.name.len() > 64 || !crate::proxy::http::is_token(self.name.as_bytes()) {
             return Err("vault header name must be 1..64 ASCII token characters".into());
         }
         if let Some(prefix) = &self.prefix
@@ -317,17 +311,13 @@ impl Vault {
         let mut out = Zeroizing::new(Vec::with_capacity(request.forward_head.len() + 8192));
         let mut lease = lifecycle::Lease::default();
         lease.bind(initiator);
-        for line in request.forward_head.split_inclusive(|b| *b == b'\n') {
-            if !line.windows(6).any(|s| s == b"vault:") {
-                out.extend_from_slice(line);
+        for line in crate::proxy::http::lines(&request.forward_head) {
+            if !line.0.windows(6).any(|s| s == b"vault:") {
+                out.extend_from_slice(line.0);
                 continue;
             }
-            let colon = line
-                .iter()
-                .position(|b| *b == b':')
-                .ok_or(Reason::CredentialPlacementDenied)?;
-            let name = &line[..colon];
-            let value = line[colon + 1..].trim_ascii();
+            let (name, value) = line.field().ok_or(Reason::CredentialPlacementDenied)?;
+            let value = value.trim_ascii();
             let mut matched: Option<(&std::sync::Arc<Secret>, Vec<u8>)> = None;
             for secret in &self.secrets {
                 let header = secret.policy.header.as_ref();

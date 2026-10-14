@@ -5,7 +5,13 @@
 //! bound, a 10 s header deadline, 30 s upstream I/O deadlines and a 300 s
 //! client deadline. TLS record state is bounded separately from relay
 //! buffers".
-use super::{Budgets, EndReason, Reason, http::Framing, origin, relay::RelayOutcome, sys};
+use super::{
+    Budgets, EndReason, Reason,
+    http::{self, Framing},
+    origin,
+    relay::RelayOutcome,
+    sys,
+};
 use crate::{network::Destination, vault::Vault};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -158,13 +164,11 @@ fn relay_inner(
     // `Expect` is refused by header name at line start, not by substring:
     // a longer header name or a value containing "expect:" is none of this
     // lane's business.
-    for line in request.forward_head.split_inclusive(|b| *b == b'\n') {
-        let Some(colon) = line.iter().position(|b| *b == b':') else {
-            continue;
-        };
-        if line[..colon].eq_ignore_ascii_case(b"expect") {
-            return Err(Reason::UnsupportedRequest);
-        }
+    if http::lines(&request.forward_head)
+        .filter_map(http::Line::field)
+        .any(|(name, _)| name.eq_ignore_ascii_case(b"expect"))
+    {
+        return Err(Reason::UnsupportedRequest);
     }
     upstream
         .set_read_timeout(Some(UPSTREAM_IO))
@@ -298,20 +302,23 @@ fn relay_inner(
 fn verify_websocket(head: &[u8], key: &[u8]) -> Result<(), Reason> {
     use base64::Engine as _;
     use sha1::{Digest as _, Sha1};
-    let text = std::str::from_utf8(head).map_err(|_| Reason::UpstreamProtocol)?;
+    let utf8 = |bytes| std::str::from_utf8(bytes).map_err(|_| Reason::UpstreamProtocol);
+    utf8(head)?;
     let mut fields = std::collections::HashMap::new();
-    for line in text.split("\r\n").skip(1).filter(|l| !l.is_empty()) {
-        let (name, value) = line.split_once(':').ok_or(Reason::UpstreamProtocol)?;
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
-            || value.bytes().any(|b| b < 0x20 && b != b'\t')
-        {
+    for (index, line) in http::lines(head).enumerate() {
+        // Every line ends in CRLF; a bare LF anywhere refuses.
+        if !line.0.ends_with(b"\r\n") {
+            return Err(Reason::UpstreamProtocol);
+        }
+        if index == 0 || line.content().is_empty() {
+            continue;
+        }
+        let (name, value) = line.field().ok_or(Reason::UpstreamProtocol)?;
+        if !http::is_token(name) || value.iter().any(|&b| b < 0x20 && b != b'\t') {
             return Err(Reason::UpstreamProtocol);
         }
         if fields
-            .insert(name.to_ascii_lowercase(), value.trim())
+            .insert(utf8(name)?.to_ascii_lowercase(), utf8(value)?.trim())
             .is_some()
         {
             return Err(Reason::UpstreamProtocol);
@@ -593,6 +600,10 @@ mod tests {
             "Content-Length: 0\r\n",
             "Transfer-Encoding: chunked\r\n",
             "Sec-WebSocket-Accept: forged\r\n",
+            "X-Bare: lf\nX-Other: 1\r\n",
+            "X-Bare-Cr: a\rb\r\n",
+            "Bad Name: 1\r\n",
+            "NoColon\r\n",
         ] {
             let mut bad = valid[..valid.len() - 2].to_vec();
             bad.extend_from_slice(extra.as_bytes());

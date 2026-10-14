@@ -183,12 +183,39 @@ impl Request {
     }
 }
 
-fn is_tchar(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+/// An RFC 9110 §5.6.2 token: one or more `tchar`.
+pub(crate) fn is_token(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
-fn is_token(bytes: &[u8]) -> bool {
-    !bytes.is_empty() && bytes.iter().all(|&b| is_tchar(b))
+/// One line of a serialized head, its line ending included.
+#[derive(Clone, Copy)]
+pub(crate) struct Line<'a>(pub(crate) &'a [u8]);
+
+impl<'a> Line<'a> {
+    /// The line without its line ending (CRLF, or a bare LF).
+    pub(crate) fn content(self) -> &'a [u8] {
+        let line = self.0.strip_suffix(b"\n").unwrap_or(self.0);
+        line.strip_suffix(b"\r").unwrap_or(line)
+    }
+
+    /// The field the line holds: the bytes before its first colon and the
+    /// bytes after it, up to the line ending, neither trimmed. `None` for a
+    /// line without a colon.
+    pub(crate) fn field(self) -> Option<(&'a [u8], &'a [u8])> {
+        let content = self.content();
+        let colon = content.iter().position(|&b| b == b':')?;
+        Some((&content[..colon], &content[colon + 1..]))
+    }
+}
+
+/// The lines of a serialized head, such as a request's `forward_head`. The
+/// first is the request or status line, the last the empty one.
+pub(crate) fn lines(head: &[u8]) -> impl Iterator<Item = Line<'_>> {
+    head.split_inclusive(|&b| b == b'\n').map(Line)
 }
 
 fn trim_ows(bytes: &[u8]) -> &[u8] {
@@ -220,16 +247,14 @@ const HOP_BY_HOP: &[&str] = &[
 
 impl Request {
     pub(crate) fn websocket_key(&self) -> Option<&[u8]> {
-        self.forward_head
-            .split_inclusive(|b| *b == b'\n')
-            .find_map(|line| {
-                let (name, value) = line.split_at(line.iter().position(|b| *b == b':')?);
-                name.eq_ignore_ascii_case(b"sec-websocket-key")
-                    .then_some(value[1..].trim_ascii())
-            })
+        lines(&self.forward_head).find_map(|line| {
+            let (name, value) = line.field()?;
+            name.eq_ignore_ascii_case(b"sec-websocket-key")
+                .then_some(value.trim_ascii())
+        })
     }
     pub(crate) fn path(&self) -> Option<&str> {
-        let line = self.forward_head.split(|b| *b == b'\n').next()?;
+        let line = lines(&self.forward_head).next()?.content();
         let path = line.split(|b| *b == b' ').nth(1)?;
         std::str::from_utf8(path.split(|b| *b == b'?').next()?).ok()
     }
@@ -546,6 +571,33 @@ mod tests {
             assert!(parse(&bad).is_err());
         }
     }
+    #[test]
+    fn head_lines_split_fields_at_the_first_colon() {
+        let head = b"GET /a:b HTTP/1.1\r\nX-Key:  v:w \r\nBare\nNoColon\r\n\r\n";
+        let fields: Vec<_> = lines(head).map(Line::field).collect();
+        assert_eq!(
+            fields,
+            [
+                Some((&b"GET /a"[..], &b"b HTTP/1.1"[..])),
+                Some((&b"X-Key"[..], &b"  v:w "[..])),
+                None,
+                None,
+                None,
+            ]
+        );
+        assert_eq!(
+            lines(head).map(Line::content).collect::<Vec<_>>(),
+            [
+                &b"GET /a:b HTTP/1.1"[..],
+                b"X-Key:  v:w ",
+                b"Bare",
+                b"NoColon",
+                b""
+            ]
+        );
+        assert!(is_token(b"X-Api_Key.1~") && !is_token(b"") && !is_token(b"a b"));
+    }
+
     #[test]
     fn scan_refuses_bare_line_endings_and_nul() {
         assert_eq!(scan(b"GET / HTTP/1.1\n", 0), Err(Reason::MalformedRequest));
