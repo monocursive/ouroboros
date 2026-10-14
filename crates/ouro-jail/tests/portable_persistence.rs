@@ -190,7 +190,9 @@ impl PreparedExecution for SimPrepared {
             removed_environment_names: Vec::new(),
         })
     }
-    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+    fn release(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
         self.0.log.lock().unwrap().released_at = Some(Instant::now());
         Ok(Box::new(SimRunning {
             sim: self.0,
@@ -2340,7 +2342,9 @@ impl PreparedExecution for ExitPrepared {
     fn applied(&self) -> Option<ouro_jail::records::Applied> {
         SimPrepared(self.0.sim.clone()).applied()
     }
-    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+    fn release(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
         Ok(Box::new(ExitRunning {
             times: self.0.times.clone(),
             step: 0,

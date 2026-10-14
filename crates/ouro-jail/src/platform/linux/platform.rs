@@ -3690,15 +3690,9 @@ impl PreparedExecution for LinuxPrepared {
         Some(self.boundary.applied.clone())
     }
 
-    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
-        // One implementation, which also reports teardown
-        self.release_reporting_teardown()
-            .map_err(|failure| failure.error)
-    }
-
     // A failed release runs the verified teardown and says
     // what it established, instead of tearing down without a verdict.
-    fn release_reporting_teardown(
+    fn release(
         self: Box<Self>,
     ) -> Result<Box<dyn RunningExecution>, Box<crate::platform::ReleaseFailure>> {
         let mut boundary = self.boundary;

@@ -462,14 +462,29 @@ impl PreparedExecution for SimPrepared {
             removed_environment_names: Vec::new(),
         })
     }
-    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+    fn release(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
         if self.sim.release_fails {
-            return Err(JailError::new(
-                ErrorCode::BackendUnavailable,
-                ouro_jail::records::ErrorStage::Released,
-                Remediation::Retry,
-                "simulated release failure",
-            ));
+            let tree = if self.sim.release_teardown_lost {
+                Some(TreeObservation {
+                    tree_empty: None,
+                    verified_at: None,
+                    verification_scope: "attempt_tree".into(),
+                    integrity: "lost".into(),
+                })
+            } else {
+                self.sim.release_teardown_verified.then(verified_tree)
+            };
+            return Err(Box::new(ouro_jail::platform::ReleaseFailure {
+                error: JailError::new(
+                    ErrorCode::BackendUnavailable,
+                    ouro_jail::records::ErrorStage::Released,
+                    Remediation::Retry,
+                    "simulated release failure",
+                ),
+                teardown: tree.map(|tree| Teardown { tree: Some(tree) }),
+            }));
         }
         Ok(Box::new(SimRunning {
             sim: self.sim,
@@ -479,28 +494,6 @@ impl PreparedExecution for SimPrepared {
     fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
         Ok(Teardown {
             tree: Some(verified_tree()),
-        })
-    }
-    fn release_reporting_teardown(
-        self: Box<Self>,
-    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
-        let verified = self.sim.release_teardown_verified;
-        let lost = self.sim.release_teardown_lost;
-        self.release().map_err(|error| {
-            let tree = if lost {
-                Some(TreeObservation {
-                    tree_empty: None,
-                    verified_at: None,
-                    verification_scope: "attempt_tree".into(),
-                    integrity: "lost".into(),
-                })
-            } else {
-                verified.then(verified_tree)
-            };
-            Box::new(ouro_jail::platform::ReleaseFailure {
-                error,
-                teardown: tree.map(|tree| Teardown { tree: Some(tree) }),
-            })
         })
     }
 }

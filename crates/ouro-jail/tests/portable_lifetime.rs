@@ -70,7 +70,9 @@ impl PreparedExecution for Prepared {
             backend_version: Some("1".into()),
         }
     }
-    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+    fn release(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
         Ok(Box::new(Running { confirmed: false }))
     }
     fn abort(self: Box<Self>) -> Result<Teardown, JailError> {

@@ -89,22 +89,14 @@ impl PreparedExecution for ScriptedPrepared {
             backend_version: Some("1".into()),
         }
     }
-    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+    fn release(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
         Ok(Box::new(ScriptedRunning { step: 0 }))
     }
     fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
         Ok(Teardown {
             tree: Some(verified_tree()),
-        })
-    }
-    fn release_reporting_teardown(
-        self: Box<Self>,
-    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
-        self.release().map_err(|error| {
-            Box::new(ouro_jail::platform::ReleaseFailure {
-                error,
-                teardown: None,
-            })
         })
     }
 }

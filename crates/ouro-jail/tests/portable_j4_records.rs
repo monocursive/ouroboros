@@ -115,7 +115,7 @@ impl PreparedExecution for Prepared {
     }
     fn release(
         self: Box<Self>,
-    ) -> Result<Box<dyn RunningExecution>, ouro_jail::records::JailError> {
+    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
         Ok(Box::new(Running {
             events: self.0.events.into(),
             stops: self.0.stops,

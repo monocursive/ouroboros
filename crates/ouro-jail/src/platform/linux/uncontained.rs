@@ -1404,14 +1404,7 @@ impl PreparedExecution for Prepared {
         Some(self.boundary.applied.clone())
     }
 
-    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
-        self.release_reporting_teardown()
-            .map_err(|failure| failure.error)
-    }
-
-    fn release_reporting_teardown(
-        self: Box<Self>,
-    ) -> Result<Box<dyn RunningExecution>, Box<ReleaseFailure>> {
+    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, Box<ReleaseFailure>> {
         let mut boundary = self.boundary;
         // The blocked launcher must still be the only thing in the pinned
         // leaf. A same-UID process can have changed either since prepared;

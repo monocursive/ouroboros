@@ -1542,7 +1542,7 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     // A failed release reports its teardown, so the refused
     // receipt carries the verified tree (§13.2 row 4) and vendor state can be
     // removed rather than retained.
-    let mut running = match prepared.release_reporting_teardown() {
+    let mut running = match prepared.release() {
         Ok(running) => running,
         Err(failure) => {
             let crate::platform::ReleaseFailure { error, teardown } = *failure;

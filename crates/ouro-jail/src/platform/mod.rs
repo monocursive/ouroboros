@@ -104,16 +104,12 @@ pub struct PreparedPlan {
     /// here): trusted input the stdio screening must treat like the state
     /// root (audit 2026-10-08 H1).
     pub config_dir: PathBuf,
-    // Vendor state and bind_ro handles staged by the
-    // supervisor, bound by descriptor (§9.1, §12). A field, so the platform
-    // receives the exact objects staging examined instead of re-resolving
-    // paths. (The other J3-launch change here is the additive
-    // `release_reporting_teardown` default method.)
     /// The vendor-state directory and `bind_ro` sources, when a launch
-    /// profile needs them; `None` otherwise.
+    /// profile needs them; `None` otherwise. Staged by the supervisor and
+    /// bound by descriptor (§9.1, §12), so the platform receives the exact
+    /// objects staging examined instead of re-resolving paths.
     pub launch: Option<crate::credentials::LaunchHandoff>,
-    // The registered proxy directory (jail-v1 §10)
-    /// The attempt's registered, 0700 proxy directory, for a proxy-mode
+    /// The attempt's registered, 0700 proxy directory (§10), for a proxy-mode
     /// profile; `None` otherwise. The platform binds the proxy socket inside
     /// it and exposes it read-only by this descriptor.
     pub proxy: Option<ProxyDirHandoff>,
@@ -179,12 +175,11 @@ pub struct BoundaryIdentity {
     pub native: Option<NativeLifetime>,
     /// The blocked launcher's stable identity.
     pub process: Option<ProcessRecord>,
-    /// The enforcement backend's name, for the receipt's `jail.backend`.
-    ///
-    /// ADDITIVE, defaulting to `None`: `jail.backend` and `backend_version`
-    /// are facts about the mechanism that made the boundary, which only the
-    /// platform that made it knows. `applied` is reported separately through
-    /// [`PreparedExecution::applied`].
+    /// The enforcement backend's name, for the receipt's `jail.backend`, or
+    /// `None` when the platform names none: `jail.backend` and
+    /// `backend_version` are facts about the mechanism that made the
+    /// boundary, which only the platform that made it knows. `applied` is
+    /// reported separately through [`PreparedExecution::applied`].
     pub backend: Option<String>,
     /// The backend's own version string, as the backend reports it.
     pub backend_version: Option<String>,
@@ -381,12 +376,10 @@ pub trait PreparedExecution {
 
     /// What this boundary actually applied, for the receipt's `applied` group.
     ///
-    /// ADDITIVE, with a default of `None`: a platform that reports nothing
-    /// leaves the supervisor's own view in place, which today is the wall
-    /// ceiling the supervisor itself enforces. The Linux slice overrides it
-    /// when it wires the mechanisms into this trait, because §13.2 wants
-    /// "actually applied filesystem/network/syscall mechanisms and limit
-    /// scopes" and only the platform knows them.
+    /// §13.2 wants "actually applied filesystem/network/syscall mechanisms
+    /// and limit scopes", which only the platform knows, so an executing
+    /// platform reports them. The default, `None`, leaves the supervisor's
+    /// own view: nothing applied but the wall ceiling it records itself.
     fn applied(&self) -> Option<crate::records::Applied> {
         None
     }
@@ -394,40 +387,20 @@ pub trait PreparedExecution {
     /// Releases the blocked launcher so it execs the target.
     ///
     /// # Errors
-    /// Returns a typed refusal when the release fails.
-    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError>;
+    /// The release refusal and, when the platform tore the boundary down
+    /// after it, what that teardown established about the tree (§13.2 row
+    /// 4): the refused receipt can then say `tree_empty = true` and vendor
+    /// state can be removed honestly. A failure with no teardown is recorded
+    /// as an unverified tree.
+    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, Box<ReleaseFailure>>;
 
     /// Tears the prepared resources down without ever running the target.
     ///
     /// # Errors
     /// Returns a typed error when teardown could not be completed or verified.
     fn abort(self: Box<Self>) -> Result<Teardown, JailError>;
-
-    // A failed release reports its teardown (§13.2 row 4)
-    /// [`PreparedExecution::release`], plus what the teardown after a failed
-    /// release established about the tree.
-    ///
-    /// ADDITIVE, with a default that reports nothing (`None`), which the
-    /// supervisor records as an unverified tree: exactly today's behaviour.
-    /// A platform that tears the boundary down on a failed release and can
-    /// verify that teardown overrides it, so the refused receipt can say
-    /// `tree_empty = true` and vendor state can be removed honestly.
-    ///
-    /// # Errors
-    /// The release refusal and, when one ran, the teardown's observation.
-    fn release_reporting_teardown(
-        self: Box<Self>,
-    ) -> Result<Box<dyn RunningExecution>, Box<ReleaseFailure>> {
-        self.release().map_err(|error| {
-            Box::new(ReleaseFailure {
-                error,
-                teardown: None,
-            })
-        })
-    }
 }
 
-// A failed release with its teardown
 /// Why a release failed, and what the teardown it ran established.
 #[derive(Debug)]
 pub struct ReleaseFailure {

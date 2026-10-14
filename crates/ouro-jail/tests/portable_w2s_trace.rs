@@ -161,7 +161,9 @@ impl PreparedExecution for Prepared {
             backend_version: None,
         }
     }
-    fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+    fn release(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
         Ok(Box::new(Running {
             script: self.0,
             step: 0,
