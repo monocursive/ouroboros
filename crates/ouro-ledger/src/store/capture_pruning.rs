@@ -1,6 +1,6 @@
 //! Capture-only expiry retains canonical events. An exact durable inventory
 //! authorizes deletion, and the terminal chain anchors it to canonical history.
-use super::pruning::{
+use super::gc::{
     RemovedFile, check_member, directory, file_hash, member, publish, read_json, safe_file,
 };
 use super::*;
