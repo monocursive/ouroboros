@@ -7,6 +7,7 @@ pub mod discovery;
 mod faults;
 mod fsx;
 mod manifest;
+mod paging;
 mod pending;
 mod projection;
 pub mod protocol;

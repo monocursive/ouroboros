@@ -7,6 +7,7 @@ use sha2::{Digest as _, Sha256};
 use super::{Store, canonical, check_run_id, digest, stream::Stream};
 use crate::{
     discovery::{MAX_CATALOG_LIMIT, MAX_CATALOG_RUNS, MAX_POSITION_BYTES, validate_filter},
+    paging::{self, Page},
     protocol::{
         CatalogPage, CatalogRequest, DiscoveryPage, DiscoveryRequest, LedgerError,
         READ_OUTPUT_BYTES, ReadFilter, ReadRequest, ReadSelector, Result, RunFilter, RunState,
@@ -35,14 +36,11 @@ struct DiscoveryPosition {
 }
 
 fn position<T: serde::de::DeserializeOwned>(value: Option<&str>) -> Result<Option<T>> {
-    value
-        .map(|v| {
-            if v.len() > MAX_POSITION_BYTES {
-                return Err(LedgerError::refused("discovery position exceeds bound"));
-            }
-            Ok(serde_json::from_str(v)?)
-        })
-        .transpose()
+    paging::position(
+        value,
+        MAX_POSITION_BYTES,
+        "discovery position exceeds bound",
+    )
 }
 
 impl Stream {
@@ -186,8 +184,7 @@ impl Store {
         hash.update(schemas::CATALOG.as_bytes());
         hash.update(b"\0");
         let mut runs = Vec::new();
-        let mut bytes = 0;
-        let mut full = false;
+        let mut page = Page::new(request.limit as usize, READ_OUTPUT_BYTES);
         let mut more = false;
         let mut matched_runs = 0;
         let mut prior_exists = prior.is_none();
@@ -207,17 +204,11 @@ impl Store {
             if prior.as_ref().is_some_and(|p| id <= &p.last_run) {
                 continue;
             }
-            if encoded.len() > READ_OUTPUT_BYTES {
-                return Err(LedgerError::refused("catalog summary exceeds page bound"));
-            }
-            full |=
-                runs.len() >= request.limit as usize || bytes + encoded.len() > READ_OUTPUT_BYTES;
-            if full {
+            if page.offer(encoded.len(), "catalog summary exceeds page bound")? {
+                runs.push(summary);
+            } else {
                 more = true;
-                continue;
             }
-            bytes += encoded.len();
-            runs.push(summary);
         }
         let snapshot = format!("sha256:{:x}", hash.finalize());
         if prior.as_ref().is_some_and(|p| p.snapshot != snapshot) || !prior_exists {

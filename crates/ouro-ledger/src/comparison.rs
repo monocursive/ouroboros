@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use crate::{
     daemon::Client,
+    paging::{self, Page},
     protocol::{
         Chain, LedgerError, MAX_FRAME_BYTES, READ_OUTPUT_BYTES, ReadFilter, ReadPage, ReadRequest,
         ReadSelector, Result, SelectionStatus,
@@ -21,6 +22,8 @@ const MAX_BYTES: usize = 64 * 1_048_576;
 const MAX_PAGES: usize = 4096;
 const MAX_BUCKETS: usize = 4096;
 const MAX_KEYS: usize = 8 * 1_048_576;
+/// The bound on a caller's diff position, checked before it is parsed.
+const POSITION_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -297,14 +300,8 @@ fn compare_with(
             return Err(LedgerError::refused("diff requires canonical run ids"));
         }
     }
-    let position: Option<Position> = after
-        .map(|v| {
-            if v.len() > 1024 {
-                return Err(LedgerError::refused("diff position exceeds bound"));
-            }
-            Ok(serde_json::from_str(v)?)
-        })
-        .transpose()?;
+    let position: Option<Position> =
+        paging::position(after, POSITION_BYTES, "diff position exceeds bound")?;
     if position
         .as_ref()
         .is_some_and(|p| p.left_run != left || p.right_run != right || p.mode != mode)
@@ -390,16 +387,14 @@ fn compare_with(
         return Err(LedgerError::refused("diff position exceeds result length"));
     }
     let mut items = Vec::new();
-    let mut bytes = 0;
+    let mut page = Page::new(limit as usize, READ_OUTPUT_BYTES);
     for item in changes.into_iter().skip(offset).take(limit as usize) {
-        let size = serde_json::to_vec(&item)?.len();
-        if size > READ_OUTPUT_BYTES {
-            return Err(LedgerError::refused("diff item exceeds output bound"));
-        }
-        if bytes + size > READ_OUTPUT_BYTES {
+        if !page.offer(
+            serde_json::to_vec(&item)?.len(),
+            "diff item exceeds output bound",
+        )? {
             break;
         }
-        bytes += size;
         items.push(item);
     }
     let complete = a.summary["complete"] == true && b.summary["complete"] == true;
