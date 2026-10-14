@@ -121,58 +121,40 @@ pub(super) struct Handles {
     pub handed: Arc<AtomicUsize>,
 }
 
-/// The two `/proc` reads that name a task: its thread group and its birth.
+/// Every `/proc` read the session makes.
 ///
 /// A seam, so a unit test can play what the kernel will not hand an
-/// unprivileged test on the reference host: a tid recycled for a new task
-/// (J4 S1). The live implementation is [`LiveProc`].
+/// unprivileged test on the reference host — a tid recycled for a new task
+/// (J4 S1), a reused backend pid, a raced exec image — and so that what a
+/// stop reads can be counted. The live implementation is [`LiveProc`]; the
+/// trait has no defaults, so a fake answers every read itself and never
+/// falls through to the real `/proc`.
 pub(super) trait ProcView: Send {
     /// The thread group `tid` belongs to, in this process's pid namespace.
     fn tgid(&self, tid: pid_t) -> Option<pid_t>;
     /// Field 22 of `/proc/<tid>/stat`: the task's start time in clock ticks
     /// since boot.
     fn start_ticks(&self, tid: pid_t) -> Option<u64>;
+    /// The parent `pid` currently reports (J5-T).
+    fn ppid(&self, pid: pid_t) -> Option<pid_t>;
     /// The direct children of every thread of `pid` (J5-T).
-    fn children(&self, pid: pid_t) -> Vec<pid_t> {
-        proc::children(pid)
-    }
+    fn children(&self, pid: pid_t) -> Vec<pid_t>;
     /// The raw `/proc/<tid>/cmdline` bytes (audit 6 N2).
-    fn cmdline(&self, tid: pid_t) -> Option<Vec<u8>> {
-        proc::cmdline_bytes(tid)
-    }
+    fn cmdline(&self, tid: pid_t) -> Option<Vec<u8>>;
     /// The image the kernel loaded for `tid` (`/proc/<tid>/exe`, raw, with
     /// its identity) and each of `images`' identity in the tracee's root
     /// (audit 3 A1, audit 4 B3).
-    fn kernel_image(&self, tid: pid_t, images: &[Vec<u8>]) -> Option<KernelImage> {
-        proc::kernel_exe(tid, images)
-    }
+    fn kernel_image(&self, tid: pid_t, images: &[Vec<u8>]) -> Option<KernelImage>;
     /// The `#!` or `binfmt_misc` interpreter a target candidate would load
     /// (audit 2026-10-08 H2).
-    fn script_image(&self, tid: pid_t, candidate: &[u8]) -> Option<ShebangImage> {
-        proc::shebang_image(tid, candidate).or_else(|| proc::binfmt_image(tid, candidate))
-    }
+    fn script_image(&self, tid: pid_t, candidate: &[u8]) -> Option<ShebangImage>;
     /// The raw `/proc/<tid>/cwd` link bytes (§11.3).
-    fn cwd(&self, tid: pid_t) -> Option<Vec<u8>> {
-        use std::os::unix::ffi::OsStringExt as _;
-        std::fs::read_link(format!("/proc/{tid}/cwd"))
-            .ok()
-            .map(|link| link.into_os_string().into_vec())
-    }
+    fn cwd(&self, tid: pid_t) -> Option<Vec<u8>>;
     /// The raw `/proc/<tid>/fd/<fd>` link bytes (audit 6 N1).
-    fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>> {
-        use std::os::unix::ffi::OsStringExt as _;
-        std::fs::read_link(format!("/proc/{tid}/fd/{fd}"))
-            .ok()
-            .map(|link| link.into_os_string().into_vec())
-    }
+    fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>>;
     /// The link count of the file `/proc/<tid>/fd/<fd>` resolves to (audit 7
     /// L7): 0 once the file is unlinked. `None` when it cannot be read.
-    fn fd_nlink(&self, tid: pid_t, fd: i64) -> Option<u64> {
-        use std::os::unix::fs::MetadataExt as _;
-        std::fs::metadata(format!("/proc/{tid}/fd/{fd}"))
-            .ok()
-            .map(|meta| meta.nlink())
-    }
+    fn fd_nlink(&self, tid: pid_t, fd: i64) -> Option<u64>;
 }
 
 /// `/proc`, read now.
@@ -185,6 +167,47 @@ impl ProcView for LiveProc {
 
     fn start_ticks(&self, tid: pid_t) -> Option<u64> {
         proc::start_ticks(tid)
+    }
+
+    fn ppid(&self, pid: pid_t) -> Option<pid_t> {
+        proc::ppid(pid)
+    }
+
+    fn children(&self, pid: pid_t) -> Vec<pid_t> {
+        proc::children(pid)
+    }
+
+    fn cmdline(&self, tid: pid_t) -> Option<Vec<u8>> {
+        proc::cmdline_bytes(tid)
+    }
+
+    fn kernel_image(&self, tid: pid_t, images: &[Vec<u8>]) -> Option<KernelImage> {
+        proc::kernel_exe(tid, images)
+    }
+
+    fn script_image(&self, tid: pid_t, candidate: &[u8]) -> Option<ShebangImage> {
+        proc::shebang_image(tid, candidate).or_else(|| proc::binfmt_image(tid, candidate))
+    }
+
+    fn cwd(&self, tid: pid_t) -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStringExt as _;
+        std::fs::read_link(format!("/proc/{tid}/cwd"))
+            .ok()
+            .map(|link| link.into_os_string().into_vec())
+    }
+
+    fn fd_link(&self, tid: pid_t, fd: i64) -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStringExt as _;
+        std::fs::read_link(format!("/proc/{tid}/fd/{fd}"))
+            .ok()
+            .map(|link| link.into_os_string().into_vec())
+    }
+
+    fn fd_nlink(&self, tid: pid_t, fd: i64) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(format!("/proc/{tid}/fd/{fd}"))
+            .ok()
+            .map(|meta| meta.nlink())
     }
 }
 
@@ -219,10 +242,11 @@ enum Owed {
 }
 
 impl Owed {
-    /// Read from the kernel's parent links while the launcher is seized and
-    /// blocked, so the chain above it cannot change under the walk.
-    fn toward(launcher: pid_t, procfs: &dyn ProcView) -> Owed {
-        match proc::child_toward(sys::getpid(), launcher) {
+    /// What this process, `own`, owes for `launcher`: read from the
+    /// kernel's parent links while the launcher is seized and blocked, so
+    /// the chain above it cannot change under the walk.
+    fn toward(own: pid_t, launcher: pid_t, procfs: &dyn ProcView) -> Owed {
+        match proc::child_toward(own, launcher, |pid| procfs.ppid(pid)) {
             Some(child) if child == launcher => Owed::Nothing,
             Some(child) => Owed::Backend {
                 pid: child,
@@ -527,7 +551,7 @@ pub(super) fn run(
         start_ticks,
     });
     session.register(launcher);
-    session.owed = Owed::toward(launcher, &*session.procfs);
+    session.owed = Owed::toward(sys::getpid(), launcher, &*session.procfs);
     session.beside = session
         .procfs
         .children(sys::getpid())
@@ -3122,6 +3146,8 @@ mod tests {
     struct Script {
         /// `tid -> (tgid, start ticks)`.
         tasks: HashMap<pid_t, (pid_t, u64)>,
+        /// `pid -> the parent it reports`.
+        parents: HashMap<pid_t, pid_t>,
         /// The children of this process, whichever pid is asked about.
         children: Vec<pid_t>,
         cmdline: HashMap<pid_t, Vec<u8>>,
@@ -3173,6 +3199,9 @@ mod tests {
                 .tasks
                 .get(&tid)
                 .map(|(_, ticks)| *ticks)
+        }
+        fn ppid(&self, pid: pid_t) -> Option<pid_t> {
+            self.read("ppid").parents.get(&pid).copied()
         }
         fn children(&self, _pid: pid_t) -> Vec<pid_t> {
             self.read("children").children.clone()
@@ -4888,6 +4917,50 @@ mod tests {
         assert_eq!(sockaddr_len(libc::AF_NETLINK as u16, 128), None);
         assert_eq!(sockaddr_len(libc::AF_PACKET as u16, 128), None);
         assert_eq!(sockaddr_len(0xffff, 128), None);
+    }
+
+    /// J5-T, through the `/proc` seam: what the tracer owes follows the
+    /// parent links from the launcher up to this process. Nothing when the
+    /// launcher is its own child; the child it descends through, with that
+    /// child's birth, when it is deeper; every child when the chain cannot
+    /// be read to this process.
+    #[test]
+    fn j5t_what_is_owed_follows_the_launchers_parents() {
+        const OWN: pid_t = 5_000_100;
+        const BACKEND: pid_t = 5_000_101;
+        const NAMESPACE_INIT: pid_t = 5_000_102;
+        const LAUNCHER: pid_t = 5_000_103;
+        let proc = FakeProc::default().task(BACKEND, BACKEND, 1500);
+        let parents = |links: &[(pid_t, pid_t)]| {
+            proc.edit(|script| script.parents = links.iter().copied().collect());
+        };
+        parents(&[(LAUNCHER, OWN)]);
+        assert_eq!(Owed::toward(OWN, LAUNCHER, &proc), Owed::Nothing);
+        parents(&[
+            (LAUNCHER, NAMESPACE_INIT),
+            (NAMESPACE_INIT, BACKEND),
+            (BACKEND, OWN),
+        ]);
+        assert_eq!(
+            Owed::toward(OWN, LAUNCHER, &proc),
+            Owed::Backend {
+                pid: BACKEND,
+                birth: Some(1500),
+                reaped: false,
+            }
+        );
+        parents(&[(LAUNCHER, NAMESPACE_INIT), (BACKEND, OWN)]);
+        assert_eq!(
+            Owed::toward(OWN, LAUNCHER, &proc),
+            Owed::Every,
+            "a link that cannot be read"
+        );
+        parents(&[(LAUNCHER, 1)]);
+        assert_eq!(
+            Owed::toward(OWN, LAUNCHER, &proc),
+            Owed::Every,
+            "reparented to init: not below this process"
+        );
     }
 
     /// J5-T (review of the fix, M5): the backend is owed only while its
