@@ -363,6 +363,17 @@ pub const ABORT_AT_SEAM: &str = "OURO_JAIL_TEST_ABORT_AT";
 /// The largest replacement ordinal [`ABORT_AT_SEAM`] accepts.
 pub const ABORT_AT_MAX_ORDINAL: usize = 10_000;
 
+/// A plain decimal, as the numeric test seams and settings take one: ASCII
+/// digits only, no sign, no space and no leading zero (so never 0). Anything
+/// else is no number, and the value is ignored.
+#[must_use]
+pub fn plain_decimal(text: &str) -> Option<u64> {
+    if text.is_empty() || text.starts_with('0') || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 /// The site, point and 1-based replacement ordinal an [`ABORT_AT_SEAM`] value
 /// names, or `None` when it names none (and is then ignored).
 #[must_use]
@@ -372,17 +383,9 @@ pub fn parse_abort_at(raw: &str) -> Option<(Site, CrashPoint, usize)> {
     let point = CrashPoint::parse(parts.next()?)?;
     let nth = match parts.next() {
         None => 1,
-        Some(text) => {
-            if text.is_empty()
-                || text.starts_with('0')
-                || !text.bytes().all(|byte| byte.is_ascii_digit())
-            {
-                return None;
-            }
-            text.parse::<usize>()
-                .ok()
-                .filter(|nth| (1..=ABORT_AT_MAX_ORDINAL).contains(nth))?
-        }
+        Some(text) => usize::try_from(plain_decimal(text)?)
+            .ok()
+            .filter(|nth| (1..=ABORT_AT_MAX_ORDINAL).contains(nth))?,
     };
     if parts.next().is_some() {
         return None;
@@ -949,6 +952,28 @@ impl PersistIo for Forward {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plain_decimal_is_digits_only_without_a_leading_zero() {
+        assert_eq!(plain_decimal("4"), Some(4));
+        assert_eq!(plain_decimal("4096"), Some(4096));
+        assert_eq!(plain_decimal("18446744073709551615"), Some(u64::MAX));
+        for refused in [
+            "",
+            "0",
+            "04",
+            "+4",
+            "-4",
+            " 4",
+            "4 ",
+            "4.0",
+            "0x4",
+            "4k",
+            "18446744073709551616",
+        ] {
+            assert_eq!(plain_decimal(refused), None, "{refused:?}");
+        }
+    }
 
     #[test]
     fn the_abort_seam_names_a_site_a_point_and_an_optional_ordinal() {

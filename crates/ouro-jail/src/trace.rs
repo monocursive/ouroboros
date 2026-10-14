@@ -314,18 +314,11 @@ pub const TRACE_CAP_ENV: &str = "OURO_JAIL_TRACE_CAP";
 /// typos, not a physical limit.
 pub const TRACE_CAP_MAX: u64 = 1024 * 1024 * 1024;
 
-fn decimal_bytes(text: &str) -> Option<u64> {
-    text.parse::<u64>().ok().filter(|_| {
-        // Plain decimal digits only, no sign and no leading zero.
-        !text.starts_with('0') && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
-    })
-}
-
 /// The cap [`TRACE_CAP_ENV`] asks for, when it is a decimal byte count in
 /// range.
 #[must_use]
 pub fn env_cap(env: Option<&str>) -> u64 {
-    env.and_then(decimal_bytes)
+    env.and_then(crate::state::plain_decimal)
         .filter(|cap| (TRACE_CAP_SEAM_MIN..=TRACE_CAP_MAX).contains(cap))
         .unwrap_or(LOCAL_CAP)
 }
@@ -339,7 +332,7 @@ pub fn env_cap(env: Option<&str>) -> u64 {
 pub fn local_bounds(env: Option<&str>, seam: Option<&str>) -> (u64, u64) {
     let base = env_cap(env);
     let cap = seam
-        .and_then(decimal_bytes)
+        .and_then(crate::state::plain_decimal)
         .filter(|cap| (TRACE_CAP_SEAM_MIN..=base).contains(cap))
         .unwrap_or(base);
     (cap, LOCAL_RESERVE.min(cap / 2))
@@ -365,11 +358,9 @@ pub const TRACE_FD_WRITE_SEAM: &str = "OURO_JAIL_TEST_TRACE_FD_WRITE_MAX";
 /// The per-write cap [`TRACE_FD_WRITE_SEAM`] asks for, if its value is one.
 #[must_use]
 pub fn fd_write_max(seam: Option<&str>) -> Option<usize> {
-    seam.filter(|text| {
-        !text.starts_with('0') && !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
-    })
-    .and_then(|text| text.parse::<usize>().ok())
-    .filter(|max| (1..=EVENT_MAX).contains(max))
+    seam.and_then(crate::state::plain_decimal)
+        .and_then(|max| usize::try_from(max).ok())
+        .filter(|max| (1..=EVENT_MAX).contains(max))
 }
 
 /// One bounded NDJSON trace sink.

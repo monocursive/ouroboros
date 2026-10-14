@@ -91,13 +91,12 @@ impl Options {
 }
 
 /// The bound a [`SEAM_MAX_ENTRIES`] value asks for: shrink-only, so a value
-/// that is not a positive number below `default` changes nothing.
+/// that is not a plain decimal ([`state::plain_decimal`]) below `default`
+/// changes nothing.
 #[must_use]
 pub fn seam_max_entries(value: &str, default: usize) -> usize {
-    value
-        .trim()
-        .parse::<usize>()
-        .ok()
+    state::plain_decimal(value)
+        .and_then(|max| usize::try_from(max).ok())
         .filter(|max| (1..default).contains(max))
         .unwrap_or(default)
 }
@@ -2825,7 +2824,7 @@ mod tests {
     #[test]
     fn the_seam_only_shrinks_the_bound() {
         assert_eq!(seam_max_entries("4", 100), 4);
-        for ignored in ["0", "100", "1000", "-3", "x", ""] {
+        for ignored in ["0", "100", "1000", "-3", "x", "", " 4", "4 ", "+4", "04"] {
             assert_eq!(seam_max_entries(ignored, 100), 100, "{ignored:?}");
         }
     }
