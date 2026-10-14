@@ -262,7 +262,7 @@ impl Runtime {
                 let fresh = read_vault_source(path, forbidden, SOURCE_MAX)
                     .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
                 if fresh.as_slice() != raw.as_slice() {
-                    return Err(Reason::CredentialUnavailable);
+                    return Err(self.failed("source_changed", Reason::CredentialUnavailable));
                 }
                 let value = self.exchange_token(policy, path, forbidden, raw, epoch, doc)?;
                 let (_, current) = read_vault_source_version(path, forbidden, SOURCE_MAX)
@@ -290,7 +290,7 @@ impl Runtime {
             // leaves the state exactly as it was.
             let next = state.generation.saturating_add(1);
             if !self.emit(next, "loaded") {
-                return Err(Reason::CredentialUnavailable);
+                return Err(self.failed("audit_unavailable", Reason::CredentialUnavailable));
             }
             state.generation = next;
             state.value = value;
@@ -360,13 +360,13 @@ impl Runtime {
             self.deny(Reason::CredentialUnavailable);
         }
         doc.refresh_pending = true;
-        let pending = encode(doc)?;
+        let pending = encode(doc).map_err(|reason| self.failed("document_unencodable", reason))?;
         update_vault_source(path, forbidden, raw, identity, &pending)
             .map_err(|code| self.deny(self.failed(code, Reason::CredentialUnavailable)))?;
         let (confirmed, pending_epoch) = read_vault_source_version(path, forbidden, SOURCE_MAX)
             .map_err(|code| self.deny(self.failed(code, Reason::CredentialRevoked)))?;
         if confirmed.as_slice() != pending.as_slice() || pending_epoch.identity() != identity {
-            return Err(self.deny(Reason::CredentialRevoked));
+            return Err(self.deny(self.failed("source_changed", Reason::CredentialRevoked)));
         }
         let generation = {
             let mut state = lock(&self.state);
@@ -378,7 +378,7 @@ impl Runtime {
             state.generation
         };
         if !self.emit(generation, "refresh_started") {
-            return Err(self.deny(Reason::CredentialUnavailable));
+            return Err(self.deny(self.failed("audit_unavailable", Reason::CredentialUnavailable)));
         }
         Ok(pending)
     }
