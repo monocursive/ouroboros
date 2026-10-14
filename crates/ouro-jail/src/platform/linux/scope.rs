@@ -37,8 +37,10 @@ use std::path::{Path, PathBuf};
 /// value is ignored (recorded as `null`).
 pub const SEAM: &str = "OURO_JAIL_TEST_SUPERVISOR_SCOPE";
 
-/// The whole step's budget: the call and the observed move share it.
+/// The whole step's budget: the call and the observed move share it. Whole
+/// seconds, because `busctl --timeout` is given it in seconds.
 pub const BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+const _: () = assert!(BUDGET.subsec_nanos() == 0 && BUDGET.as_secs() > 0);
 
 /// Where `busctl` is looked for, in order. Never a `PATH` lookup: the
 /// supervisor's `PATH` is the operator's, and this child runs before policy.
@@ -65,6 +67,14 @@ pub enum Seam {
 }
 
 impl Seam {
+    /// Every seam.
+    pub const ALL: [Seam; 4] = [
+        Seam::AssumeOutside,
+        Seam::AssumeOutsideNoBusctl,
+        Seam::AssumeOutsideNoBus,
+        Seam::AssumeOutsideNoLinger,
+    ];
+
     /// The value that selects this seam.
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -79,14 +89,7 @@ impl Seam {
     /// The seam `value` selects, exactly; anything else is ignored.
     #[must_use]
     pub fn parse(value: &str) -> Option<Seam> {
-        [
-            Seam::AssumeOutside,
-            Seam::AssumeOutsideNoBusctl,
-            Seam::AssumeOutsideNoBus,
-            Seam::AssumeOutsideNoLinger,
-        ]
-        .into_iter()
-        .find(|seam| seam.as_str() == value)
+        Seam::ALL.into_iter().find(|seam| seam.as_str() == value)
     }
 }
 
@@ -197,22 +200,25 @@ impl Reason {
 
 /// What the step did, as recorded in `lifetime.native.details` and in
 /// `doctor`.
+///
+/// Built only through its constructors, which keep the record's one rule: a
+/// reason and its detail exist exactly when the state is `unavailable`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
     /// Where the supervisor ended up.
-    pub state: State,
+    state: State,
     /// The transient unit this process asked for; `None` when none was asked
     /// for.
-    pub unit: Option<String>,
+    unit: Option<String>,
     /// Why the state is `unavailable`.
-    pub reason: Option<Reason>,
+    reason: Option<Reason>,
     /// What was observed, for a human reading the record.
-    pub detail: Option<String>,
+    detail: Option<String>,
     /// This process's cgroup (relative to the v2 root) when the step ended,
     /// when it could be read.
-    pub cgroup: Option<String>,
+    cgroup: Option<String>,
     /// The seam variable, when it is set.
-    pub seam: SeamSetting,
+    seam: SeamSetting,
 }
 
 impl Outcome {
@@ -220,6 +226,17 @@ impl Outcome {
         Outcome {
             state: State::AlreadyDelegated,
             unit: None,
+            reason: None,
+            detail: None,
+            cgroup: Some(cgroup),
+            seam,
+        }
+    }
+
+    fn entered(unit: &str, cgroup: String, seam: SeamSetting) -> Outcome {
+        Outcome {
+            state: State::Entered,
+            unit: Some(unit.to_owned()),
             reason: None,
             detail: None,
             cgroup: Some(cgroup),
@@ -242,6 +259,18 @@ impl Outcome {
             cgroup,
             seam,
         }
+    }
+
+    /// Where the supervisor ended up.
+    #[must_use]
+    pub fn state(&self) -> State {
+        self.state
+    }
+
+    /// Why the state is `unavailable`; `None` exactly when it is not.
+    #[must_use]
+    pub fn reason(&self) -> Option<Reason> {
+        self.reason
     }
 
     /// Whether the supervisor is known to be inside the delegated subtree.
@@ -347,9 +376,8 @@ pub trait Host {
     /// Where this process is now.
     fn position(&mut self) -> Position;
     /// Whether this uid's user manager outlives its sessions (lingering).
-    fn lingering(&mut self) -> Linger {
-        Linger::Yes
-    }
+    /// No default: `Yes` is the answer that authorizes the move.
+    fn lingering(&mut self) -> Linger;
     /// The `busctl` to run, if there is one.
     fn busctl(&mut self) -> Option<PathBuf>;
     /// Ask for `unit` containing this process, through `busctl` on `bus`.
@@ -396,7 +424,7 @@ pub fn unit_name(pid: u32) -> String {
 pub fn busctl_args(unit: &str, pid: u32) -> Vec<String> {
     let mut args: Vec<String> = [
         "--user",
-        "--timeout=2",
+        &format!("--timeout={}", BUDGET.as_secs()),
         "call",
         "org.freedesktop.systemd1",
         "/org/freedesktop/systemd1",
@@ -554,14 +582,7 @@ pub fn decide<H: Host>(host: &mut H, seam: SeamSetting, unit: &str) -> Outcome {
         if let Position::Inside(cgroup) = &now
             && leaf_of(cgroup) == Some(unit)
         {
-            return Outcome {
-                state: State::Entered,
-                unit: Some(unit.to_owned()),
-                reason: None,
-                detail: None,
-                cgroup: Some(cgroup.clone()),
-                seam,
-            };
+            return Outcome::entered(unit, cgroup.clone(), seam);
         }
         if host.expired() {
             return Outcome::unavailable(
@@ -611,6 +632,8 @@ mod linux {
     pub struct LinuxHost {
         uid: u32,
         pid: u32,
+        /// The step's whole budget, and the deadline it sets.
+        budget: std::time::Duration,
         deadline: Deadline,
         candidates: Vec<PathBuf>,
     }
@@ -632,6 +655,7 @@ mod linux {
                 // SAFETY: getuid takes no arguments and cannot fail.
                 uid: unsafe { libc::getuid() },
                 pid: std::process::id(),
+                budget,
                 deadline: Deadline::after(budget),
                 candidates,
             }
@@ -790,9 +814,9 @@ mod linux {
                 return Err(CallFailure {
                     reason: Reason::CallTimedOut,
                     detail: format!(
-                        "{} did not finish within {} s and was killed",
+                        "{} did not finish within the step's {:?} budget and was killed",
                         busctl.display(),
-                        BUDGET.as_secs()
+                        self.budget
                     ),
                 });
             }
@@ -851,14 +875,13 @@ mod linux {
         }
         let seam = SeamSetting::from_value(std::env::var_os(SEAM).as_deref());
         let now = LinuxHost::new().position();
-        Outcome {
-            state: super::State::Unavailable,
-            unit: None,
-            reason: Some(Reason::NotAttempted),
-            detail: Some("this process did not run the supervisor scope step".to_owned()),
-            cgroup: now.cgroup(),
+        Outcome::unavailable(
+            Reason::NotAttempted,
+            "this process did not run the supervisor scope step",
+            None,
+            now.cgroup(),
             seam,
-        }
+        )
     }
 
     /// [`current`] as the record's JSON.
@@ -919,6 +942,19 @@ mod linux {
 
         #[test]
         fn the_call_is_a_child_with_the_bus_environment_no_extra_descriptor_and_null_stdin() {
+            // A descriptor this process holds without close-on-exec, at a
+            // number no shell uses: the child must not get it. F_DUPFD takes
+            // the lowest free number from 55 up, so it never replaces a
+            // descriptor another test thread holds.
+            let file = std::fs::File::open("/proc/self/status").unwrap();
+            // SAFETY: F_DUPFD duplicates a live descriptor into a free
+            // number, owned here and closed by drop below.
+            let extra = unsafe {
+                let fd = libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&file), libc::F_DUPFD, 55);
+                assert!(fd >= 55, "{}", std::io::Error::last_os_error());
+                <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd)
+            };
+            let extra_fd = std::os::fd::AsRawFd::as_raw_fd(&extra);
             let dir = tempfile::tempdir().unwrap();
             let out = dir.path().join("seen");
             let busctl = script(
@@ -929,24 +965,17 @@ mod linux {
                      echo \"pid $$ ppid $PPID\" > $o\n\
                      for a in \"$@\"; do echo \"arg $a\" >> $o; done\n\
                      /usr/bin/tr '\\0' '\\n' < /proc/$$/environ | /usr/bin/sed 's/^/env /' >> $o\n\
-                     if [ -e /proc/$$/fd/55 ]; then echo 'fd55 open' >> $o; fi\n\
+                     if [ -e /proc/$$/fd/{extra_fd} ]; then echo 'extra fd open' >> $o; fi\n\
                      echo \"stdin $(/usr/bin/readlink /proc/$$/fd/0)\" >> $o\n\
                      echo \"stdout $(/usr/bin/readlink /proc/$$/fd/1)\" >> $o\n",
                     out = out.display()
                 ),
             );
-            // A descriptor this process holds without close-on-exec, at a
-            // number no shell uses: the child must not get it.
-            let file = std::fs::File::open("/proc/self/status").unwrap();
-            // SAFETY: dup2 onto an unused number; closed below.
-            let fd = unsafe { libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&file), 55) };
-            assert_eq!(fd, 55);
             let mut host = LinuxHost::with_candidates(vec![busctl.clone()], BUDGET);
             let found = host.busctl().expect("the stand-in is executable");
             let unit = unit_name(host.pid());
             let result = host.request(&found, &unit, Bus::Session);
-            // SAFETY: the descriptor dup2 made above, closed once.
-            unsafe { libc::close(55) };
+            drop(extra);
             assert_eq!(result, Ok(()));
             let seen = std::fs::read_to_string(&out).unwrap();
             let lines: Vec<&str> = seen.lines().collect();
@@ -974,7 +1003,7 @@ mod linux {
                 );
             }
             assert!(
-                !seen.contains("fd55 open"),
+                !seen.contains("extra fd open"),
                 "an inherited descriptor leaked: {seen}"
             );
             assert!(seen.contains("stdin /dev/null"), "{seen}");
@@ -1020,6 +1049,10 @@ mod linux {
                 .unwrap_err();
             let took = started.elapsed();
             assert_eq!(failure.reason, Reason::CallTimedOut, "{failure:?}");
+            assert!(
+                failure.detail.contains("300ms"),
+                "the detail names the budget the call had: {failure:?}"
+            );
             assert!(took < std::time::Duration::from_secs(5), "{took:?}");
             let pid = std::fs::read_to_string(&pid_file).unwrap();
             assert!(
@@ -1360,11 +1393,7 @@ mod tests {
     fn only_the_exact_seam_values_apply() {
         use std::ffi::OsStr;
         assert_eq!(SeamSetting::from_value(None), SeamSetting::Unset);
-        for seam in [
-            Seam::AssumeOutside,
-            Seam::AssumeOutsideNoBusctl,
-            Seam::AssumeOutsideNoBus,
-        ] {
+        for seam in Seam::ALL {
             assert_eq!(
                 SeamSetting::from_value(Some(OsStr::new(seam.as_str()))),
                 SeamSetting::Applied(seam)
@@ -1404,14 +1433,11 @@ mod tests {
 
     #[test]
     fn the_record_has_the_documented_shape() {
-        let outcome = Outcome {
-            state: State::Entered,
-            unit: Some(UNIT.to_owned()),
-            reason: None,
-            detail: None,
-            cgroup: Some(format!("{DELEGATED}/app.slice/{UNIT}")),
-            seam: SeamSetting::Unset,
-        };
+        let outcome = Outcome::entered(
+            UNIT,
+            format!("{DELEGATED}/app.slice/{UNIT}"),
+            SeamSetting::Unset,
+        );
         assert_eq!(
             outcome.to_json(),
             serde_json::json!({

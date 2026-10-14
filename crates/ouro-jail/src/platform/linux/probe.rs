@@ -1300,7 +1300,7 @@ fn probe_supervisor_scope() -> ProbeResult {
     const NAME: &str = Probe::SupervisorScope.name();
     const MECHANISM: &str = Probe::SupervisorScope.mechanism();
     let outcome = super::scope::current();
-    let (status, reason_code) = match (outcome.state, outcome.reason) {
+    let (status, reason_code) = match (outcome.state(), outcome.reason()) {
         (super::scope::State::Unavailable, reason) => (
             ProbeStatus::Unavailable,
             reason.map_or("unavailable", super::scope::Reason::code),
