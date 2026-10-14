@@ -305,7 +305,7 @@ mod tests {
             "--profile",
             "build",
             "--launch",
-            "codex",
+            "an-agent",
             "--workspace",
             "/w",
             "--scratch",

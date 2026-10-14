@@ -1,8 +1,5 @@
 # Reviewed pagination homonyms: repository-relative path<TAB>exact trimmed source.
 # Only the cursor token is exempt. Updating a line requires reviewing its meaning.
-crates/ouro-ledger/src/store.rs	fn reader_cursor_refuses_replaced_later_segment_after_restart() {
-crates/ouro-ledger/src/store.rs	request.cursor = store.read(&request).unwrap().next_cursor;
-crates/ouro-ledger/src/store.rs	.join(format!("{}.json", &request.cursor.as_ref().unwrap()[..32]));
 crates/ouro-ledger/src/main.rs	/// Resume with the same run and filters using the returned cursor.
 crates/ouro-ledger/src/main.rs	cursor: Option<String>,
 crates/ouro-ledger/src/main.rs	/// Resume the original snapshot using a previously returned cursor.
@@ -10,9 +7,7 @@ crates/ouro-ledger/src/main.rs	cursor: args.cursor,
 crates/ouro-ledger/src/main.rs	"next_cursor": null,
 crates/ouro-ledger/src/main.rs	let cursor = page
 crates/ouro-ledger/src/main.rs	.next_cursor
-crates/ouro-ledger/src/main.rs	.ok_or_else(|| LedgerError("unfinished export has no continuation cursor".into()))?;
 crates/ouro-ledger/src/main.rs	if request.cursor.as_ref() == Some(&cursor) {
-crates/ouro-ledger/src/main.rs	return Err(LedgerError("export cursor made no progress".into()));
 crates/ouro-ledger/src/main.rs	"next_cursor": cursor,
 crates/ouro-ledger/src/main.rs	"ouro-ledger: export checkpoint after {bytes_written} bytes; protection {}; stream {}; local consistency {}; cursor {cursor}",
 crates/ouro-ledger/src/main.rs	request.cursor = Some(cursor);
@@ -20,29 +15,15 @@ crates/ouro-ledger/src/protocol.rs	pub cursor: Option<String>,
 crates/ouro-ledger/src/protocol.rs	pub next_cursor: Option<String>,
 crates/ouro-ledger/src/reader.rs	//! Bounded readers of the original canonical stream. Cursors confer no authority.
 crates/ouro-ledger/src/reader.rs	let (id, token) = if let Some(cursor) = &request.cursor {
-crates/ouro-ledger/src/reader.rs	if cursor.len() != 64
-crates/ouro-ledger/src/reader.rs	|| !cursor
-crates/ouro-ledger/src/reader.rs	return Err(LedgerError("invalid reader cursor".into()));
 crates/ouro-ledger/src/reader.rs	next_cursor: None,
-crates/ouro-ledger/src/reader.rs	"reader cursor run, filter or limit mismatch".into(),
-crates/ouro-ledger/src/reader.rs	"reader cursor position is stale or forged".into(),
 crates/ouro-ledger/src/reader.rs	page.next_cursor = Some(format!("{id}{token}"));
 crates/ouro-ledger/src/reader.rs	page.next_cursor = Some(format!("{id}{next}"));
-crates/ouro-ledger/src/store.rs	cursor: None,
-crates/ouro-ledger/src/store.rs	request.cursor = page.next_cursor.clone();
-crates/ouro-ledger/src/store.rs	request.cursor = first.next_cursor.clone();
-crates/ouro-ledger/src/store.rs	request.cursor = second.next_cursor.clone();
-crates/ouro-ledger/src/store.rs	request.cursor = page.next_cursor;
-crates/ouro-ledger/src/store.rs	assert!(request.cursor.is_some());
-crates/ouro-ledger/src/store.rs	resumed.cursor = page.next_cursor;
-crates/ouro-ledger/src/store.rs	wrong.cursor.as_mut().unwrap().replace_range(63..64, "z");
 crates/ouro-ledger/src/reader.rs	next_cursor: Option<String>,
 crates/ouro-ledger/src/reader.rs	|| checkpoint.request.cursor.is_some()
 crates/ouro-ledger/src/reader.rs	|| checkpoint.template.next_cursor.is_some()
 crates/ouro-ledger/src/reader.rs	let id = cursor[..32].to_owned();
 crates/ouro-ledger/src/reader.rs	&cursor[32..],
 crates/ouro-ledger/src/reader.rs	(id, cursor[32..].to_owned())
-crates/ouro-ledger/src/reader.rs	"reader cursor expired or is unknown; start a new snapshot, do not append it to an old export".into()))?;
 crates/ouro-ledger/src/reader.rs	request.cursor = None;
 crates/ouro-ledger/src/reader.rs	next_cursor: page.next_cursor.clone(),
 crates/ouro-ledger/src/reader.rs	// Advancing the saved current cursor does not need to replay the
@@ -50,15 +31,6 @@ crates/ouro-ledger/src/reader.rs	page.next_cursor = checkpoint.prior.next_cursor
 crates/ouro-ledger/src/reader.rs	|| page.next_cursor.as_ref().is_some_and(|cursor| {
 crates/ouro-ledger/src/reader.rs	cursor != &format!("{}{}", checkpoint.id, session.current)
 crates/ouro-ledger/src/reader.rs	&& cursor == &format!("{}{}", checkpoint.id, checkpoint.prior.token))
-crates/ouro-ledger/src/store.rs	fn reader_cursor_cannot_change_scope_and_survives_restart() {
-crates/ouro-ledger/src/store.rs	request.cursor = first.next_cursor;
-crates/ouro-ledger/src/store.rs	let cursor = request.cursor.as_ref().unwrap();
-crates/ouro-ledger/src/store.rs	.join(format!("{}.json", &cursor[..32]));
-crates/ouro-ledger/src/store.rs	request.cursor = second.next_cursor;
-crates/ouro-ledger/src/store.rs	assert_eq!(envelope["checkpoint"]["prior"]["token"], cursor[32..]);
-crates/ouro-ledger/src/store.rs	corrupt_request.cursor = initial.next_cursor;
-crates/ouro-ledger/src/store.rs	let cursor = corrupt_request.cursor.as_ref().unwrap();
-crates/ouro-ledger/src/store.rs	let checkpoint_path = directory.join(format!("{}.json", &cursor[..32]));
 crates/ouro-ledger/src/main.rs	request.cursor = Some(page.next_cursor);
 crates/ouro-ledger/src/protocol.rs	pub next_cursor: String,
 crates/ouro-ledger/src/store/intent_tail_tests.rs	cursor: None
@@ -79,30 +51,21 @@ crates/ouro-ledger/src/store/intent_tail_tests.rs	req.cursor = Some(cursor.to_st
 crates/ouro-ledger/src/store/intent_tail_tests.rs	cursor: Some(tail.next_cursor)
 crates/ouro-ledger/src/store/tail.rs	struct Cursor {
 crates/ouro-ledger/src/store/tail.rs	let mut cursor = if let Some(text) = &request.cursor {
-crates/ouro-ledger/src/store/tail.rs	return Err(LedgerError("tail cursor exceeds bounded size".into()));
 crates/ouro-ledger/src/store/tail.rs	serde_json::from_str::<Cursor>(text)
-crates/ouro-ledger/src/store/tail.rs	.map_err(|_| LedgerError("invalid tail cursor".into()))?
 crates/ouro-ledger/src/store/tail.rs	Cursor {
 crates/ouro-ledger/src/store/tail.rs	if cursor.version != 1
 crates/ouro-ledger/src/store/tail.rs	|| cursor.run_id != request.run_id
 crates/ouro-ledger/src/store/tail.rs	|| cursor.emitted >= MAX_FRAME_BYTES
 crates/ouro-ledger/src/store/tail.rs	|| ((cursor.emitted == 0) != cursor.pending_digest.is_none())
-crates/ouro-ledger/src/store/tail.rs	"tail cursor identity or position is invalid".into(),
 crates/ouro-ledger/src/store/tail.rs	let mut offset = if cursor.after.head_seq == 0 {
 crates/ouro-ledger/src/store/tail.rs	if cursor.after.head_digest.is_some() {
-crates/ouro-ledger/src/store/tail.rs	return Err(LedgerError("tail cursor empty anchor is invalid".into()));
-crates/ouro-ledger/src/store/tail.rs	.get(&cursor.after.head_seq)
 crates/ouro-ledger/src/store/tail.rs	.filter(|a| Some(&a.digest) == cursor.after.head_digest.as_ref())
-crates/ouro-ledger/src/store/tail.rs	.ok_or_else(|| LedgerError("tail cursor does not match accepted history".into()))?;
-crates/ouro-ledger/src/store/tail.rs	if cursor.after.head_seq == stream.run.chain.head_seq {
 crates/ouro-ledger/src/store/tail.rs	if cursor.emitted != 0 {
-crates/ouro-ledger/src/store/tail.rs	"tail cursor points beyond the accepted head".into(),
 crates/ouro-ledger/src/store/tail.rs	let seq = cursor
 crates/ouro-ledger/src/store/tail.rs	if cursor.emitted >= size
 crates/ouro-ledger/src/store/tail.rs	|| cursor
 crates/ouro-ledger/src/store/tail.rs	|| record["prev"] != json!(cursor.after.head_digest)
 crates/ouro-ledger/src/store/tail.rs	if !text.is_char_boundary(cursor.emitted) {
-crates/ouro-ledger/src/store/tail.rs	return Err(LedgerError("tail cursor splits UTF-8".into()));
 crates/ouro-ledger/src/store/tail.rs	let mut end = size.min(cursor.emitted + READ_CHUNK_BYTES - ndjson.len());
 crates/ouro-ledger/src/store/tail.rs	ndjson.push_str(&text[cursor.emitted..end]);
 crates/ouro-ledger/src/store/tail.rs	cursor.after = Chain {
@@ -110,7 +73,6 @@ crates/ouro-ledger/src/store/tail.rs	cursor.emitted = 0;
 crates/ouro-ledger/src/store/tail.rs	cursor.pending_digest = None;
 crates/ouro-ledger/src/store/tail.rs	cursor.emitted = end;
 crates/ouro-ledger/src/store/tail.rs	cursor.pending_digest = Some(anchor.digest.clone());
-crates/ouro-ledger/src/store/tail.rs	let caught_up = cursor.emitted == 0 && cursor.after == stream.run.chain;
 crates/ouro-ledger/src/store/tail.rs	next_cursor: serde_json::to_string(&cursor)?,
 crates/ouro-ledger/src/store/tail.rs	scanned_through_seq: cursor.after.head_seq,
 crates/ouro-ledger/src/comparison.rs	cursor: None,
@@ -124,7 +86,6 @@ crates/ouro-ledger/src/main.rs	cursor: positions.remove(&run),
 crates/ouro-ledger/src/main.rs	cursor: args.cursor.or_else(|| positions.remove(&run_id)),
 crates/ouro-ledger/src/main.rs	#[arg(long, conflicts_with_all = ["run", "cursor", "resume"])]
 crates/ouro-ledger/src/main.rs	if args.cursor.is_some() || !args.resume.is_empty() {
-crates/ouro-ledger/src/main.rs	"automatic discovery uses --after; --cursor and --resume require --run".into(),
 crates/ouro-ledger/src/store/catalog.rs	cursor: None,
 crates/ouro-ledger/src/store/catalog.rs	cursor: prior.and_then(|p| p.read_position),
 crates/ouro-ledger/src/store/catalog.rs	Some((catalog_after, page.next_cursor.clone()))
@@ -134,7 +95,50 @@ crates/ouro-ledger/src/bundle.rs	if request.cursor.as_ref() == Some(&next) {
 crates/ouro-ledger/src/bundle.rs	request.cursor = Some(next);
 crates/ouro-ledger/src/reader.rs	/// The reader: remove interrupted writes, which have no issued cursor,
 crates/ouro-ledger/src/reader.rs	/// timestamp expires; their cursors refuse independently.
-crates/ouro-ledger/src/store.rs	assert_refused(store.read(&wrong), "invalid reader cursor");
-crates/ouro-ledger/src/store.rs	let cursor = second.next_cursor.clone().unwrap();
-crates/ouro-ledger/src/store.rs	request.cursor = Some(cursor);
-crates/ouro-ledger/src/store.rs	"reader cursor expired or is unknown; start a new snapshot, do not append it to an old export",
+crates/ouro-ledger/src/main.rs	"automatic discovery uses --after; --cursor and --resume require --run",
+crates/ouro-ledger/src/main.rs	.ok_or_else(|| LedgerError::refused("unfinished export has no continuation cursor"))?;
+crates/ouro-ledger/src/main.rs	return Err(LedgerError::refused("export cursor made no progress"));
+crates/ouro-ledger/src/reader.rs	if !crate::protocol::lower_hex(cursor, 64) {
+crates/ouro-ledger/src/reader.rs	return Err(LedgerError::refused("invalid reader cursor"));
+crates/ouro-ledger/src/reader.rs	"reader cursor run, filter or limit mismatch",
+crates/ouro-ledger/src/reader.rs	let session = self.sessions.get_mut(&id).ok_or_else(|| LedgerError::refused("reader cursor expired or is unknown; start a new snapshot, do not append it to an old export"))?;
+crates/ouro-ledger/src/reader.rs	"reader cursor position is stale or forged",
+crates/ouro-ledger/src/store/tail.rs	return Err(LedgerError::refused("tail cursor exceeds bounded size"));
+crates/ouro-ledger/src/store/tail.rs	.map_err(|_| LedgerError::refused("invalid tail cursor"))?
+crates/ouro-ledger/src/store/tail.rs	"tail cursor identity or position is invalid",
+crates/ouro-ledger/src/store/tail.rs	return Err(LedgerError::refused("tail cursor empty anchor is invalid"));
+crates/ouro-ledger/src/store/tail.rs	.anchor(cursor.after.head_seq)
+crates/ouro-ledger/src/store/tail.rs	LedgerError::refused("tail cursor does not match accepted history")
+crates/ouro-ledger/src/store/tail.rs	if cursor.after.head_seq == stream.run().chain.head_seq {
+crates/ouro-ledger/src/store/tail.rs	"tail cursor points beyond the accepted head",
+crates/ouro-ledger/src/store/tail.rs	return Err(LedgerError::refused("tail cursor splits UTF-8"));
+crates/ouro-ledger/src/store/tail.rs	let caught_up = cursor.emitted == 0 && cursor.after == stream.run().chain;
+crates/ouro-ledger/src/store/tests/reader.rs	request.cursor = first.next_cursor.clone();
+crates/ouro-ledger/src/store/tests/reader.rs	request.cursor = second.next_cursor.clone();
+crates/ouro-ledger/src/store/tests/reader.rs	request.cursor = page.next_cursor;
+crates/ouro-ledger/src/store/tests/reader.rs	assert!(request.cursor.is_some());
+crates/ouro-ledger/src/store/tests/reader.rs	fn reader_cursor_cannot_change_scope_and_survives_restart() {
+crates/ouro-ledger/src/store/tests/reader.rs	resumed.cursor = page.next_cursor;
+crates/ouro-ledger/src/store/tests/reader.rs	wrong.cursor.as_mut().unwrap().replace_range(63..64, "z");
+crates/ouro-ledger/src/store/tests/reader.rs	assert_refused(store.read(&wrong), "invalid reader cursor");
+crates/ouro-ledger/src/store/tests/reader.rs	request.cursor = first.next_cursor;
+crates/ouro-ledger/src/store/tests/reader.rs	let cursor = request.cursor.as_ref().unwrap();
+crates/ouro-ledger/src/store/tests/reader.rs	.join(format!("{}.json", &cursor[..32]));
+crates/ouro-ledger/src/store/tests/reader.rs	request.cursor = second.next_cursor;
+crates/ouro-ledger/src/store/tests/reader.rs	assert_eq!(envelope["checkpoint"]["prior"]["token"], cursor[32..]);
+crates/ouro-ledger/src/store/tests/reader.rs	let cursor = second.next_cursor.clone().unwrap();
+crates/ouro-ledger/src/store/tests/reader.rs	request.cursor = Some(cursor);
+crates/ouro-ledger/src/store/tests/reader.rs	corrupt_request.cursor = initial.next_cursor;
+crates/ouro-ledger/src/store/tests/reader.rs	let cursor = corrupt_request.cursor.as_ref().unwrap();
+crates/ouro-ledger/src/store/tests/reader.rs	let checkpoint_path = directory.join(format!("{}.json", &cursor[..32]));
+crates/ouro-ledger/src/store/tests/reader.rs	"reader cursor expired or is unknown; start a new snapshot, do not append it to an old export",
+crates/ouro-ledger/src/store/tests/retention.rs	cursor: None,
+crates/ouro-ledger/src/store/tests/rotation.rs	request.cursor = first.next_cursor.clone();
+crates/ouro-ledger/src/store/tests/rotation.rs	request.cursor = second.next_cursor.clone();
+crates/ouro-ledger/src/store/tests/rotation.rs	fn reader_cursor_refuses_replaced_later_segment_after_restart() {
+crates/ouro-ledger/src/store/tests/rotation.rs	request.cursor = store.read(&request).unwrap().next_cursor;
+crates/ouro-ledger/src/store/tests/rotation.rs	request.cursor = first.next_cursor;
+crates/ouro-ledger/src/store/tests/rotation.rs	.join(format!("{}.json", &request.cursor.as_ref().unwrap()[..32]));
+crates/ouro-ledger/src/store/tests.rs	cursor: None,
+crates/ouro-ledger/src/store/tests.rs	request.cursor = page.next_cursor.clone();
+crates/ouro-ledger/src/store/verification.rs	cursor: None,
