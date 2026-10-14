@@ -1468,6 +1468,7 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
             mediate: None,
             bridge: None,
             sigmask: None,
+            nofile_soft: None,
             argv: vec![
                 jail_exe.into(),
                 INSIDE_SUBCOMMAND.into(),

@@ -54,6 +54,8 @@ pub mod flag {
     pub const BRIDGE: &str = "--bridge";
     /// `--sigmask HEX`.
     pub const SIGMASK: &str = "--sigmask";
+    /// `--nofile-soft N`.
+    pub const NOFILE_SOFT: &str = "--nofile-soft";
     /// The separator before the target's argv.
     pub const SEPARATOR: &str = "--";
 }
@@ -109,6 +111,10 @@ pub struct LaunchArgs {
     /// inherited blocked SIGCHLD would otherwise be lost. `None` leaves the
     /// mask as inherited (`none`, where nothing in between changes it).
     pub sigmask: Option<u64>,
+    /// The soft `RLIMIT_NOFILE` the target gets: the operator's, which the
+    /// supervisor raised for itself to hand bubblewrap the pinned mount
+    /// sources above it. `None` leaves the limit as inherited.
+    pub nofile_soft: Option<u64>,
     /// The target's argv; element 0 is also the program to execute.
     pub argv: Vec<OsString>,
 }
@@ -145,6 +151,9 @@ impl LaunchArgs {
         if let Some(mask) = self.sigmask {
             out.extend([OsString::from(flag::SIGMASK), format!("{mask:x}").into()]);
         }
+        if let Some(soft) = self.nofile_soft {
+            out.extend([OsString::from(flag::NOFILE_SOFT), soft.to_string().into()]);
+        }
         out.push(OsString::from(flag::SEPARATOR));
         out.extend(self.argv.iter().cloned());
         out
@@ -169,6 +178,8 @@ pub enum LaunchUsage {
     BadFd(&'static str),
     /// A signal mask was not a hexadecimal number.
     BadMask(&'static str),
+    /// A limit was not a decimal number.
+    BadLimit(&'static str),
     /// An option the launcher does not know.
     UnknownOption(String),
     /// No `--` separator.
@@ -189,6 +200,7 @@ impl fmt::Display for LaunchUsage {
             Self::MissingValue(o) => write!(f, "{o} needs a value"),
             Self::BadFd(o) => write!(f, "{o} needs a non-negative descriptor number"),
             Self::BadMask(o) => write!(f, "{o} needs a hexadecimal signal mask"),
+            Self::BadLimit(o) => write!(f, "{o} needs a decimal limit"),
             Self::UnknownOption(o) => write!(f, "unknown option {o}"),
             Self::MissingSeparator => write!(f, "expected `--` before the program"),
             Self::EmptyArgv => write!(f, "no program after `--`"),
@@ -202,8 +214,8 @@ impl fmt::Display for LaunchUsage {
 impl std::error::Error for LaunchUsage {}
 
 /// Parse `--release-fd N --error-fd M [--narrow] [--read-open-fast-path]
-/// [--trace-data-fd T] [--mediate L,S] [--bridge R] [--sigmask HEX] --
-/// PROGRAM ARG...`, options in any order; [`LaunchArgs::to_argv`] writes
+/// [--trace-data-fd T] [--mediate L,S] [--bridge R] [--sigmask HEX]
+/// [--nofile-soft N] -- PROGRAM ARG...`, options in any order; [`LaunchArgs::to_argv`] writes
 /// them in this one.
 ///
 /// # Errors
@@ -218,6 +230,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
     let mut mediate: Option<(RawFd, RawFd)> = None;
     let mut bridge: Option<RawFd> = None;
     let mut sigmask: Option<u64> = None;
+    let mut nofile_soft: Option<u64> = None;
     let mut index = 0usize;
     let mut argv: Option<Vec<OsString>> = None;
 
@@ -276,6 +289,17 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
                 );
                 index += 2;
             }
+            flag::NOFILE_SOFT => {
+                let raw = args
+                    .get(index + 1)
+                    .ok_or(LaunchUsage::MissingValue(flag::NOFILE_SOFT))?;
+                nofile_soft = Some(
+                    raw.to_str()
+                        .and_then(|text| text.parse().ok())
+                        .ok_or(LaunchUsage::BadLimit(flag::NOFILE_SOFT))?,
+                );
+                index += 2;
+            }
             _ => return Err(LaunchUsage::UnknownOption(name)),
         }
     }
@@ -304,6 +328,7 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
         mediate,
         bridge,
         sigmask,
+        nofile_soft,
         argv,
     })
 }
@@ -511,6 +536,26 @@ pub fn launch_main(args: &[OsString]) -> ! {
                 }
             }
             if libc::sigprocmask(libc::SIG_SETMASK, &raw const set, std::ptr::null_mut()) != 0 {
+                report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
+            }
+        }
+    }
+
+    // The operator's descriptor limit: the supervisor raised its own soft
+    // limit to hand bubblewrap the pinned mount sources above it, and
+    // bubblewrap and this launcher inherited that. The target gets what the
+    // operator set. Lowering a soft limit under its hard one cannot fail on
+    // Linux; if it does, the target does not run with the raised one.
+    if let Some(soft) = parsed.nofile_soft {
+        // SAFETY: `limit` is plain stack data getrlimit fills and setrlimit
+        // reads; both are single async-signal-safe syscalls.
+        unsafe {
+            let mut limit: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) != 0 {
+                report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
+            }
+            limit.rlim_cur = soft.min(limit.rlim_max);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) != 0 {
                 report_and_exit(parsed.error_fd, errno(), EXIT_INTERNAL);
             }
         }
@@ -988,6 +1033,7 @@ mod tests {
             mediate: None,
             bridge: None,
             sigmask: None,
+            nofile_soft: None,
             argv: osv(&["/bin/sh", "-c", "echo --narrow"]),
         };
         let full = LaunchArgs {
@@ -997,6 +1043,7 @@ mod tests {
             mediate: Some((18, 19)),
             bridge: Some(20),
             sigmask: Some(0x0201),
+            nofile_soft: Some(1024),
             ..base.clone()
         };
         for args in [
@@ -1008,6 +1055,10 @@ mod tests {
             },
             LaunchArgs {
                 sigmask: Some(0),
+                ..base.clone()
+            },
+            LaunchArgs {
+                nofile_soft: Some(u64::MAX),
                 ..base.clone()
             },
         ] {

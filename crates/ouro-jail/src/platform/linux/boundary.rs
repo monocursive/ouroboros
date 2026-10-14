@@ -585,6 +585,8 @@ pub(super) fn create(
             format!("this binary's own path cannot be read: {err}"),
         )
     })?;
+    // Read before the mount preparation raises it.
+    let nofile_soft = operator_nofile_soft();
 
     // `<data>/attempts/<id>` is the attempt; the state root is two levels
     // up, and everything under it is supervisor state (§7).
@@ -611,7 +613,16 @@ pub(super) fn create(
     }
 
     let mut planned = Planned::new(
-        &snapshot, &plan, &sinks, bwrap_path, &exe, &scratch, observe_on,
+        &snapshot,
+        &plan,
+        &sinks,
+        Launcher {
+            bwrap_path,
+            exe: &exe,
+            observe_on,
+            nofile_soft,
+        },
+        &scratch,
     )?;
     let mut channels = Channels::open(&mut planned, backend_pin)?;
     planned.verify_before_spawn(backend_pin)?;
@@ -802,6 +813,25 @@ fn execution_cgroup(
     }
 }
 
+/// What runs the target: the backend, this binary as the launcher, and what
+/// the launcher restores before the exec.
+struct Launcher<'a> {
+    bwrap_path: &'a Path,
+    exe: &'a Path,
+    observe_on: bool,
+    /// The operator's soft `RLIMIT_NOFILE`, which the target gets back.
+    nofile_soft: Option<u64>,
+}
+
+/// The soft `RLIMIT_NOFILE` this process had before it raised its own: the
+/// mount preparation raises it so bubblewrap can receive every pinned source
+/// above it, and the launcher puts it back for the target. Read once per
+/// process, at its first preparation.
+fn operator_nofile_soft() -> Option<u64> {
+    static SOFT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *SOFT.get_or_init(|| crate::proxy::nofile_limits().ok().map(|(soft, _)| soft))
+}
+
 /// The mount plan and everything decided with it, before any descriptor is
 /// handed over.
 struct Planned {
@@ -842,11 +872,15 @@ impl Planned {
         snapshot: &PolicySnapshot,
         plan: &PreparedPlan,
         sinks: &Sinks,
-        bwrap_path: &Path,
-        exe: &Path,
+        launcher: Launcher<'_>,
         scratch: &Path,
-        observe_on: bool,
     ) -> Result<Planned, JailError> {
+        let Launcher {
+            bwrap_path,
+            exe,
+            observe_on,
+            nofile_soft,
+        } = launcher;
         // Protected segments. A bound reached is a refusal, never a shorter
         // answer (§9.1). The walk's names are the snapshot's own segments:
         // every contained baseline carries exactly its literals (`tool` the
@@ -945,6 +979,7 @@ impl Planned {
             // bubblewrap unblocks SIGCHLD in its child: the launcher puts
             // back the mask this supervisor inherited.
             sigmask: Some(super::launch::blocked_mask()),
+            nofile_soft,
             argv: target.clone(),
         }
         .command_line(OsStr::new(bwrap::JAIL_INSIDE_PATH));

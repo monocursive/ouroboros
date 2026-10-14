@@ -459,6 +459,7 @@ fn spawn_launcher(
                 mediate: None,
                 bridge: None,
                 sigmask: None,
+                nofile_soft: None,
                 argv: argv.to_vec(),
             }
             .to_argv(),

@@ -1231,6 +1231,7 @@ fn run_tool_profile(long_options: bool, narrow: bool) -> ToolRun {
             mediate: None,
             bridge: None,
             sigmask: None,
+            nofile_soft: None,
             argv: target,
         }
         .command_line(OsStr::new(bwrap::JAIL_INSIDE_PATH)),

@@ -1704,6 +1704,7 @@ mod tests {
             mediate: None,
             bridge: None,
             sigmask: None,
+            nofile_soft: None,
             argv: vec![OsString::from("/bin/true")],
         }
         .command_line(OsStr::new(JAIL_INSIDE_PATH));
