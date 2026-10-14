@@ -796,7 +796,6 @@ pub(super) fn create(
         observer_plan,
         trace_data,
         bwrap_status: None,
-        storage_lost_live: false,
     };
     Ok(Run::new(state, boundary))
 }
@@ -2225,10 +2224,6 @@ pub(super) struct Boundary {
     /// bubblewrap's raw wait status, once collected (from the observer, or
     /// with observation off from this process's own wait).
     bwrap_status: Option<i32>,
-    /// Audit 2026-10-08 L2: storage enforcement was found lost while the
-    /// target still ran — the only timing that may make it `outcome.cause`
-    /// (§6.4). A loss first seen after the target's own end never does.
-    storage_lost_live: bool,
 }
 
 impl Boundary {
@@ -2559,7 +2554,8 @@ impl Tree for Boundary {
             || self
                 .storage
                 .as_mut()
-                .is_some_and(|storage| storage.sample().is_err())
+                // Before release the target has not ended: it never began.
+                .is_some_and(|storage| storage.sample(false).is_err())
             || started
                 .cgroup
                 .as_ref()
@@ -2607,8 +2603,12 @@ impl Tree for Boundary {
     }
 
     fn sample(&mut self, run: &mut RunState) {
+        // Audit 2026-10-08 L2: the storage keeps whether its loss was found
+        // before the target's end, which stays known after its outcome was
+        // reported; only such a loss may become the cause.
+        let target_ended = self.target_ended(run);
         if let Some(storage) = self.storage.as_mut() {
-            match storage.sample() {
+            match storage.sample(target_ended) {
                 Ok(hits) => {
                     for _ in hits {
                         run.audit.record_limit_hit();
@@ -2617,10 +2617,7 @@ impl Tree for Boundary {
                 Err(_) => {
                     // Audit 2026-10-08 L1: the loss is sticky (`Storage::sample`
                     // replays it every call), and losing the storage read must
-                    // not also blind the cgroup ceilings. L2: only a loss found
-                    // before the target's end may become the cause, and that
-                    // end stays known after its outcome was reported.
-                    self.storage_lost_live |= !self.target_ended(run);
+                    // not also blind the cgroup ceilings.
                     run.audit
                         .record_limit_evidence_missing("storage_enforcement_lost");
                     self.hard_kill(run);
@@ -2792,11 +2789,10 @@ impl Tree for Boundary {
         // cause only when it was found while the target still ran. A loss
         // discovered after the target's own end — including the settlement
         // sample — is recorded in `errors[]` but is never the cause.
-        if self.storage_lost_live
-            && self
-                .storage
-                .as_ref()
-                .is_some_and(super::storage::Storage::lost)
+        if self
+            .storage
+            .as_ref()
+            .is_some_and(super::storage::Storage::lost_while_running)
         {
             return Some("storage_enforcement_lost".to_owned());
         }

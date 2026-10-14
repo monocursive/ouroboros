@@ -22,6 +22,10 @@ pub(super) struct Storage {
     capacity_bytes: Option<u64>,
     capacity_inodes: Option<u64>,
     failure: Option<String>,
+    /// The loss was found while the target still ran, the only timing that
+    /// may make it `outcome.cause` (§6.4, audit 2026-10-08 L2): a loss first
+    /// seen after the target's own end never does.
+    lost_while_running: bool,
 }
 
 /// The two ceilings storage admission enforces.
@@ -553,6 +557,7 @@ impl Storage {
             capacity_bytes: bytes_bounded.then_some(bytes),
             capacity_inodes: inodes_bounded.then_some(inodes),
             failure: None,
+            lost_while_running: false,
         })
     }
 
@@ -604,19 +609,24 @@ impl Storage {
     }
 
     /// Positive saturation evidence only. A missed transient stays unknown.
-    pub(super) fn sample(&mut self) -> io::Result<Vec<String>> {
-        if let Some(failure) = &self.failure {
-            return Err(io::Error::other(failure.clone()));
-        }
-        let result = self.sample_inner();
+    /// A loss is sticky: every later sample replays it. `target_ended` is
+    /// whether the target's own end is known at this sample, which decides
+    /// whether a loss found now was found while it ran.
+    pub(super) fn sample(&mut self, target_ended: bool) -> io::Result<Vec<String>> {
+        let result = match &self.failure {
+            Some(failure) => Err(io::Error::other(failure.clone())),
+            None => self.sample_inner(),
+        };
         if let Err(err) = &result {
-            self.failure = Some(err.to_string());
+            self.failure.get_or_insert_with(|| err.to_string());
+            self.lost_while_running |= !target_ended;
         }
         result
     }
 
-    pub(super) fn lost(&self) -> bool {
-        self.failure.is_some()
+    /// Whether enforcement was lost while the target still ran (§6.4).
+    pub(super) fn lost_while_running(&self) -> bool {
+        self.failure.is_some() && self.lost_while_running
     }
 
     fn sample_inner(&mut self) -> io::Result<Vec<String>> {
@@ -903,6 +913,41 @@ mod tests {
         assert!(!requested(&LimitsSnapshot::default()));
     }
 
+    /// A loss becomes `outcome.cause` only when it was found while the
+    /// target ran: the first failed sample, or a replay of it, before the
+    /// target's end is known. Found only after that end, it never does.
+    #[test]
+    fn only_a_loss_found_while_the_target_ran_can_be_the_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        // A volume that is no bounded tmpfs of one byte: its first sample
+        // finds the capacity changed, a real loss.
+        let losing = || Storage {
+            volumes: vec![Volume {
+                file: File::open(dir.path()).unwrap(),
+                uid: None,
+                bytes: Some(1),
+                inodes: None,
+            }],
+            limits: Vec::new(),
+            capacity_bytes: Some(1),
+            capacity_inodes: None,
+            failure: None,
+            lost_while_running: false,
+        };
+        let after = |ended: &[bool]| {
+            let mut storage = losing();
+            for target_ended in ended {
+                assert!(storage.sample(*target_ended).is_err());
+            }
+            (storage.loss().is_some(), storage.lost_while_running())
+        };
+        assert_eq!(after(&[]), (false, false));
+        assert_eq!(after(&[true]), (true, false));
+        assert_eq!(after(&[true, true]), (true, false));
+        assert_eq!(after(&[false]), (true, true));
+        assert_eq!(after(&[false, true]), (true, true));
+    }
+
     #[test]
     fn a_lost_enforcement_no_longer_claims_applied() {
         let mut storage = Storage {
@@ -922,6 +967,7 @@ mod tests {
             capacity_bytes: Some(1),
             capacity_inodes: None,
             failure: None,
+            lost_while_running: false,
         };
         assert!(storage.limits()[0].applied);
         assert!(storage.loss().is_none());
