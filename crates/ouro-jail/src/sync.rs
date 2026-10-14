@@ -12,7 +12,10 @@
 //!   only once it returned: the proxy's result sink (the result was counted
 //!   as handed over first), the vault's audit callback (the credential
 //!   state changes only after a `loaded` audit succeeded), and the issuer
-//!   exchange under the vault's exchange lock, which guards no data at all.
+//!   exchange under the vault's exchange lock, which guards no data at all;
+//! - some locks only serialize a call and guard no data: the account walk
+//!   (libc's one `getpwent` position, which every walk rewinds first) and
+//!   the unix-peer mediator's notification receive.
 //!
 //! So the guard is recovered and the work goes on: one panicking thread must
 //! not turn into a stuck proxy, a result that is never accounted, or a

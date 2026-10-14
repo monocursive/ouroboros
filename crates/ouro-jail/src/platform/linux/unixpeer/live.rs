@@ -246,11 +246,7 @@ impl MediatorHandle {
     /// identity pinned; until then the authorized node is refused for
     /// everyone, and the target has not been released.
     pub fn restrict_authorized_connector(&self, identity: Option<(libc::pid_t, u64)>) {
-        *self
-            .workers
-            .authorized_connector
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
+        *crate::sync::lock(&self.workers.authorized_connector) = identity;
     }
 
     fn shutdown(&mut self) {
@@ -392,10 +388,7 @@ fn service_one(w: &Workers) -> io::Result<()> {
     let sink = w.sink.as_ref();
     // Receive only what is still pending (see `Workers::recv`)
     let received = {
-        let _guard = w
-            .recv
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::sync::lock(&w.recv);
         if pending(listener) {
             Some(notif_recv(listener))
         } else {
@@ -611,10 +604,7 @@ fn mediate_pathname(
     // connect here; before the supervisor pins it, and for any other
     // connector, the node is refused.
     if w.authorized == Some((st.st_dev, st.st_ino)) {
-        let connector = w
-            .authorized_connector
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let connector = crate::sync::lock(&w.authorized_connector);
         let admitted = matches!(
             (facts.tgid, facts.tgid_start, &*connector),
             (Some(tgid), Some(ticks), Some((want_tgid, want_ticks)))

@@ -350,13 +350,13 @@ impl CollectingSink {
     /// Every decision recorded so far.
     #[must_use]
     pub fn drain(&self) -> Vec<MediationRecord> {
-        std::mem::take(&mut self.records.lock().unwrap())
+        std::mem::take(&mut crate::sync::lock(&self.records))
     }
 }
 
 impl MediationSink for CollectingSink {
     fn record(&self, record: MediationRecord) {
-        self.records.lock().unwrap().push(record);
+        crate::sync::lock(&self.records).push(record);
     }
 }
 

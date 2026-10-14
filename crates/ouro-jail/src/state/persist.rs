@@ -27,6 +27,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use super::FILE_MODE;
+use crate::sync::lock;
 
 /// A named place where a record is made durable (R02). The J4 plan numbers
 /// them P1 to P13 in this order; J4 wave 2 adds P14 to P16, and P17 is the
@@ -458,15 +459,6 @@ struct Job {
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Locks `mutex` whether or not a thread panicked while holding it: every
-/// value guarded here is a plain fact (a time, a flag, a sender) that a
-/// panic cannot leave half-written.
-fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// What the worker and its waiters share: when it last made progress, and
 /// how many jobs are outstanding.
 struct Shared {
@@ -527,11 +519,7 @@ impl Shared {
             if now >= stall_at {
                 return false;
             }
-            last = self
-                .job_ended
-                .wait_timeout(last, stall_at - now)
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
+            last = crate::sync::wait_timeout(&self.job_ended, last, stall_at - now).0;
         }
     }
 

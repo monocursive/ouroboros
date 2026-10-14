@@ -189,9 +189,7 @@ pub(crate) fn group_is_private_to(uid: u32, gid: u32) -> bool {
 }
 
 fn another_primary(uid: u32, gid: u32) -> bool {
-    let _guard = PASSWD_WALK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = crate::sync::lock(&PASSWD_WALK);
     let mut found = false;
     // SAFETY: setpwent/getpwent/endpwent share one process-wide position,
     // which the mutex serializes within this process; each entry is read

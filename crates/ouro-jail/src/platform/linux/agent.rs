@@ -40,7 +40,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Map, Value};
@@ -129,7 +129,7 @@ struct ProxyTraceSink {
 
 impl ProxySink for ProxyTraceSink {
     fn emit(&self, result: ProxyResult) {
-        let mut tally = self.tally.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut tally = crate::sync::lock(&self.tally);
         tally.seq += 1;
         let event = proxy::proxy_event(
             &result,
@@ -185,17 +185,12 @@ impl MediationSink for RecordQueue {
         start: u64,
         destination: std::net::SocketAddr,
     ) -> Option<Box<dyn super::unixpeer::ConnectionOrigin>> {
-        let origins = self
-            .origins
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()?
-            .clone();
+        let origins = crate::sync::lock(&self.origins).as_ref()?.clone();
         let prepared = origins.prepare(pid, start, destination)?;
         Some(Box::new(PreparedOrigin { origins, prepared }))
     }
     fn record(&self, record: MediationRecord) {
-        let tx = self.tx.lock().unwrap_or_else(PoisonError::into_inner);
+        let tx = crate::sync::lock(&self.tx);
         match tx.try_send(record) {
             Ok(()) => {}
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
@@ -389,11 +384,7 @@ impl AgentNet {
     /// Gives the attempt's credential vault to the proxy (started after
     /// this) and its origin rendezvous table to the mediation record queue.
     pub fn configure_vault(&mut self, vault: Arc<crate::vault::Vault>) {
-        *self
-            .queue
-            .origins
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(vault.origins.clone());
+        *crate::sync::lock(&self.queue.origins) = Some(vault.origins.clone());
         self.vault = Some(vault);
     }
 
@@ -780,11 +771,7 @@ impl AgentNet {
     /// reached the trace, or degraded with a null count and a gap when a
     /// result was lost in transport or the drain was cut short.
     pub fn apply_coverage(&self, summary: &mut CoverageSummary) {
-        let tally = self
-            .proxy_sink
-            .tally
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let tally = crate::sync::lock(&self.proxy_sink.tally);
         let class = proxy_coverage(&ProxyAccount {
             delivered: tally.delivered,
             lost: tally.lost,
