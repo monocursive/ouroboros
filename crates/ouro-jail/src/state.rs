@@ -402,6 +402,16 @@ impl AttemptId {
     }
 }
 
+/// `jail.lock`'s name inside an attempt directory.
+pub const LOCK_NAME: &str = "jail.lock";
+/// `jail-state.json`'s name inside an attempt directory.
+pub const STATE_NAME: &str = "jail-state.json";
+/// `policy.json`'s name inside an attempt directory.
+pub const POLICY_NAME: &str = "policy.json";
+/// The receipt's name inside an attempt directory.
+pub const RECEIPT_NAME: &str = "jail.json";
+/// The default trace's name inside an attempt directory.
+pub const TRACE_NAME: &str = "trace.ndjson";
 /// Managed scratch's name inside an attempt directory.
 pub const SCRATCH_NAME: &str = "scratch";
 /// The placeholder holders' name inside an attempt directory.
@@ -442,37 +452,37 @@ impl AttemptDir {
     /// `jail.lock`: the exclusive live-supervisor lease.
     #[must_use]
     pub fn lock_path(&self) -> PathBuf {
-        self.root.join("jail.lock")
+        self.root.join(LOCK_NAME)
     }
 
     /// `jail-state.json`: identity, lifecycle and owned resources.
     #[must_use]
     pub fn state_path(&self) -> PathBuf {
-        self.root.join("jail-state.json")
+        self.root.join(STATE_NAME)
     }
 
     /// `policy.json`: the immutable resolved policy envelope.
     #[must_use]
     pub fn policy_path(&self) -> PathBuf {
-        self.root.join("policy.json")
+        self.root.join(POLICY_NAME)
     }
 
     /// `jail.json`: the latest receipt.
     #[must_use]
     pub fn receipt_path(&self) -> PathBuf {
-        self.root.join("jail.json")
+        self.root.join(RECEIPT_NAME)
     }
 
     /// `trace.ndjson`: the default bounded standalone event sink.
     #[must_use]
     pub fn trace_path(&self) -> PathBuf {
-        self.root.join("trace.ndjson")
+        self.root.join(TRACE_NAME)
     }
 
     /// `vendor-state/`: created only when a launch profile requires it.
     #[must_use]
     pub fn vendor_state_path(&self) -> PathBuf {
-        self.root.join("vendor-state")
+        self.root.join(VENDOR_STATE_NAME)
     }
 
     /// `scratch/`: the default child-writable scratch directory.
@@ -1078,7 +1088,7 @@ pub fn leftover_temp_files_within(
 }
 
 /// The records a durable replacement writes directly in the attempt root.
-pub const ROOT_RECORDS: [&str; 3] = ["jail-state.json", "policy.json", "jail.json"];
+pub const ROOT_RECORDS: [&str; 3] = [STATE_NAME, POLICY_NAME, RECEIPT_NAME];
 
 /// Whether `name` is exactly what [`TempWrite`] names the temporary file of
 /// one of [`ROOT_RECORDS`]: `.<record>.<uuid>.tmp`, the uuid hyphenated.
@@ -1521,15 +1531,15 @@ pub use proxy_dir::{
 /// The jail-owned names of an attempt directory (§7), which an existing
 /// attempt root must not already hold before this supervisor claims it.
 pub const JAIL_OWNED_NAMES: [&str; 9] = [
-    "jail.lock",
-    "jail-state.json",
-    "policy.json",
-    "jail.json",
-    "trace.ndjson",
+    LOCK_NAME,
+    STATE_NAME,
+    POLICY_NAME,
+    RECEIPT_NAME,
+    TRACE_NAME,
     VENDOR_STATE_NAME,
-    "scratch",
-    "placeholders",
-    "proxy",
+    SCRATCH_NAME,
+    PLACEHOLDERS_NAME,
+    PROXY_DIR_NAME,
 ];
 
 /// Refuses an attempt root that already holds any jail-owned artifact (§7:

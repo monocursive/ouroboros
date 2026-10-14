@@ -2145,7 +2145,7 @@ fn remove_managed_scratch(
     }
     let mut created = false;
     let mut left = limits.max_entries;
-    for name in ["scratch", "placeholders"] {
+    for name in state::MANAGED_DIRS {
         let removal = cleanup::remove_managed_dir(
             attempt_dir,
             name,
@@ -4978,7 +4978,7 @@ mod tests {
         let locked = attempt_dir.root().join("scratch/a/b");
         std::fs::create_dir_all(&locked).unwrap();
         std::fs::write(locked.join("kept"), b"child bytes").unwrap();
-        std::fs::create_dir(attempt_dir.root().join("placeholders")).unwrap();
+        std::fs::create_dir(attempt_dir.placeholders_path()).unwrap();
         for dir in [&locked, &attempt_dir.root().join("scratch/a")] {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
         }
@@ -4986,8 +4986,8 @@ mod tests {
             remove_managed_scratch(&attempt_dir, &plan, cleanup::Limits::DEFAULT),
             Ok(StateCleanup::Complete)
         );
-        assert!(!attempt_dir.root().join("scratch").exists());
-        assert!(!attempt_dir.root().join("placeholders").exists());
+        assert!(!attempt_dir.scratch_path().exists());
+        assert!(!attempt_dir.placeholders_path().exists());
         // Nothing left: nothing to do, and nothing claimed as done.
         assert_eq!(
             remove_managed_scratch(&attempt_dir, &plan, cleanup::Limits::DEFAULT),
@@ -5000,7 +5000,7 @@ mod tests {
     #[test]
     fn settlement_stops_at_the_removal_bound_and_says_why() {
         let (_root, attempt_dir, plan) = scratch_fixture();
-        let scratch = attempt_dir.root().join("scratch");
+        let scratch = attempt_dir.scratch_path();
         std::fs::create_dir(&scratch).unwrap();
         for index in 0..32 {
             std::fs::write(scratch.join(format!("f{index}")), b"x").unwrap();
