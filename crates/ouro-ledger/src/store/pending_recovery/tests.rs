@@ -39,41 +39,134 @@ fn admitted_with_journal(name: &str) -> (tempfile::TempDir, Store, RunRecord) {
 }
 
 #[test]
-fn a_journal_the_system_could_not_open_or_sync_is_not_refused() {
-    // A member the kernel will not open as a file (EISDIR) is an operating
-    // system failure, not a verdict on the journal's content.
-    let (_temp, mut store, run) = admitted_with_journal("pending-eisdir");
-    let lock = store.run_dir(&run.run_id).join("owner-pending.lock");
-    fs::remove_file(&lock).unwrap();
-    fs::create_dir(&lock).unwrap();
-    match store.reconcile(&run.run_id, &peer(), &|_| false) {
-        Err(PendingFailure::Other(error)) => {
-            assert!(matches!(error.kind(), crate::protocol::ErrorKind::Io(_)));
+fn journal_files_the_kernel_keeps_refusing_are_unreadable_not_retried_forever() {
+    use std::os::unix::fs::PermissionsExt as _;
+    type Damage = fn(&std::path::Path, &std::path::Path);
+    let cases: [(&str, Damage); 5] = [
+        // EISDIR, whether at the lock or at the journal itself.
+        ("lock-directory", |run, _| {
+            fs::remove_file(run.join("owner-pending.lock")).unwrap();
+            fs::create_dir(run.join("owner-pending.lock")).unwrap();
+        }),
+        ("state-directory", |run, _| {
+            fs::remove_file(run.join(crate::pending::STATE)).unwrap();
+            fs::create_dir(run.join(crate::pending::STATE)).unwrap();
+        }),
+        // EACCES: owner-only, so every privacy check passes, yet unreadable.
+        ("state-unreadable", |run, _| {
+            fs::set_permissions(
+                run.join(crate::pending::STATE),
+                fs::Permissions::from_mode(0o000),
+            )
+            .unwrap();
+        }),
+        // ENXIO: a socket where the journal belongs. Bound under a short
+        // path, since a run directory can exceed a socket path's limit.
+        ("state-socket", |run, scratch| {
+            let socket = scratch.join("s");
+            std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            fs::remove_file(run.join(crate::pending::STATE)).unwrap();
+            fs::rename(&socket, run.join(crate::pending::STATE)).unwrap();
+        }),
+        // ELOOP: a symlink where the journal belongs.
+        ("state-symlink", |run, scratch| {
+            fs::rename(run.join(crate::pending::STATE), scratch.join("moved")).unwrap();
+            std::os::unix::fs::symlink(scratch.join("moved"), run.join(crate::pending::STATE))
+                .unwrap();
+        }),
+    ];
+    for (name, damage) in cases {
+        if name == "state-unreadable" && crate::fsx::euid() == 0 {
+            continue;
         }
-        Err(PendingFailure::Refused(class, error)) => {
-            panic!("an I/O failure was recorded as {class:?}: {error}")
+        let (temp, mut store, run) = admitted_with_journal(name);
+        let scratch = tempfile::tempdir_in(temp.path()).unwrap();
+        damage(&store.run_dir(&run.run_id), scratch.path());
+        match store.reconcile(&run.run_id, &peer(), &|_| false) {
+            Err(PendingFailure::Refused(PendingRefusal::JournalUnreadable, _)) => {}
+            Err(PendingFailure::Refused(class, error)) => panic!("{name}: {class:?}: {error}"),
+            Err(PendingFailure::Other(error)) => {
+                panic!("{name}: retried as if it could pass: {error}")
+            }
+            Ok(run) => panic!("{name}: reconciled: {run:?}"),
         }
-        Ok(run) => panic!("reconciled through an unopenable journal: {run:?}"),
+        // The orphan is settled as unknown, saying why, instead of failing
+        // settle-orphans on every attempt.
+        store.settle_orphans(&peer(), |_| false).unwrap();
+        let settled = store.show(&run.run_id).unwrap();
+        assert_eq!(settled.state, "outcome_unknown", "{name}");
+        let path = store.run_dir(&run.run_id).join(crate::manifest::STREAM);
+        let last = fs::read_to_string(path).unwrap();
+        let last: Value = serde_json::from_str(last.lines().last().unwrap()).unwrap();
+        assert_eq!(last["body"]["refusal"], "journal_unreadable", "{name}");
     }
-    fs::remove_dir(&lock).unwrap();
-    // So is a failed durability barrier while the journal is read.
-    let (temp, mut store, run) = admitted_with_journal("pending-eio");
-    faults::arm(Plan::error(
-        Scope::PendingRead,
-        Point::JournalReadBeforeFileSync,
-        temp.path().join("marker"),
+}
+
+#[test]
+fn only_a_momentary_shortage_of_the_system_is_not_the_journals_doing() {
+    let failure =
+        |errno| PendingFailure::unreadable(std::io::Error::from_raw_os_error(errno).into());
+    for errno in [
+        libc::EMFILE,
+        libc::ENFILE,
+        libc::ENOMEM,
+        libc::ENOLCK,
+        libc::ENOSPC,
+        libc::EDQUOT,
+        libc::EINTR,
+        libc::EAGAIN,
+    ] {
+        assert!(
+            matches!(failure(errno), PendingFailure::Other(_)),
+            "{errno}"
+        );
+    }
+    for errno in [
+        libc::EACCES,
+        libc::EPERM,
+        libc::EISDIR,
+        libc::ENXIO,
+        libc::ELOOP,
+        libc::EIO,
+    ] {
+        assert!(
+            matches!(
+                failure(errno),
+                PendingFailure::Refused(PendingRefusal::JournalUnreadable, _)
+            ),
+            "{errno}"
+        );
+    }
+    assert!(matches!(
+        PendingFailure::unreadable(LedgerError::refused("not a journal")),
+        PendingFailure::Refused(PendingRefusal::JournalUnreadable, _)
     ));
-    let result = store.reconcile(&run.run_id, &peer(), &|_| false);
-    faults::disarm();
-    assert!(temp.path().join("marker").exists());
-    match result {
-        Err(PendingFailure::Other(_)) => {}
-        Err(PendingFailure::Refused(class, error)) => {
-            panic!("a failed sync was recorded as {class:?}: {error}")
+}
+
+#[test]
+fn a_failed_durability_barrier_is_not_the_journals_doing() {
+    for point in [
+        Point::JournalReadBeforeFileSync,
+        Point::JournalReadBeforeDirectorySync,
+    ] {
+        let (temp, mut store, run) = admitted_with_journal("pending-eio");
+        faults::arm(Plan::error(
+            Scope::PendingRead,
+            point,
+            temp.path().join("marker"),
+        ));
+        let result = store.reconcile(&run.run_id, &peer(), &|_| false);
+        faults::disarm();
+        assert!(temp.path().join("marker").exists());
+        match result {
+            Err(PendingFailure::Other(_)) => {}
+            Err(PendingFailure::Refused(class, error)) => {
+                panic!("a failed sync was recorded as {class:?}: {error}")
+            }
+            Ok(run) => panic!("reconciled past a failed sync: {run:?}"),
         }
-        Ok(run) => panic!("reconciled past a failed sync: {run:?}"),
+        assert_eq!(store.show(&run.run_id).unwrap().state, "admitted");
     }
-    assert_eq!(store.show(&run.run_id).unwrap().state, "admitted");
 }
 
 #[test]
@@ -168,11 +261,9 @@ fn a_failure_that_is_not_the_journals_backs_off_and_is_logged_once() {
 
 #[test]
 fn settling_orphans_skips_a_run_it_cannot_reconcile_now_and_settles_the_rest() {
-    // A dead owner's journal the kernel will not open (EISDIR on its lock).
+    // A dead owner's journal whose lock another open description holds.
     let (_temp, mut store, stuck) = admitted_with_journal("pending-stuck");
-    let lock = store.run_dir(&stuck.run_id).join("owner-pending.lock");
-    fs::remove_file(&lock).unwrap();
-    fs::create_dir(&lock).unwrap();
+    let _held = Journal::open(&store.run_dir(&stuck.run_id)).unwrap();
     // Dead owners without journals, at least one after it in settlement order.
     let mut settled = Vec::new();
     while !settled.iter().any(|id: &String| *id > stuck.run_id) {
@@ -184,7 +275,6 @@ fn settling_orphans_skips_a_run_it_cannot_reconcile_now_and_settles_the_rest() {
         assert!(settled.len() < 64);
     }
     let refusal = store.settle_orphans(&peer(), |_| false).unwrap_err();
-    assert!(matches!(refusal.kind(), crate::protocol::ErrorKind::Io(_)));
     assert!(
         refusal.message().starts_with(&format!(
             "{}: pending evidence could not be reconciled now: ",

@@ -41,6 +41,8 @@ pub enum ErrorKind {
 pub struct LedgerError {
     kind: ErrorKind,
     message: String,
+    /// The errno, when the operating system reported one.
+    os_error: Option<i32>,
 }
 
 impl LedgerError {
@@ -48,6 +50,7 @@ impl LedgerError {
         Self {
             kind,
             message: message.into(),
+            os_error: None,
         }
     }
 
@@ -65,6 +68,11 @@ impl LedgerError {
         self.kind
     }
 
+    /// The errno the operating system reported, if it reported one.
+    pub fn raw_os_error(&self) -> Option<i32> {
+        self.os_error
+    }
+
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -73,9 +81,12 @@ impl LedgerError {
         self.message
     }
 
-    /// The same kind of failure, described as `message`.
+    /// The same failure, described as `message`.
     pub fn with_message(self, message: impl Into<String>) -> Self {
-        Self::new(self.kind, message)
+        Self {
+            message: message.into(),
+            ..self
+        }
     }
 }
 
@@ -87,7 +98,10 @@ impl fmt::Display for LedgerError {
 impl std::error::Error for LedgerError {}
 impl From<io::Error> for LedgerError {
     fn from(error: io::Error) -> Self {
-        Self::new(ErrorKind::Io(error.kind()), error.to_string())
+        Self {
+            os_error: error.raw_os_error(),
+            ..Self::new(ErrorKind::Io(error.kind()), error.to_string())
+        }
     }
 }
 impl From<serde_json::Error> for LedgerError {

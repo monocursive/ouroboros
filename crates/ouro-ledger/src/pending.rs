@@ -134,7 +134,15 @@ impl Journal {
             completion: None,
         })
     }
+    #[cfg(any(target_os = "linux", test))]
     pub fn read(&self, run: &RunRecord) -> Result<State> {
+        let (state, file) = self.read_unsynchronized(run)?;
+        self.synchronize(&file)?;
+        Ok(state)
+    }
+    /// The validated journal, and the descriptor it was read through, before
+    /// its durability is established: see [`Self::synchronize`].
+    pub(crate) fn read_unsynchronized(&self, run: &RunRecord) -> Result<(State, File)> {
         let _scope = faults::enter(|| Some(Scope::PendingRead));
         let mut file = Self::file(&self.dir, STATE_NAME, libc::O_RDONLY)?;
         if file.metadata()?.len() > JOURNAL_BYTES as u64 {
@@ -163,14 +171,19 @@ impl Journal {
             return Err(invalid("checksum or durable owner/run binding mismatch"));
         }
         s.validate()?;
-        // A complete replacement can survive an interrupted save without its
-        // acknowledgement. Validate it, then establish durability before any
-        // caller imports, clears or acknowledges that pending evidence.
+        Ok((s, file))
+    }
+    /// A complete replacement can survive an interrupted save without its
+    /// acknowledgement. Once it is validated, establish its durability, on
+    /// the descriptor it was read through, before any caller imports, clears
+    /// or acknowledges that pending evidence.
+    pub(crate) fn synchronize(&self, file: &File) -> Result<()> {
+        let _scope = faults::enter(|| Some(Scope::PendingRead));
         faults::hit(Point::JournalReadBeforeFileSync)?;
         file.sync_all()?;
         faults::hit(Point::JournalReadBeforeDirectorySync)?;
         self.dir.sync_all()?;
-        Ok(s)
+        Ok(())
     }
     pub fn save(&self, state: &State) -> Result<()> {
         let _scope = faults::enter(|| {

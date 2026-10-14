@@ -93,17 +93,36 @@ impl PendingFailure {
         }
     }
 
-    /// A journal that could not be opened or read is the journal's doing
-    /// only when its content, identity, size or ownership is wrong. An
-    /// operating-system failure (no descriptor or memory left, an
-    /// interrupted call, a failed sync) says nothing about the journal and
-    /// may not happen again.
+    /// A journal that could not be opened or read is unreadable, unless the
+    /// system was momentarily short of something: a descriptor, memory, a
+    /// lock record or disk space for the lock file, or the call was
+    /// interrupted. Those say nothing about the journal and may not happen
+    /// again. Anything else the kernel answers for a journal file (EACCES,
+    /// EISDIR, ENXIO, ELOOP, ...) persists until someone changes that file,
+    /// so retrying it can never succeed.
     fn unreadable(error: LedgerError) -> Self {
-        match error.kind() {
-            crate::protocol::ErrorKind::Io(_) => Self::Other(error),
-            _ => Self::Refused(PendingRefusal::JournalUnreadable, error),
+        if error.raw_os_error().is_some_and(transient) {
+            Self::Other(error)
+        } else {
+            Self::Refused(PendingRefusal::JournalUnreadable, error)
         }
     }
+}
+
+/// An errno that reports the system's momentary state, not the file's.
+fn transient(errno: i32) -> bool {
+    [
+        libc::EMFILE,
+        libc::ENFILE,
+        libc::ENOMEM,
+        libc::ENOLCK,
+        libc::ENOSPC,
+        libc::EDQUOT,
+        libc::EINTR,
+        libc::EAGAIN,
+        libc::EWOULDBLOCK,
+    ]
+    .contains(&errno)
 }
 
 impl Store {
@@ -201,7 +220,11 @@ impl Store {
                     "another process holds the pending journal's lock",
                 ))
             })?;
-        let mut state = journal.read(&run).map_err(PendingFailure::unreadable)?;
+        let (mut state, file) = journal
+            .read_unsynchronized(&run)
+            .map_err(PendingFailure::unreadable)?;
+        // A failed durability barrier is the system's, never the journal's.
+        journal.synchronize(&file).map_err(Other)?;
         if run.state.is_terminal() {
             journal.remove().map_err(Other)?;
             return Ok(run);

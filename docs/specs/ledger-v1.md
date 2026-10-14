@@ -189,7 +189,9 @@ and conservatively block retention deletion.
 A journal is refused only for faults of the journal itself, each recorded as
 one of five classes: `journal_missing` (a nonterminal run whose owner died has
 none), `journal_unreadable` (its content, digest, run or owner binding, size or
-ownership is invalid), `not_admitted` (it cannot supply an admission the run
+ownership is invalid, or the kernel refuses to open or read one of its files
+for a reason that lasts until someone changes that file, such as EACCES,
+EISDIR, ENXIO or ELOOP), `not_admitted` (it cannot supply an admission the run
 never recorded), `exit_uncorroborated` (its exit record lacks corroborating
 terminal control) and `evidence_refused` (its evidence violates the source
 contract or canonical history refuses it without the stream being poisoned).
@@ -199,11 +201,14 @@ unknown: true, unknown_reason: "pending evidence could not be reconciled"},
 coverage: {status: degraded, gaps: [{reason: invalid_pending_evidence}]}}`.
 Canonical history keeps only the class: a refusal's text can quote journal
 values, so it goes only to the writer's log, with control characters spelled
-out. A failure that is not the journal's own (an operating-system error such
-as EMFILE or a failed sync, a held journal lock, a failed append that poisoned
-the stream) records nothing. The background scan tries such a journal again
-after 2 s, doubling the wait up to 5 min, and logs a failure again only when
-it changes; a refused journal is tried again only once it changes.
+out. A failure that is not the journal's own records nothing: the system was
+momentarily short of something while opening or reading the journal (EMFILE,
+ENFILE, ENOMEM, ENOLCK, ENOSPC or EDQUOT, or an EINTR or EAGAIN), a durability
+barrier failed after the journal validated, another process holds its lock,
+removing it after its evidence became canonical failed, or an append failed
+and poisoned the stream. The background scan tries such a journal again after
+2 s, doubling the wait up to 5 min, and logs a failure again only when it
+changes; a refused journal is tried again only once it changes.
 `settle-orphans` skips such a run, settles the other orphans and then fails,
 naming each run it skipped.
 
