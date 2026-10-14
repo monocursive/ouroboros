@@ -2132,14 +2132,7 @@ fn submit_receipt(
     }
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
-    let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
-        JailError::new(
-            ErrorCode::InternalError,
-            ErrorStage::Running,
-            Remediation::InspectState,
-            format!("the receipt could not be serialized: {error}"),
-        )
-    })?;
+    let bytes = cleanup::record_bytes("receipt", &receipt, ErrorStage::Running)?;
     record.revision += 1;
     let canonical = attempt_dir.receipt_path();
     let extra = args.receipt.clone();
@@ -2713,7 +2706,9 @@ fn receipt_digest(receipt: &Receipt) -> Result<String, String> {
 /// nothing.
 ///
 /// # Errors
-/// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written.
+/// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written,
+/// a receipt past [`cleanup::RECEIPT_MAX`] included, which no reader would
+/// accept and is never written.
 pub fn write_receipt(
     attempt_dir: &AttemptDir,
     record: &mut AttemptRecord,
@@ -2767,14 +2762,7 @@ pub fn write_receipt_at(
 ) -> Result<Receipt, JailError> {
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
-    let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
-        JailError::new(
-            ErrorCode::InternalError,
-            ErrorStage::Preparing,
-            Remediation::InspectState,
-            format!("the receipt could not be serialized: {error}"),
-        )
-    })?;
+    let bytes = cleanup::record_bytes("receipt", &receipt, ErrorStage::Preparing)?;
     let canonical = state::TempWrite::create_at(site, &attempt_dir.receipt_path(), &bytes, io)?;
     // J4-D4: the rename below can land and a later step still fail (its
     // directory sync, or the extra copy), leaving this revision visible under
@@ -2963,14 +2951,7 @@ fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailEr
         "policy_digest": plan.resolved.digest,
         "provenance": plan.resolved.provenance,
     });
-    let bytes = serde_json::to_vec_pretty(&envelope).map_err(|error| {
-        JailError::new(
-            ErrorCode::InternalError,
-            ErrorStage::Preparing,
-            Remediation::InspectState,
-            format!("the policy envelope could not be serialized: {error}"),
-        )
-    })?;
+    let bytes = cleanup::record_bytes("policy envelope", &envelope, ErrorStage::Preparing)?;
     state::replace_atomically_at(state::Site::Policy, &attempt_dir.policy_path(), &bytes)
 }
 
@@ -3836,6 +3817,34 @@ mod tests {
         let foreign = dir.path().join("foreign.json");
         std::fs::write(&foreign, b"{\"schema\":\"something.else/1\"}").unwrap();
         assert!(!prior_receipt_copy(&foreign));
+    }
+
+    /// A receipt past the bound every reader holds receipts to is refused
+    /// before anything is written, and spends no revision: on disk it would
+    /// be a receipt that neither `gc` nor cleanup could read.
+    #[test]
+    fn a_receipt_past_the_reader_bound_is_never_written() {
+        let (_root, attempt_dir, _plan) = scratch_fixture();
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        let bound = usize::try_from(cleanup::RECEIPT_MAX).unwrap();
+        record.errors.push(
+            JailError::new(
+                ErrorCode::EvidenceLost,
+                ErrorStage::Running,
+                Remediation::InspectState,
+                "x".repeat(bound),
+            )
+            .to_object(),
+        );
+        let error = write_receipt(&attempt_dir, &mut record, Phase::Settled, None)
+            .expect_err("past the bound");
+        assert_eq!(error.code, ErrorCode::StateWriteFailed);
+        assert!(error.message.contains("bound"), "{}", error.message);
+        assert_eq!(record.revision, 1, "no revision is spent");
+        assert!(!attempt_dir.receipt_path().exists());
+        record.errors.clear();
+        write_receipt(&attempt_dir, &mut record, Phase::Settled, None).expect("within the bound");
+        assert_eq!(record.revision, 2);
     }
 
     /// An unsatisfied requirement refuses with the code, remediation and

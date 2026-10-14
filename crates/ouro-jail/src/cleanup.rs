@@ -647,8 +647,47 @@ pub enum Resume {
 }
 
 /// Largest receipt (or `policy.json`) this tool reads back: whoever reads
-/// one, the supervisor, cleanup, `gc` or `learn`, holds it to this one bound.
+/// one, the supervisor, cleanup, `gc` or `learn`, holds it to this one bound,
+/// and every writer refuses to write a larger one ([`record_bytes`]).
 pub const RECEIPT_MAX: u64 = 4 * 1024 * 1024;
+
+/// The bytes of a record this tool reads back under [`RECEIPT_MAX`] (a
+/// receipt or the policy envelope, named by `what`), as they are written.
+///
+/// A larger one is refused before anything is written: on disk it would be
+/// a record no reader accepts, so the attempt it describes could never be
+/// cleaned up or reported from it.
+///
+/// # Errors
+/// [`ErrorCode::InternalError`] when it cannot be serialized, and
+/// [`ErrorCode::StateWriteFailed`] when it is past the bound.
+pub fn record_bytes(
+    what: &str,
+    record: &impl serde::Serialize,
+    stage: ErrorStage,
+) -> Result<Vec<u8>, JailError> {
+    let bytes = serde_json::to_vec_pretty(record).map_err(|error| {
+        JailError::new(
+            ErrorCode::InternalError,
+            stage,
+            Remediation::InspectState,
+            format!("the {what} could not be serialized: {error}"),
+        )
+    })?;
+    if u64::try_from(bytes.len()).map_or(true, |len| len > RECEIPT_MAX) {
+        return Err(JailError::new(
+            ErrorCode::StateWriteFailed,
+            stage,
+            Remediation::InspectState,
+            format!(
+                "the {what} is {} bytes, past the {RECEIPT_MAX}-byte bound every reader holds \
+                 it to, so it was not written",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
 
 fn read_receipt(attempt_dir: &AttemptDir) -> Result<Option<Receipt>, JailError> {
     let path = attempt_dir.receipt_path();
@@ -925,14 +964,7 @@ fn complete_receipt(attempt_dir: &AttemptDir, receipt: &mut Receipt) -> Result<(
     receipt.cleanup_error = None;
     receipt.revision += 1;
     receipt.updated_at = crate::records::rfc3339_utc(std::time::SystemTime::now());
-    let bytes = serde_json::to_vec_pretty(&*receipt).map_err(|error| {
-        JailError::new(
-            ErrorCode::InternalError,
-            ErrorStage::Reconciling,
-            Remediation::InspectState,
-            format!("the receipt could not be serialized: {error}"),
-        )
-    })?;
+    let bytes = record_bytes("receipt", &*receipt, ErrorStage::Reconciling)?;
     state::replace_atomically_at(state::Site::GcResume, &attempt_dir.receipt_path(), &bytes)
 }
 
