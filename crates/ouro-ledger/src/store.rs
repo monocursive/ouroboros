@@ -60,6 +60,60 @@ struct Anchor {
     labels_digest: String,
 }
 
+/// How a stream stopped being trustworthy, decided where the failure is
+/// detected rather than recovered later from its message text. Variants are
+/// ordered by severity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PoisonKind {
+    /// This writer's own interruption or uncertain persistence: the validated
+    /// prefix stands, and what follows it is missing or unacknowledged.
+    Incomplete,
+    /// Bytes or store metadata contradict anything this writer could have
+    /// produced: an integrity violation.
+    Corrupt,
+    /// The durable segment manifest does not corroborate the canonical bytes,
+    /// so even the validated prefix has no durable anchor.
+    Unanchored,
+}
+
+impl PoisonKind {
+    pub(crate) fn stream_status(self) -> &'static str {
+        match self {
+            Self::Incomplete => "incomplete",
+            Self::Corrupt | Self::Unanchored => "corrupt",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Poison {
+    pub(crate) kind: PoisonKind,
+    pub(crate) detail: String,
+}
+
+impl Poison {
+    fn new(kind: PoisonKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// The most severe finding decides: an integrity violation is never reported
+/// as a merely incomplete stream.
+pub(crate) fn poison_status(poisoned: &[Poison]) -> Option<&'static str> {
+    poisoned
+        .iter()
+        .map(|p| p.kind)
+        .max()
+        .map(PoisonKind::stream_status)
+}
+
+fn poison_details(poisoned: &[Poison]) -> Vec<String> {
+    poisoned.iter().map(|p| p.detail.clone()).collect()
+}
+
 #[cfg_attr(test, derive(Clone))]
 struct Stream {
     run: RunRecord,
@@ -70,7 +124,7 @@ struct Stream {
     last_source: Option<Value>,
     first_loss: Option<Value>,
     receipt_phase: Option<String>,
-    poisoned: Vec<String>,
+    poisoned: Vec<Poison>,
     segments: Vec<manifest::Segment>,
     active_segment: usize,
     segment_bytes: u64,
@@ -830,7 +884,10 @@ impl Store {
                 .get_mut(run_id)
                 .expect("known stream")
                 .poisoned
-                .push(format!("uncertain persistence: {error}"));
+                .push(Poison::new(
+                    PoisonKind::Incomplete,
+                    format!("uncertain persistence: {error}"),
+                ));
             return Err(error);
         }
         Ok(receipt)
@@ -990,7 +1047,7 @@ impl Store {
             run.outcome = Some(
                 json!({"kind":"unknown","unknown":true,"unknown_reason":"stream persistence or recovery is ambiguous"}),
             );
-            run.coverage = json!({"status":"degraded","gaps":stream.poisoned});
+            run.coverage = json!({"status":"degraded","gaps":poison_details(&stream.poisoned)});
         }
         Ok(run)
     }
@@ -1056,7 +1113,7 @@ impl Store {
                     !stream
                         .poisoned
                         .iter()
-                        .any(|problem| problem.contains("manifest"))
+                        .any(|problem| problem.kind == PoisonKind::Unanchored)
                         && stream.anchors.get(&seq).is_some_and(|anchor| {
                             anchor.bytes == bytes
                                 && anchor.digest == digest
@@ -1131,7 +1188,7 @@ impl Store {
                     return self.verify_pruned(id);
                 }
                 let (stream, events) = self.load_stream_with_sync(id, &|_| Ok(()))?;
-                let mut problems = stream.poisoned.clone();
+                let mut problems = poison_details(&stream.poisoned);
                 if stream
                     .run
                     .capture_history
@@ -1171,7 +1228,7 @@ impl Store {
                     }
                 }
                 if let Some(active) = self.streams.get(id) {
-                    problems.extend(active.poisoned.clone());
+                    problems.extend(poison_details(&active.poisoned));
                 }
                 problems.sort();
                 problems.dedup();
@@ -1198,18 +1255,20 @@ impl Store {
         let manifest = match crate::manifest::read(&directory, run_id) {
             Ok(manifest) => manifest,
             Err(error) => {
-                stream
-                    .poisoned
-                    .push(format!("invalid segment manifest: {error}"));
+                stream.poisoned.push(Poison::new(
+                    PoisonKind::Unanchored,
+                    format!("invalid segment manifest: {error}"),
+                ));
                 None
             }
         };
         let names = match manifest::names(&directory) {
             Ok(names) => names,
             Err(error) => {
-                stream
-                    .poisoned
-                    .push(format!("invalid segment layout: {error}"));
+                stream.poisoned.push(Poison::new(
+                    PoisonKind::Corrupt,
+                    format!("invalid segment layout: {error}"),
+                ));
                 return Ok((stream, 0));
             }
         };
@@ -1219,9 +1278,10 @@ impl Store {
             .is_none_or(|m| count < m.segments.len() || count > m.segments.len() + 1)
             && !(manifest.is_none() && count == 1)
         {
-            stream
-                .poisoned
-                .push("segment manifest does not authorize this segment layout".into());
+            stream.poisoned.push(Poison::new(
+                PoisonKind::Unanchored,
+                "segment manifest does not authorize this segment layout",
+            ));
         }
         let mut events = 0;
         for (index, name) in names.iter().enumerate() {
@@ -1231,9 +1291,10 @@ impl Store {
             let file = match private_file(&directory.join(name), false, false) {
                 Ok(file) => file,
                 Err(error) => {
-                    stream
-                        .poisoned
-                        .push(format!("missing or unsafe canonical segment: {error}"));
+                    stream.poisoned.push(Poison::new(
+                        PoisonKind::Corrupt,
+                        format!("missing or unsafe canonical segment: {error}"),
+                    ));
                     break;
                 }
             };
@@ -1242,9 +1303,10 @@ impl Store {
             if index + 1 < count
                 && anchor.is_none_or(|a| file.metadata().is_ok_and(|m| m.len() != a.bytes))
             {
-                stream
-                    .poisoned
-                    .push("sealed segment length differs from its manifest anchor".into());
+                stream.poisoned.push(Poison::new(
+                    PoisonKind::Unanchored,
+                    "sealed segment length differs from its manifest anchor",
+                ));
                 break;
             }
             let mut reader = BufReader::new(file);
@@ -1259,15 +1321,29 @@ impl Store {
                 if length == 0 {
                     break;
                 }
-                if length > MAX_FRAME_BYTES || bytes.last() != Some(&b'\n') {
-                    stream
-                        .poisoned
-                        .push("oversized or interrupted canonical frame; bytes retained".into());
+                // This writer never emits an oversized frame; only a crash
+                // between its write and newline leaves an unterminated tail.
+                if length > MAX_FRAME_BYTES {
+                    stream.poisoned.push(Poison::new(
+                        PoisonKind::Corrupt,
+                        "oversized canonical frame; bytes retained",
+                    ));
+                    break;
+                }
+                if bytes.last() != Some(&b'\n') {
+                    stream.poisoned.push(Poison::new(
+                        PoisonKind::Incomplete,
+                        "interrupted canonical frame; bytes retained",
+                    ));
                     break;
                 }
                 bytes.pop();
+                // Every refusal of a complete frame is an integrity violation:
+                // this writer validates the same rules before it appends.
                 if let Err(error) = stream.accept_canonical(run_id, &bytes) {
-                    stream.poisoned.push(error.to_string());
+                    stream
+                        .poisoned
+                        .push(Poison::new(PoisonKind::Corrupt, error.to_string()));
                     break;
                 }
                 events += 1;
@@ -1281,22 +1357,34 @@ impl Store {
                         || (index + 1 == m.segments.len()
                             && stream.manifest().replay_digest != m.replay_digest)
                     {
-                        stream
-                            .poisoned
-                            .push("segment manifest committed prefix mismatch".into());
+                        stream.poisoned.push(Poison::new(
+                            PoisonKind::Unanchored,
+                            "segment manifest committed prefix mismatch",
+                        ));
                         break;
                     }
                 }
             }
+            // The manifest is written only after its records are synchronized,
+            // so bytes missing below an anchor are lost acknowledged history.
             if !anchored {
-                stream
-                    .poisoned
-                    .push("canonical stream truncated before its segment manifest anchor".into());
+                stream.poisoned.push(Poison::new(
+                    PoisonKind::Unanchored,
+                    "canonical stream truncated before its segment manifest anchor",
+                ));
             }
             // Only one empty unlisted successor of a fully anchored stream can be
-            // an interrupted rotation. Never manufacture a missing committed file.
+            // an interrupted rotation, and only a lone unlisted first segment an
+            // interrupted preparation. Never manufacture a missing committed file.
             if stream.segment_bytes == 0 && (index == 0 || anchor.is_some() || index + 1 != count) {
-                stream.poisoned.push("empty canonical segment".into());
+                let kind = if index == 0 && anchor.is_none() && count == 1 {
+                    PoisonKind::Incomplete
+                } else {
+                    PoisonKind::Corrupt
+                };
+                stream
+                    .poisoned
+                    .push(Poison::new(kind, "empty canonical segment"));
             }
             if !stream.poisoned.is_empty() {
                 break;
@@ -3724,6 +3812,81 @@ mod tests {
         );
         assert!(recovered.prepare("different", &payload(), &peer()).is_err());
         assert!(note(&mut recovered, &run, "partial", json!({"v":"half record"})).is_err());
+    }
+
+    /// Rewrite the canonical records and drop the segment manifest, so only the
+    /// edited records' own rules can refuse them on the next start.
+    fn rewrite_without_manifest(
+        store: &Store,
+        run: &RunRecord,
+        edit: impl FnOnce(&mut Vec<Value>),
+    ) {
+        let directory = store.root.join(&run.run_id);
+        let mut records: Vec<Value> = fs::read(directory.join(STREAM))
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        edit(&mut records);
+        let mut bytes = Vec::new();
+        for record in records {
+            bytes.extend(canonical(&record).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(directory.join(STREAM), bytes).unwrap();
+        fs::remove_file(directory.join(manifest::NAME)).unwrap();
+    }
+
+    #[test]
+    fn integrity_violations_read_as_corrupt_and_interruptions_as_incomplete() {
+        let mixed_attempt = |records: &mut Vec<Value>| {
+            records.last_mut().unwrap()["attempt_id"] =
+                json!("att_00000000-0000-4000-8000-000000000000");
+        };
+        let duplicate_request = |records: &mut Vec<Value>| {
+            let mut copy = records.last().unwrap().clone();
+            copy["seq"] = json!(copy["seq"].as_u64().unwrap() + 1);
+            copy["prev"] = json!(sha256_prefixed(
+                &canonical(records.last().unwrap()).unwrap()
+            ));
+            records.push(copy);
+        };
+        let corrupt = |problem: &str, edit: &dyn Fn(&mut Vec<Value>)| {
+            let (temp, mut store, run) = create();
+            note(&mut store, &run, "first", json!({"v":1})).unwrap();
+            rewrite_without_manifest(&store, &run, edit);
+            drop(store);
+            let mut store = Store::open(&temp.path().join("data")).unwrap();
+            assert_eq!(store.verify(None).unwrap()[0].problems, [problem]);
+            let page = store
+                .read(&read_request(&run, crate::protocol::ReadSelector::All))
+                .unwrap();
+            assert!(!page.local_consistency, "{problem}");
+            assert_eq!(page.stream_status, "corrupt", "{problem}");
+        };
+        corrupt("mixed attempt identity", &mixed_attempt);
+        corrupt(
+            "duplicate request id in canonical stream",
+            &duplicate_request,
+        );
+        let (temp, mut store, run) = create();
+        note(&mut store, &run, "first", json!({"v":1})).unwrap();
+        let path = store.root.join(&run.run_id).join(STREAM);
+        drop(store);
+        let mut torn = fs::read(&path).unwrap();
+        torn.extend_from_slice(b"{\"torn\":");
+        fs::write(&path, torn).unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        assert_eq!(
+            store.verify(None).unwrap()[0].problems,
+            ["interrupted canonical frame; bytes retained"]
+        );
+        let page = store
+            .read(&read_request(&run, crate::protocol::ReadSelector::All))
+            .unwrap();
+        assert!(!page.local_consistency);
+        assert_eq!(page.stream_status, "incomplete");
     }
 
     #[test]

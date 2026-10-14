@@ -961,7 +961,7 @@ fn best_effort_writer_restart_reconciles_bounded_overflow_without_reexecution() 
             // a journal clear that must never occur.
             assert_eq!(
                 verification[0].problems,
-                vec!["oversized or interrupted canonical frame; bytes retained".to_owned()]
+                vec!["interrupted canonical frame; bytes retained".to_owned()]
             );
             let path = fixture
                 .data

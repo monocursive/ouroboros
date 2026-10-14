@@ -179,7 +179,7 @@ impl Store {
         let mut budget = Budget(READ_OUTPUT_BYTES);
         for stream in self.streams.values() {
             serde_json::to_writer(&mut budget, &stream.run)?;
-            serde_json::to_writer(&mut budget, &stream.poisoned)?;
+            serde_json::to_writer(&mut budget, &poison_details(&stream.poisoned))?;
         }
         Ok(self.runs())
     }

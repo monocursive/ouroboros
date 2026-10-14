@@ -552,7 +552,7 @@ impl Readers {
         path: &Path,
         request: &ReadRequest,
         run: &RunRecord,
-        poisoned: &[String],
+        poisoned: &[crate::store::Poison],
         accepted_bytes: u64,
         proofs: (
             impl Fn(&str) -> Option<AppendReceipt>,
@@ -640,30 +640,21 @@ impl Readers {
             let (device, inode) = file.first_identity();
             let id = Uuid::new_v4().simple().to_string();
             let token = Uuid::new_v4().simple().to_string();
-            let mut health = if poisoned.is_empty() {
-                if ["settled", "denied", "outcome_unknown"].contains(&run.state.as_str()) {
-                    "complete"
-                } else {
-                    "active"
-                }
-            } else if poisoned.iter().any(|p| {
-                p.contains("invalid")
-                    || p.contains("mismatch")
-                    || p.contains("noncanonical")
-                    || p.contains("violates")
-            }) {
-                "corrupt"
-            } else {
-                "incomplete"
-            };
             let unexpected_tail = physical_bytes != accepted_bytes;
-            if unexpected_tail {
-                health = if physical_bytes < accepted_bytes {
-                    "corrupt"
-                } else {
-                    "incomplete"
-                };
-            }
+            // Missing accepted bytes are lost history. A poisoned stream
+            // retains the bytes it refused beyond its validated prefix, so
+            // their presence never softens the poison's own classification.
+            let health = if physical_bytes < accepted_bytes {
+                "corrupt"
+            } else if let Some(status) = crate::store::poison_status(poisoned) {
+                status
+            } else if unexpected_tail {
+                "incomplete"
+            } else if ["settled", "denied", "outcome_unknown"].contains(&run.state.as_str()) {
+                "complete"
+            } else {
+                "active"
+            };
             let mut coverage = coverage_summary(&run.coverage);
             coverage["selection_status"] = json!(selection_status(&request.filter, &coverage));
             let template = ReadPage {

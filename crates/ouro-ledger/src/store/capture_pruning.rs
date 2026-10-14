@@ -302,7 +302,10 @@ impl Store {
                         .get_mut(id)
                         .expect("known run")
                         .poisoned
-                        .push("uncertain capture GC publication; restart required".into());
+                        .push(Poison::new(
+                            PoisonKind::Incomplete,
+                            "uncertain capture GC publication; restart required",
+                        ));
                     return Err(e);
                 }
                 let stream = self.streams.get_mut(id).expect("known run");
