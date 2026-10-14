@@ -1247,27 +1247,41 @@ impl ouro_jail::gc::Host for SimHost {
     fn probe_leaf(&self, _: &ouro_jail::gc::LeafRecord) -> ouro_jail::gc::LeafProbe {
         self.probe()
     }
-    fn terminate_leaf(&self, _: &ouro_jail::gc::LeafRecord, _: Duration) -> Result<(), String> {
+    fn terminate_leaf(
+        &self,
+        _: &ouro_jail::gc::LeafRecord,
+        _: Duration,
+    ) -> Result<(), ouro_jail::gc::HostFailure> {
         if self.now() == SimCgroup::Populated {
             *self.cgroup.lock().unwrap() = SimCgroup::Empty;
         }
         Ok(())
     }
-    fn remove_leaf(&self, _: &ouro_jail::gc::LeafRecord, _: &mut usize) -> Result<(), String> {
+    fn remove_leaf(
+        &self,
+        _: &ouro_jail::gc::LeafRecord,
+        _: &mut usize,
+    ) -> Result<(), ouro_jail::gc::HostFailure> {
         match self.now() {
             SimCgroup::Empty => {
                 *self.cgroup.lock().unwrap() = SimCgroup::Gone;
                 Ok(())
             }
-            other => Err(format!("{other:?}")),
+            other => Err(ouro_jail::gc::HostFailure::new(format!("{other:?}"))),
         }
     }
     // The simulated supervisor registers its leaf with its identity.
     fn probe_named_leaf(&self, _: &Path) -> ouro_jail::gc::LeafProbe {
         ouro_jail::gc::LeafProbe::Unverifiable("no leaf is registered by name only".into())
     }
-    fn remove_named_leaf(&self, _: &Path, _: &mut usize) -> Result<(u64, u64), String> {
-        Err("no leaf is registered by name only".into())
+    fn remove_named_leaf(
+        &self,
+        _: &Path,
+        _: &mut usize,
+    ) -> Result<(u64, u64), ouro_jail::gc::HostFailure> {
+        Err(ouro_jail::gc::HostFailure::new(
+            "no leaf is registered by name only",
+        ))
     }
 }
 

@@ -2,6 +2,9 @@
 //! (the recorded owner's liveness, and the identity-checked probe, kill and
 //! removal of the execution cgroup; on Linux `platform::linux::reconcile`).
 
+use std::borrow::Cow;
+use std::fmt;
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
@@ -72,6 +75,52 @@ pub enum LeafProbe {
     },
 }
 
+/// Why a host change `gc` asked for did not happen: the step that failed,
+/// and the OS error, errno included, when there was one. gc's report carries
+/// its text ([`fmt::Display`]).
+#[derive(Debug)]
+pub struct HostFailure {
+    step: Cow<'static, str>,
+    source: Option<io::Error>,
+}
+
+impl HostFailure {
+    /// `step` failed for a reason no syscall reported.
+    #[must_use]
+    pub fn new(step: impl Into<Cow<'static, str>>) -> HostFailure {
+        HostFailure {
+            step: step.into(),
+            source: None,
+        }
+    }
+
+    /// `step` failed with the OS error `source`.
+    #[must_use]
+    pub fn os(step: &'static str, source: io::Error) -> HostFailure {
+        HostFailure {
+            step: Cow::Borrowed(step),
+            source: Some(source),
+        }
+    }
+}
+
+impl fmt::Display for HostFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.source {
+            Some(source) => write!(f, "{}: {source}", self.step),
+            None => f.write_str(&self.step),
+        }
+    }
+}
+
+impl std::error::Error for HostFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
+    }
+}
+
 /// Every host question and every host change `gc` makes.
 pub trait Host {
     /// The platform and the current boot.
@@ -85,13 +134,13 @@ pub trait Host {
     ///
     /// # Errors
     /// Why the leaf was not identified, killed or seen empty.
-    fn terminate_leaf(&self, leaf: &LeafRecord, budget: Duration) -> Result<(), String>;
+    fn terminate_leaf(&self, leaf: &LeafRecord, budget: Duration) -> Result<(), HostFailure>;
     /// Re-identifies the leaf, checks it is empty and removes it (and any
     /// empty child cgroups), spending at most `entries` directory entries.
     ///
     /// # Errors
     /// Why the leaf was not identified, not empty or not removed.
-    fn remove_leaf(&self, leaf: &LeafRecord, entries: &mut usize) -> Result<(), String>;
+    fn remove_leaf(&self, leaf: &LeafRecord, entries: &mut usize) -> Result<(), HostFailure>;
     /// What is at a leaf jail state registers by name only (a supervisor
     /// that died between the name and the identity, N7). `Identified` means
     /// only a cgroup v2 directory with an execution leaf's name directly
@@ -103,7 +152,11 @@ pub trait Host {
     ///
     /// # Errors
     /// Why the leaf was not found, not empty or not removed.
-    fn remove_named_leaf(&self, path: &Path, entries: &mut usize) -> Result<(u64, u64), String>;
+    fn remove_named_leaf(
+        &self,
+        path: &Path,
+        entries: &mut usize,
+    ) -> Result<(u64, u64), HostFailure>;
 }
 
 /// The host `gc` runs on: the platform's identity, and on Linux the
@@ -140,11 +193,11 @@ impl Host for NativeHost {
         crate::platform::linux::reconcile::probe_leaf(leaf)
     }
 
-    fn terminate_leaf(&self, leaf: &LeafRecord, budget: Duration) -> Result<(), String> {
+    fn terminate_leaf(&self, leaf: &LeafRecord, budget: Duration) -> Result<(), HostFailure> {
         crate::platform::linux::reconcile::terminate_leaf(leaf, budget)
     }
 
-    fn remove_leaf(&self, leaf: &LeafRecord, entries: &mut usize) -> Result<(), String> {
+    fn remove_leaf(&self, leaf: &LeafRecord, entries: &mut usize) -> Result<(), HostFailure> {
         crate::platform::linux::reconcile::remove_leaf(leaf, entries)
     }
 
@@ -152,7 +205,11 @@ impl Host for NativeHost {
         crate::platform::linux::reconcile::probe_named_leaf(path)
     }
 
-    fn remove_named_leaf(&self, path: &Path, entries: &mut usize) -> Result<(u64, u64), String> {
+    fn remove_named_leaf(
+        &self,
+        path: &Path,
+        entries: &mut usize,
+    ) -> Result<(u64, u64), HostFailure> {
         crate::platform::linux::reconcile::remove_named_leaf(path, entries)
     }
 }
@@ -176,19 +233,19 @@ impl Host for NativeHost {
         LeafProbe::Unverifiable(NO_MECHANISM.to_owned())
     }
 
-    fn terminate_leaf(&self, _: &LeafRecord, _: Duration) -> Result<(), String> {
-        Err(NO_MECHANISM.to_owned())
+    fn terminate_leaf(&self, _: &LeafRecord, _: Duration) -> Result<(), HostFailure> {
+        Err(HostFailure::new(NO_MECHANISM))
     }
 
-    fn remove_leaf(&self, _: &LeafRecord, _: &mut usize) -> Result<(), String> {
-        Err(NO_MECHANISM.to_owned())
+    fn remove_leaf(&self, _: &LeafRecord, _: &mut usize) -> Result<(), HostFailure> {
+        Err(HostFailure::new(NO_MECHANISM))
     }
 
     fn probe_named_leaf(&self, _: &Path) -> LeafProbe {
         LeafProbe::Unverifiable(NO_MECHANISM.to_owned())
     }
 
-    fn remove_named_leaf(&self, _: &Path, _: &mut usize) -> Result<(u64, u64), String> {
-        Err(NO_MECHANISM.to_owned())
+    fn remove_named_leaf(&self, _: &Path, _: &mut usize) -> Result<(u64, u64), HostFailure> {
+        Err(HostFailure::new(NO_MECHANISM))
     }
 }

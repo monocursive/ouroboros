@@ -667,7 +667,8 @@ fn terminate(
         ..act("gc_terminating_orphan")
     };
     record(dir, killing, recorded).map_err(|error| format!("{error}; nothing was killed"))?;
-    host.terminate_leaf(leaf, pass.options.kill_budget)?;
+    host.terminate_leaf(leaf, pass.options.kill_budget)
+        .map_err(|failure| failure.to_string())?;
     let killed = state::GcAction {
         execution_cgroup: state::Field::Set(leaf_entry(leaf)),
         verified_empty: state::Field::Set(true),
@@ -698,7 +699,7 @@ fn remove(
     let given = left;
     let removed = host.remove_leaf(leaf, &mut left);
     meter.charge(given - left.min(given));
-    removed?;
+    removed.map_err(|failure| failure.to_string())?;
     let gone = state::GcAction {
         execution_cgroup: state::Field::Set(leaf_entry(leaf)),
         ..act("gc_removed_cgroup")
@@ -726,7 +727,7 @@ fn remove_named(
     let given = left;
     let removed = host.remove_named_leaf(path, &mut left);
     meter.charge(given - left.min(given));
-    let identity = removed?;
+    let identity = removed.map_err(|failure| failure.to_string())?;
     let gone = state::GcAction {
         execution_cgroup: state::Field::Set(state::LeafEntry::new(
             path.to_path_buf(),

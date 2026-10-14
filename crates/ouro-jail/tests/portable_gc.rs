@@ -854,7 +854,8 @@ fn every_test_seam_in_force_is_recorded_in_the_report() {
 mod scripted {
     use super::*;
     use ouro_jail::gc::{
-        self, Host, HostIdentity, LeafProbe, LeafRecord, Liveness, Options, OwnerRecord,
+        self, Host, HostFailure, HostIdentity, LeafProbe, LeafRecord, Liveness, Options,
+        OwnerRecord,
     };
 
     /// A host whose answers the test chooses and whose every call is logged.
@@ -900,11 +901,11 @@ mod scripted {
             self.log(format!("probe_leaf {}", leaf.inode));
             self.leaf.clone()
         }
-        fn terminate_leaf(&self, leaf: &LeafRecord, _: Duration) -> Result<(), String> {
+        fn terminate_leaf(&self, leaf: &LeafRecord, _: Duration) -> Result<(), HostFailure> {
             self.log(format!("terminate_leaf {}", leaf.inode));
-            self.terminate.clone()
+            self.terminate.clone().map_err(HostFailure::new)
         }
-        fn remove_leaf(&self, leaf: &LeafRecord, _: &mut usize) -> Result<(), String> {
+        fn remove_leaf(&self, leaf: &LeafRecord, _: &mut usize) -> Result<(), HostFailure> {
             self.log(format!("remove_leaf {}", leaf.inode));
             Ok(())
         }
@@ -912,7 +913,7 @@ mod scripted {
             self.log(format!("probe_named_leaf {}", path.display()));
             self.leaf.clone()
         }
-        fn remove_named_leaf(&self, path: &Path, _: &mut usize) -> Result<(u64, u64), String> {
+        fn remove_named_leaf(&self, path: &Path, _: &mut usize) -> Result<(u64, u64), HostFailure> {
             self.log(format!("remove_named_leaf {}", path.display()));
             Ok((30, 5151))
         }
@@ -1949,7 +1950,8 @@ mod w3 {
     use std::sync::Arc;
 
     use ouro_jail::gc::{
-        self, Host, HostIdentity, LeafProbe, LeafRecord, Liveness, Options, OwnerRecord,
+        self, Host, HostFailure, HostIdentity, LeafProbe, LeafRecord, Liveness, Options,
+        OwnerRecord,
     };
 
     /// The execution leaf of the attempt named `id`, named for it as the
@@ -2020,10 +2022,12 @@ mod w3 {
                 Cgroup::Gone => LeafProbe::Absent,
             }
         }
-        fn rmdir(&self, path: &Path) -> Result<(), String> {
+        fn rmdir(&self, path: &Path) -> Result<(), HostFailure> {
             match self.now() {
-                Cgroup::Populated => Err("populated; an occupied cgroup is never removed".into()),
-                Cgroup::Gone => Err("the recorded leaf no longer exists".into()),
+                Cgroup::Populated => Err(HostFailure::new(
+                    "populated; an occupied cgroup is never removed",
+                )),
+                Cgroup::Gone => Err(HostFailure::new("the recorded leaf no longer exists")),
                 Cgroup::Empty => {
                     let first = self.intent_recorded(path);
                     self.intent_before_rmdir.lock().unwrap().push(first);
@@ -2049,17 +2053,19 @@ mod w3 {
             self.log("probe_leaf", &leaf.path);
             self.probe()
         }
-        fn terminate_leaf(&self, leaf: &LeafRecord, _: Duration) -> Result<(), String> {
+        fn terminate_leaf(&self, leaf: &LeafRecord, _: Duration) -> Result<(), HostFailure> {
             self.log("terminate_leaf", &leaf.path);
             if !self.kill_works {
-                return Err("still populated 5000 ms after cgroup.kill".into());
+                return Err(HostFailure::new(
+                    "still populated 5000 ms after cgroup.kill",
+                ));
             }
             if self.now() == Cgroup::Populated {
                 *self.cgroup.lock().unwrap() = Cgroup::Empty;
             }
             Ok(())
         }
-        fn remove_leaf(&self, leaf: &LeafRecord, _: &mut usize) -> Result<(), String> {
+        fn remove_leaf(&self, leaf: &LeafRecord, _: &mut usize) -> Result<(), HostFailure> {
             self.log("remove_leaf", &leaf.path);
             self.rmdir(&leaf.path)
         }
@@ -2067,7 +2073,7 @@ mod w3 {
             self.log("probe_named_leaf", path);
             self.probe()
         }
-        fn remove_named_leaf(&self, path: &Path, _: &mut usize) -> Result<(u64, u64), String> {
+        fn remove_named_leaf(&self, path: &Path, _: &mut usize) -> Result<(u64, u64), HostFailure> {
             self.log("remove_named_leaf", path);
             self.rmdir(path).map(|()| (30, 4242))
         }
@@ -2239,11 +2245,11 @@ mod w3 {
             self.log("probe_leaf", &leaf.path);
             LeafProbe::Identified { populated: true }
         }
-        fn terminate_leaf(&self, leaf: &LeafRecord, _: Duration) -> Result<(), String> {
+        fn terminate_leaf(&self, leaf: &LeafRecord, _: Duration) -> Result<(), HostFailure> {
             self.log("terminate_leaf", &leaf.path);
             Ok(())
         }
-        fn remove_leaf(&self, leaf: &LeafRecord, _: &mut usize) -> Result<(), String> {
+        fn remove_leaf(&self, leaf: &LeafRecord, _: &mut usize) -> Result<(), HostFailure> {
             self.log("remove_leaf", &leaf.path);
             Ok(())
         }
@@ -2251,7 +2257,7 @@ mod w3 {
             self.log("probe_named_leaf", path);
             LeafProbe::Identified { populated: false }
         }
-        fn remove_named_leaf(&self, path: &Path, _: &mut usize) -> Result<(u64, u64), String> {
+        fn remove_named_leaf(&self, path: &Path, _: &mut usize) -> Result<(u64, u64), HostFailure> {
             self.log("remove_named_leaf", path);
             Ok((30, 4242))
         }

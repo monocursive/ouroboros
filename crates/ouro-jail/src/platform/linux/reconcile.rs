@@ -31,9 +31,7 @@
 //! so a same-uid swap between the check and the `unlinkat` can at most remove
 //! an empty cgroup of the same user in the same delegated subtree.
 
-use std::borrow::Cow;
 use std::ffi::{CStr, CString};
-use std::fmt;
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
 use std::mem::MaybeUninit;
@@ -44,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use super::cgroup;
 use super::identity;
-use crate::gc::{LeafProbe, LeafRecord, Liveness, OwnerRecord};
+use crate::gc::{HostFailure, LeafProbe, LeafRecord, Liveness, OwnerRecord};
 
 /// How deep a child-made cgroup subtree inside a leaf may be before gc
 /// retains it rather than holding more descriptors (§14.2: 128 open
@@ -52,48 +50,6 @@ use crate::gc::{LeafProbe, LeafRecord, Liveness, OwnerRecord};
 const MAX_CHILD_DEPTH: usize = 64;
 /// How often a killed leaf's population is re-read.
 const POLL: Duration = Duration::from_millis(10);
-
-/// Why a step on a recorded leaf failed: what was being done, and the OS
-/// error, errno included, when there was one. gc's seam takes the text
-/// ([`fmt::Display`]); inside this module the error stays typed.
-#[derive(Debug)]
-struct Failure {
-    step: Cow<'static, str>,
-    source: Option<io::Error>,
-}
-
-impl Failure {
-    /// `step` failed with the OS error `source`.
-    fn os(step: &'static str, source: io::Error) -> Failure {
-        Failure {
-            step: Cow::Borrowed(step),
-            source: Some(source),
-        }
-    }
-
-    /// `step` failed for a reason no syscall reported.
-    fn new(step: impl Into<Cow<'static, str>>) -> Failure {
-        Failure {
-            step: step.into(),
-            source: None,
-        }
-    }
-}
-
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.source {
-            Some(source) => write!(f, "{}: {source}", self.step),
-            None => f.write_str(&self.step),
-        }
-    }
-}
-
-impl From<Failure> for String {
-    fn from(failure: Failure) -> String {
-        failure.to_string()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The owner
@@ -250,14 +206,16 @@ fn rmdir_at(dir: RawFd, name: &CStr) -> io::Result<()> {
 
 /// The child directories of `dir`, charging every entry read (`.` and `..`
 /// aside) to `entries`.
-fn child_dirs(dir: &File, entries: &mut usize) -> Result<Vec<CString>, Failure> {
-    let copy = dir.try_clone().map_err(|error| Failure::os("dup", error))?;
+fn child_dirs(dir: &File, entries: &mut usize) -> Result<Vec<CString>, HostFailure> {
+    let copy = dir
+        .try_clone()
+        .map_err(|error| HostFailure::os("dup", error))?;
     let dir = crate::state::anchored::Dir::from_owned(copy.into());
     let listed = super::fs::read_entries(&dir, *entries).map_err(|errno| {
         if errno == libc::E2BIG {
-            Failure::new("the per-invocation entry bound is reached")
+            HostFailure::new("the per-invocation entry bound is reached")
         } else {
-            Failure::os("readdir", io::Error::from_raw_os_error(errno))
+            HostFailure::os("readdir", io::Error::from_raw_os_error(errno))
         }
     })?;
     *entries -= listed.len();
@@ -403,38 +361,39 @@ impl Pinned {
         )
     }
 
-    fn populated(&self) -> Result<bool, Failure> {
+    fn populated(&self) -> Result<bool, HostFailure> {
         let mut text = String::new();
         self.control(c"cgroup.events", false)
             .and_then(|file| file.take(16384).read_to_string(&mut text))
             .and_then(|_| cgroup::parse_populated(&text))
-            .map_err(|error| Failure::os("cgroup.events", error))
+            .map_err(|error| HostFailure::os("cgroup.events", error))
     }
 
-    fn kill(&self) -> Result<(), Failure> {
+    fn kill(&self) -> Result<(), HostFailure> {
         self.control(c"cgroup.kill", true)
             .and_then(|mut file| file.write_all(b"1"))
-            .map_err(|error| Failure::os("cgroup.kill", error))
+            .map_err(|error| HostFailure::os("cgroup.kill", error))
     }
 
     /// Removes the leaf by name in the pinned parent, while the name still
     /// is the pinned leaf, after removing the (empty) child cgroups a child
     /// made inside it.
-    fn remove(&self, entries: &mut usize) -> Result<(), Failure> {
+    fn remove(&self, entries: &mut usize) -> Result<(), HostFailure> {
         match self.unlink() {
             Ok(()) => return Ok(()),
             Err(error)
                 if error.raw_os_error() == Some(libc::EBUSY)
                     || error.raw_os_error() == Some(libc::ENOTEMPTY) => {}
-            Err(error) => return Err(Failure::os("rmdir", error)),
+            Err(error) => return Err(HostFailure::os("rmdir", error)),
         }
         remove_children(&self.dir, 0, entries)?;
         if self.populated()? {
-            return Err(Failure::new(
+            return Err(HostFailure::new(
                 "populated again; an occupied cgroup is never removed",
             ));
         }
-        self.unlink().map_err(|error| Failure::os("rmdir", error))
+        self.unlink()
+            .map_err(|error| HostFailure::os("rmdir", error))
     }
 
     fn unlink(&self) -> io::Result<()> {
@@ -448,38 +407,40 @@ impl Pinned {
 
 /// Removes the empty child cgroups of `dir`, depth first, bounded in depth
 /// and by `entries`.
-fn remove_children(dir: &File, depth: usize, entries: &mut usize) -> Result<(), Failure> {
+fn remove_children(dir: &File, depth: usize, entries: &mut usize) -> Result<(), HostFailure> {
     if depth >= MAX_CHILD_DEPTH {
-        return Err(Failure::new(format!(
+        return Err(HostFailure::new(format!(
             "the leaf holds child cgroups deeper than {MAX_CHILD_DEPTH} levels"
         )));
     }
     for name in child_dirs(dir, entries)? {
         let child = open_at(dir.as_raw_fd(), &name, libc::O_RDONLY | libc::O_DIRECTORY)
-            .map_err(|error| Failure::os("a child cgroup", error))?;
+            .map_err(|error| HostFailure::os("a child cgroup", error))?;
         remove_children(&child, depth + 1, entries)?;
         drop(child);
-        rmdir_at(dir.as_raw_fd(), &name).map_err(|error| Failure::os("a child cgroup", error))?;
+        rmdir_at(dir.as_raw_fd(), &name)
+            .map_err(|error| HostFailure::os("a child cgroup", error))?;
     }
     Ok(())
 }
 
 /// Whether this process itself runs inside the leaf at `path`: gc never
 /// ends its own cgroup.
-fn holds_this_process(path: &Path) -> Result<bool, Failure> {
-    let own = cgroup::own_cgroup().map_err(|error| Failure::os("/proc/self/cgroup", error))?;
+fn holds_this_process(path: &Path) -> Result<bool, HostFailure> {
+    let own = cgroup::own_cgroup().map_err(|error| HostFailure::os("/proc/self/cgroup", error))?;
     let relative = path
         .strip_prefix(cgroup::CGROUP_ROOT)
-        .map_err(|_| Failure::new("the recorded leaf is outside the cgroup v2 mount"))?;
+        .map_err(|_| HostFailure::new("the recorded leaf is outside the cgroup v2 mount"))?;
     Ok(cgroup::within(&own, &format!("/{}", relative.display())))
 }
 
-fn describe(probe: &LeafProbe) -> String {
+/// Why a leaf that did not pin cannot be acted on.
+fn describe(probe: LeafProbe) -> HostFailure {
     match probe {
-        LeafProbe::Absent => "the recorded leaf no longer exists".to_owned(),
-        LeafProbe::Replaced => "the path names another cgroup".to_owned(),
-        LeafProbe::Unverifiable(reason) => reason.clone(),
-        LeafProbe::Identified { .. } => "identified".to_owned(),
+        LeafProbe::Absent => HostFailure::new("the recorded leaf no longer exists"),
+        LeafProbe::Replaced => HostFailure::new("the path names another cgroup"),
+        LeafProbe::Unverifiable(reason) => HostFailure::new(reason),
+        LeafProbe::Identified { .. } => HostFailure::new("identified"),
     }
 }
 
@@ -507,11 +468,11 @@ fn probe_pinned(pinned: &Pinned, path: &Path, registration: &str) -> LeafProbe {
                 "this gc process runs inside the {registration} leaf"
             ));
         }
-        Err(error) => return LeafProbe::Unverifiable(error.into()),
+        Err(error) => return LeafProbe::Unverifiable(error.to_string()),
     }
     match pinned.populated() {
         Ok(populated) => LeafProbe::Identified { populated },
-        Err(error) => LeafProbe::Unverifiable(error.into()),
+        Err(error) => LeafProbe::Unverifiable(error.to_string()),
     }
 }
 
@@ -520,10 +481,12 @@ fn probe_pinned(pinned: &Pinned, path: &Path, registration: &str) -> LeafProbe {
 ///
 /// # Errors
 /// Why the leaf was not identified, killed or seen empty in time.
-pub fn terminate_leaf(leaf: &LeafRecord, budget: Duration) -> Result<(), String> {
-    let pinned = pin(leaf).map_err(|probe| describe(&probe))?;
+pub fn terminate_leaf(leaf: &LeafRecord, budget: Duration) -> Result<(), HostFailure> {
+    let pinned = pin(leaf).map_err(describe)?;
     if holds_this_process(&leaf.path)? {
-        return Err("this gc process runs inside the recorded leaf".to_owned());
+        return Err(HostFailure::new(
+            "this gc process runs inside the recorded leaf",
+        ));
     }
     pinned.kill()?;
     let deadline = Instant::now() + budget;
@@ -532,10 +495,10 @@ pub fn terminate_leaf(leaf: &LeafRecord, budget: Duration) -> Result<(), String>
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(format!(
+            return Err(HostFailure::new(format!(
                 "still populated {} ms after cgroup.kill",
                 budget.as_millis()
-            ));
+            )));
         }
         std::thread::sleep(POLL);
     }
@@ -558,12 +521,12 @@ pub fn probe_named_leaf(path: &Path) -> LeafProbe {
 ///
 /// # Errors
 /// Why the leaf was not found, not empty or not removed.
-pub fn remove_named_leaf(path: &Path, entries: &mut usize) -> Result<(u64, u64), String> {
-    let pinned = pin_named(path).map_err(|probe| describe(&probe))?;
+pub fn remove_named_leaf(path: &Path, entries: &mut usize) -> Result<(u64, u64), HostFailure> {
+    let pinned = pin_named(path).map_err(describe)?;
     if pinned.populated()? {
-        return Err(
-            "populated; a cgroup registered by name only is never emptied by gc".to_owned(),
-        );
+        return Err(HostFailure::new(
+            "populated; a cgroup registered by name only is never emptied by gc",
+        ));
     }
     pinned.remove(entries)?;
     Ok(pinned.identity)
@@ -574,12 +537,14 @@ pub fn remove_named_leaf(path: &Path, entries: &mut usize) -> Result<(u64, u64),
 ///
 /// # Errors
 /// Why the leaf was not identified, not empty or not removed.
-pub fn remove_leaf(leaf: &LeafRecord, entries: &mut usize) -> Result<(), String> {
-    let pinned = pin(leaf).map_err(|probe| describe(&probe))?;
+pub fn remove_leaf(leaf: &LeafRecord, entries: &mut usize) -> Result<(), HostFailure> {
+    let pinned = pin(leaf).map_err(describe)?;
     if pinned.populated()? {
-        return Err("populated; an occupied cgroup is never removed".to_owned());
+        return Err(HostFailure::new(
+            "populated; an occupied cgroup is never removed",
+        ));
     }
-    Ok(pinned.remove(entries)?)
+    pinned.remove(entries)
 }
 
 #[cfg(test)]
@@ -688,19 +653,25 @@ mod tests {
         }
     }
 
-    /// A failure keeps the OS error, errno included, and gc's seam reads the
-    /// same text it always did.
+    /// A failure keeps the OS error, errno included, and gc's report reads
+    /// the same text it always did.
     #[test]
     fn a_failure_keeps_its_errno_and_its_text() {
+        use std::error::Error as _;
         let denied = || io::Error::from_raw_os_error(libc::EACCES);
-        let failure = Failure::os("cgroup.kill", denied());
+        let failure = HostFailure::os("cgroup.kill", denied());
         assert_eq!(
-            failure.source.as_ref().and_then(io::Error::raw_os_error),
+            failure
+                .source()
+                .and_then(|source| source.downcast_ref::<io::Error>())
+                .and_then(io::Error::raw_os_error),
             Some(libc::EACCES)
         );
-        assert_eq!(String::from(failure), format!("cgroup.kill: {}", denied()));
+        assert_eq!(failure.to_string(), format!("cgroup.kill: {}", denied()));
+        let bounded = HostFailure::new("the per-invocation entry bound is reached");
+        assert!(bounded.source().is_none());
         assert_eq!(
-            String::from(Failure::new("the per-invocation entry bound is reached")),
+            bounded.to_string(),
             "the per-invocation entry bound is reached"
         );
     }
