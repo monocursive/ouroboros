@@ -191,20 +191,42 @@ fn path_key(p: &Path) -> String {
     format!("{h:016x}")
 }
 
+/// Where an on-demand build goes: inside the target directory the running
+/// test binary was built into (`<target>/[<triple>/]<profile>/deps/<test>`),
+/// next to the profile directories. It is a build artifact like any other:
+/// reused by the next run, removed by `cargo clean`, and never left in the
+/// shared temporary directory, where each tree's copy (about 100 MB) used to
+/// stay until the machine was cleaned by hand.
+fn on_demand_dir(exe: &Path) -> Option<PathBuf> {
+    let deps = exe.parent()?;
+    if deps.file_name() != Some(OsStr::new("deps")) {
+        return None;
+    }
+    let profile = deps.parent()?;
+    let target = profile.parent()?;
+    // Keyed on the manifest directory: one target directory shared by two
+    // worktrees must still not hand one tree the other's binary, the stale
+    // cross-tree artifact this project has already been bitten by.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    Some(target.join("ouro-fixture-harness").join(path_key(&root)))
+}
+
 /// Last resort: build the package on demand.
 ///
 /// This runs *inside* `cargo test`, which already holds the lock on the
 /// workspace build directory, so the nested build is given a target directory
-/// of its own. Sharing one would block forever, and sharing a build directory
-/// between trees is a known source of stale cross-tree artifacts here.
+/// of its own ([`on_demand_dir`]). Sharing one would block forever.
 fn build_package(package: &str, name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let release = exe.components().any(|c| c.as_os_str() == "release");
-    // Keyed on the manifest directory: a single shared target directory let
-    // two worktrees hand each other's binary back, which is the stale
-    // cross-tree artifact this project has already been bitten by.
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let work = std::env::temp_dir().join(format!("ouro-fixture-harness-{}", path_key(&root)));
+    let Some(work) = on_demand_dir(&exe) else {
+        eprintln!(
+            "ouro-fixture harness: {name} is not beside the test binary and {} is not in a \
+             cargo target directory to build it into",
+            exe.display()
+        );
+        return None;
+    };
     let _lock = BuildLock::acquire(&work.join(format!("{package}.lock"))).ok()?;
     if let Some(found) = sibling(name) {
         return Some(found); // another process built it while we waited
@@ -1685,6 +1707,34 @@ mod tests {
         // creation leaves none.
         let read = read_receipts(&dir.path().join("nothing-here"), None);
         assert!(read.values.is_empty() && read.errors.is_empty());
+    }
+
+    /// The on-demand build lands inside the test binary's own target
+    /// directory, whatever the profile or target triple, and nowhere for a
+    /// binary that cargo did not put in a `deps` directory.
+    #[test]
+    fn an_on_demand_build_stays_inside_the_target_directory() {
+        let key = path_key(Path::new(env!("CARGO_MANIFEST_DIR")));
+        assert_eq!(
+            on_demand_dir(Path::new("/w/target/debug/deps/suite-0123")),
+            Some(PathBuf::from("/w/target/ouro-fixture-harness").join(&key))
+        );
+        assert_eq!(
+            on_demand_dir(Path::new(
+                "/w/target/x86_64-unknown-linux-gnu/release/deps/suite"
+            )),
+            Some(
+                PathBuf::from("/w/target/x86_64-unknown-linux-gnu/ouro-fixture-harness").join(&key)
+            )
+        );
+        assert_eq!(on_demand_dir(Path::new("/usr/local/bin/suite")), None);
+        let here = std::env::current_exe().unwrap();
+        let built = on_demand_dir(&here).expect("this test runs from a deps directory");
+        assert!(
+            !built.starts_with(std::env::temp_dir()) || here.starts_with(std::env::temp_dir()),
+            "{} is in the shared temporary directory",
+            built.display()
+        );
     }
 
     #[test]
