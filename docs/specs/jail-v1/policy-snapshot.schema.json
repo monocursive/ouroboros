@@ -305,6 +305,14 @@
             "type": "string"
           }
         },
+        "tls_only": {
+          "description": "The allow entries every grant of which omitted its port: the TLS shape, which admits no plaintext HTTP (network-rules.md, Normalization, says where the proxy enforces it). A subset of allow, as a set; omitted when empty.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
         "ruleset": {
           "enum": [
             null,
