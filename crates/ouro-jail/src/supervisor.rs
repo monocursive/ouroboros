@@ -31,6 +31,7 @@ use crate::config::{self, EnvSettings};
 use crate::launch_profile;
 use crate::lifecycle::{BOUNDARY_PENDING, Integrity, TreeEnd};
 use crate::network::NetworkMode;
+use crate::observer::CoverageClass;
 use crate::platform::{
     BoundaryIdentity, ContinuousDeadline, PlanRequest, Platform, StopReason, Teardown,
 };
@@ -1291,22 +1292,14 @@ fn label_only(ctx: &Context, plan: &Plan, request: &PlanRequest) -> RunReport {
     }
 }
 
-/// The evidence classes: the audit classes and `proxy.net`, whose loss §11.4
-/// handles as evidence loss. (`limits` is the wrapper's own class.)
-const EVIDENCE_CLASSES: [crate::observer::CoverageClass; 5] = [
-    crate::observer::CoverageClass::Exec,
-    crate::observer::CoverageClass::FsWrite,
-    crate::observer::CoverageClass::FsDeny,
-    crate::observer::CoverageClass::Net,
-    crate::observer::CoverageClass::ProxyNet,
-];
-
 /// The `evidence_lost` error for the evidence classes the observer's final
-/// account leaves degraded, or `None` when none is.
+/// account leaves degraded, or `None` when none is. The evidence classes are
+/// the ones whose loss §11.4 handles as evidence loss, the classes a trace
+/// stream carries ([`trace::STREAM_CLASSES`]); `limits` is the wrapper's own.
 fn settlement_loss(summary: &crate::observer::CoverageSummary) -> Option<JailError> {
     let mut classes = Vec::new();
     let mut reasons: Vec<&str> = Vec::new();
-    for class in EVIDENCE_CLASSES {
+    for class in trace::STREAM_CLASSES {
         let Some(entry) = summary.classes.get(&class) else {
             continue;
         };
@@ -1350,13 +1343,13 @@ fn wall_deadline(plan: &Plan) -> Option<Instant> {
 /// The evidence classes whose frames this attempt's trace carries (§11.4):
 /// the audit classes with observation on, `proxy.net` with a proxy. A trace
 /// loss can take these and no other.
-fn stream_classes(plan: &Plan) -> Vec<&'static str> {
+fn stream_classes(plan: &Plan) -> Vec<CoverageClass> {
     let mut classes = Vec::new();
     if plan.resolved.snapshot.observation.mode == crate::records::ObserveMode::On {
-        classes.extend(["exec", "fs.write", "fs.deny", "net"]);
+        classes.extend(CoverageClass::AUDIT);
     }
     if plan.resolved.snapshot.network.mode == NetworkMode::Proxy.as_str() {
-        classes.push("proxy.net");
+        classes.push(CoverageClass::ProxyNet);
     }
     classes
 }
@@ -1388,13 +1381,15 @@ fn degrade_trace_coverage(record: &mut AttemptRecord, journal: &Journal) {
             *status = SourceStatus::Degraded;
         }
     }
-    for (name, entry) in [
-        ("exec", &mut record.coverage.exec),
-        ("fs.write", &mut record.coverage.fs_write),
-        ("fs.deny", &mut record.coverage.fs_deny),
-        ("net", &mut record.coverage.net),
-        ("proxy.net", &mut record.coverage.proxy_net),
+    let coverage = &mut record.coverage;
+    for (class, entry) in [
+        (CoverageClass::Exec, &mut coverage.exec),
+        (CoverageClass::FsWrite, &mut coverage.fs_write),
+        (CoverageClass::FsDeny, &mut coverage.fs_deny),
+        (CoverageClass::Net, &mut coverage.net),
+        (CoverageClass::ProxyNet, &mut coverage.proxy_net),
     ] {
+        let name = class.as_str();
         if entry.status == SourceStatus::Unsupported {
             continue;
         }
@@ -3962,7 +3957,7 @@ mod tests {
         trace
             .lock()
             .unwrap()
-            .set_stream_classes(&["exec", "fs.write", "fs.deny", "net"]);
+            .set_stream_classes(&CoverageClass::AUDIT);
         let mut journal = Journal::new("att_test", trace.clone());
         let note = |transition: &str| {
             crate::records::Event::lifecycle_note("att_test", 0, SystemTime::now(), 0, transition)
