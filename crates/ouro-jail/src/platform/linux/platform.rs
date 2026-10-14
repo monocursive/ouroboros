@@ -1517,8 +1517,7 @@ impl Boundary {
         if let Some(agent) = boundary.agent.as_mut()
             && let Err(err) = agent.start_proxy()
         {
-            boundary.teardown();
-            return Err(err);
+            return Err(boundary.refuse(err));
         }
         if let Some(reason) = boundary.cgroup_unavailable.clone() {
             for (key, ceiling) in [
@@ -1534,8 +1533,7 @@ impl Boundary {
         }
 
         if let Err(err) = boundary.discover(bwrap_path, deadline, &filter_digest, &scan) {
-            boundary.teardown();
-            return Err(err);
+            return Err(boundary.refuse(err));
         }
         // Audit 2026-10-08 M2: storage and inode ceilings expose occupancy,
         // not refusal counters — their hit evidence is positive-only
@@ -1559,11 +1557,10 @@ impl Boundary {
         {
             // Placement can have succeeded before read-back failed. Never
             // discard that leaf and claim the target has no resource boundary.
-            boundary.teardown();
-            return Err(preparing(
+            return Err(boundary.refuse(preparing(
                 ErrorCode::MissingCapability,
                 format!("target cgroup placement failed: {err}"),
-            ));
+            )));
         }
         if let Some(plan) = boundary.observer_plan.as_ref() {
             // §13.1: gap intervals count from supervisor start on the same
@@ -1579,29 +1576,29 @@ impl Boundary {
             config.commands = match boundary.snapshot.commands.compile() {
                 Ok(filter) => filter,
                 Err(reason) => {
-                    boundary.teardown();
-                    return Err(error(
-                        ErrorCode::InvalidConfig,
-                        ErrorStage::Preparing,
-                        Remediation::Configuration,
-                        format!("the command rules do not compile: {reason}"),
-                    )
-                    .with_key_path("jail.commands"));
+                    return Err(boundary.refuse(
+                        error(
+                            ErrorCode::InvalidConfig,
+                            ErrorStage::Preparing,
+                            Remediation::Configuration,
+                            format!("the command rules do not compile: {reason}"),
+                        )
+                        .with_key_path("jail.commands"),
+                    ));
                 }
             };
             config.target = Some((boundary.launcher.pid, boundary.target_images.clone()));
             match Tracer::attach(boundary.launcher.pid, config) {
                 Ok(tracer) => boundary.tracer = Some(tracer),
                 Err(err) => {
-                    boundary.teardown();
                     // §11.4: an observer that cannot attach refuses before
                     // exec, whatever the evidence mode says.
-                    return Err(error(
+                    return Err(boundary.refuse(error(
                         ErrorCode::ObserverUnavailable,
                         ErrorStage::Preparing,
                         Remediation::HostSetup,
                         format!("the closed-set observer could not attach: {err}"),
-                    ));
+                    )));
                 }
             }
         }
@@ -1991,7 +1988,8 @@ impl Boundary {
         }
     }
 
-    /// Kills and reaps everything this boundary owns.
+    /// Kills and reaps everything this boundary owns, and removes its
+    /// placeholders once the tree is known dead.
     fn teardown(&mut self) {
         let deadline = clock::Deadline::after(TREE_BUDGET);
         self.kill_boundary();
@@ -2004,8 +2002,72 @@ impl Boundary {
             std::thread::sleep(WAIT_STEP);
         }
         self.watcher.reap();
+        // The init's pidfd and the leaf report the tree's death a little
+        // after the kill. Wait for them inside the same budget, so the
+        // placeholders are not kept only because the first look came early.
+        while self.tree_death_provable() && !self.tree_dead() && !deadline.expired() {
+            std::thread::sleep(WAIT_STEP);
+        }
         self.remove_placeholders();
         self.stop_agent(deadline.remaining());
+    }
+
+    /// Tears the boundary down after a refusal and returns `refusal`, which
+    /// then also says which placeholders it leaves in the operator's
+    /// workspace and why, when it leaves any.
+    fn refuse(&mut self, mut refusal: JailError) -> JailError {
+        self.teardown();
+        if let Some(left) = self.placeholders_left() {
+            refusal.message = format!("{}; {left}", refusal.message);
+            // What the record says is left stays left: nothing removes them
+            // after the refusal named them.
+            self.placeholders.clear();
+        }
+        refusal
+    }
+
+    /// The placeholders a teardown did not remove, for a refusal's message;
+    /// `None` when every one is gone.
+    fn placeholders_left(&self) -> Option<String> {
+        if self.placeholder_outcomes.is_empty() {
+            if self.placeholders.is_empty() {
+                return None;
+            }
+            let paths: Vec<String> = self
+                .placeholders
+                .iter()
+                .map(|placeholder| placeholder.destination().display().to_string())
+                .collect();
+            return Some(format!(
+                "the placeholder directories {} are left in the workspace: the boundary's tree \
+                 was not shown dead within its budget",
+                paths.join(", ")
+            ));
+        }
+        let kept: Vec<String> = self
+            .placeholder_outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                PlaceholderOutcome::Removed(_) | PlaceholderOutcome::AlreadyGone(_) => None,
+                PlaceholderOutcome::KeptChanged(path, reason) => {
+                    Some(format!("{} ({reason})", path.display()))
+                }
+                PlaceholderOutcome::KeptNotEmpty(path) => {
+                    Some(format!("{} (not empty)", path.display()))
+                }
+                PlaceholderOutcome::KeptError(path, errno) => Some(format!(
+                    "{} ({})",
+                    path.display(),
+                    super::sys::errno_name(*errno)
+                )),
+            })
+            .collect();
+        (!kept.is_empty()).then(|| {
+            format!(
+                "the placeholder directories {} are kept in the workspace",
+                kept.join(", ")
+            )
+        })
     }
 
     // The agent network ends after the tree it served
@@ -2084,11 +2146,20 @@ impl Boundary {
         observer_verdict(self.tracer_summary.as_ref())
     }
 
+    /// Whether the tree's death can still be shown: the observer's account
+    /// does not object and the leaf's identity was never lost.
+    fn tree_death_provable(&self) -> bool {
+        self.observer_verified_the_tree() && !self.cgroup_lost
+    }
+
+    /// Whether the tree is seen dead now: the namespace init has ended and
+    /// the leaf, when there is one, is unpopulated.
+    fn tree_dead(&self) -> bool {
+        !init_alive(self.init_fd.as_ref(), self.init_pid) && self.cgroup_empty()
+    }
+
     fn remove_placeholders(&mut self) {
-        if init_alive(self.init_fd.as_ref(), self.init_pid)
-            || !self.observer_verified_the_tree()
-            || !self.cgroup_empty()
-        {
+        if !(self.tree_death_provable() && self.tree_dead()) {
             return;
         }
         if self.placeholder_outcomes.is_empty() {
