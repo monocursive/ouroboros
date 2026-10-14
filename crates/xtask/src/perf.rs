@@ -4702,12 +4702,8 @@ not json
         /// F2: `run` never appends to an existing run directory.
         #[test]
         fn a_run_refuses_a_non_empty_out() {
-            let dir = std::env::temp_dir().join(format!(
-                "xtask-perf-out-{}-{}",
-                std::process::id(),
-                crate::stamp::unix_now()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
+            let parent = tempfile::tempdir().unwrap();
+            let dir = parent.path().join("out");
             assert!(check_out_dir(&dir, false).is_ok(), "absent is fine");
             std::fs::create_dir_all(&dir).unwrap();
             assert!(check_out_dir(&dir, false).is_ok(), "empty is fine");
@@ -4718,7 +4714,6 @@ not json
                 check_out_dir(&dir, true).is_ok(),
                 "the scope pass appends by design"
             );
-            std::fs::remove_dir_all(&dir).unwrap();
         }
 
         /// F3: every count is exact for the workload and agrees with the trace.
