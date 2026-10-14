@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::network::NetworkMode;
+use crate::network::{NetworkMode, Prefix};
 use crate::policy::{Ceiling, Ceilings, LimitKey, PolicyDelta, ProtectedCoverage};
 use crate::records::{
     ErrorCode, ErrorStage, EvidenceMode, JailError, ObserveMode, Remediation, SCHEMA_POLICY,
@@ -567,14 +567,15 @@ pub fn parse_evidence(key_path: &str, text: &str) -> Result<EvidenceMode, JailEr
 
 /// Canonicalizes `[jail_host.network] translation_prefixes` (§6.2).
 ///
-/// Each entry must be an IPv6 CIDR `address/prefix`; it is re-rendered in
-/// RFC 5952 form (lowercase, longest run of zero groups compressed) through
-/// [`Ipv6Addr`]'s `Display` before it enters the policy, so equivalent
-/// spellings such as `2001:0db8::/96` and `2001:db8::/96` produce one digest
-/// (§6.3: "equivalent semantic inputs have the same digest"). A zone-id or
-/// embedded whitespace would make the entry name a link or two entries at
-/// once rather than a network, and anything that is not an IPv6 CIDR is
-/// refused instead of being carried into the snapshot as opaque text.
+/// Each entry must be an IPv6 CIDR `address/length`. It is parsed by the
+/// proxy's own [`Prefix::parse`] (so the snapshot never records a prefix the
+/// proxy would read differently): the length is canonical decimal without a
+/// leading zero, host bits beyond the length are cleared, and the address is
+/// re-rendered in RFC 5952 form. Equivalent spellings such as
+/// `2001:0db8::/96`, `2001:db8::/96` and `2001:db8::1/96` therefore produce
+/// one digest (§6.3: "equivalent semantic inputs have the same digest"). A
+/// zone-id, whitespace, an IPv4 prefix or anything else that is not an IPv6
+/// CIDR is refused instead of being carried into the snapshot as opaque text.
 ///
 /// # Errors
 /// Returns [`ErrorCode::InvalidConfig`] naming `key_path` for an entry that
@@ -586,35 +587,13 @@ pub fn canonical_translation_prefixes(
     entries
         .iter()
         .map(|entry| {
-            let refuse_entry = |reason: String| {
+            let refuse_entry = |reason: &str| {
                 invalid(key_path, format!("`{entry}` is not an IPv6 CIDR: {reason}"))
             };
-            if entry.chars().any(char::is_whitespace) {
-                return Err(refuse_entry("it contains whitespace".to_owned()));
+            match Prefix::parse(entry).map_err(refuse_entry)? {
+                Prefix::V6(network, length) => Ok(format!("{}/{length}", Ipv6Addr::from(network))),
+                Prefix::V4(..) => Err(refuse_entry("it is an IPv4 prefix")),
             }
-            let Some((address, prefix)) = entry.split_once('/') else {
-                return Err(refuse_entry("it has no `/prefix` length".to_owned()));
-            };
-            if address.contains('%') {
-                return Err(refuse_entry(
-                    "a zone-id names a link, not a network".to_owned(),
-                ));
-            }
-            let address: Ipv6Addr = address
-                .parse()
-                .map_err(|error| refuse_entry(format!("the address is invalid: {error}")))?;
-            if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(refuse_entry(
-                    "the prefix length is not a decimal integer".to_owned(),
-                ));
-            }
-            let prefix: u8 = prefix
-                .parse()
-                .map_err(|_| refuse_entry("the prefix length is not a number".to_owned()))?;
-            if prefix > 128 {
-                return Err(refuse_entry("the prefix length exceeds 128".to_owned()));
-            }
-            Ok(format!("{address}/{prefix}"))
         })
         .collect()
 }
@@ -795,6 +774,8 @@ mod tests {
                 "2001:0db8::/96".to_owned(),
                 "FE80::/10".to_owned(),
                 "2001:db8:0:0:0:0:0:0/96".to_owned(),
+                "2001:db8::1/96".to_owned(),
+                "64:ff9b::ffff/0".to_owned(),
             ],
         )
         .expect("every spelling parses");
@@ -803,10 +784,17 @@ mod tests {
             vec![
                 "2001:db8::/96".to_owned(),
                 "fe80::/10".to_owned(),
-                "2001:db8::/96".to_owned()
+                "2001:db8::/96".to_owned(),
+                "2001:db8::/96".to_owned(),
+                "::/0".to_owned(),
             ],
-            "equivalent spellings render as one RFC 5952 form"
+            "equivalent spellings, host bits included, render as one RFC 5952 form"
         );
+        // The proxy reads the canonical form as the same prefix.
+        for entry in &canonical {
+            let rules = crate::network::Rules::new(Vec::new(), std::slice::from_ref(entry));
+            assert!(rules.is_ok(), "{entry}");
+        }
 
         for entry in [
             "banana",
@@ -814,8 +802,11 @@ mod tests {
             "10.0.0.0/8",
             "fe80::1%eth0/64",
             "2001:db8:: /96",
+            "2001:db8::/ 96",
             "2001:db8::/129",
             "2001:db8::/96/48",
+            "2001:db8::/096",
+            "2001:db8::/",
         ] {
             let error = canonical_translation_prefixes(key, &[entry.to_owned()])
                 .expect_err("a non-CIDR entry refuses");
