@@ -805,6 +805,7 @@ name = "ouro"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ouro-records",
  "serde_json",
 ]
 

@@ -47,10 +47,9 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
+    /// Request cancellation; the job's owner stops its tree with SIGTERM.
     Kill {
         job: String,
-        #[arg(long,default_value="TERM",value_parser=["TERM"])]
-        signal: String,
         #[arg(long)]
         json: bool,
     },
@@ -176,20 +175,36 @@ fn invoke(config: &PathBuf, body: &Value) -> Result<Value, String> {
     let value: Value = serde_json::from_slice(&data)
         .map_err(|_| "invalid fleet reply; outcome unconfirmed".to_string())?;
     if !status.success() || value["ok"] != true {
-        return Err(value["error"].to_string());
+        return Err(value["error"]
+            .as_str()
+            .map_or_else(|| value["error"].to_string(), str::to_owned));
     }
     Ok(value["result"].clone())
 }
 
-fn run(cli: Cli) -> Result<Value, String> {
-    let Top::Fleet(fleet) = cli.command else {
-        return Ok(
-            json!({"component":"ouro","version":env!("CARGO_PKG_VERSION"),"fleet_rpc":"ouro.fleet.rpc/1","job":"ouro.fleet.job/1","attempt":"ouro.fleet.attempt/1","fleet_schema_frozen":false}),
-        );
+/// The result and whether it is one JSON line (`--json`) or pretty JSON.
+fn run(cli: Cli) -> Result<(Value, bool), String> {
+    let fleet = match cli.command {
+        Top::Version { json } => {
+            return Ok((
+                json!({"component":"ouro","version":env!("CARGO_PKG_VERSION"),"fleet_rpc":"ouro.fleet.rpc/1","job":"ouro.fleet.job/1","attempt":"ouro.fleet.attempt/1","fleet_schema_frozen":false}),
+                json,
+            ));
+        }
+        Top::Fleet(fleet) => fleet,
     };
     let config = fleet
         .config
         .ok_or("--config is required for fleet commands")?;
+    let json = match &fleet.action {
+        Action::Run(args) => args.json,
+        Action::Status { json, .. }
+        | Action::Wait { json, .. }
+        | Action::Kill { json, .. }
+        | Action::Doctor { json } => *json,
+        // The ledger's own flags choose its output form.
+        Action::Ledger { .. } => false,
+    };
     let body = match fleet.action {
         Action::Run(args) => {
             let mut request = json!({"schema":"ouro.fleet.request/1","request_id":args.request_id,"on":args.on,"observe":args.observe,"evidence":args.evidence,"limits":args.limit,"capture":args.capture,"capture_limit":args.capture_limit,"tags":args.tag,"argv":args.argv});
@@ -221,7 +236,7 @@ fn run(cli: Cli) -> Result<Value, String> {
                         Some("exited" | "refused" | "killed" | "outcome_unknown")
                     )
                 {
-                    return Ok(row);
+                    return Ok((row, json));
                 }
                 if Instant::now() >= deadline {
                     return Err("wait timed out; job remains owned by its worker".into());
@@ -230,16 +245,26 @@ fn run(cli: Cli) -> Result<Value, String> {
             }
         }
     };
-    invoke(&config, &body)
+    Ok((invoke(&config, &body)?, json))
 }
+
 fn main() -> ExitCode {
-    match run(Cli::parse()) {
-        Ok(value) => {
-            println!("{}", serde_json::to_string_pretty(&value).unwrap());
+    let printed = run(Cli::parse()).and_then(|(value, json)| {
+        if json {
+            serde_json::to_string(&value)
+        } else {
+            serde_json::to_string_pretty(&value)
+        }
+        .map_err(|error| error.to_string())
+    });
+    match printed {
+        Ok(text) => {
+            println!("{text}");
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("ouro: {error}");
+            // Errors can carry fleet or worker text; never let it drive the terminal.
+            eprintln!("ouro: {}", ouro_records::records::escape_control(&error));
             ExitCode::FAILURE
         }
     }
