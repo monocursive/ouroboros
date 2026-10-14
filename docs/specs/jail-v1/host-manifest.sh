@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# Reference-host manifest for Jail v1 (§3.2), collected by hand until
-# `ouro-jail doctor --json` exists and supersedes it. Read-only: it probes
-# nothing beyond one unprivileged `unshare -U true`. It prints no addresses,
-# peers or credentials, so its output can be checked in as evidence. It does
-# print the short hostname, which is a provider-assigned label rather than a
-# routable address.
+# Reference-host manifest for Jail v1 (§3.2), collected with shell tools.
+# `ouro-jail doctor --json` produces the full host manifest; this script stays
+# as the fallback for a host where the binary cannot run, and the conformance
+# driver records its output (evidence/host-manifest.txt) before it builds
+# anything there. Read-only: it probes nothing beyond one unprivileged
+# `unshare -U true`. It prints no addresses, peers or credentials, so its
+# output can be checked in as evidence. It does print the short hostname,
+# which is a provider-assigned label rather than a routable address.
 #
 # A missing tool is recorded as `unavailable: <reason>`, never as a blank
-# value: the script used to print fifteen empty fields and exit 0 when the
-# tools were absent, and the driver gates the evidence on that exit status, so
-# an empty manifest was checked in as if it were a measurement. The facts §3.2
-# requires -- kernel, kernel_build, arch, os -- are required here too, and the
-# script exits 1 if any of them could not be determined.
+# value: the driver gates the evidence on this script's exit status, so blank
+# fields and exit 0 would check in an empty manifest as if it were a
+# measurement. The facts §3.2 requires -- kernel, kernel_build, arch, os --
+# are required here too, and the script exits 1 if any of them could not be
+# determined.
 # Usage: ssh <account>@<host> 'bash -s' < docs/specs/jail-v1/host-manifest.sh
 set -u
 missing=0
