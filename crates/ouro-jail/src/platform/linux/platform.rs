@@ -810,7 +810,7 @@ impl Boundary {
         let scratch = match &snapshot.roots.scratch {
             ScratchRoot::Managed => {
                 let scratch = plan.attempt_dir.join("scratch");
-                create_private_dir(&scratch)?;
+                crate::state::create_private_dir(&scratch)?;
                 scratch
             }
             ScratchRoot::Host { path } => {
@@ -2471,50 +2471,9 @@ fn write_until(fd: RawFd, bytes: &[u8], deadline: clock::Deadline) -> std::io::R
     Ok(())
 }
 
-/// A supervisor-state directory under the attempt: created private, or, when
-/// it already exists, accepted only with the private identity.
-fn create_private_dir(path: &Path) -> Result<(), JailError> {
-    if path.is_dir() {
-        // Security 2026-09-29 (audit 6, C11 half): a pre-existing directory
-        // is accepted only with the identity `state::create_private_dir`
-        // demands — operator-owned, not a symlink, no group/world access.
-        // The isolation guards keep uncontained peers away from these paths;
-        // this makes the acceptance independent of them. An operator's
-        // `--scratch` is not supervisor state and goes through `ensure_dir`.
-        use std::os::unix::fs::MetadataExt as _;
-        let metadata = std::fs::symlink_metadata(path).map_err(|err| {
-            error(
-                ErrorCode::UnsafeStatePath,
-                ErrorStage::Preparing,
-                Remediation::InspectState,
-                format!("{} could not be inspected: {err}", path.display()),
-            )
-        })?;
-        let refuse = |what: &str| {
-            error(
-                ErrorCode::UnsafeStatePath,
-                ErrorStage::Preparing,
-                Remediation::InspectState,
-                format!("{what}: {}", path.display()),
-            )
-        };
-        if !metadata.is_dir() {
-            return Err(refuse("not a directory"));
-        }
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(refuse("not owned by this operator"));
-        }
-        if metadata.mode() & 0o077 != 0 {
-            return Err(refuse("accessible by group or others"));
-        }
-        return Ok(());
-    }
-    ensure_dir(path)
-}
-
 /// Accepts an existing directory as it is, or creates it (and its missing
 /// parents) private. Only for directories that are not supervisor state:
-/// [`create_private_dir`] checks the identity of those.
+/// [`crate::state::create_private_dir`] checks those, ancestors included.
 fn ensure_dir(path: &Path) -> Result<(), JailError> {
     use std::os::unix::fs::DirBuilderExt as _;
     if path.is_dir() {
@@ -3601,7 +3560,7 @@ fn prepare_mounts(
         let added_placeholders = !scan.absent_root_literals().is_empty();
         for literal in scan.absent_root_literals() {
             let holders = attempt_dir.join("placeholders");
-            create_private_dir(&holders)?;
+            crate::state::create_private_dir(&holders)?;
             let holder = holders.join(format!("holder-{root_index}-{}", placeholders.len()));
             let placeholder = Placeholder::create(&holder, &source.join(&literal))
                 .map_err(|err| preparing(ErrorCode::BackendUnavailable, err.to_string()))?;
@@ -5585,6 +5544,34 @@ mod tests {
             !root.join("workspace/.ouroboros").exists(),
             "placeholder removal left the literal behind"
         );
+    }
+
+    /// The placeholders' holder is supervisor state, created through the
+    /// state module's check (§6.2): under an ancestor anyone can replace
+    /// entries in, it refuses, and leaves no placeholder behind.
+    #[test]
+    fn placeholder_holders_are_checked_like_all_supervisor_state() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let mut plan = mount_plan(&root);
+        let open = root.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let attempt = open.join("attempt");
+        std::fs::create_dir(&attempt).unwrap();
+        let Err(error) = prepare_mounts(
+            &mut plan,
+            &attempt,
+            &jfs::PROTECTED_LITERALS,
+            ProtectedCoverage::ExistingAndRoot,
+        ) else {
+            panic!("a holder under a world-writable ancestor refuses");
+        };
+        assert_eq!(error.code, ErrorCode::UnsafeStatePath, "{}", error.message);
+        for literal in [".git", ".ouroboros"] {
+            assert!(!root.join("workspace").join(literal).exists(), "{literal}");
+        }
     }
 
     #[test]
