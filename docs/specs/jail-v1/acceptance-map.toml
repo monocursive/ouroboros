@@ -457,18 +457,15 @@ id = "X02.6"
 gate = "X02"
 clause = "Label-only with a gate or attempt id refuses as a usage error"
 tag = "live-cli"
-lane = "macos"
 tests = [
   "ouro-jail/tests/portable_cli_config.rs::usage_errors_exit_two",
 ]
-note = "Proved on the macOS lane only; a Linux copy would let the conformance verdict close X02 by itself."
 
 [[clause]]
 id = "X02.7"
 gate = "X02"
 clause = "An attempt id with a wrong version nibble, a path escape or a non-UUID shape refuses as a usage error"
 tag = "live-cli"
-lane = "macos"
 tests = [
   "ouro-jail/tests/portable_cli_config.rs::a_malformed_attempt_id_is_a_usage_error_not_a_path",
 ]

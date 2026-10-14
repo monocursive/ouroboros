@@ -6,10 +6,10 @@
 //! validating, before any platform work, so every claim holds identically on
 //! Linux and macOS and runs on both.
 //!
-//! Some of these tests are cited by acceptance-map clauses in the macOS lane;
-//! the Linux run proves the same behavior without closing those clauses (see
-//! the note at X02.6). The refusals that exist only because macOS cannot
-//! execute stay in `macos_refusal.rs`.
+//! The X02 usage-error clauses of the acceptance map cite tests here in the
+//! Linux lane, where the conformance verdict reads them; M01's macOS lane
+//! cites one too, as proof the shared suites ran there. The refusals that
+//! exist only because macOS cannot execute stay in `macos_refusal.rs`.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
