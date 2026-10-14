@@ -365,7 +365,7 @@ fn worker_loop(w: &Workers) {
                 revents: 0,
             },
         ];
-        match crate::platform::linux::sys::poll(&mut pfds, POLL_TICK_MS) {
+        match crate::platform::linux::sys::poll_fds(&mut pfds, POLL_TICK_MS) {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
@@ -709,7 +709,7 @@ fn bounded_connect(
                     revents: 0,
                 },
             ];
-            let polled = crate::platform::linux::sys::poll(&mut pfds, CONNECT_DEADLINE_MS);
+            let polled = crate::platform::linux::sys::poll_fds(&mut pfds, CONNECT_DEADLINE_MS);
             if !polled.is_ok_and(|ready| ready > 0) {
                 Err(libc::ETIMEDOUT)
             } else if pfds[1].revents != 0 {

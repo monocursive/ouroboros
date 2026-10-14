@@ -25,7 +25,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write as _;
-use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -643,7 +643,7 @@ impl<T> FrameQueue<T> {
     /// switched to nonblocking mode, which is also how a closed one is
     /// detected.
     pub fn new(fd: OwnedFd) -> Result<Self, JailError> {
-        set_nonblocking(fd.as_raw_fd())?;
+        set_nonblocking(fd.as_fd())?;
         Ok(FrameQueue {
             file: File::from(fd),
             frames: VecDeque::new(),
@@ -852,7 +852,7 @@ impl FdSink {
                 let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                     break;
                 };
-                wait_writable(self.queue.as_fd().as_raw_fd(), remaining);
+                wait_writable(self.queue.as_fd(), remaining);
                 // A loss found here is recorded by flush_now itself; the
                 // loop's own deadline bounds the wait either way.
                 let _ = self.flush_now();
@@ -957,18 +957,15 @@ impl TraceSink for FdSink {
     }
 }
 
-/// Wait until `fd` accepts a write, or `timeout` passes. Best effort: a poll
-/// error or a spurious wakeup simply returns and the caller retries within
-/// its own deadline.
-fn wait_writable(fd: RawFd, timeout: Duration) {
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLOUT,
-        revents: 0,
-    };
-    let millis = i32::try_from(timeout.as_millis().min(1_000)).unwrap_or(1_000);
-    // SAFETY: `pfd` is a live, writable pollfd for the call's duration.
-    let _ = unsafe { libc::poll(&raw mut pfd, 1, millis.max(1)) };
+/// Wait until `fd` accepts a write, or `timeout` (at most a second, at
+/// least a millisecond) passes. Best effort: a poll error or a spurious
+/// wakeup simply returns and the caller retries within its own deadline.
+fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) {
+    let millis = u64::try_from(timeout.as_millis().min(1_000)).unwrap_or(1_000);
+    let _ = crate::sys::poll(
+        &[Some((fd, libc::POLLOUT))],
+        Some(Duration::from_millis(millis.max(1))),
+    );
 }
 
 /// Switches `fd` to nonblocking mode.
@@ -977,36 +974,19 @@ fn wait_writable(fd: RawFd, timeout: Duration) {
 /// reason: a consumer that stops reading must not stall the supervisor.
 ///
 /// # Errors
-/// Returns [`ErrorCode::InvalidFd`] when `fcntl` fails, which also detects a
-/// descriptor that is not open.
-pub fn set_nonblocking(fd: RawFd) -> Result<(), JailError> {
-    let invalid = |message: String| {
+/// Returns [`ErrorCode::InvalidFd`] when `fcntl` fails.
+pub fn set_nonblocking(fd: BorrowedFd<'_>) -> Result<(), JailError> {
+    crate::sys::set_nonblocking(fd).map_err(|error| {
         JailError::new(
             ErrorCode::InvalidFd,
             ErrorStage::Preparing,
             Remediation::Configuration,
-            message,
+            format!(
+                "descriptor {} cannot be set nonblocking: {error}",
+                fd.as_raw_fd()
+            ),
         )
-    };
-    // SAFETY: `fcntl` with `F_GETFL` reads the flags of the descriptor the
-    // caller owns. It takes no pointer and cannot write to this process.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(invalid(format!(
-            "descriptor {fd} cannot be inspected: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    // SAFETY: `F_SETFL` writes back the flags just read plus `O_NONBLOCK`, on
-    // the same owned descriptor, with no pointer argument.
-    let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-    if result < 0 {
-        return Err(invalid(format!(
-            "descriptor {fd} cannot be set nonblocking: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -1190,7 +1170,7 @@ mod tests {
     fn full_pipe() -> (std::io::PipeReader, std::os::fd::OwnedFd) {
         let (reader, writer) = std::io::pipe().expect("a pipe");
         let writer = std::os::fd::OwnedFd::from(writer);
-        set_nonblocking(writer.as_raw_fd()).expect("nonblocking");
+        set_nonblocking(writer.as_fd()).expect("nonblocking");
         let mut file = File::from(writer);
         loop {
             match file.write(&[b'f'; 4096]) {

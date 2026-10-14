@@ -20,7 +20,7 @@
 
 use std::ffi::OsString;
 use std::io::Write as _;
-use std::os::fd::{FromRawFd as _, RawFd};
+use std::os::fd::{AsFd as _, BorrowedFd, FromRawFd as _, RawFd};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
@@ -3436,7 +3436,7 @@ fn open_control(args: &RunArgs) -> Result<Option<ControlSink>, JailError> {
     // exclusively for the invocation, and `validate_channels` has established
     // that it is open for writing and distinct from every other channel.
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
-    crate::trace::set_nonblocking(fd)?;
+    crate::trace::set_nonblocking(file.as_fd())?;
     Ok(Some(ControlSink {
         file,
         frames: std::collections::VecDeque::new(),
@@ -3586,11 +3586,11 @@ pub fn await_release(
                 ),
             ));
         }
-        let signal_fd = signals.map(signals::SignalPipe::as_raw_fd);
+        let signal_fd = signals.map(signals::SignalPipe::as_fd);
         // A poll timeout runs on CLOCK_MONOTONIC, which stops during suspend:
         // bounded steps let an expiry be acted on soon after execution
         // resumes (§6.4).
-        if !poll_readable(fd, signal_fd, remaining.min(GATE_POLL_STEP))? {
+        if !poll_readable(file.as_fd(), signal_fd, remaining.min(GATE_POLL_STEP))? {
             continue;
         }
         let mut chunk = [0u8; 256];
@@ -3637,46 +3637,30 @@ fn stopped_by_signal(stage: ErrorStage) -> JailError {
 /// # Errors
 /// Returns [`ErrorCode::GateInvalid`] when `poll` itself fails.
 fn poll_readable(
-    fd: RawFd,
-    signal_fd: Option<RawFd>,
+    fd: BorrowedFd<'_>,
+    signal_fd: Option<BorrowedFd<'_>>,
     timeout: Duration,
 ) -> Result<bool, JailError> {
-    let mut fds = vec![libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    if let Some(signal_fd) = signal_fd {
-        fds.push(libc::pollfd {
-            fd: signal_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        });
-    }
-    let millis = i32::try_from(timeout.as_millis().min(1000)).unwrap_or(1000);
-    // SAFETY: `poll` reads and writes the `pollfd` array it is given, which is
-    // owned here and correctly sized by `fds.len()`. The descriptors are ones
-    // this invocation owns.
-    let ready = unsafe {
-        libc::poll(
-            fds.as_mut_ptr(),
-            u32::try_from(fds.len()).unwrap_or(1) as libc::nfds_t,
-            millis,
-        )
-    };
-    if ready < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::Interrupted {
-            return Ok(false);
+    let millis = u64::try_from(timeout.as_millis().min(1000)).unwrap_or(1000);
+    let revents = match crate::sys::poll(
+        &[
+            Some((fd, libc::POLLIN)),
+            signal_fd.map(|signal_fd| (signal_fd, libc::POLLIN)),
+        ],
+        Some(Duration::from_millis(millis)),
+    ) {
+        Ok(revents) => revents[0],
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Ok(false),
+        Err(error) => {
+            return Err(JailError::new(
+                ErrorCode::GateInvalid,
+                ErrorStage::Prepared,
+                Remediation::InspectState,
+                format!("the gate could not be polled: {error}"),
+            ));
         }
-        return Err(JailError::new(
-            ErrorCode::GateInvalid,
-            ErrorStage::Prepared,
-            Remediation::InspectState,
-            format!("the gate could not be polled: {error}"),
-        ));
-    }
-    if fds[0].revents & libc::POLLNVAL != 0 {
+    };
+    if revents & libc::POLLNVAL != 0 {
         // macOS reports `POLLNVAL` for a descriptor it cannot poll, such as a
         // character device. Spinning on that until the 60-second budget ran
         // out burned a core for a minute; saying so refuses in milliseconds.
@@ -3690,7 +3674,7 @@ fn poll_readable(
     // Any event on the gate itself means a read will not block. Only the
     // signal pipe firing returns false, so the caller re-checks its own
     // conditions and comes back.
-    Ok(fds[0].revents != 0)
+    Ok(revents != 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -3700,7 +3684,7 @@ fn poll_readable(
 /// The self-pipe that turns INT, TERM and HUP into a loop wakeup.
 pub mod signals {
     use std::io::Read as _;
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, RawFd};
+    use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, RawFd};
     use std::sync::atomic::{AtomicI32, Ordering};
 
     /// The write end the handler uses. `-1` means no handler is installed.
@@ -3749,13 +3733,10 @@ pub mod signals {
                 std::fs::File::from_raw_fd(fds[1]),
             )
         };
+        // A handler blocked on a full pipe would never return: both ends
+        // are nonblocking, or there is no pipe.
         for file in [&read, &write] {
-            // SAFETY: `fcntl` with `F_SETFL` only changes the flags of a
-            // descriptor this process owns.
-            unsafe {
-                let flags = libc::fcntl(file.as_raw_fd(), libc::F_GETFL);
-                libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
-            }
+            crate::sys::set_nonblocking(file.as_fd()).ok()?;
         }
         WRITE_FD.store(write.as_raw_fd(), Ordering::SeqCst);
         // The write end must outlive every handler invocation, so it is leaked
@@ -3790,8 +3771,8 @@ pub mod signals {
     impl SignalPipe {
         /// The read end, for `poll` alongside another descriptor.
         #[must_use]
-        pub fn as_raw_fd(&self) -> RawFd {
-            self.read.as_raw_fd()
+        pub fn as_fd(&self) -> BorrowedFd<'_> {
+            self.read.as_fd()
         }
 
         /// Whether a signal arrived since the last call. Drains the pipe.

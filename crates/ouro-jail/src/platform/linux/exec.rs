@@ -524,7 +524,7 @@ fn capture_step(
             revents: 0,
         });
     }
-    match super::sys::poll(&mut fds, timeout_ms) {
+    match super::sys::poll_fds(&mut fds, timeout_ms) {
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(Step::Interrupted),
         Err(error) => return Err(error),

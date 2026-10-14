@@ -214,7 +214,7 @@ pub fn bridge_main(args: &[OsString]) -> ! {
 fn await_seal() -> Option<bool> {
     let stderr = std::io::stderr();
     // The infinite wait is fine because the peer's death wakes the poll.
-    let revents = crate::proxy::sys::poll(&[Some((stderr.as_fd(), libc::POLLIN))], None).ok()?;
+    let revents = crate::sys::poll(&[Some((stderr.as_fd(), libc::POLLIN))], None).ok()?;
     if revents
         .first()
         .is_none_or(|&events| events & libc::POLLIN == 0)
@@ -358,7 +358,7 @@ fn serve_many(
 ) {
     let mut relays: Vec<Relay> = Vec::new();
     loop {
-        let mut interests: Vec<crate::proxy::sys::Interest<'_>> =
+        let mut interests: Vec<crate::sys::Interest<'_>> =
             Vec::with_capacity(listeners.len() + relays.len() * 2);
         for listener in listeners {
             interests.push(Some((listener.as_fd(), libc::POLLIN)));
@@ -384,7 +384,7 @@ fn serve_many(
             interests.push((client != 0).then_some((relay.client.as_fd(), client)));
             interests.push((upstream != 0).then_some((relay.upstream.as_fd(), upstream)));
         }
-        let revents = match crate::proxy::sys::poll(&interests, None) {
+        let revents = match crate::sys::poll(&interests, None) {
             Ok(revents) => revents,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return,

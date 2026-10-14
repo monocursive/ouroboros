@@ -187,7 +187,7 @@ pub fn readable(fd: RawFd) -> bool {
         events: libc::POLLIN,
         revents: 0,
     }];
-    super::sys::poll(&mut waits, 0).is_ok_and(|_| waits[0].revents & libc::POLLIN != 0)
+    super::sys::poll_fds(&mut waits, 0).is_ok_and(|_| waits[0].revents & libc::POLLIN != 0)
 }
 
 /// Waits until `deadline` for one byte on `fd`: true only for [`RELEASED`].
@@ -350,7 +350,7 @@ pub fn watcher_main(args: &[OsString]) -> ! {
             )
             .unwrap_or(0)
         });
-        match super::sys::poll(&mut fds, timeout) {
+        match super::sys::poll_fds(&mut fds, timeout) {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => std::process::exit(125),

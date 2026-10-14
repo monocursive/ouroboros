@@ -307,8 +307,8 @@ fn sized_frame(index: usize, len: usize) -> Vec<u8> {
 
 /// Read what the pipe holds right now, without blocking.
 fn read_available(reader: &mut std::io::PipeReader) -> Vec<u8> {
-    use std::os::fd::AsRawFd as _;
-    ouro_jail::trace::set_nonblocking(reader.as_raw_fd()).expect("nonblocking reader");
+    use std::os::fd::AsFd as _;
+    ouro_jail::trace::set_nonblocking(reader.as_fd()).expect("nonblocking reader");
     let mut out = Vec::new();
     let mut chunk = [0u8; 65536];
     loop {

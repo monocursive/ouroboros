@@ -798,11 +798,11 @@ impl Fixture {
         };
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let collector = drain.zip(reader).map(|(delay, mut reader)| {
-            use std::os::fd::AsRawFd as _;
+            use std::os::fd::AsFd as _;
             let done = Arc::clone(&done);
             std::thread::spawn(move || {
                 std::thread::sleep(delay);
-                ouro_jail::trace::set_nonblocking(reader.as_raw_fd()).unwrap();
+                ouro_jail::trace::set_nonblocking(reader.as_fd()).unwrap();
                 let mut pending = Vec::new();
                 let mut lines: Vec<(Vec<u8>, Instant)> = Vec::new();
                 let mut chunk = [0u8; 65536];
@@ -901,8 +901,8 @@ enum Control {
 /// Fills a pipe until a nonblocking write would block, with newlines (which
 /// the frame reader skips).
 fn fill(writer: &std::io::PipeWriter) {
-    use std::os::fd::AsRawFd as _;
-    ouro_jail::trace::set_nonblocking(writer.as_raw_fd()).unwrap();
+    use std::os::fd::AsFd as _;
+    ouro_jail::trace::set_nonblocking(writer.as_fd()).unwrap();
     let mut writer = writer;
     let chunk = [b'\n'; 4096];
     loop {

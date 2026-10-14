@@ -1,4 +1,5 @@
-//! Small shared helpers for the Linux platform modules.
+//! Small shared helpers for the Linux platform modules. The portable ones
+//! (`poll`, `O_NONBLOCK`) live in [`crate::sys`] and are re-exported here.
 
 use std::ffi::{CString, OsStr};
 use std::fmt;
@@ -8,6 +9,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use super::clock::Deadline;
+
+pub(crate) use crate::sys::{poll_fds, set_nonblocking};
 
 /// A path or argument that cannot be passed to a syscall.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,24 +147,6 @@ pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
-/// Sets `O_NONBLOCK` on `fd`, keeping its other status flags.
-///
-/// # Errors
-/// The errno from `fcntl`.
-pub fn set_nonblocking(fd: BorrowedFd<'_>) -> io::Result<()> {
-    // SAFETY: F_GETFL and F_SETFL take scalars and dereference nothing; the
-    // descriptor is live for the borrow.
-    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: as above.
-    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 /// Writes all of `bytes` to `fd`, retrying an interrupted or short write.
 ///
 /// Async-signal-safe and allocation-free (`write` only), so the launcher
@@ -224,22 +209,7 @@ pub fn write_until(fd: BorrowedFd<'_>, bytes: &[u8], deadline: Deadline) -> io::
     Ok(())
 }
 
-/// `poll(2)` over `fds` for at most `timeout_ms` (negative: no bound): how
-/// many have events.
-///
-/// # Errors
-/// The errno of a failed `poll`; `Interrupted` for a signal, which a caller
-/// may treat as nothing ready only if it asks again.
-pub fn poll(fds: &mut [libc::pollfd], timeout_ms: i32) -> io::Result<usize> {
-    let count = libc::nfds_t::try_from(fds.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many descriptors"))?;
-    // SAFETY: `fds` holds `count` initialized pollfds and outlives the call;
-    // poll writes only their `revents`.
-    let ready = unsafe { libc::poll(fds.as_mut_ptr(), count, timeout_ms) };
-    usize::try_from(ready).map_err(|_| io::Error::last_os_error())
-}
-
-/// [`poll`] of one descriptor for `events`: the events it reports, empty on
+/// [`poll_fds`] of one descriptor for `events`: the events it reports, empty on
 /// a timeout or an interruption. For callers that ask again in a loop.
 ///
 /// # Errors
@@ -254,7 +224,7 @@ pub fn poll_one(
         events,
         revents: 0,
     }];
-    match poll(&mut entry, timeout_ms) {
+    match poll_fds(&mut entry, timeout_ms) {
         Ok(_) => Ok(entry[0].revents),
         Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(0),
         Err(error) => Err(error),

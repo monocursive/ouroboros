@@ -421,7 +421,7 @@ fn drain_output_relays_counted(
             return Ok(passes);
         }
         if !progress {
-            match super::sys::poll(&mut waits, deadline.remaining_millis_capped(i32::MAX)) {
+            match super::sys::poll_fds(&mut waits, deadline.remaining_millis_capped(i32::MAX)) {
                 Ok(_) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(err) => return Err(err),

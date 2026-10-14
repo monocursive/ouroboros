@@ -368,7 +368,8 @@ mod live {
                         revents: 0,
                     },
                 ];
-                match super::super::sys::poll(&mut pfds, deadline.remaining_millis_capped(2000)) {
+                match super::super::sys::poll_fds(&mut pfds, deadline.remaining_millis_capped(2000))
+                {
                     Ok(0) => {
                         return Err(io::Error::new(
                             io::ErrorKind::TimedOut,
