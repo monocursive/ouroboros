@@ -203,9 +203,9 @@ impl RunningExecution for Running {
         }
     }
     fn observer_summary(&mut self) -> Option<ouro_jail::observer::CoverageSummary> {
-        // J4 W3: taken here, not when tree verification begins: since P3 the
-        // tree is ended before the receipts still with the persistence worker
-        // are waited for, and the observer's account is read after them.
+        // Taken here, not when tree verification begins: the tree is ended
+        // before the receipts still with the persistence worker are waited
+        // for, and the observer's account is read after them.
         let receipt = std::fs::read_dir(self.script.data.join("attempts"))
             .ok()
             .and_then(|mut listing| listing.next())
@@ -375,9 +375,9 @@ fn digests(receipt: &Value) -> [String; 2] {
 /// degraded with a null count and a `trace_transport_loss` gap. Returns how
 /// many classes that was.
 ///
-/// J4 W3: `limits` is not one of them. Its count comes from the cgroup
-/// counters, not from the trace (§11.4: no `limit.hit` event in v1), so a
-/// trace loss leaves it as the platform reported it.
+/// `limits` is not one of them. Its count comes from the cgroup counters,
+/// not from the trace (§11.4: no `limit.hit` event in v1), so a trace loss
+/// leaves it as the platform reported it.
 fn assert_trace_loss_recorded(label: &str, receipt: &Value) -> usize {
     assert_eq!(
         receipt["observer"]["sources"]["wrapper"], "degraded",
@@ -536,7 +536,7 @@ fn j4_w2s_b_the_enforced_receipt_after_a_trace_loss_records_it_in_coverage() {
 }
 
 // ---------------------------------------------------------------------------
-// J4 W3: P4, and `limits` after a trace loss
+// P4: one report per trace loss, and `limits` after a trace loss
 // ---------------------------------------------------------------------------
 
 fn evidence_lost(receipt: &Value) -> Vec<String> {
@@ -591,10 +591,10 @@ fn j4_w3_p4_a_trace_loss_is_reported_once() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-/// J4 W3 decision: after a trace transport loss, `limits` keeps what the
-/// platform reported. Its count comes from the cgroup counters (§11.4: no
-/// `limit.hit` event in v1), so no frame of it can have been lost; the audit
-/// classes are degraded as before.
+/// After a trace transport loss, `limits` keeps what the platform reported.
+/// Its count comes from the cgroup counters (§11.4: no `limit.hit` event in
+/// v1), so no frame of it can have been lost; the audit classes are degraded
+/// all the same.
 #[test]
 fn j4_w3_a_trace_loss_leaves_the_limits_class_alone() {
     let _serial = serial();
