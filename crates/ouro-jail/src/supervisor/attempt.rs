@@ -423,6 +423,7 @@ impl<'a> Attempt<'a> {
         } else {
             Outcome::refused(error)
         };
+        let refusal_at = record.errors.len();
         record.errors.push(error.to_object());
         record.exec_observed = false;
         self.journal.lifecycle("refused");
@@ -435,7 +436,7 @@ impl<'a> Attempt<'a> {
         );
         // The proxy stopped with the boundary's teardown.
         let _ = remove_proxy_directory(&self.attempt_dir, &mut self.record);
-        let omitted = fit_refused_receipt(&mut self.record);
+        let omitted = fit_refused_receipt(&mut self.record, refusal_at);
         let receipt = self.persist_terminal(state::Site::RefusedReceipt, Phase::Refused);
         // Everything that reaches here refused before the target executed,
         // so a persistence failure exits 125 like the refusal itself.

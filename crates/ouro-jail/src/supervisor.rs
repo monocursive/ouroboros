@@ -2886,48 +2886,67 @@ const REFUSED_RECEIPT_ROOM: u64 = 64 * 1024;
 /// ([`cleanup::RECEIPT_MAX`]), so a claimed attempt still ends with a
 /// receipt (I01) when the errors raised before its refusal would take it
 /// past the bound: those errors are omitted, newest first, and an error
-/// says how many. The refusal itself, the last error, always stays.
+/// says how many. The refusal, at `refusal_at` in `errors[]`, and whatever
+/// recording it raised after it always stay.
 ///
 /// Returns the omitted errors, in the order they were raised, for stderr.
-fn fit_refused_receipt(record: &mut AttemptRecord) -> Vec<crate::records::ErrorObject> {
+fn fit_refused_receipt(
+    record: &mut AttemptRecord,
+    refusal_at: usize,
+) -> Vec<crate::records::ErrorObject> {
     let limit = cleanup::RECEIPT_MAX - REFUSED_RECEIPT_ROOM;
     let fits = |record: &AttemptRecord| {
         serde_json::to_vec_pretty(&record.receipt(Phase::Refused))
             .is_ok_and(|bytes| u64::try_from(bytes.len()).is_ok_and(|len| len <= limit))
     };
-    if fits(record) {
+    if refusal_at >= record.errors.len() || fits(record) {
         return Vec::new();
     }
-    let Some(refusal) = record.errors.pop() else {
-        return Vec::new();
-    };
+    let refusing = record.errors.split_off(refusal_at);
     let mut omitted = Vec::new();
-    while !fits(record)
-        && let Some(error) = record.errors.pop()
-    {
+    while let Some(error) = record.errors.pop() {
         omitted.push(error);
+        let kept = record.errors.len();
+        record
+            .errors
+            .push(omission_note(omitted.len(), &refusing[0]));
+        record.errors.extend(refusing.iter().cloned());
+        let fitted = fits(record);
+        record.errors.truncate(kept);
+        if fitted {
+            break;
+        }
     }
     omitted.reverse();
     if !omitted.is_empty() {
-        // Raised where the refusal was: it is part of recording it.
-        let mut note = JailError::new(
-            ErrorCode::StateWriteFailed,
-            ErrorStage::Preparing,
-            Remediation::InspectState,
-            format!(
-                "{} earlier error(s) are omitted from this receipt, which with them would be \
-                 past the {}-byte bound every reader holds receipts to; they were reported on \
-                 stderr",
-                omitted.len(),
-                cleanup::RECEIPT_MAX
-            ),
-        )
-        .to_object();
-        note.stage.clone_from(&refusal.stage);
-        record.errors.push(note);
+        record
+            .errors
+            .push(omission_note(omitted.len(), &refusing[0]));
     }
-    record.errors.push(refusal);
+    record.errors.extend(refusing);
     omitted
+}
+
+/// The error that says `count` errors before `refusal` were omitted from
+/// its receipt, raised at the refusal's own stage: it is part of recording
+/// it.
+fn omission_note(
+    count: usize,
+    refusal: &crate::records::ErrorObject,
+) -> crate::records::ErrorObject {
+    let mut note = JailError::new(
+        ErrorCode::StateWriteFailed,
+        ErrorStage::Preparing,
+        Remediation::InspectState,
+        format!(
+            "{count} earlier error(s) are omitted from this receipt, which with them would be \
+             past the {}-byte bound every reader holds receipts to; they were reported on stderr",
+            cleanup::RECEIPT_MAX
+        ),
+    )
+    .to_object();
+    note.stage.clone_from(&refusal.stage);
+    note
 }
 
 /// A terminal receipt write that failed, and what it left on disk.
@@ -4075,6 +4094,53 @@ mod tests {
         assert_eq!(error.code, ErrorCode::StateWriteFailed);
         assert_eq!(record.revision, 1, "no revision is spent");
         assert!(!attempt_dir.receipt_path().exists());
+    }
+
+    /// A refused receipt past the bound keeps the refusal and what recording
+    /// it raised after it (vendor-state cleanup, say), and omits only the
+    /// errors raised before the refusal, behind a note that counts them.
+    #[test]
+    fn a_refusal_that_would_pass_the_bound_keeps_itself_and_its_tail() {
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        let error = |code, message: String| {
+            JailError::new(
+                code,
+                ErrorStage::Running,
+                Remediation::InspectState,
+                message,
+            )
+            .to_object()
+        };
+        let bound = usize::try_from(cleanup::RECEIPT_MAX).unwrap();
+        let early = error(ErrorCode::EvidenceLost, "x".repeat(bound));
+        let refusal = error(ErrorCode::ExecFailed, "refused".to_owned());
+        let tail = error(ErrorCode::StateWriteFailed, "cleanup".to_owned());
+        record.errors = vec![
+            error(ErrorCode::EvidenceLost, "small".to_owned()),
+            early.clone(),
+            refusal.clone(),
+            tail.clone(),
+        ];
+        let omitted = fit_refused_receipt(&mut record, 2);
+        assert_eq!(omitted, [early]);
+        assert_eq!(record.errors.len(), 4, "{:?}", record.errors);
+        assert_eq!(record.errors[0].message, "small");
+        assert!(
+            record.errors[1]
+                .message
+                .starts_with("1 earlier error(s) are omitted"),
+            "{}",
+            record.errors[1].message
+        );
+        assert_eq!(record.errors[1].stage, refusal.stage);
+        assert_eq!(record.errors[2..], [refusal, tail]);
+
+        let untouched = record.errors.clone();
+        assert!(fit_refused_receipt(&mut record, 2).is_empty());
+        assert_eq!(
+            record.errors, untouched,
+            "a receipt that fits is left alone"
+        );
     }
 
     /// A terminal receipt that persisted, whose rewrite recording the loss
