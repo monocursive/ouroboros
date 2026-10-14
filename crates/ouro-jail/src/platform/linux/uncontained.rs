@@ -108,9 +108,9 @@ use super::verdict::none_verdict;
 pub use super::verdict::{NoneTreeInputs, none_verdict as verdict};
 
 /// The descriptor the launcher blocks reading.
-const RELEASE_FD: RawFd = 3;
+const RELEASE_FD: RawFd = super::fds::NONE_RELEASE;
 /// The descriptor the launcher writes a failed exec's errno to.
-const ERROR_FD: RawFd = 4;
+const ERROR_FD: RawFd = super::fds::NONE_ERROR;
 /// The mechanism `none`'s tree termination names: the leaf's `cgroup.kill`,
 /// followed by the population check (§9.3), never a pid namespace.
 pub const TREE_MECHANISM: &str = "cgroup-kill";

@@ -67,14 +67,14 @@ use super::unixpeer::{
 };
 
 /// Descriptor the proxy directory is handed to bubblewrap on.
-pub const PROXY_DIR_FD: RawFd = 17;
+pub const PROXY_DIR_FD: RawFd = super::fds::PROXY_DIR;
 /// Descriptor the launcher places its mediation listener at.
-pub const LISTENER_FD: RawFd = 18;
+pub const LISTENER_FD: RawFd = super::fds::LISTENER;
 /// Descriptor the launcher places its attempt-netns `sock_diag` socket at.
-pub const SOCKDIAG_FD: RawFd = 19;
+pub const SOCKDIAG_FD: RawFd = super::fds::SOCKDIAG;
 /// Descriptor the launcher places the supervisor's end of the bridge's report
 /// socket at: one datagram for every client the bridge turned away at capacity.
-pub const BRIDGE_REPORT_FD: RawFd = 20;
+pub const BRIDGE_REPORT_FD: RawFd = super::fds::BRIDGE_REPORT;
 
 /// Bound on the queue between the mediator's threads and the supervision
 /// loop. A record that finds it full is counted and becomes a gap, and is

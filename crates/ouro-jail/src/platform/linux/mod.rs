@@ -37,6 +37,8 @@ pub mod clock;
 #[cfg(target_os = "linux")]
 pub mod exec;
 #[cfg(target_os = "linux")]
+mod fds;
+#[cfg(target_os = "linux")]
 pub mod fs;
 #[cfg(target_os = "linux")]
 pub mod identity;

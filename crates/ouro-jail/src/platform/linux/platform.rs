@@ -43,37 +43,28 @@ pub(crate) use super::mounts::refuse_pseudo_fs_grants;
 pub(crate) use super::mounts::{PlanPaths, plan_for};
 pub use super::verdict::{AbortInputs, TreeInputs, abort_verdict, verdict};
 
-// Fixed descriptor numbers (§8.3). The backend's descriptor map installs
-// the channels below `PINNED_FD_BASE`, beside `watch::BACKEND_FD` (8),
-// `watch::START_FD` (15) and `agent::PROXY_DIR_FD` (17), and the pinned binds
-// and credential views from `PINNED_FD_BASE` up. Bubblewrap consumes the
-// binds before it runs the launcher, which keeps `RELEASE_FD`, `ERROR_FD`
-// and `TRACE_DATA_FD` and places the `agent` descriptors (18 to 20) itself,
-// refusing any number still open. `agent::BRIDGE_REPORT_FD` therefore shares
-// 20 with `PINNED_FD_BASE` in a different table; the numbers that share a
-// table are checked distinct by a test.
+// The fixed descriptor numbers of the backend's map and the launcher's,
+// by the names the platform uses; [`super::fds`] is the table that holds
+// them and checks them.
 
-/// Where the attempt's narrowing `SECCOMP_RET_DATA` reaches the launcher:
-/// two bytes, written before the spawn.
-pub(super) const TRACE_DATA_FD: RawFd = 9;
+/// Where the attempt's narrowing `SECCOMP_RET_DATA` reaches the launcher.
+pub(super) const TRACE_DATA_FD: RawFd = super::fds::TRACE_DATA;
 /// Descriptor the seccomp program is handed to bubblewrap on.
-pub(crate) const SECCOMP_FD: RawFd = 10;
+pub(crate) const SECCOMP_FD: RawFd = super::fds::SECCOMP;
 /// Descriptor bubblewrap writes its JSON status to.
-pub(crate) const STATUS_FD: RawFd = 11;
+pub(crate) const STATUS_FD: RawFd = super::fds::STATUS;
 /// Descriptor the launcher blocks reading (`__launch --release-fd`), and the
 /// one a gate checks it is blocked on.
-pub(super) const RELEASE_FD: RawFd = 12;
+pub(super) const RELEASE_FD: RawFd = super::fds::RELEASE;
 /// Descriptor the launcher writes a failed exec's errno to
 /// (`__launch --error-fd`).
-pub(super) const ERROR_FD: RawFd = 13;
+pub(super) const ERROR_FD: RawFd = super::fds::ERROR;
 /// Descriptor a long argument list is handed over.
-pub(crate) const ARGS_FD: RawFd = 14;
-/// Descriptor the vendor-state directory is handed to bubblewrap on
-/// (`--bind-fd`). The `bind_ro` credential views follow the pinned binds.
-pub(crate) const VENDOR_STATE_FD: RawFd = 16;
-/// First descriptor of the pinned binds (`--ro-bind-fd`, `--bind-fd`); every
-/// fixed channel of the backend's map is below it.
-pub(super) const PINNED_FD_BASE: RawFd = 20;
+pub(crate) const ARGS_FD: RawFd = super::fds::ARGS;
+/// Descriptor the vendor-state directory is handed to bubblewrap on.
+pub(crate) const VENDOR_STATE_FD: RawFd = super::fds::VENDOR_STATE;
+/// First descriptor of the pinned binds.
+pub(super) const PINNED_FD_BASE: RawFd = super::fds::PINNED_BASE;
 
 /// The Linux platform.
 #[derive(Clone, Debug)]
@@ -509,44 +500,6 @@ pub(super) mod tests {
             profile,
             requirements,
         }
-    }
-
-    /// The fixed descriptors that share a table are distinct (see the
-    /// layout note at the constants). The backend's map: stdio and every
-    /// channel below `PINNED_FD_BASE`. The launcher's: the channels it keeps
-    /// and the `agent` descriptors it places. `agent::BRIDGE_REPORT_FD` and
-    /// `PINNED_FD_BASE` are both 20, in different tables.
-    #[test]
-    fn fixed_descriptors_that_share_a_table_are_distinct() {
-        use super::super::{agent, watch};
-        let backend = [
-            watch::BACKEND_FD,
-            TRACE_DATA_FD,
-            SECCOMP_FD,
-            STATUS_FD,
-            RELEASE_FD,
-            ERROR_FD,
-            ARGS_FD,
-            watch::START_FD,
-            VENDOR_STATE_FD,
-            agent::PROXY_DIR_FD,
-        ];
-        let launcher = [
-            RELEASE_FD,
-            ERROR_FD,
-            TRACE_DATA_FD,
-            agent::LISTENER_FD,
-            agent::SOCKDIAG_FD,
-            agent::BRIDGE_REPORT_FD,
-        ];
-        for (table, fds) in [("backend", &backend[..]), ("launcher", &launcher[..])] {
-            let mut sorted = fds.to_vec();
-            sorted.sort_unstable();
-            sorted.dedup();
-            assert_eq!(sorted.len(), fds.len(), "{table}: {fds:?}");
-            assert!(fds.iter().all(|fd| *fd > 2), "{table} spares stdio");
-        }
-        assert!(backend.iter().all(|fd| *fd < PINNED_FD_BASE));
     }
 
     /// §8.2: steps 3 to 5 spend what is left of the supervisor's one

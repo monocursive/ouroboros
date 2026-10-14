@@ -38,21 +38,21 @@ use super::{clock::Deadline, exec, identity};
 // The descriptors each helper inherits, at fixed numbers on both sides.
 /// Where the bootstrap receives the read end of its start pipe: one
 /// [`RELEASED`] byte lets it exec the backend, anything else ends it.
-pub const START_FD: RawFd = 15;
+pub const START_FD: RawFd = super::fds::START;
 /// Pinned backend, closed atomically on successful exec.
-pub const BACKEND_FD: RawFd = 8;
+pub const BACKEND_FD: RawFd = super::fds::BACKEND;
 /// Where the watcher receives a pidfd of the supervisor that started it.
-const SUPERVISOR_PIDFD_FD: RawFd = 3;
+const SUPERVISOR_PIDFD_FD: RawFd = super::fds::WATCHER_SUPERVISOR;
 /// Where the watcher receives a pidfd of the backend it guards.
-const BACKEND_PIDFD_FD: RawFd = 4;
+const BACKEND_PIDFD_FD: RawFd = super::fds::WATCHER_BACKEND;
 /// Where the watcher receives the write end of its ready pipe, on which it
 /// writes [`RELEASED`] once it holds everything it needs.
-const READY_FD: RawFd = 5;
+const READY_FD: RawFd = super::fds::WATCHER_READY;
 /// Where the watcher receives the leaf's `cgroup.kill`, when there is a leaf.
-pub const CGROUP_KILL_FD: RawFd = 6;
+pub const CGROUP_KILL_FD: RawFd = super::fds::WATCHER_CGROUP_KILL;
 const CGROUP_KILL_ARG: &str = "--cgroup-kill-fd";
 /// Where the watcher receives the read end of its release pipe.
-pub const RELEASE_FD: RawFd = 7;
+pub const RELEASE_FD: RawFd = super::fds::WATCHER_RELEASE;
 const RELEASE_ARG: &str = "--release-fd";
 /// The byte that releases the reader of a release, ready or start pipe;
 /// end-of-file means the writer is gone.
