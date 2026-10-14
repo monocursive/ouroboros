@@ -795,8 +795,6 @@ mod tests {
         assert!(parse_operator_config("[ledger]\nretian='7d'").is_err());
     }
 
-    /// `config.toml` names no base profile to extend, and its `[jail]` table
-    /// carries this build's schema or none; the parser refuses both by key.
     /// Each forbidden key is refused in its own file, with its code and key
     /// path, and only there: `config.toml` may select a profile and carry
     /// command rules.
@@ -833,6 +831,8 @@ mod tests {
         .expect("config.toml may select a profile and carry command rules");
     }
 
+    /// `config.toml` names no base profile to extend, and its `[jail]` table
+    /// carries this build's schema or none; the parser refuses both by key.
     #[test]
     fn the_operator_config_refuses_extends_and_a_foreign_schema() {
         let error = parse_operator_config("[jail]\nextends = \"tool\"\n")
