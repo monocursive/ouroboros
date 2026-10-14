@@ -140,9 +140,9 @@ pub(super) struct Runtime {
     exchange: Mutex<()>,
     audit: Mutex<Option<(String, Audit)>>,
     early_notes: Mutex<Vec<(u64, &'static str)>>,
-    /// The step the last refusal failed at, when it names one (see
+    /// The step the last labelled refusal failed at (see
     /// [`Runtime::failed`]); [`Runtime::source`] puts it in staging's
-    /// refusal.
+    /// refusal. A refusal without a label leaves it as it was.
     last_error: Mutex<Option<&'static str>>,
 }
 impl Runtime {
@@ -297,9 +297,14 @@ impl Runtime {
     }
     /// Refreshes the access token of `doc`, the document read as `raw` at
     /// `source_epoch`: the pending marker is persisted first, then the one
-    /// exchange with the issuer, then the new document is committed before
-    /// its token is served. Any failure after the marker leaves it in place
-    /// (never retried) and withdraws the credential.
+    /// exchange with the issuer, then the new document is committed over
+    /// the marker and read back before its token is served. A failure
+    /// before the commit leaves the marker, so the grant is never presented
+    /// twice; a commit whose write fails part-way leaves a document no load
+    /// accepts; a failure after the commit landed (its read-back, or the
+    /// `refreshed` audit) leaves the committed document, unmarked, whose
+    /// token this call does not serve. Every failure withdraws the
+    /// credential.
     fn exchange_token(
         &self,
         policy: &RefreshPolicy,
@@ -508,7 +513,7 @@ impl Runtime {
         *lock(&self.last_error) = None;
         Ok(Zeroizing::new(doc.access_token.0.as_bytes().to_vec()))
     }
-    /// Records `label` as the step the last refusal failed at, and returns
+    /// Records `label` as the step this refusal failed at, and returns
     /// `reason`.
     fn failed(&self, label: &'static str, reason: Reason) -> Reason {
         *lock(&self.last_error) = Some(label);
