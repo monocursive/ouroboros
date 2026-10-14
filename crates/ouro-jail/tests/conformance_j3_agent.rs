@@ -927,6 +927,68 @@ fn n03_address_and_host_rules_hold_end_to_end() {
     );
 }
 
+/// N03 / L21 through the real agent proxy, the seam no portable test
+/// crosses: the proxy the agent network starts enforces the rules the
+/// resolved snapshot states (`allow` with `tls_only`), not a re-parse of the
+/// canonical strings, which always write the port and would make every
+/// grant explicit. Under the omitted-port grant `*.example.test`, a plain
+/// `GET http://a.example.test:443/` is refused `plaintext_not_granted`
+/// before resolution, while a CONNECT to the same host and port passes the
+/// host rule and only then fails (a `.test` name has no answer). The
+/// receipt lists the grant as applied TLS only.
+#[test]
+fn n03_an_omitted_port_grant_admits_no_plaintext_through_the_agent_proxy() {
+    if !common::live() {
+        return;
+    }
+    let c = case("agent");
+    let steps = serde_json::json!([
+        [
+            "http-get",
+            "http://a.example.test:443/plain",
+            "--expect",
+            "any"
+        ],
+        ["http-connect", "a.example.test:443", "--expect", "any"]
+    ]);
+    let argv = c.script("n03c", &steps);
+    let run = c
+        .jail
+        .args(["--allow-host", "*.example.test"])
+        .target(argv)
+        .run()
+        .unwrap();
+    assert_eq!(run.code(), Some(0), "stderr: {}", run.stderr_text());
+    let receipt = settled(&run);
+    let facts: Vec<(&str, &str)> = events(&run, "proxy")
+        .iter()
+        .map(|event| {
+            (
+                event["fields"]["kind"].as_str().unwrap(),
+                event["fields"]["reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(facts.len(), 2, "{facts:?}");
+    assert_eq!(facts[0], ("http", "plaintext_not_granted"), "{facts:?}");
+    assert_eq!(facts[1].0, "connect", "{facts:?}");
+    assert!(
+        facts[1].1.starts_with("resolve_"),
+        "the CONNECT passed the host rule and failed only at resolution: {facts:?}"
+    );
+    let lines = run.fixture_lines();
+    let get = ops(&lines, "http-get")[0];
+    assert_eq!(get["args"]["status_code"], 403, "{get}");
+    assert_eq!(
+        receipt["applied"]["network"]["allowed_hosts"],
+        serde_json::json!(["*.example.test:443"])
+    );
+    assert_eq!(
+        receipt["applied"]["network"]["tls_only"],
+        serde_json::json!(["*.example.test:443"])
+    );
+}
+
 // ===========================================================================
 // N04: bounded, fail-closed
 // ===========================================================================
