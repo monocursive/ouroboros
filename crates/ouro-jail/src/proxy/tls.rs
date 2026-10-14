@@ -791,6 +791,81 @@ mod tests {
         assert_eq!(outcome.end, EndReason::Deadline);
     }
 
+    /// Runs the pump, for at most [`PUMP_TEST_LIFETIME`], over fresh TLS
+    /// connections: the lane's server side on a socket pair, whose other end
+    /// `client` gets, and its client side on a loopback TCP connection,
+    /// whose accepted end `destination` gets. Each returns its end to keep
+    /// it open, or `None` once it closed it. Returns what the pump returned,
+    /// its outcome and how long it ran.
+    fn pump_against(
+        client: impl FnOnce(UnixStream) -> Option<UnixStream>,
+        destination: impl FnOnce(TcpStream) -> Option<TcpStream>,
+    ) -> (Result<(), Reason>, RelayOutcome, Duration) {
+        use std::sync::Arc;
+        let vault = crate::vault::Vault::new("test-attempt", Vec::new()).unwrap();
+        let target = crate::network::parse_authority("fixture.test:443", None).unwrap();
+        let (socket, client_end) = UnixStream::pair().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (destination_end, _) = listener.accept().unwrap();
+        let kept = (client(client_end), destination(destination_end));
+        let (socket, remote) = (Arc::new(socket), Arc::new(remote));
+        let watch = crate::vault::lifecycle::Watch::start(
+            Arc::new(crate::vault::lifecycle::Lease::default()),
+            Arc::clone(&socket),
+            Arc::clone(&remote),
+        )
+        .unwrap();
+        let mut outcome = RelayOutcome {
+            bytes_in: 0,
+            bytes_out: 0,
+            discarded: 0,
+            end: EndReason::UpstreamClosed,
+        };
+        let started = Instant::now();
+        let pumped = pump(
+            vault.server(&target).unwrap(),
+            vault.client(&target).unwrap(),
+            &socket,
+            &remote,
+            &watch,
+            Lane {
+                websocket: false,
+                chunk: 1024,
+                lifetime: started + PUMP_TEST_LIFETIME,
+            },
+            &mut outcome,
+        )
+        .map(drop);
+        let ran = started.elapsed();
+        drop(kept);
+        (pumped, outcome, ran)
+    }
+
+    /// The lifetime [`pump_against`] gives the pump: far longer than any
+    /// case needs, so ending at it is a failure to end on the cause.
+    const PUMP_TEST_LIFETIME: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn a_record_that_does_not_decrypt_is_blamed_on_the_side_that_sent_it() {
+        let corrupt = b"not a TLS record\r\n";
+        let (pumped, _, ran) = pump_against(
+            |mut client| {
+                client.write_all(corrupt).unwrap();
+                Some(client)
+            },
+            Some,
+        );
+        assert_eq!(pumped, Err(Reason::ClientClosed));
+        assert!(ran < PUMP_TEST_LIFETIME);
+        let (pumped, _, ran) = pump_against(Some, |mut destination| {
+            destination.write_all(corrupt).unwrap();
+            Some(destination)
+        });
+        assert_eq!(pumped, Err(Reason::UpstreamProtocol));
+        assert!(ran < PUMP_TEST_LIFETIME);
+    }
+
     #[test]
     fn a_failed_client_head_blames_the_deadline_or_the_client() {
         for (kind, reason) in [
