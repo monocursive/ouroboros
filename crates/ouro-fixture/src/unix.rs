@@ -79,13 +79,29 @@ pub(crate) fn run(rep: &Reporter, mode: UnixMode) -> Result<bool, Stop> {
             cloexec,
             nonblock,
             expect,
-        } => Ok(unix_socket_dgram(rep, raw, cloexec, nonblock, &expect)),
+        } => Ok(unix_socket_dgram(
+            rep,
+            DgramType {
+                raw,
+                cloexec,
+                nonblock,
+            },
+            &expect,
+        )),
         UnixMode::UnixSocketpairDgram {
             raw,
             cloexec,
             nonblock,
             expect,
-        } => Ok(unix_socketpair_dgram(rep, raw, cloexec, nonblock, &expect)),
+        } => Ok(unix_socketpair_dgram(
+            rep,
+            DgramType {
+                raw,
+                cloexec,
+                nonblock,
+            },
+            &expect,
+        )),
         UnixMode::ScmSend {
             socket,
             fd_path,
@@ -428,78 +444,84 @@ pub(crate) fn unix_listen(
 
 // ------------------------------------------------------------------ datagram
 
-fn dgram_type(raw: bool, cloexec: bool, nonblock: bool, report: &mut OpReport) -> c_int {
-    let base = if raw {
-        libc::SOCK_RAW
-    } else {
-        libc::SOCK_DGRAM
-    };
-    report.set("type", if raw { "SOCK_RAW" } else { "SOCK_DGRAM" });
-    #[cfg(target_os = "linux")]
-    let (ty, flags) = {
-        let mut ty = base;
-        let mut flags: Vec<&str> = Vec::new();
-        if cloexec {
-            ty |= libc::SOCK_CLOEXEC;
-            flags.push("SOCK_CLOEXEC");
-        }
-        if nonblock {
-            ty |= libc::SOCK_NONBLOCK;
-            flags.push("SOCK_NONBLOCK");
-        }
-        (ty, flags)
-    };
-    #[cfg(not(target_os = "linux"))]
-    let (ty, flags): (c_int, Vec<&str>) = {
-        // The caller refused these flags on this platform already.
-        let _ = (cloexec, nonblock);
-        (base, Vec::new())
-    };
-    report.set(
-        "type_flags",
-        Value::Array(flags.into_iter().map(Value::from).collect()),
-    );
-    report.set("type_arg", ty);
-    ty
+/// The type argument a datagram-mode socket is made with: the base type and
+/// the flags OR-ed into it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DgramType {
+    /// `SOCK_RAW` instead of `SOCK_DGRAM`.
+    pub(crate) raw: bool,
+    pub(crate) cloexec: bool,
+    pub(crate) nonblock: bool,
 }
 
-fn flags_unsupported(rep: &Reporter, op: &str, cloexec: bool, nonblock: bool) -> Option<bool> {
-    (!cfg!(target_os = "linux") && (cloexec || nonblock))
+impl DgramType {
+    /// The type argument, reported on `report`.
+    fn arg(self, report: &mut OpReport) -> c_int {
+        let DgramType {
+            raw,
+            cloexec,
+            nonblock,
+        } = self;
+        let base = if raw {
+            libc::SOCK_RAW
+        } else {
+            libc::SOCK_DGRAM
+        };
+        report.set("type", if raw { "SOCK_RAW" } else { "SOCK_DGRAM" });
+        #[cfg(target_os = "linux")]
+        let (ty, flags) = {
+            let mut ty = base;
+            let mut flags: Vec<&str> = Vec::new();
+            if cloexec {
+                ty |= libc::SOCK_CLOEXEC;
+                flags.push("SOCK_CLOEXEC");
+            }
+            if nonblock {
+                ty |= libc::SOCK_NONBLOCK;
+                flags.push("SOCK_NONBLOCK");
+            }
+            (ty, flags)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (ty, flags): (c_int, Vec<&str>) = {
+            // The caller refused these flags on this platform already.
+            let _ = (cloexec, nonblock);
+            (base, Vec::new())
+        };
+        report.set(
+            "type_flags",
+            Value::Array(flags.into_iter().map(Value::from).collect()),
+        );
+        report.set("type_arg", ty);
+        ty
+    }
+}
+
+fn flags_unsupported(rep: &Reporter, op: &str, ty: DgramType) -> Option<bool> {
+    (!cfg!(target_os = "linux") && (ty.cloexec || ty.nonblock))
         .then(|| unsupported(rep, op, "OR-ing SOCK_CLOEXEC/SOCK_NONBLOCK into the type"))
 }
 
-pub(crate) fn unix_socket_dgram(
-    rep: &Reporter,
-    raw_type: bool,
-    cloexec: bool,
-    nonblock: bool,
-    expect: &Expect,
-) -> bool {
-    if let Some(r) = flags_unsupported(rep, "socket", cloexec, nonblock) {
+pub(crate) fn unix_socket_dgram(rep: &Reporter, ty: DgramType, expect: &Expect) -> bool {
+    if let Some(r) = flags_unsupported(rep, "socket", ty) {
         return r;
     }
     let mut report = OpReport::new("socket");
     report.set("family", "AF_UNIX");
-    let ty = dgram_type(raw_type, cloexec, nonblock, &mut report);
+    let ty = ty.arg(&mut report);
     report.set("mechanism", raw::mechanism());
     let emitted = finish(report, raw::socket(libc::AF_UNIX, ty, 0));
     close_fd(emitted.report.ret);
     check(rep, emitted, expect)
 }
 
-pub(crate) fn unix_socketpair_dgram(
-    rep: &Reporter,
-    raw_type: bool,
-    cloexec: bool,
-    nonblock: bool,
-    expect: &Expect,
-) -> bool {
-    if let Some(r) = flags_unsupported(rep, "socketpair", cloexec, nonblock) {
+pub(crate) fn unix_socketpair_dgram(rep: &Reporter, ty: DgramType, expect: &Expect) -> bool {
+    if let Some(r) = flags_unsupported(rep, "socketpair", ty) {
         return r;
     }
     let mut report = OpReport::new("socketpair");
     report.set("family", "AF_UNIX");
-    let ty = dgram_type(raw_type, cloexec, nonblock, &mut report);
+    let ty = ty.arg(&mut report);
     report.set("mechanism", raw::mechanism());
     let mut sv: [c_int; 2] = [-1, -1];
     let mut emitted = finish(report, raw::socketpair(libc::AF_UNIX, ty, 0, &mut sv));
