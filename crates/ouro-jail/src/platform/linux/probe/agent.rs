@@ -64,7 +64,8 @@ pub fn agent_probe(jail_exe: &Path) -> &'static AgentProbe {
 }
 
 /// A loopback listener serving `HTTP/1.1 200` to each connection until
-/// stopped, counting them.
+/// stopped, counting them. Dropping it stops and joins its thread, which
+/// closes the listener, on every path out of the probe.
 struct Origin {
     port: u16,
     hits: Arc<AtomicUsize>,
@@ -107,12 +108,23 @@ impl Origin {
         })
     }
 
+    /// Stops serving and returns how many connections were accepted.
     fn finish(mut self) -> usize {
+        self.stop();
+        self.hits.load(Ordering::SeqCst)
+    }
+
+    fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        self.hits.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for Origin {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -293,10 +305,12 @@ pub fn proxy_bridge(jail_exe: &Path) -> ProbeResult {
         .iter()
         .any(|(decision, reason)| decision == "deny" && reason == "host_not_allowed");
     let evidence = format!(
-        "through 127.0.0.1:3128: allowed destination {allowed} ({} origin connection(s)), \
+        "through {}: allowed destination {allowed} ({} origin connection(s)), \
          denied destination {denied} ({} connection(s) reached it); direct TCP egress {egress}; \
          proxy results allow/relayed {proxy_allow}, deny/host_not_allowed {proxy_deny}",
-        probe.origin_hits, probe.denied_hits
+        crate::platform::linux::bridge::LISTEN,
+        probe.origin_hits,
+        probe.denied_hits
     );
     let ok = allowed == "200"
         && denied == "403"
@@ -517,20 +531,20 @@ pub fn check_inner(protected: &str) -> String {
     ));
     steps.push(("seccomp", inner_seccomp()));
     let path = std::ffi::CString::new(protected).unwrap_or_default();
-    // SAFETY: `path` is NUL-terminated and outlives each call; the variadic
-    // mode is passed because O_CREAT is not set (it is ignored).
+    // SAFETY: `path` is NUL-terminated and outlives each call; no mode is
+    // passed, which open reads only with O_CREAT.
     let write = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
     steps.push(("write", result(i64::from(write))));
     // SAFETY: as above.
     let read = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     steps.push(("read", result(i64::from(read))));
     // Inside the Landlock grant, so only the inner seccomp filter can
-    // refuse it. SAFETY: a static NUL-terminated path.
+    // refuse it.
+    let made = std::ffi::CString::new(format!("{INNER_GRANT}/made")).unwrap_or_default();
+    // SAFETY: `made` is a NUL-terminated path that outlives the call.
     steps.push((
         "mkdir",
-        result(i64::from(unsafe {
-            libc::mkdir(c"/tmp/.ouro-inner-grant/made".as_ptr(), 0o700)
-        })),
+        result(i64::from(unsafe { libc::mkdir(made.as_ptr(), 0o700) })),
     ));
     // SAFETY: mount with static NUL-terminated strings and null data.
     steps.push((
@@ -702,4 +716,22 @@ const INNER_GRANT: &str = "/tmp/.ouro-inner-grant";
 #[must_use]
 pub fn protected_path(workspace: &Path) -> PathBuf {
     workspace.join(PROTECTED_NAME)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An origin left behind on an early return stops serving: its thread is
+    /// joined and its listener closed, so nothing accepts on its port.
+    #[test]
+    fn a_dropped_origin_stops_its_accept_thread() {
+        let origin = Origin::start(false).expect("loopback origin");
+        let port = origin.port;
+        drop(origin);
+        assert!(
+            TcpStream::connect(("127.0.0.1", port)).is_err(),
+            "the dropped origin still accepts on {port}"
+        );
+    }
 }
