@@ -4663,9 +4663,10 @@ mod tests {
         let receipt = render_receipt(&record, Phase::Refused);
         assert_eq!(receipt.errors.len(), RECEIPT_ERRORS_MAX);
         assert!(
-            receipt.errors[0]
-                .message
-                .starts_with("[73 other error(s) omitted: a receipt lists at most 128;"),
+            receipt.errors[0].message.starts_with(
+                "[73 other error(s) omitted: a receipt lists at most 128; the run that wrote \
+                 this receipt prints every error it omits on stderr] "
+            ),
             "{}",
             receipt.errors[0].message
         );
@@ -5017,6 +5018,169 @@ mod tests {
         assert_eq!(on_disk.errors.len(), RECEIPT_ERRORS_MAX, "it landed");
         assert_eq!(journal.durable_errors, 0);
         assert_eq!(unrecorded(&record, &journal, &[])[..2], record.errors[..2]);
+    }
+
+    /// A write whose rename failed left the receipt before it in place: the
+    /// journal keeps that one's count however many errors the failed write
+    /// held, so what it would have added reaches stderr.
+    #[test]
+    fn a_write_whose_rename_failed_keeps_the_count_of_the_receipt_before() {
+        struct RenameFails;
+        impl state::PersistIo for RenameFails {
+            fn rename(&self, _: state::Site, _: &Path, _: &Path) -> std::io::Result<()> {
+                Err(std::io::Error::other("rename refused"))
+            }
+        }
+        let (_root, attempt_dir, _plan) = scratch_fixture();
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        record.errors = errors(1);
+        let mut journal = Journal::new("att_test", trace::shared(DrainFailure { loss: None }));
+        let args = run_args(&[]);
+        persist(
+            state::Site::PreparedReceipt,
+            &attempt_dir,
+            &mut record,
+            Phase::Prepared,
+            &args,
+            &mut journal,
+        )
+        .unwrap();
+        assert_eq!(journal.durable_errors, 1);
+        record.errors = errors(2);
+        let seam = state::install(Arc::new(RenameFails));
+        persist(
+            state::Site::PendingReceipt,
+            &attempt_dir,
+            &mut record,
+            Phase::Prepared,
+            &args,
+            &mut journal,
+        )
+        .expect_err("the rename fails");
+        drop(seam);
+        assert_eq!(journal.durable_errors, 1);
+        assert_eq!(unrecorded(&record, &journal, &[]), record.errors[1..]);
+    }
+
+    /// The journal counts what the latest durable receipt holds, even when
+    /// it holds less than the one before it.
+    #[test]
+    fn the_durable_count_is_the_latest_receipt_s_even_when_it_falls() {
+        let bound = usize::try_from(cleanup::RECEIPT_WRITE_MAX).unwrap();
+        let (_root, attempt_dir, _plan) = scratch_fixture();
+        let big = error_object(ErrorCode::EvidenceLost, "x".repeat(bound - 64 * 1024));
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        record.errors = vec![big.clone()];
+        let mut journal = Journal::new("att_test", trace::shared(DrainFailure { loss: None }));
+        persist(
+            state::Site::PreparedReceipt,
+            &attempt_dir,
+            &mut record,
+            Phase::Prepared,
+            &run_args(&[]),
+            &mut journal,
+        )
+        .unwrap();
+        assert_eq!(journal.durable_errors, 1);
+        let refusal = JailError::new(
+            ErrorCode::GateClosed,
+            ErrorStage::Prepared,
+            Remediation::InspectState,
+            "y".repeat(128 * 1024),
+        );
+        record.outcome = Outcome::refused(&refusal);
+        record.errors.push(refusal.to_object());
+        persist(
+            state::Site::PendingReceipt,
+            &attempt_dir,
+            &mut record,
+            Phase::Refused,
+            &run_args(&[]),
+            &mut journal,
+        )
+        .expect("the refused receipt is fitted");
+        assert_eq!(
+            journal.durable_errors, 0,
+            "the refused receipt holds `big` cut"
+        );
+        assert_eq!(
+            unrecorded(&record, &journal, &[Some(&refusal), None]),
+            [big]
+        );
+    }
+
+    /// The correction a trace loss at the final note forces counts what the
+    /// corrected receipt holds as raised, not how many errors it lists.
+    #[test]
+    fn a_loss_correction_counts_what_it_holds_as_raised() {
+        let bound = usize::try_from(cleanup::RECEIPT_MAX).unwrap();
+        let (_root, attempt_dir, _plan) = scratch_fixture();
+        let mut record = refused_record(
+            vec![
+                error_object(ErrorCode::EvidenceLost, "x".repeat(bound)),
+                error_object(ErrorCode::GateClosed, "refused".to_owned()),
+            ],
+            1,
+        );
+        let mut journal = Journal::new("att_test", trace::shared(DrainFailure { loss: None }));
+        let corrected = persist_terminal(
+            state::Site::RefusedReceipt,
+            &attempt_dir,
+            &mut record,
+            Phase::Refused,
+            &run_args(&[]),
+            &mut journal,
+        )
+        .expect("the corrected receipt is written");
+        assert_eq!(corrected.errors.len(), 3, "the loss is recorded");
+        assert_eq!(journal.durable_errors, 0, "the first error is held cut");
+    }
+
+    /// A message cut to fit keeps at least its first 256 bytes, however far
+    /// past the bound the rest of the receipt is.
+    #[test]
+    fn a_cut_message_keeps_its_first_256_bytes() {
+        let bound = usize::try_from(cleanup::RECEIPT_MAX).unwrap();
+        let message: String = (0..1000)
+            .map(|index| char::from(b'a' + (index % 26) as u8))
+            .collect();
+        let mut record = refused_record(
+            vec![
+                error_object(ErrorCode::StdioFailed, message.clone()),
+                error_object(ErrorCode::GateClosed, "refused".to_owned()),
+            ],
+            1,
+        );
+        // Past the bound by far more than the message: nothing else is cut.
+        record.policy.grants = vec![crate::records::Grant {
+            kind: "read_only".to_owned(),
+            value: crate::records::NativeString::Text("g".repeat(bound)),
+            by: "operator".to_owned(),
+        }];
+        let receipt = render_receipt(&record, Phase::Refused);
+        let cut = &receipt.errors[0].message;
+        assert_eq!(cut.find(" [... "), Some(MESSAGE_KEPT_MIN), "{cut}");
+        assert!(cut.starts_with(&message[..MESSAGE_KEPT_MIN]));
+    }
+
+    /// The longest message is cut first, and a shorter one that the cut
+    /// already fitted is left as it was raised.
+    #[test]
+    fn the_longest_message_is_cut_first() {
+        let bound = usize::try_from(cleanup::RECEIPT_MAX).unwrap();
+        let shorter = error_object(ErrorCode::StdioFailed, "s".repeat(10_000));
+        let record = refused_record(
+            vec![
+                shorter.clone(),
+                error_object(ErrorCode::EvidenceLost, "x".repeat(bound)),
+                error_object(ErrorCode::GateClosed, "refused".to_owned()),
+            ],
+            2,
+        );
+        let receipt = render_receipt(&record, Phase::Refused);
+        assert!(rendered_len(&receipt) <= cleanup::RECEIPT_WRITE_MAX);
+        assert_eq!(receipt.errors[0], shorter);
+        assert!(receipt.errors[1].message.contains("bytes omitted"));
     }
 
     /// An error raised twice and held once reaches stderr once: holding one
