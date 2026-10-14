@@ -1,6 +1,7 @@
 //! L05: an unobservable tree end must retain state, even after target exit.
 use clap::Parser;
 use common::sim;
+use ouro_jail::lifecycle::{Integrity, VerificationScope};
 use ouro_jail::{cli, config::EnvSettings, records::*, supervisor};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,7 +30,10 @@ fn l05_unknown_tree_retains_scratch_and_never_settles() {
     // The tree's end cannot be observed: verification establishes nothing,
     // and the scratch the attempt made must stay.
     let platform = sim::ScriptedPlatform::new("L05 simulation", sim::namespace_boundary())
-        .tree(sim::unverified_tree("attempt_tree", "pending"))
+        .tree(sim::unverified_tree(
+            VerificationScope::AttemptTree,
+            Integrity::Pending,
+        ))
         .on_prepare(|plan| {
             std::fs::create_dir(plan.attempt_dir.join("scratch")).unwrap();
             std::fs::write(

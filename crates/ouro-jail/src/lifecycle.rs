@@ -1,8 +1,10 @@
 //! The lifecycle vocabulary of a receipt's `lifetime` group (§9.3, §13.2).
 //!
-//! The platform seam and the records carry these values as text. Code that
-//! decides on them reads them here: one spelling of each value, and one
-//! parse of a lifetime group into the facts a decision needs.
+//! The platform seam carries these values typed; the records carry them as
+//! text, written through [`Integrity::as_str`], [`BoundaryKind::as_str`] and
+//! [`VerificationScope::as_str`]. Code that decides on a record's text reads
+//! it here: one spelling of each value, and one parse of a lifetime group
+//! into the facts a decision needs.
 
 use crate::records::Lifetime;
 
@@ -40,6 +42,49 @@ impl Integrity {
 /// refusal tuple's value, and the only boundary value a lifecycle decision
 /// tells apart from the rest.
 pub const BOUNDARY_PENDING: &str = "pending";
+
+/// `lifetime.boundary` once a boundary exists (§13.2): the kind of boundary
+/// the platform created.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BoundaryKind {
+    /// A PID namespace whose init is the supervisor's child (contained
+    /// profiles on Linux).
+    PidNamespace,
+    /// The supervisor's own delegated execution cgroup (`none` on Linux).
+    SupervisorCgroup,
+}
+
+impl BoundaryKind {
+    /// The wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            BoundaryKind::PidNamespace => "pid_namespace",
+            BoundaryKind::SupervisorCgroup => "supervisor_cgroup",
+        }
+    }
+}
+
+/// `lifetime.verification_scope`: the tree a verification claims (§13.2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VerificationScope {
+    /// Every process of the attempt: the boundary contains them all.
+    AttemptTree,
+    /// What the registered boundary contains, and no more (`none`: a process
+    /// that left the leaf is an integrity loss, not a member).
+    RegisteredBoundary,
+}
+
+impl VerificationScope {
+    /// The wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            VerificationScope::AttemptTree => "attempt_tree",
+            VerificationScope::RegisteredBoundary => "registered_boundary",
+        }
+    }
+}
 
 /// What a lifetime group says about the end of the attempt's tree, parsed
 /// once from its text.
@@ -91,6 +136,18 @@ mod tests {
                 assert!(!value.is(text), "{value:?} {text:?}");
             }
         }
+    }
+
+    /// The spellings are the ones jail-v1 §13.2 and the receipt schema list.
+    #[test]
+    fn each_boundary_kind_and_scope_has_its_wire_spelling() {
+        assert_eq!(BoundaryKind::PidNamespace.as_str(), "pid_namespace");
+        assert_eq!(BoundaryKind::SupervisorCgroup.as_str(), "supervisor_cgroup");
+        assert_eq!(VerificationScope::AttemptTree.as_str(), "attempt_tree");
+        assert_eq!(
+            VerificationScope::RegisteredBoundary.as_str(),
+            "registered_boundary"
+        );
     }
 
     #[test]

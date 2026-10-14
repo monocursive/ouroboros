@@ -75,6 +75,7 @@ use crate::capability::{
     REQ_NETWORK_NONE, REQ_NETWORK_PROXY, REQ_SYSCALL_FILTER, REQ_TREE_TERMINATION,
 };
 use crate::environment;
+use crate::lifecycle::{BoundaryKind, VerificationScope};
 use crate::platform::{
     BoundaryIdentity, PreparedExecution, PreparedPlan, RunEvent, Sinks, TreeObservation,
 };
@@ -101,7 +102,7 @@ use super::running::{
 };
 use super::sys::set_nonblocking;
 use super::tracer::{self, Tracer};
-use super::verdict::{REGISTERED_SCOPE, observer_verdict};
+use super::verdict::observer_verdict;
 use super::watch;
 
 use super::verdict::none_verdict;
@@ -1191,8 +1192,8 @@ impl Tree for Uncontained {
             Value::from(run.launcher.start_time_ticks),
         );
         BoundaryIdentity {
-            boundary: "supervisor_cgroup".to_owned(),
-            verification_scope: REGISTERED_SCOPE.to_owned(),
+            boundary: BoundaryKind::SupervisorCgroup,
+            verification_scope: VerificationScope::RegisteredBoundary,
             native: Some(NativeLifetime {
                 os: Os::Linux,
                 details,
@@ -1391,6 +1392,7 @@ impl Tree for Uncontained {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle::Integrity;
     use std::time::Duration;
 
     #[test]
@@ -1692,7 +1694,7 @@ mod tests {
         Run::new(state, tree)
     }
 
-    fn final_integrity(boundary: &Run<Uncontained>, leaf_empty: bool) -> String {
+    fn final_integrity(boundary: &Run<Uncontained>, leaf_empty: bool) -> Integrity {
         verdict(&NoneTreeInputs {
             integrity_lost: boundary.tree.integrity_lost(),
             natural_end: true,
@@ -1715,7 +1717,7 @@ mod tests {
         assert!(control.tree.target_reaped(&control.state));
         assert!(control.tree.losses.is_empty());
         assert_eq!(control.tree.scan_leaf(), Some(false));
-        assert_eq!(final_integrity(&control, true), "verified");
+        assert_eq!(final_integrity(&control, true), Integrity::Verified);
 
         let mut failing = exited_child_boundary(&leaf, read_fails);
         failing.tree.collect_target(false);
@@ -1728,7 +1730,7 @@ mod tests {
             vec![(Subject::Target, Loss::VerificationFailed)]
         );
         assert!(failing.tree.integrity_lost());
-        assert_eq!(final_integrity(&failing, true), "lost");
+        assert_eq!(final_integrity(&failing, true), Integrity::Lost);
     }
 
     fn read_outside(_pid: libc::pid_t) -> std::io::Result<String> {
@@ -1943,7 +1945,7 @@ mod tests {
             boundary.tree.losses,
             vec![(Subject::Boundary, Loss::VerificationFailed)]
         );
-        assert_eq!(final_integrity(&boundary, false), "lost");
+        assert_eq!(final_integrity(&boundary, false), Integrity::Lost);
 
         // A replaced directory at the same path is the other loss.
         std::fs::rename(&leaf, root.path().join("moved")).unwrap();

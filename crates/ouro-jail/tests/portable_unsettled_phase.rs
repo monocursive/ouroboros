@@ -3,6 +3,7 @@
 //! whose target ended before any exec confirmation stays `prepared`, whatever
 //! the profile: the end-of-run code is shared. Simulated platform, portable.
 use clap::Parser;
+use ouro_jail::lifecycle::{Integrity, VerificationScope};
 use ouro_jail::platform::RunEvent;
 use ouro_jail::records::ErrorCode;
 use ouro_jail::{cli, config::EnvSettings, supervisor};
@@ -17,15 +18,16 @@ struct Script {
     /// Report the exec confirmation before the end.
     confirm_exec: bool,
     /// The integrity tree verification ends with.
-    integrity: &'static str,
+    integrity: Integrity,
 }
 
 impl Script {
     /// `none`'s boundary, the run as scripted, and a tree whose death was not
     /// established.
     fn platform(self) -> sim::ScriptedPlatform {
-        let platform = sim::ScriptedPlatform::new("phase simulation", sim::cgroup_boundary())
-            .tree(sim::unverified_tree("registered_boundary", self.integrity));
+        let platform = sim::ScriptedPlatform::new("phase simulation", sim::cgroup_boundary()).tree(
+            sim::unverified_tree(VerificationScope::RegisteredBoundary, self.integrity),
+        );
         if self.confirm_exec {
             platform
                 .events([RunEvent::ExecConfirmed])
@@ -90,17 +92,17 @@ fn run_keeping(script: Script) -> (tempfile::TempDir, Value) {
 
 #[test]
 fn an_unsettled_end_without_a_confirmed_exec_stays_prepared() {
-    for (integrity, expected) in [("pending", "verified"), ("lost", "lost")] {
+    for (integrity, expected) in [(Integrity::Pending, "verified"), (Integrity::Lost, "lost")] {
         let receipt = run(Script {
             confirm_exec: false,
             integrity,
         });
-        assert_eq!(receipt["phase"], "prepared", "{integrity}: {receipt:#}");
+        assert_eq!(receipt["phase"], "prepared", "{integrity:?}: {receipt:#}");
         assert_eq!(receipt["exec_observed"], false);
         assert_eq!(receipt["outcome"]["kind"], "unknown");
         assert_eq!(receipt["lifetime"]["tree_empty"], Value::Null);
         // An unknown end keeps the prepared verification; a loss stays lost.
-        assert_eq!(receipt["lifetime"]["integrity"], expected, "{integrity}");
+        assert_eq!(receipt["lifetime"]["integrity"], expected, "{integrity:?}");
     }
 }
 
@@ -108,7 +110,7 @@ fn an_unsettled_end_without_a_confirmed_exec_stays_prepared() {
 fn an_unsettled_end_after_a_confirmed_exec_stays_enforced() {
     let receipt = run(Script {
         confirm_exec: true,
-        integrity: "lost",
+        integrity: Integrity::Lost,
     });
     assert_eq!(receipt["phase"], "enforced", "{receipt:#}");
     assert_eq!(receipt["exec_observed"], true);
@@ -126,7 +128,7 @@ fn an_unsettled_end_after_a_confirmed_exec_stays_enforced() {
 fn the_receipt_note_names_the_receipt_by_its_canonical_digest() {
     let (root, receipt) = run_keeping(Script {
         confirm_exec: true,
-        integrity: "lost",
+        integrity: Integrity::Lost,
     });
     let attempts = root.path().canonicalize().unwrap().join("data/attempts");
     let attempt = std::fs::read_dir(&attempts)

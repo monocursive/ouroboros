@@ -660,7 +660,7 @@ mod tests {
             phase: crate::records::Phase::Enforced,
             tree_end: crate::lifecycle::TreeEnd::from_text(
                 crate::lifecycle::Integrity::Verified.as_str(),
-                "pid_namespace",
+                crate::lifecycle::BoundaryKind::PidNamespace.as_str(),
                 tree_empty,
             ),
             boot_id: Some(BOOT.to_owned()),

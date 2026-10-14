@@ -32,7 +32,7 @@ use crate::cleanup;
 use crate::cli::{DoctorArgs, ExplainArgs, PolicyArgs, RunArgs};
 use crate::config::{self, EnvSettings};
 use crate::launch_profile;
-use crate::lifecycle::{BOUNDARY_PENDING, Integrity, TreeEnd};
+use crate::lifecycle::{Integrity, TreeEnd};
 use crate::network::NetworkMode;
 use crate::observer::CoverageClass;
 use crate::platform::{
@@ -1477,11 +1477,11 @@ fn apply_boundary(record: &mut AttemptRecord, boundary: &BoundaryIdentity, profi
         Containment::None
     };
     record.lifetime = Lifetime {
-        boundary: boundary.boundary.clone(),
+        boundary: boundary.boundary.as_str().to_owned(),
         native: boundary.native.clone(),
         tree_empty: None,
         verified_at: None,
-        verification_scope: Some(boundary.verification_scope.clone()),
+        verification_scope: Some(boundary.verification_scope.as_str().to_owned()),
         integrity: Integrity::Verified.as_str().to_owned(),
     };
     record.process = boundary.process.clone();
@@ -2015,7 +2015,7 @@ fn record_teardown(record: &mut AttemptRecord, teardown: &Result<Teardown, JailE
             record.errors.push(error.to_object());
             record.lifetime.tree_empty = None;
             record.lifetime.verified_at = None;
-            if record.lifetime.boundary != BOUNDARY_PENDING {
+            if !TreeEnd::of(&record.lifetime).no_boundary {
                 record.lifetime.integrity = Integrity::Lost.as_str().to_owned();
             }
         }
@@ -2380,8 +2380,8 @@ fn forbidden_identities(
 fn record_tree(record: &mut AttemptRecord, tree: &crate::platform::TreeObservation) {
     record.lifetime.tree_empty = tree.tree_empty;
     record.lifetime.verified_at = tree.verified_at.map(rfc3339_utc);
-    record.lifetime.verification_scope = Some(tree.verification_scope.clone());
-    record.lifetime.integrity.clone_from(&tree.integrity);
+    record.lifetime.verification_scope = Some(tree.verification_scope.as_str().to_owned());
+    record.lifetime.integrity = tree.integrity.as_str().to_owned();
 }
 
 /// Retains registered vendor state, recording `reason`, why it waits (§12:
@@ -2930,8 +2930,8 @@ fn register_boundary_in_state(
 ) -> Result<(), JailError> {
     state::update_attempt_state(state::Site::Boundary, attempt_dir, |state| {
         state.boundary = state::Field::Set(serde_json::json!({
-            "kind": boundary.boundary,
-            "verification_scope": boundary.verification_scope,
+            "kind": boundary.boundary.as_str(),
+            "verification_scope": boundary.verification_scope.as_str(),
             "backend": boundary.backend,
             "backend_version": boundary.backend_version,
             "process": boundary.process,

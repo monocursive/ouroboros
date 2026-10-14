@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser as _;
 use ouro_jail::cli;
 use ouro_jail::config::EnvSettings;
+use ouro_jail::lifecycle::VerificationScope;
 use ouro_jail::supervisor;
 
 mod common;
@@ -59,7 +60,7 @@ fn run_in_process() -> supervisor::RunReport {
         // tree is verified empty.
         platform: Box::new(
             sim::ScriptedPlatform::new("in-process simulation", sim::namespace_boundary())
-                .abort_tree(sim::verified_tree("attempt_tree")),
+                .abort_tree(sim::verified_tree(VerificationScope::AttemptTree)),
         ),
         env_settings: EnvSettings {
             config_dir: Some(root.join("config")),

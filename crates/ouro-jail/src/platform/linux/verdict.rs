@@ -2,6 +2,7 @@
 
 use std::time::SystemTime;
 
+use crate::lifecycle::{Integrity, VerificationScope};
 use crate::platform::TreeObservation;
 
 use super::tracer::TracerSummary;
@@ -68,15 +69,15 @@ pub fn verdict(inputs: &TreeInputs) -> TreeObservation {
         TreeObservation {
             tree_empty: Some(true),
             verified_at: Some(SystemTime::now()),
-            verification_scope: "attempt_tree".to_owned(),
-            integrity: "verified".to_owned(),
+            verification_scope: VerificationScope::AttemptTree,
+            integrity: Integrity::Verified,
         }
     } else {
         TreeObservation {
             tree_empty: None,
             verified_at: None,
-            verification_scope: "attempt_tree".to_owned(),
-            integrity: "pending".to_owned(),
+            verification_scope: VerificationScope::AttemptTree,
+            integrity: Integrity::Pending,
         }
     }
 }
@@ -133,9 +134,6 @@ pub fn abort_verdict(inputs: &AbortInputs) -> bool {
         && children_accounted
 }
 
-/// The one verification scope a `none` receipt can carry (§13.2).
-pub(super) const REGISTERED_SCOPE: &str = "registered_boundary";
-
 /// What is known about a `none` tree when verification ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoneTreeInputs {
@@ -164,8 +162,8 @@ pub fn none_verdict(inputs: &NoneTreeInputs) -> TreeObservation {
         return TreeObservation {
             tree_empty: None,
             verified_at: None,
-            verification_scope: REGISTERED_SCOPE.to_owned(),
-            integrity: "lost".to_owned(),
+            verification_scope: VerificationScope::RegisteredBoundary,
+            integrity: Integrity::Lost,
         };
     }
     if inputs.natural_end
@@ -176,15 +174,15 @@ pub fn none_verdict(inputs: &NoneTreeInputs) -> TreeObservation {
         return TreeObservation {
             tree_empty: Some(true),
             verified_at: Some(SystemTime::now()),
-            verification_scope: REGISTERED_SCOPE.to_owned(),
-            integrity: "verified".to_owned(),
+            verification_scope: VerificationScope::RegisteredBoundary,
+            integrity: Integrity::Verified,
         };
     }
     TreeObservation {
         tree_empty: None,
         verified_at: None,
-        verification_scope: REGISTERED_SCOPE.to_owned(),
-        integrity: "pending".to_owned(),
+        verification_scope: VerificationScope::RegisteredBoundary,
+        integrity: Integrity::Pending,
     }
 }
 
@@ -238,7 +236,7 @@ mod tests {
         };
         let verified = verdict(&seen);
         assert_eq!(verified.tree_empty, Some(true));
-        assert_eq!(verified.integrity, "verified");
+        assert_eq!(verified.integrity, Integrity::Verified);
         assert!(verified.verified_at.is_some());
 
         // Security 2026-09-27 (audit 3 A5): wrong-guess trace stops are carried
@@ -313,8 +311,12 @@ mod tests {
             let observation = verdict(&inputs);
             assert_eq!(observation.tree_empty, None, "{why}");
             assert_eq!(observation.verified_at, None, "{why}");
-            assert_ne!(observation.integrity, "verified", "{why}");
-            assert_eq!(observation.verification_scope, "attempt_tree", "{why}");
+            assert_ne!(observation.integrity, Integrity::Verified, "{why}");
+            assert_eq!(
+                observation.verification_scope,
+                VerificationScope::AttemptTree,
+                "{why}"
+            );
         }
     }
 
@@ -399,8 +401,11 @@ mod tests {
         let observed = none_verdict(&clean());
         assert_eq!(observed.tree_empty, Some(true));
         assert!(observed.verified_at.is_some());
-        assert_eq!(observed.integrity, "verified");
-        assert_eq!(observed.verification_scope, "registered_boundary");
+        assert_eq!(observed.integrity, Integrity::Verified);
+        assert_eq!(
+            observed.verification_scope,
+            VerificationScope::RegisteredBoundary
+        );
     }
 
     #[test]
@@ -411,8 +416,11 @@ mod tests {
         });
         assert_eq!(observed.tree_empty, None);
         assert_eq!(observed.verified_at, None);
-        assert_eq!(observed.integrity, "lost");
-        assert_eq!(observed.verification_scope, "registered_boundary");
+        assert_eq!(observed.integrity, Integrity::Lost);
+        assert_eq!(
+            observed.verification_scope,
+            VerificationScope::RegisteredBoundary
+        );
     }
 
     #[test]
@@ -450,7 +458,7 @@ mod tests {
             let observed = none_verdict(&inputs);
             assert_eq!(observed.tree_empty, None, "{why}");
             assert_eq!(observed.verified_at, None, "{why}");
-            assert_eq!(observed.integrity, "pending", "{why}");
+            assert_eq!(observed.integrity, Integrity::Pending, "{why}");
         }
     }
 }

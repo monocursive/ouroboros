@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use clap::Parser as _;
 use ouro_jail::capability::Capability;
 use ouro_jail::config::EnvSettings;
+use ouro_jail::lifecycle::{BoundaryKind, Integrity, VerificationScope};
 use ouro_jail::observer::CoverageSummary;
 use ouro_jail::platform::{
     BoundaryIdentity, Deadline, OwnerIdentity, PlanRequest, Platform, PlatformIdentity,
@@ -91,7 +92,7 @@ impl Sim {
 }
 
 fn verified_tree() -> TreeObservation {
-    sim::verified_tree("attempt_tree")
+    sim::verified_tree(VerificationScope::AttemptTree)
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -124,8 +125,8 @@ struct SimPrepared(Sim);
 impl PreparedExecution for SimPrepared {
     fn boundary(&self) -> BoundaryIdentity {
         BoundaryIdentity {
-            boundary: "pid_namespace".into(),
-            verification_scope: "attempt_tree".into(),
+            boundary: BoundaryKind::PidNamespace,
+            verification_scope: VerificationScope::AttemptTree,
             native: Some(NativeLifetime {
                 os: Os::Linux,
                 details: serde_json::Map::default(),
@@ -256,8 +257,8 @@ impl RunningExecution for SimRunning {
             return TreeObservation {
                 tree_empty: None,
                 verified_at: None,
-                verification_scope: "attempt_tree".into(),
-                integrity: "lost".into(),
+                verification_scope: VerificationScope::AttemptTree,
+                integrity: Integrity::Lost,
             };
         }
         verified_tree()

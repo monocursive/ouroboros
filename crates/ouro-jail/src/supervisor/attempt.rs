@@ -816,8 +816,7 @@ impl<'a> Attempt<'a> {
         // (§8.1).
         let prepared_integrity = self.record.lifetime.integrity.clone();
         record_tree(&mut self.record, &tree);
-        let settled = tree.tree_empty == Some(true)
-            && Integrity::Verified.is(&self.record.lifetime.integrity);
+        let settled = tree.tree_empty == Some(true) && tree.integrity == Integrity::Verified;
         // §13.2: "If tree death itself is unknown, retain the last nonsettled
         // phase and update its outcome/coverage/error as unknown." `enforced`
         // is the phase after a confirmed target exec (§8.1).
@@ -830,7 +829,7 @@ impl<'a> Attempt<'a> {
             // `prepared`. Its integrity stays the prepared one unless a loss
             // was detected: an unknown tree end does not unmake the verified
             // boundary.
-            if Integrity::Pending.is(&self.record.lifetime.integrity) {
+            if tree.integrity == Integrity::Pending {
                 self.record.lifetime.integrity = prepared_integrity;
             }
             Phase::Prepared

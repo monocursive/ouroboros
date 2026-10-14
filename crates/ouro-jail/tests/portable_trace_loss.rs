@@ -28,6 +28,7 @@ use std::time::{Duration, SystemTime};
 use clap::Parser as _;
 use ouro_jail::capability::Capability;
 use ouro_jail::config::EnvSettings;
+use ouro_jail::lifecycle::{Integrity, VerificationScope};
 use ouro_jail::platform::{
     BoundaryIdentity, Deadline, OwnerIdentity, PlanRequest, Platform, PlatformIdentity,
     PreparedExecution, PreparedPlan, RunEvent, RunningExecution, Sinks, StopReason, Teardown,
@@ -80,7 +81,7 @@ struct Script {
     steps: Vec<Step>,
     /// The integrity tree verification ends with: `verified` settles,
     /// `lost` leaves the attempt unsettled.
-    integrity: &'static str,
+    integrity: Integrity,
     data: PathBuf,
     /// `jail.json` as it was on disk when the observer's final account was
     /// read (after the tree's end and the receipts still in flight, before
@@ -193,12 +194,12 @@ impl RunningExecution for Running {
         if self.script.fill_at_settlement {
             exhaust(self.trace.as_ref().expect("a trace sink"));
         }
-        let settled = self.script.integrity == "verified";
+        let settled = self.script.integrity == Integrity::Verified;
         TreeObservation {
             tree_empty: settled.then_some(true),
             verified_at: settled.then(SystemTime::now),
-            verification_scope: "registered_boundary".into(),
-            integrity: self.script.integrity.into(),
+            verification_scope: VerificationScope::RegisteredBoundary,
+            integrity: self.script.integrity,
         }
     }
     fn observer_summary(&mut self) -> Option<ouro_jail::observer::CoverageSummary> {
@@ -282,13 +283,13 @@ fn observed_summary() -> ouro_jail::observer::CoverageSummary {
     }
 }
 
-fn run(steps: &[Step], integrity: &'static str) -> Outcome {
+fn run(steps: &[Step], integrity: Integrity) -> Outcome {
     run_script(steps, integrity, false, false)
 }
 
 fn run_script(
     steps: &[Step],
-    integrity: &'static str,
+    integrity: Integrity,
     observed: bool,
     fill_at_settlement: bool,
 ) -> Outcome {
@@ -438,16 +439,19 @@ fn assert_trace_loss_recorded(label: &str, receipt: &Value) -> usize {
 #[test]
 fn j4_w2s_a_an_unsettled_attempts_final_receipt_note_uses_the_reserve() {
     let _serial = serial();
-    for (integrity, phase) in [("verified", "settled"), ("lost", "enforced")] {
+    for (integrity, phase) in [
+        (Integrity::Verified, "settled"),
+        (Integrity::Lost, "enforced"),
+    ] {
         let outcome = run(&[Step::Exec, Step::Fill, Step::Signaled], integrity);
-        assert_eq!(outcome.receipt["phase"], phase, "{integrity}");
+        assert_eq!(outcome.receipt["phase"], phase, "{integrity:?}");
         assert!(
             outcome.receipt["errors"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|error| error["code"] == "evidence_lost"),
-            "{integrity}: the payload was exhausted: {:#}",
+            "{integrity:?}: the payload was exhausted: {:#}",
             outcome.receipt["errors"]
         );
         let notes: Vec<&Value> = outcome
@@ -463,7 +467,7 @@ fn j4_w2s_a_an_unsettled_attempts_final_receipt_note_uses_the_reserve() {
                 && digests(&outcome.receipt)
                     .iter()
                     .any(|known| known == digest)),
-            "{integrity}: the trace must end on the final {phase} receipt's note, not on its \
+            "{integrity:?}: the trace must end on the final {phase} receipt's note, not on its \
              last frame {:#} ({:?}); receipt notes: {notes:?}",
             outcome.trace.frames.last().unwrap(),
             outcome.trace.state
@@ -481,7 +485,10 @@ fn j4_w2s_a_an_unsettled_attempts_final_receipt_note_uses_the_reserve() {
 #[test]
 fn j4_w2s_b_a_refusal_after_a_taken_trace_loss_records_it_in_coverage() {
     let _serial = serial();
-    let outcome = run(&[Step::Fill, Step::Poll, Step::ExecError], "verified");
+    let outcome = run(
+        &[Step::Fill, Step::Poll, Step::ExecError],
+        Integrity::Verified,
+    );
     assert_eq!(outcome.receipt["phase"], "refused");
     assert_eq!(outcome.receipt["outcome"]["kind"], "exec_error");
     assert!(
@@ -505,7 +512,7 @@ fn j4_w2s_b_the_enforced_receipt_after_a_trace_loss_records_it_in_coverage() {
     let _serial = serial();
     let outcome = run(
         &[Step::Fill, Step::Poll, Step::Exec, Step::Exited],
-        "verified",
+        Integrity::Verified,
     );
     let enforced = outcome
         .before_settlement
@@ -568,7 +575,7 @@ fn j4_w3_p4_a_trace_loss_is_reported_once() {
             true,
         ),
     ] {
-        let outcome = run_script(steps, "verified", true, at_settlement);
+        let outcome = run_script(steps, Integrity::Verified, true, at_settlement);
         let errors = evidence_lost(&outcome.receipt);
         if errors.len() != 1 || errors[0].contains("coverage was lost by settlement") {
             problems.push(format!(
@@ -593,7 +600,7 @@ fn j4_w3_a_trace_loss_leaves_the_limits_class_alone() {
     let _serial = serial();
     let outcome = run_script(
         &[Step::Exec, Step::Fill, Step::Poll, Step::Exited],
-        "verified",
+        Integrity::Verified,
         true,
         false,
     );

@@ -1520,7 +1520,7 @@ mod tests {
             coverage: CoverageSummary::unobserved().to_coverage(),
             process: None,
             lifetime: Lifetime {
-                boundary: "pid_namespace".into(),
+                boundary: crate::lifecycle::BoundaryKind::PidNamespace.as_str().into(),
                 ..Lifetime::pending()
             },
             outcome: Outcome::pending(),

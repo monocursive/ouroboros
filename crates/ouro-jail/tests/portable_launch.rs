@@ -27,6 +27,7 @@ use ouro_jail::capability::Capability;
 use ouro_jail::cli::{self, PolicyArgs, Selection};
 use ouro_jail::config::EnvSettings;
 use ouro_jail::credentials::LaunchHandoff;
+use ouro_jail::lifecycle::{BoundaryKind, Integrity, VerificationScope};
 use ouro_jail::platform::{
     BoundaryIdentity, Deadline, OwnerIdentity, PlanRequest, Platform, PlatformIdentity,
     PreparedExecution, PreparedPlan, RunEvent, RunningExecution, Sinks, StopReason, Teardown,
@@ -277,7 +278,7 @@ struct Sim {
 }
 
 fn verified_tree() -> TreeObservation {
-    sim::verified_tree("attempt_tree")
+    sim::verified_tree(VerificationScope::AttemptTree)
 }
 
 impl Platform for Sim {
@@ -345,8 +346,8 @@ struct SimPrepared {
 impl PreparedExecution for SimPrepared {
     fn boundary(&self) -> BoundaryIdentity {
         BoundaryIdentity {
-            boundary: "pid_namespace".into(),
-            verification_scope: "attempt_tree".into(),
+            boundary: BoundaryKind::PidNamespace,
+            verification_scope: VerificationScope::AttemptTree,
             native: Some(NativeLifetime {
                 os: Os::Linux,
                 details: Default::default(),
@@ -402,8 +403,8 @@ impl PreparedExecution for SimPrepared {
                 Some(TreeObservation {
                     tree_empty: None,
                     verified_at: None,
-                    verification_scope: "attempt_tree".into(),
-                    integrity: "lost".into(),
+                    verification_scope: VerificationScope::AttemptTree,
+                    integrity: Integrity::Lost,
                 })
             } else {
                 self.sim.release_teardown_verified.then(verified_tree)
@@ -454,8 +455,8 @@ impl RunningExecution for SimRunning {
             TreeEnd::Unknown => TreeObservation {
                 tree_empty: None,
                 verified_at: None,
-                verification_scope: "attempt_tree".into(),
-                integrity: "pending".into(),
+                verification_scope: VerificationScope::AttemptTree,
+                integrity: Integrity::Pending,
             },
         }
     }

@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::capability::Capability;
+use crate::lifecycle::{BoundaryKind, Integrity, VerificationScope};
 use crate::policy::PolicySnapshot;
 use crate::records::{JailError, NativeLifetime, Os, ProcessRecord};
 use crate::trace::SharedTrace;
@@ -201,11 +202,10 @@ impl std::fmt::Debug for Sinks {
 /// The identity of the boundary a prepared execution created (§4).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BoundaryIdentity {
-    /// `pid_namespace`, `supervisor_cgroup` or `native_tree`.
-    pub boundary: String,
-    /// The scope tree verification will claim: `attempt_tree` or
-    /// `registered_boundary`.
-    pub verification_scope: String,
+    /// The kind of boundary.
+    pub boundary: BoundaryKind,
+    /// The scope tree verification will claim.
+    pub verification_scope: VerificationScope,
     /// OS-tagged native identities.
     pub native: Option<NativeLifetime>,
     /// The blocked launcher's stable identity.
@@ -368,10 +368,10 @@ pub struct TreeObservation {
     pub tree_empty: Option<bool>,
     /// When verification completed, only with a non-null `tree_empty`.
     pub verified_at: Option<SystemTime>,
-    /// `attempt_tree` or `registered_boundary`.
-    pub verification_scope: String,
-    /// `pending`, `verified` or `lost`.
-    pub integrity: String,
+    /// The scope the verification claims.
+    pub verification_scope: VerificationScope,
+    /// The boundary's integrity at the end.
+    pub integrity: Integrity,
 }
 
 /// What an aborted preparation left behind.

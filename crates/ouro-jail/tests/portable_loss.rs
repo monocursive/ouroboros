@@ -34,6 +34,7 @@ use std::time::{Duration, SystemTime};
 use clap::Parser as _;
 use ouro_jail::capability::Capability;
 use ouro_jail::config::EnvSettings;
+use ouro_jail::lifecycle::{BoundaryKind, Integrity, VerificationScope};
 use ouro_jail::observer::{ClassSummary, CoverageClass, CoverageSummary};
 use ouro_jail::platform::{
     BoundaryIdentity, Deadline, OwnerIdentity, PlanRequest, Platform, PlatformIdentity,
@@ -110,11 +111,11 @@ impl Platform for Simulated {
 }
 
 /// The verification scope of the simulated boundary.
-fn scope(contained: bool) -> &'static str {
+fn scope(contained: bool) -> VerificationScope {
     if contained {
-        "attempt_tree"
+        VerificationScope::AttemptTree
     } else {
-        "registered_boundary"
+        VerificationScope::RegisteredBoundary
     }
 }
 
@@ -122,12 +123,11 @@ impl PreparedExecution for Prepared {
     fn boundary(&self) -> BoundaryIdentity {
         BoundaryIdentity {
             boundary: if self.0.contained {
-                "pid_namespace"
+                BoundaryKind::PidNamespace
             } else {
-                "supervisor_cgroup"
-            }
-            .into(),
-            verification_scope: scope(self.0.contained).into(),
+                BoundaryKind::SupervisorCgroup
+            },
+            verification_scope: scope(self.0.contained),
             native: Some(NativeLifetime {
                 os: Os::Linux,
                 details: Default::default(),
@@ -236,8 +236,8 @@ impl RunningExecution for Running {
         TreeObservation {
             tree_empty: Some(true),
             verified_at: Some(SystemTime::now()),
-            verification_scope: scope(self.script.contained).into(),
-            integrity: "verified".into(),
+            verification_scope: scope(self.script.contained),
+            integrity: Integrity::Verified,
         }
     }
     fn observer_summary(&mut self) -> Option<CoverageSummary> {

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use ouro_jail::capability::{Capability, CapabilityScope, CapabilityStatus};
+use ouro_jail::lifecycle::{BoundaryKind, Integrity, VerificationScope};
 use ouro_jail::observer::CoverageSummary;
 use ouro_jail::platform::{
     BoundaryIdentity, Deadline, OwnerIdentity, PlanRequest, Platform, PlatformIdentity,
@@ -79,8 +80,8 @@ pub fn available(plan: &PlanRequest, evidence: &str) -> Vec<Capability> {
 #[must_use]
 pub fn namespace_boundary() -> BoundaryIdentity {
     BoundaryIdentity {
-        boundary: "pid_namespace".into(),
-        verification_scope: "attempt_tree".into(),
+        boundary: BoundaryKind::PidNamespace,
+        verification_scope: VerificationScope::AttemptTree,
         native: Some(NativeLifetime {
             os: Os::Linux,
             details: serde_json::Map::default(),
@@ -96,8 +97,8 @@ pub fn namespace_boundary() -> BoundaryIdentity {
 #[must_use]
 pub fn cgroup_boundary() -> BoundaryIdentity {
     BoundaryIdentity {
-        boundary: "supervisor_cgroup".into(),
-        verification_scope: "registered_boundary".into(),
+        boundary: BoundaryKind::SupervisorCgroup,
+        verification_scope: VerificationScope::RegisteredBoundary,
         native: Some(NativeLifetime {
             os: Os::Linux,
             details: serde_json::Map::default(),
@@ -142,23 +143,23 @@ pub fn contained_applied(network: &str) -> Applied {
 
 /// A tree verified empty now, over `scope`.
 #[must_use]
-pub fn verified_tree(scope: &str) -> TreeObservation {
+pub fn verified_tree(scope: VerificationScope) -> TreeObservation {
     TreeObservation {
         tree_empty: Some(true),
         verified_at: Some(SystemTime::now()),
-        verification_scope: scope.into(),
-        integrity: "verified".into(),
+        verification_scope: scope,
+        integrity: Integrity::Verified,
     }
 }
 
 /// A tree whose death was not established, over `scope`, with `integrity`.
 #[must_use]
-pub fn unverified_tree(scope: &str, integrity: &str) -> TreeObservation {
+pub fn unverified_tree(scope: VerificationScope, integrity: Integrity) -> TreeObservation {
     TreeObservation {
         tree_empty: None,
         verified_at: None,
-        verification_scope: scope.into(),
-        integrity: integrity.into(),
+        verification_scope: scope,
+        integrity,
     }
 }
 
@@ -207,7 +208,7 @@ impl ScriptedPlatform {
     /// verified empty over the boundary's own scope.
     #[must_use]
     pub fn new(evidence: &'static str, boundary: BoundaryIdentity) -> ScriptedPlatform {
-        let tree = verified_tree(&boundary.verification_scope);
+        let tree = verified_tree(boundary.verification_scope);
         ScriptedPlatform {
             evidence,
             boundary,

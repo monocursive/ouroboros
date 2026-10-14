@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{Map, Value};
 
+use crate::lifecycle::{BoundaryKind, Integrity, VerificationScope};
 use crate::observer::CoverageSummary;
 use crate::platform::{BoundaryIdentity, PreparedPlan, RunEvent, Sinks, TreeObservation};
 use crate::policy::{PolicySnapshot, ProfileName, ProtectedCoverage, ScratchRoot};
@@ -481,15 +482,19 @@ impl Started {
             TreeObservation {
                 tree_empty: Some(true),
                 verified_at: Some(SystemTime::now()),
-                verification_scope: "attempt_tree".to_owned(),
-                integrity: "verified".to_owned(),
+                verification_scope: VerificationScope::AttemptTree,
+                integrity: Integrity::Verified,
             }
         } else {
             TreeObservation {
                 tree_empty: None,
                 verified_at: None,
-                verification_scope: "attempt_tree".to_owned(),
-                integrity: if self.cgroup_lost { "lost" } else { "pending" }.to_owned(),
+                verification_scope: VerificationScope::AttemptTree,
+                integrity: if self.cgroup_lost {
+                    Integrity::Lost
+                } else {
+                    Integrity::Pending
+                },
             }
         }
     }
@@ -2569,8 +2574,8 @@ impl Tree for Boundary {
             Value::from(run.launcher.start_time_ticks),
         );
         BoundaryIdentity {
-            boundary: "pid_namespace".to_owned(),
-            verification_scope: "attempt_tree".to_owned(),
+            boundary: BoundaryKind::PidNamespace,
+            verification_scope: VerificationScope::AttemptTree,
             native: Some(NativeLifetime {
                 os: Os::Linux,
                 details,
@@ -2784,11 +2789,10 @@ impl Tree for Boundary {
             tree.tree_empty = None;
             tree.verified_at = None;
             tree.integrity = if self.started.cgroup_lost {
-                "lost"
+                Integrity::Lost
             } else {
-                "pending"
-            }
-            .to_owned();
+                Integrity::Pending
+            };
         }
         tree
     }
