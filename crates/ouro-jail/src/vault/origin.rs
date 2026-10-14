@@ -6,10 +6,9 @@
 //! calling process before it connects ([`Origins::prepare`]) and, once the
 //! connect succeeded, publishes what it established under the connection's
 //! key, its whole loopback 4-tuple ([`Origins::connected`]): the pinned
-//! process, or why there is none.
-//! The sealed bridge writes the same key ahead of the stream it relays
-//! ([`preamble`]), and the proxy claims the outcome published under exactly
-//! that key ([`Origins::receive`]). TCP accept and the preamble can beat the
+//! process, or why there is none. The sealed bridge writes the same key
+//! ahead of the stream it relays ([`preamble`]), and the proxy claims the
+//! outcome published under exactly that key ([`Origins::receive`]). TCP accept and the preamble can beat the
 //! publication, so the proxy waits for it, at most [`RENDEZVOUS`]; because
 //! every completed bridge connect publishes, refusals included, the wait
 //! ends as soon as the mediator is done.
@@ -449,9 +448,11 @@ fn bridge_port(port: u16) -> bool {
 #[cfg(target_os = "linux")]
 fn bridge_key(socket: BorrowedFd<'_>) -> Option<Key> {
     use std::os::fd::FromRawFd as _;
-    // SAFETY: the stream never owns the descriptor: `ManuallyDrop` keeps it
-    // from closing it, and the borrow keeps it open while the stream lives.
-    // It is an internet socket, the only kind the mediator prepares for.
+    // SAFETY: `from_raw_fd` needs an open descriptor, which the borrow
+    // guarantees while the stream lives, and `ManuallyDrop` keeps the stream
+    // from closing a descriptor it does not own. Only its address queries
+    // are used, which any socket answers (one that is not an internet socket
+    // fails them).
     let stream = std::mem::ManuallyDrop::new(unsafe { TcpStream::from_raw_fd(socket.as_raw_fd()) });
     let (local, peer) = (stream.local_addr().ok()?, stream.peer_addr().ok()?);
     let loopback = IpAddr::V4(crate::platform::linux::bridge::LOOPBACK);
