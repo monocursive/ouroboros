@@ -10,9 +10,11 @@ defmodule OuroFleet.ClientTest do
       do: GenServer.start_link(__MODULE__, version, name: OuroFleet.Controller)
 
     def init(version), do: {:ok, %{version: version, seen: []}}
-    def handle_call(:version, _, state), do: {:reply, {:ok, state.version}, state}
 
-    def handle_call(message, _, state),
+    def handle_call({:call, :version, _deadline}, _, state),
+      do: {:reply, {:ok, state.version}, state}
+
+    def handle_call({:call, message, _deadline}, _, state),
       do: {:reply, {:ok, "ran"}, %{state | seen: [message | state.seen]}}
   end
 

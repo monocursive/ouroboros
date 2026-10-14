@@ -2,17 +2,34 @@ defmodule OuroFleet.Controller do
   @moduledoc "Durable placement identity. An unreachable worker is never replaced."
   use GenServer
   alias OuroFleet.{InvalidRequest, Protocol, Request, Store, Worker}
+
+  # How long a caller waits for any reply.
+  @call_timeout 180_000
+  # Remote work stops this long before the caller gives up, leaving time to persist what
+  # was observed and to reply.
+  @reply_margin 10_000
+  # No single worker call waits longer than this, whatever budget remains.
+  @rpc_timeout 125_000
+  # A worker's status batch ends this long before the call carrying it would time out,
+  # so its reply, with whatever it read, still arrives.
+  @worker_margin 5_000
+
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)
-  def call(message), do: GenServer.call(__MODULE__, message, 180_000)
+
+  def call(message) do
+    # Taken before queueing, so time spent behind another operation counts too.
+    deadline = System.monotonic_time(:millisecond) + @call_timeout - @reply_margin
+    GenServer.call(__MODULE__, {:call, message, deadline}, @call_timeout)
+  end
 
   def init(config) do
     jobs = Store.directory!(Path.join(config["state"], "jobs"))
     {:ok, Map.put(config, "jobs", jobs)}
   end
 
-  def handle_call(message, _from, config) do
+  def handle_call({:call, message, deadline}, _from, config) do
     try do
-      {:reply, dispatch(message, config), config}
+      {:reply, dispatch(message, config, deadline), config}
     rescue
       # Malformed input wrote nothing; refusing it must not restart this node.
       InvalidRequest ->
@@ -24,7 +41,7 @@ defmodule OuroFleet.Controller do
     end
   end
 
-  defp dispatch({:run, input}, config) do
+  defp dispatch({:run, input}, config, deadline) do
     request = Request.validate!(input)
     digest = Store.digest(request)
 
@@ -46,7 +63,7 @@ defmodule OuroFleet.Controller do
         candidates = Enum.filter(config["members"], &(request["on"] in ["auto", &1["machine"]]))
 
         plans =
-          Enum.map(candidates, fn member -> {member, rpc(member, {:plan, key, request})} end)
+          Enum.map(candidates, &{&1, rpc(&1, {:plan, key, request}, deadline)})
 
         eligible =
           for {member, {:ok, plan}} <- plans,
@@ -77,51 +94,66 @@ defmodule OuroFleet.Controller do
                 "snapshot" => nil
               })
 
-            submit(config, row, request)
+            submit(config, row, request, deadline)
         end
 
       row ->
-        submit(config, row, request)
+        submit(config, row, request, deadline)
     end
   end
 
-  defp dispatch({:status, key}, config) do
-    row = Store.read!(checkpoint(config, key))
-    if is_nil(row), do: {:error, "unknown_job"}, else: refresh(config, row)
+  defp dispatch({:status, key}, config, deadline) do
+    case Store.read!(checkpoint(config, key)) do
+      nil -> {:error, "unknown_job"}
+      row -> {:ok, observe(config, row, rpc(row["worker"], {:status, key}, deadline))}
+    end
   end
 
-  defp dispatch({:kill, key}, config), do: route(config, key, {:kill, key})
-  defp dispatch({:ledger, key, flags}, config), do: route(config, key, {:ledger, key, flags})
+  defp dispatch({:kill, key}, config, deadline), do: route(config, key, {:kill, key}, deadline)
 
-  defp dispatch(:status, config) do
-    jobs = Path.wildcard(Path.join(config["jobs"], "job_*.json"))
-    if length(jobs) > 4096, do: raise("job catalog exceeds bounded scan")
+  defp dispatch({:ledger, key, flags}, config, deadline),
+    do: route(config, key, {:ledger, key, flags}, deadline)
 
-    {:ok,
-     Enum.map(jobs, fn path ->
-       {:ok, status} = refresh(config, Store.read!(path))
-       status
-     end)}
+  defp dispatch(:status, config, deadline) do
+    paths = Path.wildcard(Path.join(config["jobs"], "job_*.json"))
+
+    if length(paths) > 4096 do
+      {:error, "job_catalog_exceeds_bounded_scan"}
+    else
+      rows = Enum.map(paths, &Store.read!/1)
+
+      # One status batch per worker rather than one call per job, so a catalog refresh
+      # costs what the number of machines costs, not what the history costs.
+      replies =
+        rows
+        |> Enum.group_by(& &1["worker"]["node"])
+        |> Enum.flat_map(fn {_node, [row | _] = group} ->
+          statuses(row["worker"], Enum.map(group, & &1["job_id"]), deadline)
+        end)
+        |> Map.new()
+
+      {:ok, Enum.map(rows, &observe(config, &1, replies[&1["job_id"]]))}
+    end
   end
 
-  defp dispatch(:doctor, config) do
+  defp dispatch(:doctor, config, deadline) do
     {:ok,
      Enum.map(config["members"], fn member ->
-       case rpc(member, :doctor) do
+       case rpc(member, :doctor, deadline) do
          {:ok, health} -> Map.merge(health, %{"machine" => member["machine"], "rpc" => "ready"})
          {:error, reason} -> %{"machine" => member["machine"], "rpc" => reason}
        end
      end)}
   end
 
-  defp dispatch(:version, _), do: {:ok, Protocol.version()}
+  defp dispatch(:version, _, _), do: {:ok, Protocol.version()}
 
-  defp dispatch(_, _), do: {:error, "unsupported_controller_operation"}
+  defp dispatch(_, _, _), do: {:error, "unsupported_controller_operation"}
 
-  defp submit(config, row, request) do
-    case rpc(row["worker"], {:submit, row["job_id"], request, row["resolved"]}) do
+  defp submit(config, row, request, deadline) do
+    case rpc(row["worker"], {:submit, row["job_id"], request, row["resolved"]}, deadline) do
       {:ok, snapshot} ->
-        Store.write!(checkpoint(config, row["job_id"]), Map.put(row, "snapshot", snapshot))
+        remember(config, row, snapshot)
 
         {:ok,
          Map.merge(snapshot, %{"worker" => row["worker"]["machine"], "job_id" => row["job_id"]})}
@@ -139,29 +171,46 @@ defmodule OuroFleet.Controller do
     end
   end
 
-  defp refresh(config, row) do
-    case rpc(row["worker"], {:status, row["job_id"]}) do
-      {:ok, snapshot} ->
-        Store.write!(checkpoint(config, row["job_id"]), Map.put(row, "snapshot", snapshot))
-        {:ok, Map.merge(snapshot, %{"worker" => row["worker"]["machine"], "stale" => false})}
+  # Each key's reply from one worker; a failed batch is that failure for every key.
+  defp statuses(member, keys, deadline) do
+    left = min(deadline - System.monotonic_time(:millisecond), @rpc_timeout)
 
-      {:error, problem} ->
-        {:ok,
-         %{
-           "job_id" => row["job_id"],
-           "worker" => row["worker"]["machine"],
-           "reachability" => "unreachable",
-           "stale" => true,
-           "reason" => problem,
-           "last_observed" => row["snapshot"]
-         }}
-    end
+    replies =
+      case rpc(member, {:statuses, keys, left - @worker_margin}, deadline) do
+        {:ok, replies} when is_map(replies) -> replies
+        {:error, _} = failure -> Map.new(keys, &{&1, failure})
+      end
+
+    Enum.map(keys, &{&1, Map.get(replies, &1, {:error, "worker_reply_incomplete"})})
   end
 
-  defp route(config, key, message) do
+  defp observe(config, row, {:ok, snapshot}) do
+    remember(config, row, snapshot)
+    Map.merge(snapshot, %{"worker" => row["worker"]["machine"], "stale" => false})
+  end
+
+  defp observe(_config, row, {:error, problem}) do
+    %{
+      "job_id" => row["job_id"],
+      "worker" => row["worker"]["machine"],
+      "reachability" => "unreachable",
+      "stale" => true,
+      "reason" => problem,
+      "last_observed" => row["snapshot"]
+    }
+  end
+
+  # An unchanged snapshot is already durable. Rewriting it would cost two fsyncs (file
+  # and directory) per job on every status call.
+  defp remember(config, row, snapshot) do
+    if snapshot != row["snapshot"],
+      do: Store.write!(checkpoint(config, row["job_id"]), Map.put(row, "snapshot", snapshot))
+  end
+
+  defp route(config, key, message, deadline) do
     case Store.read!(checkpoint(config, key)) do
       nil -> {:error, "unknown_job"}
-      row -> rpc(row["worker"], message)
+      row -> rpc(row["worker"], message, deadline)
     end
   end
 
@@ -173,20 +222,25 @@ defmodule OuroFleet.Controller do
   defp reason({:ok, _}), do: "ready"
   defp reason({:error, reason}), do: reason
 
-  def rpc(member, message) do
+  defp rpc(member, message, deadline) do
     # Node atoms come only from bounded operator-owned membership, never a job.
     remote = String.to_atom(member["node"])
 
+    # Each call waits only for what is left of the caller's budget. A call the budget
+    # cannot cover is not made, and is reported as not made.
     call = fn operation ->
-      if remote == node(),
-        do: Worker.call(operation),
-        else: :erpc.call(remote, Worker, :call, [operation], 125_000)
+      case min(deadline - System.monotonic_time(:millisecond), @rpc_timeout) do
+        left when left <= 0 -> throw(:budget_exhausted)
+        left when remote == node() -> Worker.call(operation, left)
+        left -> :erpc.call(remote, Worker, :call, [operation], left)
+      end
     end
 
     if Protocol.compatible?(call.(:version)),
       do: call.(message),
       else: {:error, "worker_schema_mismatch"}
   catch
+    :throw, :budget_exhausted -> {:error, "controller_budget_exhausted"}
     _, _ -> {:error, "worker_unreachable_or_reply_lost"}
   end
 end

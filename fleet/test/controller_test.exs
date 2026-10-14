@@ -5,30 +5,42 @@ defmodule OuroFleet.ControllerTest do
   defmodule StubWorker do
     use GenServer
 
-    def start_link(_),
-      do: GenServer.start_link(__MODULE__, %{plans: 0, submits: 0}, name: OuroFleet.Worker)
+    def start_link(_) do
+      state = %{plans: 0, submits: 0, batches: 0, budget: nil}
+      GenServer.start_link(__MODULE__, state, name: OuroFleet.Worker)
+    end
 
     def init(state), do: {:ok, state}
+    def handle_call(message, _, state), do: reply(message, state)
 
-    def handle_call(:version, _, %{incompatible: true} = state),
+    defp reply(:version, %{incompatible: true} = state),
       do: {:reply, {:ok, Map.put(Protocol.version(), "schema", "ouro.fleet.rpc/999")}, state}
 
-    def handle_call({:status, _}, _, state),
-      do: {:reply, {:error, "test_worker_unavailable"}, state}
+    defp reply(:version, state), do: {:reply, {:ok, Protocol.version()}, state}
+    defp reply({:status, job}, state), do: {:reply, observed(job, state), state}
 
-    def handle_call(:version, _, state), do: {:reply, {:ok, Protocol.version()}, state}
+    defp reply({:statuses, jobs, budget}, state) do
+      Process.sleep(Map.get(state, :delay, 0))
+      replies = Map.new(jobs, &{&1, observed(&1, state)})
+      {:reply, {:ok, replies}, %{state | batches: state.batches + 1, budget: budget}}
+    end
 
-    def handle_call({:plan, _, _}, _, state),
+    defp reply({:plan, _, _}, state),
       do:
         {:reply,
          {:ok,
           %{"active" => 0, "resolved" => %{"policy_digest" => "fixed"}, "workspace" => "/test"}},
          %{state | plans: state.plans + 1}}
 
-    def handle_call({:submit, job, _, _}, _, state),
-      do:
-        {:reply, {:ok, %{"job_id" => job, "run_id" => "same-run", "state" => "running"}},
-         %{state | submits: state.submits + 1}}
+    defp reply({:submit, job, _, _}, state),
+      do: {:reply, {:ok, snapshot(job)}, %{state | submits: state.submits + 1}}
+
+    defp snapshot(job), do: %{"job_id" => job, "run_id" => "same-run", "state" => "running"}
+
+    # Status is unavailable until a test sets `:observed`; then each job reports its
+    # submitted snapshot unless the map overrides it.
+    defp observed(job, %{observed: overrides}), do: {:ok, Map.get(overrides, job, snapshot(job))}
+    defp observed(_job, _state), do: {:error, "test_worker_unavailable"}
   end
 
   setup do
@@ -69,7 +81,7 @@ defmodule OuroFleet.ControllerTest do
     assert {:error, "request_id_conflict"} =
              Controller.call({:run, Map.put(request, "capture", ["stdout"])})
 
-    assert :sys.get_state(context.worker) == %{plans: 1, submits: 3}
+    assert %{plans: 1, submits: 3} = :sys.get_state(context.worker)
     [path] = Path.wildcard(context.root <> "/jobs/*.json")
     record = Store.read!(path)
     refute Map.has_key?(record, "argv")
@@ -106,7 +118,7 @@ defmodule OuroFleet.ControllerTest do
     end
 
     assert Process.whereis(Controller) == controller
-    assert :sys.get_state(context.worker) == %{plans: 0, submits: 0}
+    assert %{plans: 0, submits: 0} = :sys.get_state(context.worker)
     assert Path.wildcard(context.root <> "/jobs/*.json") == []
   end
 
@@ -125,4 +137,63 @@ defmodule OuroFleet.ControllerTest do
     refute Map.has_key?(stale, "state")
     refute Map.has_key?(stale, "outcome")
   end
+
+  test "a catalog refresh asks each worker once and rewrites only what changed", context do
+    jobs =
+      for id <- ["a", "b", "c"] do
+        assert {:ok, %{"job_id" => job}} = Controller.call({:run, request(id)})
+        job
+      end
+
+    [first | _] = jobs
+    path = Path.join([context.root, "jobs", first <> ".json"])
+    :sys.replace_state(context.worker, &Map.put(&1, :observed, %{}))
+    before = inodes(context.root)
+
+    assert {:ok, rows} = Controller.call(:status)
+    assert Enum.sort(Enum.map(rows, & &1["job_id"])) == Enum.sort(jobs)
+    assert Enum.all?(rows, &(&1["stale"] == false))
+    assert {:ok, %{"stale" => false}} = Controller.call({:status, first})
+    assert :sys.get_state(context.worker).batches == 1
+    assert inodes(context.root) == before
+
+    changed = %{"job_id" => first, "run_id" => "same-run", "state" => "exited"}
+    :sys.replace_state(context.worker, &Map.put(&1, :observed, %{first => changed}))
+    assert {:ok, rows} = Controller.call(:status)
+    assert Enum.find(rows, &(&1["job_id"] == first))["state"] == "exited"
+    rewritten = for {file, inode} <- inodes(context.root), before[file] != inode, do: file
+    assert rewritten == [path]
+    assert Store.read!(path)["snapshot"] == changed
+  end
+
+  test "worker calls never outlast the caller's deadline", context do
+    assert {:ok, _} = Controller.call({:run, request("late")})
+    :sys.replace_state(context.worker, &Map.put(&1, :observed, %{}))
+
+    # Past the deadline, no worker call is made at all.
+    past = System.monotonic_time(:millisecond) - 1
+    assert {:ok, [row]} = GenServer.call(Controller, {:call, :status, past})
+    assert %{"stale" => true, "reason" => "controller_budget_exhausted"} = row
+    assert :sys.get_state(context.worker).batches == 0
+
+    # With time left, the worker is told to end its batch a margin before the call ends.
+    soon = System.monotonic_time(:millisecond) + 8_000
+    assert {:ok, [%{"stale" => false}]} = GenServer.call(Controller, {:call, :status, soon})
+    assert %{batches: 1, budget: budget} = :sys.get_state(context.worker)
+    assert budget in 1..3_000
+
+    # A worker slower than the time left is cut off at the deadline.
+    :sys.replace_state(context.worker, &Map.put(&1, :delay, 2_000))
+    started = System.monotonic_time(:millisecond)
+    assert {:ok, [row]} = GenServer.call(Controller, {:call, :status, started + 300})
+    assert System.monotonic_time(:millisecond) - started < 1_500
+    assert %{"stale" => true, "reason" => "worker_unreachable_or_reply_lost"} = row
+    assert row["last_observed"]["run_id"] == "same-run"
+  end
+
+  defp request(id),
+    do: %{"schema" => "ouro.fleet.request/1", "request_id" => id, "argv" => ["/bin/true"]}
+
+  defp inodes(root),
+    do: Map.new(Path.wildcard(root <> "/jobs/*.json"), &{&1, File.stat!(&1).inode})
 end

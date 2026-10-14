@@ -2,8 +2,12 @@ defmodule OuroFleet.Worker do
   @moduledoc "Worker reservations route to Rust; only the Rust owner can launch or settle."
   use GenServer
   alias OuroFleet.{Command, InvalidRequest, Protocol, Reader, Request, Store}
+
+  # The longest any one ledger subprocess may run.
+  @command_timeout 60_000
+
   def start_link(config), do: GenServer.start_link(__MODULE__, config, name: __MODULE__)
-  def call(message), do: GenServer.call(__MODULE__, message, 120_000)
+  def call(message, timeout \\ 120_000), do: GenServer.call(__MODULE__, message, timeout)
 
   def init(config) do
     path = Store.directory!(Path.join(config["state"], "attempts"))
@@ -127,27 +131,13 @@ defmodule OuroFleet.Worker do
     end
   end
 
-  defp dispatch({:status, key}, config) do
-    case Store.read!(checkpoint(config, key)) do
-      nil ->
-        {:error, "attempt_not_reserved"}
+  defp dispatch({:status, key}, config), do: statuses(config, [key], :infinity)[key]
 
-      %{"run_id" => nil} = record ->
-        {:ok,
-         Map.merge(record, %{
-           "state" => "prepared",
-           "settlement" => "pending",
-           "reachability" => "reachable"
-         })}
-
-      record ->
-        command(config, ["settle-orphans", "--json"])
-
-        case command(config, ["show", record["run_id"], "--json"]) do
-          {:ok, run, 0} -> {:ok, render(record, run)}
-          _ -> {:error, "ledger_unavailable_outcome_unknown"}
-        end
-    end
+  # `budget` is how long, from now, the caller can still use a reply. The caller keeps
+  # its own margin for the reply's trip back.
+  defp dispatch({:statuses, keys, budget}, config) when is_integer(budget) do
+    if not is_list(keys) or length(keys) > 4096, do: Request.invalid!("invalid job batch")
+    {:ok, statuses(config, keys, System.monotonic_time(:millisecond) + budget)}
   end
 
   defp dispatch({:kill, key}, config) do
@@ -174,6 +164,41 @@ defmodule OuroFleet.Worker do
 
   defp dispatch(_, _), do: {:error, "unsupported_worker_operation"}
 
+  # One `settle-orphans` for the whole batch, then one `show` per started run, each
+  # bounded by what is left before `deadline`. A job the budget does not reach is
+  # reported as not read, never given a state.
+  defp statuses(config, keys, deadline) do
+    records = Map.new(keys, &{&1, reservation(config, &1)})
+
+    if Enum.any?(Map.values(records), &match?(%{"run_id" => run} when not is_nil(run), &1)),
+      do: bounded(config, ["settle-orphans", "--json"], deadline)
+
+    Map.new(records, fn {key, record} -> {key, status(config, record, deadline)} end)
+  end
+
+  defp reservation(config, key),
+    do: if(Request.job?(key), do: Store.read!(checkpoint(config, key)), else: :invalid)
+
+  defp status(_config, :invalid, _deadline), do: {:error, "invalid_request"}
+  defp status(_config, nil, _deadline), do: {:error, "attempt_not_reserved"}
+
+  defp status(_config, %{"run_id" => nil} = record, _deadline) do
+    {:ok,
+     Map.merge(record, %{
+       "state" => "prepared",
+       "settlement" => "pending",
+       "reachability" => "reachable"
+     })}
+  end
+
+  defp status(config, record, deadline) do
+    case bounded(config, ["show", record["run_id"], "--json"], deadline) do
+      {:ok, run, 0} -> {:ok, render(record, run)}
+      :exhausted -> {:error, "status_budget_exhausted"}
+      _ -> {:error, "ledger_unavailable_outcome_unknown"}
+    end
+  end
+
   defp active(config) do
     attempts = Path.wildcard(Path.join(config["attempts"], "job_*.json"))
     if length(attempts) > 4096, do: raise("attempt catalog exceeds bounded scan")
@@ -191,6 +216,15 @@ defmodule OuroFleet.Worker do
           true
       end
     end)
+  end
+
+  defp bounded(config, args, :infinity), do: command(config, args)
+
+  defp bounded(config, args, deadline) do
+    case deadline - System.monotonic_time(:millisecond) do
+      left when left > 0 -> command(config, args, min(left, @command_timeout))
+      _ -> :exhausted
+    end
   end
 
   defp checkpoint(config, key) do
@@ -216,8 +250,8 @@ defmodule OuroFleet.Worker do
         Request.ledger(request, workspace, config, key) ++ extra ++ ["--"] ++ request["argv"]
       )
 
-  defp command(config, args),
-    do: Command.json(config["ledger_bin"], ["--data-dir", config["data"] | args])
+  defp command(config, args, timeout \\ @command_timeout),
+    do: Command.json(config["ledger_bin"], ["--data-dir", config["data"] | args], timeout)
 
   def render(record, run) do
     Map.merge(record, %{
