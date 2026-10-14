@@ -325,9 +325,9 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
             forward_head: Vec::new(),
         });
     }
-    let (destination, path) = absolute_target(line.target, default_port)?;
+    let target = absolute_target(line.target, default_port)?;
     match hosts.first() {
-        Some(host) => same_host(host, &destination, default_port)?,
+        Some(host) => same_host(host, &target.destination, default_port)?,
         None if line.http11 => return Err(Reason::MalformedRequest),
         None => {}
     }
@@ -336,15 +336,15 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
     // existing semantics: strip it and close after the framed request.
     let forward_head = forward_head(
         &line,
-        path,
-        &destination,
+        &target,
         &fields,
         &listed,
         framing,
         websocket,
+        head.len(),
     );
     Ok(Request {
-        destination,
+        destination: target.destination,
         framing,
         forward_head,
     })
@@ -491,11 +491,18 @@ fn same_host(host: &Field<'_>, destination: &Destination, default_port: u16) -> 
     Ok(())
 }
 
+/// An `http://` absolute-form target.
+struct AbsoluteTarget<'a> {
+    destination: Destination,
+    /// The path with its query, as the client sent them.
+    path: &'a [u8],
+}
+
 /// The destination and the path (with its query) of an `http://`
 /// absolute-form target. A fragment, a byte outside printable ASCII in the
 /// path, or an authority that does not parse refuses; another scheme or
 /// form is unsupported.
-fn absolute_target(target: &[u8], default_port: u16) -> Result<(Destination, &[u8]), Reason> {
+fn absolute_target(target: &[u8], default_port: u16) -> Result<AbsoluteTarget<'_>, Reason> {
     if target.contains(&b'#') {
         return Err(Reason::MalformedRequest);
     }
@@ -519,7 +526,7 @@ fn absolute_target(target: &[u8], default_port: u16) -> Result<(Destination, &[u
     }
     let destination = parse_authority(authority_text(authority)?, Some(default_port))
         .map_err(|_| Reason::MalformedRequest)?;
-    Ok((destination, path))
+    Ok(AbsoluteTarget { destination, path })
 }
 
 /// Whether the request asks for a WebSocket (RFC 6455 §4.1): it names a
@@ -567,16 +574,20 @@ fn websocket_upgrade(
 /// origin-form target, `Host` from the validated destination, every field
 /// but the hop-by-hop ones and those `Connection` lists, the framing, and
 /// `Connection: close` (or the WebSocket upgrade).
+///
+/// `received` is the length of the head as it came, which sizes the buffer:
+/// the forwarded head is that head rewritten.
 fn forward_head(
     line: &RequestLine<'_>,
-    path: &[u8],
-    destination: &Destination,
+    target: &AbsoluteTarget<'_>,
     fields: &Fields<'_>,
     listed: &HashSet<String>,
     framing: Framing,
     websocket: bool,
+    received: usize,
 ) -> Vec<u8> {
-    let mut forward = Vec::with_capacity(256);
+    let (path, destination) = (target.path, &target.destination);
+    let mut forward = Vec::with_capacity(received + 64);
     forward.extend_from_slice(line.method);
     forward.push(b' ');
     if path.first() == Some(&b'/') {
