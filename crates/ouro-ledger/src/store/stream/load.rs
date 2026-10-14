@@ -2,14 +2,15 @@
 //! verification.
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufRead as _, BufReader},
+    io::BufReader,
     path::Path,
 };
 
 use super::{Poison, PoisonKind, Stream};
 use crate::{
     manifest,
-    protocol::{MAX_FRAME_BYTES, Result},
+    protocol::Result,
+    segments::{Frame, next_frame},
     store::{capture_pruning, writer::private_file},
 };
 
@@ -136,32 +137,26 @@ pub(in crate::store) fn load_stream(
                 stopped = Some(stream.accepted_bytes);
                 break 'segments;
             }
-            let mut bytes = Vec::new();
-            // read_until alone is unbounded; the limited reader also catches a missing newline.
-            let length = reader
-                .by_ref()
-                .take((MAX_FRAME_BYTES + 1) as u64)
-                .read_until(b'\n', &mut bytes)?;
-            if length == 0 {
-                break;
-            }
             // This writer never emits an oversized frame; only a crash
             // between its write and newline leaves an unterminated tail.
-            if length > MAX_FRAME_BYTES {
-                stream.poisoned.push(Poison::new(
-                    PoisonKind::Corrupt,
-                    "oversized canonical frame; bytes retained",
-                ));
-                break;
-            }
-            if bytes.last() != Some(&b'\n') {
-                stream.poisoned.push(Poison::new(
-                    PoisonKind::Incomplete,
-                    "interrupted canonical frame; bytes retained",
-                ));
-                break;
-            }
-            bytes.pop();
+            let bytes = match next_frame(&mut reader)? {
+                Frame::End => break,
+                Frame::Oversized => {
+                    stream.poisoned.push(Poison::new(
+                        PoisonKind::Corrupt,
+                        "oversized canonical frame; bytes retained",
+                    ));
+                    break;
+                }
+                Frame::Interrupted => {
+                    stream.poisoned.push(Poison::new(
+                        PoisonKind::Incomplete,
+                        "interrupted canonical frame; bytes retained",
+                    ));
+                    break;
+                }
+                Frame::Complete(bytes) => bytes,
+            };
             // Every refusal of a complete frame is an integrity violation:
             // this writer validates the same rules before it appends.
             if let Err(error) = stream.accept_canonical(run_id, &bytes) {

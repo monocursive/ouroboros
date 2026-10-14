@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::CString,
     fs::{self, File},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{BufReader, Read, Seek, SeekFrom},
     os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -26,7 +26,7 @@ use crate::{
         ReadFilter, ReadPage, ReadRequest, ReadSelector, ReadStage, Result, RunRecord, RunState,
         SelectionStatus, StreamStatus,
     },
-    schemas,
+    schemas, segments,
 };
 
 const MAX_SESSIONS: usize = 32;
@@ -1020,11 +1020,11 @@ impl Session {
             let bound =
                 (self.accepted_bytes - position.frame_start).min((MAX_FRAME_BYTES + 1) as u64);
             let mut input = BufReader::new(file.take(bound));
-            let mut bytes = Vec::new();
-            input.read_until(b'\n', &mut bytes)?;
-            if bytes.is_empty() || bytes.len() > MAX_FRAME_BYTES || bytes.last() != Some(&b'\n') {
+            let segments::Frame::Complete(mut bytes) = segments::next_frame(&mut input)? else {
                 return Err(invalid());
-            }
+            };
+            // A ready record is emitted with its LF.
+            bytes.push(b'\n');
             let end = position.frame_start + bytes.len() as u64;
             let digest = sha256_prefixed(&bytes[..bytes.len() - 1]);
             let record: Value =

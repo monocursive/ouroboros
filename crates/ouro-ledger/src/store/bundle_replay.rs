@@ -1,5 +1,5 @@
 //! Read-only replay of a bounded, reassembled canonical snapshot.
-use std::io::{BufRead as _, BufReader};
+use std::io::BufReader;
 
 use serde_json::{Value, json};
 
@@ -7,7 +7,10 @@ use super::{
     check_run_id,
     stream::{Stream, rules::UNRESOLVED},
 };
-use crate::protocol::{LedgerError, MAX_FRAME_BYTES, Result, RunRecord, RunState};
+use crate::{
+    protocol::{LedgerError, Result, RunRecord, RunState},
+    segments::{Frame, next_frame},
+};
 
 /// A replayed snapshot. An unresolved run also carries the outcome run
 /// projection rule 1 gave it, so a bundle exported under that rule still
@@ -33,22 +36,17 @@ pub(crate) fn replay(reader: impl std::io::Read, run_id: &str) -> Result<Replaye
     // only another such record can set a run's outcome.
     let mut reported = None;
     loop {
-        use std::io::Read as _;
-        let mut bytes = Vec::new();
-        let length = reader
-            .by_ref()
-            .take((MAX_FRAME_BYTES + 1) as u64)
-            .read_until(b'\n', &mut bytes)?;
-        if length == 0 {
-            break;
-        }
-        if length > MAX_FRAME_BYTES || bytes.pop() != Some(b'\n') {
-            return Err(LedgerError::refused(
-                "oversized or interrupted bundle record",
-            ));
-        }
+        let bytes = match next_frame(&mut reader)? {
+            Frame::End => break,
+            Frame::Oversized | Frame::Interrupted => {
+                return Err(LedgerError::refused(
+                    "oversized or interrupted bundle record",
+                ));
+            }
+            Frame::Complete(bytes) => bytes,
+        };
         if stream.run().chain.head_seq >= crate::bundle::MAX_RECORDS
-            || stream.accepted_bytes() + length as u64 > crate::bundle::MAX_STREAM_BYTES
+            || stream.accepted_bytes() + bytes.len() as u64 + 1 > crate::bundle::MAX_STREAM_BYTES
         {
             return Err(LedgerError::refused(
                 "bundle snapshot exceeds its record or byte bound",

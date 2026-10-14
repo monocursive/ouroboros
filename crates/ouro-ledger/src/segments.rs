@@ -4,7 +4,7 @@
 use std::{
     ffi::CString,
     fs::File,
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, BufRead, Read, Seek, SeekFrom},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
@@ -14,8 +14,38 @@ use serde::Serialize;
 
 use crate::{
     fsx, manifest,
-    protocol::{LedgerError, Result},
+    protocol::{LedgerError, MAX_FRAME_BYTES, Result},
 };
+
+/// What reading the next LF-terminated canonical frame found.
+pub(crate) enum Frame {
+    /// The input ended on a frame boundary.
+    End,
+    /// More than `MAX_FRAME_BYTES` with its LF: no frame this writer emits.
+    Oversized,
+    /// The input ended inside a frame.
+    Interrupted,
+    /// A frame's bytes, without its LF.
+    Complete(Vec<u8>),
+}
+
+/// Read the next canonical frame from `reader`, buffering at most one
+/// frame's bound: `read_until` alone is unbounded.
+pub(crate) fn next_frame(reader: &mut impl BufRead) -> io::Result<Frame> {
+    let mut bytes = Vec::new();
+    let length = reader
+        .take((MAX_FRAME_BYTES + 1) as u64)
+        .read_until(b'\n', &mut bytes)?;
+    Ok(if length == 0 {
+        Frame::End
+    } else if length > MAX_FRAME_BYTES {
+        Frame::Oversized
+    } else if bytes.pop() != Some(b'\n') {
+        Frame::Interrupted
+    } else {
+        Frame::Complete(bytes)
+    })
+}
 
 #[derive(Clone, Serialize)]
 struct Part {
@@ -190,5 +220,45 @@ impl Read for Snapshot {
         let n = file.read(&mut buffer[..bound])?;
         self.offset += n as u64;
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frames(input: &[u8]) -> Vec<Frame> {
+        let mut reader = input;
+        let mut frames = Vec::new();
+        loop {
+            match next_frame(&mut reader).unwrap() {
+                Frame::End => return frames,
+                frame @ (Frame::Oversized | Frame::Interrupted) => {
+                    frames.push(frame);
+                    return frames;
+                }
+                frame => frames.push(frame),
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_and_its_lf_fit_the_frame_bound_or_the_frame_is_oversized() {
+        let mut largest = vec![b'x'; MAX_FRAME_BYTES - 1];
+        largest.push(b'\n');
+        largest.extend_from_slice(b"{}\n");
+        assert!(matches!(
+            frames(&largest).as_slice(),
+            [Frame::Complete(first), Frame::Complete(second)]
+                if first.len() == MAX_FRAME_BYTES - 1 && second == b"{}"
+        ));
+        let mut oversized = vec![b'x'; MAX_FRAME_BYTES];
+        oversized.push(b'\n');
+        assert!(matches!(frames(&oversized).as_slice(), [Frame::Oversized]));
+        assert!(matches!(
+            frames(b"{}\n{").as_slice(),
+            [Frame::Complete(_), Frame::Interrupted]
+        ));
+        assert!(frames(b"").is_empty());
     }
 }
