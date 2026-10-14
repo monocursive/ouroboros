@@ -1,6 +1,8 @@
 //! Learned output is a proposal with receipt-bound evidence, never a policy file.
 use serde_json::json;
 
+mod common;
+
 /// One complete `ouro.event/1` result event of the fixture attempt, as the
 /// trace records it (learning parses the typed event).
 fn event(
@@ -76,11 +78,7 @@ fn learning_filters_network_causes_and_never_grants_denied_writes() {
     assert_eq!(proposal.denied_writes[0], "/home/operator/private");
     assert!(proposal.denied_writes[1].contains("sha256:fixture"));
     assert!(!proposal.denied_writes[0].starts_with('"'));
-    let schema: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../docs/specs/jail-v1/learned-policy.schema.json"
-    ))
-    .unwrap();
-    let validator = jsonschema::validator_for(&schema).unwrap();
+    let validator = &common::validators()["learned-policy"];
     let mut value = serde_json::to_value(&proposal).unwrap();
     assert!(validator.is_valid(&value), "{value}");
     value["provenance"]["receipt_digest"] = json!("invented");

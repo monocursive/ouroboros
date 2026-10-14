@@ -10,12 +10,22 @@ fn guarded_aliases_are_detected_across_devices_and_below_mountpoints() {
     if !common::live() {
         return;
     }
-    let backing = tempfile::tempdir().unwrap();
-    let submount = tempfile::tempdir_in("/dev/shm").unwrap();
+    let backing = common::private_tempdir();
+    // A second filesystem to mount below the guarded path: the check is
+    // about crossing devices.
+    let submount = match tempfile::tempdir_in("/dev/shm") {
+        Ok(dir) => dir,
+        Err(error) => {
+            ouro_fixture::harness::skip_or_fail(&format!(
+                "no tmpfs at /dev/shm to put a second device under the guard: {error}"
+            ));
+            return;
+        }
+    };
     std::fs::create_dir_all(backing.path().join("state/nested")).unwrap();
     // Let the already-supported backend establish the fixture mounts. The
     // tracee needs no mount authority or CAP_SYS_ADMIN after exec.
-    let output = Command::new("bwrap")
+    let output = Command::new(common::bwrap_path())
         .args([
             "--unshare-user",
             "--unshare-pid",
@@ -49,26 +59,20 @@ fn guarded_aliases_are_detected_across_devices_and_below_mountpoints() {
             "--",
             "/tmp/ouro-alias-test",
         ])
-        .args([
-            "--ignored",
-            "--exact",
-            "private_mount_alias_fixture",
-            "--nocapture",
-        ])
+        .args(common::helper_args("private_mount_alias_fixture"))
+        .env(common::HELPER_VAR, "private_mount_alias_fixture")
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    common::assert_helper_ran("private_mount_alias_fixture", &output);
 }
 
 #[test]
 #[ignore = "private mount namespace helper"]
 fn private_mount_alias_fixture() {
     use std::os::unix::fs::MetadataExt as _;
+    if !common::running_helper("private_mount_alias_fixture") {
+        return;
+    }
     assert_ne!(
         std::fs::metadata("/tmp/backing/state").unwrap().dev(),
         std::fs::metadata("/tmp/backing/state/nested")

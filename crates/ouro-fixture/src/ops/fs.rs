@@ -1,7 +1,7 @@
 //! The filesystem modes: the closed-set calls, the calls beside them that
 //! name no path (`ftruncate`, `write-mmap`), `chdir` and the `mkdir` race.
 
-use std::ffi::{OsStr, c_char, c_int};
+use std::ffi::{CString, OsStr, c_char, c_int};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 
@@ -52,7 +52,7 @@ pub(crate) fn run(rep: &Reporter, mode: FsMode) -> Result<bool, Stop> {
             if dirfd.is_some() && via != MkdirVia::Mkdirat {
                 return Err(Stop::Usage("--dirfd needs --via mkdirat".to_string()));
             }
-            let dir = open_dirfd(rep, dirfd.as_deref())?;
+            let dir = open_dirfd(rep, dirfd_path(dirfd.as_deref())?)?;
             Ok(check(
                 rep,
                 mkdir(&path, via, mode, raw_fd(dir.as_ref())),
@@ -73,9 +73,14 @@ pub(crate) fn run(rep: &Reporter, mode: FsMode) -> Result<bool, Stop> {
                     "--dirfd and --dirfd2 need --via renameat or renameat2".to_string(),
                 ));
             }
-            // Owned: the first is closed even when the second cannot open.
-            let dir = open_dirfd(rep, dirfd.as_deref())?;
-            let dir2 = open_dirfd(rep, dirfd2.as_deref())?;
+            // Both checked before either opens; owned, so the first is
+            // closed even when the second cannot open.
+            let (path, path2) = (
+                dirfd_path(dirfd.as_deref())?,
+                dirfd_path(dirfd2.as_deref())?,
+            );
+            let dir = open_dirfd(rep, path)?;
+            let dir2 = open_dirfd(rep, path2)?;
             let (fd, fd2) = (raw_fd(dir.as_ref()), raw_fd(dir2.as_ref()));
             Ok(check(
                 rep,
@@ -221,16 +226,31 @@ pub(crate) fn open_keep(path: &OsStr, via: OpenVia, flags: OpenFlags, mode: u32)
     finish(report, attempt)
 }
 
+/// A `--dirfd` argument the kernel can take. Every such argument of a mode
+/// is checked before any is opened, so a usage error never follows an
+/// open the mode already reported.
+struct DirfdPath<'a> {
+    dir: &'a OsStr,
+    path: CString,
+}
+
+fn dirfd_path(dir: Option<&OsStr>) -> Result<Option<DirfdPath<'_>>, Stop> {
+    dir.map(|dir| {
+        raw::cpath(dir)
+            .map(|path| DirfdPath { dir, path })
+            .map_err(|e| Stop::Usage(format!("--dirfd cannot be a path: {}", e.reason)))
+    })
+    .transpose()
+}
+
 /// Open DIR read-only as a directory, for a `--dirfd` option, and report
 /// the open as its own line: the descriptor is part of what the next call
 /// names, so a reader must be able to see where it came from. A read-only
 /// open is outside the closed set, so a tracer reports nothing for it.
-fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<OwnedFd>, Stop> {
-    let Some(dir) = dir else {
+fn open_dirfd(rep: &Reporter, dir: Option<DirfdPath<'_>>) -> Result<Option<OwnedFd>, Stop> {
+    let Some(DirfdPath { dir, path }) = dir else {
         return Ok(None);
     };
-    let c = raw::cpath(dir)
-        .map_err(|e| Stop::Usage(format!("--dirfd cannot be a path: {}", e.reason)))?;
     let mut report = OpReport::new("openat");
     path_value(&mut report.args, "path", dir);
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
@@ -238,7 +258,7 @@ fn open_dirfd(rep: &Reporter, dir: Option<&OsStr>) -> Result<Option<OwnedFd>, St
     report.set("dirfd", "AT_FDCWD");
     report.set("purpose", "dirfd");
     report.set("mechanism", raw::mechanism());
-    let emitted = finish(report, raw::openat(libc::AT_FDCWD, c.as_ptr(), flags, 0));
+    let emitted = finish(report, raw::openat(libc::AT_FDCWD, path.as_ptr(), flags, 0));
     rep.emit(&emitted.report);
     if emitted.report.ret < 0 {
         return Err(Stop::Failed(format!(
@@ -797,9 +817,17 @@ fn race_mkdir(rep: &Reporter, a: &OsStr, b: &OsStr, count: u32) -> Result<bool, 
             flips
         })
     };
+    // The legacy call where the architecture has one, else its `*at` form
+    // against `AT_FDCWD`, which names the same file the same way: the race
+    // is about the buffer, not the spelling, and a call this build cannot
+    // make would race nothing.
+    let legacy = raw::has_legacy_syscalls();
     let mut all = true;
     for _ in 0..count {
-        let mut report = OpReport::new("mkdir");
+        let mut report = OpReport::new(if legacy { "mkdir" } else { "mkdirat" });
+        if !legacy {
+            report.set("dirfd", "AT_FDCWD");
+        }
         path_value(&mut report.args, "path_a", a);
         path_value(&mut report.args, "path_b", b);
         report.set("racing", true);
@@ -807,7 +835,12 @@ fn race_mkdir(rep: &Reporter, a: &OsStr, b: &OsStr, count: u32) -> Result<bool, 
         // `AtomicU8` has the size and alignment of `u8`, so the array is the
         // NUL-terminated byte string the kernel reads.
         let ptr = buffer.as_ptr().cast::<c_char>();
-        let emitted = finish(report, raw::mkdir(ptr, 0o700));
+        let attempt = if legacy {
+            raw::mkdir(ptr, 0o700)
+        } else {
+            raw::mkdirat(libc::AT_FDCWD, ptr, 0o700)
+        };
+        let emitted = finish(report, attempt);
         all &= !emitted.unusable;
         rep.emit(&emitted.report);
     }

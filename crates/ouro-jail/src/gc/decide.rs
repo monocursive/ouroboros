@@ -275,14 +275,14 @@ pub fn decide(facts: &Facts) -> Next {
         }
     };
     // The supervisor verified the tree's end: no orphan is left to end.
-    let tree_verified = receipt.is_some_and(|receipt| receipt.tree_empty == Some(true));
+    let tree_verified = receipt.is_some_and(|receipt| receipt.tree_end.verified_empty);
     // Audit 2026-09-25-2, S4: no receipt was ever written.
     let receipt_is_none = receipt.is_none();
     let source = recorded_leaf(state, receipt);
     let recorded = matches!(source, LeafSource::Recorded(_) | LeafSource::NamedOnly(_));
     // J4 wave 3 (G6): lost integrity keeps the leaf and the scratch for
     // explicit recovery in every boot, so it is read before the boot rule.
-    let integrity_lost = receipt.is_some_and(|receipt| receipt.integrity == "lost");
+    let integrity_lost = receipt.is_some_and(|receipt| receipt.tree_end.integrity_lost);
     let scratch = ScratchRule {
         integrity_lost,
         removed: state.gc_removed_scratch,
@@ -657,10 +657,12 @@ mod tests {
 
     fn receipt(tree_empty: Option<bool>) -> ReceiptView {
         ReceiptView {
-            phase: "enforced".to_owned(),
-            tree_empty,
-            integrity: "verified".to_owned(),
-            boundary: "pid_namespace".to_owned(),
+            phase: crate::records::Phase::Enforced,
+            tree_end: crate::lifecycle::TreeEnd::from_text(
+                crate::lifecycle::Integrity::Verified.as_str(),
+                "pid_namespace",
+                tree_empty,
+            ),
             boot_id: Some(BOOT.to_owned()),
             leaf: LeafSource::Recorded(leaf()),
         }
@@ -714,7 +716,7 @@ mod tests {
         }
         let mut lost = base.clone();
         let mut lost_receipt = receipt(None);
-        lost_receipt.integrity = "lost".to_owned();
+        lost_receipt.tree_end.integrity_lost = true;
         lost.receipt = Ok(Some(lost_receipt));
         assert!(matches!(
             decision(decide(&lost)).cgroup,
@@ -956,7 +958,7 @@ mod tests {
     #[test]
     fn lost_integrity_keeps_scratch_in_another_boot_too() {
         let mut lost = receipt(None);
-        lost.integrity = "lost".to_owned();
+        lost.tree_end.integrity_lost = true;
         let mut facts = facts(state(), lost);
         facts.host.boot_id = Some("boot-b".to_owned());
         facts.owner = None;
@@ -1015,7 +1017,7 @@ mod tests {
             std::path::Path::new("/sys/fs/cgroup/x").join(&own),
         ));
         let mut lost = receipt(None);
-        lost.integrity = "lost".to_owned();
+        lost.tree_end.integrity_lost = true;
         lost.leaf = LeafSource::NotRecorded("the receipt registers no execution cgroup".to_owned());
         let decided = decision(decide(&facts(named, lost)));
         assert!(

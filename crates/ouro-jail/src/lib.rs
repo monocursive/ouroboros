@@ -51,6 +51,7 @@ pub mod gc;
 pub mod journal;
 pub mod launch_profile;
 pub mod learn;
+pub mod lifecycle;
 pub mod network;
 pub mod observer;
 pub mod platform;

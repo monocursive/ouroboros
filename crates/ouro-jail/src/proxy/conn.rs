@@ -678,7 +678,64 @@ fn start_relay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::Rules;
+    use crate::proxy::{Budgets, FixtureResolver, ProxyConfig, ProxySink};
+    use std::io::Read as _;
     use std::net::TcpListener;
+    use std::os::unix::net::UnixListener;
+    use std::sync::{Mutex, mpsc};
+
+    struct Sink(Mutex<mpsc::Sender<ProxyResult>>);
+    impl ProxySink for Sink {
+        fn emit(&self, result: ProxyResult) {
+            let _ = crate::sync::lock(&self.0).send(result);
+        }
+    }
+
+    /// A SOCKS5 command the proxy does not serve is answered once, in
+    /// SOCKS, by the exchange that read it: the refusal that follows adds no
+    /// second reply.
+    #[test]
+    fn a_refused_socks_command_is_answered_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("proxy.sock");
+        let (sender, results) = mpsc::channel();
+        let proxy = super::super::start(
+            ProxyConfig {
+                listener: UnixListener::bind(&path).unwrap(),
+                rules: Rules::from_strings(&["fixture.test:443".to_owned()], &[]).unwrap(),
+                budgets: Budgets::default(),
+                resolver: Arc::new(FixtureResolver::new()),
+            },
+            Arc::new(Sink(Mutex::new(sender))),
+        )
+        .unwrap();
+        // BIND is not allowed (2); UDP ASSOCIATE is not supported (7).
+        for (command, reply) in [(2u8, 2u8), (3, 7)] {
+            let mut client = UnixStream::connect(&path).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            // The method offer, then the request up to its command: the
+            // proxy answers on the command, and a request byte it never
+            // read would turn the close into a reset on Linux.
+            client.write_all(&[5, 1, 0]).unwrap();
+            client.write_all(&[5, command, 0, 1]).unwrap();
+            let mut answered = Vec::new();
+            client.read_to_end(&mut answered).unwrap();
+            assert_eq!(
+                answered,
+                [5, 0, 5, reply, 0, 1, 0, 0, 0, 0, 0, 0],
+                "command {command}"
+            );
+            let result = results.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert_eq!(
+                (result.transport, result.reason),
+                (Transport::Socks5, Reason::UnsupportedRequest)
+            );
+        }
+        assert!(proxy.stop(Duration::from_secs(10)).complete());
+    }
 
     #[test]
     fn connect_deadline_is_shared_across_answers() {

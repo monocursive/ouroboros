@@ -6,11 +6,17 @@
 //! Linux slice supplies a platform and this file keeps owning every lifecycle
 //! transition, every receipt and every budget.
 //!
-//! I01 is the shape of this file: nothing reaches `release` until resolution,
-//! state, probing, preparation and the gate have all succeeded. A failure
-//! before the attempt is claimed returns its error and leaves no claim; from
-//! the claim on, every early exit goes through [`refuse`], which writes a
-//! `refused` receipt.
+//! I01 is the shape of this module: nothing reaches `release` until
+//! resolution, state, probing, preparation and the gate have all succeeded.
+//! A failure up to the claim returns its error and writes no receipt. The
+//! claim is one exclusive link, so such a failure leaves no claim, or at
+//! most one whose directory sync failed after the link landed: a claim with
+//! no receipt, which `gc` reconciles as one. From the claim on, the claimed
+//! [`attempt::Attempt`] returns a report, never an error: every exit before
+//! the target runs goes through its `refuse` (after tearing the boundary
+//! down, once one exists), which writes the `refused` receipt or reports
+//! that it could not, and an attempt whose target ran ends in its
+//! settlement.
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -26,11 +32,11 @@ use crate::cleanup;
 use crate::cli::{DoctorArgs, ExplainArgs, PolicyArgs, RunArgs};
 use crate::config::{self, EnvSettings};
 use crate::launch_profile;
+use crate::lifecycle::{BOUNDARY_PENDING, Integrity, TreeEnd};
 use crate::network::NetworkMode;
-use crate::observer::CoverageSummary;
+use crate::observer::CoverageClass;
 use crate::platform::{
-    BoundaryIdentity, ContinuousDeadline, PlanRequest, Platform, PreparedPlan, RunEvent, Sinks,
-    StopReason, Teardown,
+    BoundaryIdentity, ContinuousDeadline, PlanRequest, Platform, StopReason, Teardown,
 };
 use crate::policy::{
     self, Layer, LayerOrigin, PolicyDelta, ProfileName, ResolveInputs, Resolved, ScratchRoot,
@@ -39,11 +45,16 @@ use crate::profiles;
 use crate::records::StateCleanup;
 use crate::records::{
     Applied, AppliedLimit, AppliedNetwork, AttemptRecord, Containment, ControlKind, ControlMessage,
-    ErrorCode, ErrorStage, GateExpectation, JailError, JailRecord, Lifetime, Outcome, OutcomeKind,
-    Phase, PlatformRecord, PolicyRecord, Receipt, Remediation, SCHEMA_POLICY_FILE, rfc3339_utc,
+    ErrorCode, ErrorStage, GateExpectation, JailError, Lifetime, Phase, PlatformRecord, Receipt,
+    Remediation, SCHEMA_POLICY_FILE, rfc3339_utc,
 };
 use crate::state::{self, AttemptDir, AttemptId};
 use crate::trace::{self, FdSink, FileSink, Priority, SharedTrace, TraceSink};
+
+mod amend;
+mod attempt;
+
+use attempt::Attempt;
 
 /// External gate wait after `prepared` (§8.2).
 pub const GATE_WAIT: Duration = Duration::from_secs(60);
@@ -222,29 +233,13 @@ pub fn resolve_learning_plan(ctx: &Context, args: &PolicyArgs) -> Result<Plan, J
 fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, JailError> {
     let config_dir = state::config_dir(&ctx.env_settings, ctx.home.as_deref())?;
     let data_dir = state::data_dir(&ctx.env_settings, ctx.home.as_deref())?;
-    // Security 2026-09-29 (audit 6 F1): a `--profile none` child sees the
-    // whole host, so every trusted file that predates the end of the last
-    // uncontained run could have been written by that child, and none can be
-    // dated while such a run is live. The markers sit in both directories,
-    // which are chosen independently: a run sharing either sees them.
-    let uncontained_epoch = state::uncontained_epoch(&[&data_dir, &config_dir])?;
-    // §6.2 step 2 — the operator launch profile, read once
-    // through a no-follow walk; its content is what the snapshot records.
-    let launch = match &args.launch {
-        Some(name) => {
-            refuse_stale_trusted_file(
-                &launch_profile::launch_directory(&config_dir).join(format!("{name}.toml")),
-                &uncontained_epoch,
-                "--launch",
-            )?;
-            Some(launch_profile::load(
-                &config_dir,
-                name,
-                ctx.home.as_deref(),
-            )?)
-        }
-        None => None,
-    };
+    // Audit 6 F1: a `--profile none` child sees the whole host, so every
+    // trusted file that predates the end of the last uncontained run could
+    // have been written by that child, and none can be dated while such a run
+    // is live. The markers sit in both directories, which are chosen
+    // independently: a run sharing either sees them.
+    let epoch = state::uncontained_epoch(&[&data_dir, &config_dir])?;
+    let launch = read_launch_profile(ctx, args, &config_dir, &epoch)?;
     let workspace = canonical_root(&ctx.cwd, args.workspace.as_deref(), "--workspace")?;
     if !workspace.is_dir() {
         return Err(usage(
@@ -254,262 +249,36 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
     }
 
     // 1. Operator config, then the selected profile.
-    let config_path = config_dir.join("config.toml");
-    refuse_stale_trusted_file(&config_path, &uncontained_epoch, "config")?;
-    let operator = match read_operator_file(&config_path, "config")? {
-        Some(text) => config::parse_operator_config(&text)?,
-        None => config::OperatorConfig::default(),
-    };
+    let operator = read_operator_config(&config_dir, &epoch)?;
     let operator_jail = operator.jail.clone().unwrap_or_default();
-    config::check_schema("jail.schema", operator_jail.schema.as_deref())?;
-    if operator_jail.extends.is_some() {
-        return Err(usage(
-            "jail.extends",
-            "`extends` belongs in a profile file, not in config.toml",
-        ));
-    }
-
-    // §6.1: `--profile none` is the only way to select `none`; files and
-    // environment cannot select it. `config.toml` is a defaults file, so a
-    // `none` written there would drop the operator onto the uncontained
-    // profile without the explicit act the clause demands, and it refuses
-    // instead — the same rule the profile-file `extends = "none"` refusal
-    // below applies.
-    let selection = match (args.profile.as_deref(), operator_jail.profile.as_deref()) {
-        (Some(cli), _) => cli.to_owned(),
-        (None, Some("none")) => {
-            return Err(JailError::new(
-                ErrorCode::PolicyWidening,
-                ErrorStage::Resolving,
-                Remediation::Configuration,
-                "config.toml may not select the `none` profile; pass `--profile none` explicitly"
-                    .to_owned(),
-            )
-            .with_key_path("jail.profile"));
-        }
-        (None, Some(configured)) => configured.to_owned(),
-        // §6.1 "Default profile: `tool`, or the launch
-        // profile's `jail` when `--launch` is set." Precedence: `--profile`,
-        // then the operator's configured profile, then the launch default,
-        // then `tool`; a configured profile that disagrees with the launch
-        // default refuses below instead of being replaced (J3 review M3).
-        (None, None) => launch.as_ref().map_or_else(
-            || "tool".to_owned(),
-            |launch| launch.jail.as_str().to_owned(),
-        ),
-    };
-
-    let mut layers: Vec<Layer> = Vec::new();
-    let (profile, policy_name) = match ProfileName::parse(&selection) {
-        Some(profile) => (profile, selection.clone()),
-        None => {
-            let path = if args.profile.is_some() {
-                absolutize(&ctx.cwd, Path::new(&selection))
-            } else if let Some(suffix) = selection.strip_prefix("~/") {
-                let home = ctx
-                    .home
-                    .as_ref()
-                    .ok_or_else(|| usage("jail.profile", "operator home is unavailable"))?;
-                config::absolute_dir(config::HOME_VAR, home)?.join(suffix)
-            } else {
-                absolutize(&config_dir, Path::new(&selection))
-            };
-            refuse_stale_trusted_file(&path, &uncontained_epoch, "--profile")?;
-            let text = read_operator_file(&path, "--profile")?
-                .ok_or_else(|| usage("--profile", format!("{} does not exist", path.display())))?;
-            let file = config::parse_policy_file(&text)?;
-            let base = ProfileName::parse(&file.extends).ok_or_else(|| {
-                usage(
-                    "extends",
-                    format!("`{}` is not a built-in profile", file.extends),
-                )
-            })?;
-            if base == ProfileName::None {
-                // §6.1: `--profile none` is the only way to select `none`.
-                return Err(JailError::new(
-                    ErrorCode::PolicyWidening,
-                    ErrorStage::Resolving,
-                    Remediation::Configuration,
-                    "a profile file may not extend `none`".to_owned(),
-                )
-                .with_key_path("extends"));
-            }
-            let delta = config::delta_from_sections(
-                "",
-                &file.filesystem,
-                &file.network,
-                &file.limits,
-                &file.observation,
-            )?;
-            let base_dir = path.parent().map(os_bytes);
-            let name = path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "profile".to_owned());
-            layers.push(Layer {
-                origin: LayerOrigin::OperatorProfileFile(name.clone()),
-                base_dir,
-                delta,
-            });
-            (base, name)
-        }
-    };
-    // §6.1 — the selected base must permit the launch
-    // profile's credentials and network, and `none` never runs one. A
-    // configured profile is never silently replaced by a launch default, and
-    // never silently replaces one either: when they name different bases the
-    // operator chooses with `--profile`.
+    let selection = select_profile(args, &operator_jail, launch.as_ref())?;
+    let base = select_base(ctx, args, &config_dir, &epoch, selection)?;
+    let profile = base.profile;
     if let Some(launch) = &launch {
-        if args.profile.is_none()
-            && let Some(configured) = operator_jail.profile.as_deref()
-            && launch.jail != profile
-        {
-            return Err(usage(
-                "jail.profile",
-                format!(
-                    "config.toml selects `{configured}` (base `{}`), but launch profile `{}` \
-                     defaults to `{}`; pass `--profile` to choose one",
-                    profile.as_str(),
-                    launch.name,
-                    launch.jail.as_str()
-                ),
-            ));
-        }
-        launch_profile::check_jail_permits(profile, launch)?;
+        check_launch_base(args, &operator_jail, profile, launch)?;
     }
-
+    let mut layers: Vec<Layer> = base.layer.into_iter().collect();
     // The operator's own `[jail]` table is a trusted layer: it may grant.
     if operator.jail.is_some() {
-        let delta = config::delta_from_sections(
-            "jail.",
-            &operator_jail.filesystem,
-            &operator_jail.network,
-            &operator_jail.limits,
-            &operator_jail.observation,
-        )?;
-        layers.push(Layer {
-            origin: LayerOrigin::OperatorConfig("config.toml".to_owned()),
-            // §6.2: apply paths relative to the file containing them, and
-            // `config.toml` sits in `config_dir` itself — not its parent.
-            base_dir: Some(os_bytes(&config_dir)),
-            delta,
-        });
+        layers.push(operator_layer(&operator_jail, &config_dir)?);
     }
-
-    // 2. The launch profile's allowed hosts, an operator
-    // grant, before the environment, CLI and project layers.
-    if let Some(layer) = launch.as_ref().and_then(launch_profile::network_layer) {
-        layers.push(layer);
-    }
-
+    // 2. The launch profile's allowed hosts, an operator grant, before the
+    // environment, CLI and project layers.
+    layers.extend(launch.as_ref().and_then(launch_profile::network_layer));
     // 3. The environment allow-list.
-    if ctx.env_settings.observe.is_some() || ctx.env_settings.evidence.is_some() {
-        layers.push(Layer {
-            origin: LayerOrigin::Environment,
-            base_dir: None,
-            delta: PolicyDelta {
-                observe: ctx.env_settings.observe,
-                evidence: ctx.env_settings.evidence,
-                ..PolicyDelta::default()
-            },
-        });
-    }
-
+    layers.extend(environment_layer(&ctx.env_settings));
     // 4. Explicit CLI grants and limits.
-    let cli_delta = PolicyDelta {
-        read_write: args.rw.iter().map(|path| os_bytes(path)).collect(),
-        read_only: args.ro.iter().map(|path| os_bytes(path)).collect(),
-        deny_read: args.deny_read.iter().map(|path| os_bytes(path)).collect(),
-        network_allow: args.allow_host.clone(),
-        limits: config::ceilings_from_cli(&args.limit)?,
-        observe: args.observe.map(Into::into),
-        evidence: args.evidence.map(Into::into),
-        ..PolicyDelta::default()
-    };
-    let has_cli = !cli_delta.read_write.is_empty()
-        || !cli_delta.read_only.is_empty()
-        || !cli_delta.deny_read.is_empty()
-        || !cli_delta.network_allow.is_empty()
-        || cli_delta.limits != policy::Ceilings::default()
-        || cli_delta.observe.is_some()
-        || cli_delta.evidence.is_some();
-    if has_cli {
-        layers.push(Layer {
-            origin: LayerOrigin::CommandLine,
-            base_dir: Some(os_bytes(&ctx.cwd)),
-            delta: cli_delta,
-        });
-    }
-
+    layers.extend(command_line_layer(ctx, args)?);
     // 5. The workspace-root `ouro.toml`, which may only narrow.
-    let project_path = workspace.join("ouro.toml");
-    if let Some(text) = read_project_file(&project_path)? {
-        // P02.9 — §6.3 "Add credentials ... Refuse": a key of
-        // the operator's launch layer in the workspace-owned narrowing file
-        // is a widening, refused with its exact key path, not a typo.
-        if let Some(key) = launch_layer_key_in_project(&text) {
-            return Err(JailError::new(
-                ErrorCode::PolicyWidening,
-                ErrorStage::Resolving,
-                Remediation::Configuration,
-                format!(
-                    "`{key}` is staged only from an operator launch profile (§12); a project \
-                     file may only narrow"
-                ),
-            )
-            .with_key_path(key));
-        }
-        let project = config::parse_project_config(&text)?;
-        if let Some(section) = project.jail {
-            config::check_schema("jail.schema", section.schema.as_deref())?;
-            let delta = config::delta_from_sections(
-                "jail.",
-                &section.filesystem,
-                &section.network,
-                &section.limits,
-                &section.observation,
-            )?;
-            layers.push(Layer {
-                origin: LayerOrigin::ProjectConfig("ouro.toml".to_owned()),
-                base_dir: Some(os_bytes(&workspace)),
-                delta,
-            });
-        }
-    }
+    layers.extend(project_layer(&workspace)?);
 
-    let scratch = match &args.scratch {
-        Some(path) => ScratchRoot::Host {
-            path: crate::records::NativeString::from_bytes(os_bytes(&canonical_root(
-                &ctx.cwd,
-                Some(path),
-                "--scratch",
-            )?))
-            .map_err(|error| usage("--scratch", error.to_string()))?,
-        },
-        None => ScratchRoot::Managed,
-    };
-
-    // §6.2: `[jail_host.network] translation_prefixes` is host configuration,
-    // merged into proxy policy before digest creation. Each entry is parsed
-    // and re-rendered in canonical RFC 5952 form so equivalent spellings of
-    // one prefix cannot yield two digests (§6.3).
-    let translation_prefixes = match operator
-        .jail_host
-        .and_then(|host| host.network)
-        .map(|network| network.translation_prefixes)
-    {
-        Some(entries) => config::canonical_translation_prefixes(
-            "jail_host.network.translation_prefixes",
-            &entries,
-        )?,
-        None => Vec::new(),
-    };
-
+    let scratch = scratch_root(ctx, args)?;
+    let translation_prefixes = translation_prefixes(operator.jail_host)?;
     let platform_os = ctx.platform.identity().os;
     let inputs = ResolveInputs {
         platform: platform_os,
         base_profile: profile,
-        policy_name,
+        policy_name: base.policy_name,
         baseline: profiles::baseline(profile, platform_os, ctx.env_lookup.as_ref()),
         workspace: os_bytes(&workspace),
         scratch,
@@ -518,46 +287,17 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
         translation_prefixes,
         layers,
     };
-    let resolved = policy::resolve(&inputs)?;
-    // The launch environment, vendor state and `launch`
-    // field group, then the digest and requirements over the result.
-    let mut resolved = match &launch {
-        Some(launch) => launch_profile::apply(resolved, launch)?,
-        None => resolved,
-    };
-
-    // jail-v2 §7.2: operator command rules, validated here so a refusal
-    // names its key; the Linux platform compiles the same rules for the
-    // observer.
+    let mut resolved = policy::resolve(&inputs)?;
+    // The launch environment, vendor state and `launch` field group, then
+    // the digest and requirements over the result.
+    if let Some(launch) = &launch {
+        resolved = launch_profile::apply(resolved, launch)?;
+    }
     if !operator_jail.commands.is_empty() {
-        operator_jail
-            .commands
-            .compile()
-            .map_err(|e| usage("jail.commands", e))?;
-        if resolved.snapshot.platform != crate::records::Os::Linux
-            || profile == ProfileName::None
-            || resolved.snapshot.observation.mode != crate::records::ObserveMode::On
-        {
-            return Err(usage(
-                "jail.commands",
-                "command rules require contained Linux execution with --observe on",
-            ));
-        }
-        resolved.snapshot.commands = operator_jail.commands.clone();
-        resolved.digest = resolved.snapshot.digest()?;
+        apply_command_rules(&mut resolved, &operator_jail.commands, profile)?;
     }
     if learning {
-        if profile == ProfileName::None || resolved.snapshot.platform != crate::records::Os::Linux {
-            return Err(usage(
-                "learn",
-                "learning requires a contained Linux run with the real observer",
-            ));
-        }
-        if resolved.snapshot.observation.mode != crate::records::ObserveMode::On {
-            return Err(usage("learn", "learning requires observation on"));
-        }
-        resolved.snapshot.observation.learning = true;
-        resolved.digest = resolved.snapshot.digest()?;
+        enable_learning(&mut resolved, profile)?;
     }
     // §6.4: `build` requires an explicit memory ceiling; the baseline leaves it
     // absent so that this refuses rather than inventing one.
@@ -567,32 +307,8 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
             "the `build` profile requires an explicit memory ceiling",
         ));
     }
-
-    // §12 "A launch profile path inside any child-writable
-    // grant refuses", and north star §4.5 refuses one inside the workspace.
     if let Some(launch) = &launch {
-        launch_profile::check_outside_writable(
-            launch,
-            &child_writable_roots(&resolved, &workspace),
-        )?;
-        // The same rule for every credential source, by identity (M2 of the
-        // J3 review): the child must not be able to change what it is given.
-        // A source that cannot be walked now is left to staging and doctor,
-        // which report it by reason.
-        let forbidden = forbidden_identities(&resolved, &workspace)?;
-        for credential in &launch.credentials {
-            if let Ok(chain) = crate::credentials::source_chain(credential.source.as_bytes())
-                && chain.iter().any(|identity| forbidden.contains(identity))
-            {
-                return Err(usage(
-                    &format!("launch.credentials.{}.source", credential.id),
-                    format!(
-                        "credential `{}` lies inside a grant the child can write",
-                        credential.id
-                    ),
-                ));
-            }
-        }
+        check_launch_placement(&resolved, &workspace, launch)?;
     }
 
     Ok(Plan {
@@ -601,6 +317,446 @@ fn resolve(ctx: &Context, args: &PolicyArgs, learning: bool) -> Result<Plan, Jai
         config_dir,
         data_dir,
     })
+}
+
+/// §6.2 step 2: the operator launch profile `--launch NAME`, read once
+/// through a no-follow walk; its content is what the snapshot records.
+///
+/// # Errors
+/// The launch profile's refusal, or [`ErrorCode::UnsafeConfigPath`] for one
+/// an uncontained run's child could have written.
+fn read_launch_profile(
+    ctx: &Context,
+    args: &PolicyArgs,
+    config_dir: &Path,
+    epoch: &state::UncontainedEpoch,
+) -> Result<Option<launch_profile::LaunchProfile>, JailError> {
+    let Some(name) = &args.launch else {
+        return Ok(None);
+    };
+    refuse_stale_trusted_file(
+        &launch_profile::launch_directory(config_dir).join(format!("{name}.toml")),
+        epoch,
+        "--launch",
+    )?;
+    launch_profile::load(config_dir, name, ctx.home.as_deref()).map(Some)
+}
+
+/// The operator's `config.toml`, or the empty configuration when there is
+/// none.
+///
+/// # Errors
+/// The read's and the parser's refusals.
+fn read_operator_config(
+    config_dir: &Path,
+    epoch: &state::UncontainedEpoch,
+) -> Result<config::OperatorConfig, JailError> {
+    let config_path = config_dir.join("config.toml");
+    refuse_stale_trusted_file(&config_path, epoch, "config")?;
+    match read_operator_file(&config_path, "config")? {
+        Some(text) => config::parse_operator_config(&text),
+        None => Ok(config::OperatorConfig::default()),
+    }
+}
+
+/// The profile selection, by precedence: `--profile`, then the operator's
+/// configured profile, then the launch profile's default, then `tool` (§6.1:
+/// "Default profile: `tool`, or the launch profile's `jail` when `--launch`
+/// is set").
+///
+/// # Errors
+/// [`ErrorCode::PolicyWidening`] at `jail.profile` for a `config.toml` that
+/// selects `none`.
+fn select_profile(
+    args: &PolicyArgs,
+    operator_jail: &config::JailSection,
+    launch: Option<&launch_profile::LaunchProfile>,
+) -> Result<String, JailError> {
+    Ok(
+        match (args.profile.as_deref(), operator_jail.profile.as_deref()) {
+            (Some(cli), _) => cli.to_owned(),
+            // §6.1: `--profile none` is the only way to select `none`; files
+            // and environment cannot select it. `config.toml` is a defaults
+            // file, so a `none` written there would drop the operator onto the
+            // uncontained profile without the explicit act the clause
+            // demands, and it refuses instead, as a profile file's
+            // `extends = "none"` does.
+            (None, Some("none")) => {
+                return Err(JailError::new(
+                    ErrorCode::PolicyWidening,
+                    ErrorStage::Resolving,
+                    Remediation::Configuration,
+                    "config.toml may not select the `none` profile; pass `--profile none` \
+                     explicitly"
+                        .to_owned(),
+                )
+                .with_key_path("jail.profile"));
+            }
+            (None, Some(configured)) => configured.to_owned(),
+            // A configured profile that disagrees with the launch default
+            // refuses in `check_launch_base` instead of being replaced.
+            (None, None) => launch.map_or_else(
+                || "tool".to_owned(),
+                |launch| launch.jail.as_str().to_owned(),
+            ),
+        },
+    )
+}
+
+/// The base profile a selection names, its display name, and the operator
+/// profile file's layer when the selection names a file.
+struct Base {
+    profile: ProfileName,
+    policy_name: String,
+    layer: Option<Layer>,
+}
+
+/// Resolves a selection to its base profile: a built-in name, or an
+/// operator profile file that extends one (§6.2).
+///
+/// # Errors
+/// The profile file's refusals, [`ErrorCode::InvalidConfig`] for a base that
+/// is not built in, and [`ErrorCode::PolicyWidening`] at `extends` for a file
+/// that extends `none`.
+fn select_base(
+    ctx: &Context,
+    args: &PolicyArgs,
+    config_dir: &Path,
+    epoch: &state::UncontainedEpoch,
+    selection: String,
+) -> Result<Base, JailError> {
+    if let Some(profile) = ProfileName::parse(&selection) {
+        return Ok(Base {
+            profile,
+            policy_name: selection,
+            layer: None,
+        });
+    }
+    let path = if args.profile.is_some() {
+        absolutize(&ctx.cwd, Path::new(&selection))
+    } else if let Some(suffix) = selection.strip_prefix("~/") {
+        let home = ctx
+            .home
+            .as_ref()
+            .ok_or_else(|| usage("jail.profile", "operator home is unavailable"))?;
+        config::absolute_dir(config::HOME_VAR, home)?.join(suffix)
+    } else {
+        absolutize(config_dir, Path::new(&selection))
+    };
+    refuse_stale_trusted_file(&path, epoch, "--profile")?;
+    let text = read_operator_file(&path, "--profile")?
+        .ok_or_else(|| usage("--profile", format!("{} does not exist", path.display())))?;
+    let file = config::parse_policy_file(&text)?;
+    let profile = ProfileName::parse(&file.extends).ok_or_else(|| {
+        usage(
+            "extends",
+            format!("`{}` is not a built-in profile", file.extends),
+        )
+    })?;
+    if profile == ProfileName::None {
+        // §6.1: `--profile none` is the only way to select `none`.
+        return Err(JailError::new(
+            ErrorCode::PolicyWidening,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            "a profile file may not extend `none`".to_owned(),
+        )
+        .with_key_path("extends"));
+    }
+    let delta = config::delta_from_sections(
+        "",
+        &file.filesystem,
+        &file.network,
+        &file.limits,
+        &file.observation,
+    )?;
+    let name = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "profile".to_owned());
+    Ok(Base {
+        profile,
+        policy_name: name.clone(),
+        layer: Some(Layer {
+            origin: LayerOrigin::OperatorProfileFile(name),
+            base_dir: path.parent().map(os_bytes),
+            delta,
+        }),
+    })
+}
+
+/// §6.1: the selected base must permit the launch profile's credentials and
+/// network, and `none` never runs one. A configured profile is never
+/// silently replaced by a launch default, and never silently replaces one
+/// either: when they name different bases the operator chooses with
+/// `--profile`.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] at `jail.profile` for that disagreement, and
+/// the launch profile's own refusal of the base.
+fn check_launch_base(
+    args: &PolicyArgs,
+    operator_jail: &config::JailSection,
+    profile: ProfileName,
+    launch: &launch_profile::LaunchProfile,
+) -> Result<(), JailError> {
+    if args.profile.is_none()
+        && let Some(configured) = operator_jail.profile.as_deref()
+        && launch.jail != profile
+    {
+        return Err(usage(
+            "jail.profile",
+            format!(
+                "config.toml selects `{configured}` (base `{}`), but launch profile `{}` \
+                 defaults to `{}`; pass `--profile` to choose one",
+                profile.as_str(),
+                launch.name,
+                launch.jail.as_str()
+            ),
+        ));
+    }
+    launch_profile::check_jail_permits(profile, launch)
+}
+
+/// The operator's own `[jail]` table, a trusted layer that may grant.
+///
+/// # Errors
+/// The table's own refusals.
+fn operator_layer(
+    operator_jail: &config::JailSection,
+    config_dir: &Path,
+) -> Result<Layer, JailError> {
+    let delta = config::delta_from_sections(
+        "jail.",
+        &operator_jail.filesystem,
+        &operator_jail.network,
+        &operator_jail.limits,
+        &operator_jail.observation,
+    )?;
+    Ok(Layer {
+        origin: LayerOrigin::OperatorConfig("config.toml".to_owned()),
+        // §6.2: apply paths relative to the file containing them, and
+        // `config.toml` sits in `config_dir` itself, not its parent.
+        base_dir: Some(os_bytes(config_dir)),
+        delta,
+    })
+}
+
+/// The environment allow-list's layer, when it sets anything (§6.2 step 3).
+fn environment_layer(settings: &EnvSettings) -> Option<Layer> {
+    (settings.observe.is_some() || settings.evidence.is_some()).then(|| Layer {
+        origin: LayerOrigin::Environment,
+        base_dir: None,
+        delta: PolicyDelta {
+            observe: settings.observe,
+            evidence: settings.evidence,
+            ..PolicyDelta::default()
+        },
+    })
+}
+
+/// The explicit CLI grants and limits' layer, when there are any (§6.2
+/// step 4).
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] for a `--limit` that does not parse.
+fn command_line_layer(ctx: &Context, args: &PolicyArgs) -> Result<Option<Layer>, JailError> {
+    let delta = PolicyDelta {
+        read_write: args.rw.iter().map(|path| os_bytes(path)).collect(),
+        read_only: args.ro.iter().map(|path| os_bytes(path)).collect(),
+        deny_read: args.deny_read.iter().map(|path| os_bytes(path)).collect(),
+        network_allow: args.allow_host.clone(),
+        limits: config::ceilings_from_cli(&args.limit)?,
+        observe: args.observe.map(Into::into),
+        evidence: args.evidence.map(Into::into),
+        ..PolicyDelta::default()
+    };
+    let any = !delta.read_write.is_empty()
+        || !delta.read_only.is_empty()
+        || !delta.deny_read.is_empty()
+        || !delta.network_allow.is_empty()
+        || delta.limits != policy::Ceilings::default()
+        || delta.observe.is_some()
+        || delta.evidence.is_some();
+    Ok(any.then(|| Layer {
+        origin: LayerOrigin::CommandLine,
+        base_dir: Some(os_bytes(&ctx.cwd)),
+        delta,
+    }))
+}
+
+/// The workspace-root `ouro.toml`'s layer, which may only narrow (§6.2
+/// step 5), when the file has a `[jail]` table.
+///
+/// # Errors
+/// The read's and the parser's refusals, and [`ErrorCode::PolicyWidening`]
+/// for a key of the operator's launch layer (§6.3: "Add credentials ...
+/// Refuse"), refused with its exact key path, not as a typo.
+fn project_layer(workspace: &Path) -> Result<Option<Layer>, JailError> {
+    let Some(text) = read_project_file(&workspace.join("ouro.toml"))? else {
+        return Ok(None);
+    };
+    if let Some(key) = launch_layer_key_in_project(&text) {
+        return Err(JailError::new(
+            ErrorCode::PolicyWidening,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            format!(
+                "`{key}` is staged only from an operator launch profile (§12); a project \
+                 file may only narrow"
+            ),
+        )
+        .with_key_path(key));
+    }
+    let Some(section) = config::parse_project_config(&text)?.jail else {
+        return Ok(None);
+    };
+    config::check_schema("jail.schema", section.schema.as_deref())?;
+    let delta = config::delta_from_sections(
+        "jail.",
+        &section.filesystem,
+        &section.network,
+        &section.limits,
+        &section.observation,
+    )?;
+    Ok(Some(Layer {
+        origin: LayerOrigin::ProjectConfig("ouro.toml".to_owned()),
+        base_dir: Some(os_bytes(workspace)),
+        delta,
+    }))
+}
+
+/// The scratch root: `--scratch`, canonical, or the managed one.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] at `--scratch` for a path that cannot be
+/// resolved or recorded.
+fn scratch_root(ctx: &Context, args: &PolicyArgs) -> Result<ScratchRoot, JailError> {
+    let Some(path) = &args.scratch else {
+        return Ok(ScratchRoot::Managed);
+    };
+    let path = canonical_root(&ctx.cwd, Some(path), "--scratch")?;
+    Ok(ScratchRoot::Host {
+        path: crate::records::NativeString::from_bytes(os_bytes(&path))
+            .map_err(|error| usage("--scratch", error.to_string()))?,
+    })
+}
+
+/// §6.2: `[jail_host.network] translation_prefixes` is host configuration,
+/// merged into proxy policy before digest creation. Each entry is parsed and
+/// re-rendered in canonical RFC 5952 form so equivalent spellings of one
+/// prefix cannot yield two digests (§6.3).
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] for an entry that is not a prefix.
+fn translation_prefixes(host: Option<config::JailHostSection>) -> Result<Vec<String>, JailError> {
+    match host
+        .and_then(|host| host.network)
+        .map(|network| network.translation_prefixes)
+    {
+        Some(entries) => config::canonical_translation_prefixes(
+            "jail_host.network.translation_prefixes",
+            &entries,
+        ),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// jail-v2 §7.2: the operator's command rules, validated here so a refusal
+/// names its key; the Linux platform compiles the same rules for the
+/// observer.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] at `jail.commands` for a rule that does not
+/// compile, or a run that cannot match it (only a contained Linux run with
+/// observation on sees each exec).
+fn apply_command_rules(
+    resolved: &mut Resolved,
+    rules: &crate::commands::Rules,
+    profile: ProfileName,
+) -> Result<(), JailError> {
+    rules.compile().map_err(|e| usage("jail.commands", e))?;
+    if resolved.snapshot.platform != crate::records::Os::Linux
+        || profile == ProfileName::None
+        || resolved.snapshot.observation.mode != crate::records::ObserveMode::On
+    {
+        return Err(usage(
+            "jail.commands",
+            "command rules require contained Linux execution with --observe on",
+        ));
+    }
+    let rules = rules.clone();
+    resolved.amend(
+        vec![policy::ProvenanceEntry {
+            origin: LayerOrigin::OperatorConfig("config.toml".to_owned()).label(),
+            key: "jail.commands".to_owned(),
+            detail: None,
+        }],
+        |snapshot| {
+            snapshot.commands = rules;
+            Ok(())
+        },
+    )
+}
+
+/// `learn`: the observer also captures read-only opens for the proposal.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] at `learn` where learning cannot run: it
+/// needs a contained Linux run with the real observer on.
+fn enable_learning(resolved: &mut Resolved, profile: ProfileName) -> Result<(), JailError> {
+    if profile == ProfileName::None || resolved.snapshot.platform != crate::records::Os::Linux {
+        return Err(usage(
+            "learn",
+            "learning requires a contained Linux run with the real observer",
+        ));
+    }
+    if resolved.snapshot.observation.mode != crate::records::ObserveMode::On {
+        return Err(usage("learn", "learning requires observation on"));
+    }
+    resolved.amend(
+        vec![policy::ProvenanceEntry {
+            origin: LayerOrigin::CommandLine.label(),
+            key: "observation.learning".to_owned(),
+            detail: Some("learn".to_owned()),
+        }],
+        |snapshot| {
+            snapshot.observation.learning = true;
+            Ok(())
+        },
+    )
+}
+
+/// §12 "A launch profile path inside any child-writable grant refuses", and
+/// north star §4.5 refuses one inside the workspace; the same rule holds for
+/// every credential source, by identity: the child must not be able to
+/// change what it is given. A source that cannot be walked now is left to
+/// staging and doctor, which report it by reason.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] for a launch profile or a credential source
+/// inside a grant the child can write.
+fn check_launch_placement(
+    resolved: &Resolved,
+    workspace: &Path,
+    launch: &launch_profile::LaunchProfile,
+) -> Result<(), JailError> {
+    launch_profile::check_outside_writable(launch, &child_writable_roots(resolved, workspace))?;
+    let forbidden = forbidden_identities(resolved, workspace)?;
+    for credential in &launch.credentials {
+        if let Ok(chain) = crate::credentials::source_chain(credential.source.as_bytes())
+            && chain.iter().any(|identity| forbidden.contains(identity))
+        {
+            return Err(usage(
+                &format!("launch.credentials.{}.source", credential.id),
+                format!(
+                    "credential `{}` lies inside a grant the child can write",
+                    credential.id
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Every root the child can write under the resolved policy: the workspace,
@@ -873,16 +1029,7 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
     // §6.1's grammar carries the selection flags; the workspace and scratch
     // roots are the same ones `run` accepts, so a doctor call can name the
     // plan it is checking instead of inheriting the invocation directory.
-    let plan = resolve_plan(
-        ctx,
-        &PolicyArgs {
-            profile: args.profile.clone(),
-            launch: args.launch.clone(),
-            workspace: args.workspace.clone(),
-            scratch: args.scratch.clone(),
-            ..PolicyArgs::default()
-        },
-    )?;
+    let plan = resolve_plan(ctx, &args.policy())?;
     let request = plan_request(&plan);
     let capabilities = ctx.platform.probe_all(&request);
     let ready = plan
@@ -1000,7 +1147,7 @@ fn first_unsatisfied(requirements: &[String], capabilities: &[Capability]) -> Op
 
 /// Runs one attempt, or refuses before the target executes (§8.1).
 ///
-/// Every path that claims the attempt and does not reach `release` writes a
+/// Every path that claims the attempt and does not run its target writes a
 /// `refused` receipt with the §13.2 tuple for the stage it failed at; a
 /// refusal before the claim (usage, resolution, the state root, the output
 /// channels) has no attempt to write one for. The return value carries the
@@ -1019,9 +1166,9 @@ pub fn run_learning(ctx: &Context, args: &RunArgs) -> RunReport {
 fn run_with(ctx: &Context, args: &RunArgs, learning: bool) -> RunReport {
     match run_inner(ctx, args, learning) {
         Ok(report) => report,
-        // Every early return of `run_inner` happens before the claim; after
-        // it, every path builds its own report. J4-R, S5: so a persistence
-        // failure here (the claim itself) refuses with 125.
+        // Every error of `run_inner` comes before the claim; after it, the
+        // attempt builds its own report. So a persistence failure here (the
+        // claim itself) refuses with 125.
         Err(error) => RunReport {
             exit_code: error.refusal_exit_code(),
             error: Some(error),
@@ -1030,11 +1177,52 @@ fn run_with(ctx: &Context, args: &RunArgs, learning: bool) -> RunReport {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport, JailError> {
     // §13.1: pin the shared monotonic base before anything writes a trace
     // event, so wrapper, audit and gap intervals all count from here.
     crate::platform::mark_supervisor_start();
+    let supplied_attempt_id = check_run_usage(args)?;
+    // §8.3, H9: the handlers go on before anything exists, so INT/TERM/HUP
+    // during resolution, preparation or the 60-second gate wait is a refusal,
+    // never the default disposition killing the supervisor with a prepared
+    // receipt and a blocked launcher left behind.
+    let signals = signals::install();
+
+    let plan = resolve(ctx, &args.policy, learning)?;
+    let request = plan_request(&plan);
+    let argv: Vec<Vec<u8>> = args
+        .argv
+        .iter()
+        .map(|argument| argument.clone().into_vec())
+        .collect();
+    let argv_digest = (!argv.is_empty()).then(|| crate::canonical::argv_digest(&argv));
+
+    validate_channels(args)?;
+    check_isolation(args, &plan)?;
+
+    if args.label_only {
+        return Ok(label_only(ctx, &plan, &request));
+    }
+
+    // §8.2: "Initial preparation budget: 30 seconds". It covers steps 1 to 5
+    // and is checked at each boundary, so a step that hangs on a child-created
+    // object cannot hold the attempt open indefinitely.
+    let budget = Budget::new(PREPARE_BUDGET);
+    // Step 1: allocate and lock private state before anything else exists.
+    let attempt_id = supplied_attempt_id.unwrap_or_else(AttemptId::generate);
+    let attempt = Attempt::claim(ctx, args, plan, attempt_id, budget, signals, argv_digest)?;
+    // From the claim on, every exit writes a receipt (I01): `run` returns a
+    // report, never an error.
+    Ok(attempt.run(request, argv))
+}
+
+/// The usage rules of §6.1 that clap does not express, and the supplied
+/// attempt id, parsed before any path derives from it.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] for a usage error, and the id grammar's
+/// refusal.
+fn check_run_usage(args: &RunArgs) -> Result<Option<AttemptId>, JailError> {
     // §6.1: PROGRAM is mandatory except with --label-only.
     if !args.label_only && args.argv.is_empty() {
         return Err(usage("PROGRAM", "a program to run is required"));
@@ -1054,950 +1242,58 @@ fn run_inner(ctx: &Context, args: &RunArgs, learning: bool) -> Result<RunReport,
     // §7: validate the id grammar before deriving any path, and before any
     // other check, so a malformed id is the usage error X02 expects rather than
     // whatever the next check happens to find first.
-    let supplied_attempt_id = match &args.attempt_id {
-        Some(text) => Some(AttemptId::parse(text)?),
-        None => None,
-    };
-
-    // §8.3, H9: the handlers go on before anything exists. They used to be
-    // installed just before `release`, so INT/TERM/HUP during resolution,
-    // preparation or the 60-second gate wait killed the supervisor with the
-    // default disposition and left a prepared receipt and a blocked launcher
-    // behind.
-    let signals = signals::install();
-
-    let plan = resolve(ctx, &args.policy, learning)?;
-    let request = plan_request(&plan);
-    let argv: Vec<Vec<u8>> = args
-        .argv
-        .iter()
-        .map(|argument| argument.clone().into_vec())
-        .collect();
-    let argv_digest = (!argv.is_empty()).then(|| crate::canonical::argv_digest(&argv));
-
-    validate_channels(args)?;
-    let roots = ChildRoots::of(&plan);
-    check_state_isolation(&plan, &roots)?;
-    // Security 2026-09-27 (audit 3 A2): every run, not only a `--launch` one.
-    check_launch_isolation(&plan, &roots)?;
-    // Security 2026-09-27 (audit 4 B1): the config directory holds the
-    // trusted, widening `config.toml`, read on every run.
-    check_config_isolation(&plan, &roots)?;
-    check_binary_isolation(&plan, &roots)?;
-    validate_receipt_path(args, &plan, &roots)?;
-
-    if args.label_only {
-        // §6.1: resolve and probe, print the label, execute nothing and copy no
-        // credential. No attempt state is allocated, so nothing to clean up.
-        let capabilities = ctx.platform.probe(&request);
-        let refusal = first_unsatisfied(&plan.resolved.requirements, &capabilities);
-        return Ok(RunReport {
-            exit_code: refusal.as_ref().map_or(0, JailError::exit_code),
-            error: refusal,
-            label: Some(format!(
-                "label {}@{} observe={} digest={}",
-                plan.resolved.policy_name,
-                plan.resolved.snapshot.platform.as_str(),
-                match plan.resolved.snapshot.observation.mode {
-                    crate::records::ObserveMode::On => "on",
-                    crate::records::ObserveMode::Off => "off",
-                },
-                plan.resolved.digest
-            )),
-            capabilities,
-            ..RunReport::default()
-        });
-    }
-
-    // §8.2: "Initial preparation budget: 30 seconds". It covers steps 1 to 5
-    // and is checked at each boundary, so a step that hangs on a child-created
-    // object cannot hold the attempt open indefinitely.
-    let budget = Budget::new(PREPARE_BUDGET);
-
-    // Step 1: allocate and lock private state before anything else exists.
-    let attempt_id = supplied_attempt_id.unwrap_or_else(AttemptId::generate);
-    let attempt_dir = AttemptDir::new(&plan.data_dir, &attempt_id);
-    attempt_dir.create(&plan.data_dir)?;
-    // §7 — an existing attempt root must hold no jail-owned
-    // artifact at all, not only no `jail-state.json` (J3 review H2). Checked
-    // before the lease, so a `jail.lock` found here is not this supervisor's.
-    state::check_fresh_attempt(&attempt_dir)?;
-    let Some(lease) = state::Lease::acquire(&attempt_dir.lock_path())? else {
-        return Err(JailError::new(
-            ErrorCode::AttemptExists,
-            ErrorStage::Resolving,
-            Remediation::InspectState,
-            "another live supervisor holds this attempt's lease".to_owned(),
-        ));
-    };
-    // J4-R: §13.3 — from here on every durable write runs on the persistence
-    // worker, and this thread waits for each step within its progress
-    // budget: a stalled disk ends a wait, it never holds the supervisor.
-    let mut persister = state::Persister::start().map_err(|error| {
-        JailError::new(
-            ErrorCode::StateWriteFailed,
-            ErrorStage::Preparing,
-            Remediation::Retry,
-            format!("the persistence worker could not be started: {error}"),
-        )
-    })?;
-    // J4 W3, P1 (b): the lease lives as long as persistence work may: when
-    // the run returns with a write stalled in the kernel, it is not released
-    // (only the end of the whole process frees it), so no `gc` can write the
-    // attempt's records under a rename that may still land.
-    persister.hold_lease(lease);
-    let _forwarding = state::install(persister.forwarding());
-    // I01: the channels that carry a refusal are opened before the claim,
-    // so once an attempt is claimed, every exit can write its receipt.
-    let mut control = open_control(args)?;
-    let trace = open_trace(ctx, args, &attempt_dir)?;
-    // Review item 15, a loss note names what this attempt covers
-    if let Ok(mut writer) = trace.lock() {
-        writer.set_stream_classes(&stream_classes(&plan));
-    }
-    let mut journal = Journal::new(attempt_id.as_str(), Arc::clone(&trace));
-    // J4-R: S9 — every OURO_JAIL_TEST_* variable in force, read once at the
-    // attempt's start and recorded in jail state and in every receipt that
-    // has native details (lifetime.native.details.test_seams).
-    let test_seams = state::test_seams();
-    claim_attempt(&attempt_dir, &attempt_id, ctx, test_seams.as_ref())?;
-    // J4-R: N6 — a failed policy.json write is a refusal like every other
-    // failure before exec: it is reported through `refuse` below, once the
-    // record that carries a refusal exists.
-    let policy_written = write_policy_file(&attempt_dir, &plan);
-
-    let now = SystemTime::now();
-    let containment = if plan.profile().is_contained() {
-        Containment::Pending
-    } else {
-        // I08: `none` is unprotected in every receipt, including a refusal.
-        Containment::None
-    };
-    let mut record = AttemptRecord {
-        attempt_id: attempt_id.as_str().to_owned(),
-        revision: 1,
-        platform: platform_record(ctx),
-        jail: JailRecord {
-            component: "ouro-jail".to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            backend: None,
-            backend_version: None,
-        },
-        policy: PolicyRecord {
-            name: plan.resolved.policy_name.clone(),
-            digest: plan.resolved.digest.clone(),
-            observe: plan.resolved.snapshot.observation.mode,
-            evidence: plan.resolved.snapshot.observation.evidence,
-            requirements: plan.resolved.requirements.clone(),
-            // §13.2: the receipt's grants are the explicit operator grants,
-            // not the profile baseline every `tool` run gets.
-            grants: plan.resolved.grants.clone(),
-        },
-        containment,
-        exec_observed: false,
-        argv_digest,
-        applied: pending_applied(&plan),
-        observer: CoverageSummary::unobserved().to_observer_record(),
-        coverage: CoverageSummary::unobserved().to_coverage(),
-        process: None,
-        lifetime: Lifetime::pending(),
-        outcome: Outcome::pending(),
-        state_cleanup: cleanup::not_needed(),
-        cleanup_error: None,
-        created_at: now,
-        updated_at: now,
-        errors: Vec::new(),
-        credentials: Vec::new(),
-    };
-    // From here on every refusal writes the `refused` receipt (I01); one
-    // after the boundary exists first tears it down and records what the
-    // teardown established (§13.2 row 4).
-    macro_rules! refused {
-        ($error:expr) => {
-            return Ok(refuse(
-                &attempt_dir,
-                &mut record,
-                &$error,
-                args,
-                control.as_mut(),
-                &mut journal,
-            ))
-        };
-    }
-    macro_rules! torn_down_and_refused {
-        ($prepared:expr, $error:expr) => {{
-            let teardown = $prepared.abort();
-            record_teardown(&mut record, &teardown);
-            refused!($error)
-        }};
-    }
-
-    // N6
-    if let Err(error) = policy_written {
-        refused!(error);
-    }
-
-    // Step 2: probe the selected mechanisms.
-    if let Err(error) = budget
-        .check(ErrorStage::Probing)
-        .and(interrupted(signals.as_ref(), ErrorStage::Probing))
-    {
-        refused!(error);
-    }
-    let capabilities = ctx.platform.probe(&request);
-    if let Some(error) = first_unsatisfied(&plan.resolved.requirements, &capabilities) {
-        refused!(error);
-    }
-
-    // §8.1 step 2 and §12 — register vendor state before
-    // creating it, then stage credentials into it, before any boundary.
-    if let Err(error) = budget
-        .check(ErrorStage::Preparing)
-        .and(interrupted(signals.as_ref(), ErrorStage::Preparing))
-    {
-        refused!(error);
-    }
-    let launch_handoff = match prepare_launch(&attempt_dir, &plan, &mut record, budget.deadline) {
-        Ok(handoff) => handoff,
-        Err(error) => refused!(error),
-    };
-    // §10 — the proxy directory is registered before it is
-    // created, outside every shared root, for a proxy-mode profile only.
-    let proxy_handoff = match prepare_proxy_dir(&attempt_dir, &plan) {
-        Ok(handoff) => handoff,
-        Err(error) => refused!(error),
-    };
-
-    // Steps 3 to 5: create the boundary and the blocked launcher.
-    let prepared = match ctx.platform.prepare(
-        PreparedPlan {
-            attempt_id: attempt_id.as_str().to_owned(),
-            attempt_dir: attempt_dir.root().to_path_buf(),
-            request,
-            argv,
-            prepare_deadline: budget.deadline,
-            workspace: plan.workspace.clone(),
-            config_dir: plan.config_dir.clone(),
-            // The staged objects, bound by descriptor
-            launch: launch_handoff,
-            proxy: proxy_handoff.clone(),
-        },
-        Sinks {
-            trace: Some(Arc::clone(&trace)),
-        },
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) => refused!(error),
-    };
-
-    // X05.3 — §8.3 "The supervisor must not retain writable
-    // copies that postpone EOF". Every process that needs the caller's stdout
-    // has it by now; the `ouro-jail` binary's `run` never writes stdout, so it
-    // lets its copy go and a target that closes its stdout gives the caller
-    // EOF. Only the binary opts in: an in-process caller keeps its stdout.
-    if RELEASE_STDOUT_AFTER_PREPARE.load(std::sync::atomic::Ordering::SeqCst) {
-        release_own_stdout();
-    }
-    let boundary = prepared.boundary();
-    apply_boundary(&mut record, &boundary, plan.profile());
-    // J4-R: §13.2 row 4 — the application is part of the boundary's facts:
-    // a refusal after this point reports what was actually applied. It used
-    // to be read after the registration below, so a failed registration
-    // wrote a refused receipt claiming `enforced` containment with nothing
-    // applied, which the receipt schema rejects.
-    if let Some(applied) = prepared.applied() {
-        record.applied = applied;
-    }
-    // J4-R: S9 — the test seams in force are recorded in every receipt that
-    // has native details (a receipt before any boundary has none; jail state
-    // records them from the claim on).
-    if let (Some(seams), Some(native)) = (test_seams.as_ref(), record.lifetime.native.as_mut()) {
-        native
-            .details
-            .insert("test_seams".to_owned(), seams.clone());
-    }
-    // The proxy socket node the platform bound, recorded so
-    // `gc` can remove exactly it after a crash (§14.2). J4 W3, P2: recorded
-    // once the boundary and its application are in the record, as for the
-    // registration below: a failure here is a refusal after setup (§13.2 row
-    // 4), whose receipt names the boundary its teardown verified. It used to
-    // come first, so the refused receipt carried the verified tree with the
-    // boundary still `pending`, which the receipt schema rejects.
-    if let Some(socket) = proxy_handoff
-        .as_ref()
-        .and_then(|handoff| handoff.socket.get())
-        && let Err(error) = state::record_proxy_socket(&attempt_dir, socket)
-    {
-        torn_down_and_refused!(prepared, error);
-    }
-    // §7: the state file names the registered execution boundary once it
-    // exists, so crash reconciliation and GC can identify resources without
-    // parsing a receipt.
-    if let Err(error) = register_boundary_in_state(&attempt_dir, &boundary) {
-        torn_down_and_refused!(prepared, error);
-    }
-    // §8.2: the preparation budget covers steps 1 to 5. A budget spent by
-    // now refuses before anything announces `prepared`: an owner must never
-    // be told an attempt is ready after its preparation ran out of time.
-    if let Err(error) = budget.check(ErrorStage::Preparing) {
-        torn_down_and_refused!(prepared, error);
-    }
-    merge_wall_limit(&mut record, &plan);
-    journal.lifecycle("prepared");
-
-    // A failure from here on has a boundary to tear down: §8.1 step 5 is the
-    // last point at which nothing has been created, and every exit after it
-    // goes through `abort`.
-    let prepared_receipt = match persist(
-        state::Site::PreparedReceipt,
-        &attempt_dir,
-        &mut record,
-        Phase::Prepared,
-        args,
-        &mut journal,
-    ) {
-        Ok(receipt) => receipt,
-        Err(error) => torn_down_and_refused!(prepared, error),
-    };
-    send_control(control.as_mut(), ControlKind::Prepared, &prepared_receipt);
-
-    // Step 6: wait for a valid external release, or release locally.
-    let gate = match budget.check(ErrorStage::Prepared) {
-        Err(error) => Err(error),
-        Ok(()) => match args.gate_fd {
-            None => interrupted(signals.as_ref(), ErrorStage::Prepared),
-            Some(fd) => {
-                let expectation = GateExpectation {
-                    attempt_id: attempt_id.as_str().to_owned(),
-                    policy_digest: plan.resolved.digest.clone(),
-                };
-                await_release(fd, &expectation, GATE_WAIT, signals.as_ref())
-            }
-        },
-    };
-    if let Err(error) = gate {
-        torn_down_and_refused!(prepared, error);
-    }
-
-    // J5 §9.3 / X06: before the untrusted target execs, the supervisor makes
-    // itself non-dumpable so a same-uid peer that can address it (a `none`
-    // child, whose target shares the host pid namespace) cannot read its
-    // /proc/<pid>/{fd,environ,mem} — its live trace and control channels and
-    // the operator environment — nor `ptrace` it. The lock is the kernel's
-    // dumpable check, not host Yama (which a peer can waive with
-    // PR_SET_PTRACER). It is set here, after the capability probes and the
-    // observer's attach to the (execve-reset, dumpable) backend and before
-    // release, so no probe fork and no observer attach is affected; children
-    // reset dumpable on execve. `doctor`/`gc` exec no untrusted target.
-    #[cfg(target_os = "linux")]
-    // SAFETY: prctl(PR_SET_DUMPABLE, 0, ...) takes scalars only and cannot fail.
-    unsafe {
-        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
-    }
-    // Security 2026-09-29 (audit 6 F1): this run is uncontained, so from the
-    // moment of release nothing on this host is distinguishable from
-    // something its child wrote. Its live markers go down before release —
-    // a run that cannot write them does not start — so concurrent runs
-    // refuse every trusted file while it lives; the guard settles them when
-    // it drops, after the run's tree is gone (it is declared before
-    // `running`, so it drops after it), and every later run refuses trusted
-    // files that do not postdate that (`refuse_stale_trusted_file`).
-    let _uncontained_run = if plan.profile() == ProfileName::None {
-        match state::UncontainedRun::arm(&[&plan.data_dir, &plan.config_dir], attempt_id.as_str()) {
-            Ok(run) => Some(run),
-            Err(error) => torn_down_and_refused!(prepared, error),
-        }
-    } else {
-        None
-    };
-    // Step 7: execute the exact target argv through the blocked launcher.
-    // A failed release reports its teardown, so the refused
-    // receipt carries the verified tree (§13.2 row 4) and vendor state can be
-    // removed rather than retained.
-    let mut running = match prepared.release() {
-        Ok(running) => running,
-        Err(failure) => {
-            let crate::platform::ReleaseFailure { error, teardown } = *failure;
-            if let Some(teardown) = teardown {
-                record_teardown(&mut record, &Ok(teardown));
-            }
-            refused!(error);
-        }
-    };
-
-    let wall_deadline = wall_deadline(&plan);
-    let mut outcome_error: Option<JailError> = None;
-    // J4 W2-S: R-1 — whether the platform reported an evidence loss while the
-    // loop ran; a class degraded at settlement without one is reported there.
-    let mut platform_loss_reported = false;
-    // J4-R: §13.3 — receipts written while the target runs are persisted by
-    // the worker while this loop keeps enforcing the wall, signals and
-    // evidence; each is acknowledged only once it is durable, in order.
-    let mut in_flight: std::collections::VecDeque<InFlight> = std::collections::VecDeque::new();
-    loop {
-        // J4-R: N4 — whatever the control reader has room for now.
-        if let Some(control) = control.as_mut() {
-            control.poll();
-        }
-        if let Some(error) = settle_in_flight(&mut in_flight, false, control.as_mut(), &mut journal)
-        {
-            persistence_failed(running.as_mut(), &mut record, &mut outcome_error, error);
-        }
-        // §13.3 + I07: a trace-sink failure — budget exhausted, external
-        // consumer stalled past its deadline — is evidence loss, and under
-        // strict it stops the attempt exactly like the tracer-queue path
-        // does. Checking here means the stop does not wait for the next
-        // event to notice it.
-        if let Some(error) = journal.take_new_loss() {
-            record.errors.push(error.to_object());
-            if plan.resolved.snapshot.observation.evidence == crate::records::EvidenceMode::Strict {
-                stop(running.as_mut(), &mut record, StopReason::EvidenceLoss);
-            }
-            outcome_error.get_or_insert(error);
-        }
-        if signals.as_ref().is_some_and(signals::SignalPipe::triggered) {
-            stop(running.as_mut(), &mut record, StopReason::OperatorSignal);
-        }
-        // A detected integrity loss reaches the receipt now, not only at the end
-        if record.lifetime.integrity != "lost" && running.integrity_lost() {
-            record.lifetime.integrity = "lost".to_owned();
-            record.lifetime.tree_empty = None;
-            record.lifetime.verified_at = None;
-            let phase = if record.exec_observed {
-                Phase::Enforced
-            } else {
-                Phase::Prepared
-            };
-            // J4-R: persisted by the worker; a failure, or no progress within
-            // the budget, stops the tree (§7) when the loop sees it.
-            match submit_receipt(
-                &persister,
-                state::Site::IntegrityReceipt,
-                &attempt_dir,
-                &mut record,
-                phase,
-                args,
-                &journal,
-            ) {
-                Ok(write) => in_flight.push_back(write),
-                Err(error) => {
-                    persistence_failed(running.as_mut(), &mut record, &mut outcome_error, error);
-                }
-            }
-        }
-        match running.wait(crate::platform::Deadline { at: wall_deadline }) {
-            RunEvent::Poll => continue,
-            RunEvent::StdioFailed {
-                reason,
-                after_target_end,
-            } => {
-                let error = JailError::new(
-                    ErrorCode::StdioFailed,
-                    ErrorStage::Running,
-                    Remediation::Configuration,
-                    reason,
-                );
-                record.errors.push(error.to_object());
-                if !after_target_end {
-                    stop(running.as_mut(), &mut record, StopReason::StdioFailure);
-                }
-                outcome_error.get_or_insert(error);
-            }
-            RunEvent::ExecConfirmed => {
-                // §11.2: exec is a confirmed transition, and there is exactly
-                // one per attempt. A repeat would advance the receipt revision
-                // and publish a second `exec_confirmed` for the same fact.
-                if record.exec_observed {
-                    continue;
-                }
-                record.exec_observed = true;
-                journal.lifecycle("exec_confirmed");
-                // J4-R: §13.3 — the enforced receipt is persisted by the
-                // worker while this loop keeps running; `exec_confirmed` is
-                // sent once it is durable, never before. §7: "Failed/ambiguous
-                // persistence ... after exec it stops the tree and leaves an
-                // incomplete receipt if necessary": a failure, or no progress
-                // within the budget, stops the tree unacknowledged.
-                match submit_receipt(
-                    &persister,
-                    state::Site::EnforcedReceipt,
-                    &attempt_dir,
-                    &mut record,
-                    Phase::Enforced,
-                    args,
-                    &journal,
-                ) {
-                    Ok(mut write) => {
-                        write.ack = Some(ControlKind::ExecConfirmed);
-                        in_flight.push_back(write);
-                    }
-                    Err(error) => {
-                        persistence_failed(
-                            running.as_mut(),
-                            &mut record,
-                            &mut outcome_error,
-                            error,
-                        );
-                    }
-                }
-            }
-            // §6.4: "Deadline or requested termination preserves the observed
-            // code/signal and records its cause." Only the fields this event
-            // establishes are written; `cause` and `error` were set by whatever
-            // asked for the termination and must survive it.
-            RunEvent::TargetExited { code } => {
-                record.outcome.kind = OutcomeKind::Exited;
-                record.outcome.code = Some(code);
-                record.outcome.signal = None;
-                break;
-            }
-            RunEvent::TargetSignaled { signal } => {
-                record.outcome.kind = OutcomeKind::Signaled;
-                record.outcome.code = None;
-                record.outcome.signal = Some(signal);
-                break;
-            }
-            RunEvent::ExecError { errno, detail } => {
-                // §8.1: an unsuccessful target exec is a pre-exec failure, and
-                // §13.2 gives it its own outcome kind. It is not `refused`:
-                // the attempt reached release and the kernel answered, which
-                // is a different fact from a refusal before anything ran.
-                record.outcome = Outcome::exec_error(&errno);
-                // §13.2 row 4 — "true / timestamp only after
-                // teardown verification": every contained attempt verifies the
-                // teardown of a failed exec, so the refused receipt says what
-                // it established and vendor state can be removed.
-                if plan.profile().is_contained() {
-                    let tree = running.wait_tree(TREE_BUDGET);
-                    record_tree(&mut record, &tree);
-                }
-                // X04: the errno stays in `cause`; a missing interpreter,
-                // which the kernel reports as ENOENT like a missing program,
-                // takes its own code so the two differ in a machine field.
-                let error = JailError::new(
-                    detail.map_or(
-                        ErrorCode::ExecFailed,
-                        crate::platform::ExecFailureDetail::error_code,
-                    ),
-                    ErrorStage::Released,
-                    Remediation::Configuration,
-                    match detail {
-                        Some(detail) => format!(
-                            "the target exec failed with {errno}: {}",
-                            detail.explanation()
-                        ),
-                        None => format!("the target exec failed with {errno}"),
-                    },
-                );
-                // J4-R: a receipt still with the worker lands (or is given up
-                // on) before the refused one.
-                if let Some(failure) =
-                    settle_in_flight(&mut in_flight, true, control.as_mut(), &mut journal)
-                {
-                    record.errors.push(failure.to_object());
-                }
-                refused!(error);
-            }
-            RunEvent::CommandForbidden { pattern } => {
-                let error = JailError::new(
-                    ErrorCode::CommandForbidden,
-                    ErrorStage::Running,
-                    Remediation::Configuration,
-                    format!("command matched forbidden pattern: {pattern}"),
-                );
-                record.errors.push(error.to_object());
-                outcome_error.get_or_insert(error);
-                stop(running.as_mut(), &mut record, StopReason::CommandForbidden);
-            }
-            RunEvent::WallExpired => {
-                // J4-D5: the first stop wins (see `stop`); an expiry during
-                // another stop's grace is recorded as the limit's hit, not
-                // as the cause.
-                // §13.2: "Limits report hits in `applied.limits[].hit` with
-                // `outcome.cause`". The expiry is the platform's report of
-                // the wall it enforces (on Linux its own boot-clock deadline,
-                // armed at release), so the `wall` row it applied is hit.
-                if let Some(wall) = record
-                    .applied
-                    .limits
-                    .iter_mut()
-                    .find(|limit| limit.key == "wall" && limit.applied)
-                {
-                    wall.hit = Some(true);
-                }
-                stop(running.as_mut(), &mut record, StopReason::WallExpiry);
-            }
-            RunEvent::EvidenceLost {
-                reason,
-                after_target_end,
-            } => {
-                let error = JailError::new(
-                    ErrorCode::EvidenceLost,
-                    ErrorStage::Running,
-                    Remediation::InspectState,
-                    reason,
-                );
-                record.errors.push(error.to_object());
-                platform_loss_reported = true;
-                // J4 W2-S: R-2 — a loss after the target's own end is
-                // recorded (the error, and exit 1 below) but it is not a stop
-                // the supervisor acted on: the target's end already was the
-                // termination trigger (§9.3), so it never becomes the cause.
-                if plan.resolved.snapshot.observation.evidence
-                    == crate::records::EvidenceMode::Strict
-                    && !after_target_end
-                {
-                    stop(running.as_mut(), &mut record, StopReason::EvidenceLoss);
-                }
-                // J4-D5 remainder: the first error is the reported one.
-                outcome_error.get_or_insert(error);
-            }
-            // §6.4 — the same honest unknown, and a coded error
-            RunEvent::ExecUnconfirmed { reason } => {
-                record.outcome.kind = OutcomeKind::Unknown;
-                record.outcome.code = None;
-                record.outcome.signal = None;
-                if let Some(cause) = running.limit_cause() {
-                    record.outcome.cause.get_or_insert(cause);
-                }
-                record.outcome.cause.get_or_insert(reason);
-                let error = JailError::new(
-                    ErrorCode::ExecUnconfirmed,
-                    ErrorStage::Running,
-                    Remediation::Configuration,
-                    "with observation off the target's exec could not be confirmed: it ended \
-                     before the supervisor saw its new image, so whether it ran is unknown; \
-                     run with --observe on to confirm it"
-                        .to_owned(),
-                );
-                record.errors.push(error.to_object());
-                outcome_error.get_or_insert(error);
-                break;
-            }
-            RunEvent::Unknown { reason } => {
-                record.outcome.kind = OutcomeKind::Unknown;
-                record.outcome.code = None;
-                record.outcome.signal = None;
-                // A resource event the supervisor itself acted on is the
-                // cause even when the target's own end is not observable:
-                // the ambiguity is the outcome's kind, not its cause.
-                if let Some(cause) = running.limit_cause() {
-                    record.outcome.cause.get_or_insert(cause);
-                }
-                record.outcome.cause.get_or_insert(reason);
-                break;
-            }
-        }
-    }
-
-    // Step 9: verify tree death, drain observations, persist settlement.
-    // J4 W3, P3: the rest of the tree is ended first. §8.1 step 8: "Target
-    // exit triggers termination of remaining attempt descendants", and
-    // §13.3: "Do not wait forever for a writer while descendants continue
-    // running"; the receipts still with the worker used to be waited for
-    // first, so under `none` a slow disk kept the target's descendants
-    // running for as long as the enforced receipt took.
-    let tree = running.wait_tree(TREE_BUDGET);
-    // J4-R: whatever the worker still holds is waited for within its budget
-    // and acknowledged in order before any terminal message. The loop is
-    // over, so a failure here stopped nothing: it is a tool error (S5), not a
-    // stop cause.
-    if let Some(error) = settle_in_flight(&mut in_flight, true, control.as_mut(), &mut journal) {
-        persistence_failed_after(&mut record, &mut outcome_error, error);
-    }
-    // Audit 2026-10-08 L2: a storage enforcement loss is recorded in
-    // `errors[]`; the applied rows it held no longer claim `applied: true`
-    // (see `Storage::limits`), and whether it is `outcome.cause` is decided
-    // by when it was found (`limit_cause`, §6.4).
-    if let Some(reason) = running.storage_loss() {
-        record.errors.push(storage_loss_error(reason).to_object());
-    }
-    for limit in running.final_limits() {
-        if let Some(recorded) = record
-            .applied
-            .limits
-            .iter_mut()
-            .find(|row| row.key == limit.key)
-        {
-            *recorded = limit;
-        }
-    }
-    if let Some(cause) = running.limit_cause() {
-        record.outcome.cause.get_or_insert(cause);
-    }
-    let summary = running.observer_summary();
-    // A sink loss that arrived after the last loop iteration, including one
-    // the observer's own drain caused while the tree was verified, still
-    // belongs in the settled receipt's errors (§13.3: the receipt is the
-    // bounded summary of what was lost). Taken after the observer stopped,
-    // so the check below knows about it.
-    if let Some(error) = journal.take_new_loss() {
-        record.errors.push(error.to_object());
-        outcome_error.get_or_insert(error);
-    }
-    if let Some(summary) = summary {
-        record.observer = summary.to_observer_record();
-        record.coverage = summary.to_coverage();
-        // J4 W2-S: R-1 — a loss the platform queued while the tree was being
-        // verified, or found only when its observer stopped, never reached
-        // the loop. Any evidence class degraded at settlement is an
-        // `evidence_lost` error and exit 1, whatever the loss's timing; it
-        // is never a cause, because nothing was stopped for it.
-        // J4 W3, P4: a trace-sink loss the journal reported is reported:
-        // the classes whose frames the lost sink refused are degraded by that
-        // same loss, which used to be reported a second time here.
-        if !platform_loss_reported
-            && journal.loss.is_none()
-            && let Some(error) = settlement_loss(&summary)
-        {
-            record.errors.push(error.to_object());
-            outcome_error.get_or_insert(error);
-        }
-    }
-    // What the helpers did, known now that they stopped
-    if let Some(native) = record.lifetime.native.as_mut() {
-        native.details.extend(running.final_native_details());
-    }
-    // The last nonsettled phase without a confirmed exec is prepared (§8.1)
-    let prepared_integrity = record.lifetime.integrity.clone();
-    record_tree(&mut record, &tree);
-
-    let settled = tree.tree_empty == Some(true) && record.lifetime.integrity == "verified";
-    // §13.2: "If tree death itself is unknown, retain the last nonsettled phase
-    // and update its outcome/coverage/error as unknown."
-    // `enforced` is the phase after a confirmed target exec (§8.1)
-    let phase = if settled {
-        Phase::Settled
-    } else if record.exec_observed {
-        Phase::Enforced
-    } else {
-        // Without a confirmed exec the last nonsettled phase is `prepared`.
-        // Its integrity stays the prepared one unless a loss was detected:
-        // an unknown tree end does not unmake the verified boundary.
-        if record.lifetime.integrity == "pending" {
-            record.lifetime.integrity = prepared_integrity;
-        }
-        Phase::Prepared
-    };
-    // §14.2: default managed scratch is removed only after verified tree
-    // death. Until then the child could still be writing to it, and after an
-    // unverified one something may still be holding it, so it is retained and
-    // the receipt says the cleanup did not complete.
-    // §8.1 step 9 and §12 — with vendor state, persist the
-    // settled receipt as `pending` first, then clean, then record the result;
-    // an unverified tree retains vendor state.
-    if matches!(state::vendor_registration(&attempt_dir), Ok(Some(_))) {
-        if settled {
-            record.state_cleanup = StateCleanup::Pending;
-            record.cleanup_error = None;
-            match persist(
-                state::Site::PendingReceipt,
-                &attempt_dir,
-                &mut record,
-                phase,
-                args,
-                &mut journal,
-            ) {
-                Ok(_) => {
-                    let vendor =
-                        cleanup::remove_vendor_state(&attempt_dir, cleanup::Limits::DEFAULT);
-                    // J4-R: S5 — the cleanup record is persistence after exec.
-                    if let Some(error) = vendor.record_error.clone() {
-                        persistence_failed_after(
-                            &mut record,
-                            &mut outcome_error,
-                            error.in_stage(ErrorStage::Settled),
-                        );
-                    }
-                    let scratch =
-                        remove_managed_scratch(&attempt_dir, &plan, cleanup::Limits::DEFAULT);
-                    match (vendor.status, scratch) {
-                        (StateCleanup::Complete, Ok(_)) => {
-                            record.state_cleanup = StateCleanup::Complete;
-                        }
-                        (StateCleanup::Complete, Err(reason)) => {
-                            record.state_cleanup = StateCleanup::Pending;
-                            record.cleanup_error = Some(reason);
-                        }
-                        (status, _) => {
-                            record.state_cleanup = status;
-                            record.cleanup_error = vendor.reason;
-                        }
-                    }
-                }
-                Err(error) => {
-                    // No durable settled receipt, so nothing would permit a
-                    // later `gc` to finish a removal started now.
-                    record.cleanup_error = Some("state_write_failed".to_owned());
-                    // J4-R: S5 — a persistence failure after exec is a tool
-                    // error (exit 1), recorded but not a stop cause.
-                    persistence_failed_after(
-                        &mut record,
-                        &mut outcome_error,
-                        error.in_stage(ErrorStage::Reconciling),
-                    );
-                }
-            }
-        } else if let Some(error) = retain_vendor_state(&attempt_dir, &mut record) {
-            persistence_failed_after(
-                &mut record,
-                &mut outcome_error,
-                error.in_stage(ErrorStage::Reconciling),
-            );
-        }
-    } else if settled {
-        match remove_managed_scratch(&attempt_dir, &plan, cleanup::Limits::DEFAULT) {
-            Ok(status) => record.state_cleanup = status,
-            Err(reason) => {
-                record.state_cleanup = StateCleanup::Pending;
-                record.cleanup_error = Some(reason);
-            }
-        }
-    }
-    // A detected integrity loss is not a budget overrun (§9.3)
-    let tree_message = if record.lifetime.integrity == "lost" {
-        "the lifetime boundary's integrity was lost (a membership escape, a replaced \
-         identity or a failed verification was detected), so tree death is unknown"
-    } else {
-        "tree death could not be verified within its budget"
-    };
-    let tree_error = (!settled).then(|| {
-        let error = JailError::new(
-            ErrorCode::TreeUnknown,
-            ErrorStage::Reconciling,
-            Remediation::InspectState,
-            tree_message.to_owned(),
-        );
-        record.errors.push(error.to_object());
-        error
-    });
-    if let Some(error) = remove_proxy_directory(&attempt_dir, &mut record) {
-        // J4-R: S5 — its state record is persistence after exec.
-        outcome_error.get_or_insert(error.in_stage(ErrorStage::Reconciling));
-    }
-    // §13.3 terminal drain, before the settled receipt is written: whatever
-    // the external trace consumer has not accepted within the no-progress
-    // deadline is recorded as evidence loss, and that loss belongs in the
-    // receipt that summarizes what was lost. (The receipt's own final note,
-    // written by persist below, is drained once more after it is sent.)
-    if let Ok(mut sink) = journal.trace.lock() {
-        sink.finish();
-    }
-    if let Some(error) = journal.take_new_loss() {
-        record.errors.push(error.to_object());
-        outcome_error.get_or_insert(error);
-    }
-    if journal.loss.is_some() {
-        degrade_trace_coverage(&mut record, &journal);
-    }
-    let receipt = match persist_terminal(
-        state::Site::TerminalReceipt,
-        &attempt_dir,
-        &mut record,
-        phase,
-        args,
-        &mut journal,
-    ) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            // J4-R: the terminal transition is not acknowledged; the receipt
-            // on disk stays the last one that persisted. S5: a tool error
-            // after exec, and the first cause is the reported error.
-            let error = error.in_stage(ErrorStage::Reconciling);
-            // J4 W3, P5: the failure, and every error the last durable
-            // receipt does not carry, reach stderr instead.
-            record.errors.push(error.to_object());
-            let reported = tree_error.or(outcome_error).unwrap_or(error);
-            let trace_error = journal.loss.clone();
-            let unrecorded =
-                unrecorded(&record, &journal, &[Some(&reported), trace_error.as_ref()]);
-            return Ok(RunReport {
-                exit_code: 1,
-                error: Some(reported),
-                receipt_path: Some(attempt_dir.receipt_path()),
-                trace_error,
-                control_dropped: finish_control(control.as_mut()),
-                unrecorded,
-                ..RunReport::default()
-            });
-        }
-    };
-    if let Some(error) = journal.loss.clone() {
-        outcome_error.get_or_insert(error);
-    }
-    send_control(
-        control.as_mut(),
-        if settled {
-            ControlKind::Settled
-        } else {
-            // §8.1: nothing after release is a refusal. An unverified tree is
-            // `unsettled`: the target did run, and saying otherwise would tell
-            // an owner that no command executed.
-            ControlKind::Unsettled
-        },
-        &receipt,
-    );
-
-    // Issue draft 03: in best-effort mode the process exit code is the
-    // child's own when the child ended naturally. The evidence gap stays in
-    // the receipt's errors, in the degraded coverage and on stderr, but a
-    // wrapper that trusts the exit code must see the child's status, not
-    // evidence_lost's 1. Strict mode keeps failing loudly, as does any
-    // non-evidence error.
-    let best_effort_natural_end = plan.resolved.snapshot.observation.evidence
-        == crate::records::EvidenceMode::BestEffort
-        && record.outcome.kind == OutcomeKind::Exited
-        && record.outcome.cause.as_deref() != Some("evidence_loss")
-        && outcome_error
-            .as_ref()
-            .is_none_or(|error| error.code == ErrorCode::EvidenceLost)
-        && record
-            .errors
-            .iter()
-            .all(|error| error.code == ErrorCode::EvidenceLost.as_str());
-    let exit_code = if let Some(error) = &tree_error {
-        error.exit_code()
-    } else if let Some(error) = &outcome_error
-        && !best_effort_natural_end
-    {
-        error.exit_code()
-    } else {
-        match record.outcome.kind {
-            OutcomeKind::Exited => i32::from(record.outcome.code.unwrap_or(0)),
-            OutcomeKind::Signaled => {
-                128 + i32::try_from(record.outcome.signal.unwrap_or(0)).unwrap_or(0)
-            }
-            _ => 1,
-        }
-    };
-    Ok(RunReport {
-        exit_code,
-        receipt: Some(receipt),
-        error: tree_error.or(outcome_error),
-        receipt_path: Some(attempt_dir.receipt_path()),
-        trace_error: journal.loss.clone(),
-        // J4-R: N4 — a bounded final drain, then an honest count.
-        control_dropped: finish_control(control.as_mut()),
-        ..RunReport::default()
-    })
+    args.attempt_id.as_deref().map(AttemptId::parse).transpose()
 }
 
-/// The evidence classes: the audit classes and `proxy.net`, whose loss §11.4
-/// handles as evidence loss. (`limits` is the wrapper's own class.)
-const EVIDENCE_CLASSES: [crate::observer::CoverageClass; 5] = [
-    crate::observer::CoverageClass::Exec,
-    crate::observer::CoverageClass::FsWrite,
-    crate::observer::CoverageClass::FsDeny,
-    crate::observer::CoverageClass::Net,
-    crate::observer::CoverageClass::ProxyNet,
-];
+/// Every isolation rule a run's paths must meet before anything is created
+/// (§6.2, §7, §9.1), over the child's roots computed once.
+///
+/// # Errors
+/// The first rule's refusal.
+fn check_isolation(args: &RunArgs, plan: &Plan) -> Result<(), JailError> {
+    let roots = ChildRoots::of(plan);
+    check_state_isolation(plan, &roots)?;
+    // Audit 3 A2: every run, not only a `--launch` one.
+    check_launch_isolation(plan, &roots)?;
+    // Audit 4 B1: the config directory holds the trusted, widening
+    // `config.toml`, read on every run.
+    check_config_isolation(plan, &roots)?;
+    check_binary_isolation(plan, &roots)?;
+    validate_receipt_path(args, plan, &roots)
+}
+
+/// `--label-only` (§6.1): resolve and probe, print the label, execute nothing
+/// and copy no credential. No attempt state is allocated, so there is nothing
+/// to clean up.
+fn label_only(ctx: &Context, plan: &Plan, request: &PlanRequest) -> RunReport {
+    let capabilities = ctx.platform.probe(request);
+    let refusal = first_unsatisfied(&plan.resolved.requirements, &capabilities);
+    RunReport {
+        exit_code: refusal.as_ref().map_or(0, JailError::exit_code),
+        error: refusal,
+        label: Some(format!(
+            "label {}@{} observe={} digest={}",
+            plan.resolved.policy_name,
+            plan.resolved.snapshot.platform.as_str(),
+            match plan.resolved.snapshot.observation.mode {
+                crate::records::ObserveMode::On => "on",
+                crate::records::ObserveMode::Off => "off",
+            },
+            plan.resolved.digest
+        )),
+        capabilities,
+        ..RunReport::default()
+    }
+}
 
 /// The `evidence_lost` error for the evidence classes the observer's final
-/// account leaves degraded, or `None` when none is.
+/// account leaves degraded, or `None` when none is. The evidence classes are
+/// the ones whose loss §11.4 handles as evidence loss, the classes a trace
+/// stream carries ([`trace::STREAM_CLASSES`]); `limits` is the wrapper's own.
 fn settlement_loss(summary: &crate::observer::CoverageSummary) -> Option<JailError> {
     let mut classes = Vec::new();
     let mut reasons: Vec<&str> = Vec::new();
-    for class in EVIDENCE_CLASSES {
+    for class in trace::STREAM_CLASSES {
         let Some(entry) = summary.classes.get(&class) else {
             continue;
         };
@@ -2041,13 +1337,13 @@ fn wall_deadline(plan: &Plan) -> Option<Instant> {
 /// The evidence classes whose frames this attempt's trace carries (§11.4):
 /// the audit classes with observation on, `proxy.net` with a proxy. A trace
 /// loss can take these and no other.
-fn stream_classes(plan: &Plan) -> Vec<&'static str> {
+fn stream_classes(plan: &Plan) -> Vec<CoverageClass> {
     let mut classes = Vec::new();
     if plan.resolved.snapshot.observation.mode == crate::records::ObserveMode::On {
-        classes.extend(["exec", "fs.write", "fs.deny", "net"]);
+        classes.extend(CoverageClass::AUDIT);
     }
     if plan.resolved.snapshot.network.mode == NetworkMode::Proxy.as_str() {
-        classes.push("proxy.net");
+        classes.push(CoverageClass::ProxyNet);
     }
     classes
 }
@@ -2079,13 +1375,15 @@ fn degrade_trace_coverage(record: &mut AttemptRecord, journal: &Journal) {
             *status = SourceStatus::Degraded;
         }
     }
-    for (name, entry) in [
-        ("exec", &mut record.coverage.exec),
-        ("fs.write", &mut record.coverage.fs_write),
-        ("fs.deny", &mut record.coverage.fs_deny),
-        ("net", &mut record.coverage.net),
-        ("proxy.net", &mut record.coverage.proxy_net),
+    let coverage = &mut record.coverage;
+    for (class, entry) in [
+        (CoverageClass::Exec, &mut coverage.exec),
+        (CoverageClass::FsWrite, &mut coverage.fs_write),
+        (CoverageClass::FsDeny, &mut coverage.fs_deny),
+        (CoverageClass::Net, &mut coverage.net),
+        (CoverageClass::ProxyNet, &mut coverage.proxy_net),
     ] {
+        let name = class.as_str();
         if entry.status == SourceStatus::Unsupported {
             continue;
         }
@@ -2182,7 +1480,7 @@ fn apply_boundary(record: &mut AttemptRecord, boundary: &BoundaryIdentity, profi
         tree_empty: None,
         verified_at: None,
         verification_scope: Some(boundary.verification_scope.clone()),
-        integrity: "verified".to_owned(),
+        integrity: Integrity::Verified.as_str().to_owned(),
     };
     record.process = boundary.process.clone();
     // §13.2 wants the backend that made the boundary and its version; only
@@ -2715,85 +2013,8 @@ fn record_teardown(record: &mut AttemptRecord, teardown: &Result<Teardown, JailE
             record.errors.push(error.to_object());
             record.lifetime.tree_empty = None;
             record.lifetime.verified_at = None;
-            if record.lifetime.boundary != "pending" {
-                record.lifetime.integrity = "lost".to_owned();
-            }
-        }
-    }
-}
-
-/// Writes the `refused` receipt of §13.2 and returns the report for it.
-fn refuse(
-    attempt_dir: &AttemptDir,
-    record: &mut AttemptRecord,
-    error: &JailError,
-    args: &RunArgs,
-    control: Option<&mut ControlSink>,
-    journal: &mut Journal,
-) -> RunReport {
-    let mut control = control;
-    // A proved exec failure keeps its own kind (§13.2); everything else that
-    // reaches here refused before the target ran.
-    record.outcome = if record.outcome.kind == OutcomeKind::ExecError {
-        Outcome {
-            error: Some(error.to_object()),
-            ..record.outcome.clone()
-        }
-    } else {
-        Outcome::refused(error)
-    };
-    record.errors.push(error.to_object());
-    record.exec_observed = false;
-    journal.lifecycle("refused");
-    // §12 vendor state on a pre-exec refusal
-    refuse_vendor_state(attempt_dir, record, args, journal);
-    // The proxy stopped with the boundary's teardown
-    let _ = remove_proxy_directory(attempt_dir, record);
-    let receipt = persist_terminal(
-        state::Site::RefusedReceipt,
-        attempt_dir,
-        record,
-        Phase::Refused,
-        args,
-        journal,
-    );
-    // J4-R: S5 — everything that reaches here refused before the target
-    // executed, so a persistence failure exits 125 like the refusal itself.
-    let exit_code = error.refusal_exit_code();
-    match receipt {
-        Ok(receipt) => {
-            send_control(control.as_deref_mut(), ControlKind::Refused, &receipt);
-            RunReport {
-                exit_code,
-                receipt: Some(receipt),
-                error: Some(error.clone()),
-                receipt_path: Some(attempt_dir.receipt_path()),
-                trace_error: journal.loss.clone(),
-                control_dropped: finish_control(control),
-                ..RunReport::default()
-            }
-        }
-        // J4-R: the refusal is still the cause (first cause wins); the report
-        // says the refused receipt did not persist, and no `refused` message
-        // acknowledges it.
-        Err(write_error) => {
-            let mut reported = error.clone();
-            reported.message = format!(
-                "{}; the refused receipt was not persisted: {}",
-                reported.message, write_error.message
-            );
-            let trace_error = journal.loss.clone();
-            // J4 W3, P5: the refusal and the failed write are in `error`;
-            // any other error no durable receipt carries reaches stderr too.
-            let unrecorded = unrecorded(record, journal, &[Some(error), trace_error.as_ref()]);
-            RunReport {
-                exit_code,
-                error: Some(reported),
-                receipt_path: Some(attempt_dir.receipt_path()),
-                trace_error,
-                control_dropped: finish_control(control),
-                unrecorded,
-                ..RunReport::default()
+            if record.lifetime.boundary != BOUNDARY_PENDING {
+                record.lifetime.integrity = Integrity::Lost.as_str().to_owned();
             }
         }
     }
@@ -2905,14 +2126,7 @@ fn submit_receipt(
     }
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
-    let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
-        JailError::new(
-            ErrorCode::InternalError,
-            ErrorStage::Running,
-            Remediation::InspectState,
-            format!("the receipt could not be serialized: {error}"),
-        )
-    })?;
+    let bytes = cleanup::record_bytes("receipt", &receipt, ErrorStage::Running)?;
     record.revision += 1;
     let canonical = attempt_dir.receipt_path();
     let extra = args.receipt.clone();
@@ -3168,26 +2382,16 @@ fn record_tree(record: &mut AttemptRecord, tree: &crate::platform::TreeObservati
     record.lifetime.integrity.clone_from(&tree.integrity);
 }
 
-/// Whether the receipt's lifetime facts permit removing vendor state (§12):
-/// no boundary was ever created, or its teardown verified the tree empty.
-/// Lost integrity never permits it.
-fn cleanup_reason_to_wait(record: &AttemptRecord) -> Option<&'static str> {
-    if record.lifetime.integrity == "lost" {
-        return Some(cleanup::REASON_INTEGRITY_LOST);
-    }
-    if record.lifetime.boundary == "pending" || record.lifetime.tree_empty == Some(true) {
-        return None;
-    }
-    Some(cleanup::REASON_TREE_UNVERIFIED)
-}
-
-/// Retains registered vendor state, recording why (§12: "Attempts with
-/// unproved live trees retain state").
+/// Retains registered vendor state, recording `reason`, why it waits (§12:
+/// "Attempts with unproved live trees retain state").
 ///
-/// J4-R: a failed record of it is returned, not dropped: it is persistence
-/// like any other.
-fn retain_vendor_state(attempt_dir: &AttemptDir, record: &mut AttemptRecord) -> Option<JailError> {
-    let reason = cleanup_reason_to_wait(record).unwrap_or(cleanup::REASON_TREE_UNVERIFIED);
+/// A failed record of it is returned, not dropped: it is persistence like
+/// any other.
+fn retain_vendor_state(
+    attempt_dir: &AttemptDir,
+    record: &mut AttemptRecord,
+    reason: &'static str,
+) -> Option<JailError> {
     record.state_cleanup = StateCleanup::Pending;
     record.cleanup_error = Some(reason.to_owned());
     state::record_cleanup(attempt_dir, StateCleanup::Pending, Some(reason)).err()
@@ -3214,8 +2418,8 @@ fn refuse_vendor_state(
             return;
         }
     }
-    if cleanup_reason_to_wait(record).is_some() {
-        if let Some(error) = retain_vendor_state(attempt_dir, record) {
+    if let Some(reason) = cleanup::wait_reason(Phase::Refused, TreeEnd::of(&record.lifetime)) {
+        if let Some(error) = retain_vendor_state(attempt_dir, record, reason) {
             record.errors.push(error.to_object());
         }
         return;
@@ -3496,7 +2700,9 @@ fn receipt_digest(receipt: &Receipt) -> Result<String, String> {
 /// nothing.
 ///
 /// # Errors
-/// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written.
+/// Returns [`ErrorCode::StateWriteFailed`] when either copy cannot be written,
+/// a receipt past [`cleanup::RECEIPT_MAX`] included, which no reader would
+/// accept and is never written.
 pub fn write_receipt(
     attempt_dir: &AttemptDir,
     record: &mut AttemptRecord,
@@ -3550,14 +2756,7 @@ pub fn write_receipt_at(
 ) -> Result<Receipt, JailError> {
     record.updated_at = SystemTime::now();
     let receipt = record.receipt(phase);
-    let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
-        JailError::new(
-            ErrorCode::InternalError,
-            ErrorStage::Preparing,
-            Remediation::InspectState,
-            format!("the receipt could not be serialized: {error}"),
-        )
-    })?;
+    let bytes = cleanup::record_bytes("receipt", &receipt, ErrorStage::Preparing)?;
     let canonical = state::TempWrite::create_at(site, &attempt_dir.receipt_path(), &bytes, io)?;
     // J4-D4: the rename below can land and a later step still fail (its
     // directory sync, or the extra copy), leaving this revision visible under
@@ -3746,14 +2945,7 @@ fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailEr
         "policy_digest": plan.resolved.digest,
         "provenance": plan.resolved.provenance,
     });
-    let bytes = serde_json::to_vec_pretty(&envelope).map_err(|error| {
-        JailError::new(
-            ErrorCode::InternalError,
-            ErrorStage::Preparing,
-            Remediation::InspectState,
-            format!("the policy envelope could not be serialized: {error}"),
-        )
-    })?;
+    let bytes = cleanup::record_bytes("policy envelope", &envelope, ErrorStage::Preparing)?;
     state::replace_atomically_at(state::Site::Policy, &attempt_dir.policy_path(), &bytes)
 }
 
@@ -4343,7 +3535,9 @@ pub fn env_bytes(name: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::Os;
+    use crate::observer::CoverageSummary;
+    use crate::platform::RunEvent;
+    use crate::records::{Os, Outcome};
 
     // Audit 2026-10-08 L22 (L04.4): the production deadline closure —
     // `ContinuousDeadline::remaining` over `elapsed_since_start_ns`, the
@@ -4619,6 +3813,34 @@ mod tests {
         assert!(!prior_receipt_copy(&foreign));
     }
 
+    /// A receipt past the bound every reader holds receipts to is refused
+    /// before anything is written, and spends no revision: on disk it would
+    /// be a receipt that neither `gc` nor cleanup could read.
+    #[test]
+    fn a_receipt_past_the_reader_bound_is_never_written() {
+        let (_root, attempt_dir, _plan) = scratch_fixture();
+        let mut record = test_record(CoverageSummary::unobserved().to_coverage());
+        let bound = usize::try_from(cleanup::RECEIPT_MAX).unwrap();
+        record.errors.push(
+            JailError::new(
+                ErrorCode::EvidenceLost,
+                ErrorStage::Running,
+                Remediation::InspectState,
+                "x".repeat(bound),
+            )
+            .to_object(),
+        );
+        let error = write_receipt(&attempt_dir, &mut record, Phase::Settled, None)
+            .expect_err("past the bound");
+        assert_eq!(error.code, ErrorCode::StateWriteFailed);
+        assert!(error.message.contains("bound"), "{}", error.message);
+        assert_eq!(record.revision, 1, "no revision is spent");
+        assert!(!attempt_dir.receipt_path().exists());
+        record.errors.clear();
+        write_receipt(&attempt_dir, &mut record, Phase::Settled, None).expect("within the bound");
+        assert_eq!(record.revision, 2);
+    }
+
     /// An unsatisfied requirement refuses with the code, remediation and
     /// message its capability's reason calls for (§13.2, §3.2).
     #[test]
@@ -4738,7 +3960,7 @@ mod tests {
         trace
             .lock()
             .unwrap()
-            .set_stream_classes(&["exec", "fs.write", "fs.deny", "net"]);
+            .set_stream_classes(&CoverageClass::AUDIT);
         let mut journal = Journal::new("att_test", trace.clone());
         let note = |transition: &str| {
             crate::records::Event::lifecycle_note("att_test", 0, SystemTime::now(), 0, transition)
@@ -5017,6 +4239,97 @@ mod tests {
             "{reason}"
         );
         assert!(scratch.exists(), "the stopped tree is retained for gc");
+    }
+
+    /// A platform that only names itself: resolution asks nothing else.
+    struct LinuxIdentity;
+
+    impl Platform for LinuxIdentity {
+        fn identity(&self) -> crate::platform::PlatformIdentity {
+            crate::platform::PlatformIdentity {
+                os: Os::Linux,
+                arch: "x86_64".to_owned(),
+                kernel: "test".to_owned(),
+            }
+        }
+
+        fn probe(&self, _: &PlanRequest) -> Vec<Capability> {
+            Vec::new()
+        }
+
+        fn prepare(
+            &self,
+            _: crate::platform::PreparedPlan,
+            _: crate::platform::Sinks,
+        ) -> Result<Box<dyn crate::platform::PreparedExecution>, JailError> {
+            unreachable!("resolution prepares nothing")
+        }
+    }
+
+    /// POL-3: the operator's command rules and `learn`'s read capture change
+    /// the snapshot after resolution; the digest is the changed snapshot's
+    /// and the provenance says what changed it.
+    #[test]
+    fn post_resolution_changes_are_digested_and_say_why() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config_toml = config.join("config.toml");
+        std::fs::write(
+            &config_toml,
+            "[jail.commands]\ndeny = [\"git push --force\"]\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&config_toml, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let ctx = Context {
+            platform: Box::new(LinuxIdentity),
+            env_settings: EnvSettings {
+                config_dir: Some(config),
+                data_dir: Some(root.join("data")),
+                ..EnvSettings::default()
+            },
+            cwd: workspace.clone(),
+            home: None,
+            env_lookup: Box::new(|_| None),
+        };
+        let args = PolicyArgs {
+            workspace: Some(workspace),
+            ..PolicyArgs::default()
+        };
+        let plan = resolve_learning_plan(&ctx, &args).unwrap();
+        let resolved = &plan.resolved;
+        assert!(resolved.snapshot.observation.learning);
+        assert_eq!(resolved.snapshot.commands.deny, ["git push --force"]);
+        assert_eq!(resolved.digest, resolved.snapshot.digest().unwrap());
+        assert_eq!(
+            resolved.requirements,
+            crate::capability::requirements(&resolved.snapshot)
+        );
+        let said = |origin: &str, key: &str| {
+            resolved
+                .provenance
+                .iter()
+                .any(|entry| entry.origin == origin && entry.key == key)
+        };
+        assert!(
+            said("operator-config:config.toml", "jail.commands"),
+            "{:?}",
+            resolved.provenance
+        );
+        assert!(
+            said("cli", "observation.learning"),
+            "{:?}",
+            resolved.provenance
+        );
+        let plain = resolve_plan(&ctx, &args).unwrap();
+        assert_ne!(
+            plain.resolved.digest, resolved.digest,
+            "learning is part of the digest"
+        );
     }
 
     fn minimal_resolved(profile: ProfileName) -> Resolved {

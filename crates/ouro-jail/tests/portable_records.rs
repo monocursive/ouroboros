@@ -14,9 +14,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jsonschema::{Registry, Resource, Validator};
+use jsonschema::Validator;
 
 mod common;
+
+/// The supervisor's own records: receipts, `gc` and canonical bytes over a
+/// simulated platform.
+#[path = "portable_records/supervisor.rs"]
+mod supervisor;
 use ouro_jail::observer::CoverageSummary;
 use ouro_jail::records::{
     Applied, AppliedFilesystem, AppliedLimit, AppliedMount, AppliedNetwork, AppliedSyscalls,
@@ -53,12 +58,12 @@ fn read_json(path: &Path) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
 }
 
-/// Builds one validator per checked-in schema, every one registered by `$id`
-/// so that `jail-event.schema.json` can `$ref` the shared envelope and
-/// `jail-control.schema.json` the receipt's outcome and error.
-fn validators() -> BTreeMap<String, Validator> {
-    let schemas = common::load_schemas(&specs_dir()).unwrap_or_else(|error| panic!("{error}"));
-    // J5-C: the six wire schemas of §13 and §8.2 (J5-D adds the doctor's).
+/// The suite's validators (`common::validators`: one per checked-in schema,
+/// registered by `$id` so that `jail-event.schema.json` can `$ref` the shared
+/// envelope and `jail-control.schema.json` the receipt's outcome and error),
+/// after checking the wire schemas of §13 and §8.2 are all there.
+fn validators() -> &'static BTreeMap<String, Validator> {
+    let validators = common::validators();
     for stem in [
         "event",
         "jail-event",
@@ -68,39 +73,11 @@ fn validators() -> BTreeMap<String, Validator> {
         "jail-control",
     ] {
         assert!(
-            schemas.contains_key(stem),
+            validators.contains_key(stem),
             "{stem}.schema.json accompanies the specification"
         );
     }
-
-    let pairs: Vec<(String, Resource)> = schemas
-        .values()
-        .map(|schema| {
-            let id = schema["$id"]
-                .as_str()
-                .expect("every schema declares an $id")
-                .to_owned();
-            (id, Resource::from_contents(schema.clone()))
-        })
-        .collect();
-    let registry: Registry = Registry::new()
-        .extend(pairs)
-        .expect("the schema identifiers are valid URIs")
-        .prepare()
-        .expect("the registry resolves");
-    let registry: &'static Registry = Box::leak(Box::new(registry));
-
-    schemas
-        .into_iter()
-        .map(|(name, schema)| {
-            let validator = jsonschema::options()
-                .with_registry(registry)
-                .should_validate_formats(true)
-                .build(&schema)
-                .unwrap_or_else(|error| panic!("compiling {name}: {error}"));
-            (name, validator)
-        })
-        .collect()
+    validators
 }
 
 fn index_of(segment: &serde_json::Value) -> usize {
@@ -919,7 +896,7 @@ fn tuple_refusal_before_boundary_creation() {
     assert_eq!(receipt.lifetime.tree_empty, None);
     assert_eq!(receipt.lifetime.verified_at, None);
     assert_eq!(receipt.outcome.kind, OutcomeKind::Refused);
-    assert_valid(&receipt, &validators, "refused contained");
+    assert_valid(&receipt, validators, "refused contained");
 
     // `none`: none / unprotected, even for a refusal (I08).
     let mut record = base_record(Containment::None, Os::Macos);
@@ -929,7 +906,7 @@ fn tuple_refusal_before_boundary_creation() {
     assert_eq!(receipt.containment, Containment::None);
     assert_eq!(receipt.child_protection, ChildProtection::Unprotected);
     assert_eq!(receipt.applied.network.mode, "host");
-    assert_valid(&receipt, &validators, "refused none");
+    assert_valid(&receipt, validators, "refused none");
 }
 
 #[test]
@@ -960,7 +937,7 @@ fn tuple_contained_preparation_complete() {
         Some("attempt_tree")
     );
     assert_eq!(receipt.lifetime.tree_empty, None);
-    assert_valid(&receipt, &validators, "prepared contained");
+    assert_valid(&receipt, validators, "prepared contained");
 }
 
 #[test]
@@ -995,7 +972,7 @@ fn tuple_none_preparation_complete_is_still_unprotected() {
         ChildProtection::Unprotected,
         "I08: `none` is never upgraded"
     );
-    assert_valid(&receipt, &validators, "prepared none");
+    assert_valid(&receipt, validators, "prepared none");
 }
 
 #[test]
@@ -1026,7 +1003,7 @@ fn tuple_verified_settlement() {
     let receipt = record.receipt(Phase::Settled);
     assert!(receipt.exec_observed);
     assert_eq!(receipt.lifetime.tree_empty, Some(true));
-    assert_valid(&receipt, &validators, "settled");
+    assert_valid(&receipt, validators, "settled");
 
     // Settlement without tree proof is rejected by the contract, so the tuple
     // above is not merely a shape this code happens to emit.
@@ -1182,7 +1159,7 @@ fn tuple_refusal_after_setup_or_proved_exec_error() {
             },
             "{label}"
         );
-        assert_valid(&receipt, &validators, &label);
+        assert_valid(&receipt, validators, &label);
         let value = serde_json::to_value(&receipt).expect("serializes");
         common::semantic_receipt(&value).expect("semantically valid");
 

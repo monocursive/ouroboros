@@ -34,6 +34,7 @@ use ouro_jail::supervisor;
 use serde_json::{Value, json};
 
 mod common;
+use common::sim;
 
 /// The boot the simulated host is in.
 const HOST_BOOT: &str = "00000000-0000-4000-8000-00000000b001";
@@ -50,18 +51,10 @@ struct SimPlatform;
 
 impl Platform for SimPlatform {
     fn owner_identity(&self) -> Option<OwnerIdentity> {
-        Some(OwnerIdentity {
-            pid: std::process::id(),
-            boot_id: HOST_BOOT.to_owned(),
-            start_time_ticks: 1,
-        })
+        Some(sim::owner_in(HOST_BOOT))
     }
     fn identity(&self) -> PlatformIdentity {
-        PlatformIdentity {
-            os: Os::Linux,
-            arch: SIM_ARCH.to_owned(),
-            kernel: "simulated".to_owned(),
-        }
+        sim::identity()
     }
     fn probe(&self, _: &PlanRequest) -> Vec<Capability> {
         unreachable!("gc probes no capability")

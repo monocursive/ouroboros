@@ -32,7 +32,7 @@
 //! - Durable, resumable: the traversal is idempotent, the directory removal is
 //!   followed by an `fsync` of the attempt directory, and only then is
 //!   `complete` recorded (`jail-state.json` through the durable replacement).
-//!   A crash at any point leaves `pending`, and [`resume`] (`gc`) finishes it.
+//!   A crash at any point leaves `pending`, and [`resume_with`] (`gc`) finishes it.
 //! - Bounded: one pass visits at most [`Limits::max_entries`] entries and holds
 //!   at most [`Limits::max_depth`] directory descriptors. A deeper directory
 //!   is renamed up to the vendor-state root and visited from there, so an
@@ -61,6 +61,7 @@
 use std::io;
 use std::path::Path;
 
+use crate::lifecycle::TreeEnd;
 use crate::records::{ErrorCode, ErrorStage, JailError, Phase, Receipt, Remediation, StateCleanup};
 use crate::state::anchored::{Dir, Kind, Name, Stat};
 use crate::state::{self, AttemptDir, VENDOR_STATE_NAME};
@@ -86,15 +87,6 @@ pub const REASON_IDENTITY_UNRECORDED: &str = "vendor_state_identity_unrecorded";
 #[must_use]
 pub fn not_needed() -> StateCleanup {
     StateCleanup::NotNeeded
-}
-
-/// Whether this build can remove vendor state at all.
-///
-/// True since J3: [`remove_vendor_state`] performs the anchored removal and
-/// records `complete` only after it and the directory sync succeeded.
-#[must_use]
-pub fn vendor_state_removal_implemented() -> bool {
-    true
 }
 
 /// How much one pass may do.
@@ -592,14 +584,25 @@ pub fn permitted(receipt: Option<&Receipt>, gc_verified_leaf: bool) -> Result<()
 /// # Errors
 /// Returns the safe reason cleanup must wait.
 pub fn permitted_by(receipt: &Receipt) -> Result<(), &'static str> {
-    if receipt.lifetime.integrity == "lost" {
-        return Err(REASON_INTEGRITY_LOST);
+    match wait_reason(receipt.phase, TreeEnd::of(&receipt.lifetime)) {
+        None => Ok(()),
+        Some(reason) => Err(reason),
     }
-    let verified_empty = receipt.lifetime.tree_empty == Some(true);
-    match receipt.phase {
-        Phase::Settled if verified_empty => Ok(()),
-        Phase::Refused if verified_empty || receipt.lifetime.boundary == "pending" => Ok(()),
-        _ => Err(REASON_TREE_UNVERIFIED),
+}
+
+/// The rule of [`permitted_by`] over a lifecycle phase and the lifetime
+/// facts it was recorded with, wherever they were read: `None` when they
+/// prove no tree of the attempt can still use what it left, or the safe
+/// reason cleanup must wait.
+#[must_use]
+pub fn wait_reason(phase: Phase, tree: TreeEnd) -> Option<&'static str> {
+    if tree.integrity_lost {
+        return Some(REASON_INTEGRITY_LOST);
+    }
+    match phase {
+        Phase::Settled if tree.verified_empty => None,
+        Phase::Refused if tree.verified_empty || tree.no_boundary => None,
+        _ => Some(REASON_TREE_UNVERIFIED),
     }
 }
 
@@ -635,8 +638,47 @@ pub enum Resume {
 }
 
 /// Largest receipt (or `policy.json`) this tool reads back: whoever reads
-/// one, the supervisor, cleanup, `gc` or `learn`, holds it to this one bound.
+/// one, the supervisor, cleanup, `gc` or `learn`, holds it to this one bound,
+/// and every writer refuses to write a larger one ([`record_bytes`]).
 pub const RECEIPT_MAX: u64 = 4 * 1024 * 1024;
+
+/// The bytes of a record this tool reads back under [`RECEIPT_MAX`] (a
+/// receipt or the policy envelope, named by `what`), as they are written.
+///
+/// A larger one is refused before anything is written: on disk it would be
+/// a record no reader accepts, so the attempt it describes could never be
+/// cleaned up or reported from it.
+///
+/// # Errors
+/// [`ErrorCode::InternalError`] when it cannot be serialized, and
+/// [`ErrorCode::StateWriteFailed`] when it is past the bound.
+pub fn record_bytes(
+    what: &str,
+    record: &impl serde::Serialize,
+    stage: ErrorStage,
+) -> Result<Vec<u8>, JailError> {
+    let bytes = serde_json::to_vec_pretty(record).map_err(|error| {
+        JailError::new(
+            ErrorCode::InternalError,
+            stage,
+            Remediation::InspectState,
+            format!("the {what} could not be serialized: {error}"),
+        )
+    })?;
+    if u64::try_from(bytes.len()).map_or(true, |len| len > RECEIPT_MAX) {
+        return Err(JailError::new(
+            ErrorCode::StateWriteFailed,
+            stage,
+            Remediation::InspectState,
+            format!(
+                "the {what} is {} bytes, past the {RECEIPT_MAX}-byte bound every reader holds \
+                 it to, so it was not written",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
 
 fn read_receipt(attempt_dir: &AttemptDir) -> Result<Option<Receipt>, JailError> {
     let path = attempt_dir.receipt_path();
@@ -730,6 +772,15 @@ fn present_managed_dirs(attempt_dir: &AttemptDir) -> Scratch {
     Scratch::Managed(present)
 }
 
+/// What [`resume_with`] did, and what it spent.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Resumed {
+    /// The outcome.
+    pub outcome: Resume,
+    /// Entries the removals charged against the given bound.
+    pub visited: usize,
+}
+
 /// Resumes an interrupted vendor-state cleanup from jail state (§12, §14.2).
 ///
 /// With no vendor state registered, a receipt that permits the cleanup and
@@ -755,30 +806,13 @@ fn present_managed_dirs(attempt_dir: &AttemptDir) -> Scratch {
 /// the same traversal, and only when `policy.json` says scratch was managed;
 /// a `policy.json` that cannot be read keeps the cleanup pending.
 ///
+/// It runs within `limits` (gc passes what is left of its per-invocation
+/// bound, and charges `visited` to it), and with gc's own verification of
+/// the registered leaf (`gc_verified_leaf`, see [`permitted`]).
+///
 /// # Errors
 /// Returns [`ErrorCode::StateWriteFailed`] when jail state or the receipt
 /// cannot be read or replaced.
-pub fn resume(attempt_dir: &AttemptDir, dry_run: bool) -> Result<Resume, JailError> {
-    resume_with(attempt_dir, dry_run, Limits::DEFAULT, false).map(|resumed| resumed.outcome)
-}
-
-// S7 and gc's verification
-/// What [`resume_with`] did, and what it spent.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Resumed {
-    /// The outcome.
-    pub outcome: Resume,
-    /// Entries the removals charged against the given bound (S7).
-    pub visited: usize,
-}
-
-/// [`resume`] within `limits` (S7: gc passes what is left of its
-/// per-invocation bound, and charges `visited` to it), and with gc's own
-/// verification of the registered leaf (`gc_verified_leaf`, see
-/// [`permitted`]).
-///
-/// # Errors
-/// As [`resume`].
 pub fn resume_with(
     attempt_dir: &AttemptDir,
     dry_run: bool,
@@ -913,14 +947,7 @@ fn complete_receipt(attempt_dir: &AttemptDir, receipt: &mut Receipt) -> Result<(
     receipt.cleanup_error = None;
     receipt.revision += 1;
     receipt.updated_at = crate::records::rfc3339_utc(std::time::SystemTime::now());
-    let bytes = serde_json::to_vec_pretty(&*receipt).map_err(|error| {
-        JailError::new(
-            ErrorCode::InternalError,
-            ErrorStage::Reconciling,
-            Remediation::InspectState,
-            format!("the receipt could not be serialized: {error}"),
-        )
-    })?;
+    let bytes = record_bytes("receipt", &*receipt, ErrorStage::Reconciling)?;
     state::replace_atomically_at(state::Site::GcResume, &attempt_dir.receipt_path(), &bytes)
 }
 
@@ -933,6 +960,7 @@ pub fn absent(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle::{BOUNDARY_PENDING, Integrity};
 
     /// A 0700 temporary directory whatever the umask: a state root under a
     /// group-writable one is refused, rightly.
@@ -1245,9 +1273,8 @@ mod tests {
     }
 
     #[test]
-    fn removal_is_implemented_and_the_empty_case_is_not_needed() {
+    fn the_empty_case_is_not_needed() {
         assert_eq!(not_needed(), StateCleanup::NotNeeded);
-        assert!(vendor_state_removal_implemented());
     }
 
     #[test]
@@ -1411,16 +1438,16 @@ mod tests {
         let mut receipt = sample_receipt();
         receipt.phase = Phase::Settled;
         receipt.lifetime.tree_empty = Some(true);
-        receipt.lifetime.integrity = "verified".into();
+        receipt.lifetime.integrity = Integrity::Verified.as_str().into();
         assert_eq!(permitted_by(&receipt), Ok(()));
-        receipt.lifetime.integrity = "lost".into();
+        receipt.lifetime.integrity = Integrity::Lost.as_str().into();
         assert_eq!(permitted_by(&receipt), Err(REASON_INTEGRITY_LOST));
-        receipt.lifetime.integrity = "verified".into();
+        receipt.lifetime.integrity = Integrity::Verified.as_str().into();
         receipt.lifetime.tree_empty = None;
         assert_eq!(permitted_by(&receipt), Err(REASON_TREE_UNVERIFIED));
         receipt.phase = Phase::Refused;
         assert_eq!(permitted_by(&receipt), Err(REASON_TREE_UNVERIFIED));
-        receipt.lifetime.boundary = "pending".into();
+        receipt.lifetime.boundary = BOUNDARY_PENDING.into();
         assert_eq!(permitted_by(&receipt), Ok(()), "no boundary ever existed");
         receipt.phase = Phase::Enforced;
         assert_eq!(permitted_by(&receipt), Err(REASON_TREE_UNVERIFIED));
@@ -1433,7 +1460,7 @@ mod tests {
         let mut receipt = sample_receipt();
         receipt.phase = Phase::Enforced;
         receipt.lifetime.tree_empty = None;
-        receipt.lifetime.integrity = "verified".into();
+        receipt.lifetime.integrity = Integrity::Verified.as_str().into();
         assert_eq!(
             permitted(Some(&receipt), false),
             Err(REASON_TREE_UNVERIFIED)
@@ -1441,7 +1468,7 @@ mod tests {
         assert_eq!(permitted(Some(&receipt), true), Ok(()));
         assert_eq!(permitted(None, false), Err(REASON_NO_TERMINAL_RECEIPT));
         assert_eq!(permitted(None, true), Ok(()));
-        receipt.lifetime.integrity = "lost".into();
+        receipt.lifetime.integrity = Integrity::Lost.as_str().into();
         assert_eq!(permitted(Some(&receipt), true), Err(REASON_INTEGRITY_LOST));
     }
 

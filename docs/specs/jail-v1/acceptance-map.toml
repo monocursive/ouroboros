@@ -459,7 +459,7 @@ clause = "Label-only with a gate or attempt id refuses as a usage error"
 tag = "live-cli"
 lane = "macos"
 tests = [
-  "ouro-jail/tests/macos_refusal.rs::usage_errors_exit_two",
+  "ouro-jail/tests/portable_cli_config.rs::usage_errors_exit_two",
 ]
 note = "Proved on the macOS lane only; a Linux copy would let the conformance verdict close X02 by itself."
 
@@ -470,7 +470,7 @@ clause = "An attempt id with a wrong version nibble, a path escape or a non-UUID
 tag = "live-cli"
 lane = "macos"
 tests = [
-  "ouro-jail/tests/macos_refusal.rs::a_malformed_attempt_id_is_a_usage_error_not_a_path",
+  "ouro-jail/tests/portable_cli_config.rs::a_malformed_attempt_id_is_a_usage_error_not_a_path",
 ]
 
 [[clause]]
@@ -1422,8 +1422,8 @@ tests = [
   "ouro-jail/tests/j4_closed_set_linux.rs::j4_o01_every_variant_is_one_event_per_result_none",
   "ouro-jail/tests/j4_closed_set_linux.rs::j4_o01_every_variant_is_one_event_per_result_agent",
   "ouro-jail/tests/portable_records.rs::r01_every_validation_case_gets_the_verdict_the_corpus_expects",
-  "ouro-jail/tests/j5_records_linux.rs::j5_tool_records_pass_the_frozen_contract",
-  "ouro-jail/tests/j5_records_linux.rs::j5_agent_records_pass_the_frozen_contract",
+  "ouro-jail/tests/records_linux.rs::contract::j5_tool_records_pass_the_frozen_contract",
+  "ouro-jail/tests/records_linux.rs::contract::j5_agent_records_pass_the_frozen_contract",
 ]
 note = "Asserted on every audit outcome these runs produce; the event schema itself does not yet forbid bytes_* on audit outcomes (J5-C). event.schema.json and jail-event.schema.json forbid bytes_in/bytes_out/duration_ms on audit and jail wrapper outcomes; every live event is validated against them"
 
@@ -1488,7 +1488,7 @@ gate = "O02"
 clause = "PID reuse carries no attribution over"
 tag = "simulated"
 tests = [
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::j4_o02_recycled_tid_carries_nothing_over",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tasks::tests::j4_o02_recycled_tid_carries_nothing_over",
 ]
 note = "Forcing PID reuse live needs CAP_SYS_ADMIN in the pid namespace (j4-authority.md, Known gaps); a session-level hook recycles a tid."
 
@@ -1545,7 +1545,7 @@ tag = "simulated"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::o03_a_truncated_path_is_a_gap_not_a_result",
 ]
-note = "Truncation: a covered call whose path the tracer could not read (kernel accepted) becomes a path_unreadable gap in a degraded coverage class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_TRUNCATE_PATH (recorded in native details). Enforcement: self.gap(GapReason::PathUnreadable, ..) in tracer/session.rs; deleting it makes the truncated call vanish."
+note = "Truncation: a covered call whose path the tracer could not read (kernel accepted) becomes a path_unreadable gap in a degraded coverage class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_TRUNCATE_PATH (recorded in native details). Enforcement: self.gap(GapReason::PathUnreadable, ..) in tracer/session/exit.rs; deleting it makes the truncated call vanish."
 
 [[clause]]
 id = "O03.2"
@@ -1554,9 +1554,9 @@ clause = "An unmatched exit produces a gap, never a result"
 tag = "simulated"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::o03_an_unmatched_exit_is_a_gap_not_a_result",
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::an_exit_with_no_entry_is_one_unmatched_exit_gap",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::exit::tests::an_exit_with_no_entry_is_one_unmatched_exit_gap",
 ]
-note = "A covered exit with no entry to pair with becomes an unmatched_exit gap in a degraded class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT. Enforcement: self.gap(GapReason::UnmatchedExit, ..) at the seam site in tracer/session.rs; deleting it counts the call as a normal result. The real branch — handle_exit's exit with no in-flight entry, the site an untriggered seam would hide — is driven directly (no seam) by the second cited unit, which asserts the loss counter and exactly one UnmatchedExit gap event; the seam remains for the live `run` shape that unit cannot produce (audit 2026-10-08 M02/L22)."
+note = "A covered exit with no entry to pair with becomes an unmatched_exit gap in a degraded class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT. Enforcement: self.gap(GapReason::UnmatchedExit, ..) at the seam site in tracer/session/exit.rs; deleting it counts the call as a normal result. The real branch — handle_exit's exit with no in-flight entry, the site an untriggered seam would hide — is driven directly (no seam) by the second cited unit, which asserts the loss counter and exactly one UnmatchedExit gap event; the seam remains for the live `run` shape that unit cannot produce (audit 2026-10-08 M02/L22)."
 
 [[clause]]
 id = "O03.6"
@@ -2200,9 +2200,9 @@ gate = "R01"
 clause = "The integrity (pending, lost) and unknown-exec settlement tuples are what records carry"
 tag = "live-cli"
 tests = [
-  "ouro-jail/tests/j5_records_linux.rs::j5_r01_a_refusal_before_the_boundary_carries_integrity_pending",
-  "ouro-jail/tests/j5_records_linux.rs::j5_r01_a_detected_escape_carries_integrity_lost",
-  "ouro-jail/tests/j5_records_linux.rs::j5_r01_an_exec_the_jail_cannot_confirm_settles_with_exec_unknown",
+  "ouro-jail/tests/records_linux.rs::contract::j5_r01_a_refusal_before_the_boundary_carries_integrity_pending",
+  "ouro-jail/tests/records_linux.rs::contract::j5_r01_a_detected_escape_carries_integrity_lost",
+  "ouro-jail/tests/records_linux.rs::contract::j5_r01_an_exec_the_jail_cannot_confirm_settles_with_exec_unknown",
 ]
 note = "Real runs of the release binary, every receipt, trace and control transcript held to the frozen contract (common::assert_run_records) and the §13.2 tuple asserted field by field: a tool refusal before boundary creation (stdin a directory, §8.3) carries boundary/integrity pending with no native identity, scope, tree result or time; a none target that moves itself out of its leaf carries integrity lost with null tree result and time, never settled, both in the receipt written while it runs (P7) and in the final one; a tool run with observation off whose target is the jail's own bound binary (so the only no-observer exec evidence, a changed image, cannot confirm it) settles verified with exec_observed false and the coded exec_unconfirmed unknown. The R06 tests in conformance_j3_none.rs also validate lost receipts the same way. Mutation table in J5-C's notes-wave3b.md."
 
@@ -2243,12 +2243,12 @@ gate = "R01"
 clause = "Every receipt, trace and control transcript the real jail writes under tool, build, agent and none, released through the gate, refused at the gate, and with observation off, passes the frozen contract, and the live trace carries each event kind the run was built to produce"
 tag = "live-cli"
 tests = [
-  "ouro-jail/tests/j5_records_linux.rs::j5_tool_records_pass_the_frozen_contract",
-  "ouro-jail/tests/j5_records_linux.rs::j5_build_records_pass_the_frozen_contract",
-  "ouro-jail/tests/j5_records_linux.rs::j5_agent_records_pass_the_frozen_contract",
-  "ouro-jail/tests/j5_records_linux.rs::j5_none_records_pass_the_frozen_contract",
-  "ouro-jail/tests/j5_records_linux.rs::j5_a_refused_release_writes_records_that_pass_the_frozen_contract",
-  "ouro-jail/tests/j5_records_linux.rs::j5_observation_off_records_pass_the_frozen_contract",
+  "ouro-jail/tests/records_linux.rs::contract::j5_tool_records_pass_the_frozen_contract",
+  "ouro-jail/tests/records_linux.rs::contract::j5_build_records_pass_the_frozen_contract",
+  "ouro-jail/tests/records_linux.rs::contract::j5_agent_records_pass_the_frozen_contract",
+  "ouro-jail/tests/records_linux.rs::contract::j5_none_records_pass_the_frozen_contract",
+  "ouro-jail/tests/records_linux.rs::contract::j5_a_refused_release_writes_records_that_pass_the_frozen_contract",
+  "ouro-jail/tests/records_linux.rs::contract::j5_observation_off_records_pass_the_frozen_contract",
 ]
 note = "jail.json holds the latest receipt only (§7) and the trace's jail.receipt notes carry the settled receipt, so the enforced-phase receipt is transient by design and no external reader can hold it to the contract: the cited runs validate the prepared receipt (read at the prepared gate), the settled receipt and every trace and control transcript through common::assert_run_records (schema and semantic rules); the enforced phase's own shape is pinned by the frozen-schema examples. Holding the enforced-phase receipt to the contract externally is the named residual (audit 2026-10-08 L22)."
 
@@ -2309,8 +2309,8 @@ gate = "R02"
 clause = "A crash at every point of each of the 12 run sites (claim, policy, launch state, execution leaf and its identity, boundary, the five receipt phases, cleanup record) and of gc's first record leaves a valid prior file or explicit incomplete state"
 tag = "live-cli"
 tests = [
-  "ouro-jail/tests/j4_records_linux.rs::j4_r02_a_crash_at_each_replacement_leaves_a_valid_prior_file",
-  "ouro-jail/tests/j4_records_linux.rs::j4_r02_a_crash_at_each_point_of_a_gc_record_leaves_valid_records",
+  "ouro-jail/tests/records_linux.rs::replacement::j4_r02_a_crash_at_each_replacement_leaves_a_valid_prior_file",
+  "ouro-jail/tests/records_linux.rs::replacement::j4_r02_a_crash_at_each_point_of_a_gc_record_leaves_valid_records",
 ]
 note = "The crash is a real abort; the point is chosen by the OURO_JAIL_TEST_ABORT_AT seam."
 
@@ -2320,10 +2320,10 @@ gate = "R02"
 clause = "A crash at the integrity-receipt, gc-resume and gc-proxy-dir sites, and at gc's later records, leaves valid records"
 tag = "live-cli"
 tests = [
-  "ouro-jail/tests/j5_records_crash_linux.rs::j5_r02_a_crash_at_each_point_of_the_integrity_receipt_leaves_valid_records",
-  "ouro-jail/tests/j5_records_crash_linux.rs::j5_r02_a_crash_at_each_point_of_both_gc_resume_writes_leaves_valid_records",
-  "ouro-jail/tests/j5_records_crash_linux.rs::j5_r02_a_crash_at_each_point_of_the_gc_proxy_dir_record_leaves_valid_records",
-  "ouro-jail/tests/j5_records_crash_linux.rs::j5_r02_a_crash_at_each_point_of_each_later_gc_record_leaves_valid_records",
+  "ouro-jail/tests/records_linux.rs::recovery::j5_r02_a_crash_at_each_point_of_the_integrity_receipt_leaves_valid_records",
+  "ouro-jail/tests/records_linux.rs::recovery::j5_r02_a_crash_at_each_point_of_both_gc_resume_writes_leaves_valid_records",
+  "ouro-jail/tests/records_linux.rs::recovery::j5_r02_a_crash_at_each_point_of_the_gc_proxy_dir_record_leaves_valid_records",
+  "ouro-jail/tests/records_linux.rs::recovery::j5_r02_a_crash_at_each_point_of_each_later_gc_record_leaves_valid_records",
   "ouro-jail/src/lib.rs::state::persist::tests::the_abort_seam_names_a_site_a_point_and_an_optional_ordinal",
 ]
 note = "The release binary is aborted by OURO_JAIL_TEST_ABORT_AT=<site>:<point>[:<n>] (the ordinal n picks the nth replacement at the site in one process) at all 4 points of P7 (a live none escape), both P12 writes (the receipt gc completes, then jail state), P13 (a dead agent's proxy directory) and every P14 record of one pass over a dead none supervisor's populated leaf (gc_terminating_orphan, gc_terminated_orphan, gc_removing_cgroup, gc_removed_cgroup, gc_finished) and over a dead tool supervisor's empty leaf, scratch and crash temporary file (gc_removing_cgroup, gc_removed_cgroup, gc_removed_scratch, gc_removed_temp_files, gc_finished): 56 crashes. Each: records parse and jail.json passes the frozen contract; both uninterrupted passes are exactly §14.2's order; for each crash point, the durable records, the leaf (gone, populated), the scratch, both kinds of temporary file, and the exact record list after the next pass are derived from §14.2's rules alone (an act is done when its record is a result the crash reached; the next pass does what is left; a repeated record is kept once). The seam only picks the point; the crash is a real abort. A crash that loses the record of an act already done leaves the next pass finishing without recording that act (spec-proposal item 25), which the expectations state exactly."
@@ -2344,7 +2344,7 @@ gate = "R02"
 clause = "The same faults at the execution-leaf and leaf-identity sites leave valid records"
 tag = "simulated"
 tests = [
-  "ouro-jail/tests/j5_records_crash_linux.rs::j5_r02_every_fault_at_the_execution_leaf_sites_leaves_valid_records",
+  "ouro-jail/tests/records_linux.rs::recovery::j5_r02_every_fault_at_the_execution_leaf_sites_leaves_valid_records",
 ]
 note = "Disk-full, short-write, fsync, rename and directory-sync faults injected through the persistence seam (state::with_persist_io) into the real leaf creation (ExecutionCgroup::create_for_attempt) in the test process, against a real attempt the release binary left after its policy and a real delegated cgroup: the creation refuses with state_write_failed; the fault seam looks at the leaf's path when it fires (no leaf at P15, the leaf at P16); jail state is the prior record before the rename and, after it (the directory-sync fault), the name, or the device and inode the test itself saw at the leaf's path; nothing else in jail state or policy.json changes; no temporary file and no leaf are left; gc keeps every record. Simulated because the faults are injected; only the Linux platform writes these sites."
 
@@ -2370,8 +2370,8 @@ gate = "R03"
 clause = "Trace partial writes cannot block deadline enforcement"
 tag = "simulated"
 tests = [
-  "ouro-jail/tests/j5_records_linux.rs::j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces",
-  "ouro-jail/tests/j5_records_linux.rs::j5_r03_a_wall_fires_on_time_while_a_stalled_consumer_holds_a_partial_frame",
+  "ouro-jail/tests/records_linux.rs::contract::j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces",
+  "ouro-jail/tests/records_linux.rs::contract::j5_r03_a_wall_fires_on_time_while_a_stalled_consumer_holds_a_partial_frame",
   "ouro-jail/src/lib.rs::trace::tests::under_the_write_size_seam_every_frame_is_written_in_pieces",
   "ouro-jail/src/lib.rs::trace::tests::the_write_size_seam_accepts_only_a_byte_count",
 ]
@@ -2443,7 +2443,7 @@ tests = [
   "ouro-jail/src/lib.rs::supervisor::tests::a_receipt_records_the_trace_loss_with_the_notes_start_and_source",
   "ouro-jail/src/lib.rs::trace::tests::a_drain_that_drops_a_reserve_note_writes_nothing_after_it",
   "ouro-jail/tests/portable_records.rs::r01_the_semantic_corpus_gets_the_verdicts_it_expects",
-  "ouro-jail/tests/j5_records_linux.rs::j5_a_trace_loss_note_and_its_receipt_agree",
+  "ouro-jail/tests/records_linux.rs::contract::j5_a_trace_loss_note_and_its_receipt_agree",
 ]
 note = "the live test is a real stalled --trace-fd consumer on the reference host (live-cli); the drain case is a Linux unit test"
 
@@ -2828,9 +2828,10 @@ tests = [
   "ouro-fixture/src/lib.rs::bounded::tests::a_read_never_writes_past_the_buffer_it_was_given",
   "ouro-records/src/lib.rs::canonical::tests::argv_framing_is_length_prefixed_not_delimited",
   "ouro-jail/tests/portable_canonical.rs::p01_both_canonical_inputs_resolve_to_the_golden_snapshot",
+  "ouro-jail/tests/portable_cli_config.rs::usage_errors_exit_two",
   "ouro-jail/tests/portable_gate.rs::x02_a_gate_that_never_delivers_times_out_rather_than_waiting_forever",
   "ouro-jail/tests/portable_gc.rs::j4_c03_a_foreign_os_or_architecture_is_retained",
-  "ouro-jail/tests/portable_j4_records.rs::d3::j4_d3_a_pre_created_attempt_root_stays_claimable_after_gc",
+  "ouro-jail/tests/portable_records.rs::supervisor::d3::j4_d3_a_pre_created_attempt_root_stays_claimable_after_gc",
   "ouro-jail/tests/portable_launch.rs::a_launch_file_must_be_private_single_linked_regular_and_outside_writable_grants",
   "ouro-jail/tests/portable_lifetime.rs::l05_unknown_tree_retains_scratch_and_never_settles",
   "ouro-jail/tests/portable_loss.rs::j4_r04_best_effort_runs_to_the_end_degraded_exits_with_the_child",
@@ -2845,7 +2846,7 @@ tests = [
   "ouro-jail/tests/portable_trace.rs::a_closed_reader_is_evidence_loss_rather_than_a_signal",
   "ouro-jail/tests/portable_unsettled_phase.rs::an_unsettled_end_after_a_confirmed_exec_stays_enforced",
   "ouro-jail/tests/portable_version.rs::the_announced_closed_set_is_the_one_the_specification_names",
-  "ouro-jail/tests/portable_w2s_trace.rs::j4_w2s_a_an_unsettled_attempts_final_receipt_note_uses_the_reserve",
+  "ouro-jail/tests/portable_trace_loss.rs::j4_w2s_a_an_unsettled_attempts_final_receipt_note_uses_the_reserve",
   "ouro-jail/tests/review_core_regressions.rs::a_native_string_never_carries_a_nul",
 ]
 checks = ["suite_clean"]
@@ -2954,10 +2955,10 @@ tag = "live-cli"
 lane = "macos"
 tests = [
   "ouro-jail/tests/macos_refusal.rs::m03_inspection_commands_use_the_exit_codes_of_section_six_four",
-  "ouro-jail/tests/macos_refusal.rs::usage_errors_exit_two",
-  "ouro-jail/tests/macos_refusal.rs::an_unknown_or_duplicate_configuration_key_refuses",
-  "ouro-jail/tests/macos_refusal.rs::doctor_takes_no_policy_override_flags",
-  "ouro-jail/tests/macos_refusal.rs::m7_gc_refuses_a_state_root_that_is_not_private",
+  "ouro-jail/tests/portable_cli_config.rs::usage_errors_exit_two",
+  "ouro-jail/tests/portable_cli_config.rs::an_unknown_or_duplicate_configuration_key_refuses",
+  "ouro-jail/tests/portable_cli_config.rs::doctor_takes_no_policy_override_flags",
+  "ouro-jail/tests/portable_cli_config.rs::m7_gc_refuses_a_state_root_that_is_not_private",
 ]
 
 [[clause]]
@@ -3250,7 +3251,7 @@ clause = "A foreign-arch `clone3` that succeeds classifies `untraced_descendant`
 tag = "live-cli"
 tests = [
   "ouro-jail/tests/j4_closed_set_linux.rs::j4_clone_untraced_is_a_gap_in_none",
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::audit4_compat_abi_listener_and_untraced_clone_route_to_their_gaps",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::entry::tests::audit4_compat_abi_listener_and_untraced_clone_route_to_their_gaps",
 ]
 
 [[clause]]
@@ -3548,7 +3549,7 @@ tests = [
   "ouro-jail/tests/command_rules_linux.rs::a_matching_child_command_is_still_forbidden",
   "ouro-jail/tests/command_rules_linux.rs::empty_arguments_do_not_turn_an_allowed_command_into_a_forbidden_one",
   "ouro-jail/src/lib.rs::commands::tests::positional_and_tail",
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::evidence::tests::the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy",
 ]
 note = "The glob, basename and path forms are the matcher unit's; the re-check unit is what judges a re-spelled kernel copy as the entry did. K31's script/no-argv shapes are K31.3."
 
@@ -3706,8 +3707,8 @@ gate = "K30"
 clause = "An open claim the descriptor does not corroborate (absolute: every component; relative, bare names included: the tail; `O_TMPFILE`: the directory) delivers with an incomplete path, counts `path_claims_unverified`, and records a bookkeeping `path_claim_unverified` gap that degrades no class and accounts for no loss; agreement records none of it"
 tag = "simulated"
 tests = [
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::an_open_claim_the_descriptor_does_not_corroborate_is_downgraded_not_lost",
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::a_path_claim_is_corroborated_by_its_components_not_only_its_name",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::exit::tests::an_open_claim_the_descriptor_does_not_corroborate_is_downgraded_not_lost",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::evidence::tests::a_path_claim_is_corroborated_by_its_components_not_only_its_name",
   "ouro-jail/src/lib.rs::platform::linux::observed::tests::a_path_claim_gap_degrades_nothing_and_accounts_for_no_loss",
 ]
 note = "The tracer's claim logic driven directly (the kernel's mismatch is manufactured); that the gap never stops a strict run is the observed half's degrades-nothing assertion, not a strict-run integration test."
@@ -3726,7 +3727,7 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/command_rules_linux.rs::an_exec_the_entry_passed_whose_image_hits_a_forbid_rule_is_killed_at_exec",
   "ouro-jail/tests/command_rules_linux.rs::a_deny_rule_that_only_the_kernel_copy_hits_kills_the_exec_and_the_run_completes",
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::an_exec_the_recheck_kills_leaves_flight_with_its_event_and_no_abandoned_gap",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::exec::tests::an_exec_the_recheck_kills_leaves_flight_with_its_event_and_no_abandoned_gap",
   "ouro-jail/src/lib.rs::platform::linux::observed::tests::an_exec_time_command_hit_is_recorded_and_only_forbid_stops_the_run",
 ]
 
@@ -3746,7 +3747,7 @@ gate = "K31"
 clause = "A `#!` script, an empty argument and an `execve` with no argv are judged as at the entry stop"
 tag = "live-lib"
 tests = [
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::evidence::tests::the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy",
   "ouro-jail/tests/command_rules_linux.rs::empty_arguments_do_not_turn_an_allowed_command_into_a_forbidden_one",
 ]
 
@@ -3788,7 +3789,7 @@ reason = "runs inside bubblewrap from m1_a_read_only_bind_of_a_writable_filesyst
 
 [[ignored]]
 test = "ouro-jail/tests/j4_closed_set_linux.rs::bless_the_published_closed_set_table"
-reason = "writes the evidence file; run deliberately"
+reason = "writes the evidence file with OURO_BLESS=1; run deliberately"
 
 [[ignored]]
 test = "ouro-jail/tests/j4_gc_linux.rs::j4_w3_zombie_leader_helper"
@@ -3796,7 +3797,7 @@ reason = "a helper process of j4_w3_p1c_a_zombie_leader_with_a_live_thread_is_al
 
 [[ignored]]
 test = "ouro-jail/tests/observer_regression_linux.rs::exitkill_child_supervisor"
-reason = "a helper process of r29_a_dead_supervisor_kills_its_traced_tree (bare #[ignore])"
+reason = "a helper process of r29_a_dead_supervisor_kills_its_traced_tree"
 
 [[ignored]]
 test = "ouro-jail/tests/portable_network_rules.rs::n03_nfc_normalization_test_17"

@@ -1,9 +1,10 @@
-//! J5-C, R02.3 and R02.4: the persistence sites the J4 crash and fault
-//! matrices never reached (jail-v1 §7, §13.2, §14.2; R02).
+//! R02.3 and R02.4, gc and the execution leaf: the persistence sites the
+//! run's own crash matrix does not reach (jail-v1 §7, §13.2, §14.2).
 //!
 //! R02.3, live: the release binary is aborted by
-//! `OURO_JAIL_TEST_ABORT_AT=<site>:<point>[:<n>]` (S9; the ordinal is J5-C's,
-//! `state::persist::parse_abort_at`) at each named point of
+//! `OURO_JAIL_TEST_ABORT_AT=<site>:<point>[:<n>]` (S9; the ordinal picks the
+//! n-th replacement at the site, `state::persist::parse_abort_at`) at each
+//! named point of
 //!
 //! - P7, the receipt recording a detected lifetime-integrity loss, written
 //!   while a `none` target that moved itself out of its leaf still runs;
@@ -16,8 +17,7 @@
 //!   (`gc_terminating_orphan`, `gc_terminated_orphan`, `gc_removing_cgroup`,
 //!   `gc_removed_cgroup`, ..., `gc_finished`) and over a dead `tool`
 //!   supervisor's empty leaf and managed scratch (`gc_removing_cgroup`,
-//!   `gc_removed_cgroup`, `gc_removed_scratch`, `gc_finished`). The J4
-//!   matrix crashed only the first.
+//!   `gc_removed_cgroup`, `gc_removed_scratch`, `gc_finished`).
 //!
 //! After each crash every record present parses, `jail.json` passes the
 //! frozen contract, the replaced record shows the prior content before the
@@ -35,12 +35,9 @@
 //! delegated cgroup. Those two sites are reached only by the Linux platform,
 //! which the portable matrix (R02.2) cannot run.
 //!
-//! Needs `OURO_CONFORMANCE=1` and the reference host. Every process these
-//! tests signal is their own jail's supervisor, by the pidfd of the process
+//! Every process these tests signal is their own jail's supervisor, by the pidfd of the process
 //! the harness spawned; every cgroup they touch is one their own attempt
 //! registered (checked by inode) or one they made.
-
-#![cfg(target_os = "linux")]
 
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
@@ -48,7 +45,6 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use ouro_fixture::harness::{self, Jail, Run};
 use ouro_jail::platform::linux::cgroup::{self, ExecutionCgroup};
@@ -58,74 +54,13 @@ use ouro_jail::records::ErrorCode;
 use ouro_jail::state::{self, AttemptDir, AttemptId, PersistIo, Site};
 use serde_json::Value;
 
-mod common;
+use super::{POINTS, Point, parse};
+use crate::common::{self, PYTHON};
 
-const PYTHON: &str = "/usr/bin/python3";
-
-/// A crash point and what the records must show after it.
-#[derive(Clone, Copy, Debug)]
-struct Point {
-    name: &'static str,
-    /// The new content is visible under the target name.
-    published: bool,
-    /// The temporary name is still there.
-    temp_left: bool,
-}
-
-const POINTS: [Point; 4] = [
-    Point {
-        name: "temp_written",
-        published: false,
-        temp_left: true,
-    },
-    Point {
-        name: "temp_synced",
-        published: false,
-        temp_left: true,
-    },
-    Point {
-        name: "renamed",
-        published: true,
-        temp_left: false,
-    },
-    Point {
-        name: "dir_synced",
-        published: true,
-        temp_left: false,
-    },
-];
-
+/// A delegated leaf (`common::delegated_leaf`) and the interpreter the
+/// fixtures are written in.
 fn live() -> bool {
-    if !common::live() {
-        return false;
-    }
-    let leaf = ouro_jail::platform::linux::probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != ouro_jail::platform::linux::probe::ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "these crashes need a delegated user scope: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    if !Path::new(PYTHON).is_file() {
-        harness::skip_or_fail("the none fixtures are python3 scripts");
-        return false;
-    }
-    true
-}
-
-fn parse(path: &Path) -> Result<Option<Value>, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| format!("{} does not parse: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("{} cannot be read: {error}", path.display())),
-    }
+    common::delegated_leaf() && common::python()
 }
 
 fn read_json(path: &Path) -> Value {
@@ -276,18 +211,6 @@ fn inode(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|meta| meta.ino())
 }
 
-fn wait_for(what: &str, mut ready: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !ready() {
-        if Instant::now() >= deadline {
-            eprintln!("timed out waiting for {what}");
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    true
-}
-
 /// The attempt's registered leaf (path and pinned inode), from jail state.
 fn registered_leaf(dir: &Path) -> Option<(PathBuf, Option<u64>)> {
     let state = parse(&dir.join("jail-state.json")).ok()??;
@@ -321,7 +244,9 @@ impl Drop for LeafGuard {
         }
         if populated(&self.path) {
             let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
-            wait_for("the leaf to empty", || !populated(&self.path));
+            // Best effort in a drop: a leaf that does not empty is left for
+            // `gc`, and the removal below fails harmlessly.
+            let _ = common::within(common::SETTLE_BOUND, || !populated(&self.path));
         }
         let _ = std::fs::remove_dir(&self.path);
     }
@@ -349,7 +274,8 @@ impl Drop for Destination {
         // Only the attempt's own target can be here: the test made this cgroup.
         if populated(&self.path) {
             let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
-            wait_for("the destination to empty", || !populated(&self.path));
+            // Best effort in a drop, as for the leaf.
+            let _ = common::within(common::SETTLE_BOUND, || !populated(&self.path));
         }
         let _ = std::fs::remove_dir(&self.path);
     }
@@ -519,7 +445,7 @@ fn pending_cleanup() -> Result<(Run, PathBuf), String> {
         ));
     }
     let dir = the_attempt(&data)?;
-    let receipt = read_json(&dir.join("jail.json"));
+    let receipt = common::read_receipt(&dir.join("jail.json"));
     let state = read_json(&dir.join("jail-state.json"));
     if receipt["phase"] != "settled"
         || receipt["state_cleanup"] != "pending"
@@ -554,7 +480,7 @@ fn resume_crash(point: Point, nth: usize) -> Vec<String> {
     };
     let data = run.data_dir.clone();
     let _leaf = LeafGuard::of(&dir);
-    let revision = read_json(&dir.join("jail.json"))["revision"]
+    let revision = common::read_receipt(&dir.join("jail.json"))["revision"]
         .as_u64()
         .unwrap_or(0);
     // One pass: the receipt is P12's first replacement, jail state its second.
@@ -562,7 +488,7 @@ fn resume_crash(point: Point, nth: usize) -> Vec<String> {
         return problems;
     }
     records_valid(&label, &dir, &mut problems);
-    let receipt = read_json(&dir.join("jail.json"));
+    let receipt = common::read_receipt(&dir.join("jail.json"));
     let state = read_json(&dir.join("jail-state.json"));
     let receipt_done = nth == 2 || point.published;
     let state_done = nth == 2 && point.published;
@@ -606,7 +532,7 @@ fn resume_crash(point: Point, nth: usize) -> Vec<String> {
     let before = present(&dir);
     gc_finishes(&label, &data, &mut problems);
     kept(&label, &dir, &before, &mut problems);
-    let receipt = read_json(&dir.join("jail.json"));
+    let receipt = common::read_receipt(&dir.join("jail.json"));
     let state = read_json(&dir.join("jail-state.json"));
     if receipt["state_cleanup"] != "complete"
         || state["state_cleanup"] != "complete"
@@ -678,10 +604,11 @@ fn proxy_crash(point: Point) -> Vec<String> {
         }
     };
     let _leaf = LeafGuard::of(&dir);
-    if let Some((leaf, _)) = registered_leaf(&dir) {
-        wait_for("the dead supervisor's leaf to empty", || {
-            !leaf.exists() || !populated(&leaf)
-        });
+    if let Some((leaf, _)) = registered_leaf(&dir)
+        && !common::within(common::SETTLE_BOUND, || !leaf.exists() || !populated(&leaf))
+    {
+        problems.push(format!("{label}: the dead supervisor's leaf never emptied"));
+        return problems;
     }
     let proxy = dir.join(state::PROXY_DIR_NAME);
     let state = read_json(&dir.join("jail-state.json"));
@@ -814,7 +741,7 @@ fn dead_supervisor(left: Left) -> Result<(Run, PathBuf, Option<LeafGuard>), Stri
                 .target([PYTHON, "-c", &code])
                 .spawn()
                 .expect("the jail starts");
-            let enforced = wait_for("the target to run", || {
+            let enforced = common::within(common::SETTLE_BOUND, || {
                 running.exists()
                     && spawned
                         .receipt_value()
@@ -872,7 +799,7 @@ fn dead_supervisor(left: Left) -> Result<(Run, PathBuf, Option<LeafGuard>), Stri
             }
         }
         Left::EmptyLeafAndTemp => {
-            if !wait_for("the dead supervisor's leaf to empty", || !populated(&leaf)) {
+            if !common::within(common::SETTLE_BOUND, || !populated(&leaf)) {
                 return Err("the dead supervisor's leaf never emptied".to_owned());
             }
             if temps.len() != 1 || !temps[0].starts_with(".jail.json.") {

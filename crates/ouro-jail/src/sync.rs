@@ -2,11 +2,21 @@
 //!
 //! A `Mutex` is poisoned when a thread panicked while holding it. The locks
 //! taken through these helpers guard plain facts (counters, flags, a slot, a
-//! table entry) that every critical section changes in a few assignments, so
-//! a panic cannot leave them half-written. The guard is recovered and the
-//! work goes on: one panicking thread must not turn into a stuck proxy, a
-//! result that is never accounted, or a credential that can no longer be
-//! revoked.
+//! table entry, a list), and a panic cannot unwind out of a critical section
+//! with one half-written:
+//!
+//! - each change is one assignment, insert or push, or a few that cannot
+//!   panic between them (revoking a credential: clear, bump, flag);
+//! - where a section runs longer work while it holds the lock, that work
+//!   does not write the guarded value, which is changed before it starts or
+//!   only once it returned: the proxy's result sink (the result was counted
+//!   as handed over first), the vault's audit callback (the credential
+//!   state changes only after a `loaded` audit succeeded), and the issuer
+//!   exchange under the vault's exchange lock, which guards no data at all.
+//!
+//! So the guard is recovered and the work goes on: one panicking thread must
+//! not turn into a stuck proxy, a result that is never accounted, or a
+//! credential that can no longer be revoked.
 //!
 //! The exceptions guard a stream a panic can leave in the middle of an
 //! exchange, which recovering would read or write past: the shared trace

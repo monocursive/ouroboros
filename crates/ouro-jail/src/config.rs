@@ -280,11 +280,26 @@ pub fn parse_policy_file(text: &str) -> Result<PolicyFile, JailError> {
 
 /// Parses the operator's `config.toml`.
 ///
+/// `jail.extends` is refused here, where the file is read: `config.toml` is
+/// a defaults file, and only a profile file names the built-in profile it
+/// extends.
+///
 /// # Errors
-/// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key or a
-/// duplicate key.
+/// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key, a
+/// duplicate key, a wrong `jail.schema` value or `jail.extends`.
 pub fn parse_operator_config(text: &str) -> Result<OperatorConfig, JailError> {
-    toml::from_str(text).map_err(|error| invalid("config", toml_error(text, &error)))
+    let config: OperatorConfig =
+        toml::from_str(text).map_err(|error| invalid("config", toml_error(text, &error)))?;
+    if let Some(jail) = &config.jail {
+        check_schema("jail.schema", jail.schema.as_deref())?;
+        if jail.extends.is_some() {
+            return Err(invalid(
+                "jail.extends",
+                "`extends` belongs in a profile file, not in config.toml",
+            ));
+        }
+    }
+    Ok(config)
 }
 
 /// Parses a project `ouro.toml`.
@@ -745,6 +760,21 @@ mod tests {
             7
         );
         assert!(parse_operator_config("[ledger]\nretian='7d'").is_err());
+    }
+
+    /// `config.toml` names no base profile to extend, and its `[jail]` table
+    /// carries this build's schema or none; the parser refuses both by key.
+    #[test]
+    fn the_operator_config_refuses_extends_and_a_foreign_schema() {
+        let error = parse_operator_config("[jail]\nextends = \"tool\"\n")
+            .expect_err("extends belongs in a profile file");
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.key_path.as_deref(), Some("jail.extends"));
+        let error = parse_operator_config("[jail]\nschema = \"ouro.policy/0\"\n")
+            .expect_err("a foreign schema refuses");
+        assert_eq!(error.key_path.as_deref(), Some("jail.schema"));
+        let accepted = format!("[jail]\nschema = \"{SCHEMA_POLICY}\"\n");
+        assert!(parse_operator_config(&accepted).is_ok());
     }
 
     /// A project `ouro.toml` may not carry `[jail.commands]`: without this

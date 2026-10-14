@@ -990,7 +990,9 @@ pub fn network_layer(launch: &LaunchProfile) -> Option<Layer> {
 }
 
 /// Adds the launch profile's environment, vendor state and `launch` field
-/// group to a resolved policy, then recomputes its digest and requirements.
+/// group to a resolved policy, through [`Resolved::amend`]: the provenance
+/// names each addition, and the digest and requirements are the amended
+/// snapshot's.
 ///
 /// The environment bindings join the baseline's (names are unique; §12's
 /// reserved names were refused by [`parse`]). `state_var` and `home_is_state`
@@ -1003,42 +1005,34 @@ pub fn network_layer(launch: &LaunchProfile) -> Option<Layer> {
 /// canonicalization errors of the snapshot digest.
 pub fn apply(mut resolved: Resolved, launch: &LaunchProfile) -> Result<Resolved, JailError> {
     let origin = format!("launch-profile:{}", launch.name);
+    let entry = |key: String, detail: Option<String>| ProvenanceEntry {
+        origin: origin.clone(),
+        key,
+        detail,
+    };
     // `launch.resolution` is the [`LaunchSource`] spelling and nothing else:
     // `doctor --launch` reports it, and its schema admits exactly those
     // values. That an operator file hides an embedded profile of the same
     // name is a fact of its own.
-    resolved.provenance.push(ProvenanceEntry {
-        origin: origin.clone(),
-        key: "launch.resolution".into(),
-        detail: Some(launch.source.as_str().to_owned()),
-    });
+    let mut why = vec![entry(
+        "launch.resolution".into(),
+        Some(launch.source.as_str().to_owned()),
+    )];
     if matches!(launch.source, LaunchSource::OperatorFile { .. })
         && bundled_profile(&launch.name).is_some()
     {
-        resolved.provenance.push(ProvenanceEntry {
-            origin: origin.clone(),
-            key: "launch.shadows".into(),
-            detail: Some(LaunchSource::Bundled.as_str().to_owned()),
-        });
+        why.push(entry(
+            "launch.shadows".into(),
+            Some(LaunchSource::Bundled.as_str().to_owned()),
+        ));
     }
     for bundle in &launch.bundles {
-        resolved.provenance.push(ProvenanceEntry {
-            origin: origin.clone(),
-            key: "launch.bundles".into(),
-            detail: Some(bundle.clone()),
-        });
+        why.push(entry("launch.bundles".into(), Some(bundle.clone())));
     }
-    let snapshot = &mut resolved.snapshot;
     let vendor_root = PathRef {
         root: RootToken::VendorState,
         path: NativeString::Text(String::new()),
     };
-    let mut names: BTreeSet<String> = snapshot
-        .environment
-        .bindings
-        .iter()
-        .map(|binding| binding.name.clone())
-        .collect();
     let mut additions: Vec<EnvBinding> = Vec::new();
     if let Some(name) = &launch.state_var {
         additions.push(EnvBinding {
@@ -1053,53 +1047,55 @@ pub fn apply(mut resolved: Resolved, launch: &LaunchProfile) -> Result<Resolved,
         });
     }
     additions.extend(launch.environment.iter().cloned());
-    for binding in additions {
-        if !names.insert(binding.name.clone()) {
-            return Err(invalid(
-                format!("launch.environment.{}", binding.name),
-                format!("`{}` is already bound", binding.name),
-            ));
-        }
-        resolved.provenance.push(ProvenanceEntry {
-            origin: origin.clone(),
-            key: format!("environment.bindings.{}", binding.name),
-            detail: None,
-        });
-        snapshot.environment.bindings.push(binding);
-    }
-    snapshot
-        .environment
-        .bindings
-        .sort_by(|left, right| left.name.cmp(&right.name));
-
-    if launch.needs_vendor_state() {
-        snapshot.roots.vendor_state = Some(VendorStateRoot::Managed);
-        if !snapshot.filesystem.read_write.contains(&vendor_root) {
-            snapshot.filesystem.read_write.push(vendor_root);
-        }
+    for binding in &additions {
+        why.push(entry(
+            format!("environment.bindings.{}", binding.name),
+            None,
+        ));
     }
     let mut credentials = launch.credentials.clone();
     credentials.sort_by(|left, right| left.id.cmp(&right.id));
     for credential in &credentials {
-        resolved.provenance.push(ProvenanceEntry {
-            origin: origin.clone(),
-            key: format!("launch.credentials.{}", credential.id),
-            detail: Some(credential.mode.clone()),
-        });
+        why.push(entry(
+            format!("launch.credentials.{}", credential.id),
+            Some(credential.mode.clone()),
+        ));
     }
-    snapshot.launch = Some(LaunchSnapshot {
-        state_var: launch.state_var.clone(),
-        home_is_state: launch.home_is_state,
-        state_subdirs: launch.state_subdirs.clone(),
-        credentials,
-    });
-    resolved.provenance.push(ProvenanceEntry {
-        origin,
-        key: "launch".to_owned(),
-        detail: Some(launch.name.clone()),
-    });
-    resolved.digest = resolved.snapshot.digest()?;
-    resolved.requirements = crate::capability::requirements(&resolved.snapshot);
+    why.push(entry("launch".to_owned(), Some(launch.name.clone())));
+    resolved.amend(why, |snapshot| {
+        let mut names: BTreeSet<String> = snapshot
+            .environment
+            .bindings
+            .iter()
+            .map(|binding| binding.name.clone())
+            .collect();
+        for binding in additions {
+            if !names.insert(binding.name.clone()) {
+                return Err(invalid(
+                    format!("launch.environment.{}", binding.name),
+                    format!("`{}` is already bound", binding.name),
+                ));
+            }
+            snapshot.environment.bindings.push(binding);
+        }
+        snapshot
+            .environment
+            .bindings
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        if launch.needs_vendor_state() {
+            snapshot.roots.vendor_state = Some(VendorStateRoot::Managed);
+            if !snapshot.filesystem.read_write.contains(&vendor_root) {
+                snapshot.filesystem.read_write.push(vendor_root);
+            }
+        }
+        snapshot.launch = Some(LaunchSnapshot {
+            state_var: launch.state_var.clone(),
+            home_is_state: launch.home_is_state,
+            state_subdirs: launch.state_subdirs.clone(),
+            credentials,
+        });
+        Ok(())
+    })?;
     Ok(resolved)
 }
 

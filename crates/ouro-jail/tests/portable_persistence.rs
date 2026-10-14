@@ -28,10 +28,10 @@ use std::os::fd::IntoRawFd as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use clap::Parser as _;
-use ouro_jail::capability::{Capability, CapabilityScope, CapabilityStatus};
+use ouro_jail::capability::Capability;
 use ouro_jail::config::EnvSettings;
 use ouro_jail::observer::CoverageSummary;
 use ouro_jail::platform::{
@@ -39,12 +39,13 @@ use ouro_jail::platform::{
     PreparedExecution, PreparedPlan, RunEvent, RunningExecution, Sinks, StopReason, Teardown,
     TreeObservation,
 };
-use ouro_jail::records::{JailError, NativeLifetime, Os, rfc3339_utc};
+use ouro_jail::records::{JailError, NativeLifetime, Os};
 use ouro_jail::state::{PersistIo, Site};
 use ouro_jail::{cli, state, supervisor};
 use serde_json::Value;
 
 mod common;
+use common::sim;
 
 // ---------------------------------------------------------------------------
 // A simulated contained platform
@@ -90,12 +91,7 @@ impl Sim {
 }
 
 fn verified_tree() -> TreeObservation {
-    TreeObservation {
-        tree_empty: Some(true),
-        verified_at: Some(SystemTime::now()),
-        verification_scope: "attempt_tree".into(),
-        integrity: "verified".into(),
-    }
+    sim::verified_tree("attempt_tree")
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -110,32 +106,13 @@ fn canonical_digest(receipt: &Value) -> String {
 
 impl Platform for Sim {
     fn owner_identity(&self) -> Option<OwnerIdentity> {
-        Some(OwnerIdentity {
-            pid: std::process::id(),
-            boot_id: "00000000-0000-4000-8000-000000000001".into(),
-            start_time_ticks: 1,
-        })
+        Some(sim::owner())
     }
     fn identity(&self) -> PlatformIdentity {
-        PlatformIdentity {
-            os: Os::Linux,
-            arch: "simulation".into(),
-            kernel: "simulated".into(),
-        }
+        sim::identity()
     }
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
-        plan.requirements
-            .iter()
-            .map(|name| Capability {
-                name: name.clone(),
-                status: CapabilityStatus::Available,
-                scope: CapabilityScope::Tree,
-                mechanism: Some("simulation".into()),
-                reason_code: Some("ok".into()),
-                measured_at: Some(rfc3339_utc(SystemTime::now())),
-                evidence_ref: Some("J4 persistence simulation".into()),
-            })
-            .collect()
+        sim::available(plan, "persistence simulation")
     }
     fn prepare(&self, _: PreparedPlan, _: Sinks) -> Result<Box<dyn PreparedExecution>, JailError> {
         Ok(Box::new(SimPrepared(self.clone())))
@@ -158,7 +135,7 @@ impl PreparedExecution for SimPrepared {
                 identity: ouro_jail::records::ProcessIdentity {
                     kind: "linux_boot_start".into(),
                     value: serde_json::from_value(serde_json::json!({
-                        "boot_id": "00000000-0000-4000-8000-000000000001",
+                        "boot_id": sim::BOOT_ID,
                         "start_time_ticks": 1
                     }))
                     .unwrap(),
@@ -1261,7 +1238,7 @@ impl ouro_jail::gc::Host for SimHost {
         ouro_jail::gc::HostIdentity {
             os: Os::Linux,
             arch: "simulation".into(),
-            boot_id: Some("00000000-0000-4000-8000-000000000001".into()),
+            boot_id: Some(sim::BOOT_ID.into()),
         }
     }
     fn owner(&self, _: &ouro_jail::gc::OwnerRecord) -> ouro_jail::gc::Liveness {
@@ -1912,15 +1889,12 @@ fn j4_d5_a_later_persistence_failure_does_not_replace_the_reported_error() {
 // S9: every test seam in force is recorded
 // ---------------------------------------------------------------------------
 
-/// Set in the environment of the child that runs [`seam_child_helper`].
-const SEAM_HELPER: &str = "OURO_J4_SEAM_HELPER";
-
 /// Runs one simulated `tool` attempt in this (child) process, whose
 /// environment the parent chose, and prints its receipt and jail state.
 #[test]
 #[ignore = "child helper invoked by j4_s9_every_test_seam_in_force_is_recorded"]
 fn seam_child_helper() {
-    if std::env::var_os(SEAM_HELPER).is_none() {
+    if !common::running_helper("seam_child_helper") {
         return;
     }
     let fixture = Fixture::new();
@@ -1936,9 +1910,7 @@ fn seam_child_helper() {
 }
 
 fn seam_child(seams: &[(&str, &str)]) -> Value {
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", "seam_child_helper", "--ignored", "--nocapture"]);
-    command.env(SEAM_HELPER, "1");
+    let mut command = common::helper_command("seam_child_helper");
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("OURO_JAIL_TEST_") {
             command.env_remove(name);
@@ -1948,16 +1920,11 @@ fn seam_child(seams: &[(&str, &str)]) -> Value {
         command.env(name, value);
     }
     let output = command.output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = common::assert_helper_ran("seam_child_helper", &output);
     let line = stdout
         .lines()
         .find_map(|line| line.strip_prefix("SEAM-RESULT "))
-        .unwrap_or_else(|| {
-            panic!(
-                "the helper printed no result: {stdout}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-        });
+        .unwrap_or_else(|| panic!("the helper printed no result: {stdout}"));
     serde_json::from_str(line).unwrap()
 }
 

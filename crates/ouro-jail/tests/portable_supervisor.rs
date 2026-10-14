@@ -12,10 +12,11 @@ use ouro_jail::config::EnvSettings;
 use ouro_jail::platform::{
     OwnerIdentity, PlanRequest, Platform, PlatformIdentity, PreparedExecution, PreparedPlan, Sinks,
 };
-use ouro_jail::records::{ErrorCode, ErrorStage, JailError, Os, Remediation, rfc3339_utc};
+use ouro_jail::records::{ErrorCode, ErrorStage, JailError, Remediation, rfc3339_utc};
 use ouro_jail::supervisor;
 
 mod common;
+use common::sim;
 
 /// A platform whose preparation always refuses, after recording what it
 /// was given.
@@ -34,11 +35,7 @@ struct Sim {
 
 impl Platform for Sim {
     fn identity(&self) -> PlatformIdentity {
-        PlatformIdentity {
-            os: Os::Linux,
-            arch: "simulation".into(),
-            kernel: "simulated".into(),
-        }
+        sim::identity()
     }
 
     fn owner_identity(&self) -> Option<OwnerIdentity> {
@@ -50,11 +47,7 @@ impl Platform for Sim {
                 let _ = std::fs::create_dir(entry.path().join("trace.ndjson"));
             }
         }
-        Some(OwnerIdentity {
-            pid: std::process::id(),
-            boot_id: "00000000-0000-4000-8000-000000000001".into(),
-            start_time_ticks: 1,
-        })
+        Some(sim::owner())
     }
 
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {

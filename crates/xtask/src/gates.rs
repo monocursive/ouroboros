@@ -1209,28 +1209,158 @@ impl Binary {
     }
 }
 
+/// The workspace's packages in one tree, for holding a log's binaries
+/// against: which directory each package is in, and which files it has.
+///
+/// A binary's crate is the stem of its artifact with `_` read as `-`: the
+/// name of a library or binary target. The package directories come from
+/// the workspace's `members`, and each target name from its manifest
+/// (`package.name`, `lib.name`, every `[[bin]] name`), never from a
+/// directory layout.
+#[derive(Debug)]
+pub struct SourceTree {
+    /// A target name, `_` read as `-`, to its package's directory.
+    packages: BTreeMap<String, String>,
+    files: TreeFiles,
+}
+
+#[derive(Debug)]
+enum TreeFiles {
+    /// The files on disk under this root.
+    Worktree(std::path::PathBuf),
+    /// The files of one commit under the package directories.
+    Commit(BTreeSet<String>),
+}
+
+impl SourceTree {
+    /// The working tree at `root`, as it is on disk.
+    ///
+    /// # Errors
+    /// A manifest that cannot be read or does not say what a package is.
+    pub fn worktree(root: &std::path::Path) -> Result<SourceTree, String> {
+        let read = |path: &str| {
+            std::fs::read_to_string(root.join(path)).map_err(|e| format!("{path}: {e}"))
+        };
+        Ok(SourceTree {
+            packages: Self::packages(&read)?,
+            files: TreeFiles::Worktree(root.to_path_buf()),
+        })
+    }
+
+    /// Commit `sha` of the repository at `root`, as git has it: a log
+    /// re-verified offline is held against the tree it ran at, not the one
+    /// checked out now.
+    ///
+    /// # Errors
+    /// git cannot show the commit's manifests or list its files.
+    pub fn commit(root: &std::path::Path, sha: &str) -> Result<SourceTree, String> {
+        let read = |path: &str| crate::proc::git(root, &["show", &format!("{sha}:{path}")]);
+        let packages = Self::packages(&read)?;
+        let dirs: BTreeSet<&str> = packages.values().map(String::as_str).collect();
+        let mut args = vec!["ls-tree", "-r", "--name-only", sha, "--"];
+        args.extend(dirs);
+        let listing = crate::proc::git(root, &args)?;
+        Ok(SourceTree {
+            packages,
+            files: TreeFiles::Commit(listing.lines().map(str::to_owned).collect()),
+        })
+    }
+
+    /// Every target name of every workspace member, read through `read`
+    /// (a path relative to the root to its text).
+    fn packages(
+        read: &dyn Fn(&str) -> Result<String, String>,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let table = |path: &str| {
+            toml::from_str::<toml::Table>(&read(path)?).map_err(|e| format!("{path}: {e}"))
+        };
+        let workspace = table("Cargo.toml")?;
+        let members = workspace
+            .get("workspace")
+            .and_then(|w| w.get("members"))
+            .and_then(toml::Value::as_array)
+            .ok_or("Cargo.toml lists no workspace members")?;
+        let mut packages = BTreeMap::new();
+        for member in members {
+            let dir = member
+                .as_str()
+                .filter(|m| !m.contains(['*', '?', '[']))
+                .ok_or_else(|| format!("workspace member {member} is not one directory"))?;
+            let manifest = table(&format!("{dir}/Cargo.toml"))?;
+            let name = |section: Option<&toml::Value>| {
+                section
+                    .and_then(|s| s.get("name"))
+                    .and_then(toml::Value::as_str)
+                    .map(|n| n.replace('_', "-"))
+            };
+            let package = name(manifest.get("package"))
+                .ok_or_else(|| format!("{dir}/Cargo.toml names no package"))?;
+            let bins = manifest
+                .get("bin")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten();
+            for target in std::iter::once(package)
+                .chain(name(manifest.get("lib")))
+                .chain(bins.filter_map(|b| name(Some(b))))
+            {
+                packages.insert(target, dir.to_owned());
+            }
+        }
+        Ok(packages)
+    }
+
+    /// Whether `path`, relative to the root, is a file of this tree.
+    fn has_file(&self, path: &str) -> bool {
+        match &self.files {
+            TreeFiles::Worktree(root) => root.join(path).is_file(),
+            TreeFiles::Commit(files) => files.contains(path),
+        }
+    }
+}
+
+/// Parse a log (see [`parse_log`]) and hold its binaries against `tree`
+/// (see [`TestLog::check_attribution`]). Every reader of a real suite log
+/// goes through this; a tree that could not be read is itself an anomaly.
+#[must_use]
+pub fn parse_log_in(text: &str, tree: &Result<SourceTree, String>) -> TestLog {
+    let mut log = parse_log(text);
+    match tree {
+        Ok(tree) => log.check_attribution(tree),
+        Err(e) => log.anomalies.push(Anomaly {
+            test: None,
+            binary: None,
+            text: format!("the log's test binaries could not be held against the tree: {e}"),
+        }),
+    }
+    log
+}
+
 impl TestLog {
-    /// Hold the crate each `Running` section was attributed to against the
-    /// tree at `root`: a source that is not `crates/<crate>/<source>` there
-    /// was attributed by cargo's print order to a crate it is not in (a
-    /// package with no `src/lib.rs` or `src/main.rs` binary takes the
-    /// previous package's name), and none of its results can be trusted.
-    pub fn check_attribution(&mut self, root: &std::path::Path) {
+    /// Hold the crate each `Running` section was attributed to against
+    /// `tree`: a source that is not a file of that crate's package was
+    /// attributed by cargo's print order to a crate it is not in (a package
+    /// with no `src/lib.rs` or `src/main.rs` binary takes the previous
+    /// package's name), and none of its results can be trusted.
+    pub fn check_attribution(&mut self, tree: &SourceTree) {
         for source in &self.sources {
             let present = source.split_once('/').is_some_and(|(krate, path)| {
                 !source
                     .split('/')
                     .any(|part| part.is_empty() || part == "..")
-                    && root.join("crates").join(krate).join(path).is_file()
+                    && tree
+                        .packages
+                        .get(krate)
+                        .is_some_and(|dir| tree.has_file(&format!("{dir}/{path}")))
             });
             if !present {
                 self.anomalies.push(Anomaly {
                     test: None,
                     binary: Some(source.clone()),
                     text: format!(
-                        "`{source}` is not crates/{source} in this tree: cargo's print order \
-                         attributed the binary to a crate it is not in, so none of its results \
-                         can be trusted"
+                        "`{source}` is not a file of that package in this tree: cargo's print \
+                         order attributed the binary to a crate it is not in, so none of its \
+                         results can be trusted"
                     ),
                 });
             }
@@ -2005,6 +2135,48 @@ pub fn load_from(
     })
 }
 
+/// The tree `cargo xtask gates` holds the logs' binaries against: the
+/// working tree at `root` when the logs are at this repository's revision,
+/// and the commit of an explicit `--revision` otherwise, so evidence
+/// re-verified offline is not failed by a test file renamed since. A
+/// `+dirty` revision's uncommitted changes are not in the repository: it is
+/// held against its commit, and a test file those changes added or moved is
+/// reported, not assumed.
+///
+/// # Errors
+/// The tree's workspace manifests cannot be read, or the commit is not in
+/// the repository.
+pub fn log_tree(root: &std::path::Path, revision: Option<&Revision>) -> Result<SourceTree, String> {
+    match revision {
+        Some(revision) => SourceTree::commit(root, &revision.sha),
+        None => SourceTree::worktree(root),
+    }
+}
+
+/// The `--log LANE=FILE` logs, each parsed and held against `tree`.
+///
+/// # Errors
+/// A malformed `--log`, a lane named twice, or a file that cannot be read.
+pub fn read_lane_logs(
+    specs: &[String],
+    tree: &Result<SourceTree, String>,
+) -> Result<BTreeMap<Lane, TestLog>, String> {
+    let mut logs = BTreeMap::new();
+    for spec in specs {
+        let Some((lane, file)) = spec.split_once('=') else {
+            return Err(format!("--log {spec}: expected LANE=FILE"));
+        };
+        let Some(lane) = Lane::parse(lane) else {
+            return Err(format!("--log {spec}: the lane is linux or macos"));
+        };
+        let text = read_log(std::path::Path::new(file))?;
+        if logs.insert(lane, parse_log_in(&text, tree)).is_some() {
+            return Err(format!("--log names the {} lane twice", lane.as_str()));
+        }
+    }
+    Ok(logs)
+}
+
 /// `cargo xtask gates`: the verdict over saved logs.
 #[derive(Debug, clap::Args)]
 pub struct GatesArgs {
@@ -2091,24 +2263,11 @@ pub fn run_cli(args: &GatesArgs, root: &std::path::Path) -> std::process::ExitCo
             }
         },
     };
-    let mut logs = BTreeMap::new();
-    for spec in &args.logs {
-        let Some((lane, file)) = spec.split_once('=') else {
-            return fail(format!("--log {spec}: expected LANE=FILE"));
-        };
-        let Some(lane) = Lane::parse(lane) else {
-            return fail(format!("--log {spec}: the lane is linux or macos"));
-        };
-        let text = match read_log(std::path::Path::new(file)) {
-            Ok(t) => t,
-            Err(e) => return fail(e),
-        };
-        let mut log = parse_log(&text);
-        log.check_attribution(root);
-        if logs.insert(lane, log).is_some() {
-            return fail(format!("--log names the {} lane twice", lane.as_str()));
-        }
-    }
+    let tree = log_tree(root, args.revision.is_some().then_some(&expected));
+    let logs = match read_lane_logs(&args.logs, &tree) {
+        Ok(logs) => logs,
+        Err(e) => return fail(e),
+    };
     let checks = match parse_checks(&args.checks) {
         Ok(c) => c,
         Err(e) => return fail(e),
@@ -4383,6 +4542,33 @@ Unrelated prose.
         })
     }
 
+    /// A test in a suite's submodule file is found there; one in an inline
+    /// module, in the suite's own file; and a name defined in neither is not.
+    #[test]
+    fn a_test_in_a_suite_module_file_is_found_in_that_file() {
+        let root = tempfile::tempdir().unwrap();
+        let tests = root.path().join("crates/k/tests");
+        std::fs::create_dir_all(tests.join("suite")).unwrap();
+        std::fs::write(
+            tests.join("suite.rs"),
+            "#[path = \"suite/part.rs\"]\nmod part;\nmod inline {\n#[test]\nfn here() {}\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tests.join("suite/part.rs"),
+            "#[test]\nfn there() {}\nmod deeper {\n#[test]\nfn below() {}\n}\n",
+        )
+        .unwrap();
+        assert!(test_exists(root.path(), "k/tests/suite.rs::part::there"));
+        assert!(test_exists(
+            root.path(),
+            "k/tests/suite.rs::part::deeper::below"
+        ));
+        assert!(test_exists(root.path(), "k/tests/suite.rs::inline::here"));
+        assert!(!test_exists(root.path(), "k/tests/suite.rs::part::here"));
+        assert!(!test_exists(root.path(), "k/tests/suite.rs::there"));
+    }
+
     #[test]
     fn a_cited_test_must_be_a_test() {
         let text = "fn helper() {}\n\n/// Doc.\n#[test]\n#[should_panic(\n    expected = \"x\"\n)]\nfn real() {}\n";
@@ -4412,6 +4598,21 @@ Unrelated prose.
         let (fn_name, modules) = segments.split_last().unwrap();
         let read = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap_or_default();
         if source.starts_with("tests/") || source.starts_with("src/bin/") {
+            // A test of a module the suite keeps in its own file, by the
+            // `#[path = "<suite>/<module>.rs"]` layout, is defined in the
+            // file of the longest module path that names one (an inline
+            // module inside that file included); otherwise in the suite's
+            // own file.
+            if let Some(stem) = source.strip_suffix(".rs") {
+                for n in (1..=modules.len()).rev() {
+                    let mut file = crate_dir.join(stem);
+                    file.extend(modules[..n].iter());
+                    let file = file.with_extension("rs");
+                    if file.is_file() {
+                        return defines_test(&read(file), fn_name);
+                    }
+                }
+            }
             return defines_test(&read(crate_dir.join(source)), fn_name);
         }
         // A unit test: the longest module path prefix that names a file.
@@ -4533,23 +4734,37 @@ test b ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ";
 
-    #[test]
-    fn a_binary_the_print_order_puts_in_the_wrong_crate_is_untrusted() {
+    /// A workspace at a temp root with the members `crates/alpha` and
+    /// `crates/beta`, and `files` (empty) beside their manifests.
+    fn workspace(files: &[&str]) -> tempfile::TempDir {
         let tree = tempfile::tempdir().unwrap();
-        let file = |path: &str| {
+        let write = |path: &str, text: &str| {
             let path = tree.path().join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, "").unwrap();
+            std::fs::write(path, text).unwrap();
         };
-        file("crates/alpha/src/lib.rs");
-        file("crates/beta/tests/only_beta.rs");
+        write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/alpha\", \"crates/beta\"]\n",
+        );
+        write("crates/alpha/Cargo.toml", "[package]\nname = \"alpha\"\n");
+        write("crates/beta/Cargo.toml", "[package]\nname = \"beta\"\n");
+        for file in files {
+            write(file, "");
+        }
+        tree
+    }
+
+    #[test]
+    fn a_binary_the_print_order_puts_in_the_wrong_crate_is_untrusted() {
+        let tree = workspace(&["crates/alpha/src/lib.rs", "crates/beta/tests/only_beta.rs"]);
         let mut log = parse_log(PRINT_ORDER_LOG);
         assert_eq!(
             log.sources,
             vec!["alpha/src/lib.rs", "alpha/tests/only_beta.rs"]
         );
         assert!(log.anomalies.is_empty(), "{:?}", log.anomalies);
-        log.check_attribution(tree.path());
+        log.check_attribution(&SourceTree::worktree(tree.path()).unwrap());
         assert_eq!(log.anomalies.len(), 1, "{:?}", log.anomalies);
         let a = &log.anomalies[0];
         assert_eq!(a.binary.as_deref(), Some("alpha/tests/only_beta.rs"));
@@ -4557,16 +4772,154 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         assert!(!log.clean());
 
         // Where the guess names a file the tree has, it stands.
-        file("crates/alpha/tests/only_beta.rs");
+        let tree = workspace(&["crates/alpha/src/lib.rs", "crates/alpha/tests/only_beta.rs"]);
+        let source = SourceTree::worktree(tree.path()).unwrap();
         let mut log = parse_log(PRINT_ORDER_LOG);
-        log.check_attribution(tree.path());
+        log.check_attribution(&source);
         assert!(log.anomalies.is_empty(), "{:?}", log.anomalies);
 
         // A source that climbs out of its crate is never taken as present.
         let mut log =
             parse_log(&PRINT_ORDER_LOG.replace("tests/only_beta.rs", "../beta/tests/only_beta.rs"));
-        log.check_attribution(tree.path());
+        log.check_attribution(&source);
         assert_eq!(log.anomalies.len(), 1, "{:?}", log.anomalies);
+    }
+
+    /// A package's directory and its target names come from the manifests,
+    /// not from a `crates/<name>` layout.
+    #[test]
+    fn a_package_is_found_by_its_manifest_not_its_directory_name() {
+        let tree = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = tree.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("Cargo.toml", "[workspace]\nmembers = [\"libs/a\"]\n");
+        write(
+            "libs/a/Cargo.toml",
+            "[package]\nname = \"alpha\"\n[lib]\nname = \"alpha_core\"\n",
+        );
+        write("libs/a/src/lib.rs", "");
+        write("libs/a/tests/only_beta.rs", "");
+        let source = SourceTree::worktree(tree.path()).unwrap();
+        let log = PRINT_ORDER_LOG.replace("deps/alpha-", "deps/alpha_core-");
+        let mut log = parse_log(&log);
+        assert_eq!(log.sources[0], "alpha-core/src/lib.rs");
+        log.check_attribution(&source);
+        assert!(log.anomalies.is_empty(), "{:?}", log.anomalies);
+
+        // A crate no member names is never present.
+        let mut log = parse_log(&PRINT_ORDER_LOG.replace("deps/alpha-", "deps/gamma-"));
+        log.check_attribution(&source);
+        assert_eq!(log.anomalies.len(), 2, "{:?}", log.anomalies);
+    }
+
+    /// The repository's own workspace reads: every package the suite runs
+    /// is a member, found in its directory under each of its target names.
+    #[test]
+    fn the_repository_workspace_names_every_package_the_suite_runs() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let tree = SourceTree::worktree(&root).unwrap();
+        for (target, dir) in [
+            ("ouro-jail", "crates/ouro-jail"),
+            ("ouro-fixture", "crates/ouro-fixture"),
+            ("stand-in-jail", "crates/ouro-fixture"),
+            ("ouro-ledger", "crates/ouro-ledger"),
+            ("ouro-records", "crates/ouro-records"),
+            ("ouro", "crates/ouro"),
+            ("xtask", "crates/xtask"),
+        ] {
+            assert_eq!(tree.packages.get(target).map(String::as_str), Some(dir));
+        }
+        assert!(tree.has_file("crates/ouro-fixture/src/bin/stand-in-jail.rs"));
+    }
+
+    /// `--revision` holds the logs against that commit's tree: a test file
+    /// renamed since does not fail old evidence, and the working tree is
+    /// what a log at this repository's revision is held against.
+    #[test]
+    fn a_log_at_an_explicit_revision_is_held_against_that_commit() {
+        let tree = workspace(&["crates/alpha/src/lib.rs", "crates/alpha/tests/only_beta.rs"]);
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(tree.path())
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "tested"]);
+        let tested = Revision {
+            sha: git(&["rev-parse", "HEAD"]),
+            dirty: false,
+        };
+        git(&[
+            "mv",
+            "crates/alpha/tests/only_beta.rs",
+            "crates/alpha/tests/renamed.rs",
+        ]);
+        git(&["commit", "-q", "-m", "renamed"]);
+
+        let at = |revision: Option<&Revision>| {
+            parse_log_in(PRINT_ORDER_LOG, &log_tree(tree.path(), revision)).anomalies
+        };
+        assert!(at(Some(&tested)).is_empty(), "{:?}", at(Some(&tested)));
+        let now = at(None);
+        assert_eq!(now.len(), 1, "{now:?}");
+        assert_eq!(now[0].binary.as_deref(), Some("alpha/tests/only_beta.rs"));
+
+        let unknown = Revision {
+            sha: "0".repeat(40),
+            dirty: false,
+        };
+        assert!(log_tree(tree.path(), Some(&unknown)).is_err());
+        assert_eq!(
+            at(Some(&unknown)).len(),
+            1,
+            "the unknown tree is an anomaly"
+        );
+    }
+
+    /// Every reader of a real log goes through `parse_log_in`, and
+    /// `cargo xtask gates` reads its `--log` files through `read_lane_logs`:
+    /// both hold the binaries against the tree, and a tree that cannot be
+    /// read is an anomaly too.
+    #[test]
+    fn the_logs_gates_reads_are_held_against_the_tree() {
+        let tree = workspace(&["crates/alpha/src/lib.rs", "crates/beta/tests/only_beta.rs"]);
+        let file = tree.path().join("test.log");
+        std::fs::write(&file, PRINT_ORDER_LOG).unwrap();
+        let logs = read_lane_logs(
+            &[format!("linux={}", file.display())],
+            &SourceTree::worktree(tree.path()),
+        )
+        .unwrap();
+        let anomalies = &logs[&Lane::Linux].anomalies;
+        assert_eq!(anomalies.len(), 1, "{anomalies:?}");
+        assert_eq!(
+            anomalies[0].binary.as_deref(),
+            Some("alpha/tests/only_beta.rs")
+        );
+
+        let unreadable = SourceTree::worktree(&tree.path().join("absent"));
+        assert!(unreadable.is_err());
+        let log = parse_log_in(PRINT_ORDER_LOG, &unreadable);
+        assert_eq!(log.anomalies.len(), 1, "{:?}", log.anomalies);
+        assert_eq!(log.anomalies[0].test, None);
+        assert!(!log.clean());
     }
 
     #[test]

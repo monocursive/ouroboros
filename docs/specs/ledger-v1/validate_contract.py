@@ -359,6 +359,40 @@ def bundle_fixtures(validators):
         expect_invalid(validators["bundle-verification"], altered, "invalid successful verification claim")
 
 
+def rule_one_bundle_fixtures(validators):
+    """A bundle exported under run projection rule 1 (before 2026-10-14):
+    its unresolved run copied the reported outcome into observed_child_outcome."""
+    manifest = read("bundle-rule-one.json")
+    report = read("bundle-verification-rule-one.json")
+    validators["bundle"].validate(manifest)
+    validators["bundle-verification"].validate(report)
+    events = (ROOT / "fixtures" / "bundle-rule-one-events.ndjson").read_bytes()
+    members = {item["name"]: item for item in manifest["files"]}
+    for name, data in [("events.ndjson", events), ("receipts.json", rfc8785.dumps(manifest["run"]["receipts"]) + b"\n")]:
+        check(members[name]["bytes"] == len(data))
+        check(members[name]["digest"] == "sha256:" + hashlib.sha256(data).hexdigest())
+    records = [json.loads(line) for line in events.splitlines()]
+    for line, record in zip(events.splitlines(), records):
+        validators["record"].validate(record)
+        check(rfc8785.dumps(record) == line)
+    unresolved = [r for r in records if r["kind"] == "outcome_unknown"]
+    check(manifest["run"]["state"] == "outcome_unknown" and unresolved)
+    reported = unresolved[-1]["body"].get("outcome")
+    check(manifest["run"]["outcome"] == {
+        "kind": "unknown", "unknown": True,
+        "unknown_reason": "owner or reconciliation reported an unresolved run outcome",
+        "observed_child_outcome": reported,
+    }, "rule 1 outcome")
+    check(reported["kind"] == "unknown", "the fixture shows a reconciler's own unknown")
+    check(report["projection_rule"] == 1)
+    check(report["snapshot"] == manifest["run"]["chain"])
+    check(report["manifest_digest"] == "sha256:" + hashlib.sha256(rfc8785.dumps(manifest) + b"\n").hexdigest())
+    for value in (0, 3, "1"):
+        altered = copy.deepcopy(report)
+        altered["projection_rule"] = value
+        expect_invalid(validators["bundle-verification"], altered, "unknown projection rule")
+
+
 def signed_bundle_fixtures(validators):
     manifest = read("bundle-v2.json")
     envelope = read("bundle-signature.json")
@@ -433,6 +467,7 @@ def main():
     discovery_fixtures(validators)
     target_comparison_fixtures(validators)
     bundle_fixtures(validators)
+    rule_one_bundle_fixtures(validators)
     signed_bundle_fixtures(validators)
     transcript_fixtures(validators)
     for suffix in ("", "-v2"):

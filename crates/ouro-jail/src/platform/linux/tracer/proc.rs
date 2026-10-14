@@ -474,16 +474,21 @@ pub fn children(pid: pid_t) -> Vec<pid_t> {
 
 /// The child of `ancestor` through which `pid` descends: `pid` itself when
 /// it is a direct child, else the child found by following each parent up
-/// from `pid` (J5-T). For the launcher under bubblewrap it is bubblewrap.
+/// from `pid` (J5-T), as `parent_of` reads it ([`ppid`] for the live
+/// tree). For the launcher under bubblewrap it is bubblewrap.
 ///
 /// `None` when a parent cannot be read, the walk reaches init first, or it
 /// is deeper than [`MAX_DEPTH`]: then `pid` is not provably below
 /// `ancestor` and the caller must not guess which child it came through.
 #[must_use]
-pub fn child_toward(ancestor: pid_t, pid: pid_t) -> Option<pid_t> {
+pub fn child_toward(
+    ancestor: pid_t,
+    pid: pid_t,
+    parent_of: impl Fn(pid_t) -> Option<pid_t>,
+) -> Option<pid_t> {
     let mut current = pid;
     for _ in 0..MAX_DEPTH {
-        let parent = ppid(current)?;
+        let parent = parent_of(current)?;
         if parent == ancestor {
             return Some(current);
         }
@@ -700,19 +705,23 @@ mod tests {
         .expect("the grandchild's pid");
         let grandchild: pid_t = line.trim().parse().expect("a pid");
         assert_eq!(
-            child_toward(me, sh),
+            child_toward(me, sh, ppid),
             Some(sh),
             "a direct child is its own way down"
         );
         assert_eq!(
-            child_toward(me, grandchild),
+            child_toward(me, grandchild, ppid),
             Some(sh),
             "a grandchild came through its parent"
         );
-        assert_eq!(child_toward(me, 1), None, "init is not below this process");
-        assert_eq!(child_toward(me, 0), None, "no such task");
         assert_eq!(
-            child_toward(sh, me),
+            child_toward(me, 1, ppid),
+            None,
+            "init is not below this process"
+        );
+        assert_eq!(child_toward(me, 0, ppid), None, "no such task");
+        assert_eq!(
+            child_toward(sh, me, ppid),
             None,
             "an ancestor is not below its child"
         );

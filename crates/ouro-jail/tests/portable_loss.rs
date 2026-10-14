@@ -32,8 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use clap::Parser as _;
-use jsonschema::{Registry, Resource, Validator};
-use ouro_jail::capability::{Capability, CapabilityScope, CapabilityStatus};
+use ouro_jail::capability::Capability;
 use ouro_jail::config::EnvSettings;
 use ouro_jail::observer::{ClassSummary, CoverageClass, CoverageSummary};
 use ouro_jail::platform::{
@@ -44,12 +43,12 @@ use ouro_jail::platform::{
 use ouro_jail::records::{
     Applied, AppliedFilesystem, AppliedNetwork, AppliedSyscalls, CLOSED_SET_LINUX_V1, ErrorCode,
     Gap, NativeLifetime, Os, ProcessIdentity, ProcessRecord, SourceHealth, SourceStatus,
-    rfc3339_utc,
 };
 use ouro_jail::{cli, supervisor};
 use serde_json::Value;
 
 mod common;
+use common::sim;
 
 // ---------------------------------------------------------------------------
 // A scripted platform whose target runs until something stops it
@@ -93,32 +92,13 @@ struct Running {
 
 impl Platform for Simulated {
     fn owner_identity(&self) -> Option<OwnerIdentity> {
-        Some(OwnerIdentity {
-            pid: std::process::id(),
-            boot_id: "00000000-0000-4000-8000-000000000001".into(),
-            start_time_ticks: 1,
-        })
+        Some(sim::owner())
     }
     fn identity(&self) -> PlatformIdentity {
-        PlatformIdentity {
-            os: Os::Linux,
-            arch: "simulation".into(),
-            kernel: "simulated".into(),
-        }
+        sim::identity()
     }
     fn probe(&self, plan: &PlanRequest) -> Vec<Capability> {
-        plan.requirements
-            .iter()
-            .map(|name| Capability {
-                name: name.clone(),
-                status: CapabilityStatus::Available,
-                scope: CapabilityScope::Tree,
-                mechanism: Some("simulation".into()),
-                reason_code: Some("ok".into()),
-                measured_at: Some(rfc3339_utc(SystemTime::now())),
-                evidence_ref: Some("loss simulation".into()),
-            })
-            .collect()
+        sim::available(plan, "loss simulation")
     }
     fn prepare(
         &self,
@@ -448,43 +428,6 @@ impl Fixture {
     }
 }
 
-fn receipt_validator() -> &'static Validator {
-    static ONCE: std::sync::OnceLock<Validator> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/jail-v1");
-        let mut resources = Vec::new();
-        let mut receipt = None;
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !name.ends_with(".schema.json") {
-                continue;
-            }
-            let schema: Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            if name == "jail-receipt.schema.json" {
-                receipt = Some(schema.clone());
-            }
-            let id = schema["$id"].as_str().unwrap().to_owned();
-            resources.push((id, Resource::from_contents(schema)));
-        }
-        let registry: &'static Registry = Box::leak(Box::new(
-            Registry::new()
-                .extend(resources)
-                .unwrap()
-                .prepare()
-                .unwrap(),
-        ));
-        jsonschema::options()
-            .with_registry(registry)
-            .should_validate_formats(true)
-            .build(&receipt.unwrap())
-            .unwrap()
-    })
-}
-
 fn valid_receipt(report: &supervisor::RunReport) -> Value {
     let receipt = serde_json::to_value(
         report
@@ -493,7 +436,7 @@ fn valid_receipt(report: &supervisor::RunReport) -> Value {
             .unwrap_or_else(|| panic!("a receipt; the run ended with {:?}", report.error)),
     )
     .unwrap();
-    let errors: Vec<String> = receipt_validator()
+    let errors: Vec<String> = common::validators()["jail-receipt"]
         .iter_errors(&receipt)
         .map(|error| error.to_string())
         .collect();

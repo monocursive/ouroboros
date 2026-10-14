@@ -1,9 +1,7 @@
-//! J5-C, R01 and O01 live: every record the real jail writes, under every
+//! R01 and O01, live: every record the real jail writes, under every
 //! profile, passes the frozen contract, and the live output carries each kind
 //! of event the examples freeze.
 //!
-//! jail-v1 §17 "Before J5" asks to "finish the executable schema constraints,
-//! verify all source-specific event semantics and freeze the wire versions".
 //! The frozen schemas and `ouro_jail::records::semantic` state those rules and
 //! the examples show one instance of each kind of record. This file runs the
 //! real `ouro-jail` on the reference host, releases each attempt through the
@@ -17,15 +15,13 @@
 //! run that never produced it.
 //!
 //! The note kinds a normal run does not write are held to the same contract
-//! where they are produced: `coverage_gap` in `j4_loss_linux.rs` (whose
-//! helper runs these checks since J5-C), `lifetime` in the R06 tests, `limit`
+//! where they are produced: `coverage_gap` in `j4_loss_linux.rs`,
+//! `lifetime` in the R06 tests, `limit`
 //! only on a host without a delegated pids controller, `helper` only when an
 //! `agent` helper dies.
 //!
 //! Every process these tests start is their own jail's; nothing on the host
 //! is inspected or changed.
-
-#![cfg(target_os = "linux")]
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -33,52 +29,10 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use ouro_fixture::harness::{self, HttpServer, Jail, Release, Run, TraceConsumer};
+use ouro_jail::policy::ProfileName;
 use serde_json::Value;
 
-mod common;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Profile {
-    Tool,
-    Build,
-    Agent,
-    None,
-}
-
-impl Profile {
-    fn name(self) -> &'static str {
-        match self {
-            Profile::Tool => "tool",
-            Profile::Build => "build",
-            Profile::Agent => "agent",
-            Profile::None => "none",
-        }
-    }
-
-    /// Whether this host can run the profile; a skip is a failure under
-    /// `OURO_CONFORMANCE=1`.
-    fn available(self) -> bool {
-        if !common::live() {
-            return false;
-        }
-        if self != Profile::None {
-            return true;
-        }
-        let leaf = ouro_jail::platform::linux::probe::run_one(
-            "cgroup_delegated_leaf",
-            &harness::jail_path(),
-            Path::new("bwrap"),
-        );
-        if leaf.status != ouro_jail::platform::linux::probe::ProbeStatus::Available {
-            harness::skip_or_fail(&format!(
-                "the none profile needs a delegated user scope: {}",
-                leaf.evidence
-            ));
-            return false;
-        }
-        true
-    }
-}
+use crate::common::{self, PYTHON};
 
 /// One gated `ouro-jail run --profile <profile>` over a private workspace
 /// holding the fixture, with trace, control, gate and `--receipt` plumbed.
@@ -86,14 +40,14 @@ struct Case {
     jail: Jail,
     workspace: PathBuf,
     fixture: PathBuf,
-    profile: Profile,
+    profile: ProfileName,
 }
 
-fn case(profile: Profile, extra: &[&str]) -> Case {
+fn case(profile: ProfileName, extra: &[&str]) -> Case {
     case_with(profile, "strict", extra)
 }
 
-fn case_with(profile: Profile, evidence: &str, extra: &[&str]) -> Case {
+fn case_with(profile: ProfileName, evidence: &str, extra: &[&str]) -> Case {
     let jail = Jail::new().expect("a private harness");
     let workspace = jail.root().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -104,12 +58,12 @@ fn case_with(profile: Profile, evidence: &str, extra: &[&str]) -> Case {
     let mut jail = jail
         .arg("run")
         .arg("--profile")
-        .arg(profile.name())
+        .arg(profile.as_str())
         .arg("--evidence")
         .arg(evidence)
         .arg("--workspace")
         .arg(&workspace);
-    if profile == Profile::Build {
+    if profile == ProfileName::Build {
         // `build` requires an explicit memory ceiling (§6.4) and exposes no
         // workspace, so the fixture is a declared read-only input.
         jail = jail
@@ -132,7 +86,7 @@ impl Case {
     /// Where the script's operations run: the workspace, or scratch under
     /// `build` (§3.1: a build reads declared inputs and writes scratch).
     fn base(&self) -> String {
-        if self.profile == Profile::Build {
+        if self.profile == ProfileName::Build {
             "/tmp/j5c".to_owned()
         } else {
             self.workspace.to_str().unwrap().to_owned()
@@ -150,7 +104,7 @@ impl Case {
         let script = self.workspace.join("j5c.json");
         std::fs::write(&script, serde_json::to_vec(steps).unwrap()).unwrap();
         let mut jail = self.jail;
-        if self.profile == Profile::Build {
+        if self.profile == ProfileName::Build {
             jail = jail.arg("--ro").arg(&script);
         }
         let mut spawned = jail
@@ -166,11 +120,9 @@ impl Case {
             .await_prepared()
             .expect("a prepared message");
         // The prepared receipt is durable before `prepared` is sent (§8.2).
-        let prepared = common::checked_receipt(
-            spawned
-                .receipt_value()
-                .expect("the prepared receipt is on disk when `prepared` arrives"),
-        );
+        let prepared = spawned
+            .receipt_value()
+            .expect("the prepared receipt is on disk when `prepared` arrives");
         let attempt = control["attempt_id"]
             .as_str()
             .expect("an attempt")
@@ -219,7 +171,7 @@ fn kinds(run: &Run) -> BTreeSet<String> {
         .collect()
 }
 
-fn assert_kinds(run: &Run, profile: Profile, expected: &[&str]) {
+fn assert_kinds(run: &Run, profile: ProfileName, expected: &[&str]) {
     let found = kinds(run);
     for kind in expected {
         assert!(
@@ -258,7 +210,7 @@ fn steps(case: &Case) -> Vec<Value> {
     let base = case.base();
     let at = |name: &str| format!("{base}/{name}");
     let mut steps = Vec::new();
-    if case.profile == Profile::Build {
+    if case.profile == ProfileName::Build {
         steps.push(serde_json::json!(["mkdir", base]));
     }
     steps.extend([
@@ -316,8 +268,8 @@ const OBSERVED_KINDS: &[&str] = &[
     "wrapper jail.receipt wrapper -",
 ];
 
-fn observed_profile(profile: Profile) {
-    if !profile.available() {
+fn observed_profile(profile: ProfileName) {
+    if !common::profile_live(profile) {
         return;
     }
     let c = case(profile, &[]);
@@ -340,17 +292,17 @@ fn observed_profile(profile: Profile) {
 
 #[test]
 fn j5_tool_records_pass_the_frozen_contract() {
-    observed_profile(Profile::Tool);
+    observed_profile(ProfileName::Tool);
 }
 
 #[test]
 fn j5_build_records_pass_the_frozen_contract() {
-    observed_profile(Profile::Build);
+    observed_profile(ProfileName::Build);
 }
 
 #[test]
 fn j5_none_records_pass_the_frozen_contract() {
-    observed_profile(Profile::None);
+    observed_profile(ProfileName::None);
 }
 
 /// `agent` adds the proxy source (an allowed and a denied request, §10) and
@@ -358,14 +310,14 @@ fn j5_none_records_pass_the_frozen_contract() {
 /// workspace, refused as an `fs.deny` of `net.connect` (§11.2, §11.4).
 #[test]
 fn j5_agent_records_pass_the_frozen_contract() {
-    if !Profile::Agent.available() {
+    if !common::profile_live(ProfileName::Agent) {
         return;
     }
     let allowed = HttpServer::start(b"allowed".to_vec()).expect("an allowed origin");
     let refused = HttpServer::start(b"never".to_vec()).expect("a refused origin");
     let (a, r) = (allowed.addr().port(), refused.addr().port());
     let allow = format!("127.0.0.1:{a}");
-    let c = case(Profile::Agent, &["--allow-host", &allow]);
+    let c = case(ProfileName::Agent, &["--allow-host", &allow]);
     let host_socket = c.workspace.join("host.sock");
     let listener = std::os::unix::net::UnixListener::bind(&host_socket).expect("a host socket");
     let mut steps = steps(&c);
@@ -395,10 +347,10 @@ fn j5_agent_records_pass_the_frozen_contract() {
     assert_eq!(refused.stop().len(), 0, "the refused origin saw nothing");
     let _ = allowed.stop();
     common::assert_run_records(&run);
-    assert_kinds(&run, Profile::Agent, OBSERVED_KINDS);
+    assert_kinds(&run, ProfileName::Agent, OBSERVED_KINDS);
     assert_kinds(
         &run,
-        Profile::Agent,
+        ProfileName::Agent,
         &[
             "proxy net.connect proxy_close allow",
             "proxy net.connect proxy_close deny",
@@ -416,10 +368,10 @@ fn j5_agent_records_pass_the_frozen_contract() {
 /// `prepared, refused` pass the same contract, and the target never ran.
 #[test]
 fn j5_a_refused_release_writes_records_that_pass_the_frozen_contract() {
-    if !Profile::Tool.available() {
+    if !common::profile_live(ProfileName::Tool) {
         return;
     }
-    let c = case(Profile::Tool, &[]);
+    let c = case(ProfileName::Tool, &[]);
     let marker = format!("{}/ran.txt", c.base());
     let steps = serde_json::json!([["open", marker, "--create", "--write"]]);
     let run = c.run(
@@ -452,10 +404,10 @@ fn j5_a_refused_release_writes_records_that_pass_the_frozen_contract() {
 /// both are valid records.
 #[test]
 fn j5_observation_off_records_pass_the_frozen_contract() {
-    if !Profile::Tool.available() {
+    if !common::profile_live(ProfileName::Tool) {
         return;
     }
-    let c = case(Profile::Tool, &["--observe", "off"]);
+    let c = case(ProfileName::Tool, &["--observe", "off"]);
     let steps = Value::from(steps(&c));
     let run = c.run(&steps, &Release::Valid);
     common::assert_run_records(&run);
@@ -475,7 +427,7 @@ fn j5_observation_off_records_pass_the_frozen_contract() {
     );
     assert_kinds(
         &run,
-        Profile::Tool,
+        ProfileName::Tool,
         &[
             "wrapper note wrapper lifecycle",
             "wrapper jail.receipt wrapper -",
@@ -492,10 +444,10 @@ fn j5_observation_off_records_pass_the_frozen_contract() {
 /// contract, `trace_loss_recorded` included, holds on the live records.
 #[test]
 fn j5_a_trace_loss_note_and_its_receipt_agree() {
-    if !Profile::Tool.available() {
+    if !common::profile_live(ProfileName::Tool) {
         return;
     }
-    let mut c = case_with(Profile::Tool, "best-effort", &[]);
+    let mut c = case_with(ProfileName::Tool, "best-effort", &[]);
     let base = c.base();
     // About 80 KB of results: more than the 64 KiB pipe, so frames wait in
     // the queue while the consumer pauses past the deadline; few enough that
@@ -802,6 +754,14 @@ fn consume(listener: &std::os::fd::OwnedFd, pace: Pace) -> Received {
     received
 }
 
+/// How long the consumer may look for the jail blocked mid-frame. The fixture
+/// writes for longer than the run's 2 s wall, so a block that never comes
+/// within this is a finding, not load.
+const HOLD_SEARCH_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the queued byte count must stay unchanged to count as a stall.
+const STABLE_SAMPLE: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Stops reading until the jail is blocked with a frame partly written, then
 /// holds the stall for `duration`.
 ///
@@ -813,7 +773,10 @@ fn consume(listener: &std::os::fd::OwnedFd, pace: Pace) -> Received {
 /// block fell between frames, or the target was between batches), one
 /// message is consumed, which frees room for about one more piece, and the
 /// check repeats. Once held, the stall lasts `duration`, and the queued
-/// count must not have moved: the jail wrote nothing more of that frame.
+/// count must not have moved: the jail wrote nothing more of that frame. A
+/// count that moved means the jail was only slow, not blocked (a full socket
+/// takes nothing more), so the search goes on rather than failing on a busy
+/// host.
 fn hold_mid_frame(
     fd: i32,
     buffer: &mut [u8],
@@ -823,13 +786,14 @@ fn hold_mid_frame(
     let started = std::time::Instant::now();
     loop {
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
-            "the jail was never seen blocked with a frame partly written"
+            started.elapsed() < HOLD_SEARCH_BOUND,
+            "the jail was never seen blocked with a frame partly written \
+             within {HOLD_SEARCH_BOUND:?}"
         );
-        // Stable: unchanged over 100 ms.
+        // Stable: unchanged over one sampling interval.
         let mut queued = queued_bytes(fd);
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(STABLE_SAMPLE);
             let now = queued_bytes(fd);
             if now == queued {
                 break;
@@ -851,16 +815,15 @@ fn hold_mid_frame(
         let written = unfinished(&stream);
         if written > 0 && queued > 0 {
             std::thread::sleep(duration);
-            assert_eq!(
-                queued_bytes(fd),
-                queued,
-                "the jail wrote more while it was supposed to be blocked"
-            );
-            return Held {
-                offset: stream.len(),
-                written,
-                held_for: duration,
-            };
+            if queued_bytes(fd) == queued {
+                return Held {
+                    offset: stream.len(),
+                    written,
+                    held_for: duration,
+                };
+            }
+            // The jail was descheduled mid-frame, not blocked: look again.
+            continue;
         }
         match receive(fd, buffer, false, false) {
             Some(message) => received.messages.push(message),
@@ -1056,7 +1019,7 @@ fn has_error(receipt: &Value, code: &str) -> bool {
 /// 2 s after its exec.
 #[test]
 fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
-    if !Profile::Tool.available() || !Path::new(PYTHON).is_file() {
+    if !common::profile_live(ProfileName::Tool) || !common::python() {
         return;
     }
     let (_run, received, last) = wall_under_partial_writes(Pace::Live);
@@ -1108,7 +1071,7 @@ fn j5_r03_a_wall_fires_on_time_while_every_trace_frame_is_written_in_pieces() {
 /// consumer stalls (wave 3's M4: the wall came 40 s late).
 #[test]
 fn j5_r03_a_wall_fires_on_time_while_a_stalled_consumer_holds_a_partial_frame() {
-    if !Profile::Tool.available() || !Path::new(PYTHON).is_file() {
+    if !common::profile_live(ProfileName::Tool) || !common::python() {
         return;
     }
     let (_run, received, last) = wall_under_partial_writes(Pace::HoldMidFrame {
@@ -1187,8 +1150,6 @@ fn j5_r03_a_wall_fires_on_time_while_a_stalled_consumer_holds_a_partial_frame() 
 // the schema accepts those tuples; these runs show the real jail writes them,
 // each held to the whole frozen contract.
 
-const PYTHON: &str = "/usr/bin/python3";
-
 fn error_codes(receipt: &Value) -> Vec<String> {
     receipt["errors"]
         .as_array()
@@ -1216,7 +1177,7 @@ fn private_workspace(jail: &Jail) -> PathBuf {
 /// no scope, no tree result or time, and integrity `pending`.
 #[test]
 fn j5_r01_a_refusal_before_the_boundary_carries_integrity_pending() {
-    if !Profile::Tool.available() {
+    if !common::profile_live(ProfileName::Tool) {
         return;
     }
     let jail = Jail::with_program("/bin/sh")
@@ -1342,7 +1303,7 @@ fn assert_lost_tuple(receipt: &Value) {
 /// keeps the lost tuple with the target's own exit.
 #[test]
 fn j5_r01_a_detected_escape_carries_integrity_lost() {
-    if !Profile::None.available() {
+    if !common::profile_live(ProfileName::None) {
         return;
     }
     let destination = Destination::new("escape");
@@ -1385,7 +1346,6 @@ fn j5_r01_a_detected_escape_carries_integrity_lost() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     };
     // While the target runs, from the receipt written when the loss was seen.
-    let running = common::checked_receipt(running);
     assert!(moved.exists() && !go.exists());
     assert_lost_tuple(&running);
     assert_eq!(running["phase"], "enforced", "{running:#}");
@@ -1422,7 +1382,7 @@ fn j5_r01_a_detected_escape_carries_integrity_lost() {
 /// outcome is the coded unknown (§6.4 `exec_unconfirmed`).
 #[test]
 fn j5_r01_an_exec_the_jail_cannot_confirm_settles_with_exec_unknown() {
-    if !Profile::Tool.available() {
+    if !common::profile_live(ProfileName::Tool) {
         return;
     }
     let jail = Jail::new().expect("a private harness");

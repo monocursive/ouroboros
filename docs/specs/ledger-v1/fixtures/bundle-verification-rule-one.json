@@ -1,0 +1,25 @@
+{
+  "authenticity": "unsigned",
+  "capture_digest_basis": "bundle_time",
+  "captures": [],
+  "child_protection": "unprotected",
+  "coverage": {
+    "gaps": [
+      {
+        "reason": "owner_lost"
+      }
+    ],
+    "status": "degraded"
+  },
+  "external_custody": false,
+  "local_consistency": true,
+  "manifest_digest": "sha256:a3a968b830c685ff85aed3a3c18b0c9a68e40df0203fcfbc9184c74331fb2314",
+  "projection_rule": 1,
+  "run_id": "run_d2546e90410341da8ada3ed3ddc5f68f",
+  "schema": "ouro.ledger.bundle-verification/1",
+  "snapshot": {
+    "head_digest": "sha256:1c740d5452f779bb82c871355062b8ea5b86b34a38ed220df138f81384555d39",
+    "head_seq": 3
+  },
+  "state": "outcome_unknown"
+}

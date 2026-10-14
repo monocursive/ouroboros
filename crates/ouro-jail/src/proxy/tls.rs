@@ -430,17 +430,19 @@ fn client_head_failure(error: &io::Error) -> Reason {
     }
 }
 
-/// What one side of the pump waits for: room to write its pending records,
-/// and records to read while it can take them. A side with nothing asked of
-/// it is left out: a half-closed peer reports POLLHUP whether or not
-/// anything was requested, which would otherwise spin.
+/// What one side of the pump waits for: room to write its pending records
+/// while it can be given any, and records to read while it can take them. A
+/// side with nothing asked of it is left out: a half-closed or failed peer
+/// reports POLLHUP whether or not anything was requested, which would
+/// otherwise spin.
 fn interest<'a>(
     fd: BorrowedFd<'a>,
     conn: &rustls::Connection,
+    can_give: bool,
     can_take: bool,
 ) -> sys::Interest<'a> {
     let mut events = 0;
-    if conn.wants_write() {
+    if can_give && conn.wants_write() {
         events |= libc::POLLOUT;
     }
     if can_take && conn.wants_read() {
@@ -487,6 +489,8 @@ struct Side {
     /// The side's records ended: its peer closed, or reading or writing
     /// them failed.
     eof: bool,
+    /// Writing to the side's socket failed: nothing more reaches it.
+    failed: bool,
     /// Plaintext handed to this side's connection whose records have not
     /// all reached its socket yet; counted once they have.
     pending: u64,
@@ -511,6 +515,7 @@ impl Side {
             blame,
             read: zeroize::Zeroizing::new(Vec::with_capacity(limit)),
             eof: false,
+            failed: false,
             pending: 0,
         }
     }
@@ -565,7 +570,9 @@ impl Side {
     }
 
     /// Moves records between the connection and `socket` as `revents`
-    /// allows: pending records out, then new records in. Plaintext whose
+    /// allows: pending records out, then new records in. A hang-up or an
+    /// error with records pending is a write attempt too, so a peer that is
+    /// gone fails the side instead of being polled for ever. Plaintext whose
     /// records all reached the socket is counted in `delivered`. A failed
     /// write ends the side and records its blame as the relay's `end`; a
     /// record that does not decrypt refuses with its blame.
@@ -579,7 +586,9 @@ impl Side {
     where
         for<'s> &'s S: io::Read + io::Write,
     {
-        if revents & libc::POLLOUT != 0 {
+        let writable = revents & libc::POLLOUT != 0
+            || revents & (libc::POLLHUP | libc::POLLERR) != 0 && self.conn.wants_write();
+        if writable && !self.failed {
             let result = self.conn.write_tls(&mut socket);
             if result.is_ok() && !self.conn.wants_write() {
                 *delivered += std::mem::take(&mut self.pending);
@@ -589,6 +598,7 @@ impl Side {
             }) {
                 *end = self.blame.write;
                 self.eof = true;
+                self.failed = true;
             }
         }
         if revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
@@ -695,11 +705,13 @@ fn pump(
                 interest(
                     socket.as_fd(),
                     &client.conn,
+                    !client.failed,
                     !client.eof && client.read.len() < limit,
                 ),
                 interest(
                     remote.as_fd(),
                     &destination.conn,
+                    !destination.failed,
                     !destination.eof && destination.read.len() < limit,
                 ),
             ],
@@ -715,6 +727,11 @@ fn pump(
         };
         client.exchange(socket, revents[0], &mut outcome.bytes_in, &mut outcome.end)?;
         destination.exchange(remote, revents[1], &mut outcome.bytes_out, &mut outcome.end)?;
+        // Nothing more can reach a client whose socket failed: the lane
+        // ends now, blamed on the client, rather than at its lifetime.
+        if client.failed {
+            break;
+        }
     }
     let rustls::Connection::Server(server) = client.conn else {
         return Err(Reason::InternalError);
@@ -789,6 +806,144 @@ mod tests {
         );
         assert!(pumped.is_ok());
         assert_eq!(outcome.end, EndReason::Deadline);
+    }
+
+    /// Runs the pump, for at most [`PUMP_TEST_LIFETIME`], over fresh TLS
+    /// connections: the lane's server side on a socket pair, whose other end
+    /// `client` gets, and its client side on a loopback TCP connection,
+    /// whose accepted end `destination` gets. Each returns its end to keep
+    /// it open, or `None` once it closed it. Returns what the pump returned,
+    /// its outcome and how long it ran.
+    fn pump_against(
+        client: impl FnOnce(UnixStream) -> Option<UnixStream>,
+        destination: impl FnOnce(TcpStream) -> Option<TcpStream>,
+    ) -> (Result<(), Reason>, RelayOutcome, Duration) {
+        use std::sync::Arc;
+        let vault = crate::vault::Vault::new("test-attempt", Vec::new()).unwrap();
+        let target = crate::network::parse_authority("fixture.test:443", None).unwrap();
+        let (socket, client_end) = UnixStream::pair().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (destination_end, _) = listener.accept().unwrap();
+        let kept = (client(client_end), destination(destination_end));
+        let (socket, remote) = (Arc::new(socket), Arc::new(remote));
+        let watch = crate::vault::lifecycle::Watch::start(
+            Arc::new(crate::vault::lifecycle::Lease::default()),
+            Arc::clone(&socket),
+            Arc::clone(&remote),
+        )
+        .unwrap();
+        let mut outcome = RelayOutcome {
+            bytes_in: 0,
+            bytes_out: 0,
+            discarded: 0,
+            end: EndReason::UpstreamClosed,
+        };
+        let started = Instant::now();
+        let pumped = pump(
+            vault.server(&target).unwrap(),
+            vault.client(&target).unwrap(),
+            &socket,
+            &remote,
+            &watch,
+            Lane {
+                websocket: false,
+                chunk: 1024,
+                lifetime: started + PUMP_TEST_LIFETIME,
+            },
+            &mut outcome,
+        )
+        .map(drop);
+        let ran = started.elapsed();
+        drop(kept);
+        (pumped, outcome, ran)
+    }
+
+    /// The lifetime [`pump_against`] gives the pump: far longer than any
+    /// case needs, so ending at it is a failure to end on the cause.
+    const PUMP_TEST_LIFETIME: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn a_record_that_does_not_decrypt_is_blamed_on_the_side_that_sent_it() {
+        let corrupt = b"not a TLS record\r\n";
+        let (pumped, _, ran) = pump_against(
+            |mut client| {
+                client.write_all(corrupt).unwrap();
+                Some(client)
+            },
+            Some,
+        );
+        assert_eq!(pumped, Err(Reason::ClientClosed));
+        assert!(ran < PUMP_TEST_LIFETIME);
+        let (pumped, _, ran) = pump_against(Some, |mut destination| {
+            destination.write_all(corrupt).unwrap();
+            Some(destination)
+        });
+        assert_eq!(pumped, Err(Reason::UpstreamProtocol));
+        assert!(ran < PUMP_TEST_LIFETIME);
+    }
+
+    /// A client that is gone while the lane has records for it (here the
+    /// answer to its ClientHello) ends the pump at once, blamed on the
+    /// client: nothing can reach it any more, so waiting out the lifetime
+    /// would only spin on its failed socket and then blame the deadline.
+    #[test]
+    fn a_client_gone_with_records_pending_ends_the_pump_and_is_blamed() {
+        let (pumped, outcome, ran) = pump_against(
+            |mut client| {
+                let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth();
+                let mut hello = rustls::ClientConnection::new(
+                    std::sync::Arc::new(config),
+                    rustls::pki_types::ServerName::try_from("fixture.test").unwrap(),
+                )
+                .unwrap();
+                let mut bytes = Vec::new();
+                hello.write_tls(&mut bytes).unwrap();
+                client.write_all(&bytes).unwrap();
+                None
+            },
+            Some,
+        );
+        assert_eq!(pumped, Ok(()));
+        assert_eq!(outcome.end, EndReason::ClientError);
+        assert!(ran < PUMP_TEST_LIFETIME / 2, "{ran:?}");
+    }
+
+    /// A destination that reset before the lane's ClientHello reached it is
+    /// the upstream's failure, and the pump ends without waiting out the
+    /// lifetime.
+    #[test]
+    fn a_destination_write_failure_is_blamed_on_the_upstream() {
+        let (pumped, outcome, ran) = pump_against(Some, |destination| {
+            use std::os::fd::AsRawFd as _;
+            let linger = libc::linger {
+                l_onoff: 1,
+                l_linger: 0,
+            };
+            // SAFETY: `linger` is a valid `linger` of the size passed, and
+            // the descriptor belongs to `destination`, open for the call.
+            let rc = unsafe {
+                libc::setsockopt(
+                    destination.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    (&raw const linger).cast(),
+                    libc::socklen_t::try_from(std::mem::size_of::<libc::linger>()).unwrap(),
+                )
+            };
+            assert_eq!(rc, 0, "{}", io::Error::last_os_error());
+            // Closed with a zero linger: the connection is reset.
+            None
+        });
+        assert_eq!(pumped, Ok(()));
+        assert_eq!(outcome.end, EndReason::UpstreamError);
+        assert!(ran < PUMP_TEST_LIFETIME / 2, "{ran:?}");
     }
 
     #[test]

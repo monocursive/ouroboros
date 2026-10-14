@@ -293,7 +293,7 @@ fn assemble(
     }
     events.sync_all()?;
     events.seek(SeekFrom::Start(0))?;
-    let run = store::replay_bundle(&mut events, run_id)?;
+    let run = store::replay_bundle(&mut events, run_id)?.run;
     let labels = snapshot.expect("at least one page");
     let mut coverage = crate::reader::coverage_summary(&run.coverage);
     coverage["selection_status"] =
@@ -382,6 +382,23 @@ pub fn verify_with_key(input: &Path, trusted_key: Option<&Path>) -> Result<Value
     verify_directory(&files::directory(input)?, Instant::now(), key.as_ref())
 }
 
+/// Which run projection rule the embedded run matches. Rule 2 is current;
+/// rule 1 gave only an unresolved run a different outcome, and is accepted
+/// for bundles exported under it when that outcome is the only difference.
+fn projection_rule(replayed: &store::Replayed, embedded: &Value) -> Result<u8> {
+    let mut run = serde_json::to_value(&replayed.run)?;
+    if run == *embedded {
+        return Ok(2);
+    }
+    if let Some(outcome) = &replayed.rule_one_outcome {
+        run["outcome"] = outcome.clone();
+        if run == *embedded {
+            return Ok(1);
+        }
+    }
+    Err(error("bundle run labels differ from canonical replay"))
+}
+
 fn verify_directory(
     dir: &File,
     start: Instant,
@@ -456,10 +473,10 @@ fn verify_directory(
     {
         return Err(error("bundle has missing or uninventoried members"));
     }
-    let run = replayed.ok_or_else(|| error("bundle has no canonical records"))?;
-    if serde_json::to_value(&run)? != value["run"] {
-        return Err(error("bundle run labels differ from canonical replay"));
-    }
+    let replayed: store::Replayed =
+        replayed.ok_or_else(|| error("bundle has no canonical records"))?;
+    let projection_rule = projection_rule(&replayed, &value["run"])?;
+    let run = replayed.run;
     if receipts != Some(json!(run.receipts)) {
         return Err(error(
             "bundle receipts differ from embedded canonical receipts",
@@ -468,7 +485,8 @@ fn verify_directory(
     check_time(start)?;
     let mut report = json!({"schema":schemas::BUNDLE_VERIFICATION, "run_id":run.run_id,
         "snapshot":run.chain, "state":run.state, "child_protection":run.child_protection,
-        "coverage":run.coverage, "local_consistency":true, "authenticity":"unsigned",
+        "coverage":run.coverage, "projection_rule":projection_rule,
+        "local_consistency":true, "authenticity":"unsigned",
         "external_custody":false, "capture_digest_basis":"bundle_time", "captures":captures,
         "manifest_digest":sha256_prefixed(&canonical_json(&value)?)});
     if let Some(signature) = signature {

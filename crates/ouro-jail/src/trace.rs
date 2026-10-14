@@ -29,6 +29,7 @@ use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd, RawFd};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::observer::CoverageClass;
 use crate::records::{ErrorCode, ErrorStage, JailError, Remediation};
 
 pub mod readback;
@@ -125,7 +126,13 @@ pub type SharedTrace = Arc<Mutex<TraceWriter>>;
 /// writer cannot know which later events a lost sink will refuse, so its note
 /// names them all; the receipt narrows the statement per class
 /// (`degrade_trace_coverage` leaves unsupported classes alone).
-pub const STREAM_CLASSES: [&str; 5] = ["exec", "fs.write", "fs.deny", "net", "proxy.net"];
+pub const STREAM_CLASSES: [CoverageClass; 5] = [
+    CoverageClass::Exec,
+    CoverageClass::FsWrite,
+    CoverageClass::FsDeny,
+    CoverageClass::Net,
+    CoverageClass::ProxyNet,
+];
 
 /// The gap reason for a trace transport loss, in the stream and the receipt.
 pub const TRANSPORT_LOSS_REASON: &str = "trace_transport_loss";
@@ -149,7 +156,7 @@ pub struct TraceWriter {
     /// The evidence classes this attempt's stream carries: what a loss note
     /// names. Every class a stream could carry until the supervisor narrows
     /// it to the attempt's own (observation on, proxy applied).
-    stream_classes: Vec<String>,
+    stream_classes: Vec<CoverageClass>,
     /// Where the first loss note's interval starts, once it was attempted:
     /// the receipts record the same loss from the same point (§13.3).
     loss_start_ns: Option<u128>,
@@ -159,8 +166,8 @@ impl TraceWriter {
     // Review item 15
     /// Narrows the classes this stream's loss note names to the evidence
     /// classes the attempt actually covers.
-    pub fn set_stream_classes(&mut self, classes: &[&str]) {
-        self.stream_classes = classes.iter().map(|class| (*class).to_owned()).collect();
+    pub fn set_stream_classes(&mut self, classes: &[CoverageClass]) {
+        self.stream_classes = classes.to_vec();
     }
 
     /// The start of the first loss note's interval, once a loss was noted.
@@ -234,7 +241,11 @@ impl TraceWriter {
         self.gap_noted = true;
         self.loss_start_ns = Some(self.last_healthy_ns);
         let gap = crate::records::Gap {
-            classes: self.stream_classes.clone(),
+            classes: self
+                .stream_classes
+                .iter()
+                .map(|class| class.as_str().to_owned())
+                .collect(),
             source: "wrapper".to_owned(),
             start_ns: self.last_healthy_ns.to_string(),
             end_ns: None,
@@ -286,10 +297,7 @@ pub fn shared(sink: impl TraceSink + Send + 'static) -> SharedTrace {
         attempt_id: None,
         last_healthy_ns: 0,
         gap_noted: false,
-        stream_classes: STREAM_CLASSES
-            .iter()
-            .map(|class| (*class).to_owned())
-            .collect(),
+        stream_classes: STREAM_CLASSES.to_vec(),
         loss_start_ns: None,
     }))
 }
@@ -1259,7 +1267,7 @@ mod tests {
         trace
             .lock()
             .unwrap()
-            .set_stream_classes(&["exec", "fs.write", "fs.deny", "net"]);
+            .set_stream_classes(&CoverageClass::AUDIT);
         assert_eq!(trace.lock().unwrap().loss_start_ns(), None);
         let filler = "f".repeat(400);
         for index in 0..100 {

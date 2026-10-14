@@ -18,123 +18,28 @@
 //! uncontained child can create for itself.
 #![cfg(target_os = "linux")]
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use jsonschema::{Registry, Resource, Validator};
 use ouro_fixture::harness::{self, Jail, Run, Spawned};
-use ouro_jail::platform::linux::{cgroup, identity, probe, watch};
+use ouro_jail::platform::linux::{cgroup, identity, watch};
 use serde_json::Value;
 
 mod common;
 
-const PYTHON: &str = "/usr/bin/python3";
+use common::PYTHON;
 
 // ---------------------------------------------------------------------------
 // Preconditions and shared helpers
 // ---------------------------------------------------------------------------
 
-/// The delegated-scope precondition every live `none` case shares: the leaf
-/// probe `none`'s tree termination rests on, plus the interpreter the
+/// A delegated leaf (`common::delegated_leaf`) and the interpreter the
 /// fixtures are written in.
 fn live() -> bool {
-    let leaf = probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != probe::ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "J3 none needs a delegated user scope with a usable leaf: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    if !Path::new(PYTHON).is_file() {
-        harness::skip_or_fail("the none fixtures are python3 scripts");
-        return false;
-    }
-    true
-}
-
-fn specs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/specs/jail-v1")
-        .canonicalize()
-        .expect("the checked-in specification directory exists")
-}
-
-/// One validator per checked-in schema, registered by `$id`.
-fn validators() -> BTreeMap<String, Validator> {
-    let mut schemas: BTreeMap<String, Value> = BTreeMap::new();
-    for entry in std::fs::read_dir(specs_dir()).expect("the specification directory") {
-        let path = entry.expect("an entry").path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if let Some(stem) = name.strip_suffix(".schema.json") {
-            let text = std::fs::read_to_string(&path).expect("a readable schema");
-            schemas.insert(stem.to_owned(), serde_json::from_str(&text).expect("JSON"));
-        }
-    }
-    let pairs: Vec<(String, Resource)> = schemas
-        .values()
-        .map(|schema| {
-            let id = schema["$id"].as_str().expect("an $id").to_owned();
-            (id, Resource::from_contents(schema.clone()))
-        })
-        .collect();
-    let registry: Registry = Registry::new()
-        .extend(pairs)
-        .expect("valid identifiers")
-        .prepare()
-        .expect("a resolvable registry");
-    let registry: &'static Registry = Box::leak(Box::new(registry));
-    schemas
-        .into_iter()
-        .map(|(name, schema)| {
-            let validator = jsonschema::options()
-                .with_registry(registry)
-                .should_validate_formats(true)
-                .build(&schema)
-                .unwrap_or_else(|error| panic!("compiling {name}: {error}"));
-            (name, validator)
-        })
-        .collect()
-}
-
-/// Every receipt and trace event of the run validates against its schema,
-/// and every receipt keeps the rules the schema cannot state
-/// (`common::semantic_receipt`). The trace is read through the guarded
-/// accessor, so it must also be complete (§13.3).
-fn validate(run: &Run) {
-    validate_receipts(run);
-    validate_events(run.trace_events());
-    // J5-C: the trace as a stream and the control transcript too.
-    common::assert_run_records(run);
-}
-
-fn validate_receipts(run: &Run) {
-    let validators = validators();
-    for receipt in run.receipts() {
-        validators["jail-receipt"]
-            .validate(&receipt)
-            .unwrap_or_else(|error| panic!("a receipt fails its schema: {error}\n{receipt:#}"));
-        common::assert_semantic_receipt(&receipt);
-    }
-}
-
-fn validate_events(events: &[Value]) {
-    let validators = validators();
-    for event in events {
-        validators["jail-event"]
-            .validate(event)
-            .unwrap_or_else(|error| panic!("an event fails its schema: {error}\n{event:#}"));
-    }
+    common::delegated_leaf() && common::python()
 }
 
 /// A `none` invocation over a private workspace, with trace and control.
@@ -155,40 +60,28 @@ fn none_case(observe: &str) -> (Jail, PathBuf) {
     (jail, workspace)
 }
 
-fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 /// The latest `--receipt` copy once it reaches `phase`.
 fn receipt_in_phase(spawned: &Spawned, phase: &str) -> Value {
     let mut latest = Value::Null;
-    wait_for(&format!("a {phase} receipt"), || {
+    common::eventually(&format!("a {phase} receipt"), common::SETTLE_BOUND, || {
         latest = spawned.receipt_value().unwrap_or(Value::Null);
         latest["phase"] == phase
     });
-    common::checked_receipt(latest)
+    latest
 }
 
 /// The latest `--receipt` copy once its lifetime integrity reads `integrity`.
 fn receipt_in_integrity(spawned: &Spawned, integrity: &str) -> Value {
     let mut latest = Value::Null;
-    wait_for(&format!("a receipt with integrity {integrity}"), || {
-        latest = spawned.receipt_value().unwrap_or(Value::Null);
-        latest["lifetime"]["integrity"] == integrity
-    });
-    common::checked_receipt(latest)
-}
-
-/// The last receipt the run left in its canonical location.
-fn last_receipt(run: &Run) -> Value {
-    run.receipts()
-        .into_iter()
-        .max_by_key(|receipt| receipt["revision"].as_u64().unwrap_or(0))
-        .unwrap_or_else(|| panic!("no receipt; stderr: {}", run.stderr_text()))
+    common::eventually(
+        &format!("a receipt with integrity {integrity}"),
+        common::SETTLE_BOUND,
+        || {
+            latest = spawned.receipt_value().unwrap_or(Value::Null);
+            latest["lifetime"]["integrity"] == integrity
+        },
+    );
+    latest
 }
 
 fn populated(cgroup_dir: &Path) -> bool {
@@ -224,7 +117,9 @@ fn remove_cgroup(dir: &Path) {
     }
     if populated(dir) {
         std::fs::write(dir.join("cgroup.kill"), "1").expect("cgroup.kill");
-        wait_for("the cgroup to empty", || !populated(dir));
+        common::eventually("the cgroup to empty", common::SETTLE_BOUND, || {
+            !populated(dir)
+        });
     }
     std::fs::remove_dir(dir).expect("an empty cgroup is removed");
 }
@@ -351,7 +246,7 @@ fn r05_clean_none_evidence_stays_unprotected() {
         .run()
         .expect("the jail runs");
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    validate(&run);
+    common::assert_run_records(&run);
     assert!(written.exists());
     let receipt = run
         .receipt_phase("settled")
@@ -433,7 +328,7 @@ print(json.dumps({'own_reserved': own, 'found_state_root': True,
         .run()
         .expect("the jail runs");
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    validate(&run);
+    common::assert_run_records(&run);
     let report: Value = serde_json::from_str(run.stdout_text().trim()).expect("a report");
     assert_eq!(report["own_reserved"], serde_json::json!([]));
     assert_eq!(report["found_state_root"], true);
@@ -523,9 +418,9 @@ fn r06_a_target_that_leaves_the_leaf_while_live_is_never_settled() {
             0
         );
         let run = spawned.wait().expect("the jail ends");
-        validate(&run);
+        common::assert_run_records(&run);
         assert_eq!(run.code(), Some(1), "{observe}: {}", run.stderr_text());
-        let receipt = last_receipt(&run);
+        let receipt = common::last_receipt(&run);
         assert_lost(&receipt);
         assert_eq!(receipt["phase"], "enforced");
         assert_eq!(receipt["exec_observed"], true);
@@ -584,10 +479,10 @@ fn r06_a_descendant_that_leaves_after_the_target_exits_loses_integrity() {
             .target([PYTHON, "-c", &code])
             .run()
             .expect("the jail runs");
-        validate(&run);
+        common::assert_run_records(&run);
         assert_eq!(run.code(), Some(1), "{observe}: {}", run.stderr_text());
         assert!(moved.exists(), "{observe}: the descendant never moved");
-        let receipt = last_receipt(&run);
+        let receipt = common::last_receipt(&run);
         assert_lost(&receipt);
         assert_eq!(receipt["phase"], "enforced");
         // The target's own exit is independent of what its descendant did.
@@ -633,9 +528,9 @@ fn r06_a_target_that_leaves_and_exits_at_once_is_caught_by_its_zombie() {
         .target([PYTHON, "-c", &code])
         .run()
         .expect("the jail runs");
-    validate(&run);
+    common::assert_run_records(&run);
     assert_eq!(run.code(), Some(1), "{}", run.stderr_text());
-    let receipt = last_receipt(&run);
+    let receipt = common::last_receipt(&run);
     assert_lost(&receipt);
     assert_eq!(receipt["outcome"]["kind"], "exited", "{receipt:#}");
     assert_eq!(receipt["outcome"]["code"], 5);
@@ -673,9 +568,9 @@ fn r06_a_descendant_that_leaves_and_exits_at_once_is_caught_by_its_zombie() {
         .target([PYTHON, "-c", &code])
         .run()
         .expect("the jail runs");
-    validate(&run);
+    common::assert_run_records(&run);
     assert_eq!(run.code(), Some(1), "{}", run.stderr_text());
-    let receipt = last_receipt(&run);
+    let receipt = common::last_receipt(&run);
     assert_lost(&receipt);
     assert_eq!(receipt["outcome"]["kind"], "exited", "{receipt:#}");
     assert_eq!(receipt["outcome"]["code"], 0);
@@ -734,9 +629,9 @@ fn r06_a_replaced_leaf_loses_integrity_and_is_never_touched() {
         0
     );
     let run = spawned.wait().expect("the jail ends");
-    validate(&run);
+    common::assert_run_records(&run);
     assert_eq!(run.code(), Some(1), "{}", run.stderr_text());
-    let receipt = last_receipt(&run);
+    let receipt = common::last_receipt(&run);
     assert_lost(&receipt);
     assert_eq!(receipt["outcome"]["kind"], "signaled");
     assert_eq!(receipt["outcome"]["signal"], libc::SIGTERM);
@@ -791,7 +686,7 @@ fn l02_none_supervisor_death_leaves_the_specified_unknown() {
             .target([PYTHON, "-c", &code])
             .spawn()
             .expect("the jail starts");
-        wait_for("the target", || running.exists());
+        common::eventually("the target", common::SETTLE_BOUND, || running.exists());
         let enforced = receipt_in_phase(&spawned, "enforced");
         let (leaf, inode) = leaf_of(&enforced);
         let pid: i32 = std::fs::read_to_string(&descendant)
@@ -811,15 +706,9 @@ fn l02_none_supervisor_death_leaves_the_specified_unknown() {
         assert_eq!(run.signal(), Some(libc::SIGKILL));
         // The trace ends wherever the kill found the supervisor, not on the
         // note of a final receipt (§13.3), so the guarded accessor rightly
-        // refuses it: its complete frames are validated from the readback.
-        validate_receipts(&run);
-        validate_events(
-            &run.trace_readback
-                .as_ref()
-                .expect("a trace was requested")
-                .frames,
-        );
-        let last = last_receipt(&run);
+        // refuses it: its complete frames are held to what a prefix keeps.
+        let _ = common::assert_trace_prefix(&run);
+        let last = common::last_receipt(&run);
         assert_unprotected(&last);
         assert_eq!(last["phase"], "enforced", "{observe}: {last:#}");
         assert_eq!(last["lifetime"]["tree_empty"], Value::Null);
@@ -834,9 +723,11 @@ fn l02_none_supervisor_death_leaves_the_specified_unknown() {
             // the kernel kills the traced tree when its tracer dies. That is
             // the observer's attachment, not a lifetime claim: the record
             // above stays unknown all the same.
-            wait_for("the traced descendant to die with its tracer", || {
-                watch::readable(descendant_fd.as_raw_fd())
-            });
+            common::eventually(
+                "the traced descendant to die with its tracer",
+                common::SETTLE_BOUND,
+                || watch::readable(descendant_fd.as_raw_fd()),
+            );
         } else {
             // Nothing ended the descendant: no watchdog exists (§8.2), the
             // unknown is real, and the retained leaf still holds it.
@@ -924,7 +815,7 @@ fn l03_none_without_a_usable_cgroup_refuses() {
             .expect("the jail runs");
         assert_eq!(run.code(), Some(125), "{observe}: {}", run.stderr_text());
         assert!(!marker.exists(), "{observe}: the target ran");
-        validate(&run);
+        common::assert_run_records(&run);
         let receipt = run
             .receipt_phase("refused")
             .unwrap_or_else(|| panic!("{observe}: {}", run.stderr_text()));
@@ -971,8 +862,7 @@ fn x06_none_reserved_names_and_private_channels_do_not_reach_the_child() {
             .spawn()
             .expect("the jail starts");
         let prepared = spawned.owner().await_prepared().expect("prepared");
-        let receipt =
-            common::checked_receipt(spawned.receipt_value().expect("the prepared receipt"));
+        let receipt = spawned.receipt_value().expect("the prepared receipt");
         spawned
             .owner()
             .release(
@@ -983,7 +873,7 @@ fn x06_none_reserved_names_and_private_channels_do_not_reach_the_child() {
             .expect("released");
         let run = spawned.wait().expect("the jail ends");
         assert_eq!(run.code(), Some(0), "{observe}: {}", run.stderr_text());
-        validate(&run);
+        common::assert_run_records(&run);
 
         // Exactly validated stdio: gate, control, trace, state, pidfds and
         // the launcher's own channels all closed before exec.
@@ -1067,7 +957,7 @@ fn none_runs_without_the_enforcement_backend_on_path() {
             .run()
             .expect("the jail runs");
         assert_eq!(run.code(), Some(0), "{observe}: {}", run.stderr_text());
-        validate(&run);
+        common::assert_run_records(&run);
         let receipt = run
             .receipt_phase("settled")
             .unwrap_or_else(|| panic!("{observe}: {}", run.stderr_text()));
@@ -1143,7 +1033,7 @@ fn none_refuses_restrictions_it_cannot_apply() {
             .expect("the jail runs");
         assert_eq!(run.code(), Some(125), "{label}: {}", run.stderr_text());
         assert!(!marker.exists(), "{label}: the target ran unrestricted");
-        validate(&run);
+        common::assert_run_records(&run);
         let receipt = run
             .receipt_phase("refused")
             .unwrap_or_else(|| panic!("{label}: {}", run.stderr_text()));
@@ -1177,7 +1067,7 @@ fn none_exec_failure_is_a_proved_exec_error() {
             .run()
             .expect("the jail runs");
         assert_eq!(run.code(), Some(125), "{observe}: {}", run.stderr_text());
-        validate(&run);
+        common::assert_run_records(&run);
         let receipt = run.receipt_phase("refused").expect("a refused receipt");
         assert_unprotected(&receipt);
         assert_eq!(receipt["exec_observed"], false);
@@ -1205,8 +1095,7 @@ fn none_gate_closed_refuses_after_a_verified_teardown() {
             .spawn()
             .expect("the jail starts");
         spawned.owner().await_prepared().expect("prepared");
-        let prepared =
-            common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
+        let prepared = spawned.receipt_value().expect("a prepared receipt");
         assert_eq!(prepared["phase"], "prepared");
         assert_unprotected(&prepared);
         assert_eq!(prepared["lifetime"]["integrity"], "verified");
@@ -1223,7 +1112,7 @@ fn none_gate_closed_refuses_after_a_verified_teardown() {
         assert!(run.gate_closed_by_harness);
         assert_eq!(run.code(), Some(125), "{observe}: {}", run.stderr_text());
         assert!(!marker.exists());
-        validate(&run);
+        common::assert_run_records(&run);
         let receipt = run.receipt_phase("refused").expect("a refused receipt");
         assert_unprotected(&receipt);
         assert_eq!(receipt["outcome"]["error"]["code"], "gate_closed");
@@ -1264,7 +1153,7 @@ fn none_wall_expiry_ends_the_tree_through_the_leaf() {
             .target([PYTHON, "-c", &code])
             .run()
             .expect("the jail runs");
-        validate(&run);
+        common::assert_run_records(&run);
         let receipt = run
             .receipt_phase("settled")
             .unwrap_or_else(|| panic!("{observe}: {}", run.stderr_text()));
@@ -1403,8 +1292,7 @@ fn g1_tampering_between_prepared_and_release_refuses_with_integrity_lost() {
                 .spawn()
                 .expect("the jail starts");
             let prepared = spawned.owner().await_prepared().expect("prepared");
-            let receipt =
-                common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
+            let receipt = spawned.receipt_value().expect("a prepared receipt");
             let (leaf, inode) = leaf_of(&receipt);
             let launcher = receipt["lifetime"]["native"]["details"]["launcher_pid"]
                 .as_i64()
@@ -1432,7 +1320,7 @@ fn g1_tampering_between_prepared_and_release_refuses_with_integrity_lost() {
                 run.stderr_text()
             );
             assert!(!marker.exists(), "{label}/{observe}: the target ran");
-            validate(&run);
+            common::assert_run_records(&run);
             let refused = run
                 .receipt_phase("refused")
                 .unwrap_or_else(|| panic!("{label}/{observe}: {}", run.stderr_text()));
@@ -1498,7 +1386,7 @@ fn a13_an_oom_kill_in_the_leaf_ends_the_tree() {
         .spawn()
         .expect("the jail starts");
     let prepared = spawned.owner().await_prepared().expect("prepared");
-    let receipt = common::checked_receipt(spawned.receipt_value().expect("a prepared receipt"));
+    let receipt = spawned.receipt_value().expect("a prepared receipt");
     let (leaf, _) = leaf_of(&receipt);
     // memory.max bounds resident memory; the host has swap. Disable swap in
     // this leaf only, so the allocation deterministically reaches OOM.
@@ -1513,7 +1401,7 @@ fn a13_an_oom_kill_in_the_leaf_ends_the_tree() {
         )
         .expect("released");
     let run = spawned.wait().expect("the jail ends");
-    validate(&run);
+    common::assert_run_records(&run);
     assert!(
         started.elapsed() < Duration::from_secs(20),
         "the tree ran on toward the wall after the OOM kill"
@@ -1550,7 +1438,6 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
     if !live() {
         return;
     }
-    let validators = validators();
     let root = common::private_tempdir();
     for name in ["data", "config", "workspace"] {
         std::fs::create_dir(root.path().join(name)).unwrap();
@@ -1603,7 +1490,9 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or(Value::Null)
     };
-    wait_for("a prepared receipt", || current()["phase"] == "prepared");
+    common::eventually("a prepared receipt", common::SETTLE_BOUND, || {
+        current()["phase"] == "prepared"
+    });
     let prepared = current();
     let (leaf, _) = leaf_of(&prepared);
     let pid = prepared["lifetime"]["native"]["details"]["launcher_pid"]
@@ -1613,7 +1502,7 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
         .iter()
         .map(|part| part.as_encoded_bytes().to_vec())
         .collect();
-    wait_for("the target image", || {
+    common::eventually("the target image", common::SETTLE_BOUND, || {
         std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|raw| {
             raw.split(|byte| *byte == 0)
                 .filter(|part| !part.is_empty())
@@ -1625,14 +1514,10 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
     let target_fd = identity::pidfd_open(pid).expect("the live target");
     std::fs::write(destination.path.join("cgroup.procs"), pid.to_string())
         .expect("the target is moved out");
-    wait_for("the loss in the receipt", || {
+    common::eventually("the loss in the receipt", common::SETTLE_BOUND, || {
         current()["lifetime"]["integrity"] == "lost"
     });
-    let mid_run = current();
-    validators["jail-receipt"]
-        .validate(&mid_run)
-        .unwrap_or_else(|error| panic!("{error}\n{mid_run:#}"));
-    common::assert_semantic_receipt(&mid_run);
+    let mid_run = common::checked_receipt(current());
     assert_eq!(mid_run["phase"], "prepared", "{mid_run:#}");
     assert_eq!(mid_run["exec_observed"], false);
 
@@ -1647,11 +1532,7 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
         std::thread::sleep(Duration::from_millis(5));
     };
     assert_eq!(status.code(), Some(1));
-    let last = current();
-    validators["jail-receipt"]
-        .validate(&last)
-        .unwrap_or_else(|error| panic!("{error}\n{last:#}"));
-    common::assert_semantic_receipt(&last);
+    let last = common::checked_receipt(current());
     assert_unprotected(&last);
     assert_eq!(last["phase"], "prepared", "{last:#}");
     assert_eq!(last["exec_observed"], false);
@@ -1716,11 +1597,11 @@ fn adversary_target_and_grandchild_both_escape_alive() {
             .target([PYTHON, "-c", &code])
             .run()
             .expect("the jail runs");
-        validate(&run);
+        common::assert_run_records(&run);
         assert_eq!(run.code(), Some(1), "{observe}: {}", run.stderr_text());
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&pids).unwrap()).unwrap();
-        let receipt = last_receipt(&run);
+        let receipt = common::last_receipt(&run);
         assert_lost(&receipt);
         assert_eq!(receipt["phase"], "enforced", "{observe}: {receipt:#}");
         assert_eq!(receipt["exec_observed"], true);
@@ -1800,11 +1681,11 @@ impl Drop for ChildMade {
 /// host (seen once on the reference host, 2026-09-23).
 fn written_pid(what: &str, path: &std::path::Path) -> i32 {
     let mut pid = None;
-    wait_for(what, || {
+    common::eventually(what, common::SETTLE_BOUND, || {
         pid = std::fs::read_to_string(path)
             .ok()
             .and_then(|text| text.trim().parse::<i32>().ok());
         pid.is_some()
     });
-    pid.expect("wait_for returns only once the pid parsed")
+    pid.expect("the wait returns only once the pid parsed")
 }

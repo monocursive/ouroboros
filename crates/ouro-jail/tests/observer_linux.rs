@@ -7,834 +7,46 @@
 //! errno of every call it makes, so the comparison is result by result and
 //! errno by errno, not "an event turned up".
 //!
-//! The fixture is a small C program built at test time (`helper.c` below).
-//! It doubles as the inside launcher of jail-v1 §3.6: it installs the
-//! narrowing filter this crate produces — read from a file, never a second
-//! copy of the program — blocks reading one byte from stdin, and then execs
-//! the target. That is exactly the sequence the product's launcher performs,
-//! so the tests exercise the attach window as it will really exist.
+//! The fixture is a small C program built at test time
+//! (`fixtures/observer.c`). It doubles as the inside launcher of jail-v1
+//! §3.6: it installs the narrowing filter this crate produces — read from a
+//! file, never a second copy of the program — blocks reading one byte from
+//! stdin, and then execs the target. That is exactly the sequence the
+//! product's launcher performs, so the tests exercise the attach window as it
+//! will really exist (`common/observer.rs`).
 //!
 //! Tests skip with a reason when a tool they need is missing. Under
 //! `OURO_CONFORMANCE=1` a skip is a failure.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::io::BufRead as _;
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use ouro_fixture::harness;
 use ouro_jail::platform::linux::tracer::{
-    ClosedOp, GapReason, Tracer, TracerConfig, TracerError, TracerEvent, TracerSummary, cmdline,
-    descendants, narrowing_filter, narrowing_filter_bytes, narrowing_filter_digest, nspid,
+    ClosedOp, GapReason, OpSet, Tracer, TracerConfig, TracerError, TracerEvent, narrowing_filter,
+    narrowing_filter_bytes, narrowing_filter_digest, nspid,
 };
-
-// --------------------------------------------------------------- fixtures
-
-/// The launcher and every fixture, in one binary.
-///
-/// `launch` is the inside launcher: it reads the cBPF program produced by
-/// `narrowing_filter()` from a file, installs it with `no_new_privs`, blocks
-/// on the release pipe and then execs. Every other mode is a fixture that
-/// prints one tab-separated line per operation:
-/// `label <TAB> raw return <TAB> errno <TAB> path <TAB> path2`.
-const HELPER_C: &str = r##"
-#define _GNU_SOURCE
-#include <errno.h>
-#include <fcntl.h>
-#include <linux/filter.h>
-#include <linux/seccomp.h>
-#include <pthread.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/mman.h>
-#include <sys/prctl.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
-#include <sys/types.h>
-#include <sys/un.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-struct ouro_open_how { unsigned long long flags, mode, resolve; };
-
-extern char **environ;
-
-static void report(const char *label, long r, const char *p1, const char *p2) {
-    printf("%s\t%ld\t%d\t%s\t%s\n", label, r, r < 0 ? errno : 0, p1 ? p1 : "", p2 ? p2 : "");
-    fflush(stdout);
-}
-
-static int install_filter(const char *path) {
-    static struct sock_filter prog[1024];
-    struct sock_fprog fprog;
-    int fd = open(path, O_RDONLY);
-    ssize_t n;
-    if (fd < 0) return -1;
-    n = read(fd, prog, sizeof prog);
-    close(fd);
-    if (n <= 0 || (size_t) n % sizeof(struct sock_filter)) return -2;
-    fprog.len = (unsigned short) ((size_t) n / sizeof(struct sock_filter));
-    fprog.filter = prog;
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) return -3;
-    if (syscall(SYS_seccomp, 1, 0, &fprog)) return -4;
-    return 0;
-}
-
-static int await_release(void) {
-    char b;
-    for (;;) {
-        ssize_t n = read(0, &b, 1);
-        if (n == 1) return 0;
-        if (n == 0) return -1;
-        if (errno != EINTR) return -1;
-    }
-}
-
-/* helper launch FILTER PROGRAM [ARGS...]
-   helper launch FILTER --probe-openat PATH   */
-static int mode_launch(int argc, char **argv) {
-    if (argc < 4) return 2;
-    if (install_filter(argv[2])) { fprintf(stderr, "install_filter failed\n"); return 3; }
-    /* The exec that brought us here is complete and the filter is on. The
-       supervisor seizes only after reading this, so the seize can never land
-       in the middle of an exec it did not ask about. */
-    report("ready", (long) getpid(), "", "");
-    if (await_release()) return 4;
-    if (strcmp(argv[3], "--probe-openat") == 0) {
-        long r;
-        if (argc < 5) return 2;
-        r = syscall(SYS_openat, AT_FDCWD, argv[4], O_WRONLY | O_CREAT, 0600);
-        report("openat_create", r, argv[4], "");
-        r = syscall(SYS_openat, AT_FDCWD, argv[4], O_RDONLY, 0);
-        report("openat_rdonly", r, argv[4], "");
-        r = syscall(SYS_write, 1, "", 0);
-        report("write", r, "", "");
-        return 0;
-    }
-    execv(argv[3], &argv[3]);
-    fprintf(stderr, "execv %s: %s\n", argv[3], strerror(errno));
-    return 127;
-}
-
-/* helper closed-set BASE EACCES_FILE */
-static int mode_closed_set(int argc, char **argv) {
-    char a[512], b[512], c[512], s[512], d[512], miss[512], sock[512];
-    char a2[512], b2[512], d2[512], a3[512], c3[512], s3[512], a4[512];
-    char n1[512], n2[512];
-    struct ouro_open_how how;
-    struct sockaddr_un sa;
-    const char *base;
-    long r;
-    int fd;
-    if (argc < 4) return 2;
-    base = argv[2];
-    snprintf(a, sizeof a, "%s/a", base);
-    snprintf(b, sizeof b, "%s/b", base);
-    snprintf(c, sizeof c, "%s/c", base);
-    snprintf(s, sizeof s, "%s/s", base);
-    snprintf(d, sizeof d, "%s/d", base);
-    snprintf(miss, sizeof miss, "%s/absent/x", base);
-    snprintf(sock, sizeof sock, "%s/no-socket", base);
-    snprintf(a2, sizeof a2, "%s/a2", base);
-    snprintf(b2, sizeof b2, "%s/b2", base);
-    snprintf(d2, sizeof d2, "%s/d2", base);
-    snprintf(a3, sizeof a3, "%s/a3", base);
-    snprintf(c3, sizeof c3, "%s/c3", base);
-    snprintf(s3, sizeof s3, "%s/s3", base);
-    snprintf(a4, sizeof a4, "%s/a4", base);
-    snprintf(n1, sizeof n1, "%s/n1", base);
-    snprintf(n2, sizeof n2, "%s/n2", base);
-
-    r = syscall(SYS_openat, AT_FDCWD, a, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    report("open_create", r, a, ""); if (r >= 0) close((int) r);
-    r = syscall(SYS_openat, AT_FDCWD, a, O_RDONLY, 0);
-    report("open_rdonly", r, a, ""); if (r >= 0) close((int) r);
-    r = syscall(SYS_openat, AT_FDCWD, a, O_WRONLY, 0);
-    report("open_write", r, a, ""); if (r >= 0) close((int) r);
-    r = syscall(SYS_openat, AT_FDCWD, miss, O_WRONLY | O_CREAT, 0600);
-    report("open_enoent", r, miss, "");
-    r = native_mkdir(d, 0700);
-    report("mkdir", r, d, "");
-    r = native_mkdir(d, 0700);
-    report("mkdir_eexist", r, d, "");
-    r = native_rename(a, b);
-    report("rename", r, a, b);
-    r = native_link(b, c);
-    report("link", r, b, c);
-    r = native_symlink("a-target", s);
-    report("symlink", r, s, "a-target");
-    r = native_unlink(c);
-    report("unlink", r, c, "");
-    r = native_unlink(c);
-    report("unlink_enoent", r, c, "");
-    r = native_rmdir(d);
-    report("rmdir", r, d, "");
-    fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    memset(&sa, 0, sizeof sa);
-    sa.sun_family = AF_UNIX;
-    strncpy(sa.sun_path, sock, sizeof sa.sun_path - 1);
-    r = syscall(SYS_connect, fd, &sa, (long) sizeof sa);
-    report("connect", r, sock, "");
-    if (fd >= 0) close(fd);
-    r = syscall(SYS_openat, AT_FDCWD, argv[3], O_WRONLY, 0);
-    report("open_eacces", r, argv[3], "");
-
-    r = native_creat(a2, 0600);
-    report("creat", r, a2, ""); if (r >= 0) close((int) r);
-    r = syscall(SYS_renameat2, AT_FDCWD, a2, AT_FDCWD, b2, 0);
-    report("renameat2", r, a2, b2);
-    r = syscall(SYS_unlinkat, AT_FDCWD, b2, 0);
-    report("unlinkat", r, b2, "");
-    r = syscall(SYS_mkdirat, AT_FDCWD, d2, 0700);
-    report("mkdirat", r, d2, "");
-    r = syscall(SYS_unlinkat, AT_FDCWD, d2, AT_REMOVEDIR);
-    report("unlinkat_removedir", r, d2, "");
-    r = native_open(a3, O_WRONLY | O_CREAT, 0600);
-    report("open", r, a3, ""); if (r >= 0) close((int) r);
-    r = syscall(SYS_linkat, AT_FDCWD, a3, AT_FDCWD, c3, 0);
-    report("linkat", r, a3, c3);
-    r = syscall(SYS_symlinkat, "t2", AT_FDCWD, s3);
-    report("symlinkat", r, s3, "t2");
-    how.flags = O_WRONLY | O_CREAT;
-    how.mode = 0600;
-    how.resolve = 0;
-    r = syscall(437, AT_FDCWD, a4, &how, (long) sizeof how);
-    report("openat2", r, a4, ""); if (r >= 0) close((int) r);
-
-    /* the three rows jail-v1 §11.2 gained: a pathname truncate and the two
-       mknod spellings. A FIFO needs no privilege. */
-    r = syscall(SYS_truncate, a3, 0L);
-    report("truncate", r, a3, "");
-    r = native_mknod(n1, S_IFIFO | 0600, 0);
-    report("mknod", r, n1, "");
-    r = syscall(SYS_mknodat, AT_FDCWD, n2, S_IFIFO | 0600, 0);
-    report("mknodat", r, n2, "");
-    r = syscall(SYS_ftruncate, 0, 0L);
-    report("ftruncate", r, "", "");
-
-    /* J4 N8: the rows no tracer-level comparison reached before. A failed
-       execve and execveat, a renameat, and a connect that succeeds (to a
-       listener this process holds). */
-    {
-        char *av[2];
-        char prog[512], r4[512], sp[512];
-        struct sockaddr_un la;
-        int ls, cs;
-        snprintf(prog, sizeof prog, "%s/absent-program", base);
-        snprintf(r4, sizeof r4, "%s/r4", base);
-        snprintf(sp, sizeof sp, "%s/listen.sock", base);
-        av[0] = prog;
-        av[1] = NULL;
-        r = syscall(SYS_execve, prog, av, environ);
-        report("execve_enoent", r, prog, "");
-        r = syscall(SYS_execveat, AT_FDCWD, prog, av, environ, 0);
-        report("execveat_enoent", r, prog, "");
-        r = syscall(SYS_renameat, AT_FDCWD, a4, AT_FDCWD, r4);
-        report("renameat", r, a4, r4);
-        ls = socket(AF_UNIX, SOCK_STREAM, 0);
-        memset(&la, 0, sizeof la);
-        la.sun_family = AF_UNIX;
-        strncpy(la.sun_path, sp, sizeof la.sun_path - 1);
-        if (ls < 0 || bind(ls, (struct sockaddr *) &la, sizeof la) || listen(ls, 1)) return 5;
-        cs = socket(AF_UNIX, SOCK_STREAM, 0);
-        r = syscall(SYS_connect, cs, &la, (long) sizeof la);
-        report("connect_ok", r, sp, "");
-        close(cs);
-        close(ls);
-    }
-    return 0;
-}
-
-/* helper exec-cases MISSING NOEXEC */
-static int mode_exec_cases(int argc, char **argv) {
-    char *av[2];
-    if (argc < 4) return 2;
-    av[1] = NULL;
-    av[0] = argv[2];
-    execv(argv[2], av);
-    report("execve_enoent", -1, argv[2], "");
-    av[0] = argv[3];
-    execv(argv[3], av);
-    report("execve_eacces", -1, argv[3], "");
-    av[0] = "/bin/true";
-    execv("/bin/true", av);
-    report("execve_true", -1, "/bin/true", "");
-    return 9;
-}
-
-/* helper fork-once */
-static int mode_fork_once(void) {
-    pid_t pid = fork();
-    int status = 0;
-    if (pid < 0) return 3;
-    if (pid == 0) {
-        char buf[64];
-        int n = snprintf(buf, sizeof buf, "child\t%d\t0\t\t\n", (int) getpid());
-        ssize_t w = write(1, buf, (size_t) n);
-        (void) w;
-        _exit(7);
-    }
-    waitpid(pid, &status, 0);
-    report("parent", (long) pid, "", "");
-    return 0;
-}
-
-static void *sleeper(void *arg) {
-    (void) arg;
-    usleep(300000);
-    report("worker", 0, "", "");
-    return NULL;
-}
-
-static char *g_exec_argv[2];
-
-static void *execer(void *arg) {
-    (void) arg;
-    usleep(150000);
-    execv(g_exec_argv[0], g_exec_argv);
-    _exit(3);
-}
-
-/* helper threads leader-exit | helper threads worker-exec PROGRAM */
-static int mode_threads(int argc, char **argv) {
-    pthread_t t[4];
-    int i;
-    if (argc < 3) return 2;
-    if (strcmp(argv[2], "worker-exec") == 0) {
-        if (argc < 4) return 2;
-        g_exec_argv[0] = argv[3];
-        g_exec_argv[1] = NULL;
-        for (i = 0; i < 3; i++) pthread_create(&t[i], NULL, sleeper, NULL);
-        pthread_create(&t[3], NULL, execer, NULL);
-        report("leader", 0, "", "");
-        for (;;) pause();
-    }
-    for (i = 0; i < 4; i++) pthread_create(&t[i], NULL, sleeper, NULL);
-    report("leader", 0, "", "");
-    pthread_exit(NULL);
-    return 0;
-}
-
-/* helper rwm PATH N */
-static int mode_rwm(int argc, char **argv) {
-    long n, i;
-    int fd;
-    char buf[64];
-    if (argc < 4) return 2;
-    n = atol(argv[3]);
-    fd = (int) syscall(SYS_openat, AT_FDCWD, argv[2], O_RDWR | O_CREAT | O_TRUNC, 0600);
-    report("open_create", (long) fd, argv[2], "");
-    if (fd < 0) return 3;
-    for (i = 0; i < n; i++) {
-        void *m;
-        ssize_t w = write(fd, "hello", 5);
-        (void) w;
-        lseek(fd, 0, SEEK_SET);
-        w = read(fd, buf, sizeof buf);
-        (void) w;
-        m = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        if (m != MAP_FAILED) { ((char *) m)[0] = 'x'; munmap(m, 4096); }
-    }
-    close(fd);
-    report("done", n, argv[2], "");
-    return 0;
-}
-
-/* helper storm N PATH: N covered openat, then wait for a second release
-   byte, then one mkdir so the consumer can observe the queue recovering. */
-static int mode_storm(int argc, char **argv) {
-    long n, i;
-    char dir[512];
-    if (argc < 4) return 2;
-    n = atol(argv[2]);
-    for (i = 0; i < n; i++) {
-        long r = syscall(SYS_openat, AT_FDCWD, argv[3], O_WRONLY | O_CREAT, 0600);
-        if (r >= 0) close((int) r);
-    }
-    report("storm", n, argv[3], "");
-    if (await_release()) return 4;
-    snprintf(dir, sizeof dir, "%s.d", argv[3]);
-    report("after", native_mkdir(dir, 0700), dir, "");
-    return 0;
-}
-
-/* helper fileops N DIR: the J0 file workload. */
-static int mode_fileops(int argc, char **argv) {
-    long n, i;
-    char a[512], b[512];
-    if (argc < 4) return 2;
-    n = atol(argv[2]);
-    snprintf(a, sizeof a, "%s/w", argv[3]);
-    snprintf(b, sizeof b, "%s/x", argv[3]);
-    for (i = 0; i < n; i++) {
-        long fd = syscall(SYS_openat, AT_FDCWD, a, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (fd >= 0) close((int) fd);
-        native_rename(a, b);
-        native_unlink(b);
-    }
-    report("fileops", n, argv[3], "");
-    return 0;
-}
-
-/* helper denied ROPATH */
-static int mode_denied(int argc, char **argv) {
-    long r;
-    if (argc < 3) return 2;
-    r = syscall(SYS_openat, AT_FDCWD, argv[2], O_WRONLY | O_CREAT, 0600);
-    report("open_erofs", r, argv[2], "");
-    r = native_mkdir(argv[2], 0700);
-    report("mkdir_erofs", r, argv[2], "");
-    return 0;
-}
-
-/* helper raise: die from a signal, so the wait status is not an exit code */
-static int mode_raise(void) {
-    report("raising", 0, "", "");
-    kill(getpid(), SIGKILL);
-    return 0;
-}
-
-/* helper open-path PATH: one covered openat on an arbitrary byte string.
-   The path is not echoed: it need not be printable. */
-static int mode_open_path(int argc, char **argv) {
-    long r;
-    if (argc < 3) return 2;
-    r = syscall(SYS_openat, AT_FDCWD, argv[2], O_WRONLY | O_CREAT, 0600);
-    if (r >= 0) close((int) r);
-    printf("open_path\t%ld\t%d\t\t\n", r, r < 0 ? errno : 0);
-    fflush(stdout);
-    return 0;
-}
-
-/* helper openat2-short PATH: an open_how too small for the kernel to use,
-   so its flags cannot be decoded by anyone, tracer included. */
-static int mode_openat2_short(int argc, char **argv) {
-    struct ouro_open_how how;
-    long r;
-    if (argc < 3) return 2;
-    how.flags = O_WRONLY | O_CREAT;
-    how.mode = 0600;
-    how.resolve = 0;
-    r = syscall(437, AT_FDCWD, argv[2], &how, (long) 8);
-    report("openat2_short", r, argv[2], "");
-    return 0;
-}
-
-/* helper shell-ops BASE: the same shape through coreutils, for bubblewrap. */
-static int mode_shell_ops(int argc, char **argv) {
-    char a[512], b[512], d[512];
-    long r;
-    if (argc < 3) return 2;
-    snprintf(a, sizeof a, "%s/a", argv[2]);
-    snprintf(b, sizeof b, "%s/b", argv[2]);
-    snprintf(d, sizeof d, "%s/d", argv[2]);
-    r = syscall(SYS_openat, AT_FDCWD, a, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    report("open_create", r, a, ""); if (r >= 0) close((int) r);
-    r = native_rename(a, b);
-    report("rename", r, a, b);
-    r = native_unlink(b);
-    report("unlink", r, b, "");
-    r = native_mkdir(d, 0700);
-    report("mkdir", r, d, "");
-    r = native_rmdir(d);
-    report("rmdir", r, d, "");
-    report("nspid", (long) getpid(), "", "");
-    return 0;
-}
-
-int main(int argc, char **argv) {
-    if (argc < 2) return 2;
-    if (!strcmp(argv[1], "launch")) return mode_launch(argc, argv);
-    if (!strcmp(argv[1], "closed-set")) return mode_closed_set(argc, argv);
-    if (!strcmp(argv[1], "exec-cases")) return mode_exec_cases(argc, argv);
-    if (!strcmp(argv[1], "fork-once")) return mode_fork_once();
-    if (!strcmp(argv[1], "threads")) return mode_threads(argc, argv);
-    if (!strcmp(argv[1], "rwm")) return mode_rwm(argc, argv);
-    if (!strcmp(argv[1], "storm")) return mode_storm(argc, argv);
-    if (!strcmp(argv[1], "fileops")) return mode_fileops(argc, argv);
-    if (!strcmp(argv[1], "denied")) return mode_denied(argc, argv);
-    if (!strcmp(argv[1], "raise")) return mode_raise();
-    if (!strcmp(argv[1], "open-path")) return mode_open_path(argc, argv);
-    if (!strcmp(argv[1], "openat2-short")) return mode_openat2_short(argc, argv);
-    if (!strcmp(argv[1], "shell-ops")) return mode_shell_ops(argc, argv);
-    return 2;
-}
-"##;
 
 mod common;
 
-// ---------------------------------------------------------------------------
-// One tracer at a time
-// ---------------------------------------------------------------------------
+use common::observer::{
+    Fixture, Observed, Report, Work, attach, collect, find_launcher, launch, native_expectation,
+    paths, serial, spawn_launcher,
+};
 
-/// Serialise the checks in this binary.
-///
-/// Every check here drives real processes. A tracer's thread owns
-/// `waitpid(-1, __WALL)` for the whole process, so while one is attached it
-/// reaps *every* child this process has, including the `gcc` a second check is
-/// waiting on and the launcher a second tracer just seized. Two of them at
-/// once do not race on any data structure; they steal each other's children,
-/// and the loser waits for a status that has already been collected.
-///
-/// That is a property of the binary, not of how it is invoked, so it is
-/// enforced here rather than by passing `--test-threads=1`: the checks are
-/// correct under any parallelism the runner chooses.
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // A check that panicked while holding this poisoned it. There is no shared
-    // state behind the lock — only the process's children, which that check no
-    // longer has — so the next one takes the guard and carries on.
-    SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-// ------------------------------------------------------------- scaffolding
-
-/// Report a missing precondition, in the words the rest of the suite uses.
-/// Under `OURO_CONFORMANCE=1` a skip is a failure, so a conformance run
-/// cannot pass by not running.
-fn skip(reason: &str) -> bool {
-    harness::skip_or_fail(reason);
-    false
-}
-
-fn tool(path: &str) -> bool {
-    Path::new(path).exists()
-}
-
-/// The shared build directory: the compiled helper and the filter file the
-/// launcher installs. Built once per test binary.
-fn build() -> Result<&'static (PathBuf, PathBuf), String> {
-    static BUILD: OnceLock<Result<(PathBuf, PathBuf), String>> = OnceLock::new();
-    BUILD
-        .get_or_init(|| {
-            let dir = std::env::temp_dir().join(format!("ouro-j1-observer-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-            let source = dir.join("helper.c");
-            std::fs::write(
-                &source,
-                format!("{}\n{HELPER_C}", include_str!("fixtures/native_fs.h")),
-            )
-            .map_err(|e| format!("write helper.c: {e}"))?;
-            let helper = dir.join("helper");
-            // `-B` beside the compiler, so building the fixture does not
-            // depend on `PATH`: `gcc` looks up `as` and `ld` there, and every
-            // other program these checks run is named absolutely for the same
-            // reason. A host that has the compiler but not its assembler
-            // still skips, with that as the reason.
-            let out = Command::new("/usr/bin/gcc")
-                .args(["-O1", "-Wall", "-pthread", "-B/usr/bin", "-o"])
-                .arg(&helper)
-                .arg(&source)
-                .output()
-                .map_err(|e| format!("run gcc: {e}"))?;
-            if !out.status.success() {
-                return Err(format!(
-                    "gcc failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                ));
-            }
-            // The launcher installs the bytes this crate produces. There is
-            // no second copy of the program anywhere in the tests.
-            let filter = dir.join("filter.bin");
-            std::fs::write(&filter, narrowing_filter_bytes())
-                .map_err(|e| format!("write filter.bin: {e}"))?;
-            Ok((helper, filter))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
-/// A per-test working directory, removed when the test ends.
-struct Work {
-    dir: PathBuf,
-    helper: PathBuf,
-    filter: PathBuf,
-}
-
-impl Work {
-    fn path(&self, name: &str) -> String {
-        self.dir.join(name).to_string_lossy().into_owned()
-    }
-
-    fn base(&self) -> String {
-        self.dir.to_string_lossy().into_owned()
-    }
-}
-
-impl Drop for Work {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
+/// The launcher and every fixture, in one binary.
+static FIXTURE: Fixture = Fixture {
+    name: "observer",
+    source: include_str!("fixtures/observer.c"),
+    pthread: true,
+    filter: narrowing_filter_bytes,
+};
 
 /// Prepare a test. `None` means the test skipped and must return.
 fn setup(name: &str, tools: &[&str]) -> Option<Work> {
-    for path in tools {
-        if !tool(path) {
-            skip(&format!("{name}: {path} is not installed"));
-            return None;
-        }
-    }
-    let (helper, filter) = match build() {
-        Ok(pair) => pair,
-        Err(err) => {
-            skip(&format!("{name}: the fixture could not be built: {err}"));
-            return None;
-        }
-    };
-    let dir = std::env::temp_dir().join(format!("ouro-j1-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create the work directory");
-    Some(Work {
-        dir,
-        helper: helper.clone(),
-        filter: filter.clone(),
-    })
-}
-
-/// A launcher that is running and blocked on its release pipe.
-struct Launched {
-    pid: libc::pid_t,
-    release: std::process::ChildStdin,
-    output: BufReader<std::process::ChildStdout>,
-}
-
-impl Launched {
-    /// Wait until the launcher has finished its own exec and installed the
-    /// filter. Seizing before that would attach in the middle of an exec
-    /// this test never asked about, and the kernel would rightly report that
-    /// transition too.
-    fn await_ready(&mut self) {
-        let mut line = String::new();
-        self.output
-            .read_line(&mut line)
-            .expect("the launcher announces itself");
-        let report = Report::parse(line.trim_end_matches('\n'))
-            .unwrap_or_else(|| panic!("unparseable readiness line {line:?}"));
-        assert_eq!(report.label, "ready", "unexpected first line {line:?}");
-    }
-
-    /// Let the launcher exec.
-    fn release(&mut self) {
-        self.release
-            .write_all(b"g")
-            .expect("write the release byte");
-        self.release.flush().expect("flush the release byte");
-    }
-
-    /// The rest of the fixture's stdout, as bytes. Used where the output
-    /// carries a pathname that is not required to be text.
-    fn raw_output(&mut self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut self.output, &mut buf);
-        buf
-    }
-
-    fn lines(&mut self) -> Vec<Report> {
-        let mut out = Vec::new();
-        let mut line = String::new();
-        while self.output.read_line(&mut line).unwrap_or(0) > 0 {
-            if let Some(report) = Report::parse(line.trim_end_matches('\n')) {
-                out.push(report);
-            }
-            line.clear();
-        }
-        out
-    }
-}
-
-impl Drop for Launched {
-    fn drop(&mut self) {
-        // The tracer thread owns every wait in this process, so the child is
-        // never waited on here. Killing is only a safety net for a test that
-        // failed before releasing.
-        // SAFETY: `kill` with a pid this test created and a valid signal.
-        unsafe { libc::kill(self.pid, libc::SIGKILL) };
-    }
-}
-
-/// One line of fixture output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Report {
-    label: String,
-    raw: i64,
-    errno: i32,
-    path: String,
-    path2: String,
-}
-
-impl Report {
-    fn parse(line: &str) -> Option<Report> {
-        let mut fields = line.split('\t');
-        let label = fields.next()?.to_string();
-        let raw = fields.next()?.parse().ok()?;
-        let errno = fields.next()?.parse().ok()?;
-        let path = fields.next().unwrap_or_default().to_string();
-        let path2 = fields.next().unwrap_or_default().to_string();
-        Some(Report {
-            label,
-            raw,
-            errno,
-            path,
-            path2,
-        })
-    }
-
-    /// The signed raw syscall return the kernel produced, which is what the
-    /// observer reports: the value on success, `-errno` on failure.
-    fn ret(&self) -> i64 {
-        if self.errno == 0 {
-            self.raw
-        } else {
-            -i64::from(self.errno)
-        }
-    }
-}
-
-/// Spawn the launcher with the fixture arguments it should exec into.
-fn launch(work: &Work, argv: &[&str]) -> Launched {
-    let mut command = Command::new(&work.helper);
-    command.arg("launch").arg(&work.filter).args(argv);
-    spawn_launcher(command)
-}
-
-fn spawn_launcher(mut command: Command) -> Launched {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn the launcher");
-    let pid = child.id() as libc::pid_t;
-    let release = child.stdin.take().expect("stdin pipe");
-    let output = BufReader::new(child.stdout.take().expect("stdout pipe"));
-    // `std::process::Child` never reaps on drop, and the tracer thread owns
-    // every wait in this process, so the handle itself is not kept.
-    drop(child);
-    let mut launched = Launched {
-        pid,
-        release,
-        output,
-    };
-    launched.await_ready();
-    launched
-}
-
-/// Everything the observer said, and its counters.
-struct Observed {
-    events: Vec<TracerEvent>,
-    summary: TracerSummary,
-}
-
-impl Observed {
-    fn syscalls(&self) -> Vec<&TracerEvent> {
-        self.events
-            .iter()
-            .filter(|event| matches!(event, TracerEvent::Syscall { .. }))
-            .collect()
-    }
-
-    fn exits(&self) -> Vec<(libc::pid_t, i32)> {
-        self.events
-            .iter()
-            .filter_map(|event| match event {
-                TracerEvent::Exit { pid, status, .. } => Some((*pid, *status)),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn execs(&self) -> Vec<libc::pid_t> {
-        self.events
-            .iter()
-            .filter_map(|event| match event {
-                TracerEvent::Exec { pid, .. } => Some(*pid),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn forks(&self) -> Vec<(libc::pid_t, libc::pid_t)> {
-        self.events
-            .iter()
-            .filter_map(|event| match event {
-                TracerEvent::Fork { parent, child, .. } => Some((*parent, *child)),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn gaps(&self) -> Vec<(GapReason, Option<u64>)> {
-        self.events
-            .iter()
-            .filter_map(|event| match event {
-                TracerEvent::Gap { reason, count, .. } => Some((*reason, *count)),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn untraced_exits(&self) -> Vec<libc::pid_t> {
-        self.events
-            .iter()
-            .filter_map(|event| match event {
-                TracerEvent::UntracedChildExit { pid, .. } => Some(*pid),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn finished(&self) -> bool {
-        self.events
-            .iter()
-            .any(|e| matches!(e, TracerEvent::Finished))
-    }
-}
-
-/// Read every event until `Finished`, then take the summary.
-fn collect(tracer: Tracer, budget: Duration) -> Observed {
-    let deadline = Instant::now() + budget;
-    let mut events = Vec::new();
-    loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        match tracer.events().recv_timeout(left) {
-            Ok(TracerEvent::Finished) => {
-                events.push(TracerEvent::Finished);
-                break;
-            }
-            Ok(event) => events.push(event),
-            Err(_) => break,
-        }
-    }
-    let summary = tracer.finish();
-    Observed { events, summary }
-}
-
-/// The primary and secondary path of a syscall event, as text.
-fn paths(event: &TracerEvent) -> (String, String) {
-    match event {
-        TracerEvent::Syscall { args, .. } => (
-            args.path
-                .as_ref()
-                .map(|p| String::from_utf8_lossy(&p.bytes).into_owned())
-                .unwrap_or_default(),
-            args.path2
-                .as_ref()
-                .map(|p| String::from_utf8_lossy(&p.bytes).into_owned())
-                .unwrap_or_default(),
-        ),
-        _ => (String::new(), String::new()),
-    }
+    FIXTURE.setup(name, tools)
 }
 
 fn describe(event: &TracerEvent) -> String {
@@ -850,50 +62,6 @@ fn describe(event: &TracerEvent) -> String {
             format!("{tid} {syscall} ({}) {a} {b} = {ret}", op.as_str())
         }
         other => format!("{other:?}"),
-    }
-}
-
-/// Attach, with a message that names what was refused.
-fn attach(pid: libc::pid_t, config: TracerConfig) -> Tracer {
-    match Tracer::attach(pid, config) {
-        Ok(tracer) => tracer,
-        Err(err) => panic!("attach to {pid} failed: {err}"),
-    }
-}
-
-/// Wait for the inside launcher to appear under `root` and return its host
-/// pid, validated by its argv.
-fn find_launcher(root: libc::pid_t, argv0: &[u8], budget: Duration) -> Option<libc::pid_t> {
-    let deadline = Instant::now() + budget;
-    while Instant::now() < deadline {
-        for pid in descendants(root) {
-            if let Some(argv) = cmdline(pid)
-                && argv.first().is_some_and(|first| first == argv0)
-            {
-                return Some(pid);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    None
-}
-
-/// Independently name the syscall emitted by the native C fixture macros.
-fn native_expectation(syscall: &str, op: ClosedOp) -> (&str, ClosedOp) {
-    if cfg!(target_arch = "aarch64") {
-        match syscall {
-            "mkdir" => ("mkdirat", op),
-            "rename" => ("renameat", op),
-            "link" => ("linkat", op),
-            "symlink" => ("symlinkat", op),
-            "unlink" => ("unlinkat", op),
-            "rmdir" => ("unlinkat", ClosedOp::Unlink),
-            "creat" | "open" => ("openat", op),
-            "mknod" => ("mknodat", op),
-            _ => (syscall, op),
-        }
-    } else {
-        (syscall, op)
     }
 }
 
@@ -953,8 +121,8 @@ fn o01_every_closed_set_result_matches_the_fixture() {
         // `ftruncate` mutates through a descriptor, like `write`, and is
         // named in §11.2 as excluded.
         ("ftruncate", None),
-        // J4 N8: the four rows below completed the one-to-one comparison of
-        // all 22 x86_64 rows.
+        // With the four rows below, every row of the native table is
+        // compared one to one.
         ("execve_enoent", Some(("execve", ClosedOp::Exec))),
         ("execveat_enoent", Some(("execveat", ClosedOp::Exec))),
         ("renameat", Some(("renameat", ClosedOp::Rename))),
@@ -1254,7 +422,10 @@ fn o01_through_bubblewrap_carries_host_pids_for_namespace_processes() {
         "the inside process exited 0"
     );
     assert!(
-        observed.untraced_exits().contains(&bwrap),
+        observed
+            .untraced_exits()
+            .iter()
+            .any(|(pid, _)| *pid == bwrap),
         "bubblewrap is a child of this process and never a tracee: {:?}",
         observed.untraced_exits()
     );
@@ -1322,9 +493,8 @@ fn o02_exec_success_and_failure_are_distinct_events() {
     );
     assert_eq!(observed.summary.exec_transitions, 2);
     // A confirmed transition names the image by the pathname snapshot of the
-    // entry it was paired with. Descendant argv digests stay null in J1, so
-    // this is the only name the consumer gets, and it is an argument
-    // snapshot rather than a resolved path (§11.3).
+    // entry it was paired with: an argument snapshot rather than a resolved
+    // path (§11.3).
     let images: Vec<String> = observed
         .events
         .iter()
@@ -1475,7 +645,7 @@ fn o02_a_non_leader_exec_keeps_the_birth_identity() {
         "{:?}",
         observed.summary.loss
     );
-    // J4 O02: the birth the events name is the one the process was attached
+    // O02: the birth the events name is the one the process was attached
     // with — the kernel gives the exec'ing worker the leader's start time —
     // on both transitions and on the exit.
     let attached = observed
@@ -1598,19 +768,19 @@ fn o03_queue_loss_is_bounded_counted_and_coalesced() {
         observed.summary.loss.queue_dropped > 0,
         "the queue was 64 events deep and 20,000 arrived"
     );
-    let queue_gaps: Vec<(GapReason, Option<u64>)> = observed
+    let queue_gaps: Vec<(GapReason, OpSet, Option<u64>)> = observed
         .gaps()
         .into_iter()
-        .filter(|(reason, _)| *reason == GapReason::QueueFull)
+        .filter(|(reason, _, _)| *reason == GapReason::QueueFull)
         .collect();
     assert!(!queue_gaps.is_empty(), "the loss must be reported as a gap");
-    for (_, count) in &queue_gaps {
+    for (_, _, count) in &queue_gaps {
         assert!(
             count.is_some(),
             "the count of dropped events is known exactly"
         );
     }
-    let counted: u64 = queue_gaps.iter().filter_map(|(_, c)| *c).sum();
+    let counted: u64 = queue_gaps.iter().filter_map(|(_, _, c)| *c).sum();
     assert_eq!(
         counted, observed.summary.loss.queue_dropped,
         "the gap accounts for every dropped event"
@@ -1806,10 +976,14 @@ fn o01_a_denied_write_keeps_its_own_operation_and_errno() {
     );
 }
 
-/// The J0 file workload again, under the productized tracer, so the cost
-/// measured in J0 can be compared with the cost of the module that shipped.
+/// The file workload the observer's cost is measured on, under the shipped
+/// tracer: every open, rename and unlink is observed exactly once, with no
+/// loss. Its cost, traced and untraced, is printed beside the ptrace spike's
+/// on the reference host for comparison, and not asserted: wall-clock time
+/// depends on the host, and the perf gate (`cargo xtask perf`) is where cost
+/// is judged.
 #[test]
-fn perf_the_j0_file_workload_costs_what_the_spike_cost() {
+fn the_file_workload_is_observed_call_for_call() {
     let _serial = serial();
     let Some(work) = setup("perf", &["/usr/bin/gcc"]) else {
         return;
@@ -1836,7 +1010,7 @@ fn perf_the_j0_file_workload_costs_what_the_spike_cost() {
 
     println!(
         "perf fileops rounds={ROUNDS}: untraced={:.3}s traced={:.3}s ratio={:.1}x \
-         (J0 spike narrow median 0.81s, untraced 0.15s)",
+         (the ptrace spike on the reference host: narrow median 0.81s, untraced 0.15s)",
         untraced.as_secs_f64(),
         traced.as_secs_f64(),
         traced.as_secs_f64() / untraced.as_secs_f64().max(0.001),
@@ -1942,13 +1116,8 @@ fn o06_a_path_is_bytes_and_a_short_snapshot_declares_itself_incomplete() {
     let arg = OsString::from_vec(raw.clone());
 
     let open_path = |config: TracerConfig| {
-        let mut command = Command::new(&work.helper);
-        command
-            .arg("launch")
-            .arg(&work.filter)
-            .arg(&work.helper)
-            .arg("open-path")
-            .arg(&arg);
+        let mut command = work.launcher();
+        command.arg(&work.helper).arg("open-path").arg(&arg);
         let mut run = spawn_launcher(command);
         let pid = run.pid;
         let tracer = attach(pid, config);
@@ -2170,7 +1339,7 @@ fn o03_the_in_flight_bound_refuses_entries_and_reports_no_results() {
         observed
             .gaps()
             .iter()
-            .any(|(reason, _)| *reason == GapReason::InflightExhausted),
+            .any(|(reason, _, _)| *reason == GapReason::InflightExhausted),
         "the refusals are reported as gaps: {:?}",
         observed.gaps()
     );

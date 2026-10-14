@@ -9,6 +9,7 @@
   "external_custody": false,
   "local_consistency": true,
   "manifest_digest": "sha256:b9762462ff2059b4eef6b6351085c530775967fe9f93dcdffd6b6d3d6dbdcd02",
+  "projection_rule": 2,
   "run_id": "run_2d907e8d3d464749940ba1d279460857",
   "schema": "ouro.ledger.bundle-verification/1",
   "snapshot": {

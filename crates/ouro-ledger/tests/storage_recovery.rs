@@ -9,7 +9,9 @@ use std::{
 };
 
 use ouro_ledger::{
-    protocol::{AppendReceipt, Peer, ReadFilter, ReadRequest, ReadSelector, RunRecord},
+    protocol::{
+        AppendReceipt, MAX_FRAME_BYTES, Peer, ReadFilter, ReadRequest, ReadSelector, RunRecord,
+    },
     store::Store,
 };
 use ouro_records::canonical::{sha256_prefixed, to_jcs};
@@ -24,6 +26,7 @@ fn first_run_consistent(store: &Store) -> bool {
 
 fn peer() -> Peer {
     Peer {
+        // SAFETY: geteuid takes no arguments and cannot fail.
         uid: unsafe { libc::geteuid() },
         pid: std::process::id(),
         birth: "storage-recovery-fixture".into(),
@@ -417,9 +420,93 @@ fn durable_cursor_refuses_changed_checkpoint_and_replaced_canonical_inode() {
         }
 
         let mut recovered = Store::open(&fixture.data).unwrap();
-        assert!(recovered.read(&request).is_err());
+        let error = recovered
+            .read(&request)
+            .expect_err("a durable cursor over changed state is refused")
+            .to_string();
+        let expected = if replace_canonical {
+            "reader canonical snapshot is corrupt: identity or length changed"
+        } else {
+            "reader checkpoint is corrupt or unavailable"
+        };
+        assert!(error.contains(expected), "{error}");
         assert!(first_run_consistent(&recovered));
     }
+}
+
+/// A store with three acknowledged notes and a read cursor after the first
+/// record, closed for damage.
+fn snapshot_fixture() -> (Fixture, ReadRequest) {
+    let (fixture, mut store) = Fixture::new();
+    for key in ["anchor-one", "anchor-two", "anchor-three"] {
+        fixture.append_large(&mut store, key);
+    }
+    let mut request = fixture.read_request();
+    request.cursor = store.read(&request).unwrap().next_cursor;
+    assert!(request.cursor.is_some());
+    (fixture, request)
+}
+
+#[test]
+fn an_oversized_canonical_frame_is_corrupt_not_incomplete() {
+    let (fixture, store) = Fixture::new();
+    drop(store);
+    let mut bytes = fs::read(fixture.stream()).unwrap();
+    bytes.extend(std::iter::repeat_n(b'x', MAX_FRAME_BYTES + 1));
+    synced_replace(&fixture.stream(), &bytes);
+    let mut store = Store::open(&fixture.data).unwrap();
+    let report = &store.verify_page(None, None, 1).unwrap().reports[0];
+    assert_eq!(
+        report.problems,
+        ["oversized canonical frame; bytes retained"]
+    );
+    let page = store.read(&fixture.read_request()).unwrap();
+    assert_eq!(page.stream_status, "corrupt");
+}
+
+#[test]
+fn history_lost_below_its_manifest_anchor_refuses_every_snapshot() {
+    let (fixture, mut request) = snapshot_fixture();
+    // Drop the last acknowledged frame; the manifest still anchors it.
+    let bytes = fs::read(fixture.stream()).unwrap();
+    let last = bytes[..bytes.len() - 1]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .unwrap();
+    synced_replace(&fixture.stream(), &bytes[..=last]);
+    let mut store = Store::open(&fixture.data).unwrap();
+    let report = &store.verify_page(None, None, 1).unwrap().reports[0];
+    assert_eq!(
+        report.problems,
+        ["canonical stream truncated before its segment manifest anchor"]
+    );
+    // Without a durable anchor even the surviving prefix cannot be resumed.
+    let error = store
+        .read(&request)
+        .expect_err("no resume without an anchor")
+        .to_string();
+    assert!(
+        error.contains("canonical snapshot was truncated"),
+        "{error}"
+    );
+    request.cursor = None;
+    assert_eq!(store.read(&request).unwrap().stream_status, "corrupt");
+}
+
+#[test]
+fn an_interrupted_tail_keeps_the_anchored_prefix_resumable() {
+    let (fixture, mut request) = snapshot_fixture();
+    let mut bytes = fs::read(fixture.stream()).unwrap();
+    bytes.extend_from_slice(b"{\"torn\":");
+    synced_replace(&fixture.stream(), &bytes);
+    let mut store = Store::open(&fixture.data).unwrap();
+    // The validated prefix keeps its durable anchors: the snapshot resumes.
+    let resumed = store.read(&request).unwrap();
+    assert_eq!(resumed.snapshot.head_seq, 5);
+    request.cursor = None;
+    let fresh = store.read(&request).unwrap();
+    assert!(!fresh.local_consistency);
+    assert_eq!(fresh.stream_status, "incomplete");
 }
 
 #[test]

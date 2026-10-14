@@ -5,9 +5,13 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use serde::Deserialize as _;
+
 use super::host::{LeafRecord, OwnerRecord};
 use super::leaf_name_of;
-use crate::records::SCHEMA_RECEIPT;
+use crate::cleanup;
+use crate::lifecycle::TreeEnd;
+use crate::records::{Phase, SCHEMA_RECEIPT};
 use crate::state;
 
 /// What `gc` needs from `jail-state.json`.
@@ -128,13 +132,10 @@ pub enum LeafSource {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ReceiptView {
     /// The lifecycle phase.
-    pub phase: String,
-    /// `lifetime.tree_empty`: `Some(true)` only after a verified tree end.
-    pub tree_empty: Option<bool>,
-    /// `lifetime.integrity`.
-    pub integrity: String,
-    /// `lifetime.boundary`: `pending` when no boundary ever existed.
-    pub boundary: String,
+    pub phase: Phase,
+    /// What `lifetime.integrity`, `boundary` and `tree_empty` say about the
+    /// tree's end.
+    pub tree_end: TreeEnd,
     /// The boot the recorded process identity names, when it names one.
     pub boot_id: Option<String>,
     /// The execution leaf from `lifetime.native.details.execution_cgroup`.
@@ -149,12 +150,7 @@ impl ReceiptView {
     /// integrity.
     #[must_use]
     pub fn proves_tree_end(&self) -> bool {
-        self.integrity != "lost"
-            && match self.phase.as_str() {
-                "settled" => self.tree_empty == Some(true),
-                "refused" => self.tree_empty == Some(true) || self.boundary == "pending",
-                _ => false,
-            }
+        cleanup::wait_reason(self.phase, self.tree_end).is_none()
     }
 }
 
@@ -289,10 +285,8 @@ pub fn parse_receipt(bytes: &[u8], id: &str) -> Result<ReceiptView, String> {
     }
     let phase = receipt
         .get("phase")
-        .and_then(Value::as_str)
-        .filter(|phase| ["prepared", "enforced", "settled", "refused"].contains(phase))
-        .ok_or("it has no lifecycle phase")?
-        .to_owned();
+        .and_then(|phase| Phase::deserialize(phase).ok())
+        .ok_or("it has no lifecycle phase")?;
     let lifetime = receipt.get("lifetime").unwrap_or(&Value::Null);
     let native = lifetime.get("native").unwrap_or(&Value::Null);
     let leaf = if native.get("os").and_then(Value::as_str) == Some("linux") {
@@ -318,19 +312,14 @@ pub fn parse_receipt(bytes: &[u8], id: &str) -> Result<ReceiptView, String> {
     } else {
         LeafSource::NotRecorded("the receipt records no Linux lifetime details".to_owned())
     };
+    let text = |key: &str| lifetime.get(key).and_then(Value::as_str).unwrap_or("");
     Ok(ReceiptView {
         phase,
-        tree_empty: lifetime.get("tree_empty").and_then(Value::as_bool),
-        integrity: lifetime
-            .get("integrity")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-        boundary: lifetime
-            .get("boundary")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
+        tree_end: TreeEnd::from_text(
+            text("integrity"),
+            text("boundary"),
+            lifetime.get("tree_empty").and_then(Value::as_bool),
+        ),
         boot_id: receipt
             .pointer("/process/identity/value/boot_id")
             .and_then(Value::as_str)
@@ -430,6 +419,51 @@ mod tests {
         let mut phaseless = receipt;
         phaseless["phase"] = serde_json::json!("running");
         assert!(parse_receipt(&serde_json::to_vec(&phaseless).unwrap(), id).is_err());
+    }
+
+    /// The receipt's lifetime facts are parsed once, and a tree end is
+    /// proved exactly where the vendor-state cleanup accepts it.
+    #[test]
+    fn a_receipt_proves_its_tree_end_by_the_cleanup_rule() {
+        let id = "att_00000000-0000-4000-8000-000000000001";
+        let view = |phase: &str, lifetime: Value| {
+            let receipt = serde_json::json!({
+                "schema": SCHEMA_RECEIPT, "attempt_id": id, "phase": phase,
+                "lifetime": lifetime,
+            });
+            parse_receipt(&serde_json::to_vec(&receipt).unwrap(), id).unwrap()
+        };
+        let lifetime = |integrity: &str, boundary: &str, tree_empty: Value| {
+            serde_json::json!({"integrity": integrity, "boundary": boundary,
+                "tree_empty": tree_empty})
+        };
+        let refused_before_any_boundary =
+            view("refused", lifetime("pending", "pending", Value::Null));
+        assert_eq!(refused_before_any_boundary.phase, Phase::Refused);
+        assert!(refused_before_any_boundary.tree_end.no_boundary);
+        assert!(refused_before_any_boundary.proves_tree_end());
+        let settled = view(
+            "settled",
+            lifetime("verified", "pid_namespace", Value::Bool(true)),
+        );
+        assert!(settled.tree_end.verified_empty && settled.proves_tree_end());
+        let lost = view(
+            "settled",
+            lifetime("lost", "pid_namespace", Value::Bool(true)),
+        );
+        assert!(lost.tree_end.integrity_lost && !lost.proves_tree_end());
+        let unverified = view(
+            "enforced",
+            lifetime("verified", "pid_namespace", Value::Null),
+        );
+        assert!(!unverified.proves_tree_end());
+        let silent = view("refused", Value::Null);
+        assert_eq!(
+            silent.tree_end,
+            TreeEnd::from_text("", "", None),
+            "a receipt that says nothing proves nothing"
+        );
+        assert!(!silent.proves_tree_end());
     }
 
     #[test]

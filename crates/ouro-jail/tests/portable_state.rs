@@ -12,17 +12,14 @@
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::process::Command;
 
 use ouro_jail::records::ErrorCode;
 use ouro_jail::state::{self, AttemptDir, AttemptId, Lease, TempWrite};
 
 mod common;
 
-/// The environment variable that turns the child helper below into a prober.
+/// The environment variable that names the lock the child helper probes.
 const LOCK_PROBE: &str = "OURO_TEST_LOCK_PROBE";
-/// The exit status the child uses when the lease is already held.
-const BUSY: i32 = 3;
 
 fn private_dir(root: &Path, name: &str) -> std::path::PathBuf {
     let path = root.join(name);
@@ -81,38 +78,41 @@ fn the_lease_is_exclusive_across_processes() {
     let lock = data.join("jail.lock");
 
     let probe = || {
-        let status = Command::new(std::env::current_exe().expect("the test binary"))
-            .args(["--ignored", "--exact", "lock_probe_child_helper"])
-            .env(LOCK_PROBE, &lock)
-            .status()
-            .expect("the child runs");
-        status.code().expect("the child exits normally")
+        let output =
+            common::rerun_self("lock_probe_child_helper", &[(LOCK_PROBE, lock.as_os_str())]);
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix("LEASE "))
+            .unwrap_or_else(|| panic!("the helper reported no lease: {output}"))
+            .to_owned()
     };
 
     let held = Lease::acquire(&lock)
         .expect("the lock file opens")
         .expect("the lease is free");
-    assert_eq!(probe(), BUSY, "a second process cannot take a held lease");
+    assert_eq!(probe(), "busy", "a second process cannot take a held lease");
     drop(held);
-    assert_eq!(probe(), 0, "the lease is released when it is dropped");
+    assert_eq!(probe(), "taken", "the lease is released when it is dropped");
 }
 
-/// The child half of [`the_lease_is_exclusive_across_processes`].
+/// The child half of [`the_lease_is_exclusive_across_processes`]: reports
+/// whether this second process could take the lease.
 ///
-/// Ignored so it never runs in an ordinary pass; the parent invokes it by name
-/// with `--ignored`.
+/// Ignored so it never runs in an ordinary pass; the parent runs it by name.
 #[test]
 #[ignore = "child helper invoked by the_lease_is_exclusive_across_processes"]
 fn lock_probe_child_helper() {
-    let Some(path) = std::env::var_os(LOCK_PROBE) else {
-        panic!("the helper needs {LOCK_PROBE}");
+    if !common::running_helper("lock_probe_child_helper") {
+        return;
+    }
+    let path = std::env::var_os(LOCK_PROBE).expect("the parent names the lock");
+    let lease = Lease::acquire(Path::new(&path));
+    let verdict = match &lease {
+        Ok(Some(_)) => "taken",
+        Ok(None) => "busy",
+        Err(error) => panic!("the lock could not be probed: {error}"),
     };
-    let code = match Lease::acquire(Path::new(&path)) {
-        Ok(Some(_lease)) => 0,
-        Ok(None) => BUSY,
-        Err(_) => 4,
-    };
-    std::process::exit(code);
+    println!("LEASE {verdict}");
 }
 
 #[test]

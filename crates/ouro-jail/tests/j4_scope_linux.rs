@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ouro_fixture::harness::{self, Jail, Run};
-use ouro_jail::platform::linux::{cgroup, probe};
+use ouro_jail::platform::linux::cgroup;
 use serde_json::Value;
 
 mod common;
@@ -32,25 +32,6 @@ mod common;
 const SEAM: &str = "OURO_JAIL_TEST_SUPERVISOR_SCOPE";
 /// The first component of every unit the step asks for.
 const UNIT_PREFIX: &str = "ouro-jail-";
-
-fn live() -> bool {
-    if !common::live() {
-        return false;
-    }
-    let leaf = probe::run_one(
-        "cgroup_delegated_leaf",
-        &harness::jail_path(),
-        Path::new("bwrap"),
-    );
-    if leaf.status != probe::ProbeStatus::Available {
-        harness::skip_or_fail(&format!(
-            "the scope tests run inside a delegated user scope with a usable leaf: {}",
-            leaf.evidence
-        ));
-        return false;
-    }
-    true
-}
 
 fn uid() -> u32 {
     // SAFETY: getuid takes no arguments and cannot fail.
@@ -99,26 +80,6 @@ fn jail(profile: &str, seam: Option<&str>, target: &[&str]) -> Jail {
         None => jail.env_remove(SEAM),
     };
     jail.receipt().target(target)
-}
-
-/// Every receipt the run left, each checked against the schema and the
-/// semantic rules, and the settled one.
-fn settled(run: &Run) -> Value {
-    for receipt in run.receipts() {
-        let _ = common::checked_receipt(receipt);
-    }
-    assert!(
-        run.receipt_errors().is_empty(),
-        "{:?}",
-        run.receipt_errors()
-    );
-    run.receipt_phase("settled").unwrap_or_else(|| {
-        panic!(
-            "a settled receipt (exit {:?}): {}",
-            run.code(),
-            run.stderr_text()
-        )
-    })
 }
 
 fn details(receipt: &Value) -> &Value {
@@ -201,7 +162,7 @@ fn last_component(cgroup: &str) -> &str {
 /// `entered` with the unit; and the scope is gone once the supervisor is.
 #[test]
 fn j4_scope_the_supervisor_enters_its_own_scope_and_its_attempt_gets_a_leaf() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let ours = cgroup_of(std::process::id()).expect("the test's own cgroup");
@@ -248,7 +209,7 @@ fn j4_scope_the_supervisor_enters_its_own_scope_and_its_attempt_gets_a_leaf() {
         "scoped\n",
         "the target's stdout still reaches the supervisor's own stdout"
     );
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert_leaf(&receipt);
     let record = scope_record(&run);
     assert_eq!(record["state"], "entered", "{record:#}");
@@ -276,14 +237,14 @@ fn j4_scope_the_supervisor_enters_its_own_scope_and_its_attempt_gets_a_leaf() {
 /// `none`'s boundary records the step as well (the uncontained receipt).
 #[test]
 fn j4_scope_the_uncontained_boundary_records_the_step() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let run = jail("none", Some("assume-outside"), &["/usr/bin/true"])
         .run()
         .expect("the jail runs");
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     assert!(
         details(&receipt)["execution_cgroup"]["path"].is_string(),
         "{receipt:#}"
@@ -306,7 +267,7 @@ fn j4_scope_the_uncontained_boundary_records_the_step() {
 /// supervisor stays where it was started.
 #[test]
 fn j4_scope_already_delegated_takes_no_action() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let ours = cgroup_of(std::process::id()).expect("the test's own cgroup");
@@ -323,7 +284,7 @@ fn j4_scope_already_delegated_takes_no_action() {
         "the supervisor moved"
     );
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    assert_leaf(&settled(&run));
+    assert_leaf(&common::settled(&run));
     let record = scope_record(&run);
     assert_eq!(
         record,
@@ -356,7 +317,7 @@ fn assert_unchanged(seam: &str, reason_code: &str, requested: bool) -> Value {
     );
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
     assert_eq!(run.stdout_text(), "same\n");
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     // Inside the conformance scope the leaf is still there: the step's
     // failure did not change what the attempt got.
     assert_leaf(&receipt);
@@ -385,7 +346,7 @@ fn assert_unchanged(seam: &str, reason_code: &str, requested: bool) -> Value {
 /// No user bus: the call fails, the reason names `busctl`'s own message.
 #[test]
 fn j4_scope_an_unreachable_bus_leaves_the_attempt_unchanged() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let record = assert_unchanged("assume-outside-no-bus", "scope_call_failed", true);
@@ -400,7 +361,7 @@ fn j4_scope_an_unreachable_bus_leaves_the_attempt_unchanged() {
 /// No `busctl`: nothing is run and the attempt is the same.
 #[test]
 fn j4_scope_a_missing_busctl_leaves_the_attempt_unchanged() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     assert_unchanged("assume-outside-no-busctl", "busctl_missing", false);
@@ -412,7 +373,7 @@ fn j4_scope_a_missing_busctl_leaves_the_attempt_unchanged() {
 /// does not).
 #[test]
 fn j4_scope_without_lingering_the_supervisor_stays_put() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let record = assert_unchanged("assume-outside-no-linger", "no_linger", false);
@@ -423,14 +384,14 @@ fn j4_scope_without_lingering_the_supervisor_stays_put() {
 /// A seam value the product does not know is ignored and says so.
 #[test]
 fn j4_scope_an_unknown_seam_value_is_ignored_and_recorded() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let run = jail("tool", Some("outside"), &["/usr/bin/true"])
         .run()
         .expect("the jail runs");
     assert_eq!(run.code(), Some(0), "{}", run.stderr_text());
-    let receipt = settled(&run);
+    let receipt = common::settled(&run);
     let record = scope_record(&run);
     assert_eq!(record["state"], "already_delegated", "{record:#}");
     assert!(
@@ -479,7 +440,7 @@ fn row<'a>(report: &'a Value, name: &str) -> &'a Value {
 /// `supervisor_scope` row and the full record.
 #[test]
 fn j4_scope_doctor_reports_the_step() {
-    if !live() {
+    if !common::delegated_leaf() {
         return;
     }
     let (inside, inside_code) = doctor(None);
