@@ -68,7 +68,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
@@ -477,7 +476,7 @@ pub(super) fn run(
         epoch_boottime_ns,
         Box::new(LiveProc),
     );
-    match seize_and_confirm(launcher) {
+    match seize_and_confirm(launcher, ensure_wake_handler) {
         Ok(()) => {
             if ready.send(Ok(())).is_err() {
                 // The caller went away between spawning and confirming.
@@ -510,19 +509,34 @@ pub(super) fn run(
 }
 
 /// Install the handler that lets `finish` interrupt a blocking `waitpid`.
-/// Process-global and installed once; the handler does nothing at all.
-fn ensure_wake_handler() -> bool {
-    static INSTALLED: OnceLock<bool> = OnceLock::new();
-    *INSTALLED.get_or_init(|| sys::install_wake_handler().is_ok())
+/// Process-global; the handler does nothing at all, so installing it again
+/// is harmless, and a failed install is retried by the next attach rather
+/// than remembered.
+fn ensure_wake_handler() -> std::io::Result<()> {
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if !INSTALLED.load(Ordering::Acquire) {
+        sys::install_wake_handler()?;
+        INSTALLED.store(true, Ordering::Release);
+    }
+    Ok(())
 }
 
-fn seize_and_confirm(launcher: pid_t) -> Result<(), TracerError> {
+/// Seize `launcher` once the wake handler is in place. Shutdown interrupts
+/// the tracer thread's `waitpid` with the wake signal every few
+/// milliseconds; with no handler that signal's default action would end the
+/// whole supervisor, so no tracee is taken on without one.
+fn seize_and_confirm(
+    launcher: pid_t,
+    wake_handler: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), TracerError> {
     // J5-D: the one statement of which architecture the tables cover, so
     // the tracer refuses exactly where `doctor` reports it unsupported.
     if !seccomp::tables_cover(std::env::consts::ARCH) {
         return Err(TracerError::UnsupportedArch);
     }
-    ensure_wake_handler();
+    wake_handler().map_err(|err| TracerError::WakeHandler {
+        errno: err.raw_os_error().unwrap_or(0),
+    })?;
     sys::seize(launcher, sys::SEIZE_OPTIONS).map_err(|err| TracerError::Seize {
         pid: launcher,
         errno: err.raw_os_error().unwrap_or(0),
@@ -3018,6 +3032,29 @@ mod tests {
     use super::super::EVENT_FIXED_BYTES;
     use super::sockaddr_len;
     use super::*;
+
+    /// Shutdown signals the tracer thread with the wake signal, so a tracer
+    /// whose handler could not be installed must refuse before it seizes
+    /// anything, rather than attach and later kill the supervisor.
+    #[test]
+    fn no_tracee_is_seized_without_the_wake_handler() {
+        let refused = || Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        // pid 0 is never a task: a seize would fail with its own error.
+        match seize_and_confirm(0, refused) {
+            Err(TracerError::UnsupportedArch)
+                if !cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) => {}
+            other => assert_eq!(
+                other,
+                Err(TracerError::WakeHandler {
+                    errno: libc::EINVAL
+                })
+            ),
+        }
+        assert!(matches!(
+            seize_and_confirm(0, || Ok(())),
+            Err(TracerError::Seize { pid: 0, .. } | TracerError::UnsupportedArch)
+        ));
+    }
 
     /// A session whose consumer never reads: the handoff holds one event.
     fn stalled_session() -> (Session, std::sync::mpsc::Receiver<TracerEvent>) {

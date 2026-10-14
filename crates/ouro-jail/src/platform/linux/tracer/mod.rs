@@ -1020,8 +1020,9 @@ pub struct TracerSummary {
 /// Why a tracer could not be attached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TracerError {
-    /// This module's syscall table is x86_64's. On another architecture it
-    /// would label calls it cannot name, so it refuses instead.
+    /// This module has syscall tables for x86_64 and aarch64 only. On
+    /// another architecture it would label calls it cannot name, so it
+    /// refuses instead.
     UnsupportedArch,
     /// `PTRACE_SEIZE` failed. `ESRCH` means no such task; `EPERM` means the
     /// Yama scope or an LSM refused, usually because the target is not a
@@ -1032,6 +1033,11 @@ pub enum TracerError {
     SeizeUnconfirmed { pid: pid_t },
     /// Something else is already tracing the target.
     SeizedByAnotherThread { pid: pid_t, tracer: pid_t },
+    /// The handler for the signal that interrupts the tracer thread's
+    /// `waitpid` could not be installed. Without it, stopping the tracer
+    /// would deliver that signal unhandled and end the supervisor, so
+    /// nothing is seized.
+    WakeHandler { errno: i32 },
     /// The tracer thread could not be spawned.
     ThreadSpawn { message: String },
 }
@@ -1056,6 +1062,11 @@ impl fmt::Display for TracerError {
             TracerError::SeizedByAnotherThread { pid, tracer } => {
                 write!(f, "pid {pid} is already traced by task {tracer}")
             }
+            TracerError::WakeHandler { errno } => write!(
+                f,
+                "the tracer's wake-signal handler could not be installed: {}",
+                std::io::Error::from_raw_os_error(*errno)
+            ),
             TracerError::ThreadSpawn { message } => {
                 write!(f, "the tracer thread could not be spawned: {message}")
             }
