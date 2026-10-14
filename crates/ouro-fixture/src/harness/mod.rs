@@ -647,6 +647,10 @@ impl Jail {
         let stderr = child.stderr.take().map(|pipe| drain_thread(pipe, deadline));
 
         Ok(Spawned {
+            group: GroupGuard {
+                pid: libc::pid_t::try_from(child.id()).map_err(io::Error::other)?,
+                armed: true,
+            },
             deadline,
             child,
             control,
@@ -742,6 +746,9 @@ fn drain_thread<R: std::io::Read + AsRawFd + Send + 'static>(
 
 /// A running jail with its channels attached.
 pub struct Spawned {
+    // Declared first, so it is dropped first: the jail's group is gone
+    // before its private state directory (`root`) is removed.
+    group: GroupGuard,
     deadline: std::time::Instant,
     child: Child,
     control: Option<LineReader>,
@@ -754,6 +761,41 @@ pub struct Spawned {
     root: TempDir,
     receipt: Option<PathBuf>,
     control_seen: Vec<Value>,
+}
+
+/// The jail's process group (it is spawned as the leader of its own), killed
+/// and reaped when the test drops the run without `wait` reaping it: a test
+/// that panics would otherwise leave the jail and its children running over
+/// a removed state directory.
+struct GroupGuard {
+    pid: libc::pid_t,
+    /// False once the leader was reaped: its pid, and so its group id, may
+    /// then belong to another process.
+    armed: bool,
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // SAFETY: plain integers. The leader is unreaped (`armed`), so the
+        // group id is still this run's and cannot name another group.
+        unsafe { libc::kill(-self.pid, libc::SIGKILL) };
+        // Reap the leader, with a bound: SIGKILL cannot be caught, so it
+        // ends promptly unless the kernel holds it in uninterruptible sleep.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut status = 0;
+            // SAFETY: `status` is a live int; `pid` is this process's
+            // unreaped child (std's `Child` never reaps on drop).
+            let reaped = unsafe { libc::waitpid(self.pid, &raw mut status, libc::WNOHANG) };
+            if reaped != 0 || std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 impl Spawned {
@@ -805,19 +847,11 @@ impl Spawned {
 
         let status = loop {
             if let Some(status) = self.child.try_wait()? {
+                self.group.armed = false;
                 break status;
             }
             if std::time::Instant::now() >= self.deadline {
-                // SAFETY: this is the process group created for our unreaped child.
-                unsafe {
-                    libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
-                }
-                let _ = self.child.kill();
-                let reap = std::time::Instant::now() + Duration::from_secs(1);
-                while matches!(self.child.try_wait(), Ok(None)) && std::time::Instant::now() < reap
-                {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
+                // The guard kills the group and reaps the leader.
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "jail exceeded harness deadline",
@@ -1010,8 +1044,27 @@ impl Run {
     }
 
     /// The fixture's own report lines, parsed from stdout.
+    ///
+    /// # Panics
+    /// When a line is not JSON: the fixture prints nothing else, so such a
+    /// line is output this test did not expect, and dropping it would let
+    /// an assertion that some line is absent pass without reading it. A
+    /// test whose target prints other text says so with
+    /// [`Run::fixture_lines_lossy`].
     #[must_use]
     pub fn fixture_lines(&self) -> Vec<Value> {
+        report_lines(&self.stdout).unwrap_or_else(|line| {
+            panic!(
+                "stdout holds a line that is not a fixture report: {line:?}; \
+                 use fixture_lines_lossy if the target prints other text"
+            )
+        })
+    }
+
+    /// The report lines among stdout's lines, skipping any that are not
+    /// JSON. For a target that prints other text beside the fixture's.
+    #[must_use]
+    pub fn fixture_lines_lossy(&self) -> Vec<Value> {
         self.stdout
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
@@ -1247,6 +1300,18 @@ pub fn trace_guard(
             .collect::<Vec<_>>()
             .join("; ")
     ))
+}
+
+/// Every non-empty line of `stdout` as JSON, or the first that is not.
+fn report_lines(stdout: &[u8]) -> Result<Vec<Value>, String> {
+    stdout
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            serde_json::from_slice::<Value>(l)
+                .map_err(|_| String::from_utf8_lossy(l).chars().take(200).collect())
+        })
+        .collect()
 }
 
 /// A receipt file's one JSON document (jail-v1 §7: `jail.json` is the
@@ -1561,6 +1626,66 @@ mod tests {
         let b = Jail::with_program("/bin/true").unwrap();
         assert_ne!(a.data_dir(), b.data_dir());
         assert!(a.data_dir().is_dir() && a.config_dir().is_dir());
+    }
+
+    /// Review FX11: a run dropped without `wait` (a panicking test) takes
+    /// its jail's whole process group with it.
+    #[test]
+    fn dropping_a_spawned_run_kills_its_process_group() {
+        let dir = TempDir::new("ouro-harness-drop").unwrap();
+        let pid_file = dir.path().join("grandchild");
+        let spawned = Jail::with_program("/bin/sh")
+            .expect("a private harness root")
+            .args([
+                "-c",
+                &format!("sleep 30 & echo $! > {}; wait", pid_file.display()),
+            ])
+            .spawn()
+            .expect("the shell starts");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let grandchild: libc::pid_t = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|t| t.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(std::time::Instant::now() < deadline, "no grandchild");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        drop(spawned);
+        // The grandchild was in the group: it was killed. It is not ours to
+        // reap, so wait until it is gone or a zombie of its reaper.
+        let gone = |pid: libc::pid_t| {
+            // SAFETY: signal 0 only checks existence.
+            let exists = unsafe { libc::kill(pid, 0) } == 0;
+            !exists
+                || std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .is_ok_and(|stat| stat.contains(") Z "))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !gone(grandchild) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the group outlived its run"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Review FX10: a line that is not a report is not silently dropped.
+    #[test]
+    fn report_lines_refuse_a_line_that_is_not_json() {
+        assert_eq!(
+            report_lines(b"{\"op\":\"a\"}\n\n{\"op\":\"b\"}\n")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            report_lines(b"{\"op\":\"a\"}\nWARNING: something\n").unwrap_err(),
+            "WARNING: something"
+        );
     }
 
     #[test]
