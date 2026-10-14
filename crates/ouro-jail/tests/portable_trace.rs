@@ -10,7 +10,7 @@
 //! back-pressure paths.
 
 use std::io::Read as _;
-use std::os::fd::IntoRawFd as _;
+use std::os::fd::OwnedFd;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -46,10 +46,7 @@ fn blocked_reader() -> (Child, FdSink) {
             .stdin(Stdio::piped()),
     );
     let stdin = child.stdin.take().expect("a piped stdin");
-    let fd = stdin.into_raw_fd();
-    // SAFETY: the descriptor came from this process's own `Stdio::piped`
-    // handle, which was just given up, so the sink owns it exclusively.
-    let sink = unsafe { FdSink::from_raw_fd(fd) }.expect("the pipe can be made nonblocking");
+    let sink = FdSink::new(OwnedFd::from(stdin)).expect("the pipe can be made nonblocking");
     (child, sink)
 }
 
@@ -66,9 +63,7 @@ fn frames_reach_a_draining_reader_in_order_and_exactly_once() {
             .stdout(Stdio::piped()),
     );
     let stdin = child.stdin.take().expect("a piped stdin");
-    let fd = stdin.into_raw_fd();
-    // SAFETY: as above, the sink is the only owner of this descriptor.
-    let mut sink = unsafe { FdSink::from_raw_fd(fd) }.expect("nonblocking");
+    let mut sink = FdSink::new(OwnedFd::from(stdin)).expect("nonblocking");
 
     let mut expected = Vec::new();
     // Stay under the pipe capacity in both directions: `cat` is not drained
@@ -183,9 +178,7 @@ fn a_closed_reader_is_evidence_loss_rather_than_a_signal() {
             .stdin(Stdio::piped()),
     );
     let stdin = child.stdin.take().expect("a piped stdin");
-    let fd = stdin.into_raw_fd();
-    // SAFETY: the sink is the only owner of this descriptor.
-    let mut sink = unsafe { FdSink::from_raw_fd(fd) }.expect("nonblocking");
+    let mut sink = FdSink::new(OwnedFd::from(stdin)).expect("nonblocking");
     let _ = child.wait();
 
     // SIGPIPE is ignored by the Rust runtime, so this surfaces as EPIPE and is
@@ -294,11 +287,8 @@ fn j4_s8_the_last_receipt_note_is_read_only_from_a_complete_trace() {
 
 /// A sink over a fresh pipe whose read end the test holds.
 fn pipe_sink() -> (std::io::PipeReader, FdSink) {
-    use std::os::fd::{IntoRawFd as _, OwnedFd};
     let (reader, writer) = std::io::pipe().expect("a pipe");
-    let fd = OwnedFd::from(writer).into_raw_fd();
-    // SAFETY: the write end was just created here and handed over whole.
-    let sink = unsafe { FdSink::from_raw_fd(fd) }.expect("the pipe can be made nonblocking");
+    let sink = FdSink::new(OwnedFd::from(writer)).expect("the pipe can be made nonblocking");
     (reader, sink)
 }
 

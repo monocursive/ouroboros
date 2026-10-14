@@ -25,7 +25,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write as _;
-use std::os::fd::{AsRawFd as _, FromRawFd as _, RawFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd, RawFd};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -426,6 +426,43 @@ impl LocalFile for File {
     }
 }
 
+/// What a sink lost: the first reason, kept because later losses follow
+/// from it and a later message would hide its cause, and every frame lost
+/// since.
+#[derive(Debug, Default)]
+struct LossLedger {
+    loss: Option<Loss>,
+    lost_frames: u64,
+    /// What every reason names besides itself: an override of the sink's
+    /// bounds or writes, in force for the attempt.
+    qualifier: Option<String>,
+}
+
+impl LossLedger {
+    /// Records `frames` more lost frames for `reason`, and returns the error
+    /// for the frame at hand.
+    fn lose(&mut self, reason: &str, frames: u64) -> JailError {
+        let reason = match &self.qualifier {
+            Some(qualifier) => format!("{reason} ({qualifier})"),
+            None => reason.to_owned(),
+        };
+        self.lost_frames += frames;
+        let first = self
+            .loss
+            .as_ref()
+            .map_or_else(|| reason.clone(), |loss| loss.reason.clone());
+        self.loss = Some(Loss {
+            reason: first,
+            lost_frames: Some(self.lost_frames),
+        });
+        evidence_lost(&reason)
+    }
+
+    fn loss(&self) -> Option<&Loss> {
+        self.loss.as_ref()
+    }
+}
+
 /// The bounded local `trace.ndjson` sink (§13.3).
 ///
 /// A write that fails part-way is truncated back to the last frame boundary,
@@ -440,10 +477,8 @@ pub struct FileSink {
     cap: u64,
     reserve: u64,
     state: SinkState,
-    loss: Option<Loss>,
-    lost_frames: u64,
-    /// Set when [`TRACE_CAP_SEAM`] shrank the cap: every loss says so.
-    seam: Option<String>,
+    /// Every loss names an override of the cap in force.
+    ledger: LossLedger,
 }
 
 impl FileSink {
@@ -469,9 +504,7 @@ impl FileSink {
             cap,
             reserve,
             state: SinkState::Open,
-            loss: None,
-            lost_frames: 0,
-            seam: None,
+            ledger: LossLedger::default(),
         }
     }
 
@@ -497,7 +530,7 @@ impl FileSink {
             ));
         }
         if !notes.is_empty() {
-            sink.seam = Some(notes.join("; "));
+            sink.ledger.qualifier = Some(notes.join("; "));
         }
         sink
     }
@@ -508,23 +541,9 @@ impl FileSink {
         self.written
     }
 
-    /// Records one more lost frame. The first reason is kept: later losses
-    /// follow from it, and a later message would hide its cause.
+    /// Records one more lost frame.
     fn lose(&mut self, reason: &str) -> JailError {
-        let reason = match &self.seam {
-            Some(seam) => format!("{reason} ({seam})"),
-            None => reason.to_owned(),
-        };
-        self.lost_frames += 1;
-        let first = self
-            .loss
-            .as_ref()
-            .map_or_else(|| reason.clone(), |loss| loss.reason.clone());
-        self.loss = Some(Loss {
-            reason: first,
-            lost_frames: Some(self.lost_frames),
-        });
-        evidence_lost(&reason)
+        self.ledger.lose(reason, 1)
     }
 
     /// Latches at least `state`; a sink never reopens.
@@ -586,7 +605,7 @@ impl TraceSink for FileSink {
     }
 
     fn loss(&self) -> Option<&Loss> {
-        self.loss.as_ref()
+        self.ledger.loss()
     }
 }
 
@@ -599,26 +618,130 @@ impl TraceSink for FileSink {
 /// queue as a whole never exceeds its 4 MiB.
 pub const EXTERNAL_RESERVE: usize = 256 * 1024;
 
-/// The external `--trace-fd` sink (§13.3).
+/// Whole frames waiting for a nonblocking descriptor, each with a tag (a
+/// trace frame's [`Priority`]), the front one possibly written in part.
 ///
-/// Nonblocking, with a queue of whole frames: a write that would block leaves
-/// the frame queued, and a frame the pipe took in part stays at the front with
-/// its written offset. A flush writes straight from the front frame at that
-/// offset, so its cost is one `write` per frame it moves, whatever the queue
-/// holds, and a partially written frame is resumed, never re-sent.
+/// A flush writes straight from the front frame at its offset, so its cost
+/// is one `write` per frame it moves, whatever the queue holds, and a
+/// partly written frame is resumed, never re-sent as a second one. A write
+/// that would block leaves the rest queued.
 #[derive(Debug)]
-pub struct FdSink {
+pub struct FrameQueue<T> {
     file: File,
-    /// Whole frames, each ending in its LF; the front one may be partly
-    /// written.
-    frames: VecDeque<Vec<u8>>,
-    /// Each queued frame's priority, in step with `frames`: a drain that
-    /// drops a reserve note must not let a later one through.
-    priorities: VecDeque<Priority>,
+    /// Whole frames, oldest first.
+    frames: VecDeque<(Vec<u8>, T)>,
     /// Bytes of the front frame already written.
     front_written: usize,
     /// Bytes still to write, over all queued frames.
     queued: usize,
+}
+
+impl<T> FrameQueue<T> {
+    /// An empty queue for `fd`, which it switches to nonblocking mode.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::InvalidFd`] when the descriptor cannot be
+    /// switched to nonblocking mode, which is also how a closed one is
+    /// detected.
+    pub fn new(fd: OwnedFd) -> Result<Self, JailError> {
+        set_nonblocking(fd.as_raw_fd())?;
+        Ok(FrameQueue {
+            file: File::from(fd),
+            frames: VecDeque::new(),
+            front_written: 0,
+            queued: 0,
+        })
+    }
+
+    /// Queues one whole frame.
+    pub fn push(&mut self, frame: Vec<u8>, tag: T) {
+        self.queued += frame.len();
+        self.frames.push_back((frame, tag));
+    }
+
+    /// Bytes queued and not yet written.
+    #[must_use]
+    pub fn queued(&self) -> usize {
+        self.queued
+    }
+
+    /// Frames queued, a partly written one included.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Whether every queued frame was written.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    /// Whether the front frame was written in part: what follows it on the
+    /// wire would join its torn bytes on one line.
+    #[must_use]
+    pub fn torn(&self) -> bool {
+        self.front_written > 0
+    }
+
+    /// The tags of the queued frames, oldest first.
+    pub fn tags(&self) -> impl Iterator<Item = &T> {
+        self.frames.iter().map(|(_, tag)| tag)
+    }
+
+    /// Drops every queued frame, a partly written one included.
+    pub fn clear(&mut self) {
+        self.frames.clear();
+        self.front_written = 0;
+        self.queued = 0;
+    }
+
+    /// The descriptor.
+    #[must_use]
+    pub fn as_fd(&self) -> BorrowedFd<'_> {
+        self.file.as_fd()
+    }
+
+    /// Writes what the descriptor takes right now, at most `write_max` bytes
+    /// a write when given. Returns whether any byte was written.
+    ///
+    /// # Errors
+    /// A write's failure other than `WouldBlock` and `Interrupted`: the
+    /// descriptor can take nothing more (a reader that closed its end
+    /// included). The queue is left as it was.
+    pub fn flush(&mut self, write_max: Option<usize>) -> std::io::Result<bool> {
+        let mut progressed = false;
+        while let Some((front, _)) = self.frames.front() {
+            let front_len = front.len();
+            let end = write_max.map_or(front_len, |max| (self.front_written + max).min(front_len));
+            match (&self.file).write(&front[self.front_written..end]) {
+                Ok(0) => break,
+                Ok(written) => {
+                    progressed = true;
+                    self.front_written += written;
+                    self.queued -= written;
+                    if self.front_written == front_len {
+                        self.frames.pop_front();
+                        self.front_written = 0;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(progressed)
+    }
+}
+
+/// The external `--trace-fd` sink (§13.3): nonblocking, with a [`FrameQueue`]
+/// bounded at [`EXTERNAL_QUEUE_MAX`], a reserve for the final notes and a
+/// no-progress deadline.
+#[derive(Debug)]
+pub struct FdSink {
+    /// Each frame ends in its LF and carries its priority: a drain that
+    /// drops a reserve note must not let a later one through.
+    queue: FrameQueue<Priority>,
     queue_max: usize,
     reserve: usize,
     no_progress: Duration,
@@ -628,56 +751,44 @@ pub struct FdSink {
     /// any other write error): nothing more can be delivered, and every
     /// frame is counted.
     state: SinkState,
-    loss: Option<Loss>,
-    lost_frames: u64,
+    /// Every loss names the write-size seam when it is in force.
+    ledger: LossLedger,
     /// [`TRACE_FD_WRITE_SEAM`]'s cap on each write, when the seam is set.
     write_max: Option<usize>,
 }
 
 impl FdSink {
-    /// Takes ownership of `fd` and marks it nonblocking.
-    ///
-    /// # Safety
-    /// `fd` must be an open descriptor that this invocation owns exclusively
-    /// (§6.1 requires exactly that of every supplied channel). The sink closes
-    /// it when dropped, so no other owner may keep using it.
+    /// A sink over `fd`, which it marks nonblocking. §6.1 requires that the
+    /// invocation own every supplied channel exclusively; the sink closes it
+    /// when dropped.
     ///
     /// # Errors
     /// Returns [`ErrorCode::InvalidFd`] when the descriptor cannot be switched
     /// to nonblocking mode, which is also how a closed fd is detected.
-    pub unsafe fn from_raw_fd(fd: RawFd) -> Result<Self, JailError> {
-        // SAFETY: the caller guarantees exclusive ownership of an open `fd`.
-        let file = unsafe { File::from_raw_fd(fd) };
-        set_nonblocking(file.as_raw_fd())?;
+    pub fn new(fd: OwnedFd) -> Result<Self, JailError> {
         Ok(FdSink {
-            file,
-            frames: VecDeque::new(),
-            priorities: VecDeque::new(),
-            front_written: 0,
-            queued: 0,
+            queue: FrameQueue::new(fd)?,
             queue_max: EXTERNAL_QUEUE_MAX,
             reserve: EXTERNAL_RESERVE,
             no_progress: EXTERNAL_NO_PROGRESS,
             last_progress: Instant::now(),
             state: SinkState::Open,
-            loss: None,
-            lost_frames: 0,
+            ledger: LossLedger::default(),
             write_max: None,
         })
     }
 
-    /// Takes ownership of `fd` for an attempt, applying
-    /// [`TRACE_FD_WRITE_SEAM`]'s value `seam` if it is one.
-    ///
-    /// # Safety
-    /// As for [`FdSink::from_raw_fd`].
+    /// A sink over `fd` for an attempt, applying [`TRACE_FD_WRITE_SEAM`]'s
+    /// value `seam` if it is one.
     ///
     /// # Errors
-    /// As for [`FdSink::from_raw_fd`].
-    pub unsafe fn for_attempt(fd: RawFd, seam: Option<&str>) -> Result<Self, JailError> {
-        // SAFETY: the caller's guarantee is the one `from_raw_fd` needs.
-        let mut sink = unsafe { Self::from_raw_fd(fd) }?;
+    /// As for [`FdSink::new`].
+    pub fn for_attempt(fd: OwnedFd, seam: Option<&str>) -> Result<Self, JailError> {
+        let mut sink = Self::new(fd)?;
         sink.write_max = fd_write_max(seam);
+        sink.ledger.qualifier = sink.write_max.map(|max| {
+            format!("trace fd writes capped to {max} bytes by the test seam {TRACE_FD_WRITE_SEAM}")
+        });
         Ok(sink)
     }
 
@@ -694,7 +805,7 @@ impl FdSink {
     /// Bytes currently waiting in the queue.
     #[must_use]
     pub fn queued(&self) -> usize {
-        self.queued
+        self.queue.queued()
     }
 
     /// Drains what the descriptor will accept right now.
@@ -705,33 +816,15 @@ impl FdSink {
     /// progress for the no-progress deadline. A loss already recorded is not
     /// reported again; [`TraceSink::loss`] keeps it.
     pub fn flush_now(&mut self) -> Result<(), JailError> {
-        while let Some(front) = self.frames.front() {
-            let front_len = front.len();
-            // J5-C, wave 3: under the seam, at most `write_max` bytes a write.
-            let end = self
-                .write_max
-                .map_or(front_len, |max| (self.front_written + max).min(front_len));
-            match (&self.file).write(&front[self.front_written..end]) {
-                Ok(0) => break,
-                Ok(written) => {
-                    self.front_written += written;
-                    self.queued -= written;
-                    self.last_progress = Instant::now();
-                    if self.front_written == front_len {
-                        self.frames.pop_front();
-                        self.priorities.pop_front();
-                        self.front_written = 0;
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(error) => {
-                    return Err(self.break_down(&format!("trace fd write failed: {error}")));
-                }
+        match self.queue.flush(self.write_max) {
+            Ok(true) => self.last_progress = Instant::now(),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(self.break_down(&format!("trace fd write failed: {error}")));
             }
         }
         if self.state == SinkState::Open
-            && !self.frames.is_empty()
+            && !self.queue.is_empty()
             && self.last_progress.elapsed() > self.no_progress
         {
             self.state = SinkState::Lost;
@@ -749,44 +842,43 @@ impl FdSink {
     /// a saturated trace never delays settlement by more than one deadline.
     /// After it, the queue is empty: delivered or counted.
     pub fn drain_final(&mut self) {
-        if self.frames.is_empty() {
+        if self.queue.is_empty() {
             return;
         }
         let stalled =
             self.state == SinkState::Lost && self.last_progress.elapsed() > self.no_progress;
         if self.state != SinkState::Closed && !stalled {
             let deadline = Instant::now() + self.no_progress;
-            while !self.frames.is_empty() && self.state != SinkState::Closed {
+            while !self.queue.is_empty() && self.state != SinkState::Closed {
                 let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                     break;
                 };
-                wait_writable(self.file.as_raw_fd(), remaining);
+                wait_writable(self.queue.as_fd().as_raw_fd(), remaining);
                 // A loss found here is recorded by flush_now itself; the
                 // loop's own deadline bounds the wait either way.
                 let _ = self.flush_now();
             }
         }
-        if !self.frames.is_empty() {
-            let undelivered = self.frames.len() as u64;
+        if !self.queue.is_empty() {
+            let undelivered = self.queue.len() as u64;
             // A frame already partly on the wire cannot be finished later, and
             // anything written after its torn bytes would join them on one
             // line: a corrupt stream. Nothing more is written then, and the
             // consumer sees a visibly incomplete last line. With no partial
             // frame the stream still ends on a frame boundary, so the reserve
             // notes may follow.
-            let torn = self.front_written > 0;
             // A reserve note dropped here (the loss note queued behind a
             // stalled consumer's frames) is a refused reserve note: as in
             // `write_frame`, nothing more is written, so no later note is
             // delivered after the missing one (§13.3).
-            let refused = if torn {
+            let refused = if self.queue.torn() {
                 SinkState::Closed
-            } else if self.priorities.contains(&Priority::Reserve) {
+            } else if self.queue.tags().any(|tag| *tag == Priority::Reserve) {
                 Priority::Reserve.refused()
             } else {
                 Priority::Normal.refused()
             };
-            self.clear_queue();
+            self.queue.clear();
             self.state = self.state.latch(refused);
             let _ = self.lose(
                 "trace fd could not deliver its queued frames before settlement",
@@ -795,42 +887,18 @@ impl FdSink {
         }
     }
 
-    fn clear_queue(&mut self) {
-        self.frames.clear();
-        self.priorities.clear();
-        self.front_written = 0;
-        self.queued = 0;
-    }
-
     /// The descriptor failed: every queued frame, a partly written one
     /// included, is lost, and nothing more will be written.
     fn break_down(&mut self, reason: &str) -> JailError {
-        let undelivered = self.frames.len() as u64;
-        self.clear_queue();
+        let undelivered = self.queue.len() as u64;
+        self.queue.clear();
         self.state = SinkState::Closed;
         self.lose(reason, undelivered)
     }
 
-    /// Records `frames` more lost frames. The first reason is kept: later
-    /// losses follow from it, and a later message would hide its cause.
+    /// Records `frames` more lost frames.
     fn lose(&mut self, reason: &str, frames: u64) -> JailError {
-        // J5-C, wave 3: a loss under the write-size seam says so.
-        let reason = match self.write_max {
-            Some(max) => format!(
-                "{reason} (trace fd writes capped to {max} bytes by the test seam {TRACE_FD_WRITE_SEAM})"
-            ),
-            None => reason.to_owned(),
-        };
-        self.lost_frames += frames;
-        let first = self
-            .loss
-            .as_ref()
-            .map_or_else(|| reason.clone(), |loss| loss.reason.clone());
-        self.loss = Some(Loss {
-            reason: first,
-            lost_frames: Some(self.lost_frames),
-        });
-        evidence_lost(&reason)
+        self.ledger.lose(reason, frames)
     }
 }
 
@@ -853,7 +921,7 @@ impl TraceSink for FdSink {
             Priority::Normal => self.queue_max.saturating_sub(self.reserve),
             Priority::Reserve => self.queue_max,
         };
-        if self.queued + frame.len() + 1 > budget {
+        if self.queue.queued() + frame.len() + 1 > budget {
             self.state = self.state.latch(priority.refused());
             return Err(self.lose(
                 match priority {
@@ -863,15 +931,13 @@ impl TraceSink for FdSink {
                 1,
             ));
         }
-        if self.frames.is_empty() {
+        if self.queue.is_empty() {
             self.last_progress = Instant::now();
         }
         let mut owned = Vec::with_capacity(frame.len() + 1);
         owned.extend_from_slice(frame);
         owned.push(b'\n');
-        self.queued += owned.len();
-        self.frames.push_back(owned);
-        self.priorities.push_back(priority);
+        self.queue.push(owned, priority);
         self.flush_now()
     }
 
@@ -884,11 +950,11 @@ impl TraceSink for FdSink {
     }
 
     fn loss(&self) -> Option<&Loss> {
-        self.loss.as_ref()
+        self.ledger.loss()
     }
 
     fn caught_up(&self) -> bool {
-        self.frames.is_empty()
+        self.queue.is_empty()
     }
 }
 
@@ -1144,10 +1210,8 @@ mod tests {
     /// the missing one, a silent hole (§13.3).
     #[test]
     fn an_exhausted_reserve_closes_the_fd_sink() {
-        use std::os::fd::IntoRawFd as _;
         let (reader, writer) = full_pipe();
-        // SAFETY: the write end was just created here and handed over whole.
-        let sink = unsafe { FdSink::from_raw_fd(writer.into_raw_fd()) }.expect("nonblocking");
+        let sink = FdSink::new(writer).expect("nonblocking");
         // A 1000-byte queue keeps 250 bytes for the reserve.
         let mut sink = sink.with_bounds(1000, Duration::from_secs(60));
         for index in 0..4 {
@@ -1175,10 +1239,8 @@ mod tests {
     /// The same for a reserve note refused for its size: nothing follows it.
     #[test]
     fn an_oversized_reserve_note_closes_the_fd_sink() {
-        use std::os::fd::IntoRawFd as _;
         let (reader, writer) = full_pipe();
-        // SAFETY: the write end was just created here and handed over whole.
-        let mut sink = unsafe { FdSink::from_raw_fd(writer.into_raw_fd()) }.expect("nonblocking");
+        let mut sink = FdSink::new(writer).expect("nonblocking");
         assert!(
             sink.write_frame(&[b'x'; EVENT_MAX + 1], Priority::Reserve)
                 .is_err()
@@ -1262,14 +1324,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_drain_that_drops_a_reserve_note_writes_nothing_after_it() {
-        use std::os::fd::{IntoRawFd as _, OwnedFd};
         // On Linux a nonblocking pipe write of at most PIPE_BUF bytes is whole
         // or refused, so no frame is left partly written (which would end the
         // stream for a different reason); hence the Linux gate.
         let (reader, writer) = std::io::pipe().expect("a pipe");
-        let fd = OwnedFd::from(writer).into_raw_fd();
-        // SAFETY: the write end was just created here and handed over whole.
-        let sink = unsafe { FdSink::from_raw_fd(fd) }.expect("nonblocking");
+        let sink = FdSink::new(OwnedFd::from(writer)).expect("nonblocking");
         let mut sink = sink.with_bounds(EXTERNAL_QUEUE_MAX, Duration::from_millis(50));
         let frame = vec![b'x'; 1000];
         while sink.queued() == 0 {
@@ -1323,11 +1382,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn under_the_write_size_seam_every_frame_is_written_in_pieces() {
-        use std::os::fd::IntoRawFd as _;
         let (reader, writer) = std::os::unix::net::UnixDatagram::pair().expect("a socket pair");
-        // SAFETY: the writing end was just created here and handed over whole.
-        let mut sink =
-            unsafe { FdSink::for_attempt(writer.into_raw_fd(), Some("64")) }.expect("nonblocking");
+        let mut sink = FdSink::for_attempt(OwnedFd::from(writer), Some("64")).expect("nonblocking");
         let frames: Vec<Vec<u8>> = (0..20u8)
             .map(|index| format!("{{\"n\":{index},\"pad\":\"{}\"}}", "x".repeat(600)).into_bytes())
             .collect();
@@ -1428,11 +1484,9 @@ mod tests {
     /// prefix, never a hole plus later frames (§13.3).
     #[test]
     fn an_fd_sink_that_drops_an_oversized_frame_latches_lost() {
-        use std::os::fd::IntoRawFd as _;
         let file = tempfile::NamedTempFile::new().expect("a temporary file");
-        let fd = file.reopen().expect("a handle").into_raw_fd();
-        // SAFETY: the write end was just created here and handed over whole.
-        let mut sink = unsafe { FdSink::from_raw_fd(fd) }.expect("nonblocking");
+        let fd = OwnedFd::from(file.reopen().expect("a handle"));
+        let mut sink = FdSink::new(fd).expect("nonblocking");
         let error = sink
             .write_frame(&[b'x'; EVENT_MAX + 1], Priority::Normal)
             .expect_err("an oversized frame refuses");

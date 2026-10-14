@@ -3981,7 +3981,8 @@ fn open_trace(
         let seam = std::env::var(trace::TRACE_FD_WRITE_SEAM).ok();
         // SAFETY: as for the control descriptor: exclusively owned for this
         // invocation and already validated as open for writing.
-        let sink = unsafe { FdSink::for_attempt(fd, seam.as_deref()) }?;
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let sink = FdSink::for_attempt(fd, seam.as_deref())?;
         return Ok(trace::shared(sink));
     }
     let path = attempt_dir.trace_path();
