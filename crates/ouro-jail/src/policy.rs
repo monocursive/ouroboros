@@ -39,7 +39,16 @@ pub enum ProfileName {
 }
 
 impl ProfileName {
-    /// The wire spelling.
+    /// Every built-in profile.
+    pub const ALL: [ProfileName; 4] = [
+        ProfileName::Agent,
+        ProfileName::Tool,
+        ProfileName::Build,
+        ProfileName::None,
+    ];
+
+    /// The wire spelling, the one table of names: [`ProfileName::parse`]
+    /// reads it, and a test holds the serde spelling to it.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -53,13 +62,9 @@ impl ProfileName {
     /// Parses a built-in profile name, or `None` when the argument names a file.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "agent" => Some(ProfileName::Agent),
-            "tool" => Some(ProfileName::Tool),
-            "build" => Some(ProfileName::Build),
-            "none" => Some(ProfileName::None),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|profile| profile.as_str() == text)
     }
 
     /// Whether this profile applies containment at all.
@@ -119,15 +124,14 @@ impl PathRef {
             && path::strip_ancestor(self.path.as_bytes(), other.path.as_bytes()).is_some()
     }
 
-    /// A lossy rendering for diagnostics only.
+    /// A lossy rendering for diagnostics only, the root in its wire
+    /// spelling.
     #[must_use]
     pub fn to_display(&self) -> String {
-        let root = match self.root {
-            RootToken::Host => "host",
-            RootToken::Workspace => "workspace",
-            RootToken::Scratch => "scratch",
-            RootToken::VendorState => "vendor_state",
-        };
+        let root = serde_json::to_value(self.root)
+            .ok()
+            .and_then(|root| root.as_str().map(str::to_owned))
+            .unwrap_or_default();
         format!("{root}:{}", self.path.to_display())
     }
 }
@@ -178,7 +182,15 @@ pub enum ProtectedCoverage {
 }
 
 impl ProtectedCoverage {
-    /// The wire spelling.
+    /// Every coverage, weakest first.
+    pub const ALL: [ProtectedCoverage; 3] = [
+        ProtectedCoverage::None,
+        ProtectedCoverage::ExistingAndRoot,
+        ProtectedCoverage::AllDescendants,
+    ];
+
+    /// The wire spelling, the one table of names (see
+    /// [`ProfileName::as_str`]).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -191,12 +203,9 @@ impl ProtectedCoverage {
     /// Parses the wire spelling.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "none" => Some(ProtectedCoverage::None),
-            "existing_and_root" => Some(ProtectedCoverage::ExistingAndRoot),
-            "all_descendants" => Some(ProtectedCoverage::AllDescendants),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|coverage| coverage.as_str() == text)
     }
 }
 
@@ -654,16 +663,7 @@ impl LimitKey {
     /// Parses the wire spelling.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "wall" => Some(LimitKey::Wall),
-            "pids" => Some(LimitKey::Pids),
-            "mem" => Some(LimitKey::Mem),
-            "swap" => Some(LimitKey::Swap),
-            "storage" => Some(LimitKey::Storage),
-            "inodes" => Some(LimitKey::Inodes),
-            "cpu" => Some(LimitKey::Cpu),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|key| key.as_str() == text)
     }
 }
 
@@ -1834,6 +1834,35 @@ mod tests {
             assert_eq!(origin.key_prefix(), prefix, "{origin:?}");
             assert_eq!(origin.expands_home(), home, "{origin:?}");
         }
+    }
+
+    /// `as_str` is the one table of wire names: `parse` reads it, and the
+    /// serde spelling the snapshot writes must agree with it.
+    #[test]
+    fn wire_spellings_have_one_source() {
+        fn serde_name(value: impl Serialize) -> String {
+            serde_json::to_value(value)
+                .expect("serializes")
+                .as_str()
+                .expect("a string")
+                .to_owned()
+        }
+        for profile in ProfileName::ALL {
+            assert_eq!(serde_name(profile), profile.as_str());
+            assert_eq!(ProfileName::parse(profile.as_str()), Some(profile));
+        }
+        for coverage in ProtectedCoverage::ALL {
+            assert_eq!(serde_name(coverage), coverage.as_str());
+            assert_eq!(ProtectedCoverage::parse(coverage.as_str()), Some(coverage));
+        }
+        for key in LimitKey::ALL {
+            assert_eq!(LimitKey::parse(key.as_str()), Some(key));
+        }
+        assert_eq!(ProfileName::parse("Agent"), None);
+        assert_eq!(
+            reference(RootToken::VendorState, "a").to_display(),
+            "vendor_state:a"
+        );
     }
 
     #[test]

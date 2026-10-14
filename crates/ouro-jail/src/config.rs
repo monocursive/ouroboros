@@ -52,6 +52,25 @@ fn invalid(key: &str, message: impl Into<String>) -> JailError {
     .with_key_path(key)
 }
 
+/// A TOML parse error as one line: the parser's message and where in `text`
+/// it points, as a 1-based line and column. The parser's own rendering also
+/// quotes the offending source line; that text is the file's, possibly the
+/// contained party's, so it is left out of an error that reaches receipts.
+#[must_use]
+pub(crate) fn toml_error(text: &str, error: &toml::de::Error) -> String {
+    let message = error.message().trim_end();
+    let Some(before) = error.span().and_then(|span| text.get(..span.start)) else {
+        return message.to_owned();
+    };
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count())
+        + 1;
+    format!("{message} (line {line}, column {column})")
+}
+
 /// A TOML scalar that may be written as an integer or as a string with a unit.
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
 #[serde(untagged)]
@@ -223,7 +242,7 @@ pub struct ProjectConfig {
 /// duplicate key or a wrong `schema` value.
 pub fn parse_policy_file(text: &str) -> Result<PolicyFile, JailError> {
     let file: PolicyFile =
-        toml::from_str(text).map_err(|error| invalid("profile", error.message().to_owned()))?;
+        toml::from_str(text).map_err(|error| invalid("profile", toml_error(text, &error)))?;
     if file.schema != SCHEMA_POLICY {
         return Err(invalid(
             "schema",
@@ -239,7 +258,7 @@ pub fn parse_policy_file(text: &str) -> Result<PolicyFile, JailError> {
 /// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key or a
 /// duplicate key.
 pub fn parse_operator_config(text: &str) -> Result<OperatorConfig, JailError> {
-    toml::from_str(text).map_err(|error| invalid("config", error.message().to_owned()))
+    toml::from_str(text).map_err(|error| invalid("config", toml_error(text, &error)))
 }
 
 /// Parses a project `ouro.toml`.
@@ -256,7 +275,7 @@ pub fn parse_operator_config(text: &str) -> Result<OperatorConfig, JailError> {
 /// `jail.profile` or `jail.extends`.
 pub fn parse_project_config(text: &str) -> Result<ProjectConfig, JailError> {
     let project: ProjectConfig =
-        toml::from_str(text).map_err(|error| invalid("jail", error.message().to_owned()))?;
+        toml::from_str(text).map_err(|error| invalid("jail", toml_error(text, &error)))?;
     if let Some(jail) = &project.jail {
         for (key, present) in [
             ("profile", jail.profile.is_some()),
@@ -842,6 +861,14 @@ mod tests {
         )
         .expect_err("unknown keys are never ignored");
         assert_eq!(error.code, ErrorCode::InvalidConfig);
+        // One line, with the position and without the file's text.
+        assert!(error.message.contains("future_key"), "{}", error.message);
+        assert!(
+            error.message.ends_with("(line 3, column 1)"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains('\n'), "{}", error.message);
     }
 
     #[test]

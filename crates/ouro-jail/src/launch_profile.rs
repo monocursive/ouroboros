@@ -415,8 +415,15 @@ pub fn parse(
     let base_dir = source
         .directory()
         .map(|directory| directory.as_os_str().as_bytes().to_vec());
-    let mut file: LaunchFile = toml::from_str(text)
-        .map_err(|error| invalid("launch", format!("launch profile: {}", error.message())))?;
+    let mut file: LaunchFile = toml::from_str(text).map_err(|error| {
+        invalid(
+            "launch",
+            format!(
+                "launch profile: {}",
+                crate::config::toml_error(text, &error)
+            ),
+        )
+    })?;
     // Launch profiles are a widening layer (the launch `network_layer`
     // forwards grants only), so a declared narrowing key must refuse here
     // rather than parse into silence: the operator would believe a
@@ -443,8 +450,15 @@ pub fn parse(
         }
         let source = bundled_fragment(name)
             .ok_or_else(|| invalid("launch.bundles", format!("unknown fragment: {name}")))?;
-        let fragment: Fragment =
-            toml::from_str(source).map_err(|e| invalid("launch.bundles", e.to_string()))?;
+        let fragment: Fragment = toml::from_str(source).map_err(|error| {
+            invalid(
+                "launch.bundles",
+                format!(
+                    "fragment `{name}`: {}",
+                    crate::config::toml_error(source, &error)
+                ),
+            )
+        })?;
         for (key, value) in fragment.environment {
             if file.environment.insert(key.clone(), value).is_some() {
                 return Err(invalid(
@@ -494,11 +508,8 @@ pub fn parse(
             ),
         ));
     }
-    let jail = match file.jail.as_str() {
-        "agent" => ProfileName::Agent,
-        "tool" => ProfileName::Tool,
-        "build" => ProfileName::Build,
-        "none" => {
+    let jail = match ProfileName::parse(&file.jail) {
+        Some(ProfileName::None) => {
             // §6.1: `--profile none` is the only way to select `none`.
             return Err(JailError::new(
                 ErrorCode::PolicyWidening,
@@ -508,10 +519,11 @@ pub fn parse(
             )
             .with_key_path("launch.jail"));
         }
-        other => {
+        Some(contained) => contained,
+        None => {
             return Err(invalid(
                 "launch.jail",
-                format!("`{other}` is not a contained built-in profile"),
+                format!("`{}` is not a contained built-in profile", file.jail),
             ));
         }
     };
