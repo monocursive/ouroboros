@@ -141,3 +141,32 @@ fn a_fork_the_fixture_cannot_make_is_its_own_failure() {
         }
     }
 }
+
+/// A mode with two directory arguments checks both before opening either:
+/// a second one the kernel cannot take is a usage error with nothing run,
+/// not one that follows the first's reported open. (A NUL cannot be in a
+/// process argument, so the step comes from a script.)
+#[test]
+fn every_dirfd_is_checked_before_any_is_opened() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("script.json");
+    std::fs::write(
+        &script,
+        serde_json::to_vec(&serde_json::json!([[
+            "rename",
+            dir.path().join("a").to_str().unwrap(),
+            dir.path().join("b").to_str().unwrap(),
+            "--via",
+            "renameat",
+            "--dirfd",
+            dir.path().to_str().unwrap(),
+            "--dirfd2",
+            "x\u{0}y"
+        ]]))
+        .unwrap(),
+    )
+    .unwrap();
+    let out = run(&[OsString::from("script"), script.into_os_string()]);
+    assert_eq!(code(&out), EXIT_USAGE, "{out:?}");
+    assert!(lines(&out).is_empty(), "nothing ran: {:?}", lines(&out));
+}
