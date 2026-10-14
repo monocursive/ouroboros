@@ -1333,6 +1333,9 @@ use crate::records::StateCleanup;
 /// The vendor-state directory's name inside an attempt directory (§7).
 pub const VENDOR_STATE_NAME: &str = "vendor-state";
 
+/// The schema identifier of `jail-state.json` (§7).
+pub const SCHEMA_STATE: &str = "ouro.jail.state/1";
+
 /// Largest `jail-state.json` this tool reads back. It writes the file itself;
 /// the bound is there so a replaced file cannot grow a read without limit.
 const STATE_FILE_MAX: u64 = 1024 * 1024;
@@ -1407,8 +1410,10 @@ pub fn update_attempt_state(
     change: impl FnOnce(&mut serde_json::Value),
 ) -> Result<(), JailError> {
     let mut state = read_attempt_state(attempt_dir)?;
-    if state.get("schema").and_then(serde_json::Value::as_str) != Some("ouro.jail.state/1") {
-        return Err(state_parse_failed("the schema is not ouro.jail.state/1"));
+    if state.get("schema").and_then(serde_json::Value::as_str) != Some(SCHEMA_STATE) {
+        return Err(state_parse_failed(format!(
+            "the schema is not {SCHEMA_STATE}"
+        )));
     }
     change(&mut state);
     let bytes = serde_json::to_vec_pretty(&state).map_err(state_parse_failed)?;
@@ -2349,7 +2354,7 @@ mod tests {
         let attempt = AttemptDir::new(&data, &AttemptId::generate());
         attempt.create(&data).unwrap();
         let state = serde_json::json!({
-            "schema": "ouro.jail.state/1",
+            "schema": SCHEMA_STATE,
             "vendor_state": null,
             "state_cleanup": "not_needed",
         });

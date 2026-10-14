@@ -3882,8 +3882,8 @@ fn claim_attempt(
             "the Linux supervisor birth identity could not be read".to_owned(),
         ));
     }
-    let state = serde_json::json!({
-        "schema": "ouro.jail.state/1",
+    let mut state = serde_json::json!({
+        "schema": state::SCHEMA_STATE,
         "attempt_id": attempt_id.as_str(),
         "os": identity.os.as_str(),
         "arch": identity.arch,
@@ -3909,7 +3909,6 @@ fn claim_attempt(
     });
     // J4-R: S9 — a test seam in force is recorded where gc and a reader of
     // jail state see it, from the claim on.
-    let mut state = state;
     if let Some(seams) = test_seams {
         state["test_seams"] = seams.clone();
     }
@@ -3919,7 +3918,14 @@ fn claim_attempt(
     // exclusive and atomic, so the claim is never visible, and never left by a
     // crash, with fewer than all its bytes (it used to be created empty and
     // then written, so every run had an unparseable claim for a moment).
-    let bytes = serde_json::to_vec_pretty(&state).unwrap_or_default();
+    let bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
+        JailError::new(
+            ErrorCode::InternalError,
+            ErrorStage::Preparing,
+            Remediation::InspectState,
+            format!("the attempt claim could not be serialized: {error}"),
+        )
+    })?;
     match state::create_exclusively_at(state::Site::Claim, &path, &bytes)? {
         state::Published::Created => Ok(()),
         // A previous jail claim, live or dead, refuses rather than spawning
@@ -3939,39 +3945,15 @@ fn register_boundary_in_state(
     attempt_dir: &AttemptDir,
     boundary: &crate::platform::BoundaryIdentity,
 ) -> Result<(), JailError> {
-    let path = attempt_dir.state_path();
-    let raw = std::fs::read_to_string(&path).map_err(|error| {
-        JailError::new(
-            ErrorCode::StateWriteFailed,
-            ErrorStage::Preparing,
-            Remediation::InspectState,
-            format!("{}: {error}", path.display()),
-        )
-    })?;
-    let mut state: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
-        JailError::new(
-            ErrorCode::InternalError,
-            ErrorStage::Preparing,
-            Remediation::InspectState,
-            format!("the attempt state could not be parsed back: {error}"),
-        )
-    })?;
-    state["boundary"] = serde_json::json!({
-        "kind": boundary.boundary,
-        "verification_scope": boundary.verification_scope,
-        "backend": boundary.backend,
-        "backend_version": boundary.backend_version,
-        "process": boundary.process,
-    });
-    let bytes = serde_json::to_vec_pretty(&state).map_err(|error| {
-        JailError::new(
-            ErrorCode::InternalError,
-            ErrorStage::Preparing,
-            Remediation::InspectState,
-            format!("the attempt state could not be serialized: {error}"),
-        )
-    })?;
-    state::replace_atomically_at(state::Site::Boundary, &path, &bytes)
+    state::update_attempt_state(state::Site::Boundary, attempt_dir, |state| {
+        state["boundary"] = serde_json::json!({
+            "kind": boundary.boundary,
+            "verification_scope": boundary.verification_scope,
+            "backend": boundary.backend,
+            "backend_version": boundary.backend_version,
+            "process": boundary.process,
+        });
+    })
 }
 
 fn write_policy_file(attempt_dir: &AttemptDir, plan: &Plan) -> Result<(), JailError> {
