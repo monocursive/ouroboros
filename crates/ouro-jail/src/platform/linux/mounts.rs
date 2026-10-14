@@ -492,6 +492,17 @@ pub(super) fn staged_mounts(
     })
 }
 
+/// A read-only bind of an object this process made and pinned itself, such
+/// as the vault's public CA. The bind and its pin are one value, so the bind
+/// can only ever take the pinned object: [`prepare_mounts`] adds the bind
+/// from it and never pins its source again by path.
+pub(super) struct PinnedBind {
+    /// The object, pinned through the directory it was written in.
+    pub(super) pin: jfs::PinnedPath,
+    /// Where it appears inside the sandbox.
+    pub(super) destination: PathBuf,
+}
+
 pub(super) type MountPreparation = (
     jfs::ProtectedScan,
     Vec<jfs::PinnedPath>,
@@ -730,11 +741,11 @@ pub(super) fn sanitize_resolv_conf(bytes: Option<&[u8]>) -> (String, &'static st
 
 /// Pin every source once, scan the pinned writable roots, then give each bind
 /// its own descriptor. Bubblewrap validates the mounted inode against that fd.
-/// `pinned` are sources this process pinned already, from objects it made:
-/// they are bound as pinned, never pinned again by path.
+/// `pinned` are binds of objects this process made and pinned already: they
+/// are added here, bound as pinned, never pinned again by path.
 pub(super) fn prepare_mounts(
     plan: &mut BwrapPlan,
-    pinned: Vec<jfs::PinnedPath>,
+    pinned: Vec<PinnedBind>,
     attempt_dir: &Path,
     names: &[&str],
     coverage: ProtectedCoverage,
@@ -746,10 +757,12 @@ pub(super) fn prepare_mounts(
             format!("mount source pinning failed: {err}"),
         )
     };
-    let mut pins: BTreeMap<PathBuf, jfs::PinnedPath> = pinned
-        .into_iter()
-        .map(|pin| (pin.path().to_owned(), pin))
-        .collect();
+    let mut pins: BTreeMap<PathBuf, jfs::PinnedPath> = BTreeMap::new();
+    for PinnedBind { pin, destination } in pinned {
+        plan.extra_ro_binds
+            .push((pin.path().to_owned(), destination));
+        pins.insert(pin.path().to_owned(), pin);
+    }
     let mut roots: Vec<(PathBuf, PathBuf)> = plan
         .extra_rw_binds
         .iter()
@@ -1291,8 +1304,8 @@ mod tests {
     }
 
     /// A source this process pinned before the mounts were prepared is bound
-    /// as that pin: a name replaced since is not pinned in its place, and
-    /// the handoff check of the pin refuses it.
+    /// as that pin, at its destination: a name replaced since is not pinned
+    /// in its place, and the handoff check of the pin refuses it.
     #[test]
     fn a_source_pinned_beforehand_is_bound_as_pinned_and_not_pinned_again() {
         use std::os::unix::fs::MetadataExt as _;
@@ -1306,10 +1319,13 @@ mod tests {
         let swap = root.join("external/swap.pem");
         std::fs::write(&swap, b"planted").unwrap();
         std::fs::rename(&swap, &source).unwrap();
-        plan.bind_read_only(source.clone(), PathBuf::from("/run/ouro/vault-ca.pem"));
+        let destination = PathBuf::from("/run/ouro/vault-ca.pem");
         let (_, pins, _fds, placeholders) = prepare_mounts(
             &mut plan,
-            vec![pin],
+            vec![PinnedBind {
+                pin,
+                destination: destination.clone(),
+            }],
             &root.join("attempt"),
             &jfs::PROTECTED_LITERALS,
             ProtectedCoverage::None,
@@ -1321,6 +1337,10 @@ mod tests {
             .expect("the source is pinned");
         assert_eq!(bound.identity(), (written.dev(), written.ino()));
         assert!(bound.verify().is_err(), "the replaced name is refused");
+        assert!(
+            plan.extra_ro_binds.contains(&(source, destination)),
+            "the pinned object is bound at its destination"
+        );
         drop(placeholders);
     }
 
