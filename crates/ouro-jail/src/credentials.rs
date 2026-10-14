@@ -1481,11 +1481,16 @@ mod tests {
     /// `doctor` runs the same pre-read checks staging runs for a `vault`
     /// source, so a source staging would refuse as group-readable or
     /// oversized is not reported available; one that passes them says its
-    /// value was not read rather than `ok`.
+    /// value was not read rather than `ok`. Each verdict is held to the real
+    /// staging call (`stage_one`, which reads the source through the vault
+    /// runtime), not to a read the test makes with a bound of its choosing:
+    /// two refresh documents of exactly [`crate::vault::SOURCE_MAX`] bytes
+    /// and one byte more pin the bound staging uses to the one doctor
+    /// reports.
     #[test]
     fn doctor_applies_the_vault_precheck_staging_applies() {
         use std::os::unix::fs::PermissionsExt as _;
-        let (_dir, path, _handle) = directory();
+        let (_dir, path, handle) = directory();
         let write = |name: &str, bytes: &[u8], mode: u32| {
             std::fs::write(path.join(name), bytes).unwrap();
             std::fs::set_permissions(path.join(name), std::fs::Permissions::from_mode(mode))
@@ -1493,9 +1498,32 @@ mod tests {
             NativeString::from_bytes(path.join(name).as_os_str().as_encoded_bytes().to_vec())
                 .unwrap()
         };
-        let declaration = |id: &str, source: NativeString| CredentialDecl {
+        // A refresh document that is valid for a month, padded with JSON
+        // whitespace to `size` bytes: staging reads it whole and needs no
+        // token exchange.
+        let document = |size: usize| {
+            let expires = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 30 * 24 * 60 * 60;
+            let mut text = format!(
+                r#"{{"access_token":"access","refresh_token":"refresh","expires_at":{expires}}}"#
+            )
+            .into_bytes();
+            text.resize(size, b' ');
+            text
+        };
+        let refresh = crate::vault::RefreshPolicy {
+            token_url: "https://issuer.example.com/token".to_owned(),
+            client_id: "fixture".to_owned(),
+            refresh_before_seconds: 0,
+            encoding: crate::vault::TokenEncoding::Form,
+        };
+        let declaration = |id: &str, source: NativeString, refreshes: bool| CredentialDecl {
             vault: Some(crate::vault::Policy {
                 hosts: vec!["https://api.example.com".to_owned()],
+                refresh: refreshes.then(|| refresh.clone()),
                 ..crate::vault::Policy::default()
             }),
             id: id.to_owned(),
@@ -1503,16 +1531,22 @@ mod tests {
             dest: NativeString::Text(format!(".vault-{id}")),
             mode: MODE_VAULT.to_owned(),
         };
+        let max = crate::vault::SOURCE_MAX;
         let cases = [
-            ("group", write("group", b"key", 0o640), "source_not_private"),
             (
-                "large",
-                write("large", &vec![b'k'; crate::vault::SOURCE_MAX + 1], 0o600),
+                declaration("group", write("group", b"key", 0o640), false),
+                "source_not_private",
+            ),
+            (
+                declaration("large", write("large", &document(max + 1), 0o600), true),
                 "source_oversized",
             ),
             (
-                "private",
-                write("private", b"key", 0o600),
+                declaration("largest", write("largest", &document(max), 0o600), true),
+                REASON_VALUE_UNREAD,
+            ),
+            (
+                declaration("private", write("private", b"key", 0o600), false),
                 REASON_VALUE_UNREAD,
             ),
         ];
@@ -1522,19 +1556,22 @@ mod tests {
             state_subdirs: Vec::new(),
             credentials: cases
                 .iter()
-                .map(|(id, source, _)| declaration(id, source.clone()))
+                .map(|(declaration, _)| declaration.clone())
                 .collect(),
         };
         let checks = inspect(&launch, &[]);
-        for ((id, source, reason), check) in cases.iter().zip(&checks) {
-            assert_eq!((check.id.as_str(), check.reason_code), (*id, *reason));
+        assert_eq!(checks.len(), cases.len());
+        for ((declaration, reason), check) in cases.iter().zip(&checks) {
+            let id = declaration.id.as_str();
+            assert_eq!((check.id.as_str(), check.reason_code), (id, *reason));
             assert_eq!(check.available, *reason == REASON_VALUE_UNREAD, "{id}");
-            let staged =
-                read_vault_source_version(source.as_bytes(), &[], crate::vault::SOURCE_MAX);
-            match staged {
-                Ok(_) => assert_eq!(*reason, REASON_VALUE_UNREAD, "{id}"),
-                Err(refused) => assert_eq!(refused, *reason, "{id}: staging agrees"),
-            }
+            let staged = stage_one(&handle, declaration, &[], &mut 0);
+            assert_eq!(
+                staged.is_ok(),
+                check.available,
+                "{id}: staging agrees with doctor ({:?})",
+                staged.err().map(|error| error.message)
+            );
         }
     }
 
