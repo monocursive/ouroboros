@@ -18,32 +18,12 @@ use crate::cli::{
 use crate::raw::{self, Attempt};
 use crate::report::{Emitted, Expect, OpReport, Reporter, path_value, write_all};
 
-/// A pipe whose two ends are both close-on-exec.
+/// A pipe whose two ends are both close-on-exec ([`crate::harness::pipes::cloexec_pipe`]),
+/// as raw numbers: the callers hand them across a `fork`.
 pub(crate) fn cloexec_pipe() -> Result<(c_int, c_int), std::io::Error> {
-    let mut fds = [0 as c_int; 2];
-    #[cfg(target_os = "linux")]
-    // SAFETY: `fds` is a live array of two ints, which is what `pipe2` writes.
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    #[cfg(not(target_os = "linux"))]
-    // SAFETY: as above, for `pipe`; Darwin has no `pipe2`.
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    #[cfg(not(target_os = "linux"))]
-    for fd in fds {
-        // SAFETY: `fd` was just returned by `pipe` and is owned here.
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-            let e = std::io::Error::last_os_error();
-            // SAFETY: both descriptors are owned here.
-            unsafe {
-                libc::close(fds[0]);
-                libc::close(fds[1]);
-            }
-            return Err(e);
-        }
-    }
-    Ok((fds[0], fds[1]))
+    use std::os::fd::IntoRawFd as _;
+    let (read, write) = crate::harness::pipes::cloexec_pipe()?;
+    Ok((read.into_raw_fd(), write.into_raw_fd()))
 }
 
 /// This thread's errno, read without allocating: safe to call after `fork`.
@@ -938,28 +918,10 @@ fn ftruncate(rep: &Reporter, path: &OsStr, length: i64, expect: &Expect) -> bool
 }
 
 /// Why a named syscall cannot run in this build, or `None` when it can.
+/// Why `name` cannot be called on this build (the raw layer's own list), so
+/// a mode can say so before preparing anything for it.
 fn unavailable(name: &str) -> Option<String> {
-    let legacy = matches!(
-        name,
-        "open" | "creat" | "mkdir" | "rename" | "unlink" | "rmdir" | "link" | "symlink" | "mknod"
-    );
-    if legacy && !raw::has_legacy_syscalls() {
-        return Some(format!(
-            "{name} has no syscall number on {}/{}; use the *at variant",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ));
-    }
-    // `mknodat` is here rather than in the legacy set: Darwin has no such
-    // syscall at all, while Linux has it on every architecture.
-    let linux_only = matches!(name, "openat2" | "renameat2" | "execveat" | "mknodat");
-    if linux_only && !cfg!(target_os = "linux") {
-        return Some(format!(
-            "{name} is a Linux syscall; unsupported on this platform ({})",
-            std::env::consts::OS
-        ));
-    }
-    None
+    raw::absent(name)
 }
 
 // ------------------------------------------------------------------- network
@@ -1817,7 +1779,7 @@ fn fd_directory() -> &'static str {
 /// Descriptor numbers the kernel says are open, or `None` when the directory
 /// could not be listed. The directory's own descriptor is excluded: it is
 /// closed before the numbers are confirmed.
-fn open_fd_numbers() -> Option<Vec<c_int>> {
+pub fn open_fd_numbers() -> Option<Vec<c_int>> {
     let entries = std::fs::read_dir(fd_directory()).ok()?;
     let mut numbers: Vec<c_int> = Vec::new();
     for entry in entries.flatten() {
@@ -1848,23 +1810,7 @@ fn describe_fd(fd: c_int) -> Option<Value> {
     if flags < 0 {
         return None;
     }
-    // SAFETY: `st` is a live stat struct for an open descriptor.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: as above.
-    let kind = if unsafe { libc::fstat(fd, &raw mut st) } == 0 {
-        match st.st_mode & libc::S_IFMT {
-            libc::S_IFIFO => "fifo",
-            libc::S_IFCHR => "character",
-            libc::S_IFDIR => "directory",
-            libc::S_IFBLK => "block",
-            libc::S_IFREG => "regular",
-            libc::S_IFLNK => "symlink",
-            libc::S_IFSOCK => "socket",
-            _ => "unknown",
-        }
-    } else {
-        "unreadable"
-    };
+    let kind = crate::unix::file_kind(fd).unwrap_or("unreadable");
     let mut m = serde_json::Map::new();
     m.insert("fd".into(), Value::from(fd));
     m.insert("kind".into(), Value::from(kind));

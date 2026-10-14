@@ -59,6 +59,29 @@ impl OpReport {
     }
 }
 
+/// The directions a descriptor is open for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenFor {
+    pub readable: bool,
+    pub writable: bool,
+}
+
+/// The directions `fd` is open for (`F_GETFL`), or `None` when it is not
+/// open.
+#[must_use]
+pub fn open_for(fd: c_int) -> Option<OpenFor> {
+    // SAFETY: `F_GETFL` only reads the status flags of a descriptor number.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return None;
+    }
+    let access = flags & libc::O_ACCMODE;
+    Some(OpenFor {
+        readable: access == libc::O_RDONLY || access == libc::O_RDWR,
+        writable: access == libc::O_WRONLY || access == libc::O_RDWR,
+    })
+}
+
 /// A path as JSON: always a lossy string for readability, plus the exact bytes
 /// whenever the path is not valid UTF-8, so non-UTF-8 names stay comparable.
 pub fn path_value(map: &mut Map<String, Value>, key: &str, p: &OsStr) {
@@ -193,16 +216,10 @@ impl Reporter {
     /// Is this descriptor open and writable? A report that goes nowhere is a
     /// usage error, not a run that quietly succeeded.
     pub fn check_fd(fd: c_int) -> Result<(), String> {
-        // SAFETY: `F_GETFL` only reads the status flags of a descriptor number.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags < 0 {
-            return Err(format!("--report-fd {fd} is not open"));
-        }
-        let access = flags & libc::O_ACCMODE;
-        if access == libc::O_WRONLY || access == libc::O_RDWR {
-            Ok(())
-        } else {
-            Err(format!("--report-fd {fd} is not writable"))
+        match open_for(fd) {
+            None => Err(format!("--report-fd {fd} is not open")),
+            Some(access) if access.writable => Ok(()),
+            Some(_) => Err(format!("--report-fd {fd} is not writable")),
         }
     }
 

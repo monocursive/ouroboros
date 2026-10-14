@@ -350,18 +350,8 @@ fn close_extra_descriptors() {
 /// The open descriptor numbers, from the kernel where it lists them and from a
 /// bounded probe otherwise.
 fn enumerate_descriptors() -> Vec<libc::c_int> {
-    let dir = if cfg!(target_os = "linux") {
-        "/proc/self/fd"
-    } else {
-        "/dev/fd"
-    };
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        let mut out: Vec<libc::c_int> = entries
-            .flatten()
-            .filter_map(|e| e.file_name().to_str().and_then(|n| n.parse().ok()))
-            .collect();
-        out.sort_unstable();
-        return out;
+    if let Some(numbers) = ouro_fixture::ops::open_fd_numbers() {
+        return numbers;
     }
     // SAFETY: `rl` is a live rlimit struct, which is what `getrlimit` writes.
     let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
@@ -395,18 +385,12 @@ fn checked_reader(fd: i32) -> Result<OwnedFd, String> {
 }
 
 fn check_access(fd: i32, want_write: bool) -> Result<(), String> {
-    // SAFETY: `F_GETFL` only reads the status flags of a descriptor number.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(format!("fd {fd} is not open"));
-    }
-    let access = flags & libc::O_ACCMODE;
-    let writable = access == libc::O_WRONLY || access == libc::O_RDWR;
-    let readable = access == libc::O_RDONLY || access == libc::O_RDWR;
-    if want_write && !writable {
+    let access =
+        ouro_fixture::report::open_for(fd).ok_or_else(|| format!("fd {fd} is not open"))?;
+    if want_write && !access.writable {
         return Err(format!("fd {fd} is not writable"));
     }
-    if !want_write && !readable {
+    if !want_write && !access.readable {
         return Err(format!("fd {fd} is not readable"));
     }
     Ok(())
