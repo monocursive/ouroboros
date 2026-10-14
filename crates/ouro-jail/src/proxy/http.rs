@@ -266,6 +266,27 @@ struct Field<'a> {
     value: &'a [u8],
 }
 
+/// A head's header fields, in order.
+struct Fields<'a>(Vec<Field<'a>>);
+
+impl Fields<'_> {
+    /// Every field named `wanted` (lower case), in order.
+    fn named(&self, wanted: &str) -> Vec<&Field<'_>> {
+        self.0
+            .iter()
+            .filter(|field| field.lower == wanted)
+            .collect()
+    }
+}
+
+/// The request line's parts.
+struct RequestLine<'a> {
+    method: &'a [u8],
+    target: &'a [u8],
+    version: &'a [u8],
+    http11: bool,
+}
+
 fn authority_text(bytes: &[u8]) -> Result<&str, Reason> {
     std::str::from_utf8(bytes).map_err(|_| Reason::MalformedRequest)
 }
@@ -280,22 +301,76 @@ pub fn parse_request(head: &[u8]) -> Result<Request, Reason> {
 }
 
 pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<Request, Reason> {
-    // The same line-ending checks `read_head` applies, so this function is
-    // safe on bytes that did not come through it: exactly one CRLF CRLF, at
-    // the end, and no bare CR, bare LF or NUL anywhere.
+    let mut lines = head_lines(head)?;
+    let line = request_line(lines.next().ok_or(Reason::MalformedRequest)?)?;
+    let fields = fields(lines)?;
+    let hosts = fields.named("host");
+    if hosts.len() > 1 {
+        return Err(Reason::MalformedRequest);
+    }
+    let framing = framing(&fields, line.http11)?;
+    let listed = connection_listed(&fields)?;
+    if line.method == b"CONNECT" {
+        if framing != Framing::Empty || !fields.named("content-length").is_empty() {
+            return Err(Reason::AmbiguousFraming);
+        }
+        let destination = parse_authority(authority_text(line.target)?, None)
+            .map_err(|_| Reason::MalformedRequest)?;
+        if let Some(host) = hosts.first() {
+            same_host(host, &destination, destination.port)?;
+        }
+        return Ok(Request {
+            destination,
+            framing: Framing::Tunnel,
+            forward_head: Vec::new(),
+        });
+    }
+    let (destination, path) = absolute_target(line.target, default_port)?;
+    match hosts.first() {
+        Some(host) => same_host(host, &destination, default_port)?,
+        None if line.http11 => return Err(Reason::MalformedRequest),
+        None => {}
+    }
+    let websocket = websocket_upgrade(&fields, &line, framing, &listed)?;
+    // An unrelated hop-by-hop Upgrade hint keeps the ordinary HTTP lane's
+    // existing semantics: strip it and close after the framed request.
+    let forward_head = forward_head(
+        &line,
+        path,
+        &destination,
+        &fields,
+        &listed,
+        framing,
+        websocket,
+    );
+    Ok(Request {
+        destination,
+        framing,
+        forward_head,
+    })
+}
+
+/// The lines of a head without their CRLF, after the same line-ending
+/// checks `read_head` applies, so parsing is safe on bytes that did not come
+/// through it: exactly one CRLF CRLF, at the end, and no bare CR, bare LF or
+/// NUL anywhere.
+fn head_lines(head: &[u8]) -> Result<impl Iterator<Item = &[u8]>, Reason> {
     if scan(head, 0)? != Some(head.len()) {
         return Err(Reason::MalformedRequest);
     }
     let body = head
         .strip_suffix(b"\r\n\r\n")
         .ok_or(Reason::MalformedRequest)?;
-    let mut lines = body.split(|&b| b == b'\n').map(|line| {
+    Ok(body.split(|&b| b == b'\n').map(|line| {
         // `scan` proved every LF follows a CR; the final line had its CRLF
         // stripped with the terminator.
         line.strip_suffix(b"\r").unwrap_or(line)
-    });
-    let request_line = lines.next().ok_or(Reason::MalformedRequest)?;
-    let mut parts = request_line.split(|&b| b == b' ');
+    }))
+}
+
+/// `METHOD SP target SP HTTP/1.x`, with a token method and a target.
+fn request_line(line: &[u8]) -> Result<RequestLine<'_>, Reason> {
+    let mut parts = line.split(|&b| b == b' ');
     let (Some(method), Some(target), Some(version), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
@@ -309,8 +384,18 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
         b"HTTP/1.0" => false,
         _ => return Err(Reason::MalformedRequest),
     };
+    Ok(RequestLine {
+        method,
+        target,
+        version,
+        http11,
+    })
+}
 
-    let mut fields: Vec<Field<'_>> = Vec::new();
+/// The header fields: a token name, a colon, a value without control
+/// characters (optional whitespace around it removed).
+fn fields<'a>(lines: impl Iterator<Item = &'a [u8]>) -> Result<Fields<'a>, Reason> {
+    let mut fields = Vec::new();
     for line in lines {
         if line.is_empty() {
             return Err(Reason::MalformedRequest);
@@ -333,23 +418,18 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
         let lower = String::from_utf8_lossy(name).to_ascii_lowercase();
         fields.push(Field { name, lower, value });
     }
+    Ok(Fields(fields))
+}
 
-    let named = |wanted: &str| -> Vec<&Field<'_>> {
-        fields
-            .iter()
-            .filter(|field| field.lower == wanted)
-            .collect()
-    };
-    let hosts = named("host");
-    if hosts.len() > 1 {
-        return Err(Reason::MalformedRequest);
-    }
-    let lengths = named("content-length");
-    let encodings = named("transfer-encoding");
+/// How the body is delimited: one `Content-Length`, or one
+/// `Transfer-Encoding: chunked` in HTTP/1.1, never both; no body otherwise.
+fn framing(fields: &Fields<'_>, http11: bool) -> Result<Framing, Reason> {
+    let lengths = fields.named("content-length");
+    let encodings = fields.named("transfer-encoding");
     if lengths.len() > 1 || encodings.len() > 1 || (!lengths.is_empty() && !encodings.is_empty()) {
         return Err(Reason::AmbiguousFraming);
     }
-    let framing = if let Some(field) = lengths.first() {
+    if let Some(field) = lengths.first() {
         let text = field.value;
         if text.is_empty() || text.len() > 19 || !text.iter().all(u8::is_ascii_digit) {
             return Err(Reason::AmbiguousFraming);
@@ -358,24 +438,27 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
             .ok()
             .and_then(|text| text.parse().ok())
             .ok_or(Reason::AmbiguousFraming)?;
-        if length == 0 {
+        Ok(if length == 0 {
             Framing::Empty
         } else {
             Framing::Length(length)
-        }
+        })
     } else if let Some(field) = encodings.first() {
         if !http11 || !field.value.eq_ignore_ascii_case(b"chunked") {
             return Err(Reason::AmbiguousFraming);
         }
-        Framing::Chunked
+        Ok(Framing::Chunked)
     } else {
-        Framing::Empty
-    };
+        Ok(Framing::Empty)
+    }
+}
 
-    // Names listed in Connection are removed; a framing or Host field must
-    // never be removable that way, or upstream framing would differ from ours.
+/// The names `Connection` lists, which are removed when forwarding. A
+/// framing or Host field must never be removable that way, or upstream
+/// framing would differ from ours.
+fn connection_listed(fields: &Fields<'_>) -> Result<HashSet<String>, Reason> {
     let mut listed: HashSet<String> = HashSet::new();
-    for field in named("connection") {
+    for field in fields.named("connection") {
         for token in field.value.split(|&b| b == b',') {
             let token = trim_ows(token);
             if token.is_empty() {
@@ -394,28 +477,25 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
             listed.insert(token);
         }
     }
+    Ok(listed)
+}
 
-    if method == b"CONNECT" {
-        if framing != Framing::Empty || !lengths.is_empty() {
-            return Err(Reason::AmbiguousFraming);
-        }
-        let destination =
-            parse_authority(authority_text(target)?, None).map_err(|_| Reason::MalformedRequest)?;
-        if let Some(host) = hosts.first() {
-            let stated = parse_authority(authority_text(host.value)?, Some(destination.port))
-                .map_err(|_| Reason::HostMismatch)?;
-            if stated != destination {
-                return Err(Reason::HostMismatch);
-            }
-        }
-        return Ok(Request {
-            destination,
-            framing: Framing::Tunnel,
-            forward_head: Vec::new(),
-        });
+/// Checks that a `Host` field names `destination`, its port defaulting to
+/// `default_port`.
+fn same_host(host: &Field<'_>, destination: &Destination, default_port: u16) -> Result<(), Reason> {
+    let stated = parse_authority(authority_text(host.value)?, Some(default_port))
+        .map_err(|_| Reason::HostMismatch)?;
+    if stated != *destination {
+        return Err(Reason::HostMismatch);
     }
+    Ok(())
+}
 
-    // Plain HTTP: `http://` absolute form only.
+/// The destination and the path (with its query) of an `http://`
+/// absolute-form target. A fragment, a byte outside printable ASCII in the
+/// path, or an authority that does not parse refuses; another scheme or
+/// form is unsupported.
+fn absolute_target(target: &[u8], default_port: u16) -> Result<(Destination, &[u8]), Reason> {
     if target.contains(&b'#') {
         return Err(Reason::MalformedRequest);
     }
@@ -439,52 +519,65 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
     }
     let destination = parse_authority(authority_text(authority)?, Some(default_port))
         .map_err(|_| Reason::MalformedRequest)?;
-    match hosts.first() {
-        Some(host) => {
-            let stated = parse_authority(authority_text(host.value)?, Some(default_port))
-                .map_err(|_| Reason::HostMismatch)?;
-            if stated != destination {
-                return Err(Reason::HostMismatch);
-            }
-        }
-        None if http11 => return Err(Reason::MalformedRequest),
-        None => {}
-    }
+    Ok((destination, path))
+}
 
-    let upgrades = named("upgrade");
-    let websocket =
-        !named("sec-websocket-key").is_empty() || !named("sec-websocket-version").is_empty();
-    if websocket {
-        use base64::Engine as _;
-        let keys = named("sec-websocket-key");
-        let versions = named("sec-websocket-version");
-        if method != b"GET"
-            || !http11
-            || framing != Framing::Empty
-            || upgrades.len() != 1
-            || !upgrades[0].value.eq_ignore_ascii_case(b"websocket")
-            || !listed.contains("upgrade")
-            || keys.len() != 1
-            || versions.len() != 1
-            || versions[0].value != b"13"
-            || !base64::engine::general_purpose::STANDARD
-                .decode(keys[0].value)
-                .is_ok_and(|key| key.len() == 16)
-            || listed.iter().any(|name| name.starts_with("sec-websocket-"))
-        {
-            return Err(Reason::UnsupportedRequest);
-        }
-        for name in ["sec-websocket-protocol", "sec-websocket-extensions"] {
-            if named(name).len() > 1 {
-                return Err(Reason::MalformedRequest);
-            }
+/// Whether the request asks for a WebSocket (RFC 6455 §4.1): it names a
+/// key or a version. One that does is admitted only as exactly one valid
+/// HTTP/1.1 `GET` upgrade, with no body and nothing about the handshake
+/// removable through `Connection`.
+fn websocket_upgrade(
+    fields: &Fields<'_>,
+    line: &RequestLine<'_>,
+    framing: Framing,
+    listed: &HashSet<String>,
+) -> Result<bool, Reason> {
+    use base64::Engine as _;
+    let keys = fields.named("sec-websocket-key");
+    let versions = fields.named("sec-websocket-version");
+    if keys.is_empty() && versions.is_empty() {
+        return Ok(false);
+    }
+    let upgrades = fields.named("upgrade");
+    if line.method != b"GET"
+        || !line.http11
+        || framing != Framing::Empty
+        || upgrades.len() != 1
+        || !upgrades[0].value.eq_ignore_ascii_case(b"websocket")
+        || !listed.contains("upgrade")
+        || keys.len() != 1
+        || versions.len() != 1
+        || versions[0].value != b"13"
+        || !base64::engine::general_purpose::STANDARD
+            .decode(keys[0].value)
+            .is_ok_and(|key| key.len() == 16)
+        || listed.iter().any(|name| name.starts_with("sec-websocket-"))
+    {
+        return Err(Reason::UnsupportedRequest);
+    }
+    for name in ["sec-websocket-protocol", "sec-websocket-extensions"] {
+        if fields.named(name).len() > 1 {
+            return Err(Reason::MalformedRequest);
         }
     }
-    // An unrelated hop-by-hop Upgrade hint keeps the ordinary HTTP lane's
-    // existing semantics: strip it and close after the framed request.
+    Ok(true)
+}
 
-    let mut forward = Vec::with_capacity(head.len() + 64);
-    forward.extend_from_slice(method);
+/// The head sent upstream, built from validated parts only: the
+/// origin-form target, `Host` from the validated destination, every field
+/// but the hop-by-hop ones and those `Connection` lists, the framing, and
+/// `Connection: close` (or the WebSocket upgrade).
+fn forward_head(
+    line: &RequestLine<'_>,
+    path: &[u8],
+    destination: &Destination,
+    fields: &Fields<'_>,
+    listed: &HashSet<String>,
+    framing: Framing,
+    websocket: bool,
+) -> Vec<u8> {
+    let mut forward = Vec::with_capacity(256);
+    forward.extend_from_slice(line.method);
     forward.push(b' ');
     if path.first() == Some(&b'/') {
         forward.extend_from_slice(path);
@@ -493,14 +586,14 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
         forward.extend_from_slice(path);
     }
     forward.push(b' ');
-    forward.extend_from_slice(version);
+    forward.extend_from_slice(line.version);
     forward.extend_from_slice(b"\r\nHost: ");
     match (&destination.host, destination.port) {
         (host, 80) => forward.extend_from_slice(host.to_string().as_bytes()),
         (host, port) => forward.extend_from_slice(format!("{host}:{port}").as_bytes()),
     }
     forward.extend_from_slice(b"\r\n");
-    for field in &fields {
+    for field in &fields.0 {
         if HOP_BY_HOP.contains(&field.lower.as_str()) || listed.contains(&field.lower) {
             continue;
         }
@@ -517,11 +610,7 @@ pub(crate) fn parse_request_with_port(head: &[u8], default_port: u16) -> Result<
     } else {
         forward.extend_from_slice(b"Connection: close\r\n\r\n");
     }
-    Ok(Request {
-        destination,
-        framing,
-        forward_head: forward,
-    })
+    forward
 }
 
 /// The response for a refusal: status, safe reason code, no request data.

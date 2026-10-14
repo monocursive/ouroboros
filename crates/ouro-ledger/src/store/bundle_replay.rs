@@ -1,10 +1,29 @@
 //! Read-only replay of a bounded, reassembled canonical snapshot.
 use super::*;
 
-pub(crate) fn replay(reader: impl std::io::Read, run_id: &str) -> Result<RunRecord> {
+/// A replayed snapshot. An unresolved run also carries the outcome run
+/// projection rule 1 gave it, so a bundle exported under that rule still
+/// verifies; for every other run the two rules agree.
+pub(crate) struct Replayed {
+    pub(crate) run: RunRecord,
+    pub(crate) rule_one_outcome: Option<Value>,
+}
+
+/// Run projection rule 1, current until 2026-10-14: an unresolved run kept
+/// the generic reason and copied whatever outcome its record reported (the
+/// owner's or reconciler's own unknown, or null) into observed_child_outcome.
+fn rule_one_unknown_outcome(reported: Option<&Value>) -> Value {
+    json!({"kind":"unknown","unknown":true,"unknown_reason":UNRESOLVED,
+        "observed_child_outcome":reported})
+}
+
+pub(crate) fn replay(reader: impl std::io::Read, run_id: &str) -> Result<Replayed> {
     check_run_id(run_id)?;
     let mut stream = Stream::empty(run_id);
     let mut reader = BufReader::new(reader);
+    // The outcome the last outcome_unknown record reported: once unresolved,
+    // only another such record can set a run's outcome.
+    let mut reported = None;
     loop {
         use std::io::Read as _;
         let mut bytes = Vec::new();
@@ -26,11 +45,22 @@ pub(crate) fn replay(reader: impl std::io::Read, run_id: &str) -> Result<RunReco
             ));
         }
         stream.accept_canonical(run_id, &bytes)?;
+        if stream.run.state == "outcome_unknown" {
+            let record: Value = serde_json::from_slice(&bytes)?;
+            if record["kind"] == "outcome_unknown" {
+                reported = Some(record["body"].get("outcome").cloned());
+            }
+        }
     }
     if stream.run.chain.head_seq == 0 {
         return Err(LedgerError("bundle snapshot is empty".into()));
     }
-    Ok(stream.run)
+    let rule_one_outcome = (stream.run.state == "outcome_unknown")
+        .then(|| rule_one_unknown_outcome(reported.flatten().as_ref()));
+    Ok(Replayed {
+        run: stream.run,
+        rule_one_outcome,
+    })
 }
 
 #[cfg(test)]

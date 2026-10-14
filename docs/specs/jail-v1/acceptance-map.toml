@@ -1488,7 +1488,7 @@ gate = "O02"
 clause = "PID reuse carries no attribution over"
 tag = "simulated"
 tests = [
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::j4_o02_recycled_tid_carries_nothing_over",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tasks::tests::j4_o02_recycled_tid_carries_nothing_over",
 ]
 note = "Forcing PID reuse live needs CAP_SYS_ADMIN in the pid namespace (j4-authority.md, Known gaps); a session-level hook recycles a tid."
 
@@ -1545,7 +1545,7 @@ tag = "simulated"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::o03_a_truncated_path_is_a_gap_not_a_result",
 ]
-note = "Truncation: a covered call whose path the tracer could not read (kernel accepted) becomes a path_unreadable gap in a degraded coverage class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_TRUNCATE_PATH (recorded in native details). Enforcement: self.gap(GapReason::PathUnreadable, ..) in tracer/session.rs; deleting it makes the truncated call vanish."
+note = "Truncation: a covered call whose path the tracer could not read (kernel accepted) becomes a path_unreadable gap in a degraded coverage class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_TRUNCATE_PATH (recorded in native details). Enforcement: self.gap(GapReason::PathUnreadable, ..) in tracer/session/exit.rs; deleting it makes the truncated call vanish."
 
 [[clause]]
 id = "O03.2"
@@ -1554,9 +1554,9 @@ clause = "An unmatched exit produces a gap, never a result"
 tag = "simulated"
 tests = [
   "ouro-jail/tests/j5_boundary_linux.rs::o03_an_unmatched_exit_is_a_gap_not_a_result",
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::an_exit_with_no_entry_is_one_unmatched_exit_gap",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::exit::tests::an_exit_with_no_entry_is_one_unmatched_exit_gap",
 ]
-note = "A covered exit with no entry to pair with becomes an unmatched_exit gap in a degraded class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT. Enforcement: self.gap(GapReason::UnmatchedExit, ..) at the seam site in tracer/session.rs; deleting it counts the call as a normal result. The real branch — handle_exit's exit with no in-flight entry, the site an untriggered seam would hide — is driven directly (no seam) by the second cited unit, which asserts the loss counter and exactly one UnmatchedExit gap event; the seam remains for the live `run` shape that unit cannot produce (audit 2026-10-08 M02/L22)."
+note = "A covered exit with no entry to pair with becomes an unmatched_exit gap in a degraded class with a null count, driven through `ouro-jail run` under the path-gated tracer seam OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT. Enforcement: self.gap(GapReason::UnmatchedExit, ..) at the seam site in tracer/session/exit.rs; deleting it counts the call as a normal result. The real branch — handle_exit's exit with no in-flight entry, the site an untriggered seam would hide — is driven directly (no seam) by the second cited unit, which asserts the loss counter and exactly one UnmatchedExit gap event; the seam remains for the live `run` shape that unit cannot produce (audit 2026-10-08 M02/L22)."
 
 [[clause]]
 id = "O03.6"
@@ -3251,7 +3251,7 @@ clause = "A foreign-arch `clone3` that succeeds classifies `untraced_descendant`
 tag = "live-cli"
 tests = [
   "ouro-jail/tests/j4_closed_set_linux.rs::j4_clone_untraced_is_a_gap_in_none",
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::audit4_compat_abi_listener_and_untraced_clone_route_to_their_gaps",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::entry::tests::audit4_compat_abi_listener_and_untraced_clone_route_to_their_gaps",
 ]
 
 [[clause]]
@@ -3549,7 +3549,7 @@ tests = [
   "ouro-jail/tests/command_rules_linux.rs::a_matching_child_command_is_still_forbidden",
   "ouro-jail/tests/command_rules_linux.rs::empty_arguments_do_not_turn_an_allowed_command_into_a_forbidden_one",
   "ouro-jail/src/lib.rs::commands::tests::positional_and_tail",
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::evidence::tests::the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy",
 ]
 note = "The glob, basename and path forms are the matcher unit's; the re-check unit is what judges a re-spelled kernel copy as the entry did. K31's script/no-argv shapes are K31.3."
 
@@ -3707,8 +3707,8 @@ gate = "K30"
 clause = "An open claim the descriptor does not corroborate (absolute: every component; relative, bare names included: the tail; `O_TMPFILE`: the directory) delivers with an incomplete path, counts `path_claims_unverified`, and records a bookkeeping `path_claim_unverified` gap that degrades no class and accounts for no loss; agreement records none of it"
 tag = "simulated"
 tests = [
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::an_open_claim_the_descriptor_does_not_corroborate_is_downgraded_not_lost",
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::a_path_claim_is_corroborated_by_its_components_not_only_its_name",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::exit::tests::an_open_claim_the_descriptor_does_not_corroborate_is_downgraded_not_lost",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::evidence::tests::a_path_claim_is_corroborated_by_its_components_not_only_its_name",
   "ouro-jail/src/lib.rs::platform::linux::observed::tests::a_path_claim_gap_degrades_nothing_and_accounts_for_no_loss",
 ]
 note = "The tracer's claim logic driven directly (the kernel's mismatch is manufactured); that the gap never stops a strict run is the observed half's degrades-nothing assertion, not a strict-run integration test."
@@ -3727,7 +3727,7 @@ tag = "live-cli"
 tests = [
   "ouro-jail/tests/command_rules_linux.rs::an_exec_the_entry_passed_whose_image_hits_a_forbid_rule_is_killed_at_exec",
   "ouro-jail/tests/command_rules_linux.rs::a_deny_rule_that_only_the_kernel_copy_hits_kills_the_exec_and_the_run_completes",
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::an_exec_the_recheck_kills_leaves_flight_with_its_event_and_no_abandoned_gap",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::exec::tests::an_exec_the_recheck_kills_leaves_flight_with_its_event_and_no_abandoned_gap",
   "ouro-jail/src/lib.rs::platform::linux::observed::tests::an_exec_time_command_hit_is_recorded_and_only_forbid_stops_the_run",
 ]
 
@@ -3747,7 +3747,7 @@ gate = "K31"
 clause = "A `#!` script, an empty argument and an `execve` with no argv are judged as at the entry stop"
 tag = "live-lib"
 tests = [
-  "ouro-jail/src/lib.rs::platform::linux::tracer::session::tests::the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy",
+  "ouro-jail/src/lib.rs::platform::linux::tracer::session::evidence::tests::the_exec_recheck_judges_what_the_entry_judged_on_the_kernels_copy",
   "ouro-jail/tests/command_rules_linux.rs::empty_arguments_do_not_turn_an_allowed_command_into_a_forbidden_one",
 ]
 

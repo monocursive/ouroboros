@@ -682,7 +682,7 @@ fn run_inside_raw(
 fn probe_bwrap_present(bwrap: &Path) -> ProbeResult {
     const NAME: &str = Probe::BwrapPresent.name();
     const MECHANISM: &str = Probe::BwrapPresent.mechanism();
-    match bwrap::bwrap_version(bwrap) {
+    match bwrap::bwrap_version(bwrap, Deadline::after(PROBE_DEADLINE)) {
         Ok(version) if version.at_least(bwrap::MINIMUM_VERSION) => {
             ProbeResult::new(NAME, ProbeStatus::Available, MECHANISM, "ok", version.raw)
         }
@@ -1459,15 +1459,25 @@ fn probe_observer(jail_exe: &Path) -> ProbeResult {
         let mut fds = FdMap::new();
         fds.add(release_r, RELEASE_FD)?;
         fds.add(error_w, ERROR_FD)?;
+        let launch = super::launch::LaunchArgs {
+            release_fd: RELEASE_FD,
+            error_fd: ERROR_FD,
+            narrow: true,
+            read_open_fast_path: false,
+            trace_data_fd: None,
+            mediate: None,
+            bridge: None,
+            sigmask: None,
+            argv: vec![
+                jail_exe.into(),
+                INSIDE_SUBCOMMAND.into(),
+                format!("create=write:{}", target.display()).into(),
+            ],
+        };
         let mut command = Command::new(jail_exe);
         command
             .arg(super::launch::SUBCOMMAND)
-            .args(["--release-fd", &RELEASE_FD.to_string()])
-            .args(["--error-fd", &ERROR_FD.to_string()])
-            .args(["--narrow", "--"])
-            .arg(jail_exe)
-            .arg(INSIDE_SUBCOMMAND)
-            .arg(format!("create=write:{}", target.display()))
+            .args(launch.to_argv())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

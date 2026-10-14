@@ -4,10 +4,10 @@
 //! Every `unsafe` block the tracer runs, its tests aside, lives here except
 //! the filter install (`filter::install_narrowing_filter_for`), which has to
 //! stay allocation-free between `fork` and `execve`; the rest of the module
-//! is ordinary Rust. The request numbers and
-//! option bits are spelled out rather than taken from `libc` so that the ABI
-//! this module speaks is visible in one place; [`tests`] asserts each one
-//! against `libc` so a typo cannot survive a build.
+//! is ordinary Rust. The ptrace requests, events and syscall-info ops are
+//! `libc`'s, named here so that the ABI this module speaks is listed in one
+//! place. The option bits are spelled out as the `u64` word `PTRACE_SEIZE`
+//! takes, and [`tests`] asserts each one against `libc`.
 
 use std::io;
 
@@ -15,20 +15,15 @@ use libc::{c_int, c_uint, c_void, pid_t};
 
 // ------------------------------------------------------------ ptrace ABI
 
-pub const PTRACE_CONT: c_uint = 7;
-pub const PTRACE_SINGLESTEP: c_uint = 9;
-/// Read only by the x86_64 register reader; other architectures' ABIs
-/// have no `PTRACE_GETREGS` (aarch64 uses `PTRACE_GETREGSET`).
+// Read only by the x86_64 register reader; other architectures' ABIs have
+// no `PTRACE_GETREGS` (aarch64 uses `PTRACE_GETREGSET`).
 #[cfg(target_arch = "x86_64")]
-pub const PTRACE_GETREGS: c_uint = 12;
-pub const PTRACE_DETACH: c_uint = 17;
-pub const PTRACE_SYSCALL: c_uint = 24;
-pub const PTRACE_GETEVENTMSG: c_uint = 0x4201;
-pub const PTRACE_GETSIGINFO: c_uint = 0x4202;
-pub const PTRACE_SEIZE: c_uint = 0x4206;
-pub const PTRACE_LISTEN: c_uint = 0x4208;
-/// Not in every `libc` release; kernel 4.3 and later.
-pub const PTRACE_GET_SYSCALL_INFO: c_uint = 0x420e;
+use libc::PTRACE_GETREGS;
+pub use libc::{PTRACE_CONT, PTRACE_SINGLESTEP, PTRACE_SYSCALL};
+use libc::{
+    PTRACE_DETACH, PTRACE_GET_SYSCALL_INFO, PTRACE_GETEVENTMSG, PTRACE_GETSIGINFO, PTRACE_LISTEN,
+    PTRACE_SEIZE,
+};
 
 pub const PTRACE_O_TRACESYSGOOD: u64 = 0x0000_0001;
 pub const PTRACE_O_TRACEFORK: u64 = 0x0000_0002;
@@ -55,14 +50,10 @@ pub const SEIZE_OPTIONS: u64 = PTRACE_O_TRACESYSGOOD
     | PTRACE_O_TRACESECCOMP
     | PTRACE_O_EXITKILL;
 
-pub const PTRACE_EVENT_FORK: c_int = 1;
-pub const PTRACE_EVENT_VFORK: c_int = 2;
-pub const PTRACE_EVENT_CLONE: c_int = 3;
-pub const PTRACE_EVENT_EXEC: c_int = 4;
-pub const PTRACE_EVENT_VFORK_DONE: c_int = 5;
-pub const PTRACE_EVENT_EXIT: c_int = 6;
-pub const PTRACE_EVENT_SECCOMP: c_int = 7;
-pub const PTRACE_EVENT_STOP: c_int = 128;
+pub use libc::{
+    PTRACE_EVENT_CLONE, PTRACE_EVENT_EXEC, PTRACE_EVENT_EXIT, PTRACE_EVENT_FORK,
+    PTRACE_EVENT_SECCOMP, PTRACE_EVENT_STOP, PTRACE_EVENT_VFORK, PTRACE_EVENT_VFORK_DONE,
+};
 
 /// `SIGTRAP | 0x80`: a syscall stop under `PTRACE_O_TRACESYSGOOD`.
 pub const SYSCALL_STOP_SIG: c_int = libc::SIGTRAP | 0x80;
@@ -92,11 +83,12 @@ pub const FRAME_IP: u64 = if cfg!(target_arch = "aarch64") {
     40 + 16 * 8
 };
 
-/// `struct ptrace_syscall_info.op`.
-pub const SYSCALL_INFO_NONE: u8 = 0;
-pub const SYSCALL_INFO_ENTRY: u8 = 1;
-pub const SYSCALL_INFO_EXIT: u8 = 2;
-pub const SYSCALL_INFO_SECCOMP: u8 = 3;
+// `struct ptrace_syscall_info.op`.
+pub use libc::{
+    PTRACE_SYSCALL_INFO_ENTRY as SYSCALL_INFO_ENTRY, PTRACE_SYSCALL_INFO_EXIT as SYSCALL_INFO_EXIT,
+    PTRACE_SYSCALL_INFO_NONE as SYSCALL_INFO_NONE,
+    PTRACE_SYSCALL_INFO_SECCOMP as SYSCALL_INFO_SECCOMP,
+};
 
 /// The in-kernel restart codes. They are visible to a tracer at a syscall
 /// exit stop and never to user space. None of them is a result yet: when
@@ -722,23 +714,9 @@ mod tests {
         assert_eq!(frame(&regs(SIGUSR1, u64::MAX - 15, 0x40_2000)), None);
     }
 
-    /// `PTRACE_GET_SYSCALL_INFO` is deliberately absent: it is not in every
-    /// `libc` release, which is why this module defines it.
+    /// The option bits spelled out above must be the ones `libc` knows.
     #[test]
-    fn ptrace_constants_match_libc() {
-        assert_eq!(u64::from(PTRACE_CONT), libc::PTRACE_CONT as u64);
-        assert_eq!(u64::from(PTRACE_SINGLESTEP), libc::PTRACE_SINGLESTEP as u64);
-        #[cfg(target_arch = "x86_64")]
-        assert_eq!(u64::from(PTRACE_GETREGS), libc::PTRACE_GETREGS as u64);
-        assert_eq!(u64::from(PTRACE_GETSIGINFO), libc::PTRACE_GETSIGINFO as u64);
-        assert_eq!(u64::from(PTRACE_DETACH), libc::PTRACE_DETACH as u64);
-        assert_eq!(u64::from(PTRACE_SYSCALL), libc::PTRACE_SYSCALL as u64);
-        assert_eq!(
-            u64::from(PTRACE_GETEVENTMSG),
-            libc::PTRACE_GETEVENTMSG as u64
-        );
-        assert_eq!(u64::from(PTRACE_SEIZE), libc::PTRACE_SEIZE as u64);
-        assert_eq!(u64::from(PTRACE_LISTEN), libc::PTRACE_LISTEN as u64);
+    fn ptrace_option_bits_match_libc() {
         assert_eq!(PTRACE_O_TRACESYSGOOD, libc::PTRACE_O_TRACESYSGOOD as u64);
         assert_eq!(PTRACE_O_TRACEFORK, libc::PTRACE_O_TRACEFORK as u64);
         assert_eq!(PTRACE_O_TRACEVFORK, libc::PTRACE_O_TRACEVFORK as u64);
@@ -747,34 +725,6 @@ mod tests {
         assert_eq!(PTRACE_O_TRACEEXIT, libc::PTRACE_O_TRACEEXIT as u64);
         assert_eq!(PTRACE_O_TRACESECCOMP, libc::PTRACE_O_TRACESECCOMP as u64);
         assert_eq!(PTRACE_O_EXITKILL, libc::PTRACE_O_EXITKILL as u64);
-        assert_eq!(
-            i64::from(PTRACE_EVENT_FORK),
-            i64::from(libc::PTRACE_EVENT_FORK)
-        );
-        assert_eq!(
-            i64::from(PTRACE_EVENT_VFORK),
-            i64::from(libc::PTRACE_EVENT_VFORK)
-        );
-        assert_eq!(
-            i64::from(PTRACE_EVENT_CLONE),
-            i64::from(libc::PTRACE_EVENT_CLONE)
-        );
-        assert_eq!(
-            i64::from(PTRACE_EVENT_EXEC),
-            i64::from(libc::PTRACE_EVENT_EXEC)
-        );
-        assert_eq!(
-            i64::from(PTRACE_EVENT_VFORK_DONE),
-            i64::from(libc::PTRACE_EVENT_VFORK_DONE)
-        );
-        assert_eq!(
-            i64::from(PTRACE_EVENT_EXIT),
-            i64::from(libc::PTRACE_EVENT_EXIT)
-        );
-        assert_eq!(
-            i64::from(PTRACE_EVENT_SECCOMP),
-            i64::from(libc::PTRACE_EVENT_SECCOMP)
-        );
     }
 
     /// The seccomp ABI the narrowing filter speaks, from the modules that

@@ -12,6 +12,50 @@ pub(super) struct JournalSeen {
     changed: (i64, i64),
 }
 
+/// Why a dead owner's pending evidence was refused. Canonical history keeps
+/// only this class, never the refusal's text, which can quote journal values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PendingRefusal {
+    /// A nonterminal run whose owner died has no pending journal.
+    JournalMissing,
+    /// The journal cannot be opened safely or decoded.
+    JournalUnreadable,
+    /// Pending evidence cannot supply the admission the run never recorded.
+    NotAdmitted,
+    /// The recorded exit lacks corroborating terminal control.
+    ExitUncorroborated,
+    /// The journal's evidence violates the source contract or canonical history.
+    EvidenceRefused,
+}
+
+impl PendingRefusal {
+    fn class(self) -> &'static str {
+        match self {
+            Self::JournalMissing => "journal_missing",
+            Self::JournalUnreadable => "journal_unreadable",
+            Self::NotAdmitted => "not_admitted",
+            Self::ExitUncorroborated => "exit_uncorroborated",
+            Self::EvidenceRefused => "evidence_refused",
+        }
+    }
+}
+
+/// A failed reconciliation. Only a refusal the journal caused is final for an
+/// unchanged journal; anything else (a held lock, store I/O, an owner that is
+/// still alive) may not happen again.
+pub(super) enum PendingFailure {
+    Refused(PendingRefusal, LedgerError),
+    Other(LedgerError),
+}
+
+impl PendingFailure {
+    fn into_error(self) -> LedgerError {
+        match self {
+            Self::Refused(_, error) | Self::Other(error) => error,
+        }
+    }
+}
+
 impl Store {
     pub(super) fn pending_exists(&self, id: &str) -> bool {
         fs::symlink_metadata(self.root.join(id).join(STATE)).is_ok()
@@ -30,18 +74,18 @@ impl Store {
     }
 
     /// A dead owner's local evidence could not be reconciled. Record the
-    /// unknown outcome with the refusal; the journal stays for inspection.
+    /// unknown outcome with the refusal's class; the journal stays for
+    /// inspection, and the refusal's text goes only to the operator's log.
     pub(super) fn record_invalid_pending(
         &mut self,
         id: &str,
         peer: &Peer,
-        problem: &LedgerError,
+        refusal: PendingRefusal,
     ) -> Result<AppendReceipt> {
-        let problem: String = problem.to_string().chars().take(512).collect();
         self.append(
             id,
             json!({"kind":"outcome_unknown","request_id":"reconcile:pending-invalid","body":{
-                "reason":"invalid_pending_evidence","problem":problem,
+                "reason":"invalid_pending_evidence","refusal":refusal.class(),
                 "outcome":{"kind":"unknown","unknown":true,"unknown_reason":"pending evidence could not be reconciled"},
                 "coverage":{"status":"degraded","gaps":[{"reason":"invalid_pending_evidence"}]}}}),
             "operator",
@@ -57,72 +101,109 @@ impl Store {
         peer: &Peer,
         alive: &impl Fn(&Peer) -> bool,
     ) -> Result<RunRecord> {
-        if !self.stream(id)?.poisoned.is_empty() {
-            return Err(LedgerError(
+        self.reconcile(id, peer, alive)
+            .map_err(PendingFailure::into_error)
+    }
+
+    pub(super) fn reconcile(
+        &mut self,
+        id: &str,
+        peer: &Peer,
+        alive: &impl Fn(&Peer) -> bool,
+    ) -> std::result::Result<RunRecord, PendingFailure> {
+        use PendingFailure::{Other, Refused};
+        use PendingRefusal::*;
+        let refused = |refusal| move |error| Refused(refusal, error);
+        if !self.stream(id).map_err(Other)?.poisoned.is_empty() {
+            return Err(Other(LedgerError(
                 "ambiguous canonical history refuses pending recovery".into(),
-            ));
+            )));
         }
-        let run = self.show(id)?;
+        let run = self.show(id).map_err(Other)?;
         if run.payload["evidence"] != "best-effort" {
-            return Err(LedgerError(
+            return Err(Other(LedgerError(
                 "strict runs cannot recover pending owner evidence".into(),
-            ));
+            )));
         }
-        let owner = run
-            .owner
-            .as_ref()
-            .ok_or_else(|| LedgerError("pending recovery requires a durable owner".into()))?;
+        let owner = run.owner.as_ref().ok_or_else(|| {
+            Other(LedgerError(
+                "pending recovery requires a durable owner".into(),
+            ))
+        })?;
         if peer != owner && alive(owner) {
-            return Err(LedgerError(
+            return Err(Other(LedgerError(
                 "only the live owner may reconcile its journal".into(),
-            ));
+            )));
         }
         if !self.pending_exists(id) {
             if ["settled", "denied", "outcome_unknown"].contains(&run.state.as_str()) {
                 return Ok(run);
             }
-            return Err(LedgerError(
-                "nonterminal recovery requires its pending journal".into(),
+            return Err(Refused(
+                JournalMissing,
+                LedgerError("nonterminal recovery requires its pending journal".into()),
             ));
         }
-        let journal = Journal::open(&self.root.join(id))?;
-        let mut state = journal.read(&run)?;
+        let journal = Journal::try_open(&self.root.join(id))
+            .map_err(refused(JournalUnreadable))?
+            .ok_or_else(|| {
+                Other(LedgerError(
+                    "another process holds the pending journal's lock".into(),
+                ))
+            })?;
+        let mut state = journal.read(&run).map_err(refused(JournalUnreadable))?;
         if ["settled", "denied", "outcome_unknown"].contains(&run.state.as_str()) {
-            journal.remove()?;
+            journal.remove().map_err(Other)?;
             return Ok(run);
         }
         if run.state != "admitted" {
-            return Err(LedgerError(
-                "pending evidence cannot supply admission".into(),
+            return Err(Refused(
+                NotAdmitted,
+                LedgerError("pending evidence cannot supply admission".into()),
             ));
         }
         if let Some(completion) = &state.completion {
-            validate_completion(&run, completion)?;
+            validate_completion(&run, completion).map_err(refused(ExitUncorroborated))?;
         }
         let events = state.pending();
         for event in &events {
-            crate::redaction::validate_stored(event, &run.payload, &run.attempt_id)?;
+            crate::redaction::validate_stored(event, &run.payload, &run.attempt_id)
+                .map_err(refused(EvidenceRefused))?;
         }
+        // History refuses journal evidence without poisoning the stream; a
+        // persistence failure poisons it and is never the journal's fault.
+        let appended = |store: &Self, result: Result<AppendReceipt>| {
+            result.map(drop).map_err(|error| {
+                if store.stream(id).is_ok_and(|s| s.poisoned.is_empty()) {
+                    Refused(EvidenceRefused, error)
+                } else {
+                    Other(error)
+                }
+            })
+        };
         if state.active || state.completion.is_some() {
-            state.outage()?;
+            state.outage().map_err(refused(EvidenceRefused))?;
             let record = json!({"kind":"evidence_gap","request_id":format!("outage:{}",state.episode),"body":{"reason":"writer_outage","episode":state.episode,"owner":owner}});
-            self.append(id, record, "recovery", peer, None)?;
+            let result = self.append(id, record, "recovery", peer, None);
+            appended(self, result)?;
         }
         for event in events {
-            self.append_source_as(id, &event, peer, None, "recovery")?;
+            let result = self.append_source_as(id, &event, peer, None, "recovery");
+            appended(self, result)?;
         }
         if let Some(completion) = &state.completion {
             let record = json!({"kind":completion.kind,"request_id":"settlement","effect_id":null,"body":completion.body});
-            self.append(id, record, "recovery", peer, None)?;
-            journal.remove()?;
+            let result = self.append(id, record, "recovery", peer, None);
+            appended(self, result)?;
+            journal.remove().map_err(Other)?;
         } else if !alive(owner) {
-            self.append(id, json!({"kind":"outcome_unknown","request_id":"reconcile:pending-owner-dead","body":{"outcome":{"kind":"unknown","unknown":true,"unknown_reason":"pending owner has no durable local exit record"},"coverage":{"status":"degraded","gaps":[{"reason":"local_exit_missing"}]}}}), "recovery", peer, None)?;
-            journal.remove()?;
+            self.append(id, json!({"kind":"outcome_unknown","request_id":"reconcile:pending-owner-dead","body":{"outcome":{"kind":"unknown","unknown":true,"unknown_reason":"pending owner has no durable local exit record"},"coverage":{"status":"degraded","gaps":[{"reason":"local_exit_missing"}]}}}), "recovery", peer, None).map_err(Other)?;
+            journal.remove().map_err(Other)?;
         } else {
             state.clear();
-            journal.save(&state)?;
+            journal.save(&state).map_err(Other)?;
         }
-        self.show(id)
+        self.show(id).map_err(Other)
     }
 
     #[cfg(target_os = "linux")]
@@ -147,9 +228,17 @@ impl Store {
             if self.pending_failures.get(&id) == Some(&seen) {
                 continue;
             }
-            let Err(problem) = self.reconcile_pending(&id, peer, &crate::daemon::peer_alive) else {
-                self.pending_failures.remove(&id);
-                continue;
+            let (refusal, problem) = match self.reconcile(&id, peer, &crate::daemon::peer_alive) {
+                Ok(_) => {
+                    self.pending_failures.remove(&id);
+                    continue;
+                }
+                Err(PendingFailure::Other(problem)) => {
+                    // Not the journal's doing: the next attempt may succeed.
+                    eprintln!("pending recovery for {id} will be retried: {problem}");
+                    continue;
+                }
+                Err(PendingFailure::Refused(refusal, problem)) => (refusal, problem),
             };
             eprintln!("pending recovery for {id}: {problem}");
             // Retain the failed journal for inspection. A bad local file is
@@ -157,7 +246,7 @@ impl Store {
             if self
                 .stream(&id)
                 .is_ok_and(|s| ["prepared", "admitted"].contains(&s.run.state.as_str()))
-                && let Err(error) = self.record_invalid_pending(&id, peer, &problem)
+                && let Err(error) = self.record_invalid_pending(&id, peer, refusal)
             {
                 eprintln!("recording unknown outcome for {id}: {error}");
             }

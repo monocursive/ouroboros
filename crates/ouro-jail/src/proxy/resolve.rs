@@ -9,9 +9,11 @@ use std::io;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::sync::{lock, wait_timeout};
 
 /// Why resolution produced no answer set.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -116,12 +118,8 @@ impl SystemResolver {
     /// Lookups currently running, including abandoned late ones.
     #[must_use]
     pub fn in_flight(&self) -> usize {
-        *self.state.in_flight.lock().unwrap_or_else(poison)
+        *lock(&self.state.in_flight)
     }
-}
-
-fn poison<T>(error: PoisonError<T>) -> T {
-    error.into_inner()
 }
 
 /// Serves one fresh cached answer set, if there is one.
@@ -129,7 +127,7 @@ fn cached(
     cache: &Mutex<HashMap<String, (Instant, Vec<IpAddr>)>>,
     name: &str,
 ) -> Option<Vec<IpAddr>> {
-    let cache = cache.lock().unwrap_or_else(poison);
+    let cache = lock(cache);
     let (at, answers) = cache.get(name)?;
     (at.elapsed() < CACHE_TTL).then(|| answers.clone())
 }
@@ -140,7 +138,7 @@ fn store(
     name: String,
     answers: Vec<IpAddr>,
 ) {
-    let mut cache = cache.lock().unwrap_or_else(poison);
+    let mut cache = lock(cache);
     if cache.len() >= CACHE_MAX {
         cache.clear();
     }
@@ -158,7 +156,7 @@ struct InFlight(Arc<Shared>);
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        let mut in_flight = self.0.in_flight.lock().unwrap_or_else(poison);
+        let mut in_flight = lock(&self.0.in_flight);
         *in_flight = in_flight.saturating_sub(1);
         self.0.free.notify_one();
     }
@@ -188,7 +186,7 @@ impl Resolver for SystemResolver {
         let queued = if waiters > self.max_in_flight.saturating_mul(4) {
             Err(ResolveError::Overloaded)
         } else {
-            let mut in_flight = self.state.in_flight.lock().unwrap_or_else(poison);
+            let mut in_flight = lock(&self.state.in_flight);
             loop {
                 if Instant::now() >= deadline {
                     break Err(ResolveError::Timeout);
@@ -197,14 +195,11 @@ impl Resolver for SystemResolver {
                     *in_flight += 1;
                     break Ok(());
                 }
-                let (guard, wait) = self
-                    .state
-                    .free
-                    .wait_timeout(
-                        in_flight,
-                        deadline.saturating_duration_since(Instant::now()),
-                    )
-                    .unwrap_or_else(poison);
+                let (guard, wait) = wait_timeout(
+                    &self.state.free,
+                    in_flight,
+                    deadline.saturating_duration_since(Instant::now()),
+                );
                 in_flight = guard;
                 if wait.timed_out() {
                     continue;
@@ -280,21 +275,21 @@ impl FixtureResolver {
 
     /// Scripts the answers for `host`.
     pub fn script(&self, host: &str, answers: Vec<FixtureAnswer>) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = lock(&self.state);
         state.scripts.insert(host.to_owned(), answers.into());
     }
 
     /// How many times `host` was resolved.
     #[must_use]
     pub fn calls(&self, host: &str) -> usize {
-        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = lock(&self.state);
         state.calls.get(host).copied().unwrap_or(0)
     }
 }
 
 impl Resolver for FixtureResolver {
     fn resolve(&self, host: &str, deadline: Instant) -> Result<Vec<IpAddr>, ResolveError> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = lock(&self.state);
         *state.calls.entry(host.to_owned()).or_default() += 1;
         let answer = match state.scripts.get_mut(host) {
             None => return Err(ResolveError::Failed),
@@ -312,11 +307,7 @@ impl Resolver for FixtureResolver {
                     if remaining.is_zero() {
                         return Err(ResolveError::Timeout);
                     }
-                    state = self
-                        .wake
-                        .wait_timeout(state, remaining)
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .0;
+                    state = wait_timeout(&self.wake, state, remaining).0;
                 }
             }
         }

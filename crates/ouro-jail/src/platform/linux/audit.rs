@@ -171,16 +171,15 @@ impl AuditWriter {
     /// coverage degraded and the count null, and a degraded class names
     /// its gap.
     pub fn record_limit_evidence_missing(&mut self, reason: &str) {
-        self.push_gap(Gap {
-            classes: vec![CoverageClass::Limits.as_str().to_owned()],
-            source: "audit".to_owned(),
-            // Nothing observes the evidence to come back: the hole stays
-            // open-ended, like a child's own lost notifications (§13.1).
-            start_ns: now_ns().to_string(),
-            end_ns: None,
-            reason: reason.to_owned(),
-            lost_count: None,
-        });
+        // Nothing observes the evidence to come back: the hole stays
+        // open-ended, like a child's own lost notifications (§13.1).
+        self.push_gap(
+            vec![CoverageClass::Limits.as_str().to_owned()],
+            reason,
+            now_ns(),
+            None,
+            None,
+        );
     }
 
     /// Records why a requested ceiling stays unapplied: the explanatory
@@ -240,14 +239,13 @@ impl AuditWriter {
                 // frame, not even the sink's own loss note: this result is a
                 // gap of its class, with a count of one (see [`AuditWriter`]).
                 let now = now_ns();
-                self.push_gap(Gap {
-                    classes: vec![class.as_str().to_owned()],
-                    source: "audit".to_owned(),
-                    start_ns: now.to_string(),
-                    end_ns: Some(now.to_string()),
-                    reason: TRACE_WRITER_POISONED.to_owned(),
-                    lost_count: Some(1),
-                });
+                self.push_gap(
+                    vec![class.as_str().to_owned()],
+                    TRACE_WRITER_POISONED,
+                    now,
+                    Some(now),
+                    Some(1),
+                );
                 false
             }
         }
@@ -392,10 +390,7 @@ impl AuditWriter {
             self.emit(&event, CoverageClass::FsDeny);
             return;
         }
-        let Some(base) = base_operation(op, args.flags) else {
-            self.record_unmapped();
-            return;
-        };
+        let base = op.audit_operation(args.flags);
         // A write refused by the filesystem itself — EROFS on a read-only
         // grant, EBUSY on a rename or unlink across one — is a denial of a
         // mutation just like EACCES/EPERM (issue draft 09); the receipt's
@@ -586,24 +581,6 @@ impl AuditWriter {
         );
     }
 
-    /// A result whose operation the closed set does not name. It is never
-    /// counted under a guessed class: it could have been any audit result,
-    /// so it is a one-result gap in every audit class.
-    fn record_unmapped(&mut self) {
-        let now = now_ns();
-        self.push_gap(Gap {
-            classes: CoverageClass::AUDIT
-                .iter()
-                .map(|class| class.as_str().to_owned())
-                .collect(),
-            source: "audit".to_owned(),
-            start_ns: now.to_string(),
-            end_ns: Some(now.to_string()),
-            reason: OPERATION_UNMAPPED.to_owned(),
-            lost_count: Some(1),
-        });
-    }
-
     /// A confirmed exec transition (`PTRACE_EVENT_EXEC`).
     ///
     /// `image` is the pathname argument of the `execve` that produced the
@@ -704,40 +681,44 @@ impl AuditWriter {
         to_ns: u64,
         count: Option<u64>,
     ) {
-        let classes = classes_for(ops);
-        self.push_gap(Gap {
-            classes: classes
-                .iter()
-                .map(|class| class.as_str().to_owned())
-                .collect(),
-            source: "audit".to_owned(),
-            start_ns: from_ns.to_string(),
-            // A hole whose cause is never observed to end — a child's own
-            // notification listener — has no end the observer can state:
-            // `null`, not the moment it was noticed (§13.1 lets it be).
-            end_ns: (!reason.is_open_ended()).then(|| to_ns.to_string()),
-            reason: reason.as_str().to_owned(),
-            lost_count: count,
-        });
+        let classes = classes_for(ops)
+            .iter()
+            .map(|class| class.as_str().to_owned())
+            .collect();
+        // A hole whose cause is never observed to end — a child's own
+        // notification listener — has no end the observer can state:
+        // `null`, not the moment it was noticed (§13.1 lets it be).
+        let to_ns = (!reason.is_open_ended()).then_some(to_ns);
+        self.push_gap(classes, reason.as_str(), from_ns, to_ns, count);
     }
 
-    /// Records one gap: degrades the classes it names, coalesces it with a
-    /// gap of the same reason and classes, bounds the summaries, and writes
-    /// its note. The summary keeps the gap whether or not the trace took its
-    /// note; a note it did not take is the stream's loss.
-    fn push_gap(&mut self, gap: Gap) {
+    /// Records one gap of `reason` over `classes`, from `from_ns` to `to_ns`
+    /// (`None` when its end is never observed): degrades the classes it
+    /// names, coalesces it with a gap of the same reason and classes, bounds
+    /// the summaries, and writes its note. The summary keeps the gap whether
+    /// or not the trace took its note; a note it did not take is the
+    /// stream's loss.
+    fn push_gap(
+        &mut self,
+        classes: Vec<String>,
+        reason: &str,
+        from_ns: u64,
+        to_ns: Option<u64>,
+        lost_count: Option<u64>,
+    ) {
+        let gap = Gap {
+            classes,
+            source: "audit".to_owned(),
+            start_ns: from_ns.to_string(),
+            end_ns: to_ns.map(|to| to.to_string()),
+            reason: reason.to_owned(),
+            lost_count,
+        };
         for class in CoverageClass::ALL {
             if gap.classes.iter().any(|name| name == class.as_str()) {
                 self.degraded.insert(class);
             }
         }
-        let (from_ns, to_ns) = (
-            gap.start_ns.parse::<u64>().unwrap_or(0),
-            gap.end_ns
-                .as_deref()
-                .and_then(|end| end.parse::<u64>().ok())
-                .unwrap_or(0),
-        );
         // Keep bounded interval summaries; repeated losses extend an interval.
         if let Some(existing) = self
             .gaps
@@ -753,12 +734,6 @@ impl AuditWriter {
         }
         if self.gaps.len() >= 64 {
             let existing = self.gaps.last_mut().expect("nonempty bounded gaps");
-            // Audit 7 L13: an open-ended loss (`end_ns: null`) merged into a
-            // closed interval must leave the interval open — only a
-            // presented or written `end` bounds it, never a merge.
-            if gap.end_ns.is_none() {
-                existing.end_ns = None;
-            }
             existing.reason = "coalesced_losses".to_owned();
             extend_gap_interval(existing, from_ns, to_ns);
             existing.lost_count = None;
@@ -1092,8 +1067,6 @@ const TRACE_WRITER_POISONED: &str = "trace_writer_poisoned";
 const OBSERVER_PANICKED: &str = "observer_panicked";
 /// The gap reason of an observed attempt whose observer left no account.
 const OBSERVER_ACCOUNT_MISSING: &str = "observer_account_missing";
-/// The gap reason of a result whose operation the closed set does not name.
-const OPERATION_UNMAPPED: &str = "operation_unmapped";
 
 /// The errno a signed raw return carries: `Some` only for a failure
 /// (`-errno`) whose magnitude is an errno at all.
@@ -1175,15 +1148,6 @@ fn strip_root(path: &[u8], root: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// The operation a successful closed-set call is reported as (§11.2): the
-/// observer's own mapping, which the published table uses too, read into the
-/// closed set. `None` would mean that mapping named an operation outside the
-/// closed set; a test holds every row to it, and the writer turns it into a
-/// gap rather than guess a class.
-fn base_operation(op: ClosedOp, flags: Option<u64>) -> Option<ClosedOperation> {
-    ClosedOperation::from_name(op.audit_operation(flags))
-}
-
 /// The classes a gap affects, from the operations it swallowed.
 ///
 /// §11.4: "A gap names the affected classes explicitly". The observer knows
@@ -1194,30 +1158,30 @@ fn base_operation(op: ClosedOp, flags: Option<u64>) -> Option<ClosedOperation> {
 fn classes_for(ops: OpSet) -> Vec<CoverageClass> {
     let mut classes: BTreeSet<CoverageClass> = BTreeSet::new();
     for op in ops.iter() {
-        match base_operation(op, None) {
-            Some(operation) => {
-                classes.insert(operation.coverage_class());
-            }
-            // An operation without a class could have been any result.
-            None => classes.extend(CoverageClass::AUDIT),
-        }
+        classes.insert(op.audit_operation(None).coverage_class());
         classes.insert(CoverageClass::FsDeny);
     }
     classes.into_iter().collect()
 }
 
-fn extend_gap_interval(gap: &mut Gap, from: u64, to: u64) {
+/// Widen `gap`'s interval to cover a loss from `from` to `to` (`None` when
+/// that loss is never observed to end). The bounds read back are the ones
+/// [`AuditWriter::push_gap`] wrote from numbers.
+///
+/// An open interval stays open, and audit 7 L13: an open-ended loss merged
+/// into a closed interval leaves it open — only a presented or written end
+/// bounds an interval, never a merge.
+fn extend_gap_interval(gap: &mut Gap, from: u64, to: Option<u64>) {
     gap.start_ns = gap
         .start_ns
         .parse::<u64>()
-        .unwrap_or(from)
-        .min(from)
+        .map_or(from, |start| start.min(from))
         .to_string();
-    // An open interval stays open: merging a later loss into it cannot give
-    // it an end.
-    if let Some(end) = gap.end_ns.as_deref() {
-        gap.end_ns = Some(end.parse::<u64>().unwrap_or(to).max(to).to_string());
-    }
+    let end = gap
+        .end_ns
+        .as_deref()
+        .and_then(|end| end.parse::<u64>().ok());
+    gap.end_ns = end.zip(to).map(|(end, to)| end.max(to).to_string());
 }
 
 #[cfg(test)]
@@ -1268,49 +1232,35 @@ mod tests {
     #[test]
     fn a_create_open_is_fs_create_and_a_mutating_open_is_fs_write() {
         assert_eq!(
-            base_operation(ClosedOp::Open, Some(O_CREAT | 1)),
-            Some(ClosedOperation::FsCreate)
+            ClosedOp::Open.audit_operation(Some(O_CREAT | 1)),
+            ClosedOperation::FsCreate
         );
         assert_eq!(
-            base_operation(ClosedOp::Open, Some(1)),
-            Some(ClosedOperation::FsWrite)
+            ClosedOp::Open.audit_operation(Some(1)),
+            ClosedOperation::FsWrite
         );
         assert_eq!(
-            base_operation(ClosedOp::Open, None),
-            Some(ClosedOperation::FsWrite)
+            ClosedOp::Open.audit_operation(None),
+            ClosedOperation::FsWrite
         );
     }
 
     #[test]
     fn every_directory_entry_creation_is_fs_create() {
         for op in [ClosedOp::Mkdir, ClosedOp::Link, ClosedOp::Symlink] {
-            assert_eq!(base_operation(op, None), Some(ClosedOperation::FsCreate));
+            assert_eq!(op.audit_operation(None), ClosedOperation::FsCreate);
         }
         for op in [ClosedOp::Unlink, ClosedOp::Rmdir] {
-            assert_eq!(base_operation(op, None), Some(ClosedOperation::FsUnlink));
+            assert_eq!(op.audit_operation(None), ClosedOperation::FsUnlink);
         }
         assert_eq!(
-            base_operation(ClosedOp::Rename, None),
-            Some(ClosedOperation::FsRename)
+            ClosedOp::Rename.audit_operation(None),
+            ClosedOperation::FsRename
         );
         assert_eq!(
-            base_operation(ClosedOp::Connect, None),
-            Some(ClosedOperation::NetConnect)
+            ClosedOp::Connect.audit_operation(None),
+            ClosedOperation::NetConnect
         );
-    }
-
-    /// The tracer's §11.2 mapping names only closed-set operations, whatever
-    /// the flags, so no result reaches the unmapped gap.
-    #[test]
-    fn every_tracer_operation_is_in_the_closed_set() {
-        for op in ClosedOp::ALL {
-            for flags in [None, Some(0), Some(1), Some(O_CREAT | 1)] {
-                assert!(
-                    base_operation(op, flags).is_some(),
-                    "{op:?} with {flags:?} names an operation outside the closed set"
-                );
-            }
-        }
     }
 
     #[test]
@@ -1325,21 +1275,6 @@ mod tests {
         connect(&mut writer, 0);
         assert_eq!(writer.count(CoverageClass::FsDeny), 1);
         assert_eq!(writer.count(CoverageClass::Net), 1);
-    }
-
-    #[test]
-    fn an_unmapped_operation_is_a_gap_in_every_audit_class_never_a_count() {
-        let mut writer = writer();
-        writer.record_unmapped();
-        let summary = writer.summary(Some(&TracerSummary::default()), applied());
-        assert_degraded_classes_name_their_gaps(&summary);
-        for class in CoverageClass::AUDIT {
-            let entry = &summary.classes[&class];
-            assert_eq!(entry.status, SourceStatus::Degraded, "{class:?}");
-            assert_eq!(entry.observed_count, None, "{class:?}");
-            assert_eq!(entry.gaps[0].reason, "operation_unmapped");
-            assert_eq!(entry.gaps[0].lost_count, Some(1));
-        }
     }
 
     #[test]
@@ -1861,16 +1796,16 @@ mod tests {
     #[test]
     fn the_two_operations_revision_eight_added_are_classified() {
         assert_eq!(
-            base_operation(ClosedOp::Mknod, None),
-            Some(ClosedOperation::FsCreate)
+            ClosedOp::Mknod.audit_operation(None),
+            ClosedOperation::FsCreate
         );
         assert_eq!(
-            base_operation(ClosedOp::Truncate, None),
-            Some(ClosedOperation::FsWrite)
+            ClosedOp::Truncate.audit_operation(None),
+            ClosedOperation::FsWrite
         );
         assert_eq!(
-            base_operation(ClosedOp::Truncate, None),
-            base_operation(ClosedOp::Open, Some(1)),
+            ClosedOp::Truncate.audit_operation(None),
+            ClosedOp::Open.audit_operation(Some(1)),
             "both are mutations of an existing file; their actions differ"
         );
     }
@@ -2000,51 +1935,51 @@ mod tests {
         assert_eq!(foreign.end_ns.as_deref(), Some("2"));
     }
 
+    /// One rule widens every merged interval: the earliest start, the latest
+    /// end, and no end once either side has none.
+    #[test]
+    fn a_merged_interval_covers_both_and_ends_only_if_both_end() {
+        let gap = |start: u64, end: Option<u64>| Gap {
+            classes: Vec::new(),
+            source: "audit".to_owned(),
+            start_ns: start.to_string(),
+            end_ns: end.map(|end| end.to_string()),
+            reason: "queue_full".to_owned(),
+            lost_count: Some(1),
+        };
+        let merged = |mut into: Gap, from: u64, to: Option<u64>| {
+            extend_gap_interval(&mut into, from, to);
+            (into.start_ns, into.end_ns)
+        };
+        let closed = |start: &str, end: &str| (start.to_owned(), Some(end.to_owned()));
+        assert_eq!(merged(gap(5, Some(9)), 2, Some(7)), closed("2", "9"));
+        assert_eq!(merged(gap(5, Some(9)), 6, Some(12)), closed("5", "12"));
+        assert_eq!(merged(gap(5, Some(9)), 7, None), ("5".to_owned(), None));
+        assert_eq!(merged(gap(5, None), 1, Some(3)), ("1".to_owned(), None));
+    }
+
     /// Audit 7 L13: at the 64-gap bound, an open-ended loss merged into the
     /// closed `coalesced_losses` interval leaves it open — a merge never
     /// gives the loss an end.
     #[test]
     fn an_open_ended_loss_merged_at_the_gap_bound_leaves_the_interval_open() {
         let mut writer = writer();
-        // Distinct (reason, classes) keys, so none of the 64 coalesces.
+        // Distinct (reason, classes) keys, so none of the 64 coalesces:
+        // every reason with an end, under each of three class sets.
         let ops = [
             OpSet::of(ClosedOp::Exec),
             OpSet::of(ClosedOp::Open),
             OpSet::of(ClosedOp::Connect),
         ];
-        let reasons = [
-            GapReason::QueueFull,
-            GapReason::MediationResponseUndelivered,
-            GapReason::UnmatchedExit,
-            GapReason::EntryAbandoned,
-            GapReason::InflightExhausted,
-            GapReason::PathUnreadable,
-            GapReason::SockaddrUnreadable,
-            GapReason::FlagsUnavailable,
-            GapReason::SyscallInfoUnavailable,
-            GapReason::IdentityUnavailable,
-            GapReason::FinalStatusUnknown,
-            GapReason::UnexpectedTraceStop,
-            GapReason::TraceesAbandoned,
-            GapReason::UnreapedChildren,
-            GapReason::RestartFailed,
-            GapReason::LifecycleDropped,
-            GapReason::DeathUnattributed,
-            GapReason::ForeignAbi,
-            GapReason::RestartUnresolved,
-            GapReason::ArgumentSnapshotUnstable,
-            GapReason::MemoryFlagsUnverified,
-            GapReason::ExecImageMismatch,
-            GapReason::PathClaimUnverified,
-        ];
-        for i in 0..64 {
-            writer.record_gap(
-                reasons[i % reasons.len()],
-                ops[i % 3],
-                i as u64,
-                i as u64 + 1,
-                Some(1),
-            );
+        let keys: Vec<(GapReason, OpSet)> = GapReason::ALL
+            .into_iter()
+            .filter(|reason| !reason.is_open_ended())
+            .flat_map(|reason| ops.map(|ops| (reason, ops)))
+            .take(64)
+            .collect();
+        assert_eq!(keys.len(), 64, "enough keys to reach the bound");
+        for (i, (reason, ops)) in keys.into_iter().enumerate() {
+            writer.record_gap(reason, ops, i as u64, i as u64 + 1, Some(1));
         }
         assert_eq!(writer.gaps().len(), 64);
         let bounded = writer.gaps().last().unwrap();

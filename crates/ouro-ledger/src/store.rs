@@ -32,7 +32,7 @@ use crate::schemas;
 
 mod bundle_replay;
 mod capture_pruning;
-pub(crate) use bundle_replay::replay as replay_bundle;
+pub(crate) use bundle_replay::{Replayed, replay as replay_bundle};
 mod catalog;
 #[cfg(test)]
 mod intent_tail_tests;
@@ -44,9 +44,12 @@ mod pruning;
 mod retention;
 mod tail;
 mod transcript;
+mod verification;
+pub(crate) use verification::{VerifyPlan, verify_page};
 
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
-/// Canonical history one verify page re-reads before it yields the writer.
+/// Canonical history one verify page re-reads, so one request's reply stays
+/// prompt; the re-read itself never runs on the writer thread.
 const VERIFY_PAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -157,6 +160,9 @@ pub struct Store {
     pending_failures: BTreeMap<String, Option<pending_recovery::JournalSeen>>,
     segment_limit: u64,
     verify_page_bytes: u64,
+    /// Advances whenever a GC may remove or rewrite run files, so a verifier
+    /// reading off the writer thread can tell a GC race from damage.
+    gc_generation: u64,
     #[cfg(test)]
     fault: Option<Fault>,
 }
@@ -471,6 +477,7 @@ impl Store {
             pending_failures: BTreeMap::new(),
             segment_limit: SEGMENT_BYTES,
             verify_page_bytes: VERIFY_PAGE_BYTES,
+            gc_generation: 0,
             #[cfg(test)]
             fault: None,
         };
@@ -1127,15 +1134,25 @@ impl Store {
             if self.pending_exists(&id) {
                 // Corrupt or incomplete local evidence must never imply
                 // settlement; its refusal is recorded with the unknown outcome.
-                let result = self.reconcile_pending(&id, peer, &alive);
+                let result = self.reconcile(&id, peer, &alive);
                 if !["prepared", "admitted"].contains(&self.stream(&id)?.run.state.as_str()) {
                     reconciled.push(self.show(&id)?);
                     continue;
                 }
-                if let Err(problem) = result {
-                    self.record_invalid_pending(&id, peer, &problem)?;
-                    reconciled.push(self.show(&id)?);
-                    continue;
+                match result {
+                    Ok(_) => {}
+                    Err(pending_recovery::PendingFailure::Refused(refusal, _)) => {
+                        self.record_invalid_pending(&id, peer, refusal)?;
+                        reconciled.push(self.show(&id)?);
+                        continue;
+                    }
+                    // Not the journal's doing: nothing is recorded for this
+                    // run, and a later settlement can retry it.
+                    Err(pending_recovery::PendingFailure::Other(problem)) => {
+                        return Err(LedgerError(format!(
+                            "{id}: pending evidence could not be reconciled now: {problem}"
+                        )));
+                    }
                 }
             }
             let owner = self.stream(&id)?.run.owner.clone();
@@ -1167,274 +1184,226 @@ impl Store {
         status
     }
 
-    /// Freshly re-read and re-hash one run, or a bounded page of runs after
-    /// `after`. A page stops at `limit` runs or before it would re-read more
-    /// than VERIFY_PAGE_BYTES of canonical history (it always verifies at
-    /// least one run), so no request holds the single writer thread for a
-    /// whole store.
-    pub fn verify_page(
-        &self,
-        run_id: Option<&str>,
-        after: Option<&str>,
-        limit: u32,
-    ) -> Result<VerifyPage> {
-        if let Some(id) = run_id {
-            return Ok(VerifyPage {
-                reports: vec![self.verify_run(id)?],
-                next_after: None,
-                done: true,
-            });
-        }
-        if !(1..=MAX_VERIFY_LIMIT).contains(&limit) {
-            return Err(LedgerError(format!(
-                "verify limit must be between 1 and {MAX_VERIFY_LIMIT}"
-            )));
-        }
-        if let Some(id) = after {
-            check_run_id(id)?;
-        }
-        let lower = after.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
-        let mut reports: Vec<VerifyReport> = Vec::new();
-        let mut bytes = 0u64;
-        let mut next_after = None;
-        for (id, stream) in self
-            .streams
-            .range::<str, _>((lower, std::ops::Bound::Unbounded))
-        {
-            let read = bytes.saturating_add(stream.accepted_bytes);
-            if let Some(last) = reports.last()
-                && (reports.len() >= limit as usize || read > self.verify_page_bytes)
-            {
-                next_after = Some(last.run_id.clone());
-                break;
-            }
-            bytes = read;
-            reports.push(self.verify_run(id)?);
-        }
-        Ok(VerifyPage {
-            reports,
-            done: next_after.is_none(),
-            next_after,
-        })
-    }
-
-    /// Every run, page by page, as the CLI assembles it.
-    #[cfg(test)]
-    pub(crate) fn verify(&self, run_id: Option<&str>) -> Result<Vec<VerifyReport>> {
-        let mut reports = Vec::new();
-        let mut after = None;
-        loop {
-            let page = self.verify_page(run_id, after.as_deref(), MAX_VERIFY_LIMIT)?;
-            reports.extend(page.reports);
-            if page.done {
-                return Ok(reports);
-            }
-            after = page.next_after;
-        }
-    }
-
-    fn verify_run(&self, id: &str) -> Result<VerifyReport> {
-        if self.stream(id)?.pruned.is_some() {
-            return self.verify_pruned(id);
-        }
-        let (stream, events) = self.load_stream_with_sync(id, &|_| Ok(()))?;
-        let mut problems = poison_details(&stream.poisoned);
-        if stream
-            .run
-            .capture_history
-            .as_ref()
-            .is_some_and(|h| h.state == "pruning")
-        {
-            problems.push("capture deletion is incomplete; retry GC or restart the writer".into());
-        }
-        if stream.poisoned.is_empty() {
-            let projection = (|| -> Result<Value> {
-                let bytes = crate::protocol::read_bounded(
-                    private_file(&self.root.join(id).join("run.json"), false, false)?,
-                    crate::projection::MAX_RUN_BYTES as u64,
-                    "run projection exceeds its bounded read limit",
-                )?;
-                let value: Value = serde_json::from_slice(&bytes)?;
-                validate_frozen("run", &value)?;
-                Ok(value)
-            })();
-            if projection.is_err()
-                || projection.as_ref().is_ok_and(|value| {
-                    serde_json::to_value(&stream.run).is_ok_and(|expected| expected != *value)
-                })
-            {
-                problems.push("run projection does not match verified canonical records".into());
-            }
-        }
-        if let Some(active) = self.streams.get(id) {
-            problems.extend(poison_details(&active.poisoned));
-        }
-        problems.sort();
-        problems.dedup();
-        Ok(VerifyReport {
-            run_id: id.into(),
-            local_consistency: problems.is_empty(),
-            child_protection: stream.run.child_protection,
-            coverage: crate::reader::coverage_summary(&stream.run.coverage),
-            events,
-            problems,
-            history: None,
-        })
-    }
-
     fn load_stream_with_sync(
         &self,
         run_id: &str,
         sync: &impl Fn(&File) -> std::io::Result<()>,
     ) -> Result<(Stream, u64)> {
-        let mut stream = Stream::empty(run_id);
         let directory = self.root.join(run_id);
-        let manifest = match crate::manifest::read(&directory, run_id) {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                stream.poisoned.push(Poison::new(
-                    PoisonKind::Unanchored,
-                    format!("invalid segment manifest: {error}"),
-                ));
-                None
-            }
-        };
-        let names = match manifest::names(&directory) {
-            Ok(names) => names,
+        let layout = Layout::read(&directory, run_id);
+        let loaded = load_stream(&directory, run_id, layout, sync, &mut || true)?;
+        Ok((loaded.stream, loaded.events))
+    }
+}
+
+/// One run's canonical layout as it stood at one moment. A re-read never goes
+/// past it, so it is consistent with whatever the writer appends later.
+struct Layout {
+    manifest: std::result::Result<Option<manifest::Manifest>, String>,
+    names: std::result::Result<Vec<String>, String>,
+    /// The last segment's length at that moment: appends only ever grow the
+    /// last segment, and a rotation seals it at or beyond this length.
+    last_bytes: Option<u64>,
+}
+
+impl Layout {
+    fn read(directory: &Path, run_id: &str) -> Self {
+        let manifest = crate::manifest::read(directory, run_id).map_err(|error| error.to_string());
+        let names = manifest::names(directory).map_err(|error| error.to_string());
+        let last_bytes = names
+            .as_ref()
+            .ok()
+            .and_then(|names| names.last())
+            .and_then(|name| fs::symlink_metadata(directory.join(name)).ok())
+            .map(|metadata| metadata.len());
+        Self {
+            manifest,
+            names,
+            last_bytes,
+        }
+    }
+}
+
+struct Loaded {
+    stream: Stream,
+    events: u64,
+    /// The canonical bytes re-read before `proceed` stopped the load, if it did.
+    stopped: Option<u64>,
+}
+
+/// Re-read and re-validate one run's canonical history within `layout`.
+/// `proceed` is asked before every frame; once it answers false the load
+/// stops and says how far it got, never what it did not read.
+fn load_stream(
+    directory: &Path,
+    run_id: &str,
+    layout: Layout,
+    sync: &impl Fn(&File) -> std::io::Result<()>,
+    proceed: &mut impl FnMut() -> bool,
+) -> Result<Loaded> {
+    let mut stream = Stream::empty(run_id);
+    let manifest = match layout.manifest {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            stream.poisoned.push(Poison::new(
+                PoisonKind::Unanchored,
+                format!("invalid segment manifest: {error}"),
+            ));
+            None
+        }
+    };
+    let names = match layout.names {
+        Ok(names) => names,
+        Err(error) => {
+            stream.poisoned.push(Poison::new(
+                PoisonKind::Corrupt,
+                format!("invalid segment layout: {error}"),
+            ));
+            return Ok(Loaded {
+                stream,
+                events: 0,
+                stopped: None,
+            });
+        }
+    };
+    let count = names.len();
+    if manifest
+        .as_ref()
+        .is_none_or(|m| count < m.segments.len() || count > m.segments.len() + 1)
+        && !(manifest.is_none() && count == 1)
+    {
+        stream.poisoned.push(Poison::new(
+            PoisonKind::Unanchored,
+            "segment manifest does not authorize this segment layout",
+        ));
+    }
+    let mut events = 0;
+    let mut stopped = None;
+    'segments: for (index, name) in names.iter().enumerate() {
+        stream.begin_segment(index + 1);
+        let anchor = manifest.as_ref().and_then(|m| m.segments.get(index));
+        let mut anchored = anchor.is_none();
+        let file = match private_file(&directory.join(name), false, false) {
+            Ok(file) => file,
             Err(error) => {
                 stream.poisoned.push(Poison::new(
                     PoisonKind::Corrupt,
-                    format!("invalid segment layout: {error}"),
+                    format!("missing or unsafe canonical segment: {error}"),
                 ));
-                return Ok((stream, 0));
+                break;
             }
         };
-        let count = names.len();
-        if manifest
-            .as_ref()
-            .is_none_or(|m| count < m.segments.len() || count > m.segments.len() + 1)
-            && !(manifest.is_none() && count == 1)
+        // Once a successor exists, its predecessor is sealed at the
+        // durable anchor. A tail there could not come from this writer.
+        if index + 1 < count
+            && anchor.is_none_or(|a| file.metadata().is_ok_and(|m| m.len() != a.bytes))
         {
             stream.poisoned.push(Poison::new(
                 PoisonKind::Unanchored,
-                "segment manifest does not authorize this segment layout",
+                "sealed segment length differs from its manifest anchor",
             ));
+            break;
         }
-        let mut events = 0;
-        for (index, name) in names.iter().enumerate() {
-            stream.begin_segment(index + 1);
-            let anchor = manifest.as_ref().and_then(|m| m.segments.get(index));
-            let mut anchored = anchor.is_none();
-            let file = match private_file(&directory.join(name), false, false) {
-                Ok(file) => file,
-                Err(error) => {
-                    stream.poisoned.push(Poison::new(
-                        PoisonKind::Corrupt,
-                        format!("missing or unsafe canonical segment: {error}"),
-                    ));
-                    break;
-                }
-            };
-            // Once a successor exists, its predecessor is sealed at the
-            // durable anchor. A tail there could not come from this writer.
-            if index + 1 < count
-                && anchor.is_none_or(|a| file.metadata().is_ok_and(|m| m.len() != a.bytes))
-            {
+        let limit = match layout.last_bytes {
+            Some(bytes) if index + 1 == count => bytes,
+            _ => u64::MAX,
+        };
+        use std::io::Read as _;
+        let mut reader = BufReader::new((&file).take(limit));
+        loop {
+            if !proceed() {
+                stopped = Some(stream.accepted_bytes);
+                break 'segments;
+            }
+            let mut bytes = Vec::new();
+            // read_until alone is unbounded; the limited reader also catches a missing newline.
+            let length = reader
+                .by_ref()
+                .take((MAX_FRAME_BYTES + 1) as u64)
+                .read_until(b'\n', &mut bytes)?;
+            if length == 0 {
+                break;
+            }
+            // This writer never emits an oversized frame; only a crash
+            // between its write and newline leaves an unterminated tail.
+            if length > MAX_FRAME_BYTES {
                 stream.poisoned.push(Poison::new(
-                    PoisonKind::Unanchored,
-                    "sealed segment length differs from its manifest anchor",
+                    PoisonKind::Corrupt,
+                    "oversized canonical frame; bytes retained",
                 ));
                 break;
             }
-            let mut reader = BufReader::new(file);
-            loop {
-                let mut bytes = Vec::new();
-                // read_until alone is unbounded; the limited reader also catches a missing newline.
-                use std::io::Read as _;
-                let length = reader
-                    .by_ref()
-                    .take((MAX_FRAME_BYTES + 1) as u64)
-                    .read_until(b'\n', &mut bytes)?;
-                if length == 0 {
-                    break;
-                }
-                // This writer never emits an oversized frame; only a crash
-                // between its write and newline leaves an unterminated tail.
-                if length > MAX_FRAME_BYTES {
-                    stream.poisoned.push(Poison::new(
-                        PoisonKind::Corrupt,
-                        "oversized canonical frame; bytes retained",
-                    ));
-                    break;
-                }
-                if bytes.last() != Some(&b'\n') {
-                    stream.poisoned.push(Poison::new(
-                        PoisonKind::Incomplete,
-                        "interrupted canonical frame; bytes retained",
-                    ));
-                    break;
-                }
-                bytes.pop();
-                // Every refusal of a complete frame is an integrity violation:
-                // this writer validates the same rules before it appends.
-                if let Err(error) = stream.accept_canonical(run_id, &bytes) {
-                    stream
-                        .poisoned
-                        .push(Poison::new(PoisonKind::Corrupt, error.to_string()));
-                    break;
-                }
-                events += 1;
-                if let Some(anchor) = anchor
-                    && events == anchor.last_seq
-                {
-                    anchored = true;
-                    let m = manifest.as_ref().expect("anchored manifest");
-                    if stream.segments.last() != Some(anchor)
-                        || stream.run.attempt_id != m.attempt_id
-                        || (index + 1 == m.segments.len()
-                            && stream.manifest().replay_digest != m.replay_digest)
-                    {
-                        stream.poisoned.push(Poison::new(
-                            PoisonKind::Unanchored,
-                            "segment manifest committed prefix mismatch",
-                        ));
-                        break;
-                    }
-                }
-            }
-            // The manifest is written only after its records are synchronized,
-            // so bytes missing below an anchor are lost acknowledged history.
-            if !anchored {
+            if bytes.last() != Some(&b'\n') {
                 stream.poisoned.push(Poison::new(
-                    PoisonKind::Unanchored,
-                    "canonical stream truncated before its segment manifest anchor",
+                    PoisonKind::Incomplete,
+                    "interrupted canonical frame; bytes retained",
                 ));
+                break;
             }
-            // Only one empty unlisted successor of a fully anchored stream can be
-            // an interrupted rotation, and only a lone unlisted first segment an
-            // interrupted preparation. Never manufacture a missing committed file.
-            if stream.segment_bytes == 0 && (index == 0 || anchor.is_some() || index + 1 != count) {
-                let kind = if index == 0 && anchor.is_none() && count == 1 {
-                    PoisonKind::Incomplete
-                } else {
-                    PoisonKind::Corrupt
-                };
+            bytes.pop();
+            // Every refusal of a complete frame is an integrity violation:
+            // this writer validates the same rules before it appends.
+            if let Err(error) = stream.accept_canonical(run_id, &bytes) {
                 stream
                     .poisoned
-                    .push(Poison::new(kind, "empty canonical segment"));
-            }
-            if !stream.poisoned.is_empty() {
+                    .push(Poison::new(PoisonKind::Corrupt, error.to_string()));
                 break;
             }
-            // Sync the exact descriptor just verified, not a reopened path. A
-            // failure aborts startup before any repaired metadata is published.
-            sync(reader.get_ref())?;
+            events += 1;
+            if let Some(anchor) = anchor
+                && events == anchor.last_seq
+            {
+                anchored = true;
+                let m = manifest.as_ref().expect("anchored manifest");
+                if stream.segments.last() != Some(anchor)
+                    || stream.run.attempt_id != m.attempt_id
+                    || (index + 1 == m.segments.len()
+                        && stream.manifest().replay_digest != m.replay_digest)
+                {
+                    stream.poisoned.push(Poison::new(
+                        PoisonKind::Unanchored,
+                        "segment manifest committed prefix mismatch",
+                    ));
+                    break;
+                }
+            }
         }
-        if stream.poisoned.is_empty() {
-            capture_pruning::apply(&directory, &mut stream)?;
+        // The manifest is written only after its records are synchronized,
+        // so bytes missing below an anchor are lost acknowledged history.
+        if !anchored {
+            stream.poisoned.push(Poison::new(
+                PoisonKind::Unanchored,
+                "canonical stream truncated before its segment manifest anchor",
+            ));
         }
-        Ok((stream, events))
+        // Only one empty unlisted successor of a fully anchored stream can be
+        // an interrupted rotation, and only a lone unlisted first segment an
+        // interrupted preparation. Never manufacture a missing committed file.
+        if stream.segment_bytes == 0 && (index == 0 || anchor.is_some() || index + 1 != count) {
+            let kind = if index == 0 && anchor.is_none() && count == 1 {
+                PoisonKind::Incomplete
+            } else {
+                PoisonKind::Corrupt
+            };
+            stream
+                .poisoned
+                .push(Poison::new(kind, "empty canonical segment"));
+        }
+        if !stream.poisoned.is_empty() {
+            break;
+        }
+        // Sync the exact descriptor just verified, not a reopened path. A
+        // failure aborts startup before any repaired metadata is published.
+        sync(&file)?;
     }
+    if stream.poisoned.is_empty() && stopped.is_none() {
+        capture_pruning::apply(directory, &mut stream)?;
+    }
+    Ok(Loaded {
+        stream,
+        events,
+        stopped,
+    })
 }
 
 impl Stream {
@@ -2006,11 +1975,13 @@ fn apply_record(
     Ok(())
 }
 
-/// The projection of an unresolved run. A child outcome the owner did observe
-/// stays beside the unknown; an owner's or reconciler's own unknown is not a
-/// child outcome, so its reason becomes the run's.
+const UNRESOLVED: &str = "owner or reconciliation reported an unresolved run outcome";
+
+/// The projection of an unresolved run (run projection rule 2). A child
+/// outcome the owner did observe stays beside the unknown; an owner's or
+/// reconciler's own unknown is not a child outcome, so its reason becomes
+/// the run's.
 fn unknown_outcome(reported: Option<&Value>) -> Value {
-    const UNRESOLVED: &str = "owner or reconciliation reported an unresolved run outcome";
     match reported {
         Some(child) if child["kind"] != "unknown" => json!({"kind":"unknown","unknown":true,
             "unknown_reason":UNRESOLVED,"observed_child_outcome":child}),
@@ -2067,7 +2038,7 @@ mod tests {
             boot_id: "fixture-boot".into(),
         }
     }
-    fn payload() -> Value {
+    pub(super) fn payload() -> Value {
         let receipt: Value = serde_json::from_str(include_str!(
             "../../../docs/specs/jail-v1/examples/receipt-prepared.json"
         ))
@@ -2219,7 +2190,16 @@ mod tests {
             .unwrap()
             .create(&run, &peer())
             .unwrap();
-        fs::write(directory.join(STATE), b"{\"damaged\":true}").unwrap();
+        // Decoding this journal fails with an error that quotes its value.
+        fs::write(
+            directory.join(STATE),
+            b"{\"state\":\"journal-value-7f3a\",\"digest\":\"x\"}",
+        )
+        .unwrap();
+        let refusal = store
+            .reconcile_pending(&run.run_id, &peer(), &|_| false)
+            .unwrap_err();
+        assert!(refusal.0.contains("journal-value-7f3a"), "{refusal}");
         let settled = store.settle_orphans(&peer(), |_| false).unwrap();
         assert_eq!(settled[0].state, "outcome_unknown");
         assert_eq!(
@@ -2235,12 +2215,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(last["request_id"], "reconcile:pending-invalid");
-        assert!(
-            last["body"]["problem"]
-                .as_str()
-                .is_some_and(|problem| !problem.is_empty()),
-            "{last}"
+        // History keeps the refusal's class, never its text.
+        assert_eq!(
+            last["body"],
+            json!({"reason":"invalid_pending_evidence","refusal":"journal_unreadable",
+                "outcome":{"kind":"unknown","unknown":true,
+                    "unknown_reason":"pending evidence could not be reconciled"},
+                "coverage":{"status":"degraded","gaps":[{"reason":"invalid_pending_evidence"}]}})
         );
+        assert!(!String::from_utf8_lossy(&stream).contains("journal-value-7f3a"));
     }
 
     #[cfg(target_os = "linux")]
@@ -2293,6 +2276,44 @@ mod tests {
             store.show(&run.run_id).unwrap().chain,
             recorded.chain,
             "a terminal run gains no second unknown outcome"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reconciliation_the_journal_did_not_refuse_is_neither_recorded_nor_cached() {
+        use crate::pending::Journal;
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("data")).unwrap();
+        let mut plan = payload();
+        plan["evidence"] = "best-effort".into();
+        let run = store.prepare("pending-busy", &plan, &peer()).unwrap();
+        store.claim_owner(&run.run_id, &peer()).unwrap();
+        store
+            .append_owner(
+                &run.run_id,
+                "admission",
+                "admitted",
+                None,
+                &json!({"receipt":prepared(&run)}),
+                &peer(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap();
+        let run = store.show(&run.run_id).unwrap();
+        let journal = Journal::open(&store.root.join(&run.run_id)).unwrap();
+        journal.create(&run, &peer()).unwrap();
+        // While another holder keeps the journal locked, nothing is decided.
+        store.recover_pending_orphans(&peer());
+        assert_eq!(store.show(&run.run_id).unwrap().state, "admitted");
+        drop(journal);
+        // The unchanged journal is tried again and reconciled.
+        store.recover_pending_orphans(&peer());
+        let reconciled = store.show(&run.run_id).unwrap();
+        assert_eq!(reconciled.state, "outcome_unknown");
+        assert_eq!(
+            reconciled.outcome.unwrap()["unknown_reason"],
+            "pending owner has no durable local exit record"
         );
     }
 
@@ -4100,6 +4121,25 @@ mod tests {
         }
         fs::write(directory.join(STREAM), bytes).unwrap();
         fs::remove_file(directory.join(manifest::NAME)).unwrap();
+    }
+
+    #[test]
+    fn the_most_severe_poison_decides_a_stream_status() {
+        let poison = |kinds: &[PoisonKind]| -> Vec<Poison> {
+            kinds.iter().map(|kind| Poison::new(*kind, "x")).collect()
+        };
+        assert_eq!(poison_status(&[]), None);
+        for kinds in [
+            [PoisonKind::Incomplete, PoisonKind::Corrupt],
+            [PoisonKind::Corrupt, PoisonKind::Incomplete],
+            [PoisonKind::Incomplete, PoisonKind::Unanchored],
+        ] {
+            assert_eq!(poison_status(&poison(&kinds)), Some("corrupt"), "{kinds:?}");
+        }
+        assert_eq!(
+            poison_status(&poison(&[PoisonKind::Incomplete])),
+            Some("incomplete")
+        );
     }
 
     #[test]

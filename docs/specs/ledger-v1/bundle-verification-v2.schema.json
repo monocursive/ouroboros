@@ -54,6 +54,13 @@
     "coverage": {
       "type": "object"
     },
+    "projection_rule": {
+      "enum": [
+        1,
+        2
+      ],
+      "description": "The run projection rule the embedded run matched (ledger-v1 §8.4). 2 is current. 1 is accepted only for an outcome_unknown run whose outcome alone differs, as bundles exported before 2026-10-14 embed it."
+    },
     "local_consistency": {
       "const": true
     },

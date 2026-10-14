@@ -1263,12 +1263,23 @@ fn an_unread_foreground_terminal_stops_forwarding_but_not_the_run() {
     let forwarding = &stdout["forwarding"];
     assert_eq!(forwarding["reason"], "queue_full");
     assert_ne!(forwarding["state"], "complete");
-    assert_eq!(
-        forwarding["delivered_bytes"].as_u64().unwrap()
-            + forwarding["undelivered_bytes"].as_u64().unwrap(),
-        2_097_152
+    let shown = forwarding["delivered_bytes"].as_u64().unwrap();
+    let unshown = forwarding["undelivered_bytes"].as_u64().unwrap();
+    assert_eq!(shown + unshown, 2_097_152);
+    // The warning never claims the 8-byte capture holds what was not shown.
+    let held = 8_u64.saturating_sub(shown).min(unshown);
+    let kept = if held == 0 {
+        "the capture holds none of them".to_owned()
+    } else {
+        format!("the capture holds the first {held} of them")
+    };
+    let expected = format!(
+        "ouro-ledger: stdout forwarding {}: {unshown} bytes had not reached the terminal \
+         when the run was recorded; {kept}",
+        forwarding["state"].as_str().unwrap()
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("stdout forwarding"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.lines().any(|line| line == expected), "{stderr}");
 }
 
 fn detached_fixture() -> Option<Fixture> {

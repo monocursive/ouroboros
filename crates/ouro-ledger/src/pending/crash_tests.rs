@@ -238,6 +238,22 @@ fn cleanup_keeps_the_same_mutex_inode_for_future_openers() {
     assert!(!dir.join(NEXT).exists());
 }
 
+#[test]
+fn a_dropped_journal_unlocks_even_while_a_copy_of_its_descriptor_lives() {
+    let (_temp, store, run) = setup("pending.outage");
+    let dir = store.root().join(&run.run_id);
+    let journal = Journal::open(&dir).unwrap();
+    // A child forked by another thread holds a copy until it execs.
+    // SAFETY: dup takes the open descriptor by value; the copy is owned below.
+    let copy = unsafe { libc::dup(journal.lock.as_raw_fd()) };
+    assert!(copy >= 0);
+    // SAFETY: dup returned a new descriptor owned only here.
+    let copy = unsafe { File::from_raw_fd(copy) };
+    drop(journal);
+    Journal::open(&dir).unwrap();
+    drop(copy);
+}
+
 struct Process {
     child: Child,
     log: PathBuf,

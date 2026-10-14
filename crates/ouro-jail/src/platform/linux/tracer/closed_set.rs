@@ -7,6 +7,7 @@
 //! which is a directory fd and where the flags live. A syscall not in this
 //! table is not observed and is not claimed to be.
 
+use crate::observer::ClosedOperation;
 use crate::platform::linux::abi;
 
 /// The operation families the consumer maps onto the §11.2 audit rows.
@@ -72,23 +73,25 @@ impl ClosedOp {
     /// with the flags undecodable the weaker claim, `fs.write`, is made.
     /// A truncation by path is a mutation of an existing file: `fs.write`
     /// with its own action. This is the one mapping the audit writer and the
-    /// published table both use.
+    /// published table both use, and every family maps into the closed set.
     #[must_use]
-    pub fn audit_operation(self, flags: Option<u64>) -> &'static str {
+    pub fn audit_operation(self, flags: Option<u64>) -> ClosedOperation {
         match self {
-            ClosedOp::Exec => "proc.exec",
+            ClosedOp::Exec => ClosedOperation::ProcExec,
             ClosedOp::Open => {
                 if flags.is_some_and(|value| value & (libc::O_CREAT as u64) != 0) {
-                    "fs.create"
+                    ClosedOperation::FsCreate
                 } else {
-                    "fs.write"
+                    ClosedOperation::FsWrite
                 }
             }
-            ClosedOp::Truncate => "fs.write",
-            ClosedOp::Rename => "fs.rename",
-            ClosedOp::Unlink | ClosedOp::Rmdir => "fs.unlink",
-            ClosedOp::Mkdir | ClosedOp::Mknod | ClosedOp::Link | ClosedOp::Symlink => "fs.create",
-            ClosedOp::Connect => "net.connect",
+            ClosedOp::Truncate => ClosedOperation::FsWrite,
+            ClosedOp::Rename => ClosedOperation::FsRename,
+            ClosedOp::Unlink | ClosedOp::Rmdir => ClosedOperation::FsUnlink,
+            ClosedOp::Mkdir | ClosedOp::Mknod | ClosedOp::Link | ClosedOp::Symlink => {
+                ClosedOperation::FsCreate
+            }
+            ClosedOp::Connect => ClosedOperation::NetConnect,
         }
     }
 

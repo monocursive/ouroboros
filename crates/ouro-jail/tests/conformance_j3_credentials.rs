@@ -29,7 +29,9 @@ use std::time::Duration;
 use ouro_fixture::harness::{self, Jail, Run};
 use ouro_jail::cleanup;
 use ouro_jail::credentials::{self, REASON_SOURCE_MUTABLE};
-use ouro_jail::platform::linux::bwrap::{BwrapPlan, CredentialBind, VENDOR_STATE_INSIDE_PATH};
+use ouro_jail::platform::linux::bwrap::{
+    BwrapPlan, CredentialBind, Staged, VENDOR_STATE_INSIDE_PATH,
+};
 use ouro_jail::platform::linux::clock::Deadline;
 use ouro_jail::platform::linux::exec::{self, FdMap};
 use ouro_jail::policy::{CredentialDecl, LaunchSnapshot};
@@ -162,14 +164,16 @@ fn run_with_views(
         scratch.path(),
         Path::new(env!("CARGO_BIN_EXE_ouro-jail")),
     );
-    plan.bwrap = common::bwrap_path();
-    plan.vendor_state = Some(staging.vendor_path());
-    plan.vendor_state_fd = Some(VENDOR_FD);
-    plan.credential_binds = vec![CredentialBind {
+    plan.set_backend(&common::bwrap_path());
+    plan.stage_vendor_state(Staged {
+        host: staging.vendor_path(),
+        fd: VENDOR_FD,
+    });
+    plan.add_credential_view(CredentialBind {
         fd: Some(BIND_FD),
         destination: Path::new(VENDOR_STATE_INSIDE_PATH).join("conf/config.toml"),
-    }];
-    plan.inner = inner;
+    });
+    plan.set_command(inner);
     let rendered = plan.render().unwrap();
     assert!(
         !rendered.argv.iter().any(|arg| {
@@ -376,18 +380,20 @@ fn c01_bwrap_refuses_a_bind_ro_source_swapped_between_resolution_and_mount() {
         scratch.path(),
         Path::new(env!("CARGO_BIN_EXE_ouro-jail")),
     );
-    plan.bwrap = common::bwrap_path();
-    plan.vendor_state = Some(staging.vendor_path());
-    plan.vendor_state_fd = Some(VENDOR_FD);
-    plan.credential_binds = vec![CredentialBind {
+    plan.set_backend(&common::bwrap_path());
+    plan.stage_vendor_state(Staged {
+        host: staging.vendor_path(),
+        fd: VENDOR_FD,
+    });
+    plan.add_credential_view(CredentialBind {
         fd: Some(BIND_FD),
         destination: Path::new(VENDOR_STATE_INSIDE_PATH).join("conf/config.toml"),
-    }];
-    plan.inner = vec![
+    });
+    plan.set_command(vec![
         OsString::from("/usr/bin/cp"),
         OsString::from("/run/ouro/state/conf/config.toml"),
         marker.clone().into_os_string(),
-    ];
+    ]);
     let rendered = plan.render().unwrap();
 
     // Which `mount(2)` is the view's bind: count them in an undelayed run.

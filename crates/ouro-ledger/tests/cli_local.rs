@@ -147,6 +147,45 @@ fn doctor_does_not_start_a_session_writer() {
 }
 
 #[test]
+fn doctor_reports_a_writer_of_another_protocol_as_incompatible() {
+    use ouro_ledger::{
+        daemon::{read_frame, write_frame},
+        protocol::{PROTOCOL_VERSION, Request, Response},
+    };
+    let mut cli = LocalCli::new();
+    let ledger = cli.data.join("ledger");
+    fs::create_dir(&ledger).unwrap();
+    fs::set_permissions(&ledger, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = ledger.join("serve.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    // A writer from another release: it answers, in another protocol.
+    thread::spawn(move || {
+        for mut connection in listener.incoming().flatten() {
+            while let Ok(Request::Ping) = read_frame::<Request>(&mut connection) {
+                let value = json!({"protocol": PROTOCOL_VERSION + 1});
+                if write_frame(&mut connection, &Response::Ok { value }).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let output = cli.invoke(&["doctor", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["ready"], false);
+    assert_eq!(value["writer"], "incompatible");
+    assert_eq!(
+        value["reason"],
+        format!(
+            "ledger writer speaks protocol {}, this client speaks protocol {PROTOCOL_VERSION}; \
+             restart the writer once its runs settle",
+            PROTOCOL_VERSION + 1
+        )
+    );
+}
+
+#[test]
 fn retention_cli_persists_holds_and_preview_never_starts_or_mutates_a_writer() {
     let mut cli = LocalCli::new();
     assert!(!cli.invoke(&["gc", "--dry-run", "--json"]).status.success());
@@ -971,6 +1010,76 @@ fn writer_keeps_accepting_after_descriptor_exhaustion() {
         Response::Ok { .. }
     ));
     assert!(writer.child.try_wait().unwrap().is_none());
+}
+
+/// A writer whose listening socket fails for good cannot serve owners; it
+/// must exit with a failure, never as a clean shutdown.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_writer_that_can_no_longer_accept_exits_with_a_failure() {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+    let mut cli = LocalCli::new();
+    let mut writer = cli.start_writer();
+    let log = cli
+        .temp
+        .path()
+        .join(format!("serve-{}.stderr", cli.command_count));
+    let pid = writer.child.id() as libc::pid_t;
+    // The writer is an unreaped child of this test, so the pid names it.
+    let pidfd = ouro_fixture::harness::pidfd::open(pid).expect("the writer is pinned");
+    let mut listeners = 0;
+    for entry in fs::read_dir(format!("/proc/{pid}/fd")).unwrap() {
+        let target: i32 = entry
+            .unwrap()
+            .file_name()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        // SAFETY: pidfd_getfd takes descriptors and flags by value and returns
+        // a new descriptor of this process duplicating the writer's.
+        let copy = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_getfd,
+                std::os::fd::AsRawFd::as_raw_fd(&pidfd),
+                target,
+                0,
+            )
+        };
+        if copy < 0 {
+            continue;
+        }
+        // SAFETY: as above; the copy is owned only here.
+        let copy = unsafe { OwnedFd::from_raw_fd(copy as i32) };
+        let raw = std::os::fd::AsRawFd::as_raw_fd(&copy);
+        let mut listening: libc::c_int = 0;
+        let mut size = std::mem::size_of_val(&listening) as libc::socklen_t;
+        // SAFETY: the copy is open; the output pointer and length describe a live c_int.
+        let answered = unsafe {
+            libc::getsockopt(
+                raw,
+                libc::SOL_SOCKET,
+                libc::SO_ACCEPTCONN,
+                (&mut listening as *mut libc::c_int).cast(),
+                &mut size,
+            )
+        } == 0;
+        if answered && listening == 1 {
+            // Shutting down the shared listening socket makes the writer's
+            // accept fail with EINVAL, which is not transient.
+            // SAFETY: shutdown takes the open descriptor and a flag by value.
+            assert_eq!(unsafe { libc::shutdown(raw, libc::SHUT_RDWR) }, 0);
+            listeners += 1;
+        }
+    }
+    assert_eq!(listeners, 1, "the writer listens on exactly one socket");
+    let status = writer.wait_within(REPLY_LIMIT, "a writer without its acceptor");
+    assert!(!status.success(), "{status}");
+    let stderr = fs::read_to_string(log).unwrap();
+    assert!(
+        stderr.contains("ledger writer stopped accepting connections"),
+        "{stderr}"
+    );
 }
 
 #[test]

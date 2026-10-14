@@ -81,6 +81,19 @@ The daemon allows at most 32 live connection handlers and a 32-entry bounded
 writer queue. The writer serializes requests; a full queue refuses and a timed-out
 reply does not roll back a persisted request.
 
+The writer names its wire protocol version in its `ping` answer (`protocol`,
+currently 1). Every client checks it once per connection and refuses a writer
+of another version with `ledger writer speaks protocol N, this client speaks
+protocol M; restart the writer once its runs settle` (a writer older than
+versioning speaks "an unversioned protocol"). `doctor` reports such a writer as
+`writer: incompatible` rather than unreachable, and neither on-demand start nor
+`serve --detach` starts a second writer beside it. A writer is never restarted
+implicitly, so the upgrade rule is: after upgrading `ouro-ledger`, restart the
+writer once its runs settle. Clients from before versioning do not check; against
+a newer writer they fail on the first reply whose shape changed, for example
+`verify`, which answers with pages since protocol 1. A request a writer cannot
+decode is refused with `unsupported_request` before the connection closes.
+
 A caller that loses a reply retries the same request id and exact immutable
 payload. Success returns the original `{seq, digest}`; conflicting payloads
 refuse. Socket timeout means an unknown request outcome until the caller retries
@@ -391,6 +404,22 @@ and chain head. It is rebuilt from verified canonical records at daemon startup.
 The current implementation embeds receipt values in canonical records rather
 than separately storing mutable receipt pointers.
 
+The projection rule is versioned; canonical records never change with it.
+Rule 2 (current since 2026-10-14) gives an `outcome_unknown` run the outcome
+`{kind: unknown, unknown: true}` with, when the record reported a child outcome
+other than unknown, that outcome as `observed_child_outcome` and the generic
+reason "owner or reconciliation reported an unresolved run outcome"; when the
+record reported an unknown of its own (the owner's or the reconciler's), its
+`unknown_reason` becomes the run's and there is no `observed_child_outcome`.
+Rule 1 always used the generic reason and copied whatever the record reported,
+including such an unknown or nothing (`null`), into `observed_child_outcome`, so
+it labelled a reconciler's own unknown as a child outcome. Runs differ between
+the rules only there. A writer of rule 2 rewrites, at its next start, every
+`run.json` whose bytes differ from the replayed projection, so the projections
+of existing unresolved runs change in place then; their records do not.
+Bundles exported under rule 1 keep their embedded projection and still verify
+(§8.4).
+
 `segments.json` version 2 anchors each segment in order: filename, committed
 byte length, first and last global sequence, SHA-256 over its exact bytes
 including LF delimiters, and last record digest. The manifest also holds one
@@ -461,9 +490,18 @@ A recovery sync failure refuses startup; no recovered retry can be acknowledged 
 A valid chain is local consistency only: deleting both history and its same-user
 manifest anchor has no external witness in this slice.
 Source gaps remain explicit even when the hash chain is consistent.
-Whole-store `verify` re-reads history one page per writer request: at most 25
-runs, stopping before 8 MiB of canonical bytes unless a single run is larger, so
-live owners' requests interleave with it. Its `coverage` is the bounded summary
+`verify` never re-reads history on the writer thread. For each page the writer
+only plans: it selects at most 25 runs, stopping before 8 MiB of canonical bytes
+unless a single run is larger, and for each run lists its segments, notes the
+last segment's length and reads its manifest and `run.json`. The connection
+that asked then re-reads and re-hashes those segments up to the noted lengths,
+so live owners keep the writer while one large run is verified, and records
+appended meanwhile are neither read nor reported. A clean re-read must match
+the published projection and end at the head the writer had accepted. A run
+whose re-read found problems is planned and re-read once more if a GC ran in
+between; if one ran again, the report says so. A page waits up to 300 s; the
+connection stops re-reading after 280 s and reports, as not consistent, how many
+canonical bytes it checked. Its `coverage` is the bounded summary
 (status, per-class status, sources and gap counts); `show` has the full record.
 `doctor` reports only the writer's accepted state (run count, ambiguous streams,
 unfinished deletions, blocked preparation and the index) without re-reading
@@ -1092,10 +1130,18 @@ longer exists. It accepts only the flat allowlisted inventory, rejects symbolic
 and hard links, nonregular files, extra/missing members, oversized data and
 noncanonical/interrupted records, and hashes the same bytes it semantically
 replays. Hash-consistent changes to projection labels or receipt copies refuse
-unless they match canonical history. The
+unless they match canonical history. The embedded run must equal the replay
+under projection rule 2 (§4), or, for a bundle exported earlier, under rule 1:
+that is accepted only for an `outcome_unknown` run whose outcome, recomputed by
+rule 1 from the same records, is the only difference. The report names the rule
+that matched in `projection_rule`. The
 [verification report](ledger-v1/bundle-verification.schema.json) separates
 `local_consistency`, original coverage, and `child_protection`. A consistent
-`none` run remains `unprotected`.
+`none` run remains `unprotected`. The
+[rule 1 fixture](ledger-v1/fixtures/bundle-rule-one.json) is a bundle generated by
+the rule 1 projection code, with its
+[events](ledger-v1/fixtures/bundle-rule-one-events.ndjson) and
+[verification report](ledger-v1/fixtures/bundle-verification-rule-one.json).
 
 The v1 format is **unsigned**, with `external_custody: false`. Someone able to
 rewrite the complete bundle can recompute its hashes. Neither this manifest nor

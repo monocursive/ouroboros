@@ -18,7 +18,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Serialize, de::DeserializeOwned};
@@ -32,16 +32,19 @@ use crate::{
         MAX_FRAME_BYTES, OperatorIntent, PROTOCOL_VERSION, Peer, ReadPage, ReadRequest, Request,
         Response, Result, RunRecord, StoreStatus, TailPage, TailRequest, VerifyPage, VerifyReport,
     },
-    store::Store,
+    store::{Store, VerifyPlan},
 };
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(10);
 const ACCEPT_BACKOFF_LIMIT: Duration = Duration::from_secs(1);
 const GC_TIMEOUT: Duration = Duration::from_secs(300);
-/// One verify page re-reads a bounded amount of history, but a single large
-/// run still takes longer than an ordinary request.
-const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+/// A verify page is re-read by its connection, never by the writer thread,
+/// so waiting on one large run delays only the client that asked for it.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
+/// The connection stops re-reading here and reports what it did not check,
+/// leaving room to ask the writer about GC and to send the page in time.
+const VERIFY_WORK: Duration = VERIFY_TIMEOUT.saturating_sub(Duration::from_secs(20));
 
 fn response_timeout(request: &Request) -> Duration {
     match request {
@@ -65,7 +68,7 @@ impl Client {
     }
 
     /// An authenticated connection whose protocol has not been checked yet.
-    pub(crate) fn open(data: &Path) -> Result<Self> {
+    pub fn open(data: &Path) -> Result<Self> {
         let path = data.join("ledger/serve.sock");
         let meta = fs::symlink_metadata(&path)?;
         if meta.uid() != crate::os::euid() || meta.mode() & 0o077 != 0 {
@@ -89,15 +92,18 @@ impl Client {
     /// A writer of another version could misread or refuse every request;
     /// say so once, instead of failing later on an undecodable reply.
     pub(crate) fn check_protocol(&mut self) -> Result<()> {
-        let writer = self.ping()?;
-        if writer["protocol"] != PROTOCOL_VERSION {
-            return Err(LedgerError(format!(
-                "ledger writer speaks protocol {}, this client speaks {PROTOCOL_VERSION}; \
-                 restart the writer with this version once its runs settle",
-                writer["protocol"]
-            )));
-        }
-        Ok(())
+        protocol_mismatch(&self.ping()?).map_or(Ok(()), Err)
+    }
+
+    /// The writer that answers for `data` in this protocol, or `None` when
+    /// none answers. One that answers in another protocol is a refusal, never
+    /// an absence: starting a second writer would only fail on the store lock.
+    pub(crate) fn reachable(data: &Path) -> Result<Option<Self>> {
+        let Ok(mut client) = Self::open(data) else {
+            return Ok(None);
+        };
+        client.check_protocol()?;
+        Ok(Some(client))
     }
 
     fn request<T: DeserializeOwned>(&mut self, request: Request) -> Result<T> {
@@ -294,6 +300,22 @@ impl Client {
     }
 }
 
+/// Why a writer that answered `ping` with `writer` cannot serve this client.
+/// A writer older than protocol versioning names no protocol at all.
+pub fn protocol_mismatch(writer: &Value) -> Option<LedgerError> {
+    if writer["protocol"] == PROTOCOL_VERSION {
+        return None;
+    }
+    let spoken = match writer["protocol"].as_u64() {
+        Some(version) => format!("protocol {version}"),
+        None => "an unversioned protocol".into(),
+    };
+    Some(LedgerError(format!(
+        "ledger writer speaks {spoken}, this client speaks protocol {PROTOCOL_VERSION}; \
+         restart the writer once its runs settle"
+    )))
+}
+
 pub fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     if bytes.is_empty() || bytes.len() > MAX_FRAME_BYTES {
@@ -329,7 +351,7 @@ fn read_frame_bytes(reader: &mut impl Read) -> std::io::Result<Vec<u8>> {
 
 /// The next request, or the refusal to send before closing a connection
 /// whose frames cannot be trusted. A transport error closes it silently.
-fn next_request(socket: &mut UnixStream) -> std::result::Result<Request, Option<String>> {
+fn next_request(socket: &mut impl Read) -> std::result::Result<Request, Option<String>> {
     let bytes = match read_frame_bytes(socket) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
@@ -364,13 +386,39 @@ fn transient_accept_error(error: &std::io::Error) -> bool {
     )
 }
 
+/// Refuse a connection the writer cannot serve now. A fresh socket's send
+/// buffer holds this small frame, so the acceptor never waits on a client
+/// that does not read.
+fn refuse_busy(mut socket: &UnixStream, reason: &str) {
+    let _ = socket.set_nonblocking(true);
+    let _ = write_frame(
+        &mut socket,
+        &Response::Error {
+            message: format!("writer_busy: {reason}; retry"),
+        },
+    );
+}
+
+/// A connection handler on its own thread. Starting one can fail under
+/// resource pressure, which the acceptor survives.
+type Spawn = fn(Box<dyn FnOnce() + Send>) -> std::io::Result<()>;
+
+fn spawn_thread(handler: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+    thread::Builder::new().spawn(handler).map(drop)
+}
+
 /// Accept until a non-transient failure, which is returned. Connections past
-/// the bound are refused explicitly rather than dropped.
-fn accept_connections(listener: UnixListener, sender: mpsc::SyncSender<Message>) -> LedgerError {
+/// the bound, or whose handler cannot start, are refused explicitly rather
+/// than dropped.
+fn accept_connections(
+    listener: UnixListener,
+    sender: mpsc::SyncSender<Message>,
+    spawn: Spawn,
+) -> LedgerError {
     let count = Arc::new(AtomicUsize::new(0));
     let mut backoff = ACCEPT_BACKOFF;
     loop {
-        let mut socket = match listener.accept() {
+        let socket = match listener.accept() {
             Ok((socket, _)) => {
                 backoff = ACCEPT_BACKOFF;
                 socket
@@ -391,60 +439,147 @@ fn accept_connections(listener: UnixListener, sender: mpsc::SyncSender<Message>)
         }
         if count.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             count.fetch_sub(1, Ordering::AcqRel);
-            // A fresh socket's send buffer holds this small frame, so the
-            // acceptor never waits on a client that does not read.
-            let _ = socket.set_nonblocking(true);
-            let _ = write_frame(
-                &mut socket,
-                &Response::Error {
-                    message: format!(
-                        "writer_busy: the writer already serves {MAX_CONNECTIONS} connections; retry"
-                    ),
-                },
+            refuse_busy(
+                &socket,
+                &format!("the writer already serves {MAX_CONNECTIONS} connections"),
             );
             continue;
         }
-        let sender = sender.clone();
-        let count = count.clone();
-        thread::spawn(move || {
-            let _ = socket.set_read_timeout(Some(TIMEOUT));
-            let _ = socket.set_write_timeout(Some(TIMEOUT));
-            loop {
-                let request = match next_request(&mut socket) {
-                    Ok(request) => request,
-                    Err(refusal) => {
-                        if let Some(message) = refusal {
-                            let _ = write_frame(&mut socket, &Response::Error { message });
-                        }
-                        break;
-                    }
-                };
-                let timeout = response_timeout(&request);
-                let (reply, response) = mpsc::sync_channel(1);
-                let message = Message {
-                    request,
-                    peer: peer.clone(),
-                    reply,
-                };
-                if sender.try_send(message).is_err() {
-                    let _ = write_frame(
-                        &mut socket,
-                        &Response::Error {
-                            message: "bounded daemon queue is full".into(),
-                        },
-                    );
-                    break;
-                }
-                let Ok(value) = response.recv_timeout(timeout) else {
-                    break;
-                };
-                if write_frame(&mut socket, &value).is_err() {
-                    break;
-                }
+        // Shared, so the connection can still be refused if its thread
+        // cannot start.
+        let socket = Arc::new(socket);
+        let handler = {
+            let (socket, sender, count) = (socket.clone(), sender.clone(), count.clone());
+            move || {
+                serve_connection(&socket, &peer, &sender);
+                count.fetch_sub(1, Ordering::AcqRel);
             }
+        };
+        if let Err(error) = spawn(Box::new(handler)) {
             count.fetch_sub(1, Ordering::AcqRel);
-        });
+            refuse_busy(&socket, "the writer cannot start a connection handler now");
+            eprintln!("ouro-ledger: refusing a connection after {error}");
+            thread::sleep(backoff);
+            backoff = (backoff * 2).min(ACCEPT_BACKOFF_LIMIT);
+        }
     }
+}
+
+/// Why a connection gets no answer from the writer thread.
+#[derive(Clone, Copy)]
+enum Unanswered {
+    /// The bounded queue is full, or the writer is gone; the client is told.
+    QueueFull,
+    /// The writer did not answer in time; the connection closes.
+    Lost,
+}
+
+fn ask<T>(
+    sender: &mpsc::SyncSender<Message>,
+    peer: &Peer,
+    timeout: Duration,
+    work: impl FnOnce(mpsc::SyncSender<T>) -> Work,
+) -> std::result::Result<T, Unanswered> {
+    let (reply, response) = mpsc::sync_channel(1);
+    let message = Message {
+        work: work(reply),
+        peer: peer.clone(),
+    };
+    sender
+        .try_send(message)
+        .map_err(|_| Unanswered::QueueFull)?;
+    response.recv_timeout(timeout).map_err(|_| Unanswered::Lost)
+}
+
+fn serve_connection(mut socket: &UnixStream, peer: &Peer, sender: &mpsc::SyncSender<Message>) {
+    let _ = socket.set_read_timeout(Some(TIMEOUT));
+    let _ = socket.set_write_timeout(Some(TIMEOUT));
+    loop {
+        let request = match next_request(&mut socket) {
+            Ok(request) => request,
+            Err(refusal) => {
+                if let Some(message) = refusal {
+                    let _ = write_frame(&mut socket, &Response::Error { message });
+                }
+                return;
+            }
+        };
+        let response = match request {
+            Request::Verify {
+                run_id,
+                after,
+                limit,
+            } => verify(sender, peer, run_id.as_deref(), after.as_deref(), limit),
+            request => ask(sender, peer, response_timeout(&request), |reply| {
+                Work::Request(request, reply)
+            }),
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(Unanswered::QueueFull) => {
+                let _ = write_frame(
+                    &mut socket,
+                    &Response::Error {
+                        message: "bounded daemon queue is full".into(),
+                    },
+                );
+                return;
+            }
+            Err(Unanswered::Lost) => return,
+        };
+        if write_frame(&mut socket, &response).is_err() {
+            return;
+        }
+    }
+}
+
+/// One fresh verification page. The writer only plans it and says whether a
+/// GC ran; the canonical history is re-read here, on this connection's
+/// thread, so owners keep their writer while a large run is verified.
+fn verify(
+    sender: &mpsc::SyncSender<Message>,
+    peer: &Peer,
+    run_id: Option<&str>,
+    after: Option<&str>,
+    limit: u32,
+) -> std::result::Result<Response, Unanswered> {
+    let deadline = Instant::now() + VERIFY_WORK;
+    // Asking the writer stays possible past the deadline, so a stopped
+    // re-read is still reported rather than dropped.
+    let wait = || {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .max(TIMEOUT)
+    };
+    let unanswered = std::cell::Cell::new(None);
+    let lost = |problem| {
+        unanswered.set(Some(problem));
+        LedgerError("the writer did not answer".into())
+    };
+    let page = crate::store::verify_page(
+        &mut |run_id, after, limit| {
+            ask(sender, peer, wait(), |reply| Work::PlanVerify {
+                run_id: run_id.map(str::to_owned),
+                after: after.map(str::to_owned),
+                limit,
+                reply,
+            })
+            .map_err(lost)?
+        },
+        &mut || ask(sender, peer, wait(), Work::GcGeneration).map_err(lost),
+        &mut || Instant::now() < deadline,
+        run_id,
+        after,
+        limit,
+    );
+    if let Some(problem) = unanswered.get() {
+        return Err(problem);
+    }
+    let response = match page.and_then(|page| Ok(serde_json::to_value(page)?)) {
+        Ok(value) => Response::Ok { value },
+        Err(error) => Response::Error { message: error.0 },
+    };
+    Ok(response)
 }
 
 #[derive(Clone)]
@@ -455,10 +590,22 @@ struct Capability {
     token_id: String,
 }
 
+/// What a connection asks of the single writer thread, each with its reply.
+enum Work {
+    Request(Request, mpsc::SyncSender<Response>),
+    /// The writer's cheap half of a fresh verification page.
+    PlanVerify {
+        run_id: Option<String>,
+        after: Option<String>,
+        limit: u32,
+        reply: mpsc::SyncSender<Result<VerifyPlan>>,
+    },
+    GcGeneration(mpsc::SyncSender<u64>),
+}
+
 struct Message {
-    request: Request,
+    work: Work,
     peer: Peer,
-    reply: mpsc::SyncSender<Response>,
 }
 
 pub fn serve(data: &Path) -> Result<()> {
@@ -477,7 +624,7 @@ pub fn serve(data: &Path) -> Result<()> {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     fs::File::open(store.root())?.sync_all()?;
     let (sender, receiver) = mpsc::sync_channel::<Message>(MAX_CONNECTIONS);
-    let acceptor = thread::spawn(move || accept_connections(listener, sender));
+    let acceptor = thread::spawn(move || accept_connections(listener, sender, spawn_thread));
     let mut capabilities = BTreeMap::new();
     #[cfg(target_os = "linux")]
     let recovery_peer = peer_identity(crate::os::euid(), std::process::id())?;
@@ -495,24 +642,35 @@ pub fn serve(data: &Path) -> Result<()> {
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        #[cfg(test)]
-        let _fault_scope = crate::faults::scope(crate::faults::request_kind(&message.request));
-        let result = dispatch(
-            &mut store,
-            &mut capabilities,
-            message.request,
-            &message.peer,
-        );
-        let response = match result {
-            Ok(value) => Response::Ok { value },
-            Err(error) => Response::Error { message: error.0 },
-        };
-        #[cfg(test)]
-        if matches!(response, Response::Ok { .. }) {
-            crate::faults::hit("reply.before_send")?;
+        match message.work {
+            Work::Request(request, reply) => {
+                #[cfg(test)]
+                let _fault_scope = crate::faults::scope(crate::faults::request_kind(&request));
+                let response = match dispatch(&mut store, &mut capabilities, request, &message.peer)
+                {
+                    Ok(value) => Response::Ok { value },
+                    Err(error) => Response::Error { message: error.0 },
+                };
+                #[cfg(test)]
+                if matches!(response, Response::Ok { .. }) {
+                    crate::faults::hit("reply.before_send")?;
+                }
+                // A dropped reply never rolls back a persisted request or its receipt.
+                let _ = reply.try_send(response);
+            }
+            Work::PlanVerify {
+                run_id,
+                after,
+                limit,
+                reply,
+            } => {
+                let _ =
+                    reply.try_send(store.plan_verify(run_id.as_deref(), after.as_deref(), limit));
+            }
+            Work::GcGeneration(reply) => {
+                let _ = reply.try_send(store.gc_generation());
+            }
         }
-        // A dropped reply never rolls back a persisted request or its receipt.
-        let _ = message.reply.try_send(response);
         store.flush_index();
     }
     let problem = acceptor
@@ -613,15 +771,10 @@ fn dispatch(
         Request::ShowWithTranscript { run_id } => store.show_with_transcript(&run_id),
         Request::Catalog { request } => Ok(serde_json::to_value(store.catalog(&request)?)?),
         Request::Discover { request } => Ok(serde_json::to_value(store.discover(&request)?)?),
-        Request::Verify {
-            run_id,
-            after,
-            limit,
-        } => Ok(serde_json::to_value(store.verify_page(
-            run_id.as_deref(),
-            after.as_deref(),
-            limit,
-        )?)?),
+        // Connections re-read history themselves; see `verify`.
+        Request::Verify { .. } => Err(LedgerError(
+            "fresh verification is never run on the writer thread".into(),
+        )),
         Request::Status => Ok(serde_json::to_value(store.status())?),
         Request::Read { request } => Ok(serde_json::to_value(store.read(&request)?)?),
         Request::Ping => Ok(
@@ -790,6 +943,189 @@ mod tests {
             birth: "fixture".into(),
             boot_id: "fixture".into(),
         }
+    }
+
+    /// A writer process kept on a leash: killed when the test ends.
+    struct Worker(std::process::Child);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    const SLOW_VERIFY_WORKER: &str = "OURO_LEDGER_SLOW_VERIFY_WORKER";
+    const FRAME_DELAY: Duration = Duration::from_millis(50);
+
+    fn request_payload() -> Value {
+        let receipt: Value = serde_json::from_str(include_str!(
+            "../../../docs/specs/jail-v1/examples/receipt-prepared.json"
+        ))
+        .unwrap();
+        json!({"schema":"ouro.ledger.request/1","profile":"tool","argv_digest":receipt["argv_digest"],
+            "policy_digest":receipt["policy"]["digest"],"requirements":receipt["policy"]["requirements"],
+            "jail_image_digest":receipt["argv_digest"],"io":{"mode":"batch","pty":false},
+            "capture":{"streams":[],"limit_bytes":1_048_576},"evidence":"strict"})
+    }
+
+    /// Re-reading one run takes several times the 2 s request timeout here,
+    /// yet the writer keeps answering status, ping and appends meanwhile.
+    #[test]
+    fn a_slow_fresh_verification_never_holds_the_writer_from_other_clients() {
+        if let Some(data) = std::env::var_os(SLOW_VERIFY_WORKER) {
+            crate::faults::slow_verification(FRAME_DELAY);
+            serve(Path::new(&data)).unwrap();
+            unreachable!("the writer serves until it is killed");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let frames = 80;
+        let run_id = {
+            let mut store = Store::open(&data).unwrap();
+            let run = store
+                .prepare("slow-verify", &request_payload(), &fixture_peer())
+                .unwrap();
+            for n in 1..frames {
+                store
+                    .hold(&run.run_id, &format!("hold-{n}"), &fixture_peer())
+                    .unwrap();
+            }
+            run.run_id
+        };
+        let log = fs::File::create(temp.path().join("writer.log")).unwrap();
+        let _writer = Worker(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "daemon::tests::a_slow_fresh_verification_never_holds_the_writer_from_other_clients",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(SLOW_VERIFY_WORKER, &data)
+                .env("OURO_CONFIG_DIR", temp.path().join("config"))
+                .stdin(std::process::Stdio::null())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Client::connect(&data).is_err() {
+            assert!(Instant::now() < deadline, "the writer never became ready");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let verifier = {
+            let (data, run_id) = (data.clone(), run_id.clone());
+            thread::spawn(move || {
+                let started = Instant::now();
+                let reports = Client::connect(&data).unwrap().verify(Some(&run_id));
+                (started.elapsed(), reports)
+            })
+        };
+        thread::sleep(Duration::from_millis(300));
+        let mut client = Client::connect(&data).unwrap();
+        for _ in 0..3 {
+            // Each call fails on its own 2 s timeout if the writer is held.
+            assert_eq!(client.status().unwrap().runs, 1);
+            assert_eq!(client.ping().unwrap()["protocol"], PROTOCOL_VERSION);
+            thread::sleep(Duration::from_millis(500));
+        }
+        client.hold(&run_id, "during-verify").unwrap();
+        let (elapsed, reports) = verifier.join().unwrap();
+        let report = &reports.unwrap()[0];
+        assert!(elapsed >= FRAME_DELAY * frames, "{elapsed:?}");
+        // The re-read covers what was accepted when the page was planned.
+        assert!(report.local_consistency, "{report:?}");
+        assert_eq!(report.events, u64::from(frames));
+    }
+
+    /// A private data directory with a listening writer socket.
+    fn listening(temp: &Path) -> (std::path::PathBuf, UnixListener) {
+        let data = temp.join("data");
+        crate::store::private_directory(&data.join("ledger")).unwrap();
+        let path = data.join("ledger/serve.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        (data, listener)
+    }
+
+    /// Answers every forwarded request with `value`, as a stand-in writer.
+    fn answer_requests(receiver: mpsc::Receiver<Message>, value: Value) {
+        thread::spawn(move || {
+            for message in receiver {
+                if let Work::Request(_, reply) = message.work {
+                    let _ = reply.try_send(Response::Ok {
+                        value: value.clone(),
+                    });
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn a_connection_whose_thread_cannot_start_is_refused_and_accepting_continues() {
+        static STARTS: AtomicUsize = AtomicUsize::new(0);
+        fn first_start_fails(handler: Box<dyn FnOnce() + Send>) -> std::io::Result<()> {
+            if STARTS.fetch_add(1, Ordering::AcqRel) == 0 {
+                return Err(std::io::Error::from_raw_os_error(libc::EAGAIN));
+            }
+            spawn_thread(handler)
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (data, listener) = listening(temp.path());
+        let (sender, receiver) = mpsc::sync_channel(MAX_CONNECTIONS);
+        answer_requests(receiver, json!({"protocol":PROTOCOL_VERSION}));
+        thread::spawn(move || accept_connections(listener, sender, first_start_fails));
+        let mut refused = UnixStream::connect(data.join("ledger/serve.sock")).unwrap();
+        refused.set_read_timeout(Some(TIMEOUT)).unwrap();
+        match read_frame::<Response>(&mut refused).unwrap() {
+            Response::Error { message } => assert!(
+                message.starts_with("writer_busy: the writer cannot start a connection handler"),
+                "{message}"
+            ),
+            response => panic!("unexpected {response:?}"),
+        }
+        // The acceptor survived and serves the next connection.
+        Client::connect(&data).unwrap();
+        assert_eq!(STARTS.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn a_writer_of_another_protocol_is_refused_with_its_version_never_restarted() {
+        let temp = tempfile::tempdir().unwrap();
+        let (data, _) = listening(temp.path());
+        fs::remove_file(data.join("ledger/serve.sock")).unwrap();
+        // No writer answers: the caller may start one.
+        assert!(Client::reachable(&data).unwrap().is_none());
+        for (writer, spoken) in [
+            (
+                json!({"protocol":PROTOCOL_VERSION + 1}),
+                format!("protocol {}", PROTOCOL_VERSION + 1),
+            ),
+            (
+                json!({"writer":"available"}),
+                "an unversioned protocol".into(),
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (data, listener) = listening(temp.path());
+            let (sender, receiver) = mpsc::sync_channel(MAX_CONNECTIONS);
+            answer_requests(receiver, writer);
+            thread::spawn(move || accept_connections(listener, sender, spawn_thread));
+            let expected = format!(
+                "ledger writer speaks {spoken}, this client speaks protocol {PROTOCOL_VERSION}; \
+                 restart the writer once its runs settle"
+            );
+            assert_eq!(Client::connect(&data).err().unwrap().0, expected);
+            // Reachable but incompatible is a refusal, not an absent writer.
+            assert_eq!(Client::reachable(&data).err().unwrap().0, expected);
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (data, listener) = listening(temp.path());
+        let (sender, receiver) = mpsc::sync_channel(MAX_CONNECTIONS);
+        answer_requests(receiver, json!({"protocol":PROTOCOL_VERSION}));
+        thread::spawn(move || accept_connections(listener, sender, spawn_thread));
+        assert!(Client::reachable(&data).unwrap().is_some());
     }
 
     #[test]
