@@ -624,8 +624,7 @@ pub(super) fn create(
             format!("this binary's own path cannot be read: {err}"),
         )
     })?;
-    // Read before the mount preparation raises it.
-    let nofile_soft = operator_nofile_soft();
+    let nofile_soft = exec::operator_nofile_soft();
 
     // `<data>/attempts/<id>` is the attempt; the state root is two levels
     // up, and everything under it is supervisor state (§7).
@@ -860,15 +859,6 @@ struct Launcher<'a> {
     observe_on: bool,
     /// The operator's soft `RLIMIT_NOFILE`, which the target gets back.
     nofile_soft: Option<u64>,
-}
-
-/// The soft `RLIMIT_NOFILE` this process had before it raised its own: the
-/// mount preparation raises it so bubblewrap can receive every pinned source
-/// above it, and the launcher puts it back for the target. Read once per
-/// process, at its first preparation.
-fn operator_nofile_soft() -> Option<u64> {
-    static SOFT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    *SOFT.get_or_init(|| crate::proxy::nofile_limits().ok().map(|(soft, _)| soft))
 }
 
 /// The mount plan and everything decided with it, before any descriptor is

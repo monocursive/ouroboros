@@ -115,8 +115,9 @@ pub struct LaunchArgs {
     /// mask as inherited (`none`, where nothing in between changes it).
     pub sigmask: Option<u64>,
     /// The soft `RLIMIT_NOFILE` the target gets: the operator's, which the
-    /// supervisor raised for itself to hand bubblewrap the pinned mount
-    /// sources above it. `None` leaves the limit as inherited.
+    /// supervisor may have raised for itself to hand descriptors on above
+    /// their targets (the pinned mount sources among them). `None` leaves
+    /// the limit as inherited.
     pub nofile_soft: Option<u64>,
     /// The target's argv; element 0 is also the program to execute.
     pub argv: Vec<OsString>,
@@ -543,10 +544,9 @@ pub fn launch_main(args: &[OsString]) -> ! {
         }
     }
 
-    // The operator's descriptor limit: the supervisor raised its own soft
-    // limit to hand bubblewrap the pinned mount sources above it, and
-    // bubblewrap and this launcher inherited that. The target gets what the
-    // operator set. Lowering a soft limit under its hard one cannot fail on
+    // The operator's descriptor limit: the supervisor may have raised its
+    // own soft limit to hand descriptors on above their targets, and this
+    // launcher inherited that. The target gets what the operator set. Lowering a soft limit under its hard one cannot fail on
     // Linux; if it does, the target does not run with the raised one.
     if let Some(soft) = parsed.nofile_soft {
         // SAFETY: `limit` is plain stack data getrlimit fills and setrlimit

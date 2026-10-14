@@ -149,7 +149,7 @@ pub(super) fn reserve_mount_descriptors(needed: usize, protected: usize) -> Resu
     if descriptor_shortfall(needed, open()?, soft, hard, protected).is_none() {
         return Ok(());
     }
-    let (soft, hard) = crate::proxy::raise_nofile_soft_to_hard().map_err(unreadable)?;
+    let (soft, hard) = exec::raise_nofile_soft().map_err(unreadable)?;
     descriptor_shortfall(needed, open()?, soft, hard, protected).map_or(Ok(()), Err)
 }
 

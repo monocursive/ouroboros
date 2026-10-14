@@ -85,6 +85,8 @@ impl LinuxPlatform {
     /// operator's `PATH` ([`resolved_bwrap`]).
     #[must_use]
     pub fn new() -> Self {
+        // Read before anything this process does raises it.
+        let _ = super::exec::operator_nofile_soft();
         let backend_pin = resolved_bwrap().map_err(str::to_owned).and_then(|path| {
             jfs::PinnedPath::open(path)
                 .map(std::sync::Arc::new)

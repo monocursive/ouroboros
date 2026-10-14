@@ -24,6 +24,46 @@ pub(crate) use bootstrap::{BootstrapChild, BootstrapSpawn, KillOnDrop, spawn_boo
 /// source, including when there are more than 256 pinned mounts.
 const RESERVE_BASE: RawFd = 256;
 
+/// The soft `RLIMIT_NOFILE` this process had before it raised its own, read
+/// once per process: by [`raise_nofile_soft`] before its first raise, or by
+/// the first caller. The launcher puts it back for the target, so what the
+/// target can open does not depend on what the supervisor needed.
+pub(crate) fn operator_nofile_soft() -> Option<u64> {
+    static SOFT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *SOFT.get_or_init(|| crate::proxy::nofile_limits().ok().map(|(soft, _)| soft))
+}
+
+/// Raises this process's soft `RLIMIT_NOFILE` to its hard limit, after
+/// recording the operator's ([`operator_nofile_soft`]); the (soft, hard)
+/// pair in force afterwards. Every raise in this process goes through here.
+///
+/// # Errors
+/// The `getrlimit` error.
+pub(super) fn raise_nofile_soft() -> io::Result<(u64, u64)> {
+    let _ = operator_nofile_soft();
+    crate::proxy::raise_nofile_soft_to_hard()
+}
+
+/// Makes descriptor number `base` usable by this process, raising the soft
+/// `RLIMIT_NOFILE` when it does not reach it: `F_DUPFD` refuses a start at
+/// or above the soft limit with `EINVAL`, which names nothing. A hard limit
+/// that does not reach it either is refused naming both limits.
+fn room_from(base: RawFd) -> io::Result<()> {
+    let base = u64::try_from(base).unwrap_or(0);
+    let (soft, _) = crate::proxy::nofile_limits()?;
+    if soft > base {
+        return Ok(());
+    }
+    let (soft, hard) = raise_nofile_soft()?;
+    if soft > base {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "RLIMIT_NOFILE allows descriptors below {soft} (hard limit {hard}), and the supervisor \
+         hands descriptors on from number {base}: raise the hard limit above {base}"
+    )))
+}
+
 pub use super::sys::pipe;
 
 /// Descriptors to install at fixed numbers in a child.
@@ -68,7 +108,8 @@ impl FdMap {
     ///
     /// # Errors
     ///
-    /// The errno from `fcntl`.
+    /// The errno from `fcntl`, or a descriptor limit that cannot reach the
+    /// range above the targets even raised to its hard limit.
     ///
     /// # Panics
     ///
@@ -96,6 +137,7 @@ impl FdMap {
         let high = if raw >= self.reserve_base {
             fd
         } else {
+            room_from(self.reserve_base)?;
             // SAFETY: `raw` is a live descriptor owned by `fd`; F_DUPFD_CLOEXEC
             // returns a new owned descriptor above every target in this map.
             let dup = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, self.reserve_base) };

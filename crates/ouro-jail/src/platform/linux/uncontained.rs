@@ -463,7 +463,10 @@ fn spawn_launcher(
                 mediate: None,
                 bridge: None,
                 sigmask: None,
-                nofile_soft: None,
+                // The supervisor may have raised its own soft limit to hand
+                // descriptors on (`exec::FdMap`); the target gets the
+                // operator's back.
+                nofile_soft: exec::operator_nofile_soft(),
                 argv: argv.to_vec(),
             }
             .to_argv(),
