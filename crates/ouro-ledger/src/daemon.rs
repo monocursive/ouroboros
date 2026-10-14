@@ -72,7 +72,7 @@ impl Client {
     pub fn open(data: &Path) -> Result<Self> {
         let path = data.join("ledger/serve.sock");
         let meta = fs::symlink_metadata(&path)?;
-        if meta.uid() != crate::fsx::euid() || meta.mode() & 0o077 != 0 {
+        if !crate::fsx::owner_only(&meta) {
             return Err(LedgerError::refused(
                 "daemon socket is not owned and private",
             ));

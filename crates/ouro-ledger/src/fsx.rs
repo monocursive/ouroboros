@@ -36,7 +36,9 @@ const DIR_FLAGS: libc::c_int = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CL
 const FILE_MODE: u32 = 0o600;
 const DIR_MODE: u32 = 0o700;
 
-fn owner_only(metadata: &Metadata) -> bool {
+/// Whether `metadata` is owned by the effective uid with no group or other
+/// permission bits, whatever kind of file it describes.
+pub(crate) fn owner_only(metadata: &Metadata) -> bool {
     metadata.uid() == euid() && metadata.mode() & 0o077 == 0
 }
 
