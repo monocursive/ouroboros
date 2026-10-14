@@ -590,6 +590,47 @@ fn rule_one(reported: Value) -> Value {
 }
 
 #[test]
+fn a_run_label_outside_the_vocabulary_differs_from_canonical_replay() {
+    // Run labels were plain strings, compared with the replay; one outside
+    // the vocabulary still says the labels differ, never how decoding failed.
+    let edits: [fn(&mut Value); 5] = [
+        |run| run["state"] = json!("bogus"),
+        |run| run["settlement"] = json!("bogus"),
+        |run| run["child_protection"] = json!("bogus"),
+        |run| run["history"] = json!({"state":"bogus","anchor_digest":"x","collected_at":"x"}),
+        |run| {
+            run["capture_history"] = json!({"state":"bogus","anchor_digest":"x","collected_at":"x"})
+        },
+    ];
+    for edit in edits {
+        let mut f = Fixture::new();
+        let path = f.bundle(&[]);
+        alter_manifest(&path, |value| edit(&mut value["run"]));
+        assert_eq!(
+            verify(&path).unwrap_err().message(),
+            "bundle run labels differ from canonical replay"
+        );
+    }
+    // As before, only once every earlier check passed.
+    let mut f = Fixture::new();
+    let path = f.bundle(&[]);
+    alter_manifest(&path, |value| value["run"]["state"] = json!("bogus"));
+    fs::write(path.join("extra.bin"), b"uninventoried").unwrap();
+    assert_eq!(
+        verify(&path).unwrap_err().message(),
+        "unexpected bundle members"
+    );
+    // A label of the wrong type was never a label, and is still a decode error.
+    let mut f = Fixture::new();
+    let path = f.bundle(&[]);
+    alter_manifest(&path, |value| value["run"]["state"] = json!(7));
+    assert_ne!(
+        verify(&path).unwrap_err().message(),
+        "bundle run labels differ from canonical replay"
+    );
+}
+
+#[test]
 fn only_an_unresolved_run_may_carry_its_rule_one_outcome() {
     // A denied run's known outcome relabelled to rule 1's unresolved form.
     let mut f = Fixture::new();

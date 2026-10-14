@@ -395,7 +395,32 @@ fn projection_rule(replayed: &store::Replayed, embedded: &Value) -> Result<u8> {
             return Ok(1);
         }
     }
-    Err(error("bundle run labels differ from canonical replay"))
+    Err(error(LABELS_DIFFER))
+}
+
+const LABELS_DIFFER: &str = "bundle run labels differ from canonical replay";
+
+/// The manifest, decoded once every run label that is a string is replaced
+/// by a non-terminal one in the vocabulary, if that is all it lacked. Run
+/// labels were plain strings compared with the canonical replay, so one
+/// outside the vocabulary still fails as a label that differs from it,
+/// never as a decoding error.
+fn with_known_labels(manifest: &Value) -> Option<Manifest> {
+    let mut manifest = manifest.clone();
+    for (label, known) in [
+        ("/run/state", "prepared"),
+        ("/run/settlement", "pending"),
+        ("/run/child_protection", "unprotected"),
+        ("/run/history/state", "pruned"),
+        ("/run/capture_history/state", "pruned"),
+    ] {
+        if let Some(value) = manifest.pointer_mut(label)
+            && value.is_string()
+        {
+            *value = json!(known);
+        }
+    }
+    serde_json::from_value(manifest).ok()
 }
 
 fn verify_directory(
@@ -404,7 +429,12 @@ fn verify_directory(
     trusted: Option<&signing::PublicKey>,
 ) -> Result<Value> {
     let value = read_json(files::member(dir, "bundle.json", false)?)?;
-    let manifest: Manifest = serde_json::from_value(value.clone())?;
+    // A run label outside the vocabulary cannot match the replay; it is
+    // refused where any other label difference is, after every check before.
+    let (manifest, labels_known) = match serde_json::from_value(value.clone()) {
+        Ok(manifest) => (manifest, true),
+        Err(problem) => (with_known_labels(&value).ok_or(problem)?, false),
+    };
     let signed = manifest.schema == schemas::SIGNED_BUNDLE && manifest.authenticity == "signed";
     if !(signed || (manifest.schema == schemas::BUNDLE && manifest.authenticity == "unsigned"))
         || manifest.capture_digest_basis != "bundle_time"
@@ -473,6 +503,9 @@ fn verify_directory(
     }
     let replayed: store::Replayed =
         replayed.ok_or_else(|| error("bundle has no canonical records"))?;
+    if !labels_known {
+        return Err(error(LABELS_DIFFER));
+    }
     let projection_rule = projection_rule(&replayed, &value["run"])?;
     let run = replayed.run;
     if receipts != Some(json!(run.receipts)) {
