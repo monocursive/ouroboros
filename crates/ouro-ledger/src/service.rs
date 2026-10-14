@@ -99,6 +99,8 @@ mod linux {
     };
 
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+    /// The most a user-manager command may print before it is refused.
+    const MAX_MANAGER_OUTPUT_BYTES: u64 = 16_384;
     const START_TIMEOUT: Duration = Duration::from_secs(45);
     static CANCEL: AtomicBool = AtomicBool::new(false);
 
@@ -138,7 +140,8 @@ mod linux {
                 let stdout = child.stdout.take().ok_or_else(|| {
                     LedgerError::refused("systemd user-manager output unavailable")
                 })?;
-                let bytes = crate::protocol::read_bounded(stdout, 16_384, REFUSAL)?;
+                let bytes =
+                    crate::protocol::read_bounded(stdout, MAX_MANAGER_OUTPUT_BYTES, REFUSAL)?;
                 if !status.success() {
                     return Err(LedgerError::refused(REFUSAL));
                 }

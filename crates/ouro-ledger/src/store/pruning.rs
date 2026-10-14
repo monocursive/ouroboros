@@ -24,6 +24,8 @@ use crate::{
 };
 
 const MAX_REPLAYS: usize = 65_536;
+/// The largest file a retained GC anchor may inventory.
+const MAX_ANCHORED_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,7 +142,8 @@ impl Authority for Retained {
             ));
         }
         for (i, file) in self.files.iter().enumerate() {
-            if !crate::protocol::sha256_digest(&file.digest) || file.bytes > 1024 * 1024 * 1024 {
+            if !crate::protocol::sha256_digest(&file.digest) || file.bytes > MAX_ANCHORED_FILE_BYTES
+            {
                 return Err(LedgerError::refused("invalid GC file anchor"));
             }
             if let Some(segment) = self.manifest.segments.get(i) {

@@ -33,7 +33,7 @@ fn validate_body(kind: &str, effect: Option<&str>, body: &Value) -> Result<()> {
         ));
     }
     check_reserved(body, "operator")?;
-    if canonical(body)?.len() > 65_536 {
+    if canonical(body)?.len() as u64 > crate::protocol::MAX_OPERATOR_BODY_BYTES {
         return Err(LedgerError::refused("operator body exceeds 64 KiB bound"));
     }
     Ok(())

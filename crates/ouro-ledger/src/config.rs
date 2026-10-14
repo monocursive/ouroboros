@@ -7,6 +7,9 @@ use std::{
     path::Path,
 };
 
+/// The largest operator configuration file the writer reads.
+const MAX_CONFIG_BYTES: u64 = 65_536;
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -48,7 +51,8 @@ pub fn load_path(path: &Path) -> Result<LedgerRetention> {
             "retention config must be an owned regular file without group/other write access",
         ));
     }
-    let bytes = crate::protocol::read_bounded(file, 65_536, "retention config exceeds 64 KiB")?;
+    let bytes =
+        crate::protocol::read_bounded(file, MAX_CONFIG_BYTES, "retention config exceeds 64 KiB")?;
     let text = String::from_utf8(bytes)
         .map_err(|_| LedgerError::refused("retention config is not UTF-8"))?;
     let config: Config = toml::from_str(&text).map_err(|e| {

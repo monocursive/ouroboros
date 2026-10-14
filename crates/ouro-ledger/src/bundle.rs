@@ -26,6 +26,8 @@ mod signing;
 pub const MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RECORDS: u64 = 10_000;
 const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
+/// The signature envelope, bounded independently of the manifest.
+const MAX_SIGNATURE_BYTES: u64 = 4096;
 const DEADLINE: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -413,13 +415,12 @@ fn verify_directory(
     let mut expected = BTreeSet::from(["bundle.json".to_owned()]);
     let signature = if signed {
         expected.insert("signature.json".into());
-        // The envelope itself is bounded independently of the 4 MiB manifest.
         let mut file = files::member(dir, "signature.json", false)?;
-        if file.metadata()?.len() > 4096 {
+        if file.metadata()?.len() > MAX_SIGNATURE_BYTES {
             return Err(error("bundle signature exceeds 4 KiB"));
         }
         Some(signing::verify(
-            read_json((&mut file).take(4097))?,
+            read_json((&mut file).take(MAX_SIGNATURE_BYTES + 1))?,
             &canonical_json(&value)?,
             trusted,
         )?)

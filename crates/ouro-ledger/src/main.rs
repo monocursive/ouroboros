@@ -227,7 +227,7 @@ fn append_command(data: &std::path::Path, args: AppendArgs) -> Result<i32> {
         // Validate input size before bootstrapping a writer or making a mutation.
         let bytes = read_bounded(
             std::fs::File::open(&args.body_file)?,
-            65_536,
+            ouro_ledger::protocol::MAX_OPERATOR_BODY_BYTES,
             "operator body exceeds 64 KiB bound",
         )?;
         let body = serde_json::from_slice(&bytes)?;

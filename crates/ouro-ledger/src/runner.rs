@@ -213,7 +213,7 @@ fn plan(options: &RunOptions, image: &File) -> Result<Value> {
         }
     }
     let mut bytes = Vec::new();
-    let mut chunk = [0_u8; 8192];
+    let mut chunk = [0_u8; PIPE_READ_BYTES];
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match pipe.read(&mut chunk) {
@@ -256,7 +256,7 @@ fn image_digest(image: &File) -> Result<String> {
     file.seek(SeekFrom::Start(0))?;
     let bytes = crate::protocol::read_bounded(
         file,
-        256 * 1_048_576,
+        MAX_IMAGE_BYTES,
         "jail executable exceeds image bound",
     )?;
     Ok(canonical::sha256_prefixed(&bytes))
@@ -388,7 +388,7 @@ impl Frames {
     }
     fn drain(&mut self) -> Result<Vec<Value>> {
         let mut result = Vec::new();
-        let mut bytes = [0_u8; 8192];
+        let mut bytes = [0_u8; PIPE_READ_BYTES];
         // Bound work per loop as well as pending memory.
         for _ in 0..32 {
             match self.stream.read(&mut bytes) {
@@ -464,6 +464,16 @@ const HEARTBEAT: Duration = Duration::from_millis(250);
 /// exit (no pidfd).
 #[cfg(target_os = "linux")]
 const EXIT_POLL: Duration = Duration::from_millis(5);
+/// One read from a jail pipe or socket.
+#[cfg(target_os = "linux")]
+const PIPE_READ_BYTES: usize = 8192;
+/// Reads a forwarded stream may queue for the terminal: at most 1 MiB, so
+/// the owner never waits on a client write.
+#[cfg(target_os = "linux")]
+const TEE_QUEUE_READS: usize = 128;
+/// The largest jail executable the owner hashes.
+#[cfg(target_os = "linux")]
+const MAX_IMAGE_BYTES: u64 = 256 * 1_048_576;
 
 /// A descriptor that becomes readable when `pid` exits. The caller holds the
 /// unreaped child, so the pid cannot name another process.
@@ -519,8 +529,7 @@ impl Tee {
         use std::sync::atomic::Ordering;
         let delivered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let written = delivered.clone();
-        // At most 1 MiB queued per selected stream. The owner never waits on a client write.
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(128);
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(TEE_QUEUE_READS);
         let (done, finished) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let result = (|| {
@@ -645,7 +654,7 @@ fn write_capture(writer: &mut impl Write, mut bytes: &[u8], stored: &mut u64) ->
 #[cfg(target_os = "linux")]
 impl Capture {
     fn drain(&mut self) -> Result<()> {
-        let mut buffer = [0_u8; 8192];
+        let mut buffer = [0_u8; PIPE_READ_BYTES];
         for _ in 0..32 {
             let n = match self.stream.read(&mut buffer) {
                 Ok(0) => {
@@ -1104,7 +1113,7 @@ mod tests {
             file: Some(File::create(temp.path().join("stdout.bin")).unwrap()),
             observed: 0,
             stored: 0,
-            limit: 16 * 1_048_576,
+            limit: crate::protocol::MAX_CAPTURE_BYTES,
             eof: false,
             name: "stdout",
             tee: Some(Tee::new(terminal)),

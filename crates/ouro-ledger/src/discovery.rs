@@ -4,10 +4,12 @@ use crate::protocol::{LedgerError, Result, RunFilter};
 pub const MAX_CATALOG_RUNS: usize = 16_384;
 pub const MAX_CATALOG_LIMIT: u32 = 100;
 pub const MAX_POSITION_BYTES: usize = 4096;
+/// The longest launch profile or tag name.
+const MAX_NAME_BYTES: usize = 128;
 
 pub fn valid_name(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 128
+        && value.len() <= MAX_NAME_BYTES
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))

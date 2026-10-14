@@ -8,6 +8,8 @@ use serde_json::Value;
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
 /// The most bytes one selected capture stream may store.
 pub const MAX_CAPTURE_BYTES: u64 = 16 * 1_048_576;
+/// The most canonical bytes one operator intent's body may hold.
+pub const MAX_OPERATOR_BODY_BYTES: u64 = 65_536;
 /// The streams a request may select for capture.
 pub const CAPTURE_STREAMS: [&str; 3] = ["stdout", "stderr", "argv"];
 pub const MAX_CONNECTIONS: usize = 32;
