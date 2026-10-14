@@ -7,7 +7,7 @@ for a particular external agent.
 
 | Contract | Implementation and executable evidence |
 | --- | --- |
-| L1 preparation and one launch | `store.rs` request conflict/replay tests; `launch_linux.rs` durable gate and detached lost-reply tests; lifecycle fault matrix. |
+| L1 preparation and one launch | store writer tests (`store/tests/writer.rs`) for request conflict/replay; `launch_linux.rs` durable gate and detached lost-reply tests; lifecycle fault matrix. |
 | L2 attributed canonical events | `daemon.rs` role/peer authentication, source validation, source sequence/replay and private-field refusal; exact canonical export and replay tests. |
 | L3 independent intents | `store/operator.rs`, concurrent operator CLI tests, lost-reply replay and immutable effect identities. Operator decisions cannot settle the launch owner. |
 | L4 verification and bundles | `storage_recovery.rs`, unsigned/signed bundle tampering and offline cross-platform tests. Consistency, coverage, signer trust and child protection stay separate. |
