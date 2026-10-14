@@ -130,8 +130,25 @@ fn origin(value: &str) -> Result<(&str, Destination), String> {
     ))
 }
 
+/// The longest credential value: it must fit one header line.
+pub(crate) const VALUE_MAX: usize = 8192;
 /// The largest vault source read: a raw key or a refresh token document.
 pub(crate) const SOURCE_MAX: usize = 64 * 1024;
+
+/// Whether `value` can be a credential: 1..=[`VALUE_MAX`] printable ASCII
+/// bytes, so no line ending.
+pub(crate) fn valid_value(value: &[u8]) -> bool {
+    !value.is_empty() && value.len() <= VALUE_MAX && value.iter().all(|b| matches!(b, 0x20..=0x7e))
+}
+
+/// Pins every executable the policy binds its credential to.
+fn executables(policy: &Policy) -> Result<Vec<origin::Executable>, String> {
+    policy
+        .binaries
+        .iter()
+        .map(|path| origin::Executable::pin(path))
+        .collect()
+}
 
 /// The variable that carries a vault credential's placeholder into the
 /// child: `OURO_VAULT_` and the id in upper case with `.` and `-` as `_`.
@@ -159,22 +176,17 @@ impl std::fmt::Debug for Secret {
 impl Secret {
     pub fn new(id: String, policy: Policy, bytes: Vec<u8>) -> Result<Self, String> {
         let value = Zeroizing::new(bytes);
-        if value.is_empty() || value.len() > 8192 || value.iter().any(|b| !matches!(b, 0x20..=0x7e))
-        {
-            return Err(
-                "vault value must be 1..8192 printable ASCII bytes without line endings".into(),
-            );
+        if !valid_value(&value) {
+            return Err(format!(
+                "vault value must be 1..{VALUE_MAX} printable ASCII bytes without line endings"
+            ));
         }
         policy.validate()?;
         if policy.refresh.is_some() {
             return Err("refresh requires a source-backed secret".into());
         }
         let runtime = lifecycle::Runtime::static_value(value);
-        let executables = policy
-            .binaries
-            .iter()
-            .map(|p| origin::Executable::pin(p))
-            .collect::<Result<Vec<_>, _>>()?;
+        let executables = executables(&policy)?;
         Ok(Self {
             id,
             policy,
@@ -190,11 +202,7 @@ impl Secret {
         forbidden: Vec<(u64, u64)>,
     ) -> Result<Self, String> {
         policy.validate()?;
-        let executables = policy
-            .binaries
-            .iter()
-            .map(|p| origin::Executable::pin(p))
-            .collect::<Result<Vec<_>, _>>()?;
+        let executables = executables(&policy)?;
         let runtime = lifecycle::Runtime::source(path, forbidden, policy.refresh.clone())?;
         Ok(Self {
             id,
@@ -287,20 +295,13 @@ impl Vault {
     fn placeholder(&self, secret: &Secret) -> String {
         format!("vault:{}:{}", self.attempt, secret.id)
     }
-    /// A placeholder is eligible exactly where its secret declares: the
-    /// header name matches (case-insensitively) and the value is the
+    /// Substitutes the request's placeholders for a connection `initiator`
+    /// started. A placeholder is eligible exactly where its secret declares:
+    /// the header name matches (case-insensitively) and the value is the
     /// declared prefix followed by the placeholder and nothing else. The
     /// default declaration is the complete `Authorization` value. Other
     /// placements of the marker are refused, never rewritten and never
     /// logged.
-    pub fn inject(
-        &self,
-        scheme: &str,
-        request: &mut crate::proxy::http::Request,
-    ) -> Result<lifecycle::Lease, crate::proxy::Reason> {
-        self.inject_bound(scheme, request, &origin::Initiator::default())
-    }
-
     pub(crate) fn inject_bound(
         &self,
         scheme: &str,
@@ -308,7 +309,7 @@ impl Vault {
         initiator: &origin::Initiator,
     ) -> Result<lifecycle::Lease, crate::proxy::Reason> {
         use crate::proxy::Reason;
-        let mut out = Zeroizing::new(Vec::with_capacity(request.forward_head.len() + 8192));
+        let mut out = Zeroizing::new(Vec::with_capacity(request.forward_head.len() + VALUE_MAX));
         let mut lease = lifecycle::Lease::default();
         lease.bind(initiator);
         for line in crate::proxy::http::lines(&request.forward_head) {
@@ -439,6 +440,28 @@ mod tests {
             let _ = self.0.lock().unwrap().send(result);
         }
     }
+    /// A policy for `hosts`, plaintext allowed exactly when one is `http://`.
+    fn policy(hosts: &[&str]) -> Policy {
+        Policy {
+            hosts: hosts.iter().map(|host| (*host).to_owned()).collect(),
+            allow_plaintext: hosts.iter().any(|host| host.starts_with("http://")),
+            ..Policy::default()
+        }
+    }
+    /// The vault of one secret `api` with `policy` and `value`.
+    fn vault_of(policy: Policy, value: &[u8]) -> Vault {
+        let secret = Secret::new("api".into(), policy, value.to_vec()).unwrap();
+        Vault::new("test-attempt", vec![Arc::new(secret)]).unwrap()
+    }
+    /// Substitutes as the proxy does for a connection with no process
+    /// authority.
+    fn inject(
+        vault: &Vault,
+        scheme: &str,
+        request: &mut proxy::http::Request,
+    ) -> Result<lifecycle::Lease, Reason> {
+        vault.inject_bound(scheme, request, &origin::Initiator::default())
+    }
     fn roots(cert: rustls::pki_types::CertificateDer<'static>) -> Arc<rustls::ClientConfig> {
         let mut roots = rustls::RootCertStore::empty();
         roots.add(cert).unwrap();
@@ -464,9 +487,11 @@ mod tests {
         }
         Ok(bytes)
     }
+    /// One request through a vault proxy's TLS lane to a local upstream:
+    /// `trusted` says whether the vault trusts the upstream's certificate,
+    /// `authorized` whether the secret is bound to the upstream's host.
     fn run_tls(
         trusted: bool,
-        _matching_host: bool,
         authorized: bool,
         first: impl Fn(u16) -> String,
         pipeline: &[u8],
@@ -525,25 +550,15 @@ mod tests {
             }
             bytes
         });
-        let secret = Secret::new(
-            "api".into(),
-            Policy {
-                hosts: vec![format!(
-                    "https://{}:{port}",
-                    if authorized {
-                        "fixture.test"
-                    } else {
-                        "other.test"
-                    }
-                )],
-                allow_plaintext: false,
-                header: None,
-                ..Policy::default()
-            },
-            b"Bearer fixture-secret".to_vec(),
-        )
-        .unwrap();
-        let mut vault = Vault::new("test-attempt", vec![Arc::new(secret)]).unwrap();
+        let host = if authorized {
+            "fixture.test"
+        } else {
+            "other.test"
+        };
+        let mut vault = vault_of(
+            policy(&[&format!("https://{host}:{port}")]),
+            b"Bearer fixture-secret",
+        );
         if trusted {
             vault.client = roots(trusted_cert);
         }
@@ -624,8 +639,7 @@ mod tests {
     }
     #[test]
     fn tls_vault_substitutes_only_after_both_authorities_and_the_certificate_pass() {
-        let (event, upstream, response) =
-            run_tls(true, true, true, authorized_get(true), b"", true);
+        let (event, upstream, response) = run_tls(true, true, authorized_get(true), b"", true);
         assert_eq!(event.reason, Reason::Relayed);
         assert_eq!(
             event.origin_verification,
@@ -638,15 +652,23 @@ mod tests {
         );
         assert!(!upstream.windows(6).any(|s| s == b"vault:"));
         assert!(response.ends_with(b"OK"));
-        for (case, reason) in [
+        for (trusted, matching_host, authorized, reason) in [
             // An untrusted upstream certificate fails the handshake.
-            ((false, true, true), Reason::UpstreamProtocol),
-            ((true, false, true), Reason::OriginMismatch),
-            ((true, true, false), Reason::OriginMismatch),
+            (false, true, true, Reason::UpstreamProtocol),
+            (true, false, true, Reason::OriginMismatch),
+            (true, true, false, Reason::OriginMismatch),
         ] {
-            let (event, upstream, _) =
-                run_tls(case.0, case.1, case.2, authorized_get(case.1), b"", false);
-            assert_eq!(event.reason, reason, "{case:?}");
+            let (event, upstream, _) = run_tls(
+                trusted,
+                authorized,
+                authorized_get(matching_host),
+                b"",
+                false,
+            );
+            assert_eq!(
+                event.reason, reason,
+                "{trusted} {matching_host} {authorized}"
+            );
             assert!(
                 upstream.is_empty(),
                 "no HTTP credential bytes may reach an unverified destination"
@@ -656,7 +678,6 @@ mod tests {
     #[test]
     fn tls_vault_relays_a_verified_websocket_in_both_directions() {
         let (event, upstream, response) = run_tls(
-            true,
             true,
             true,
             |port| {
@@ -676,7 +697,6 @@ mod tests {
     #[test]
     fn tls_vault_drains_large_plaintext_before_the_upstream_close_notify() {
         let (event, _, response) = run_tls(
-            true,
             true,
             true,
             |port| {
@@ -700,8 +720,7 @@ mod tests {
     #[test]
     fn tls_vault_closes_the_response_and_counts_discarded_pipeline_bytes() {
         let pipeline = b"GET /second HTTP/1.1\r\nHost: fixture.test\r\n\r\n";
-        let (event, upstream, response) =
-            run_tls(true, true, true, authorized_get(true), pipeline, true);
+        let (event, upstream, response) = run_tls(true, true, authorized_get(true), pipeline, true);
         assert_eq!(event.reason, Reason::Relayed);
         assert_eq!(event.discarded_bytes, pipeline.len() as u64);
         assert!(!upstream.windows(7).any(|bytes| bytes == b"/second"));
@@ -713,33 +732,17 @@ mod tests {
         // `http://fixture.test:443` names the very destination the https
         // secret is bound to; only the scheme distinguishes the plaintext
         // injection attempt.
-        let secret = Arc::new(
-            Secret::new(
-                "api".into(),
-                Policy {
-                    hosts: vec!["https://fixture.test".into()],
-                    allow_plaintext: false,
-                    header: None,
-                    ..Policy::default()
-                },
-                b"Bearer fixture-secret".to_vec(),
-            )
-            .unwrap(),
-        );
-        let vault = Vault::new("test-attempt", vec![secret]).unwrap();
+        let vault = vault_of(policy(&["https://fixture.test"]), b"Bearer fixture-secret");
         let flight = || {
             proxy::http::parse_request(
                 b"GET http://fixture.test:443/ HTTP/1.1\r\nHost: fixture.test:443\r\nAuthorization: vault:test-attempt:api\r\n\r\n",
             )
             .unwrap()
         };
-        vault
-            .inject("http", &mut flight())
+        inject(&vault, "http", &mut flight())
             .expect_err("a plaintext origin must not receive an https-bound secret");
         let mut secure = flight();
-        vault
-            .inject("https", &mut secure)
-            .expect("the bound https origin substitutes");
+        inject(&vault, "https", &mut secure).expect("the bound https origin substitutes");
         assert!(
             secure
                 .forward_head
@@ -748,26 +751,12 @@ mod tests {
         );
         // Positive control: the allow_plaintext opt-in substitutes over http
         // (default port 80 here, matching the secret's own binding).
-        let plain = Arc::new(
-            Secret::new(
-                "api".into(),
-                Policy {
-                    hosts: vec!["http://fixture.test".into()],
-                    allow_plaintext: true,
-                    header: None,
-                    ..Policy::default()
-                },
-                b"Bearer fixture-secret".to_vec(),
-            )
-            .unwrap(),
-        );
-        let plain_vault = Vault::new("test-attempt", vec![plain]).unwrap();
+        let plain_vault = vault_of(policy(&["http://fixture.test"]), b"Bearer fixture-secret");
         let mut default_port = proxy::http::parse_request(
             b"GET http://fixture.test/ HTTP/1.1\r\nHost: fixture.test\r\nAuthorization: vault:test-attempt:api\r\n\r\n",
         )
         .unwrap();
-        plain_vault
-            .inject("http", &mut default_port)
+        inject(&plain_vault, "http", &mut default_port)
             .expect("the allow_plaintext opt-in substitutes");
     }
     /// A vault proxy reads the bridge's preamble first: a connection that
@@ -775,16 +764,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_vault_connection_closed_before_its_preamble_is_no_request() {
-        let secret = Secret::new(
-            "api".into(),
-            Policy {
-                hosts: vec!["https://fixture.test".into()],
-                ..Policy::default()
-            },
-            b"fixture-secret".to_vec(),
-        )
-        .unwrap();
-        let vault = Vault::new("test-attempt", vec![Arc::new(secret)]).unwrap();
+        let vault = vault_of(policy(&["https://fixture.test"]), b"fixture-secret");
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("proxy.sock");
         let (sender, receiver) = mpsc::channel();
@@ -823,26 +803,12 @@ mod tests {
     }
     #[test]
     fn a_placeholder_outside_authorization_is_refused_never_rewritten() {
-        let secret = Arc::new(
-            Secret::new(
-                "api".into(),
-                Policy {
-                    hosts: vec!["http://fixture.test".into()],
-                    allow_plaintext: true,
-                    header: None,
-                    ..Policy::default()
-                },
-                b"Bearer fixture-secret".to_vec(),
-            )
-            .unwrap(),
-        );
-        let vault = Vault::new("test-attempt", vec![secret]).unwrap();
+        let vault = vault_of(policy(&["http://fixture.test"]), b"Bearer fixture-secret");
         let mut request = proxy::http::parse_request(
             b"POST http://fixture.test/ HTTP/1.1\r\nHost: fixture.test\r\nX-Api-Key: vault:test-attempt:api\r\nContent-Length: 0\r\n\r\n",
         )
         .unwrap();
-        let error = vault
-            .inject("http", &mut request)
+        let error = inject(&vault, "http", &mut request)
             .expect_err("a marker outside Authorization must refuse");
         assert_eq!(error, Reason::CredentialPlacementDenied);
         assert!(
@@ -864,20 +830,15 @@ mod tests {
     #[test]
     fn a_misplaced_placeholder_or_an_unbindable_path_is_named_for_what_it_is() {
         let placed = |paths: Vec<String>, text: &[u8]| {
-            let secret = Secret::new(
-                "api".into(),
+            let vault = vault_of(
                 Policy {
-                    hosts: vec!["http://fixture.test".into()],
-                    allow_plaintext: true,
                     paths,
-                    ..Policy::default()
+                    ..policy(&["http://fixture.test"])
                 },
-                b"fixture-secret".to_vec(),
-            )
-            .unwrap();
-            let vault = Vault::new("test-attempt", vec![Arc::new(secret)]).unwrap();
+                b"fixture-secret",
+            );
             let mut request = proxy::http::parse_request(text).unwrap();
-            vault.inject("http", &mut request).map(|_| ())
+            inject(&vault, "http", &mut request).map(|_| ())
         };
         // A placeholder in the request line is no declared placement.
         assert_eq!(
@@ -904,7 +865,6 @@ mod tests {
         let (event, upstream, _) = run_tls(
             true,
             true,
-            true,
             |port| {
                 format!(
                     "GET / HTTP/1.1\r\nHost: fixture.test:{port}\r\nX-Pad: {}\r\n\r\n",
@@ -919,7 +879,6 @@ mod tests {
 
         // Chunked framing is refused in this one-request lane.
         let (event, upstream, _) = run_tls(
-            true,
             true,
             true,
             |port| {
@@ -943,7 +902,6 @@ mod tests {
         let (event, upstream, _) = run_tls(
             true,
             true,
-            true,
             |port| {
                 format!(
                     "GET / HTTP/1.1\r\nHost: fixture.test:{port}\r\n\
@@ -960,7 +918,6 @@ mod tests {
         // The match is by header name, not substring: a value that merely
         // mentions `expect:` is none of this lane's business and relays.
         let (event, upstream, _) = run_tls(
-            true,
             true,
             true,
             |port| {
@@ -984,28 +941,13 @@ mod tests {
     fn plaintext_is_opt_in_and_substitution_is_exact() {
         assert!(
             Policy {
-                hosts: vec!["http://fixture.test".into()],
                 allow_plaintext: false,
-                header: None,
-                ..Policy::default()
+                ..policy(&["http://fixture.test"])
             }
             .validate()
             .is_err()
         );
-        let secret = Arc::new(
-            Secret::new(
-                "api".into(),
-                Policy {
-                    hosts: vec!["http://fixture.test".into()],
-                    allow_plaintext: true,
-                    header: None,
-                    ..Policy::default()
-                },
-                b"Bearer fixture-secret".to_vec(),
-            )
-            .unwrap(),
-        );
-        let vault = Vault::new("test-attempt", vec![secret]).unwrap();
+        let vault = vault_of(policy(&["http://fixture.test"]), b"Bearer fixture-secret");
         for (host, value, ok) in [
             ("fixture.test", "vault:test-attempt:api", true),
             ("other.test", "vault:test-attempt:api", false),
@@ -1015,17 +957,12 @@ mod tests {
                 "GET http://{host}/ HTTP/1.1\r\nHost: {host}\r\nAuthorization: {value}\r\n\r\n"
             );
             let mut request = proxy::http::parse_request(text.as_bytes()).unwrap();
-            assert_eq!(vault.inject("http", &mut request).is_ok(), ok);
+            assert_eq!(inject(&vault, "http", &mut request).is_ok(), ok);
         }
         assert!(
             Secret::new(
                 "api".into(),
-                Policy {
-                    hosts: vec!["https://fixture.test".into()],
-                    allow_plaintext: false,
-                    header: None,
-                    ..Policy::default()
-                },
+                policy(&["https://fixture.test"]),
                 b"secret\n".to_vec()
             )
             .is_err()
@@ -1038,23 +975,16 @@ mod tests {
     #[test]
     fn a_declared_header_placement_substitutes_named_headers_and_bearer_prefixes() {
         let substitute = |header: Option<Header>, text: &str| -> Option<Vec<u8>> {
-            let secret = Arc::new(
-                Secret::new(
-                    "api".into(),
-                    Policy {
-                        hosts: vec!["https://fixture.test".into()],
-                        allow_plaintext: false,
-                        header,
-                        ..Policy::default()
-                    },
-                    b"fixture-secret".to_vec(),
-                )
-                .unwrap(),
+            let vault = vault_of(
+                Policy {
+                    header,
+                    ..policy(&["https://fixture.test"])
+                },
+                b"fixture-secret",
             );
-            let vault = Vault::new("test-attempt", vec![secret]).unwrap();
             let mut request =
                 proxy::http::parse_request(text.as_bytes()).expect("a parseable request");
-            vault.inject("https", &mut request).ok()?;
+            inject(&vault, "https", &mut request).ok()?;
             Some(request.forward_head.clone())
         };
         let key = "GET http://fixture.test:443/ HTTP/1.1\r\nHost: fixture.test:443\r\nx-api-key: vault:test-attempt:api\r\n\r\n";

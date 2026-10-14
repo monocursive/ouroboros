@@ -1,6 +1,6 @@
 //! Supervisor-owned live sources and bounded OAuth2 refresh. Never retries an
 //! uncertain rotating grant: a persisted pending marker requires reauthorization.
-use super::Secret;
+use super::{SOURCE_MAX, Secret, valid_value as valid};
 use crate::{
     credentials::{read_vault_source, read_vault_source_version, update_vault_source},
     proxy::Reason,
@@ -92,9 +92,11 @@ struct Response {
     #[serde(default)]
     id_token: Option<SecretText>,
 }
-fn valid(value: &[u8]) -> bool {
-    !value.is_empty() && value.len() <= 8192 && value.iter().all(|b| matches!(b, 0x20..=0x7e))
-}
+/// The largest issuer token response read.
+const RESPONSE_MAX: usize = 64 * 1024;
+/// The longest token lifetime accepted from an issuer: one year, in
+/// seconds.
+const MAX_TOKEN_LIFETIME: u64 = 365 * 24 * 60 * 60;
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -211,7 +213,7 @@ impl Runtime {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             return Ok((state.value.clone(), state.generation));
         };
-        let (raw, mut epoch) = read_vault_source_version(path, forbidden, 65536)
+        let (raw, mut epoch) = read_vault_source_version(path, forbidden, SOURCE_MAX)
             .map_err(|_| self.deny(Reason::CredentialRevoked))?;
         let value = if let Some(policy) = &self.refresh {
             let doc: Document =
@@ -240,13 +242,13 @@ impl Runtime {
                 // Only one local exchange. Other attempts contend through the
                 // source CAS + flock and observe the persisted pending marker.
                 let _guard = self.exchange.lock().unwrap_or_else(|e| e.into_inner());
-                let fresh = read_vault_source(path, forbidden, 65536)
+                let fresh = read_vault_source(path, forbidden, SOURCE_MAX)
                     .map_err(|_| self.deny(Reason::CredentialRevoked))?;
                 if fresh.as_slice() != raw.as_slice() {
                     return Err(Reason::CredentialUnavailable);
                 }
                 let value = self.exchange_token(policy, path, forbidden, raw, epoch, doc)?;
-                let (_, current) = read_vault_source_version(path, forbidden, 65536)
+                let (_, current) = read_vault_source_version(path, forbidden, SOURCE_MAX)
                     .map_err(|_| self.deny(Reason::CredentialRevoked))?;
                 epoch = current;
                 value
@@ -306,7 +308,7 @@ impl Runtime {
         let pending = encode(&doc)?;
         update_vault_source(path, forbidden, &raw, identity, &pending)
             .map_err(|_| self.deny(Reason::CredentialUnavailable))?;
-        let (confirmed, pending_epoch) = read_vault_source_version(path, forbidden, 65536)
+        let (confirmed, pending_epoch) = read_vault_source_version(path, forbidden, SOURCE_MAX)
             .map_err(|_| self.deny(Reason::CredentialRevoked))?;
         if confirmed.as_slice() != pending.as_slice() || pending_epoch.identity() != identity {
             return Err(self.deny(Reason::CredentialRevoked));
@@ -359,10 +361,10 @@ impl Runtime {
             response
                 .body_mut()
                 .as_reader()
-                .take(65537)
+                .take(u64::try_from(RESPONSE_MAX + 1).unwrap_or(u64::MAX))
                 .read_to_end(&mut bytes)
                 .map_err(|_| Reason::CredentialUnavailable)?;
-            if bytes.len() > 65536 {
+            if bytes.len() > RESPONSE_MAX {
                 return Err(Reason::CredentialUnavailable);
             }
             let response: Response =
@@ -392,8 +394,8 @@ impl Runtime {
             update_vault_source(path, forbidden, &pending, identity, &replacement)
                 .map_err(|_| Reason::CredentialRevoked)?;
             // Deletion/replacement during exchange or commit never releases a token.
-            let check =
-                read_vault_source(path, forbidden, 65536).map_err(|_| Reason::CredentialRevoked)?;
+            let check = read_vault_source(path, forbidden, SOURCE_MAX)
+                .map_err(|_| Reason::CredentialRevoked)?;
             if check.as_slice() != replacement.as_slice() {
                 return Err(Reason::CredentialRevoked);
             }
@@ -423,7 +425,7 @@ impl Runtime {
     fn live(&self, generation: u64) -> bool {
         // Never start a network exchange from a stream's revocation check.
         if let Some((path, forbidden)) = &self.source {
-            let Ok((raw, epoch)) = read_vault_source_version(path, forbidden, 65536) else {
+            let Ok((raw, epoch)) = read_vault_source_version(path, forbidden, SOURCE_MAX) else {
                 self.deny_if(Reason::CredentialRevoked, Some(generation));
                 return false;
             };
@@ -505,7 +507,7 @@ fn expiry(response: &Response) -> Result<u64, Reason> {
     use base64::Engine as _;
     let now = now();
     let ttl = match response.expires_in {
-        Some(ttl) if ttl > 0 && ttl <= 31_536_000 => Some(now.saturating_add(ttl)),
+        Some(ttl) if ttl > 0 && ttl <= MAX_TOKEN_LIFETIME => Some(now.saturating_add(ttl)),
         Some(_) => return Err(Reason::CredentialUnavailable),
         None => None,
     };
@@ -535,7 +537,7 @@ fn expiry(response: &Response) -> Result<u64, Reason> {
         (Some(a), None) | (None, Some(a)) => a,
         (None, None) => return Err(Reason::CredentialUnavailable),
     };
-    if expiry <= now || expiry > now.saturating_add(31_536_000) {
+    if expiry <= now || expiry > now.saturating_add(MAX_TOKEN_LIFETIME) {
         return Err(Reason::CredentialUnavailable);
     }
     Ok(expiry)
