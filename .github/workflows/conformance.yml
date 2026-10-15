@@ -6,6 +6,8 @@
 #   variables: UKAI_CI_HOST (address), UKAI_CI_USER (account), UKAI_CI_KNOWN_HOSTS
 #              (one `ssh-keyscan -t ed25519 <host>` line)
 #   secret:    UKAI_CI_SSH_KEY (private key authorized for that account only)
+# The pre-rename OURO_CI_* settings remain valid until the provisioned
+# repository variables and secret have been migrated together.
 name: conformance
 on:
   push:
@@ -23,7 +25,7 @@ jobs:
   # §16 makes a skipped required capability a failure; a wholly unconfigured
   # host cannot run at all, but the skip must be loud, not a green silence.
   not-configured-notice:
-    if: vars.UKAI_CI_HOST == ''
+    if: vars.UKAI_CI_HOST == '' && vars.OURO_CI_HOST == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -34,19 +36,19 @@ jobs:
           {
             echo "## ⚠️ conformance did not run"
             echo
-            echo "UKAI_CI_HOST is not configured, so the reference-host job was"
+            echo "Neither UKAI_CI_HOST nor the legacy OURO_CI_HOST is configured, so the reference-host job was"
             echo "skipped. A green push without this job proves nothing about the"
             echo "live kernel features (jail-v1 §16). Configure UKAI_CI_HOST,"
             echo "UKAI_CI_USER, UKAI_CI_KNOWN_HOSTS and UKAI_CI_SSH_KEY."
           } >> "$GITHUB_STEP_SUMMARY"
   reference-host:
-    if: vars.UKAI_CI_HOST != ''
+    if: vars.UKAI_CI_HOST != '' || vars.OURO_CI_HOST != ''
     runs-on: ubuntu-24.04
     # A wedged SSH session must fail the job, not hold the serialized lane.
     timeout-minutes: 45
     env:
-      CI_HOST: ${{ vars.UKAI_CI_HOST }}
-      CI_USER: ${{ vars.UKAI_CI_USER }}
+      CI_HOST: ${{ vars.UKAI_CI_HOST || vars.OURO_CI_HOST }}
+      CI_USER: ${{ vars.UKAI_CI_USER || vars.OURO_CI_USER }}
     steps:
       # This job holds the reference-host key, so the checkout keeps no token.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
@@ -54,8 +56,8 @@ jobs:
           persist-credentials: false
       - name: SSH identity
         env:
-          KEY: ${{ secrets.UKAI_CI_SSH_KEY }}
-          KNOWN_HOSTS: ${{ vars.UKAI_CI_KNOWN_HOSTS }}
+          KEY: ${{ secrets.UKAI_CI_SSH_KEY || secrets.OURO_CI_SSH_KEY }}
+          KNOWN_HOSTS: ${{ vars.UKAI_CI_KNOWN_HOSTS || vars.OURO_CI_KNOWN_HOSTS }}
         run: |
           umask 077
           mkdir -p ~/.ssh

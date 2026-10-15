@@ -8,10 +8,10 @@ export const jailVersion = release.jail.version;
 // Published previews retain their immutable pre-rename tags. Packaging uses
 // tag_prefix for future Ukai releases; publishing also updates published_tag.
 export const jailTag = release.jail.published_tag;
-export const jailCommand = jailTag.slice(0, jailTag.indexOf('-v'));
+export const jailCommand = jailTag.replace(/-v\d.*$/, '');
 export const jailReleaseUrl = `${releases}/${jailTag}`;
 export const vmVersion = release.vm.version;
-export const vmCommand = release.vm.published_tag.slice(0, release.vm.published_tag.indexOf('-v'));
+export const vmCommand = release.vm.published_tag.replace(/-v\d.*$/, '');
 export const vmReleaseUrl = `${releases}/${release.vm.published_tag}`;
 
 // Reference documents as of the published Linux release, so a reader sees the
