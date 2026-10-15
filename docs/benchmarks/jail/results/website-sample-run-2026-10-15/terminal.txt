@@ -1,0 +1,7 @@
+$ ukai-jail run --profile tool --workspace . --limit wall=30s -- \
+    sh -c "cat $HOME/.ssh/authorized_keys; curl -sS https://example.com; echo ok > result.txt"
+cat: /home/ubuntu/.ssh/authorized_keys: No such file or directory
+curl: (6) Could not resolve host: example.com
+[exit status 0]
+$ cat result.txt
+ok

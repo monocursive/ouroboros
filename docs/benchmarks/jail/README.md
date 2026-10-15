@@ -4,8 +4,10 @@ Newer, separate work: the [11 October macOS Linux VM prototype](macos-linux-vm-2
 records the original offline execution and VM cleanup limitation. The later
 [preview package qualification](macos-vm-preview-package-2026-10-11.md) covers the
 custodian fix and installable candidate. The [public release record](macos-vm-publication-2026-10-11.md)
-adds website delivery, public installation and a verified quickstart. These
-records do not change the historical native Jail evidence or Linux release scope.
+adds website delivery, public installation and a verified quickstart. The
+[15 October website sample run](website-sample-run-2026-10-15.md) records the
+run and receipt shown on the home page. These records do not change the
+historical native Jail evidence or Linux release scope.
 
 This is an uncommitted implementation against `dev` at
 `2c8f28dcda4bc60b2e5ba51b2f8f9d7c93bf5bfa`. The binaries' build-input digests
