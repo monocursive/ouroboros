@@ -71,7 +71,7 @@ Install Rust 1.98.1 and your distribution's bubblewrap package. Run as your
 normal user. The reference host uses Ubuntu 26.04.1 and bubblewrap 0.11.1.
 
 ```sh
-git clone --branch ukai-rename https://github.com/monocursive/ukai.git
+git clone --branch dev https://github.com/monocursive/ukai.git
 cd ukai
 cargo +1.98.1 build --release -p ukai-jail
 mkdir -p "$HOME/.local/bin"

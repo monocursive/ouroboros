@@ -114,7 +114,7 @@ second wall limit.
 A completed attempt requires a verified Linux Jail receipt and acknowledged
 VM stop. Incomplete evidence returns 125. Files and Linux receipts remain in
 `<out>/workspace/` and `<out>/evidence/`; `attempt.json` records Mac supervision.
-The [package qualification](https://github.com/monocursive/ukai/blob/ukai-rename/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
+The [package qualification](https://github.com/monocursive/ukai/blob/dev/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
 passed all 14 measured teardown cases. Simultaneous suspension of all three
 host controllers, host sleep/wake, kernel failure and arbitrary guest compromise
 are outside qualified coverage. The native macOS cleanup blocker remains open.
@@ -140,7 +140,7 @@ reference host runs Ubuntu 26.04.1 and bubblewrap 0.11.1. Run as your normal
 user; the jail does not install a backend or change host security settings.
 
 ```sh
-git clone --branch ukai-rename https://github.com/monocursive/ukai.git
+git clone --branch dev https://github.com/monocursive/ukai.git
 cd ukai
 cargo +1.98.1 build --release -p ukai-jail
 mkdir -p "$HOME/.local/bin"
@@ -159,7 +159,7 @@ that would let a child modify its executable.
 report before continuing. A required control must be available; a preferred
 limit may be left unapplied and reported as such. Explicit PID, memory, swap, and
 CPU limits require a delegated cgroup v2 scope. The
-[host setup reference](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/operating.md#lingering-and-the-scope-step)
+[host setup reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md#lingering-and-the-scope-step)
 explains that setup and its effect on process cleanup.
 
 For a source-built native `ukai-jail` on macOS, `version` and `explain` work; `doctor` reports why execution is
@@ -167,7 +167,7 @@ unavailable. Other Linux architectures are not yet supported for execution.
 Signed Jail packages are linked above; a Homebrew tap remains unconfigured.
 Older `v0.1.x` releases belong to the archived agent runtime.
 
-The separate [VM preview source](https://github.com/monocursive/ukai/tree/ukai-rename/crates/ukai-jail/vm)
+The separate [VM preview source](https://github.com/monocursive/ukai/tree/dev/crates/ukai-jail/vm)
 documents its build process and lifetime design. Use the Mac quickstart above
 for the packaged release.
 
@@ -369,7 +369,7 @@ into the writable tree; these seccomp denials have no observer event. Existing
 hard links within the admitted ownership rules remain usable. The storage ceiling covers
 allocated file data; use `mem` to bound charged RAM as well. A storage
 receipt's `hit=null` means saturation was not established, not that the limit
-was never reached. The [limit specification](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1.md#64-limits-and-errors)
+was never reached. The [limit specification](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1.md#64-limits-and-errors)
 defines the scope and remaining backend limitations. Project quotas and
 automatic volume provisioning are not implemented.
 
@@ -401,7 +401,7 @@ Review the resolved file and network grants before the run. Change the
 executable path and read-only grant to match your installation. A provider
 that needs authentication also needs explicit credential configuration in
 your launch profile; normal login state is not exposed automatically. See the
-[launch profile reference](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/operating.md#launch-profiles-and-credentials)
+[launch profile reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md#launch-profiles-and-credentials)
 for the configuration format.
 
 OpenCode 1.18.32 uses `rg` for file search. Without it, OpenCode attempts a
@@ -415,7 +415,7 @@ jail does not expose a private tool directory to the agent.
 verify every vendor tool dependency or provider availability.
 
 OpenCode has recorded live runs. The
-[compatibility table](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/agent-compatibility.md)
+[compatibility table](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/agent-compatibility.md)
 names the tested versions, jail builds, and remaining gaps. Check it before
 assuming a profile will work with your setup.
 
@@ -563,8 +563,8 @@ proposal needs the same review as any other access change. Review output
 files and test results separately: containment does not establish that the
 agent completed its task correctly.
 
-The [receipt schema](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/jail-receipt.schema.json)
-and [exit code reference](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/operating.md#exit-codes)
+The [receipt schema](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/jail-receipt.schema.json)
+and [exit code reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md#exit-codes)
 cover the machine interfaces in detail.
 
 ## Performance
@@ -589,7 +589,7 @@ Across workloads and sessions, the highest p95 added startup time with
 observation off was 131 ms. The full benchmark includes 540 measured launches;
 all 60 observation-off no-op runs returned `exec_unconfirmed` and exit 1.
 Their timings are included, but they are not successful run receipts. The
-[full report](https://github.com/monocursive/ukai/blob/ukai-rename/docs/benchmarks/jail/followup-2026-09-29.md#k17-results)
+[full report](https://github.com/monocursive/ukai/blob/dev/docs/benchmarks/jail/followup-2026-09-29.md#k17-results)
 includes the method, build, host, raw data, and limitations.
 
 ## Understand the boundary
@@ -606,6 +606,6 @@ still return a secret in its response. Command deny-rules help catch mistakes;
 another program can perform the same operation under a different name.
 
 For more detail, use the
-[operator reference](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/operating.md).
-See the [roadmap](https://github.com/monocursive/ukai/blob/ukai-rename/docs/roadmap.md)
+[operator reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md).
+See the [roadmap](https://github.com/monocursive/ukai/blob/dev/docs/roadmap.md)
 for what we're working on next.

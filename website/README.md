@@ -14,9 +14,9 @@ The homepage is `src/pages/index.astro`. The guide and roadmap render the
 repository's `docs/guide.md` and `docs/roadmap.md` directly, so those documents
 have one source. The cormorant branding lives in `../assets/logo/`; run
 `uv run ../assets/logo/export_assets.py` from this directory to regenerate
-the website assets and favicons. Fonts are hosted locally. Source links currently
-target `ukai-rename`, where the rename is published; switch them to `dev` after
-that branch is merged.
+the website assets and favicons. Fonts are hosted locally. Current source links
+and clone instructions target `dev`; published release links retain their
+immutable tags.
 
 `/install.sh` and `/release.pub` are the repository's root `install.sh` and
 `crates/ukai-jail/dist/release.pub`, imported at build time, so the served
