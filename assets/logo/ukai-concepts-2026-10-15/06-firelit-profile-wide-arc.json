@@ -1,0 +1,10 @@
+{
+  "title": "Firelit profile — wider detached arc",
+  "date": "2026-10-15",
+  "engine": "Built-in image_gen",
+  "file": "06-firelit-profile-wide-arc.png",
+  "source": "05-firelit-profile-esoteric.png",
+  "transparent_background": false,
+  "prompt": "Use case: precise-object-edit / logo-brand. Edit the supplied Ukai cormorant logo with exactly these three changes: (1) Remove the four-point star completely. (2) Replace the small head-sized amber halo with ONE substantially wider detached amber arc framing the head AND upper body. Its centre should be lower, approximately at the base of the neck, and its radius roughly twice that of the existing head halo. Sweep above the head and down the left side of the upper body, leaving the right side open. Maintain an obvious ivory gap between the arc and every part of the bird: no touching, overlap or attachment. The arc should read as a spacious external frame, not something worn around the neck. Keep its stroke restrained and clean. (3) Simplify the folded-wing interior to ONE elegant tapered crescent-shaped ivory negative-space cut; remove extra little feather slits so there is only one wing cut. Preserve the original sleek ink-black cormorant, right-facing upright S-shaped neck, small head, long slender hooked beak, eye, standing pose, feet, long tapering tail and amber firelight highlight along the front edge of its head and neck. Keep the composition balanced on the same warm ivory background, with generous margins. Minimal esoteric character through precise geometry and negative space. Flat black and warm amber, crisp vector-like edges. One clean standalone logo. No star, sparkle, dots, text, runes, extra symbols, concentric arcs, complete circle, border, shadows, glow, gradients, texture, mockup or scenery. Absolutely no neck ring, collar, neck band, rope, tether, chain or restraint.",
+  "status": "Raster logo concept"
+}

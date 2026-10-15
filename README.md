@@ -1,3 +1,5 @@
+![Ukai](assets/logo/ukai-readme-banner.png)
+
 # Ukai Jail
 
 **Give your agent only the access it needs.**

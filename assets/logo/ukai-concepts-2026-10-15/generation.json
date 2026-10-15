@@ -1,0 +1,47 @@
+{
+  "project": "Ukai",
+  "date": "2026-10-15",
+  "engine": "Built-in image_gen",
+  "status": "Raster logo concepts; no vector master included.",
+  "brief": "Sleek black cormorant with a warm firelight accent. No neck ring, collar, rope or tether.",
+  "recommended_direction": "A",
+  "assets": [
+    {
+      "id": "A",
+      "title": "Firelit profile",
+      "file": "01-firelit-profile.png",
+      "transparent_background": false,
+      "prompt": "Use case: logo-brand. Create one premium minimal logo symbol for Ukai, a sleek black cormorant in alert side profile with folded wing, long low tapered body, graceful upright S neck, small head, long slender beak with tiny hooked tip. A single broad tapering burnt amber (#D97932) accent along the forward-facing edge of head/neck evokes nearby firelight, part of the silhouette; no detailed literal scene. Mostly ink-black (#151817) flat shape on solid warm ivory (#F3F0E8). Controlled elegant negative space to separate folded wing. Distinctive natural silhouette, balanced compact square footprint, 25 percent generous whitespace. Professional vector-friendly graphic, 2 flat inks, crisp curves and edges, strong enough for favicon at 24px. Calm and precise for a developer tool, not a gaming/esports mascot. Symbol only, NO text/letters. No photorealism, gradients, texture, shadows, mockups, ornamental seals, flames surrounding bird, circular border, branch, boat, fish, human, neck ring, collar, ropes or tethers. Do not render collage or multiple variations."
+    },
+    {
+      "id": "B",
+      "title": "The dive",
+      "file": "02-the-dive.png",
+      "transparent_background": false,
+      "prompt": "Use case: logo-brand. Asset type: concept logo symbol for Ukai, a modern Linux sandbox for AI coding agents. Concept: The dive. Create one distinctive minimalist logo symbol of a sleek black cormorant diving diagonally down toward lower right. Long slim cormorant beak with subtly hooked tip, recognisable small head, extended slender curved neck, streamlined folded wings swept back and pointed tail. An economical bold black shape with one clean ivory negative-space slash defining wing and a small burnt amber wedge catching edge of upper back, firelight implied by flat color only. Flat ink black #151817 and amber #D97932 on warm ivory #F3F0E8. Compact energetic asymmetric silhouette, disciplined geometry with graceful organic curves, about 50 percent canvas width, centered with generous whitespace. Professional modern developer infrastructure brand, quietly Japanese graphic economy without imitation calligraphy. Vector-friendly flat graphic, strong silhouette at small sizes. No text, letters, badge, frame, gradients, 3D, shadows, texture, photo, mockup, boat, fish, person, neck ring, collar, tether, rope, cage. One single logo, no layout sheet."
+    },
+    {
+      "id": "C",
+      "title": "River U",
+      "file": "03-river-u.png",
+      "transparent_background": false,
+      "prompt": "Use case: logo-brand\nAsset type: standalone professional logo symbol for Ukai, an AI-agent Linux sandbox project at ukai.sh. Concept: River U.\nPrimary request: Design one highly refined, memorable, compact cormorant emblem. A single bold continuous ink-black cormorant silhouette naturally forms an OPEN U: the upturned pointed tail rises at the left, a low folded body connects across the bottom, and its long curved upright neck rises at the right. Clearly recognizable seabird with a small head and long narrow slightly hooked beak pointing right. The ivory U-shaped negative space between tail and neck is open at the top. The entire silhouette must read as an elegant bird before it reads as a U.\nStyle/medium: flat two-ink brand mark, clean vector-friendly geometry, polished professional identity design, minimal and precise. A tiny flat burnt-amber tapered sweep inside the folded wing evokes warm firelight from traditional Japanese cormorant fishing. The neck is a continuous uninterrupted black shape.\nComposition/framing: exactly one standalone symbol, centered on a solid warm ivory background, generous whitespace around all edges, square image. Compact elegant icon footprint.\nColor palette: background warm ivory #F3F0E8, bird ink black #151817, one restrained burnt amber #D97932 accent; solid flat colors only.\nText: none.\nConstraints: absolutely no neck ring, collar, band across the neck, rope, tether or restraint. No enclosing circle, closed loop or badge. No gradients, shadows, texture, mockup, lettering, scenery, boat, fish, people, flames or fire basket. No eagle, heron or crane; depict a sleek cormorant with folded wings. Prioritize bird recognition and strong small-scale legibility."
+    },
+    {
+      "id": "D",
+      "title": "Folded wing",
+      "file": "04-folded-wing.png",
+      "transparent_background": false,
+      "prompt": "Use case: logo-brand\nAsset type: standalone professional logo symbol for Ukai, an AI-agent Linux sandbox project at ukai.sh. Concept: Folded wing.\nPrimary request: Design one exceptionally refined angular compact full-body cormorant emblem in side profile facing LEFT. A long upright curved neck flows into a small head with a long slender slightly hooked beak pointing left. The compact black body has a sharp long tail extending toward the lower right. The folded wing is composed of two bold interlocking tapered feather masses separated by one broad ivory cut. Its lower wing edge contains one restrained ember-orange triangular highlight evoking reflected firelight. Use concise cut-paper fold logic, refined angular curves, a stable approximately square footprint, and a distinctive clean silhouette. The neck is continuous uninterrupted black with no lines crossing it.\nStyle/medium: polished professional identity design, flat two-ink vector-friendly mark, confident large simple shapes with no ornamental details. Sleek cormorant recognition is paramount; beak narrow and neck long, no eagle-like heavy head.\nComposition/framing: exactly one centered standalone bird symbol on a solid warm ivory background, square image and generous whitespace. Quiet, capable, precise character.\nColor palette: solid background warm ivory #F3F0E8, bird ink black #151817, one small restrained burnt amber #D97932 highlight. Only flat inks.\nText: none.\nConstraints: absolutely no neck ring, collar, neck band, rope, tether or restraint. No crane, heron or eagle. No spread wings, origami decoration, circle or badge. No boat, fish, people, landscape or scene. No flames or fire basket. No gradients, shadows, textures, mockups, typography, text, watermark or extra symbols. Make the silhouette and ivory wing cut bold enough for use as a small app icon."
+    },
+    {
+      "id": "A-transparent",
+      "title": "Firelit profile — transparent candidate",
+      "file": "01-firelit-profile-transparent.png",
+      "parent": "A",
+      "transparent_background": true,
+      "prompt": "Use case: background-extraction. Edit the supplied Ukai cormorant logo for production cleanup only. Preserve the existing bird silhouette, proportions, upright side-profile pose, beak shape, feet, tail, negative-space wing line, eye shape, and amber highlight along the front of the neck exactly. Do not redesign, simplify, reshape, or add elements. Single requested change: remove the ivory background completely and make it truly transparent, including the eye opening and all wing negative spaces; render the remaining bird with uniform flat ink-black (#151817) and uniform flat warm amber (#D97932), with no texture, lighting variation, gradients, or shadows. Preserve clean edges with suitable antialiasing. Absolutely no neck ring, collar, ropes, tethers, or restraints. No text. Return one isolated mark on a genuinely transparent background, not a checkerboard illustration.",
+      "validation": "RGBA with real transparency. Slight color and alpha variation remains in generated fills; this is a raster concept, not a flat two-ink vector master."
+    }
+  ]
+}

@@ -24,7 +24,8 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <link rel="canonical" href={canonical} />
     {markdown && <link rel="alternate" type="text/markdown" href={new URL(markdown, Astro.site)} title="Markdown version" />}
     <link rel="alternate" type="text/plain" href="/llms.txt" title="Documentation for agents" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" sizes="16x16 24x24 32x32 48x48" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" sizes="any" />
     <link rel="preload" href="/fonts/DepartureMono-Regular.woff2" as="font" type="font/woff2" crossorigin />
     <title>{title}</title>
   </head>
@@ -33,7 +34,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <header class="site-header">
       <div class="container navigation">
         <a class="brand" href="/" aria-label="Ukai Jail home">
-          <img src="/brand/ukai.svg" width="36" height="36" alt="" />
+          <img src="/favicon.svg" width="36" height="36" alt="" />
           <span>ukai<span class="brand-suffix"> / jail</span></span>
         </a>
         <nav aria-label="Main navigation">

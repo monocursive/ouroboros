@@ -48,11 +48,7 @@ h1 { margin-block: 24px; font-size: clamp(48px, 5.7vw, 82px); line-height: 1.08;
 .introduction { max-width: 600px; color: var(--muted); font-size: 17px; }
 .hero-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 20px 28px; margin-top: 30px; }
 .emblem { position: relative; width: 100%; max-width: 440px; aspect-ratio: 1; }
-.orbit { position: absolute; }
-.orbit-outer { inset: 0; width: 100%; height: 100%; }
-.orbit-middle { inset: 10.682%; width: 78.636%; height: 78.636%; }
-.orbit-inner { inset: 22.5%; width: 55%; height: 55%; }
-.hero-mark { position: absolute; width: 86.364%; height: 86.364%; left: 6.818%; top: 5.455%; }
+.hero-mark { width: 100%; height: 100%; }
 .example { padding-bottom: 64px; }
 .terminal { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 22px 25px; }
 .terminal-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 20px; color: var(--muted); }

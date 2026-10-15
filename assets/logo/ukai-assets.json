@@ -1,0 +1,91 @@
+{
+  "brand": "Ukai",
+  "approved_concept": "assets/logo/ukai-concepts-2026-10-15/06-firelit-profile-wide-arc.png",
+  "approved_concept_sha256": "c424f56918a92a55dd2e2bb5a47519f67d74c12bcf3e22bbf68777288aa6d309",
+  "palette": {
+    "ink": "#151817",
+    "amber": "#E79425",
+    "ivory": "#F3F0E8"
+  },
+  "master": "ukai-mark.svg",
+  "provenance": {
+    "mark": "Approved raster separated into silhouette/firelight/arc; fitted with Potracer 0.0.4, curve tolerance 0.55, then flattened to two solid inks. Eye and wing are transparent negative space. No embedded bitmap.",
+    "favicon": "Optically redrawn head and neck, enlarged amber edge, heavier detached arc; eye, wing, feet and tail omitted. Ivory tile preserves contrast on both browser themes.",
+    "wordmark": "Manrope variable 5.3.0 at weight 650, lowercase ukai, tracking -0.025 em, converted to paths with FontTools 4.67.0. Font license: Manrope-OFL.txt.",
+    "banner": "1600 x 480 opaque ivory canvas; embedded vector mark and outlined wordmark, no external resources.",
+    "on_dark": "Identical mark geometry; ink is replaced with ivory for dark backgrounds."
+  },
+  "rebuild": "uv run assets/logo/export_assets.py",
+  "files": [
+    {
+      "path": "ukai-mark.svg",
+      "bytes": 5353,
+      "sha256": "a341cc4aa4f1e94dd57cdcdaf818d35ed8ff0fc52d76db2319ba5deabbc4b47b"
+    },
+    {
+      "path": "ukai-mark.png",
+      "bytes": 40350,
+      "sha256": "400acdee0f6fabe944a999c5fa92e125062683837ea15fab236878d8e5da03d6"
+    },
+    {
+      "path": "ukai-mark-on-dark.svg",
+      "bytes": 5353,
+      "sha256": "02cb3706f4d4182fe64478865f4faa5b7c40a236b232e246c9b1cb54a9b06f55"
+    },
+    {
+      "path": "ukai-mark-on-dark.png",
+      "bytes": 39480,
+      "sha256": "185df6bf0231a0a1c05b86920fc021ff3a3b785fac58172e2b4006e1ac9b28b4"
+    },
+    {
+      "path": "ukai-wordmark.svg",
+      "bytes": 3303,
+      "sha256": "340a1448ef4ebcccd19ef6f5459fc3a69b3b3490d04ababc61e14954e1841bfc"
+    },
+    {
+      "path": "ukai-favicon.svg",
+      "bytes": 882,
+      "sha256": "09f614ceb7d2487706d47fb132c42e896a7725a6a0dd242b822895d998133f24"
+    },
+    {
+      "path": "ukai-favicon.ico",
+      "bytes": 16870,
+      "sha256": "9c2275c96c712b1d51a81ce128885caff32ebe9ab9a2c3e7af8174fddffe478f"
+    },
+    {
+      "path": "ukai-favicon-16.png",
+      "bytes": 615,
+      "sha256": "fa7872089402f6be8dbfb77cebcd4ae585d417422e77587e996b16a1b2e99ac4"
+    },
+    {
+      "path": "ukai-favicon-24.png",
+      "bytes": 840,
+      "sha256": "04934403cfa995cdf75b585ffd8e2f01c13e8b50f6eff18e2fcf6a933a07c7a7"
+    },
+    {
+      "path": "ukai-favicon-32.png",
+      "bytes": 1099,
+      "sha256": "266f124ae5ab0af32da3f3b12b0688a9f1e6b3bd7ff09dd38e412ecf9481b7e5"
+    },
+    {
+      "path": "ukai-favicon-48.png",
+      "bytes": 1713,
+      "sha256": "94a1cb390f9d1ec8dcc02dd1b6ba6a04b4eab5e9a43d43e5049a9bcc8fd76f2d"
+    },
+    {
+      "path": "ukai-readme-banner.svg",
+      "bytes": 8567,
+      "sha256": "b4d3572492cfc5f7707e86fd1f7b339b0e1e7f18fe336d41ab6139c88bc4e720"
+    },
+    {
+      "path": "ukai-readme-banner.png",
+      "bytes": 27241,
+      "sha256": "c244bf85a8e2737540870355537e45225c73714e4bcc62d10bf7b90a44418321"
+    },
+    {
+      "path": "ukai-asset-preview.png",
+      "bytes": 91652,
+      "sha256": "086b62c43a66d64f2770a07071361adb31a6a8528f9b52881806de23407414d2"
+    }
+  ]
+}
