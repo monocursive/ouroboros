@@ -1,0 +1,10 @@
+Creating hybrid image...
+
+Formatting '/var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/ouro-k27-vm-jow0z0wf/guest.qcow2', fmt=qcow2 cluster_size=65536 extended_l2=off compression_type=zlib size=12884901888 backing_file=/private/tmp/claude-501/-Users-monocursive-code-ouroboros/f3a11513-b960-4f1c-bf3f-6b7a1851838b/scratchpad/release/image/ubuntu26.img backing_fmt=qcow2 lazy_refcounts=off refcount_bits=16
+The secret key was saved as /var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/ouro-k27-vm-jow0z0wf/test-signing.key - Keep it secret!
+The public key was saved as /var/folders/lx/bqwnzxj968s7839wdjlld36h0000gn/T/ouro-k27-vm-jow0z0wf/test-signing.pub - That one can be public.
+
+Files signed using this key pair can be verified with the following command:
+
+minisign -Vm <file> -P RWQfsH2nlRY3zkFHOKKy/xjUgjjqtjUi88JJwTQi4IEWQfXWtggnkj5u
+
