@@ -26,7 +26,7 @@ New evidence follows these rules. Existing corpora are not rewritten.
 2. **`bundle.json`** names that archive:
 
    ```json
-   {"url": "https://github.com/monocursive/ouroboros/releases/download/…",
+   {"url": "https://github.com/monocursive/ukai/releases/download/…",
     "sha256": "<archive SHA-256>", "bytes": 123, "files": 456,
     "root_manifest_sha256": "<SHA-256 of this corpus's SHA256SUMS>"}
    ```

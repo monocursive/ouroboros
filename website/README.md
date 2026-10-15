@@ -1,8 +1,7 @@
 # Ukai website
 
-The Astro site restored from `legacy:website/`, updated for the standalone
-`ukai-jail`. The archived agent runtime, release links, and demo recordings
-are not part of this site.
+The Astro site for [Ukai](https://ukai.sh), covering the standalone Linux
+jail and the separate macOS VM preview.
 
 ```sh
 cd website
@@ -13,13 +12,18 @@ npm run build
 
 The homepage is `src/pages/index.astro`. The guide and roadmap render the
 repository's `docs/guide.md` and `docs/roadmap.md` directly, so those documents
-have one source. The shared layout and styles retain the archived site's
-branding and locally hosted fonts.
+have one source. The cormorant branding lives in `../assets/logo/`; run
+`uv run ../assets/logo/export_assets.py` from this directory to regenerate
+the website assets and favicons. Fonts are hosted locally. Source links currently
+target `ukai-rename`, where the rename is published; switch them to `dev` after
+that branch is merged.
 
 `/install.sh` and `/release.pub` are the repository's root `install.sh` and
 `crates/ukai-jail/dist/release.pub`, imported at build time, so the served
 installer cannot drift from the reviewed one. Release links and versions come
-from `crates/ukai-jail/dist/release.json`.
+from `crates/ukai-jail/dist/release.json`. Its `published_tag` fields retain
+the immutable tags of the previews released before the rename; `tag_prefix`
+is for newly assembled Ukai releases. Update `published_tag` when publishing.
 
 The documentation layout generates its section index from Markdown headings.
 `/guide.md` and `/roadmap.md` serve the exact source text. `/llms.txt` is a
@@ -32,7 +36,7 @@ automatic discovery of `llms.txt` is not assumed.
 After editing shared files under `docs/`, restart the development server if
 its Markdown cache is stale. `npm run build` regenerates all formats.
 
-The restored Cloudflare Pages configuration targets `ukai`. `npm run
+The Cloudflare Pages project `ukai` serves `https://ukai.sh`. `npm run
 deploy` publishes the built site and must only be used when publication is
 requested. Local builds do not update the live website.
 

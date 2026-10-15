@@ -25,8 +25,8 @@ See the [platform requirements](docs/specs/jail-v1.md#32-initial-support-matrix)
 and [Linux acceptance record](docs/benchmarks/jail/release-preview-2026-10-10.md).
 
 **macOS VM preview 0.1.0-preview.1.** [Signed and notarized Apple Silicon DMG](https://github.com/monocursive/ukai/releases/tag/ouro-vm-v0.1.0-preview.1)
-is available for macOS 27+. `ukai-vm` runs offline Linux ARM64 commands in a
-disposable VM. See the [Mac quickstart](docs/guide.md#macos-vm-preview) for limits
+is available for macOS 27+. The published `ouro-vm` command runs offline Linux
+ARM64 commands in a disposable VM. See the [Mac quickstart](docs/guide.md#macos-vm-preview) for limits
 and examples; native Mac programs and online agents are outside this preview.
 
 The Bash installer embeds SHA-256 hashes for both Linux archives and the Mac DMG, and checks the
@@ -45,7 +45,9 @@ maintainer signing.
 
 ## Install and run
 
-The installer selects `ukai-jail` on Linux and `ukai-vm` on Apple Silicon.
+The installer selects the published `ouro-jail` on Linux and `ouro-vm` on Apple
+Silicon. These signed previews retain their pre-rename commands and paths;
+the current source build uses `ukai-jail` and `ukai-vm`.
 On Linux, install your distribution's `bubblewrap` package first.
 The binaries require glibc 2.39 or newer; no Rust compiler or sudo is needed
 for the installer. Host enforcement still requires a successful `doctor` report.
@@ -53,21 +55,23 @@ for the installer. Host enforcement still requires a successful `doctor` report.
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://ukai.sh/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
-ukai-jail version --json
-ukai-jail doctor --profile tool --json
+ouro-jail version --json
+ouro-jail doctor --profile tool --json
 ```
 
-On macOS the command is `ukai-vm`: run `ukai-vm version` and `ukai-vm doctor`
+On macOS the command is `ouro-vm`: run `ouro-vm version` and `ouro-vm doctor`
 after installing, then follow the [Mac example](docs/guide.md#macos-vm-preview).
 
 See the [guide](docs/guide.md#install-the-developer-preview) for supported hosts,
-upgrades and explicit downgrade handling. To build from source:
+upgrades and explicit downgrade handling. The remaining examples use the current
+Ukai source build; the published preview's [guide](https://github.com/monocursive/ukai/blob/ouro-jail-v0.1.0-rc.2/docs/guide.md)
+documents its original commands and schemas. To build from source:
 
 Install Rust 1.98.1 and your distribution's bubblewrap package. Run as your
 normal user. The reference host uses Ubuntu 26.04.1 and bubblewrap 0.11.1.
 
 ```sh
-git clone --branch dev https://github.com/monocursive/ukai.git
+git clone --branch ukai-rename https://github.com/monocursive/ukai.git
 cd ukai
 cargo +1.98.1 build --release -p ukai-jail
 mkdir -p "$HOME/.local/bin"

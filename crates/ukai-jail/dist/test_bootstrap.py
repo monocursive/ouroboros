@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -186,6 +187,66 @@ cp "$BOOTSTRAP_ARTIFACTS/${url##*/}" "$output"
         # The website serves this file itself (website/src/pages/install.sh.ts);
         # a second copy could drift from it.
         self.assertFalse((ROOT / 'website/public/install.sh').exists())
+
+    def test_pre_rename_downloads_use_the_original_release_and_asset_names(self):
+        # Use the real trusted script, not the fixture's repinned Ukai archives.
+        # Downloads intentionally fail: this checks routing without running a
+        # platform-specific release binary on the test host.
+        self.installer.write_text((ROOT / 'install.sh').read_text())
+        for version in ['0.1.0-rc.1', '0.1.0-rc.2']:
+            for arch, target in [('x86_64', TARGETS[0]), ('aarch64', TARGETS[1])]:
+                with self.subTest(version=version, target=target):
+                    self.env['BOOTSTRAP_ARCH'] = arch
+                    result = self.run_installer('--version', 'ouro-jail-v' + version)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f'https://github.com/monocursive/ukai/releases/download/'
+                                  f'ouro-jail-v{version}/ouro-jail-{version}-{target}.tar.gz',
+                                  self.log.read_text())
+                    self.log.unlink()
+        self.mac_fixture()
+        self.installer.write_text((ROOT / 'install.sh').read_text())
+        result = self.run_mac('--version', 'ouro-vm-v' + VM_VERSION)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'/releases/download/ouro-vm-v{VM_VERSION}/ouro-vm-{VM_VERSION}-{VM_TARGET}.dmg',
+                      self.log.read_text())
+        self.assertFalse(self.mac_log.exists())
+
+    def test_pre_rename_archive_installs_its_original_binary_not_a_renamed_copy(self):
+        binary = self.root / 'ouro-jail'
+        binary.write_text("#!/bin/sh\nprintf 'ouro-jail 0.1.0\\nplatform test\\n'\n")
+        binary.chmod(0o755)
+        notices = self.root / 'ouro-jail.LICENSES.txt'
+        notices.write_text('Original package notices\n')
+        archive = self.artifacts / f'ouro-jail-0.1.0-rc.2-{TARGETS[0]}.tar.gz'
+        with tarfile.open(archive, 'w:gz') as package:
+            package.add(binary, arcname=binary.name)
+            package.add(notices, arcname=notices.name)
+        # Repin the trusted test script and its legacy identity for this fixture.
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        original = archive_pins((ROOT / 'install.sh').read_text())['0.1.0-rc.2', TARGETS[0]]
+        self.installer.write_text((ROOT / 'install.sh').read_text().replace(original, digest))
+        for args in [(), ('--from-dir', str(self.artifacts))]:
+            result = self.run_installer(*args)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertEqual((self.prefix / 'ouro-jail').read_bytes(), binary.read_bytes())
+            self.assertEqual((self.prefix / 'ouro-jail.LICENSES.txt').read_bytes(), notices.read_bytes())
+            self.assertFalse((self.prefix / 'ukai-jail').exists())
+            self.assertIn(b'/ouro-jail doctor', result.stdout)
+        archive.write_bytes(archive.read_bytes() + b'tampered')
+        self.assertNotEqual(self.run_installer().returncode, 0)
+        self.assertEqual((self.prefix / 'ouro-jail').read_bytes(), binary.read_bytes())
+
+    def test_pre_rename_mac_package_keeps_its_command_and_passes_the_prefix(self):
+        dmg = self.mac_fixture()
+        digest = hashlib.sha256(dmg.read_bytes()).hexdigest()
+        original = archive_pins((ROOT / 'install.sh').read_text())[VM_VERSION, VM_TARGET]
+        self.installer.write_text(self.installer.read_text().replace(original, digest))
+        dmg.rename(dmg.with_name(dmg.name.replace('ukai-vm-', 'ouro-vm-')))
+        result = self.run_mac()
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b'/bin/ouro-vm doctor', result.stdout)
+        self.assertIn('--prefix\n' + str(self.root / 'Mac prefix'), self.mac_log.read_text())
+        self.assertIn('detach\n', self.mac_log.read_text())
 
     def test_vm_pin_rendering_keeps_linux_pins_and_sets_the_mac_default(self):
         script = (ROOT / 'install.sh').read_text()

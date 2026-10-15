@@ -31,11 +31,11 @@ bundle features natively, including the installed CLI commands.
 
 Fourteen starter launch profiles are embedded. OpenCode has recorded live
 runs, but a bundled profile is not a promise that every version of that agent
-works. The [compatibility records](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/agent-compatibility.md)
+works. The [compatibility records](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/agent-compatibility.md)
 name the tested combinations. Native macOS `ukai-jail` supports inspection
 commands and refuses execution.
 
-You can [build the jail and try a small command](https://github.com/monocursive/ukai/blob/dev/docs/guide.md#build-and-check-your-host)
+You can [build the jail and try a small command](https://github.com/monocursive/ukai/blob/ukai-rename/docs/guide.md#build-and-check-your-host)
 today. [Signed Linux developer-preview packages](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2)
 are also available; a Homebrew tap remains unconfigured.
 
@@ -44,7 +44,7 @@ is now available as a signed, notarized DMG through the same Bash installer.
 It runs offline Linux ARM64 `tool` and `build` commands in a disposable VM on
 macOS 27+. Inputs are copied and outputs returned for review. Native Mac
 programs, online agents and host directory sharing are outside this preview.
-The [qualification record](https://github.com/monocursive/ukai/blob/dev/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
+The [qualification record](https://github.com/monocursive/ukai/blob/ukai-rename/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
 documents the 14 measured teardown cases and the remaining fault-model limits.
 
 ## Next: make the first run easier
@@ -119,7 +119,7 @@ including children that have detached from their parent.
 
 The first Endpoint Security prototype cleans up while its custodian stays alive;
 killing that custodian left workloads running. A
-[reciprocal-custody prototype](https://github.com/monocursive/ukai/blob/dev/docs/benchmarks/jail/macos-reciprocal-custody.md) now
+[reciprocal-custody prototype](https://github.com/monocursive/ukai/blob/ukai-rename/docs/benchmarks/jail/macos-reciprocal-custody.md) now
 uses two independent clients. In 200 development VM trials, either one could
 fail and the surviving client cleaned up the known fixture. Killing both left
 every known fixture process running, and fail-closed exec authorization did
@@ -225,9 +225,9 @@ An agent preparing a report should collect those details for its user to
 review before posting anything.
 
 For the full acceptance criteria, see the
-[jail specification](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v2.md).
-The [north star](https://github.com/monocursive/ukai/blob/dev/north-star.md)
-and [managed-teams specification](https://github.com/monocursive/ukai/blob/dev/docs/specs/managed-teams-v1.md)
+[jail specification](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v2.md).
+The [north star](https://github.com/monocursive/ukai/blob/ukai-rename/north-star.md)
+and [managed-teams specification](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/managed-teams-v1.md)
 cover the later work. Ukai will continue to run other teams' agents;
 an agent loop, chat UI, vendor session protocol, and automatic merging or
 deployment are outside the current plan.

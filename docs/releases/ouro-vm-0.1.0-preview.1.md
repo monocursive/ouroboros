@@ -1,6 +1,9 @@
-# Ouro VM 0.1.0-preview.1 — macOS developer preview
+# Ukai VM 0.1.0-preview.1 — macOS developer preview
 
-Ouro VM runs offline Linux ARM64 commands in disposable virtual machines on
+This release was published as `ouro-vm` before the Ukai rename. Its signed
+package, commands and paths retain that identity.
+
+Ukai VM runs offline Linux ARM64 commands in disposable virtual machines on
 Apple Silicon Macs. This is a separate preview from the native Linux
 `ouro-jail` release. Native macOS binaries, Xcode, Apple SDKs and online agents
 are outside its scope; the native macOS process-lifetime question remains open.
@@ -13,7 +16,7 @@ plus two virtual CPUs per active attempt. Execution was measured on macOS
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://ouroboros.monocursive.com/install.sh | bash
+  https://ukai.sh/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 ouro-vm version
 ouro-vm doctor
@@ -28,7 +31,7 @@ version is preserved and a repeat install refuses.
 The `bootstrap.sh` release asset is the same public installer. For an offline
 install, put it beside the DMG and run `bash bootstrap.sh --from-dir .`.
 Use `--vm-prefix /absolute/path` for a different root containing `bin` and
-`share`. Read the [Mac quickstart](https://ouroboros.monocursive.com/guide/#macos-vm-preview)
+`share`. Read the [Mac quickstart](https://ukai.sh/guide/#macos-vm-preview)
 for a first command, limits and uninstall instructions.
 
 ## Package identity
@@ -42,7 +45,7 @@ for a first command, limits and uninstall instructions.
 - Linux Jail inside the guest: published ARM64 `0.1.0-rc.1`.
 
 These are the exact final bytes tested in the
-[package qualification](https://github.com/monocursive/ouroboros/blob/ouro-vm-v0.1.0-preview.1/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md).
+[package qualification](https://github.com/monocursive/ukai/blob/ouro-vm-v0.1.0-preview.1/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md).
 The DMG's readme, source archive and build metadata retain their original
 pre-publication candidate wording. This release publishes that qualified
 artifact without rebuilding it. The tag also includes the later public
@@ -81,8 +84,8 @@ remain separate.
 
 ## Licenses and source
 
-The DMG contains the preview source and Ouroboros, Python, PyInstaller and
-Linux Jail dependency notices. Ubuntu package copyright notices remain in
+The DMG contains the preview source, the project's original license, and
+Python, PyInstaller and Linux Jail dependency notices. Ubuntu package copyright notices remain in
 the guest under `/usr/share/doc`; installed package versions are recorded in
 `/usr/local/share/ouro-vm/packages.txt`. Upstream image/archive URLs and hashes
 are recorded in `payload/image/image.json`. Ubuntu source packages are available

@@ -5,10 +5,14 @@ export const repositoryUrl = `https://github.com/${release.repository}`;
 const releases = `${repositoryUrl}/releases/tag`;
 
 export const jailVersion = release.jail.version;
-export const jailTag = `${release.jail.tag_prefix}${release.jail.version}`;
+// Published previews retain their immutable pre-rename tags. Packaging uses
+// tag_prefix for future Ukai releases; publishing also updates published_tag.
+export const jailTag = release.jail.published_tag;
+export const jailCommand = jailTag.slice(0, jailTag.indexOf('-v'));
 export const jailReleaseUrl = `${releases}/${jailTag}`;
 export const vmVersion = release.vm.version;
-export const vmReleaseUrl = `${releases}/${release.vm.tag_prefix}${release.vm.version}`;
+export const vmCommand = release.vm.published_tag.slice(0, release.vm.published_tag.indexOf('-v'));
+export const vmReleaseUrl = `${releases}/${release.vm.published_tag}`;
 
 // Reference documents as of the published Linux release, so a reader sees the
 // contract the released binary implements rather than later development.

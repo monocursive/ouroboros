@@ -1,12 +1,12 @@
-# Publish an Ukai Jail developer preview
+# Publish a Ukai Jail developer preview
 
-[Ouroboros Jail 0.1.0-rc.2](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2), Ukai's
-name until 15 October 2026, was published on 14 October 2026 from
+[Linux preview 0.1.0-rc.2](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2), published before
+the Ukai rename on 15 October 2026, was released on 14 October 2026 from
 `531d252a6c56e0403ae7b1937988f2037e294853`, following the procedure below; its
 [publication record](benchmarks/jail/release-preview-2026-10-14.md) lists the
 exact-commit checks, the clean-VM evidence and the verified installations.
 
-[Ouroboros Jail 0.1.0-rc.1](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.1)
+[Linux preview 0.1.0-rc.1](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.1)
 was published on 10 October 2026 from
 `06a48d5a2de89d5d0ebffa84a9561d034cdd8b5d`. All eight signed assets were
 downloaded anonymously and matched the reviewed candidate. The
@@ -59,7 +59,8 @@ sets the default release and embeds both archive hashes in `bootstrap.sh`, while
 retaining previously pinned releases, the macOS preview's included. After
 publication, copy that reviewed bootstrap to the root `install.sh`, set the new
 version in [release.json](../crates/ukai-jail/dist/release.json) (the website,
-the VM tooling and the tests read the published coordinates there), update the
+the VM tooling and the tests read the coordinates there), set that platform's
+`published_tag` to the actual published tag, update the
 docs, and deploy the website, which serves the root `install.sh` and
 `release.pub` directly. Verify the website script's bytes and an actual public
 installation. Never discover a trusted hash from a mutable remote manifest at
@@ -73,7 +74,7 @@ The release binaries and their tag are unchanged.
 Maintainer candidate signing and publication checks still use the
 [dedicated release public key](../crates/ukai-jail/dist/release.pub), created on
 10 October 2026. Users of the current installer do not need this key.
-Its private half is stored outside the repository at
+Its private half retains its pre-rename location outside the repository at
 `~/.config/ouroboros/release-keys/ouro-jail-2026-10-10.key`, in a mode-0700 directory
 with file mode 0600. It is unencrypted for local noninteractive signing; maintain
 a private backup for future releases. Private key material is never sent to CI.

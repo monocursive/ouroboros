@@ -1,9 +1,9 @@
 # Signed release tooling
 
-The first developer preview targets `monocursive/ukai`, with
+New developer previews target `monocursive/ukai`, with
 `ukai-jail-vVERSION` tags and Linux x86_64/ARM64 packages. The dedicated production
 identity is [release.pub](release.pub).
-[Ouroboros Jail 0.1.0-rc.1](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.1)
+[Linux preview 0.1.0-rc.1](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.1)
 was the first public signed developer preview; the current one is
 [0.1.0-rc.2](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2).
 Both were published before the rename, with `ouro-jail-vVERSION` tags.

@@ -3,6 +3,7 @@
   "jail": {
     "version": "0.1.0-rc.2",
     "tag_prefix": "ukai-jail-v",
+    "published_tag": "ouro-jail-v0.1.0-rc.2",
     "publication_scope": "linux-preview",
     "unsupported_clauses": ["K22.2", "K23.1", "K24.1", "K26.1", "K29.1"],
     "elf_machine_by_target": {
@@ -13,6 +14,7 @@
   "vm": {
     "version": "0.1.0-preview.1",
     "tag_prefix": "ukai-vm-v",
+    "published_tag": "ouro-vm-v0.1.0-preview.1",
     "target": "macos-arm64"
   }
 }

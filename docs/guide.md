@@ -22,10 +22,12 @@ The same installer detects your platform. The following commands are for Linux;
 Mac users should follow the [Mac quickstart](#macos-vm-preview).
 
 Ukai was called Ouroboros until 15 October 2026. The current previews were
-published under that name (`ouro-jail`, `ouro-vm`); this guide uses the names
-of the next release, the first published as Ukai.
+published under that name (`ouro-jail`, `ouro-vm`) and keep those command names.
+The installation examples below use the published commands. Later sections
+use the current `ukai-jail` source build; for the published Linux binary's
+complete guide, use the [release guide](https://github.com/monocursive/ukai/blob/ouro-jail-v0.1.0-rc.2/docs/guide.md).
 
-[Ouroboros Jail 0.1.0-rc.2](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2)
+[Linux preview 0.1.0-rc.2](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2)
 ships Linux x86_64 and ARM64 packages. Install your distribution's
 `bubblewrap` package first. The binaries require glibc 2.39 or
 newer; Alpine/musl and macOS execution are unavailable in this preview.
@@ -36,8 +38,8 @@ Rust compiler or sudo is needed.
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://ukai.sh/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
-ukai-jail version --json
-ukai-jail doctor --profile tool --json
+ouro-jail version --json
+ouro-jail doctor --profile tool --json
 ```
 
 The installer embeds this preview's SHA-256 hashes for both architectures. It
@@ -54,12 +56,12 @@ The supported-host notes remain in the release: Ubuntu 26.04 is the x86_64
 reference host; stock Ubuntu 24 containment is refused. The tested Pi lacks
 memory cgroups and Landlock, so its default `build` profile remains unavailable.
 Run `doctor` before relying on a profile. Archived runtime releases are separate;
-use `ukai-jail-v...` tags for this distribution. The ledger and fleet are not
-included in these packages.
+use the linked preview release; future releases use `ukai-jail-v...` tags.
+The ledger and fleet are not included in these packages.
 
 ## macOS VM preview
 
-[Ouro VM 0.1.0-preview.1](https://github.com/monocursive/ukai/releases/tag/ouro-vm-v0.1.0-preview.1)
+[Ukai VM preview 0.1.0-preview.1](https://github.com/monocursive/ukai/releases/tag/ouro-vm-v0.1.0-preview.1)
 is a signed, notarized download for **Apple Silicon and macOS 27+**. Execution
 was tested on macOS 27.0.1; installation and CLI launch were also checked in a
 fresh macOS VM. Allow 8 GiB free APFS storage, two virtual CPUs and 2 GiB RAM per
@@ -69,13 +71,13 @@ running attempt. Intel Macs and nested VM execution are unsupported.
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://ukai.sh/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
-ukai-vm version
-ukai-vm doctor
+ouro-vm version
+ouro-vm doctor
 ```
 
 The installer checks an embedded SHA-256 pin before mounting the 512 MiB DMG.
 It installs the bundled runtime and guest image under
-`~/.local/share/ukai-vm/0.1.0-preview.1`, with a command in `~/.local/bin`.
+`~/.local/share/ouro-vm/0.1.0-preview.1`, with a command in `~/.local/bin`.
 Python, Rust, Swift, Homebrew, sudo and Endpoint Security approval are not needed.
 Use `bash -s -- --vm-prefix /absolute/path` to change the root containing `bin`
 and `share`. An already installed version is preserved and repeat installation
@@ -88,7 +90,7 @@ Run a small offline Linux command:
 vm_demo="$(mktemp -d "$HOME/ukai-vm-demo.XXXXXX")"
 mkdir "$vm_demo/input"
 printf 'hello\n' > "$vm_demo/input/input.txt"
-ukai-vm run --workspace "$vm_demo/input" --out "$vm_demo/result" \
+ouro-vm run --workspace "$vm_demo/input" --out "$vm_demo/result" \
   --profile build --wall 30 -- \
   /bin/sh -c 'cat input.txt; printf "created in Linux\n" > output.txt'
 cat "$vm_demo/result/workspace/output.txt"
@@ -112,7 +114,7 @@ second wall limit.
 A completed attempt requires a verified Linux Jail receipt and acknowledged
 VM stop. Incomplete evidence returns 125. Files and Linux receipts remain in
 `<out>/workspace/` and `<out>/evidence/`; `attempt.json` records Mac supervision.
-The [package qualification](https://github.com/monocursive/ukai/blob/dev/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
+The [package qualification](https://github.com/monocursive/ukai/blob/ukai-rename/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
 passed all 14 measured teardown cases. Simultaneous suspension of all three
 host controllers, host sleep/wake, kernel failure and arbitrary guest compromise
 are outside qualified coverage. The native macOS cleanup blocker remains open.
@@ -123,18 +125,22 @@ is required. The DMG also contains a standalone installer and build-time notes;
 its notes describe the candidate before publication. The public release notes
 record publication of those exact tested bytes.
 
-To uninstall the default installation, remove `~/.local/bin/ukai-vm` and
-`~/.local/share/ukai-vm/0.1.0-preview.1`. Keep or delete attempt directories as
+To uninstall the default installation, remove `~/.local/bin/ouro-vm` and
+`~/.local/share/ouro-vm/0.1.0-preview.1`. Keep or delete attempt directories as
 needed. A crashed launcher can leave a disk there; never boot or reuse it.
 
 ## Build and check your host
+
+The remaining Linux examples use the current Ukai source build. The published
+previews retain their original commands, data paths and receipt schemas;
+renaming an executable does not migrate those contracts.
 
 You need Git, Rust 1.98.1, and your distribution's bubblewrap package. The
 reference host runs Ubuntu 26.04.1 and bubblewrap 0.11.1. Run as your normal
 user; the jail does not install a backend or change host security settings.
 
 ```sh
-git clone --branch dev https://github.com/monocursive/ukai.git
+git clone --branch ukai-rename https://github.com/monocursive/ukai.git
 cd ukai
 cargo +1.98.1 build --release -p ukai-jail
 mkdir -p "$HOME/.local/bin"
@@ -153,7 +159,7 @@ that would let a child modify its executable.
 report before continuing. A required control must be available; a preferred
 limit may be left unapplied and reported as such. Explicit PID, memory, swap, and
 CPU limits require a delegated cgroup v2 scope. The
-[host setup reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md#lingering-and-the-scope-step)
+[host setup reference](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/operating.md#lingering-and-the-scope-step)
 explains that setup and its effect on process cleanup.
 
 For a source-built native `ukai-jail` on macOS, `version` and `explain` work; `doctor` reports why execution is
@@ -161,7 +167,7 @@ unavailable. Other Linux architectures are not yet supported for execution.
 Signed Jail packages are linked above; a Homebrew tap remains unconfigured.
 Older `v0.1.x` releases belong to the archived agent runtime.
 
-The separate [VM preview source](https://github.com/monocursive/ukai/tree/dev/crates/ukai-jail/vm)
+The separate [VM preview source](https://github.com/monocursive/ukai/tree/ukai-rename/crates/ukai-jail/vm)
 documents its build process and lifetime design. Use the Mac quickstart above
 for the packaged release.
 
@@ -174,8 +180,8 @@ a local directory. No checksum manifest or signature tool is needed:
 
 ```sh
 bash /path/to/install.sh --from-dir /path/to/artifacts
-ukai-jail version --json
-ukai-jail doctor --profile tool --json
+ouro-jail version --json
+ouro-jail doctor --profile tool --json
 ```
 
 Use `--bin-dir /absolute/path` for a different destination, or
@@ -363,7 +369,7 @@ into the writable tree; these seccomp denials have no observer event. Existing
 hard links within the admitted ownership rules remain usable. The storage ceiling covers
 allocated file data; use `mem` to bound charged RAM as well. A storage
 receipt's `hit=null` means saturation was not established, not that the limit
-was never reached. The [limit specification](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1.md#64-limits-and-errors)
+was never reached. The [limit specification](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1.md#64-limits-and-errors)
 defines the scope and remaining backend limitations. Project quotas and
 automatic volume provisioning are not implemented.
 
@@ -395,7 +401,7 @@ Review the resolved file and network grants before the run. Change the
 executable path and read-only grant to match your installation. A provider
 that needs authentication also needs explicit credential configuration in
 your launch profile; normal login state is not exposed automatically. See the
-[launch profile reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md#launch-profiles-and-credentials)
+[launch profile reference](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/operating.md#launch-profiles-and-credentials)
 for the configuration format.
 
 OpenCode 1.18.32 uses `rg` for file search. Without it, OpenCode attempts a
@@ -409,7 +415,7 @@ jail does not expose a private tool directory to the agent.
 verify every vendor tool dependency or provider availability.
 
 OpenCode has recorded live runs. The
-[compatibility table](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/agent-compatibility.md)
+[compatibility table](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/agent-compatibility.md)
 names the tested versions, jail builds, and remaining gaps. Check it before
 assuming a profile will work with your setup.
 
@@ -557,8 +563,8 @@ proposal needs the same review as any other access change. Review output
 files and test results separately: containment does not establish that the
 agent completed its task correctly.
 
-The [receipt schema](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/jail-receipt.schema.json)
-and [exit code reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md#exit-codes)
+The [receipt schema](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/jail-receipt.schema.json)
+and [exit code reference](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/operating.md#exit-codes)
 cover the machine interfaces in detail.
 
 ## Performance
@@ -583,7 +589,7 @@ Across workloads and sessions, the highest p95 added startup time with
 observation off was 131 ms. The full benchmark includes 540 measured launches;
 all 60 observation-off no-op runs returned `exec_unconfirmed` and exit 1.
 Their timings are included, but they are not successful run receipts. The
-[full report](https://github.com/monocursive/ukai/blob/dev/docs/benchmarks/jail/followup-2026-09-29.md#k17-results)
+[full report](https://github.com/monocursive/ukai/blob/ukai-rename/docs/benchmarks/jail/followup-2026-09-29.md#k17-results)
 includes the method, build, host, raw data, and limitations.
 
 ## Understand the boundary
@@ -600,6 +606,6 @@ still return a secret in its response. Command deny-rules help catch mistakes;
 another program can perform the same operation under a different name.
 
 For more detail, use the
-[operator reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md).
-See the [roadmap](https://github.com/monocursive/ukai/blob/dev/docs/roadmap.md)
+[operator reference](https://github.com/monocursive/ukai/blob/ukai-rename/docs/specs/jail-v1/operating.md).
+See the [roadmap](https://github.com/monocursive/ukai/blob/ukai-rename/docs/roadmap.md)
 for what we're working on next.

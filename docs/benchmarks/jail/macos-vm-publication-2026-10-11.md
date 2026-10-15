@@ -1,6 +1,6 @@
 # macOS VM preview publication — 11 October 2026
 
-**Published:** [Ouro VM 0.1.0-preview.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-vm-v0.1.0-preview.1),
+**Published:** [Ukai VM preview 0.1.0-preview.1](https://github.com/monocursive/ukai/releases/tag/ouro-vm-v0.1.0-preview.1),
 an explicit GitHub prerelease. The public installer, homepage, guide, roadmap,
 Markdown documents and agent index describe the Mac VM path. Native macOS
 execution remains unavailable; the Linux release is unchanged.

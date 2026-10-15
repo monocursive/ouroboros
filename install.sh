@@ -42,14 +42,16 @@ Usage: bash install.sh [--version VERSION] [--bin-dir /absolute/path]
                        [--allow-downgrade]
        bash install.sh [--version VERSION] [--vm-prefix /absolute/path]
 
-Linux: installs ukai-jail $version into ~/.local/bin (--bin-dir changes it).
-macOS: installs ukai-vm $macos_version into ~/.local/share/ukai-vm, with a
-command in ~/.local/bin. --vm-prefix changes the root containing bin and share.
+Linux: installs the Ukai Jail preview $version into ~/.local/bin.
+macOS: installs the Ukai VM preview $macos_version under ~/.local/share,
+with a command in ~/.local/bin. --vm-prefix changes the root containing bin and share.
+Pre-rename releases retain their ouro-jail / ouro-vm commands and package paths.
 Apple Silicon and macOS 27+ are required; Intel Macs are unsupported.
 The Mac preview runs offline Linux commands in disposable VMs, not Mac programs
 or online agents. Allow 8 GiB free APFS space and 2 GiB RAM per running VM.
 Only releases with embedded SHA-256 pins are accepted. --version also accepts
 vVERSION, ukai-jail-vVERSION (Linux), or ukai-vm-vVERSION (Mac).
+The original ouro-jail-vVERSION and ouro-vm-vVERSION tags are also accepted.
 Linux: run again to upgrade; downgrades require --allow-downgrade.
 Mac: an already installed version is preserved and a repeat install refuses.
 Requires curl, tar, and sha256sum or shasum. No sudo or Rust compiler.
@@ -83,6 +85,8 @@ EOF
     if [ "$system" = Darwin ] && [ "$version_selected" = false ]; then version=$macos_version; fi
     version=${version#ukai-jail-v}
     version=${version#ukai-vm-v}
+    version=${version#ouro-jail-v}
+    version=${version#ouro-vm-v}
     version=${version#v}
     number='(0|[1-9][0-9]*)'
     identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
@@ -114,6 +118,17 @@ EOF
         *) fail "no pinned SHA-256 for $version ($target); download the current installer" ;;
     esac
     # END SHA256 PINS
+    # These immutable archives predate the rename. Bind their package names to
+    # their trusted hashes, so newly assembled Ukai packages keep the new names.
+    package_name=ukai-jail
+    [ "$system" != Darwin ] || package_name=ukai-vm
+    case "$expected" in
+        100d0e8e78d27c08372b18352de987da447f157ef75c8ebeac0cf5e24dd0400a|\
+        9413e8fd0cea1417c1ba47e5e0fad07edf3a26b8615e68a5aa642662f1209da8|\
+        28baa9b51821df4144689a730896ade833b58b8626e00eaf94ff0d4e807c5203|\
+        e2e77ffd1a508a2b2b49353b8f2fb2c511eb28fbd6f5af89387d48dd7df15497) package_name=ouro-jail ;;
+        f3a85e14987228bb5271956ce19bb4cb57272c24235b6f8b98db51b68e0c54a0) package_name=ouro-vm ;;
+    esac
     if [ "$system" = Darwin ]; then
         [ "$bin_selected" = false ] || fail 'on macOS use --vm-prefix (contains bin and share), not --bin-dir or --prefix'
         [ "$allow_downgrade" = false ] || fail '--allow-downgrade applies only to the Linux installer'
@@ -124,13 +139,13 @@ EOF
         if ! [[ "$macos_major" =~ ^[0-9]+$ ]] || [ "$macos_major" -lt 27 ]; then
             fail 'macOS 27 or newer is required'
         fi
-        artifact="ukai-vm-$version-$target.dmg"
+        artifact="$package_name-$version-$target.dmg"
         work=$(mktemp -d "${TMPDIR:-/tmp}/ukai-install.XXXXXX")
         if [ -n "$source_dir" ]; then
             cp -- "$source_dir/$artifact" "$work/$artifact" || fail "missing release asset: $artifact"
         else
             command -v curl >/dev/null 2>&1 || fail 'required command not found: curl'
-            base=${base:-$repository/releases/download/ukai-vm-v$version}
+            base=${base:-$repository/releases/download/$package_name-v$version}
             printf 'Downloading Ukai VM %s (about 512 MiB)...\n' "$version"
             curl --disable --fail --silent --show-error --location \
                 --proto '=https' --proto-redir '=https' --tlsv1.2 \
@@ -143,7 +158,7 @@ EOF
         hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$work/mount" "$work/$artifact" >/dev/null
         mounted="$work/mount"
         /bin/bash "$mounted/install.sh" --prefix "$vm_prefix"
-        printf '\nCheck your Mac: %s/bin/ukai-vm doctor\n' "$vm_prefix"
+        printf '\nCheck your Mac: %s/bin/%s doctor\n' "$vm_prefix" "$package_name"
         printf 'Usage and preview limits: https://ukai.sh/guide/#macos-vm-preview\n'
         exit 0
     fi
@@ -167,7 +182,7 @@ EOF
         [ -d "$source_dir" ] || fail '--from-dir must name an artifact directory'
     else
         command -v curl >/dev/null 2>&1 || fail 'required command not found: curl'
-        base=${base:-$repository/releases/download/ukai-jail-v$version}
+        base=${base:-$repository/releases/download/$package_name-v$version}
     fi
     work=$(mktemp -d "${TMPDIR:-/tmp}/ukai-install.XXXXXX")
     fetch() {
@@ -178,21 +193,21 @@ EOF
                 --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --connect-timeout 15 --max-time 600 --retry 3 \
                 "$base/$1" --output "$work/$1" ||
-                fail "cannot download $1 for ukai-jail-v$version; see $repository/releases"
+                fail "cannot download $1 for $package_name-v$version; see $repository/releases"
         fi
     }
-    artifact="ukai-jail-$version-$target.tar.gz"
+    artifact="$package_name-$version-$target.tar.gz"
     fetch "$artifact"
     [ "$(digest "$work/$artifact")" = "$expected" ] || fail "checksum verification failed: $artifact"
     # Extract only the binary and notices from the checksum-verified archive.
-    tar -xOzf "$work/$artifact" ukai-jail > "$work/ukai-jail"
-    tar -xOzf "$work/$artifact" ukai-jail.LICENSES.txt > "$work/ukai-jail.LICENSES.txt"
-    chmod 755 "$work/ukai-jail"
+    tar -xOzf "$work/$artifact" "$package_name" > "$work/$package_name"
+    tar -xOzf "$work/$artifact" "$package_name.LICENSES.txt" > "$work/$package_name.LICENSES.txt"
+    chmod 755 "$work/$package_name"
     # Legacy installs have only the package version the binary reports.
     version_of() {
-        "$1" version 2>/dev/null | sed -n 's/^ukai-jail \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\([-+][0-9A-Za-z.+-]\{1,\}\)\{0,1\}\)$/\1/p'
+        "$1" version 2>/dev/null | sed -n "s/^$package_name \\([0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*\\([-+][0-9A-Za-z.+-]\\{1,\\}\\)\\{0,1\\}\\)$/\\1/p"
     }
-    binary_version=$(version_of "$work/ukai-jail")
+    binary_version=$(version_of "$work/$package_name")
     valid_version "$binary_version" || { echo 'The staged binary does not report a release version.' >&2; exit 1; }
     # Prints -1 when $1 is older than $2, 0 when equal, 1 when newer: semver's
     # numeric triple, then a pre-release suffix that is older than no suffix.
@@ -232,15 +247,15 @@ EOF
             }'
     }
     mkdir -p "$prefix"
-    for name in ukai-jail ukai-jail.release ukai-jail.LICENSES.txt; do
+    for name in "$package_name" "$package_name.release" "$package_name.LICENSES.txt"; do
         [ ! -L "$prefix/$name" ] || { echo "Refusing a symlinked installation file: $name" >&2; exit 1; }
         [ ! -e "$prefix/$name" ] || [ -f "$prefix/$name" ] || { echo "Installation destination must be a regular file: $name" >&2; exit 1; }
     done
-    if [ -e "$prefix/ukai-jail" ]; then
-        if [ -e "$prefix/ukai-jail.release" ]; then
-            installed_version=$(sed -n '1p' "$prefix/ukai-jail.release")
-            installed_digest=$(sed -n '2p' "$prefix/ukai-jail.release")
-            actual=$(digest "$prefix/ukai-jail")
+    if [ -e "$prefix/${package_name}" ]; then
+        if [ -e "$prefix/${package_name}.release" ]; then
+            installed_version=$(sed -n '1p' "$prefix/${package_name}.release")
+            installed_digest=$(sed -n '2p' "$prefix/${package_name}.release")
+            actual=$(digest "$prefix/${package_name}")
             if [ "$installed_digest" != "$actual" ]; then
                 # A crash between the two renames, or a manual binary replacement,
                 # must fail closed. The explicit downgrade override also permits
@@ -249,7 +264,7 @@ EOF
                 installed_version=$version
             fi
         else
-            installed_version=$(version_of "$prefix/ukai-jail")
+            installed_version=$(version_of "$prefix/${package_name}")
         fi
         valid_version "$installed_version" || { echo 'Existing binary has no valid version record.' >&2; exit 1; }
         relation=$(version_relation "$version" "$installed_version")
@@ -259,22 +274,22 @@ EOF
         fi
     fi
     # Same-directory temporary file and rename keep the final install atomic.
-    staged=$(mktemp "$prefix/.ukai-jail.XXXXXX")
-    notice=$(mktemp "$prefix/.ukai-jail-license.XXXXXX")
-    record=$(mktemp "$prefix/.ukai-jail-release.XXXXXX")
-    cat "$work/ukai-jail" > "$staged"
+    staged=$(mktemp "$prefix/.${package_name}.XXXXXX")
+    notice=$(mktemp "$prefix/.${package_name}-license.XXXXXX")
+    record=$(mktemp "$prefix/.${package_name}-release.XXXXXX")
+    cat "$work/${package_name}" > "$staged"
     chmod 755 "$staged"
-    cat "$work/ukai-jail.LICENSES.txt" > "$notice"
+    cat "$work/${package_name}.LICENSES.txt" > "$notice"
     chmod 644 "$notice"
     binary_digest=$(digest "$staged")
     printf '%s\n%s\n' "$version" "$binary_digest" > "$record"
     chmod 644 "$record"
-    mv -f "$notice" "$prefix/ukai-jail.LICENSES.txt"
-    mv -f "$record" "$prefix/ukai-jail.release"
-    mv -f "$staged" "$prefix/ukai-jail"
-    "$prefix/ukai-jail" version
+    mv -f "$notice" "$prefix/${package_name}.LICENSES.txt"
+    mv -f "$record" "$prefix/${package_name}.release"
+    mv -f "$staged" "$prefix/${package_name}"
+    "$prefix/${package_name}" version
     printf 'Installed release %s in %s. Add that directory to PATH if needed.\n' "$version" "$prefix"
-    printf '\nCheck host support: %s/ukai-jail doctor --profile tool\n' "$prefix"
+    printf '\nCheck host support: %s/%s doctor --profile tool\n' "$prefix" "$package_name"
     case ":${PATH:-}:" in
         *":$prefix:"*) ;;
         *) printf 'Add this directory to PATH: export PATH="%s:%s"\n' "$prefix" "\$PATH" ;;

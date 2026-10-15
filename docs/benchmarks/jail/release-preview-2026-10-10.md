@@ -32,11 +32,11 @@ untested Linux clauses and failed macOS refusal tests still block publication.
 
 The clean optimized suite at `5441e6c96be6fca9d60384d87383ab17a251c74d`
 passed 2,089 tests with zero failures. Its first
-[conformance workflow](https://github.com/monocursive/ouroboros/actions/runs/38065597642)
+[conformance workflow](https://github.com/monocursive/ukai/actions/runs/38065597642)
 failed the acceptance check because an existing privileged XFS test was missing
 from the map's reviewed ignored set. This was not a test failure. The corrected
 map pins that fixture requirement; replay over the original Linux and
-[macOS refusal logs](https://github.com/monocursive/ouroboros/actions/runs/38065597671)
+[macOS refusal logs](https://github.com/monocursive/ukai/actions/runs/38065597671)
 passes every noncredential gate in the Linux release scope. Final publication
 still requires passing CI and actual reference conformance on the release commit.
 
@@ -53,12 +53,12 @@ the test; the non-sudo conformance account does not provision mounts itself.
 
 ## Published release verification
 
-The [public Linux preview](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.1)
+The [public Linux preview](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.1)
 is built from `06a48d5a2de89d5d0ebffa84a9561d034cdd8b5d`.
-[Rust](https://github.com/monocursive/ouroboros/actions/runs/38068176764),
-[contracts](https://github.com/monocursive/ouroboros/actions/runs/38068176775),
-[reference conformance](https://github.com/monocursive/ouroboros/actions/runs/38068176785)
-and [native packaging](https://github.com/monocursive/ouroboros/actions/runs/38068189013)
+[Rust](https://github.com/monocursive/ukai/actions/runs/38068176764),
+[contracts](https://github.com/monocursive/ukai/actions/runs/38068176775),
+[reference conformance](https://github.com/monocursive/ukai/actions/runs/38068176785)
+and [native packaging](https://github.com/monocursive/ukai/actions/runs/38068189013)
 passed at that exact commit. Reference conformance passed 2,089 tests with zero
 failures and no acceptance-map problems. The dedicated release key signed both
 native packages; all eight public assets matched the reviewed candidate after
@@ -159,8 +159,8 @@ separately; the x86_64 VM record is not ARM64 conformance evidence.
 
 ## SHA-256-pinned public installer
 
-Later on 10 October 2026, the live [Bash installer](https://ouroboros.monocursive.com/install.sh)
-was changed to embed the SHA-256 hashes of both existing RC1 Linux archives and
+Later on 10 October 2026, the live [Bash installer](https://ukai.sh/install.sh)
+(then served at `ouroboros.monocursive.com`) was changed to embed the SHA-256 hashes of both existing RC1 Linux archives and
 install directly. It needs no Minisign and executes no downloaded installer.
 Anonymous downloads of both archives matched the embedded pins:
 

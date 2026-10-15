@@ -1,8 +1,8 @@
-# Ouroboros Jail 0.1.0-rc.2 — publication record
+# Ukai Jail 0.1.0-rc.2 — publication record
 
-[Ouroboros Jail 0.1.0-rc.2](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2)
-was published on 14 October 2026 as a GitHub prerelease, not marked latest. It
-followed the [release procedure](../../RELEASING.md). Its scope is unchanged
+[Ukai Jail 0.1.0-rc.2](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2)
+was published under the original name on 14 October 2026 as a GitHub prerelease,
+not marked latest. It followed the [release procedure](../../RELEASING.md). Its scope is unchanged
 from rc.1: Linux x86_64 and ARM64 only, `linux-preview`, with K22.2, K23.1,
 K24.1, K26.1 and K29.1 unsupported.
 
@@ -99,12 +99,16 @@ downloads.
 
 ## Public installer
 
-The root `install.sh` is now the reviewed rc.2 bootstrap. It defaults to
-`0.1.0-rc.2` and keeps the rc.1 pins. `dist/release.json` names rc.2.
+This records the pre-rename publication. The links now use Ukai's canonical
+domain and repository; the recorded bytes and hashes describe the original
+deployment at `ouroboros.monocursive.com`.
+
+The root `install.sh` was the reviewed rc.2 bootstrap. It defaulted to
+`0.1.0-rc.2` and kept the rc.1 pins. `dist/release.json` named rc.2.
 
 **Website.** The website was deployed from commit `79ab88d1c`. The live
-<https://ouroboros.monocursive.com/install.sh> is byte-identical to the root
-installer (SHA-256 `6e057b82…`), and the live `release.pub` matches the
+[public installer](https://ukai.sh/install.sh) was byte-identical to the root
+installer (SHA-256 `6e057b82…`), and the live `release.pub` matched the
 repository.
 
 **Public install.** On the reference host, a fresh `HOME` with
