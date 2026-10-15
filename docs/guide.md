@@ -34,7 +34,7 @@ Rust compiler or sudo is needed.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://ukai.monocursive.com/install.sh | bash
+  https://ukai.sh/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 ukai-jail version --json
 ukai-jail doctor --profile tool --json
@@ -67,7 +67,7 @@ running attempt. Intel Macs and nested VM execution are unsupported.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://ukai.monocursive.com/install.sh | bash
+  https://ukai.sh/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 ukai-vm version
 ukai-vm doctor
@@ -167,7 +167,7 @@ for the packaged release.
 
 ## Verify a supplied package
 
-For offline installation, save the [Bash installer](https://ukai.monocursive.com/install.sh)
+For offline installation, save the [Bash installer](https://ukai.sh/install.sh)
 and the archive for your architecture from the [release](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2).
 The installer verifies its embedded SHA-256 pin even when the archive comes from
 a local directory. No checksum manifest or signature tool is needed:

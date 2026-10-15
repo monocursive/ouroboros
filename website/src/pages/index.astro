@@ -1,7 +1,7 @@
 ---
 import Site from '../layouts/Site.astro';
 import { jailReleaseUrl, releasedDocument, vmReleaseUrl, vmVersion } from '../release';
-const command = `curl --proto '=https' --tlsv1.2 -fsSL https://ukai.monocursive.com/install.sh | bash
+const command = `curl --proto '=https' --tlsv1.2 -fsSL https://ukai.sh/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 # Linux: ukai-jail doctor --profile tool
 # macOS: ukai-vm doctor`;

@@ -62,7 +62,7 @@
           ]
         },
         "manifest": {
-          "$ref": "https://ukai.monocursive.com/schemas/ledger-v1/segments"
+          "$ref": "https://ukai.sh/schemas/ledger-v1/segments"
         },
         "replay": {
           "type": "object",

@@ -39,7 +39,7 @@ You can [build the jail and try a small command](https://github.com/monocursive/
 today. [Signed Linux developer-preview packages](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2)
 are also available; a Homebrew tap remains unconfigured.
 
-The separate [Ukai VM preview for Apple Silicon](https://ukai.monocursive.com/guide/#macos-vm-preview)
+The separate [Ukai VM preview for Apple Silicon](https://ukai.sh/guide/#macos-vm-preview)
 is now available as a signed, notarized DMG through the same Bash installer.
 It runs offline Linux ARM64 `tool` and `build` commands in a disposable VM on
 macOS 27+. Inputs are copied and outputs returned for review. Native Mac

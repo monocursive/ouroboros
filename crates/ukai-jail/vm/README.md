@@ -7,7 +7,7 @@ The [11 October measurements](../../../docs/benchmarks/jail/macos-linux-vm-2026-
 record the earlier prototype and its simultaneous-suspension failure. The current
 custodian fixes that case; new package measurements are recorded separately.
 
-Install with the [public Bash installer](https://ukai.monocursive.com/install.sh)
+Install with the [public Bash installer](https://ukai.sh/install.sh)
 and follow the [Mac quickstart](../../../docs/guide.md#macos-vm-preview).
 The released DMG is the exact signed, notarized, stapled package from the
 [qualification record](../../../docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md).

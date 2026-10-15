@@ -45,7 +45,7 @@ the archived runtime. The current public preview command is:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://ukai.monocursive.com/install.sh | bash
+  https://ukai.sh/install.sh | bash
 ```
 
 The HTTPS-served script is the trust anchor for the embedded hashes. A mirror

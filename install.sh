@@ -144,7 +144,7 @@ EOF
         mounted="$work/mount"
         /bin/bash "$mounted/install.sh" --prefix "$vm_prefix"
         printf '\nCheck your Mac: %s/bin/ukai-vm doctor\n' "$vm_prefix"
-        printf 'Usage and preview limits: https://ukai.monocursive.com/guide/#macos-vm-preview\n'
+        printf 'Usage and preview limits: https://ukai.sh/guide/#macos-vm-preview\n'
         exit 0
     fi
     [ "$vm_prefix_selected" = false ] || fail '--vm-prefix applies only to the macOS VM preview'

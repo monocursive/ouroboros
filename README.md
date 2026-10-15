@@ -8,7 +8,7 @@ and runtime for a command and its children. Each attempt produces a receipt
 of the policy applied, the outcome, and any gaps in observation. Your existing
 agent keeps its own models and workflow.
 
-[Website](https://ukai.monocursive.com/) · [User guide](docs/guide.md) ·
+[Website](https://ukai.sh/) · [User guide](docs/guide.md) ·
 [Roadmap](docs/roadmap.md) · [Operator reference](docs/specs/jail-v1/operating.md)
 
 Ukai was called Ouroboros until 15 October 2026. The previews below were
@@ -49,7 +49,7 @@ The binaries require glibc 2.39 or newer; no Rust compiler or sudo is needed
 for the installer. Host enforcement still requires a successful `doctor` report.
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://ukai.monocursive.com/install.sh | bash
+curl --proto '=https' --tlsv1.2 -fsSL https://ukai.sh/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 ukai-jail version --json
 ukai-jail doctor --profile tool --json

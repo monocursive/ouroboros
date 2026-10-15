@@ -35,7 +35,7 @@ case "$(uname -s):$(uname -m)" in
     Linux:x86_64) target=x86_64-unknown-linux-gnu ;;
     Linux:aarch64|Linux:arm64) target=aarch64-unknown-linux-gnu ;;
     Darwin:*)
-        echo 'ukai-jail is not released for macOS: native execution refuses. On Apple Silicon, use the Ukai VM preview: https://ukai.monocursive.com/guide/#macos-vm-preview' >&2
+        echo 'ukai-jail is not released for macOS: native execution refuses. On Apple Silicon, use the Ukai VM preview: https://ukai.sh/guide/#macos-vm-preview' >&2
         exit 2 ;;
     *) echo 'Unsupported operating system or architecture.' >&2; exit 2 ;;
 esac

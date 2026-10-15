@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ukai.monocursive.com/schemas/ledger-v1/segments",
+  "$id": "https://ukai.sh/schemas/ledger-v1/segments",
   "type": "object",
   "additionalProperties": false,
   "required": [
