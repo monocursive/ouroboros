@@ -26,7 +26,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - id: version
@@ -62,7 +62,7 @@ jobs:
       PREVIEW_VERSION: ${{ needs.coordinate.outputs.version }}
       PREVIEW_TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # The tested freeze verifies ancestry and unchanged frozen inputs.
           fetch-depth: 0
@@ -92,7 +92,7 @@ jobs:
             --binary target/release/ukai-jail --target "$PREVIEW_TARGET" \
             --revision "$UKAI_BUILD_REVISION" --inputs "$inputs" \
             --version "$PREVIEW_VERSION" --out stage
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: native-${{ matrix.target }}
           path: stage/
@@ -105,10 +105,10 @@ jobs:
     env:
       PREVIEW_VERSION: ${{ needs.coordinate.outputs.version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           pattern: native-*
           path: stages/
@@ -121,7 +121,7 @@ jobs:
             --revision "$(git rev-parse HEAD)" --inputs "$inputs" \
             --version "$PREVIEW_VERSION" --out candidate
           echo 'Unsigned candidate; publication requires production signing and exact-commit CI/conformance.' >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ukai-jail-${{ needs.coordinate.outputs.version }}-candidate
           path: candidate/
