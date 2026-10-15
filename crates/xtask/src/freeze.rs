@@ -15,13 +15,13 @@
 //! launch profiles' mounts, environment and allowed hosts, and the frozen
 //! schemas (`frozen-schemas.toml`, when it exists). With `--doctor`, it also
 //! records the tested run, validated strictly (see [`validate_tested`]).
-//! `crates/ouro-jail/tests/portable_freeze.rs` fails when an in-tree value
+//! `crates/ukai-jail/tests/portable_freeze.rs` fails when an in-tree value
 //! drifts from the file; `cargo xtask freeze --check` is the milestone gate:
 //! it fails unless the file is exactly what this tree generates and records
 //! a valid tested run of this very tree.
 //!
 //! Values come from files and from the jail's own rendering functions
-//! (`ouro_jail::platform::linux::freeze`), the same ones the test calls.
+//! (`ukai_jail::platform::linux::freeze`), the same ones the test calls.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -35,13 +35,13 @@ use crate::util::{sha256_hex, toml_string as quote};
 // so it is included by path; the parts this crate does not call are unused
 // here.
 #[allow(dead_code)]
-#[path = "../../ouro-jail/src/build_provenance.rs"]
+#[path = "../../ukai-jail/src/build_provenance.rs"]
 mod build_provenance;
 
 /// Where the freeze file lives, relative to the repository root.
 pub const FREEZE_PATH: &str = "docs/specs/jail-v1/milestone-1-freeze.toml";
 /// The freeze file's own identifier.
-pub const SCHEMA: &str = "ouro.jail.milestone-freeze/1";
+pub const SCHEMA: &str = "ukai.jail.milestone-freeze/1";
 /// The line that separates the tree's values from the tested run.
 pub const TESTED_MARKER: &str =
     "# --- the tested run (cargo xtask freeze --doctor); everything above is the tree ---";
@@ -56,7 +56,7 @@ const FROZEN_PATHSPECS: [&str; 6] = [
     "docs/specs/jail-v1/evidence/seccomp-table-*.txt",
     "docs/specs/jail-v1/frozen-schemas.toml",
     "docs/specs/jail-v1/*.schema.json",
-    "crates/ouro-jail/profiles/launch",
+    "crates/ukai-jail/profiles/launch",
     "crates/*/Cargo.toml",
 ];
 
@@ -79,12 +79,12 @@ const FILTER_TABLES: [(&str, &str, usize); 6] = [
 ];
 const CLOSED_SET_TABLE: &str = "closed-set-x86_64.txt";
 const EVIDENCE: &str = "docs/specs/jail-v1/evidence";
-const LAUNCH_DIR: &str = "crates/ouro-jail/profiles/launch";
+const LAUNCH_DIR: &str = "crates/ukai-jail/profiles/launch";
 const FROZEN_SCHEMAS: &str = "docs/specs/jail-v1/frozen-schemas.toml";
 
 /// Where the backend's mount constants are written, for the freeze file's
 /// comments and, off Linux, for reading them (see [`backend_list`]).
-const BWRAP_SOURCE: &str = "crates/ouro-jail/src/platform/linux/bwrap.rs";
+const BWRAP_SOURCE: &str = "crates/ukai-jail/src/platform/linux/bwrap.rs";
 /// The comment that opens the manifests' section, after the backend plans.
 const MANIFESTS_HEADING: &str = "\n# Every Cargo manifest's";
 
@@ -214,7 +214,7 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
     );
     let _ = writeln!(
         w,
-        "# do not edit by hand. crates/ouro-jail/tests/portable_freeze.rs fails"
+        "# do not edit by hand. crates/ukai-jail/tests/portable_freeze.rs fails"
     );
     let _ = writeln!(
         w,
@@ -239,7 +239,7 @@ pub fn tree_part(root: &Path) -> Result<String, String> {
     let _ = writeln!(
         w,
         "\n# The bubblewrap invocation each contained profile's plan renders to\n\
-         # (ouro_jail::platform::linux::freeze::backend_plans; generated on Linux)"
+         # (ukai_jail::platform::linux::freeze::backend_plans; generated on Linux)"
     );
     w.push_str(&backend_plan_section(root)?);
 
@@ -341,7 +341,7 @@ fn filter_sections(w: &mut String, root: &Path) -> Result<(), String> {
         let _ = writeln!(
             w,
             "name = {}",
-            quote(ouro_jail::records::CLOSED_SET_LINUX_V1)
+            quote(ukai_jail::records::CLOSED_SET_LINUX_V1)
         );
         let _ = writeln!(w, "narrowing_filter = {}", quote(&narrowing));
         let _ = writeln!(
@@ -365,15 +365,15 @@ fn mounts_section(w: &mut String, root: &Path) -> Result<(), String> {
     let mounts: [(&str, &str, &str, Vec<String>); 4] = [
         (
             "linux_runtime_roots",
-            "crates/ouro-jail/src/profiles.rs",
+            "crates/ukai-jail/src/profiles.rs",
             "LINUX_RUNTIME_ROOTS",
-            owned(ouro_jail::profiles::LINUX_RUNTIME_ROOTS),
+            owned(ukai_jail::profiles::LINUX_RUNTIME_ROOTS),
         ),
         (
             "protected_segments",
-            "crates/ouro-jail/src/profiles.rs",
+            "crates/ukai-jail/src/profiles.rs",
             "PROTECTED_SEGMENTS",
-            owned(ouro_jail::profiles::PROTECTED_SEGMENTS),
+            owned(ukai_jail::profiles::PROTECTED_SEGMENTS),
         ),
         (
             "backend_runtime_roots",
@@ -457,7 +457,7 @@ fn launch_profile_sections(w: &mut String, root: &Path) -> Result<(), String> {
         let _ = writeln!(
             w,
             "environment = {}",
-            quote(&ouro_jail::platform::linux::freeze::canonical_json(
+            quote(&ukai_jail::platform::linux::freeze::canonical_json(
                 &environment,
                 false
             ))
@@ -482,7 +482,7 @@ fn launch_profile_sections(w: &mut String, root: &Path) -> Result<(), String> {
                 // Vault release authority includes more than a staged file:
                 // pin origins, headers, paths, executable bindings and refresh
                 // policy (including future fields), not just source/mode.
-                let definition = ouro_jail::platform::linux::freeze::canonical_json(
+                let definition = ukai_jail::platform::linux::freeze::canonical_json(
                     &json_of_toml(credential),
                     false,
                 );
@@ -501,12 +501,12 @@ fn contained_section(w: &mut String) -> Result<(), String> {
         "\n# What every contained profile passes from the operator's environment, and its PATH"
     );
     let _ = writeln!(w, "[contained]");
-    let names: Vec<String> = ouro_jail::profiles::CONTAINED_ENVIRONMENT_NAMES
+    let names: Vec<String> = ukai_jail::profiles::CONTAINED_ENVIRONMENT_NAMES
         .iter()
         .map(|name| (*name).to_owned())
         .collect();
     let _ = writeln!(w, "environment_names = {}", quote_list(&names));
-    let _ = writeln!(w, "path = {}", quote(ouro_jail::profiles::CONTAINED_PATH));
+    let _ = writeln!(w, "path = {}", quote(ukai_jail::profiles::CONTAINED_PATH));
     Ok(())
 }
 
@@ -518,10 +518,10 @@ fn baseline_sections(w: &mut String) -> Result<(), String> {
         "\n# Each built-in profile resolved on Linux with fixed inputs (workspace /work,\n\
          # managed scratch, no layer): what it grants, as its canonical snapshot"
     );
-    let baselines = ouro_jail::platform::linux::freeze::baselines()
+    let baselines = ukai_jail::platform::linux::freeze::baselines()
         .map_err(|error| format!("the built-in baselines: {error}"))?;
     for baseline in baselines {
-        let snapshot = ouro_jail::platform::linux::freeze::canonical_json(&baseline.snapshot, true);
+        let snapshot = ukai_jail::platform::linux::freeze::canonical_json(&baseline.snapshot, true);
         let _ = writeln!(w, "\n[[baseline]]");
         let _ = writeln!(w, "profile = {}", quote(baseline.profile.as_str()));
         let _ = writeln!(w, "digest = {}", quote(&baseline.digest));
@@ -543,7 +543,7 @@ fn manifests_section(w: &mut String, root: &Path) -> Result<(), String> {
         let _ = writeln!(w, "\n[[manifest]]");
         let _ = writeln!(w, "file = {}", quote(&file));
         let sections =
-            ouro_jail::platform::linux::freeze::canonical_json(&manifest_sections(&manifest), true);
+            ukai_jail::platform::linux::freeze::canonical_json(&manifest_sections(&manifest), true);
         let _ = writeln!(w, "sections = {}", literal(&sections)?);
     }
     Ok(())
@@ -589,7 +589,7 @@ fn frozen_schemas_section(w: &mut String, root: &Path) -> Result<(), String> {
 fn backend_list(root: &Path, name: &str) -> Result<Vec<String>, String> {
     #[cfg(target_os = "linux")]
     {
-        use ouro_jail::platform::linux::bwrap::{ETC_PATHS, RUNTIME_ROOTS};
+        use ukai_jail::platform::linux::bwrap::{ETC_PATHS, RUNTIME_ROOTS};
         let _ = root;
         match name {
             "RUNTIME_ROOTS" => Ok(RUNTIME_ROOTS.iter().map(|p| (*p).to_owned()).collect()),
@@ -690,7 +690,7 @@ fn backend_plan_section(root: &Path) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         let _ = root;
-        let plans = ouro_jail::platform::linux::freeze::backend_plans()
+        let plans = ukai_jail::platform::linux::freeze::backend_plans()
             .map_err(|error| error.to_string())?;
         for (profile, argv) in plans {
             let _ = writeln!(out, "\n[[backend_plan]]");
@@ -735,7 +735,7 @@ const TESTED_FACTS: [(&str, &[&str]); 15] = [
     ("opt_level", &["build", "opt_level"]),
     ("debug_assertions", &["build", "debug_assertions"]),
     ("inputs", &["build", "inputs"]),
-    ("ouro_jail_sha256", &["binaries", "ouro-jail", "sha256"]),
+    ("ukai_jail_sha256", &["binaries", "ukai-jail", "sha256"]),
     ("backend", &["binaries", "bwrap"]),
     ("host", &["host"]),
     ("supervisor_scope", &["supervisor_scope"]),
@@ -1111,8 +1111,8 @@ fn toml_of_json(
 /// # Errors
 /// The rules the run breaks.
 pub fn tested_section(root: &Path, doctor: &serde_json::Value) -> Result<String, String> {
-    if doctor["schema"] != "ouro.jail.doctor/1" {
-        return Err("the --doctor file is not an ouro.jail.doctor/1 record".to_owned());
+    if doctor["schema"] != "ukai.jail.doctor/1" {
+        return Err("the --doctor file is not an ukai.jail.doctor/1 record".to_owned());
     }
     render_tested(root, &tested_facts(doctor))
         .map(|(section, _)| section)
@@ -1876,7 +1876,7 @@ mod tests {
         unready["ready"] = false.into();
         assert!(tested_section(root, &unready).is_err());
         let mut other = doctor;
-        other["schema"] = "ouro.jail.receipt/1".into();
+        other["schema"] = "ukai.jail.receipt/1".into();
         assert!(tested_section(root, &other).is_err());
     }
 }

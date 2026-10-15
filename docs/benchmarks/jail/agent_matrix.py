@@ -188,8 +188,8 @@ def main():
             work, config, home = root / 'work', root / 'config', root / 'home'
             for path in [work, config, home]:
                 path.mkdir(mode=0o700)
-            env = {**minimal, 'HOME': str(home), 'OURO_CONFIG_DIR': str(config),
-                   'OURO_DATA_DIR': str(root / 'data')}
+            env = {**minimal, 'HOME': str(home), 'UKAI_CONFIG_DIR': str(config),
+                   'UKAI_DATA_DIR': str(root / 'data')}
             for key, leaf in [('XDG_CONFIG_HOME', 'config'), ('XDG_DATA_HOME', 'data'),
                               ('XDG_CACHE_HOME', 'cache'), ('XDG_STATE_HOME', 'state')]:
                 env[key] = str(home / leaf)
@@ -239,7 +239,7 @@ def main():
                 judge = subprocess.run([str(binary), 'run', '--profile', 'tool', '--workspace', str(work),
                                         '--limit', 'wall=15s', '--', '/usr/bin/python3', '-I', '-m',
                                         'unittest', 'discover', '-s', str(work), '-v'],
-                                       env={**env, 'OURO_DATA_DIR': str(root / 'judge-data')},
+                                       env={**env, 'UKAI_DATA_DIR': str(root / 'judge-data')},
                                        cwd=work, capture_output=True, timeout=30)
                 (destination / 'judge.txt').write_bytes(judge.stdout + judge.stderr)
                 if judge.returncode != 0:

@@ -2,7 +2,7 @@
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.ledger.diff/1"
+      "const": "ukai.ledger.diff/1"
     },
     "mode": {
       "enum": [
@@ -119,7 +119,7 @@
               "outcome": {
                 "anyOf": [
                   {
-                    "$ref": "urn:ouro:schema:ledger-source:1#/$defs/outcome"
+                    "$ref": "urn:ukai:schema:ledger-source:1#/$defs/outcome"
                   },
                   {
                     "type": "null"
@@ -217,7 +217,7 @@
   ],
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-diff:1",
+  "$id": "urn:ukai:schema:ledger-diff:1",
   "title": "Bounded comparison of covered event counts or recorded target labels",
   "$defs": {
     "summary": {
@@ -230,7 +230,7 @@
         "snapshot": {
           "anyOf": [
             {
-              "$ref": "urn:ouro:schema:ledger-read:1#/$defs/chain"
+              "$ref": "urn:ukai:schema:ledger-read:1#/$defs/chain"
             },
             {
               "type": "null"
@@ -257,7 +257,7 @@
         "coverage": {
           "anyOf": [
             {
-              "$ref": "urn:ouro:schema:ledger-read:1#/$defs/coverage"
+              "$ref": "urn:ukai:schema:ledger-read:1#/$defs/coverage"
             },
             {
               "type": "null"
@@ -298,7 +298,7 @@
                       "minimum": 1
                     },
                     "provenance": {
-                      "$ref": "urn:ouro:schema:ledger-source:1#/properties/provenance"
+                      "$ref": "urn:ukai:schema:ledger-source:1#/properties/provenance"
                     }
                   },
                   "required": [
@@ -329,7 +329,7 @@
                       "minimum": 1
                     },
                     "provenance": {
-                      "$ref": "urn:ouro:schema:ledger-source:1#/properties/provenance"
+                      "$ref": "urn:ukai:schema:ledger-source:1#/properties/provenance"
                     }
                   },
                   "required": [
@@ -360,7 +360,7 @@
                       "minimum": 1
                     },
                     "provenance": {
-                      "$ref": "urn:ouro:schema:ledger-source:1#/properties/provenance"
+                      "$ref": "urn:ukai:schema:ledger-source:1#/properties/provenance"
                     }
                   },
                   "required": [
@@ -391,7 +391,7 @@
                       "minimum": 1
                     },
                     "provenance": {
-                      "$ref": "urn:ouro:schema:ledger-source:1#/properties/provenance"
+                      "$ref": "urn:ukai:schema:ledger-source:1#/properties/provenance"
                     }
                   },
                   "required": [
@@ -497,7 +497,7 @@
               "minimum": 1
             },
             "provenance": {
-              "$ref": "urn:ouro:schema:ledger-source:1#/properties/provenance"
+              "$ref": "urn:ukai:schema:ledger-source:1#/properties/provenance"
             }
           },
           "required": [
@@ -526,7 +526,7 @@
             "path": {
               "allOf": [
                 {
-                  "$ref": "urn:ouro:schema:ledger-source:1#/$defs/path"
+                  "$ref": "urn:ukai:schema:ledger-source:1#/$defs/path"
                 },
                 {
                   "properties": {
@@ -544,7 +544,7 @@
             "path2": {
               "allOf": [
                 {
-                  "$ref": "urn:ouro:schema:ledger-source:1#/$defs/path"
+                  "$ref": "urn:ukai:schema:ledger-source:1#/$defs/path"
                 },
                 {
                   "properties": {

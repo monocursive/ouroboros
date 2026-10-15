@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ouroboros.dev/schemas/managed-policy-v1.json",
+  "$id": "https://ukai.dev/schemas/managed-policy-v1.json",
   "title": "Managed teams v1 immutable policy revision",
   "$comment": "Draft document contract. Values are authority only after trusted installation and current authorization checks.",
   "type": "object",
@@ -32,7 +32,7 @@
   ],
   "properties": {
     "schema": {
-      "const": "ouro.managed.policy/1"
+      "const": "ukai.managed.policy/1"
     },
     "policy_id": {
       "$ref": "#/$defs/id"

@@ -3,7 +3,7 @@
 Implemented on the named x86-64 Linux lane, 2026-09-23 to 2026-09-24, on the
 same stock host as J3: Ubuntu 26.04.1, kernel 7.0.0-31, bubblewrap 0.11.1, the
 distribution's user-namespace restriction left on, no sysctl, AppArmor profile,
-file capability or setuid helper. The unprivileged `ouro-ci` account runs
+file capability or setuid helper. The unprivileged `ukai-ci` account runs
 everything. Live evidence is recorded under [`evidence/`](evidence/):
 
 - [`j4-test-log-2026-09-23-ouro-ci.txt`](evidence/j4-test-log-2026-09-23-ouro-ci.txt):
@@ -94,7 +94,7 @@ All tests run live on the reference host unless named portable.
 - `gc` retains execution leaves made by builds before the attempt-named leaves;
   a same-uid forgery in another data directory is not detected; attempts
   retained for recovery still count against gc's bound on every pass.
-- Test seams (`OURO_JAIL_TEST_*`) exist in the release binary; each one set is
+- Test seams (`UKAI_JAIL_TEST_*`) exist in the release binary; each one set is
   recorded in jail state and in native details, and a refusal before a
   boundary exists records them in jail state only.
 - On macOS, `portable_proxy`'s descriptor-exhaustion helper fails under a full

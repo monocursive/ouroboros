@@ -2,7 +2,7 @@
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.ledger.discovery/1"
+      "const": "ukai.ledger.discovery/1"
     },
     "catalog_snapshot": {
       "type": "string",
@@ -16,7 +16,7 @@
     "run": {
       "anyOf": [
         {
-          "$ref": "urn:ouro:schema:ledger-catalog:1#/$defs/summary"
+          "$ref": "urn:ukai:schema:ledger-catalog:1#/$defs/summary"
         },
         {
           "type": "null"
@@ -26,7 +26,7 @@
     "page": {
       "anyOf": [
         {
-          "$ref": "urn:ouro:schema:ledger-read:1"
+          "$ref": "urn:ukai:schema:ledger-read:1"
         },
         {
           "type": "null"
@@ -70,6 +70,6 @@
   ],
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-discovery:1",
+  "$id": "urn:ukai:schema:ledger-discovery:1",
   "title": "One bounded run evidence page from a bound catalog selection"
 }

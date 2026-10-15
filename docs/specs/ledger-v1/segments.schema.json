@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ouroboros.monocursive.com/schemas/ledger-v1/segments",
+  "$id": "https://ukai.monocursive.com/schemas/ledger-v1/segments",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -12,8 +12,8 @@
   "properties": {
     "schema": {
       "enum": [
-        "ouro.ledger.segments/1",
-        "ouro.ledger.segments/2"
+        "ukai.ledger.segments/1",
+        "ukai.ledger.segments/2"
       ]
     },
     "run_id": {
@@ -88,7 +88,7 @@
     {
       "properties": {
         "schema": {
-          "const": "ouro.ledger.segments/1"
+          "const": "ukai.ledger.segments/1"
         },
         "segment": {
           "properties": {
@@ -113,7 +113,7 @@
     {
       "properties": {
         "schema": {
-          "const": "ouro.ledger.segments/2"
+          "const": "ukai.ledger.segments/2"
         }
       },
       "required": [

@@ -1,23 +1,23 @@
-defmodule OuroFleet.ControllerTest do
+defmodule UkaiFleet.ControllerTest do
   use ExUnit.Case, async: false
-  alias OuroFleet.{Controller, Protocol, Store}
+  alias UkaiFleet.{Controller, Protocol, Store}
 
   defmodule StubWorker do
     use GenServer
 
     def start_link(_) do
       state = %{plans: 0, submits: 0, batches: 0, budget: nil}
-      GenServer.start_link(__MODULE__, state, name: OuroFleet.Worker)
+      GenServer.start_link(__MODULE__, state, name: UkaiFleet.Worker)
     end
 
     def init(state), do: {:ok, state}
 
-    # `OuroFleet.Worker.call/2` wraps each message with the deadline the worker works to.
+    # `UkaiFleet.Worker.call/2` wraps each message with the deadline the worker works to.
     def handle_call({:call, message, deadline}, _, state),
       do: reply(message, %{state | budget: deadline - System.monotonic_time(:millisecond)})
 
     defp reply(:version, %{incompatible: true} = state),
-      do: {:reply, {:ok, Map.put(Protocol.version(), "schema", "ouro.fleet.rpc/999")}, state}
+      do: {:reply, {:ok, Map.put(Protocol.version(), "schema", "ukai.fleet.rpc/999")}, state}
 
     defp reply(:version, state), do: {:reply, {:ok, Protocol.version()}, state}
     defp reply({:status, job}, state), do: {:reply, observed(job, state), state}
@@ -50,7 +50,7 @@ defmodule OuroFleet.ControllerTest do
     root =
       Path.join(
         System.tmp_dir!(),
-        "ouro-fleet-controller-" <> Base.encode16(:crypto.strong_rand_bytes(8))
+        "ukai-fleet-controller-" <> Base.encode16(:crypto.strong_rand_bytes(8))
       )
 
     File.mkdir!(root)
@@ -70,7 +70,7 @@ defmodule OuroFleet.ControllerTest do
 
   test "lost replies and controller restart keep placement, changed requests refuse", context do
     request = %{
-      "schema" => "ouro.fleet.request/1",
+      "schema" => "ukai.fleet.request/1",
       "request_id" => "same",
       "argv" => ["/bin/true"]
     }
@@ -95,7 +95,7 @@ defmodule OuroFleet.ControllerTest do
     :sys.replace_state(context.worker, &Map.put(&1, :incompatible, true))
 
     request = %{
-      "schema" => "ouro.fleet.request/1",
+      "schema" => "ukai.fleet.request/1",
       "request_id" => "mismatch",
       "argv" => ["/bin/true"]
     }
@@ -110,7 +110,7 @@ defmodule OuroFleet.ControllerTest do
     controller = Process.whereis(Controller)
 
     for {message, detail} <- [
-          {{:run, %{"schema" => "ouro.fleet.request/1", "request_id" => "typo", "argv" => []}},
+          {{:run, %{"schema" => "ukai.fleet.request/1", "request_id" => "typo", "argv" => []}},
            "invalid argv"},
           {{:run, "not an object"}, "request must be an object"},
           {{:run, Map.put(request("x"), "tags", ["a", "a"])}, "invalid tags list"},
@@ -130,7 +130,7 @@ defmodule OuroFleet.ControllerTest do
 
   test "an unavailable worker keeps its last observation and never invents failure" do
     request = %{
-      "schema" => "ouro.fleet.request/1",
+      "schema" => "ukai.fleet.request/1",
       "request_id" => "stale",
       "argv" => ["/bin/true"]
     }
@@ -227,7 +227,7 @@ defmodule OuroFleet.ControllerTest do
   end
 
   defp request(id),
-    do: %{"schema" => "ouro.fleet.request/1", "request_id" => id, "argv" => ["/bin/true"]}
+    do: %{"schema" => "ukai.fleet.request/1", "request_id" => id, "argv" => ["/bin/true"]}
 
   defp inodes(root),
     do: Map.new(Path.wildcard(root <> "/jobs/*.json"), &{&1, File.stat!(&1).inode})

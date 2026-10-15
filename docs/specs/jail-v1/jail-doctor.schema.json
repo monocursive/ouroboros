@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:jail-doctor:1",
-  "title": "Ouro jail doctor report v1",
-  "description": "The record `ouro-jail doctor --json` prints (jail-v1 \u00a73.2, \u00a714.1): the measured capabilities, the host manifest that supersedes host-manifest.sh, the binaries and the build that produced it. On Linux it carries `host`, `supervisor_scope` and the resolved bubblewrap; on macOS, where execution is unsupported in this milestone, it carries none of them and every capability is an unsupported requirement row.",
+  "$id": "urn:ukai:schema:jail-doctor:1",
+  "title": "Ukai jail doctor report v1",
+  "description": "The record `ukai-jail doctor --json` prints (jail-v1 \u00a73.2, \u00a714.1): the measured capabilities, the host manifest that supersedes host-manifest.sh, the binaries and the build that produced it. On Linux it carries `host`, `supervisor_scope` and the resolved bubblewrap; on macOS, where execution is unsupported in this milestone, it carries none of them and every capability is an unsupported requirement row.",
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.jail.doctor/1"
+      "const": "ukai.jail.doctor/1"
     },
     "component": {
-      "const": "ouro-jail"
+      "const": "ukai-jail"
     },
     "version": {
       "type": "string",
@@ -75,7 +75,7 @@
     "binaries": {
       "type": "object",
       "properties": {
-        "ouro-jail": {
+        "ukai-jail": {
           "$ref": "#/$defs/binary"
         },
         "bwrap": {
@@ -90,7 +90,7 @@
         }
       },
       "required": [
-        "ouro-jail"
+        "ukai-jail"
       ],
       "additionalProperties": false
     },
@@ -138,7 +138,7 @@
         "properties": {
           "binaries": {
             "required": [
-              "ouro-jail",
+              "ukai-jail",
               "bwrap"
             ]
           },
@@ -191,7 +191,7 @@
           },
           "binaries": {
             "propertyNames": {
-              "const": "ouro-jail"
+              "const": "ukai-jail"
             }
           },
           "build": {

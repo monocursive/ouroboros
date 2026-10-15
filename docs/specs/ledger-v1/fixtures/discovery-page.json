@@ -1,8 +1,8 @@
 {
-  "catalog_snapshot": "sha256:babe44c2c571aecdd02235d24ecf7826b065e209c2e277f9b049bd95f57000cf",
+  "catalog_snapshot": "sha256:06457b716efb2dc3307340a915eab45a3f22175a883835c1e10a172cc9e88ebc",
   "done": false,
   "matched_runs": 2,
-  "next_after": "{\"schema\":\"ouro.ledger.discovery-position/1\",\"snapshot\":\"sha256:babe44c2c571aecdd02235d24ecf7826b065e209c2e277f9b049bd95f57000cf\",\"scope\":\"sha256:5ecc147306969b1b7a5c15f4452f4a90b23a8109cffbb039697c01ffe0b3c4b3\",\"catalog_after\":\"{\\\"schema\\\":\\\"ouro.ledger.catalog-position/1\\\",\\\"snapshot\\\":\\\"sha256:babe44c2c571aecdd02235d24ecf7826b065e209c2e277f9b049bd95f57000cf\\\",\\\"scope\\\":\\\"sha256:b9ec109eac00da4709172904bada02cbc8bec107f9f8afaf5ee54b3c52bc99d1\\\",\\\"last_run\\\":\\\"run_11111111111111111111111111111111\\\"}\",\"read_position\":null}",
+  "next_after": "{\"schema\":\"ukai.ledger.discovery-position/1\",\"snapshot\":\"sha256:06457b716efb2dc3307340a915eab45a3f22175a883835c1e10a172cc9e88ebc\",\"scope\":\"sha256:5ecc147306969b1b7a5c15f4452f4a90b23a8109cffbb039697c01ffe0b3c4b3\",\"catalog_after\":\"{\\\"schema\\\":\\\"ukai.ledger.catalog-position/1\\\",\\\"snapshot\\\":\\\"sha256:06457b716efb2dc3307340a915eab45a3f22175a883835c1e10a172cc9e88ebc\\\",\\\"scope\\\":\\\"sha256:b9ec109eac00da4709172904bada02cbc8bec107f9f8afaf5ee54b3c52bc99d1\\\",\\\"last_run\\\":\\\"run_11111111111111111111111111111111\\\"}\",\"read_position\":null}",
   "page": {
     "child_protection": "enforced",
     "coverage": {
@@ -92,7 +92,7 @@
           "ok": false,
           "return_value": -2
         },
-        "prev": "sha256:79dbda94a7ae2fbeb32669b5ebc113ee715978003c5838425ff95c2018ebd957",
+        "prev": "sha256:50579a87ee8b72fc9f0da3f5dbfd5a677ed36b4dd9f4cd8d6f38f4a2518e5cbc",
         "provenance": {
           "peer_birth": "boot:fixture:start:42",
           "peer_pid": 41200,
@@ -103,7 +103,7 @@
         "received_at": "2026-09-30T12:00:01Z",
         "request_id": "source:audit:1",
         "run_id": "run_11111111111111111111111111111111",
-        "schema": "ouro.event/1",
+        "schema": "ukai.event/1",
         "seq": 5,
         "source": "audit",
         "source_seq": 1,
@@ -112,9 +112,9 @@
     ],
     "run_id": "run_11111111111111111111111111111111",
     "scanned_through_seq": 7,
-    "schema": "ouro.ledger.read/1",
+    "schema": "ukai.ledger.read/1",
     "snapshot": {
-      "head_digest": "sha256:c0680f83c34c0ccd35722190b6afcada817feeb060327a2ebbca4a1a363e02c0",
+      "head_digest": "sha256:5aef31cfdb7da57f775a8f7f7aa9cfbc60843224801629532e1ca5524b280a23",
       "head_seq": 7
     },
     "state": "settled",
@@ -125,7 +125,7 @@
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "capture_history": null,
     "chain": {
-      "head_digest": "sha256:c0680f83c34c0ccd35722190b6afcada817feeb060327a2ebbca4a1a363e02c0",
+      "head_digest": "sha256:5aef31cfdb7da57f775a8f7f7aa9cfbc60843224801629532e1ca5524b280a23",
       "head_seq": 7
     },
     "child_protection": "enforced",
@@ -197,5 +197,5 @@
       "qa"
     ]
   },
-  "schema": "ouro.ledger.discovery/1"
+  "schema": "ukai.ledger.discovery/1"
 }

@@ -16,6 +16,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 DOCS = [ROOT / "README.md", ROOT / "north-star.md", *sorted((ROOT / "docs").rglob("*.md"))]
 LINK = re.compile(r"\]\(([^)\s]+)\)")
 HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+# Historical documents (the evidence store, evidence directories, dated
+# reports) keep the crate paths they were written with before Ouroboros was
+# renamed Ukai (2026-10-15); their links resolve through the renamed crates.
+HISTORICAL = re.compile(r"^docs/(benchmarks/|releases/|.*/evidence/|.*\d{4}-\d{2}-\d{2})")
+RENAMED = re.compile(r"(?<=crates/)ouro(?=[-/])")
 
 
 def anchors(path: pathlib.Path) -> set[str]:
@@ -43,6 +48,7 @@ def retired(path: pathlib.Path) -> bool:
 def main() -> int:
     problems = 0
     retired_links = 0
+    renamed_links = 0
     for doc in DOCS:
         base = doc.parent
         for m in LINK.finditer(doc.read_text(encoding="utf-8")):
@@ -55,6 +61,9 @@ def main() -> int:
             if not resolved.exists() and retired(resolved):
                 retired_links += 1
                 continue
+            if not resolved.exists() and HISTORICAL.match(rel.as_posix()) and RENAMED.search(path):
+                resolved = (base / RENAMED.sub("ukai", path)).resolve()
+                renamed_links += resolved.exists()
             if not resolved.exists():
                 print(f"MISSING   {rel} -> {target}")
                 problems += 1
@@ -64,7 +73,8 @@ def main() -> int:
                 problems += 1
     checked = len(DOCS)
     print(f"Checked {checked} documents; {problems} broken links or anchors; "
-          f"{retired_links} links to archives retired from HEAD.")
+          f"{retired_links} links to archives retired from HEAD; "
+          f"{renamed_links} historical links resolved through the Ukai rename.")
     print("Document contract only; no runtime behavior is tested.")
     return 1 if problems else 0
 

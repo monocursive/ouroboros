@@ -4,7 +4,7 @@ main() (
     set -euo pipefail
     umask 077
     export LC_ALL=C
-    repository=https://github.com/monocursive/ouroboros
+    repository=https://github.com/monocursive/ukai
     version=0.1.0-rc.2
     macos_version=0.1.0-preview.1
     version_selected=false
@@ -35,21 +35,21 @@ main() (
     trap 'exit 130' INT
     trap 'exit 143' HUP TERM
 
-    fail() { printf 'ouro installer: %s\n' "$*" >&2; exit 1; }
+    fail() { printf 'ukai installer: %s\n' "$*" >&2; exit 1; }
     usage() {
         cat <<EOF
 Usage: bash install.sh [--version VERSION] [--bin-dir /absolute/path]
                        [--allow-downgrade]
        bash install.sh [--version VERSION] [--vm-prefix /absolute/path]
 
-Linux: installs ouro-jail $version into ~/.local/bin (--bin-dir changes it).
-macOS: installs ouro-vm $macos_version into ~/.local/share/ouro-vm, with a
+Linux: installs ukai-jail $version into ~/.local/bin (--bin-dir changes it).
+macOS: installs ukai-vm $macos_version into ~/.local/share/ukai-vm, with a
 command in ~/.local/bin. --vm-prefix changes the root containing bin and share.
 Apple Silicon and macOS 27+ are required; Intel Macs are unsupported.
 The Mac preview runs offline Linux commands in disposable VMs, not Mac programs
 or online agents. Allow 8 GiB free APFS space and 2 GiB RAM per running VM.
 Only releases with embedded SHA-256 pins are accepted. --version also accepts
-vVERSION, ouro-jail-vVERSION (Linux), or ouro-vm-vVERSION (Mac).
+vVERSION, ukai-jail-vVERSION (Linux), or ukai-vm-vVERSION (Mac).
 Linux: run again to upgrade; downgrades require --allow-downgrade.
 Mac: an already installed version is preserved and a repeat install refuses.
 Requires curl, tar, and sha256sum or shasum. No sudo or Rust compiler.
@@ -81,8 +81,8 @@ EOF
     done
     system=$(uname -s)
     if [ "$system" = Darwin ] && [ "$version_selected" = false ]; then version=$macos_version; fi
-    version=${version#ouro-jail-v}
-    version=${version#ouro-vm-v}
+    version=${version#ukai-jail-v}
+    version=${version#ukai-vm-v}
     version=${version#v}
     number='(0|[1-9][0-9]*)'
     identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
@@ -102,7 +102,7 @@ EOF
         Darwin:arm64) target=macos-arm64 ;;
         *) fail 'supported hosts: Linux x86_64/ARM64 or Apple Silicon macOS 27+' ;;
     esac
-    # Rendered by crates/ouro-jail/dist/bootstrap.py; every release this
+    # Rendered by crates/ukai-jail/dist/bootstrap.py; every release this
     # installer accepts has its archive or disk image hash here.
     # BEGIN SHA256 PINS
     case "$version:$target" in
@@ -124,14 +124,14 @@ EOF
         if ! [[ "$macos_major" =~ ^[0-9]+$ ]] || [ "$macos_major" -lt 27 ]; then
             fail 'macOS 27 or newer is required'
         fi
-        artifact="ouro-vm-$version-$target.dmg"
-        work=$(mktemp -d "${TMPDIR:-/tmp}/ouro-install.XXXXXX")
+        artifact="ukai-vm-$version-$target.dmg"
+        work=$(mktemp -d "${TMPDIR:-/tmp}/ukai-install.XXXXXX")
         if [ -n "$source_dir" ]; then
             cp -- "$source_dir/$artifact" "$work/$artifact" || fail "missing release asset: $artifact"
         else
             command -v curl >/dev/null 2>&1 || fail 'required command not found: curl'
-            base=${base:-$repository/releases/download/ouro-vm-v$version}
-            printf 'Downloading Ouro VM %s (about 512 MiB)...\n' "$version"
+            base=${base:-$repository/releases/download/ukai-vm-v$version}
+            printf 'Downloading Ukai VM %s (about 512 MiB)...\n' "$version"
             curl --disable --fail --silent --show-error --location \
                 --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --connect-timeout 15 --max-time 1800 --retry 3 \
@@ -143,8 +143,8 @@ EOF
         hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$work/mount" "$work/$artifact" >/dev/null
         mounted="$work/mount"
         /bin/bash "$mounted/install.sh" --prefix "$vm_prefix"
-        printf '\nCheck your Mac: %s/bin/ouro-vm doctor\n' "$vm_prefix"
-        printf 'Usage and preview limits: https://ouroboros.monocursive.com/guide/#macos-vm-preview\n'
+        printf '\nCheck your Mac: %s/bin/ukai-vm doctor\n' "$vm_prefix"
+        printf 'Usage and preview limits: https://ukai.monocursive.com/guide/#macos-vm-preview\n'
         exit 0
     fi
     [ "$vm_prefix_selected" = false ] || fail '--vm-prefix applies only to the macOS VM preview'
@@ -167,9 +167,9 @@ EOF
         [ -d "$source_dir" ] || fail '--from-dir must name an artifact directory'
     else
         command -v curl >/dev/null 2>&1 || fail 'required command not found: curl'
-        base=${base:-$repository/releases/download/ouro-jail-v$version}
+        base=${base:-$repository/releases/download/ukai-jail-v$version}
     fi
-    work=$(mktemp -d "${TMPDIR:-/tmp}/ouro-install.XXXXXX")
+    work=$(mktemp -d "${TMPDIR:-/tmp}/ukai-install.XXXXXX")
     fetch() {
         if [ -n "$source_dir" ]; then
             cp -- "$source_dir/$1" "$work/$1" || fail "missing release asset: $1"
@@ -178,21 +178,21 @@ EOF
                 --proto '=https' --proto-redir '=https' --tlsv1.2 \
                 --connect-timeout 15 --max-time 600 --retry 3 \
                 "$base/$1" --output "$work/$1" ||
-                fail "cannot download $1 for ouro-jail-v$version; see $repository/releases"
+                fail "cannot download $1 for ukai-jail-v$version; see $repository/releases"
         fi
     }
-    artifact="ouro-jail-$version-$target.tar.gz"
+    artifact="ukai-jail-$version-$target.tar.gz"
     fetch "$artifact"
     [ "$(digest "$work/$artifact")" = "$expected" ] || fail "checksum verification failed: $artifact"
     # Extract only the binary and notices from the checksum-verified archive.
-    tar -xOzf "$work/$artifact" ouro-jail > "$work/ouro-jail"
-    tar -xOzf "$work/$artifact" ouro-jail.LICENSES.txt > "$work/ouro-jail.LICENSES.txt"
-    chmod 755 "$work/ouro-jail"
+    tar -xOzf "$work/$artifact" ukai-jail > "$work/ukai-jail"
+    tar -xOzf "$work/$artifact" ukai-jail.LICENSES.txt > "$work/ukai-jail.LICENSES.txt"
+    chmod 755 "$work/ukai-jail"
     # Legacy installs have only the package version the binary reports.
     version_of() {
-        "$1" version 2>/dev/null | sed -n 's/^ouro-jail \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\([-+][0-9A-Za-z.+-]\{1,\}\)\{0,1\}\)$/\1/p'
+        "$1" version 2>/dev/null | sed -n 's/^ukai-jail \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\([-+][0-9A-Za-z.+-]\{1,\}\)\{0,1\}\)$/\1/p'
     }
-    binary_version=$(version_of "$work/ouro-jail")
+    binary_version=$(version_of "$work/ukai-jail")
     valid_version "$binary_version" || { echo 'The staged binary does not report a release version.' >&2; exit 1; }
     # Prints -1 when $1 is older than $2, 0 when equal, 1 when newer: semver's
     # numeric triple, then a pre-release suffix that is older than no suffix.
@@ -232,15 +232,15 @@ EOF
             }'
     }
     mkdir -p "$prefix"
-    for name in ouro-jail ouro-jail.release ouro-jail.LICENSES.txt; do
+    for name in ukai-jail ukai-jail.release ukai-jail.LICENSES.txt; do
         [ ! -L "$prefix/$name" ] || { echo "Refusing a symlinked installation file: $name" >&2; exit 1; }
         [ ! -e "$prefix/$name" ] || [ -f "$prefix/$name" ] || { echo "Installation destination must be a regular file: $name" >&2; exit 1; }
     done
-    if [ -e "$prefix/ouro-jail" ]; then
-        if [ -e "$prefix/ouro-jail.release" ]; then
-            installed_version=$(sed -n '1p' "$prefix/ouro-jail.release")
-            installed_digest=$(sed -n '2p' "$prefix/ouro-jail.release")
-            actual=$(digest "$prefix/ouro-jail")
+    if [ -e "$prefix/ukai-jail" ]; then
+        if [ -e "$prefix/ukai-jail.release" ]; then
+            installed_version=$(sed -n '1p' "$prefix/ukai-jail.release")
+            installed_digest=$(sed -n '2p' "$prefix/ukai-jail.release")
+            actual=$(digest "$prefix/ukai-jail")
             if [ "$installed_digest" != "$actual" ]; then
                 # A crash between the two renames, or a manual binary replacement,
                 # must fail closed. The explicit downgrade override also permits
@@ -249,7 +249,7 @@ EOF
                 installed_version=$version
             fi
         else
-            installed_version=$(version_of "$prefix/ouro-jail")
+            installed_version=$(version_of "$prefix/ukai-jail")
         fi
         valid_version "$installed_version" || { echo 'Existing binary has no valid version record.' >&2; exit 1; }
         relation=$(version_relation "$version" "$installed_version")
@@ -259,22 +259,22 @@ EOF
         fi
     fi
     # Same-directory temporary file and rename keep the final install atomic.
-    staged=$(mktemp "$prefix/.ouro-jail.XXXXXX")
-    notice=$(mktemp "$prefix/.ouro-jail-license.XXXXXX")
-    record=$(mktemp "$prefix/.ouro-jail-release.XXXXXX")
-    cat "$work/ouro-jail" > "$staged"
+    staged=$(mktemp "$prefix/.ukai-jail.XXXXXX")
+    notice=$(mktemp "$prefix/.ukai-jail-license.XXXXXX")
+    record=$(mktemp "$prefix/.ukai-jail-release.XXXXXX")
+    cat "$work/ukai-jail" > "$staged"
     chmod 755 "$staged"
-    cat "$work/ouro-jail.LICENSES.txt" > "$notice"
+    cat "$work/ukai-jail.LICENSES.txt" > "$notice"
     chmod 644 "$notice"
     binary_digest=$(digest "$staged")
     printf '%s\n%s\n' "$version" "$binary_digest" > "$record"
     chmod 644 "$record"
-    mv -f "$notice" "$prefix/ouro-jail.LICENSES.txt"
-    mv -f "$record" "$prefix/ouro-jail.release"
-    mv -f "$staged" "$prefix/ouro-jail"
-    "$prefix/ouro-jail" version
+    mv -f "$notice" "$prefix/ukai-jail.LICENSES.txt"
+    mv -f "$record" "$prefix/ukai-jail.release"
+    mv -f "$staged" "$prefix/ukai-jail"
+    "$prefix/ukai-jail" version
     printf 'Installed release %s in %s. Add that directory to PATH if needed.\n' "$version" "$prefix"
-    printf '\nCheck host support: %s/ouro-jail doctor --profile tool\n' "$prefix"
+    printf '\nCheck host support: %s/ukai-jail doctor --profile tool\n' "$prefix"
     case ":${PATH:-}:" in
         *":$prefix:"*) ;;
         *) printf 'Add this directory to PATH: export PATH="%s:%s"\n' "$prefix" "\$PATH" ;;

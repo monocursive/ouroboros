@@ -1,9 +1,9 @@
 {
-  "schema": "ouro.ledger.read/1",
+  "schema": "ukai.ledger.read/1",
   "run_id": "run_11111111111111111111111111111111",
   "snapshot": {
     "head_seq": 1,
-    "head_digest": "sha256:995d8cffb5c2ab694a06451e7633a30230a77d6c65d3842acd3811a029cbcba6"
+    "head_digest": "sha256:33ef4ae030b36ce0b5acb2348d2b35fd2ee1adc08f2a3fba9485ecc72f6b7f71"
   },
   "state": "prepared",
   "child_protection": "unprotected",

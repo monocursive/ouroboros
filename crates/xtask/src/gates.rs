@@ -11,7 +11,7 @@
 //! pure: every input is a value, so every branch is unit-tested against real
 //! logs.
 //!
-//! # The map (`ouro.jail.acceptance-map/1`)
+//! # The map (`ukai.jail.acceptance-map/1`)
 //!
 //! - `[[gate]]`: `id`, `row` (the §15 text verbatim), `kind` (`scripted`, or
 //!   `credential` for A01).
@@ -26,7 +26,7 @@
 //! panic` and a doc-test's ` (line N)` removed.
 //!
 //! Tags say how the clause is proved, at the strongest honest level:
-//! `live-cli` (a listed test drives the real `ouro-jail` on the lane's host,
+//! `live-cli` (a listed test drives the real `ukai-jail` on the lane's host,
 //! or a driver check runs there), `live-lib` (live, below the command line),
 //! `portable` (no live kernel feature needed), `simulated` (a seam, fake clock
 //! or simulated platform stands in for the real trigger), `recorded-limit`
@@ -54,9 +54,9 @@ use crate::revision::Revision;
 use crate::util::toml_string;
 
 /// The map's own identifier.
-pub const MAP_SCHEMA: &str = "ouro.jail.acceptance-map/1";
+pub const MAP_SCHEMA: &str = "ukai.jail.acceptance-map/1";
 /// The verdict's identifier, in `gates.json`.
-pub const VERDICT_SCHEMA: &str = "ouro.jail.gate-verdict/1";
+pub const VERDICT_SCHEMA: &str = "ukai.jail.gate-verdict/1";
 /// Where the map lives, relative to the repository root.
 pub const MAP_PATH: &str = "docs/specs/jail-v1/acceptance-map.toml";
 /// Where the §15 table lives, relative to the repository root.
@@ -675,11 +675,11 @@ pub struct TestLog {
     /// Skip notes (a live test that did not run): a `skipped:` line, or one
     /// after a test's `test <name> ... `, then named by its test.
     pub skips: Vec<String>,
-    /// `ouro-suite-revision=` lines: the revision the suite ran at.
+    /// `ukai-suite-revision=` lines: the revision the suite ran at.
     pub revisions: Vec<String>,
-    /// `ouro-suite-conformance=` lines: `OURO_CONFORMANCE` as the suite saw it.
+    /// `ukai-suite-conformance=` lines: `UKAI_CONFORMANCE` as the suite saw it.
     pub conformance: Vec<String>,
-    /// `ouro-suite-path=` lines: the PATH the suite's shell had.
+    /// `ukai-suite-path=` lines: the PATH the suite's shell had.
     pub paths: Vec<String>,
     /// Test binaries (`Running` and `Doc-tests` sections) in the log.
     pub binaries: usize,
@@ -728,7 +728,7 @@ pub fn binding_problems(
         }
         if log.conformance.as_slice() != ["1"] {
             p.push(format!(
-                "the {lane_name} log was not run with OURO_CONFORMANCE=1 (it says {:?}): \
+                "the {lane_name} log was not run with UKAI_CONFORMANCE=1 (it says {:?}): \
                  a live test that skipped itself would print ok",
                 log.conformance
             ));
@@ -765,7 +765,7 @@ pub fn describe_lanes(logs: &BTreeMap<Lane, TestLog>) -> String {
     logs.iter()
         .map(|(lane, log)| {
             format!(
-                "{} (revision {}, OURO_CONFORMANCE={})",
+                "{} (revision {}, UKAI_CONFORMANCE={})",
                 lane.as_str(),
                 log.revisions.first().map_or("unknown", String::as_str),
                 log.conformance.first().map_or("unset", String::as_str)
@@ -864,9 +864,9 @@ fn normalise(name: &str) -> String {
 pub const SKIP_MARKER: &str = "skipped:";
 
 /// The markers the conformance suite prints before any test runs.
-pub const MARKER_PATH: &str = "ouro-suite-path=";
-pub const MARKER_REVISION: &str = "ouro-suite-revision=";
-pub const MARKER_CONFORMANCE: &str = "ouro-suite-conformance=";
+pub const MARKER_PATH: &str = "ukai-suite-path=";
+pub const MARKER_REVISION: &str = "ukai-suite-revision=";
+pub const MARKER_CONFORMANCE: &str = "ukai-suite-conformance=";
 
 /// Parse a `cargo test` log (see the module doc and the format document).
 ///
@@ -2052,7 +2052,7 @@ pub struct Acceptance {
 }
 
 /// Where the release coordinates live, relative to the repository root.
-pub const RELEASE_PATH: &str = "crates/ouro-jail/dist/release.json";
+pub const RELEASE_PATH: &str = "crates/ukai-jail/dist/release.json";
 
 /// The Linux developer release's publication scope, from [`RELEASE_PATH`]:
 /// its name and the clauses it reports unsupported instead of failing.
@@ -2680,7 +2680,7 @@ pub fn resolve_bare_test_ids(add: &mut Additions, root: &std::path::Path) -> Res
 
 /// The comment the map file starts with.
 pub const MAP_HEADER: &str = "\
-# Acceptance map for jail-v1 §15 and jail-v2 §11 (J5, `ouro.jail.acceptance-map/1`).
+# Acceptance map for jail-v1 §15 and jail-v2 §11 (J5, `ukai.jail.acceptance-map/1`).
 #
 # Every acceptance row — jail-v1 §15 and jail-v2 §11's K rows — split into
 # the separately testable claims it makes, with the tests (or driver checks)
@@ -2945,8 +2945,19 @@ mod tests {
     }
 
     /// The J4 evidence run (`8baec7d6`, 1299 passed, 0 failed, 13 ignored).
-    const J4_LOG: &str =
+    const J4_LOG_RECORDED: &str =
         include_str!("../../../docs/specs/jail-v1/evidence/j4-test-log-2026-09-23-ouro-ci.txt");
+
+    /// A log recorded before Ouroboros was renamed Ukai (2026-10-15), with
+    /// its crate names and paths (`ouro-jail`, `ouro_jail`, `crates/ouro-…`)
+    /// read as the renamed crates the map and the tree now name.
+    fn renamed(log: &str) -> String {
+        log.replace("ouro-", "ukai-").replace("ouro_", "ukai_")
+    }
+
+    fn j4_log() -> String {
+        renamed(J4_LOG_RECORDED)
+    }
     /// The checked-in map and spec at this revision.
     const MAP: &str = include_str!("../../../docs/specs/jail-v1/acceptance-map.toml");
     const SPEC: &str = include_str!("../../../docs/specs/jail-v1.md");
@@ -2964,10 +2975,10 @@ mod tests {
         ));
         assert_eq!(
             log.skips,
-            ["ouro-jail/tests/conformance_j1.rs::x01_literal_argv: skipped: bubblewrap is absent"]
+            ["ukai-jail/tests/conformance_j1.rs::x01_literal_argv: skipped: bubblewrap is absent"]
         );
         assert_eq!(
-            log.results["ouro-jail/tests/conformance_j1.rs::x01_literal_argv"],
+            log.results["ukai-jail/tests/conformance_j1.rs::x01_literal_argv"],
             [Outcome::Ok]
         );
         assert!(log.anomalies.is_empty(), "{:?}", log.anomalies);
@@ -2986,7 +2997,7 @@ mod tests {
         assert!(
             log.anomalies
                 .iter()
-                .any(|a| a.binary.as_deref() == Some("ouro-jail/src/lib.rs")
+                .any(|a| a.binary.as_deref() == Some("ukai-jail/src/lib.rs")
                     && a.text.contains("does not read as libtest's counts")
                     && a.text.contains("one passed")),
             "{:?}",
@@ -3095,7 +3106,7 @@ mod tests {
 
     /// The checked-in release coordinates' scope.
     fn release_scope() -> ReleaseScope {
-        ReleaseScope::parse(include_str!("../../ouro-jail/dist/release.json")).unwrap()
+        ReleaseScope::parse(include_str!("../../ukai-jail/dist/release.json")).unwrap()
     }
 
     fn linux(log: &str) -> BTreeMap<Lane, TestLog> {
@@ -3121,7 +3132,7 @@ mod tests {
 ";
 
     const MINI_MAP: &str = r#"
-schema = "ouro.jail.acceptance-map/1"
+schema = "ukai.jail.acceptance-map/1"
 
 [[gate]]
 id = "X01"
@@ -3137,7 +3148,7 @@ id = "X01.1"
 gate = "X01"
 clause = "spaces reach the fixture"
 tag = "live-cli"
-tests = ["ouro-jail/tests/conformance_j1.rs::x01_literal_argv"]
+tests = ["ukai-jail/tests/conformance_j1.rs::x01_literal_argv"]
 
 [[clause]]
 id = "A01.1"
@@ -3146,12 +3157,12 @@ clause = "a real agent run"
 tag = "credential"
 
 [[ignored]]
-test = "ouro-jail/tests/conformance_j2.rs::startup_supervisor_helper"
+test = "ukai-jail/tests/conformance_j2.rs::startup_supervisor_helper"
 reason = "helper"
 "#;
 
     const MINI_LOG: &str = "\
-     Running unittests src/lib.rs (target/release/deps/ouro_jail-1d54b8c75e2e48d1)
+     Running unittests src/lib.rs (target/release/deps/ukai_jail-1d54b8c75e2e48d1)
 
 running 1 test
 test records::tests::a ... ok
@@ -3191,14 +3202,14 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
     #[test]
     fn the_log_parser_names_tests_by_crate_source_and_libtest_name() {
-        let log = parse_log(J4_LOG);
+        let log = parse_log(&j4_log());
         for id in [
-            "ouro-jail/tests/conformance_j1.rs::x01_literal_argv",
-            "ouro-jail/src/lib.rs::platform::linux::seccomp::tests::architecture_is_checked_before_any_syscall_number",
-            "ouro-fixture/src/lib.rs::harness::tests::a_skip_is_a_failure_in_conformance_mode_and_a_note_otherwise",
-            "ouro-fixture/tests/harness_gate.rs::a_run_that_fails_to_start_is_an_error_not_a_pass",
+            "ukai-jail/tests/conformance_j1.rs::x01_literal_argv",
+            "ukai-jail/src/lib.rs::platform::linux::seccomp::tests::architecture_is_checked_before_any_syscall_number",
+            "ukai-fixture/src/lib.rs::harness::tests::a_skip_is_a_failure_in_conformance_mode_and_a_note_otherwise",
+            "ukai-fixture/tests/harness_gate.rs::a_run_that_fails_to_start_is_an_error_not_a_pass",
             "xtask/src/main.rs::conformance::tests::a_clean_run_passes_and_the_remote_directory_is_removed",
-            "ouro-jail/doc::crates/ouro-jail/src/platform/linux/tracer/mod.rs - platform::linux::tracer - compile",
+            "ukai-jail/doc::crates/ukai-jail/src/platform/linux/tracer/mod.rs - platform::linux::tracer - compile",
         ] {
             assert_eq!(
                 log.results.get(id).map(Vec::as_slice),
@@ -3208,13 +3219,13 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
         }
         // The fixture crate's integration tests are not the jail's.
         assert!(!log.results.contains_key(
-            "ouro-jail/tests/harness_gate.rs::a_run_that_fails_to_start_is_an_error_not_a_pass"
+            "ukai-jail/tests/harness_gate.rs::a_run_that_fails_to_start_is_an_error_not_a_pass"
         ));
     }
 
     #[test]
     fn the_j4_log_attributes_every_result_libtest_counted() {
-        let log = parse_log(J4_LOG);
+        let log = parse_log(&j4_log());
         let results: usize = log.results.values().map(Vec::len).sum();
         assert_eq!(results, 1299 + 13, "passed plus ignored in the J4 run");
         assert_eq!(log.failed_binaries, 0);
@@ -3228,12 +3239,12 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
     fn a_result_printed_after_interleaved_output_belongs_to_the_pending_test() {
         // conformance_j2's l02 test runs a subprocess helper that prints its
         // own `running 1 test` lines before libtest prints `ok`.
-        let log = parse_log(J4_LOG);
+        let log = parse_log(&j4_log());
         for id in [
-            "ouro-jail/tests/conformance_j2.rs::l02_startup_parent_death_window_is_closed",
-            "ouro-jail/tests/conformance_j3_none.rs::an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared",
-            "ouro-jail/tests/observer_regression_linux.rs::r29_a_dead_supervisor_kills_its_traced_tree",
-            "ouro-jail/tests/portable_state.rs::the_lease_is_exclusive_across_processes",
+            "ukai-jail/tests/conformance_j2.rs::l02_startup_parent_death_window_is_closed",
+            "ukai-jail/tests/conformance_j3_none.rs::an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared",
+            "ukai-jail/tests/observer_regression_linux.rs::r29_a_dead_supervisor_kills_its_traced_tree",
+            "ukai-jail/tests/portable_state.rs::the_lease_is_exclusive_across_processes",
         ] {
             assert_eq!(
                 log.results.get(id).map(Vec::as_slice),
@@ -3245,11 +3256,11 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
     #[test]
     fn the_j4_ignored_set_is_the_thirteen_the_j4_report_counts() {
-        let ignored = parse_log(J4_LOG).ignored();
+        let ignored = parse_log(&j4_log()).ignored();
         assert_eq!(ignored.len(), 13, "{ignored:#?}");
-        assert!(ignored.contains("ouro-jail/tests/conformance_j2.rs::startup_supervisor_helper"));
+        assert!(ignored.contains("ukai-jail/tests/conformance_j2.rs::startup_supervisor_helper"));
         assert!(ignored.contains(
-            "ouro-fixture/doc::crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail"
+            "ukai-fixture/doc::crates/ukai-fixture/src/harness/mod.rs - harness::skip_or_fail"
         ));
     }
 
@@ -3324,21 +3335,21 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
     #[test]
     fn test_ids_are_crate_source_and_name() {
         for good in [
-            "ouro-jail/tests/conformance_j1.rs::x01_literal_argv",
-            "ouro-jail/src/lib.rs::platform::linux::seccomp::tests::x",
+            "ukai-jail/tests/conformance_j1.rs::x01_literal_argv",
+            "ukai-jail/src/lib.rs::platform::linux::seccomp::tests::x",
             "xtask/src/main.rs::gates::tests::x",
-            "ouro-fixture/src/bin/stand-in-jail.rs::x",
-            "ouro-jail/doc::crates/ouro-jail/src/a.rs - a - compile",
+            "ukai-fixture/src/bin/stand-in-jail.rs::x",
+            "ukai-jail/doc::crates/ukai-jail/src/a.rs - a - compile",
         ] {
             assert!(is_test_id(good), "{good}");
         }
         for bad in [
             "conformance_j1.rs::x01_literal_argv",
-            "ouro-jail/tests/conformance_j1.rs",
-            "ouro-jail/tests/conformance_j1::x",
-            "ouro-jail/src/other.rs::x",
-            "ouro-jail/tests/a.rs::",
-            "ouro-jail/tests/a.rs::has space",
+            "ukai-jail/tests/conformance_j1.rs",
+            "ukai-jail/tests/conformance_j1::x",
+            "ukai-jail/src/other.rs::x",
+            "ukai-jail/tests/a.rs::",
+            "ukai-jail/tests/a.rs::has space",
             "/tests/a.rs::x",
         ] {
             assert!(!is_test_id(bad), "{bad}");
@@ -3348,7 +3359,7 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
     #[test]
     fn a_malformed_map_is_refused_with_every_problem() {
         let bad = r#"
-schema = "ouro.jail.acceptance-map/0"
+schema = "ukai.jail.acceptance-map/0"
 
 [[gate]]
 id = "X01"
@@ -3365,37 +3376,37 @@ id = "X01.1"
 gate = "Q99"
 clause = "c"
 tag = "untested"
-tests = ["ouro-jail/tests/a.rs::t"]
+tests = ["ukai-jail/tests/a.rs::t"]
 
 [[clause]]
 id = "X01.3"
 gate = "X01"
 clause = "c"
 tag = "live-cli"
-tests = ["not-an-id", "ouro-jail/tests/a.rs::helper"]
+tests = ["not-an-id", "ukai-jail/tests/a.rs::helper"]
 checks = ["no_such_check"]
 
 [[ignored]]
-test = "ouro-jail/tests/a.rs::helper"
+test = "ukai-jail/tests/a.rs::helper"
 reason = ""
 "#;
         let err = Map::parse(bad).unwrap_err();
         for needle in [
-            "ouro.jail.acceptance-map/0",
+            "ukai.jail.acceptance-map/0",
             "X01.1 is recorded-limit without a `limit`",
             "clause id X01.1 is used twice",
             "gate Q99, which has no [[gate]]",
             "X01.1 is untested but lists evidence",
             "`not-an-id` is not a test id",
             "`no_such_check` is not a driver check",
-            "`ouro-jail/tests/a.rs::helper` is pinned as ignored and mapped as evidence",
-            "the ignored test `ouro-jail/tests/a.rs::helper` has no reason",
+            "`ukai-jail/tests/a.rs::helper` is pinned as ignored and mapped as evidence",
+            "the ignored test `ukai-jail/tests/a.rs::helper` has no reason",
         ] {
             assert!(err.contains(needle), "missing `{needle}` in:\n{err}");
         }
         assert!(Map::parse("schema = [").is_err());
         assert!(
-            Map::parse("schema = \"ouro.jail.acceptance-map/1\"\nsurprise = 1\n").is_err(),
+            Map::parse("schema = \"ukai.jail.acceptance-map/1\"\nsurprise = 1\n").is_err(),
             "unknown keys are refused, not ignored"
         );
     }
@@ -3475,7 +3486,7 @@ reason = ""
     #[test]
     fn a_mapped_test_that_is_absent_failed_or_ignored_fails_its_gate() {
         let (map, rows) = mini();
-        let test = "ouro-jail/tests/conformance_j1.rs::x01_literal_argv".to_owned();
+        let test = "ukai-jail/tests/conformance_j1.rs::x01_literal_argv".to_owned();
         for (log, why) in [
             (
                 MINI_LOG.replace("test x01_literal_argv ... ok\n", ""),
@@ -3524,7 +3535,7 @@ reason = ""
     #[test]
     fn a_clause_with_no_evidence_fails_unless_it_is_a_recorded_limit() {
         let untested = MINI_MAP.replace(
-            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"live-cli\"\ntests = [\"ukai-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
             "tag = \"untested\"",
         );
         let (_, rows) = mini();
@@ -3543,7 +3554,7 @@ reason = ""
         );
 
         let limit = MINI_MAP.replace(
-            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"live-cli\"\ntests = [\"ukai-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
             &format!(
                 "tag = \"recorded-limit\"\nlimit = {}",
                 toml_string(GOOD_LIMIT)
@@ -3564,7 +3575,7 @@ reason = ""
         // An untested clause is untested in every lane: tagging it macos must
         // not turn it into "evaluated elsewhere" in the Linux verdict.
         let text = MINI_MAP.replace(
-            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"live-cli\"\ntests = [\"ukai-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
             "tag = \"untested\"\nlane = \"macos\"",
         );
         let (_, rows) = mini();
@@ -3603,7 +3614,7 @@ reason = ""
         assert!(
             v.problems
                 .iter()
-                .any(|p| p.contains("ouro-jail/src/lib.rs::records::tests::a")
+                .any(|p| p.contains("ukai-jail/src/lib.rs::records::tests::a")
                     && p.contains("not pinned")),
             "{:#?}",
             v.problems
@@ -3710,7 +3721,7 @@ reason = ""
     #[test]
     fn merging_tests_into_an_untested_clause_takes_the_contributors_tag() {
         let untested = MINI_MAP.replace(
-            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"live-cli\"\ntests = [\"ukai-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
             "tag = \"untested\"",
         );
         let mut map = Map::parse(&untested).unwrap();
@@ -3718,7 +3729,7 @@ reason = ""
             &mut map,
             &additions(
                 "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\n\
-                 tests = [\"ouro-jail/tests/j5_process_linux.rs::x01_new\"]\nnote = \"B1 adds it\"\n",
+                 tests = [\"ukai-jail/tests/j5_process_linux.rs::x01_new\"]\nnote = \"B1 adds it\"\n",
             ),
             "B1",
         )
@@ -3727,7 +3738,7 @@ reason = ""
         assert_eq!(c.tag, Tag::LiveCli);
         assert_eq!(
             c.tests,
-            vec!["ouro-jail/tests/j5_process_linux.rs::x01_new"]
+            vec!["ukai-jail/tests/j5_process_linux.rs::x01_new"]
         );
         assert!(c.note.as_deref().unwrap().contains("B1 adds it"));
         assert!(
@@ -3745,7 +3756,7 @@ reason = ""
             &mut map,
             &additions(
                 "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"portable\"\n\
-                 tests = [\"ouro-jail/tests/portable_gate.rs::x01_parser\"]\n",
+                 tests = [\"ukai-jail/tests/portable_gate.rs::x01_parser\"]\n",
             ),
             "C",
         )
@@ -3758,7 +3769,7 @@ reason = ""
         assert_eq!(map.clause[0].tests.len(), 2);
 
         let limited = MINI_MAP.replace(
-            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"live-cli\"\ntests = [\"ukai-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
             &format!(
                 "tag = \"recorded-limit\"\nlimit = {}",
                 toml_string(GOOD_LIMIT)
@@ -3770,7 +3781,7 @@ reason = ""
             &additions(
                 "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\n\
                  resolves_limit = true\n\
-                 tests = [\"ouro-jail/tests/j5_boundary_linux.rs::x01_live\"]\n",
+                 tests = [\"ukai-jail/tests/j5_boundary_linux.rs::x01_live\"]\n",
             ),
             "B2",
         )
@@ -3789,7 +3800,7 @@ reason = ""
             &mut map,
             &additions(
                 "[[clause]]\nid = \"X01.new\"\ngate = \"X01\"\nclause = \"tabs too\"\n\
-                 tag = \"live-cli\"\ntests = [\"ouro-jail/tests/j5_process_linux.rs::x01_tabs\"]\n",
+                 tag = \"live-cli\"\ntests = [\"ukai-jail/tests/j5_process_linux.rs::x01_tabs\"]\n",
             ),
             "B1",
         )
@@ -3826,7 +3837,7 @@ reason = ""
             ),
             (
                 "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\n\
-                 tests = [\"ouro-jail/tests/conformance_j2.rs::startup_supervisor_helper\"]\n",
+                 tests = [\"ukai-jail/tests/conformance_j2.rs::startup_supervisor_helper\"]\n",
                 "pinned as ignored",
             ),
         ] {
@@ -3843,9 +3854,9 @@ reason = ""
             &mut map,
             &additions(
                 "[[clause]]\ngate = \"X01\"\nclause = \"spaces reach the fixture\"\ntag = \"live-cli\"\n\
-                 tests = [\"ouro-jail/tests/j5_process_linux.rs::x01_more\"]\n\
+                 tests = [\"ukai-jail/tests/j5_process_linux.rs::x01_more\"]\n\
                  [[clause]]\ngate = \"X01\"\nclause = \"tabs reach the fixture\"\ntag = \"live-cli\"\n\
-                 tests = [\"ouro-jail/tests/j5_process_linux.rs::x01_tabs\"]\n",
+                 tests = [\"ukai-jail/tests/j5_process_linux.rs::x01_tabs\"]\n",
             ),
             "B1",
         )
@@ -3867,14 +3878,14 @@ reason = ""
         assert_eq!(
             add.clause[0].tests,
             vec![
-                "ouro-jail/tests/conformance_j1.rs::x01_literal_argv",
-                "ouro-fixture/tests/harness_gate.rs::a_run_that_fails_to_start_is_an_error_not_a_pass",
+                "ukai-jail/tests/conformance_j1.rs::x01_literal_argv",
+                "ukai-fixture/tests/harness_gate.rs::a_run_that_fails_to_start_is_an_error_not_a_pass",
                 "xtask/src/main.rs::gates::tests::x",
             ]
         );
         assert_eq!(
             add.ignored[0].test,
-            "ouro-jail/tests/portable_state.rs::lock_probe_child_helper"
+            "ukai-jail/tests/portable_state.rs::lock_probe_child_helper"
         );
         let mut missing = additions(
             "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\ntests = [\"no_such_file.rs::t\"]\n",
@@ -3890,8 +3901,8 @@ reason = ""
     fn merged_ignored_pins_are_added_once() {
         let (mut map, _) = mini();
         let add = additions(
-            "[[ignored]]\ntest = \"ouro-jail/tests/j5_process_linux.rs::helper\"\nreason = \"a helper\"\n\
-             [[ignored]]\ntest = \"ouro-jail/tests/conformance_j2.rs::startup_supervisor_helper\"\nreason = \"helper\"\n",
+            "[[ignored]]\ntest = \"ukai-jail/tests/j5_process_linux.rs::helper\"\nreason = \"a helper\"\n\
+             [[ignored]]\ntest = \"ukai-jail/tests/conformance_j2.rs::startup_supervisor_helper\"\nreason = \"helper\"\n",
         );
         merge(&mut map, &add, "B1").unwrap();
         assert_eq!(map.ignored.len(), 2, "{:#?}", map.ignored);
@@ -3926,7 +3937,7 @@ reason = ""
 ## 16. Next
 ";
     const REVIEW_MAP: &str = r#"
-schema = "ouro.jail.acceptance-map/1"
+schema = "ukai.jail.acceptance-map/1"
 
 [[gate]]
 id = "X01"
@@ -3946,7 +3957,7 @@ id = "X01.1"
 gate = "X01"
 clause = "spaces reach the fixture"
 tag = "live-cli"
-tests = ["ouro-jail/tests/conformance_j1.rs::x01_literal_argv"]
+tests = ["ukai-jail/tests/conformance_j1.rs::x01_literal_argv"]
 
 [[clause]]
 id = "I01.3"
@@ -3962,7 +3973,7 @@ clause = "a real agent run"
 tag = "credential"
 
 [[ignored]]
-test = "ouro-fixture/doc::crates/ouro-fixture/src/harness/mod.rs - harness::skip_or_fail"
+test = "ukai-fixture/doc::crates/ukai-fixture/src/harness/mod.rs - harness::skip_or_fail"
 reason = "an `ignore` doc example"
 "#;
 
@@ -4002,7 +4013,7 @@ reason = "an `ignore` doc example"
         assert!(
             v.problems
                 .iter()
-                .any(|p| p.contains("ouro-jail/tests/conformance_j1.rs")),
+                .any(|p| p.contains("ukai-jail/tests/conformance_j1.rs")),
             "an anomaly that names no test is a failure, not a warning: {v:#?}"
         );
         assert!(
@@ -4040,7 +4051,7 @@ reason = "an `ignore` doc example"
         let log = parse_log(&text);
         assert!(
             log.results
-                .contains_key("ouro-jail/tests/conformance_j1.rs::x01_literal_argv"),
+                .contains_key("ukai-jail/tests/conformance_j1.rs::x01_literal_argv"),
             "{:#?}",
             log.results
         );
@@ -4131,7 +4142,7 @@ reason = "an `ignore` doc example"
 
     fn bound(log: &str, revision: &str, conformance: &str) -> String {
         format!(
-            "ouro-suite-path=/usr/bin\nouro-suite-revision={revision}\nouro-suite-conformance={conformance}\n{log}"
+            "ukai-suite-path=/usr/bin\nukai-suite-revision={revision}\nukai-suite-conformance={conformance}\n{log}"
         )
     }
 
@@ -4173,11 +4184,11 @@ reason = "an `ignore` doc example"
             ),
             (
                 lanes(&bound(MINI_LOG, REV, "1"), &bound(MINI_LOG, REV, "")),
-                "OURO_CONFORMANCE",
+                "UKAI_CONFORMANCE",
             ),
             (
                 lanes(MINI_LOG, &bound(MINI_LOG, REV, "1")),
-                "no ouro-suite-revision",
+                "no ukai-suite-revision",
             ),
             (
                 lanes(
@@ -4210,7 +4221,7 @@ reason = "an `ignore` doc example"
             ("I01.1", "I01", "plain_session_smoke"),
         ] {
             let text = format!(
-                "schema = \"ouro.jail.acceptance-map/1\"\n\
+                "schema = \"ukai.jail.acceptance-map/1\"\n\
                  [[gate]]\nid = \"{gate_id}\"\nrow = \"r\"\n\
                  [[clause]]\nid = \"{id}\"\ngate = \"{gate_id}\"\nclause = \"c\"\ntag = \"live-cli\"\nchecks = [\"{check}\"]\n"
             );
@@ -4220,7 +4231,7 @@ reason = "an `ignore` doc example"
                 "{id} {check}: {err}"
             );
         }
-        let text = "schema = \"ouro.jail.acceptance-map/1\"\n\
+        let text = "schema = \"ukai.jail.acceptance-map/1\"\n\
                     [[gate]]\nid = \"I01\"\nrow = \"r\"\n\
                     [[clause]]\nid = \"I01.3\"\ngate = \"I01\"\nclause = \"c\"\ntag = \"live-cli\"\nchecks = [\"suite_clean\"]\n";
         assert!(Map::parse(text).is_ok());
@@ -4232,7 +4243,7 @@ reason = "an `ignore` doc example"
 
     fn with_limit(limit: &str) -> Map {
         let text = MINI_MAP.replace(
-            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"live-cli\"\ntests = [\"ukai-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
             &format!("tag = \"recorded-limit\"\nlimit = {}", toml_string(limit)),
         );
         Map::parse(&text).unwrap_or_else(|e| panic!("{limit}: {e}"))
@@ -4246,7 +4257,7 @@ reason = "an `ignore` doc example"
         assert!(with_limit(GOOD_LIMIT).problems_at(&repo_root()).is_empty());
         // The review's G3: a made-up record.
         let text = MINI_MAP.replace(
-            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"live-cli\"\ntests = [\"ukai-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
             "tag = \"recorded-limit\"\nlimit = \"see nowhere.md, section 99\"",
         );
         let err = Map::parse(&text).unwrap_err();
@@ -4284,7 +4295,7 @@ reason = "an `ignore` doc example"
             ),
         ] {
             let text = MINI_MAP.replace(
-                "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+                "tag = \"live-cli\"\ntests = [\"ukai-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
                 &format!("tag = \"recorded-limit\"\nlimit = {}", toml_string(limit)),
             );
             let err = Map::parse(&text).unwrap_err();
@@ -4317,7 +4328,7 @@ reason = "an `ignore` doc example"
     #[test]
     fn a_merge_cannot_raise_a_tag_or_leave_a_limit_without_a_new_test() {
         let untested = MINI_MAP.replace(
-            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"live-cli\"\ntests = [\"ukai-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
             "tag = \"untested\"",
         );
         let mut map = Map::parse(&untested).unwrap();
@@ -4335,7 +4346,7 @@ reason = "an `ignore` doc example"
             &mut map,
             &additions(
                 "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"portable\"\n\
-                 tests = [\"ouro-jail/tests/portable_gate.rs::x01_new\"]\n",
+                 tests = [\"ukai-jail/tests/portable_gate.rs::x01_new\"]\n",
             ),
             "G4",
         )
@@ -4352,7 +4363,7 @@ reason = "an `ignore` doc example"
             &mut map,
             &additions(
                 "[[clause]]\nid = \"X01.1\"\ngate = \"X01\"\ntag = \"live-cli\"\nresolves_limit = true\n\
-                 tests = [\"ouro-jail/tests/j5_boundary_linux.rs::x01_live\"]\n",
+                 tests = [\"ukai-jail/tests/j5_boundary_linux.rs::x01_live\"]\n",
             ),
             "G4",
         )
@@ -4364,7 +4375,7 @@ reason = "an `ignore` doc example"
     #[test]
     fn a_merge_that_cites_a_made_up_record_is_refused() {
         let untested = MINI_MAP.replace(
-            "tag = \"live-cli\"\ntests = [\"ouro-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
+            "tag = \"live-cli\"\ntests = [\"ukai-jail/tests/conformance_j1.rs::x01_literal_argv\"]",
             "tag = \"untested\"",
         );
         let mut map = Map::parse(&untested).unwrap();
@@ -4387,7 +4398,7 @@ reason = "an `ignore` doc example"
         let (mut map, _) = mini();
         let add = additions(
             "[[clause]]\nid = \"X01.new\"\ngate = \"X01\"\nclause = \"tabs too\"\ntag = \"live-cli\"\n\
-             tests = [\"ouro-jail/tests/conformance_j1.rs::x01_tabs\"]\n",
+             tests = [\"ukai-jail/tests/conformance_j1.rs::x01_tabs\"]\n",
         );
         merge(&mut map, &add, "B1").unwrap();
         merge(&mut map, &add, "B1").unwrap();
@@ -4676,8 +4687,8 @@ Unrelated prose.
     fn the_j4_log_under_the_checked_in_map_fails_only_what_it_could_not_prove() {
         let map = Map::parse(MAP).unwrap();
         let rows = combine_rows(spec_rows(SPEC).unwrap(), spec_v2_rows(SPEC_V2).unwrap()).unwrap();
-        let log = parse_log(J4_LOG);
-        let v = evaluate(&map, &rows, &linux(J4_LOG), &no_checks());
+        let log = parse_log(&j4_log());
+        let v = evaluate(&map, &rows, &linux(&j4_log()), &no_checks());
         assert_only_expected_reasons(&v, &log);
         assert_eq!(
             gate(&v, "I01").status,
@@ -4692,19 +4703,23 @@ Unrelated prose.
     /// The full run at the J5 base, `1328c381` (run
     /// 20260924T194045Z-1328c38108fa on the reference host: 1345 passed,
     /// 0 failed, 13 ignored).
-    const BASE_LOG: &str = include_str!(
+    const BASE_LOG_RECORDED: &str = include_str!(
         "../../../docs/specs/jail-v1/evidence/j5-base-test-log-2026-09-24-ouro-ci.txt"
     );
 
+    fn base_log() -> String {
+        renamed(BASE_LOG_RECORDED)
+    }
+
     #[test]
     fn the_base_run_attributes_every_result_and_fails_only_what_it_could_not_prove() {
-        let log = parse_log(BASE_LOG);
+        let log = parse_log(&base_log());
         let results: usize = log.results.values().map(Vec::len).sum();
         assert_eq!(results, 1345 + 13);
         assert!(log.clean());
         let map = Map::parse(MAP).unwrap();
         let rows = combine_rows(spec_rows(SPEC).unwrap(), spec_v2_rows(SPEC_V2).unwrap()).unwrap();
-        let v = evaluate(&map, &rows, &linux(BASE_LOG), &no_checks());
+        let v = evaluate(&map, &rows, &linux(&base_log()), &no_checks());
         assert_only_expected_reasons(&v, &log);
         // Given the driver checks it did not have, the base still fails
         // every clause that is untested: the verdict never passes a gate on
@@ -4713,7 +4728,7 @@ Unrelated prose.
             .into_iter()
             .map(|c| (c, true))
             .collect::<BTreeMap<_, _>>();
-        let v = evaluate(&map, &rows, &linux(BASE_LOG), &all);
+        let v = evaluate(&map, &rows, &linux(&base_log()), &all);
         for c in map.clause.iter().filter(|c| c.tag == Tag::Untested) {
             let g = gate(&v, &c.gate);
             assert_eq!(g.status, GateStatus::Fail, "{} is untested", c.id);
@@ -4822,17 +4837,17 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let tree = SourceTree::worktree(&root).unwrap();
         for (target, dir) in [
-            ("ouro-jail", "crates/ouro-jail"),
-            ("ouro-fixture", "crates/ouro-fixture"),
-            ("stand-in-jail", "crates/ouro-fixture"),
-            ("ouro-ledger", "crates/ouro-ledger"),
-            ("ouro-records", "crates/ouro-records"),
-            ("ouro", "crates/ouro"),
+            ("ukai-jail", "crates/ukai-jail"),
+            ("ukai-fixture", "crates/ukai-fixture"),
+            ("stand-in-jail", "crates/ukai-fixture"),
+            ("ukai-ledger", "crates/ukai-ledger"),
+            ("ukai-records", "crates/ukai-records"),
+            ("ukai", "crates/ukai"),
             ("xtask", "crates/xtask"),
         ] {
             assert_eq!(tree.packages.get(target).map(String::as_str), Some(dir));
         }
-        assert!(tree.has_file("crates/ouro-fixture/src/bin/stand-in-jail.rs"));
+        assert!(tree.has_file("crates/ukai-fixture/src/bin/stand-in-jail.rs"));
     }
 
     /// `--revision` holds the logs against that commit's tree: a test file

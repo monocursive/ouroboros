@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-request:1",
+  "$id": "urn:ukai:schema:ledger-request:1",
   "title": "Ledger immutable request plan, first execution slice",
   "type": "object",
   "properties": {
@@ -8,7 +8,7 @@
       "const": "systemd_user_service"
     },
     "schema": {
-      "const": "ouro.ledger.request/1"
+      "const": "ukai.ledger.request/1"
     },
     "profile": {
       "type": "string",

@@ -1,9 +1,9 @@
 {
-  "schema": "ouro.ledger.export/1",
+  "schema": "ukai.ledger.export/1",
   "run_id": "run_11111111111111111111111111111111",
   "snapshot": {
     "head_seq": 7,
-    "head_digest": "sha256:a18a27f12601e2a6276294d3cbf3905c911589d7544246af85cf813908c08e30"
+    "head_digest": "sha256:b037e9b266f56629115919fb4c74cf601ae1bc9c16fdb7e8ccafae9b2260c22e"
   },
   "state": "settled",
   "child_protection": "enforced",

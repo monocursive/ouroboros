@@ -25,7 +25,7 @@ def contracts(root):
         result[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     if not result:
         raise ValueError("no ledger contracts found")
-    return {"schema": "ouro.ledger.contract-freeze/1", "milestone": 2, "sha256": result}
+    return {"schema": "ukai.ledger.contract-freeze/1", "milestone": 2, "sha256": result}
 
 
 def check(root=ROOT):

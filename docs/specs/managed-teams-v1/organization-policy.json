@@ -1,5 +1,5 @@
 {
-  "schema": "ouro.managed.policy/1",
+  "schema": "ukai.managed.policy/1",
   "policy_id": "acme-engineering",
   "revision": 1,
   "scope": "organization",

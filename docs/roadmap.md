@@ -1,4 +1,4 @@
-# Where we're taking Ouroboros
+# Where we're taking Ukai
 
 The aim is straightforward: let developers use capable agents while keeping
 control of what those agents can reach. We're starting with a standalone
@@ -13,7 +13,7 @@ implementation. We haven't set release dates.
 
 ## Available in the source today
 
-The `ouro-jail` CLI runs commands on Linux x86_64 and aarch64 with file and network
+The `ukai-jail` CLI runs commands on Linux x86_64 and aarch64 with file and network
 policies, runtime limits, and a receipt for each attempt. It includes HTTP
 and SOCKS5 TCP proxying, optional HTTP(S) credential vaulting, event journals,
 `tail`, and permission proposals with `learn`.
@@ -31,20 +31,20 @@ bundle features natively, including the installed CLI commands.
 
 Fourteen starter launch profiles are embedded. OpenCode has recorded live
 runs, but a bundled profile is not a promise that every version of that agent
-works. The [compatibility records](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/agent-compatibility.md)
-name the tested combinations. Native macOS `ouro-jail` supports inspection
+works. The [compatibility records](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/agent-compatibility.md)
+name the tested combinations. Native macOS `ukai-jail` supports inspection
 commands and refuses execution.
 
-You can [build the jail and try a small command](https://github.com/monocursive/ouroboros/blob/dev/docs/guide.md#build-and-check-your-host)
-today. [Signed Linux developer-preview packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2)
+You can [build the jail and try a small command](https://github.com/monocursive/ukai/blob/dev/docs/guide.md#build-and-check-your-host)
+today. [Signed Linux developer-preview packages](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2)
 are also available; a Homebrew tap remains unconfigured.
 
-The separate [Ouro VM preview for Apple Silicon](https://ouroboros.monocursive.com/guide/#macos-vm-preview)
+The separate [Ukai VM preview for Apple Silicon](https://ukai.monocursive.com/guide/#macos-vm-preview)
 is now available as a signed, notarized DMG through the same Bash installer.
 It runs offline Linux ARM64 `tool` and `build` commands in a disposable VM on
 macOS 27+. Inputs are copied and outputs returned for review. Native Mac
 programs, online agents and host directory sharing are outside this preview.
-The [qualification record](https://github.com/monocursive/ouroboros/blob/dev/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
+The [qualification record](https://github.com/monocursive/ukai/blob/dev/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
 documents the 14 measured teardown cases and the remaining fault-model limits.
 
 ## Next: make the first run easier
@@ -68,7 +68,7 @@ prepares signed native x86_64 and ARM64 packages and passes full reference
 conformance; production signing and publication remain pending.
 
 The first signed developer preview is `ouro-jail-v0.1.0-rc.1` in
-`monocursive/ouroboros`, with Linux x86_64 and ARM64 packages and a dedicated
+`monocursive/ukai`, with Linux x86_64 and ARM64 packages and a dedicated
 release identity. The [guide](guide.md#install-the-developer-preview) provides
 the verified Bash installer and current host requirements. Wider host and agent
 compatibility remain ongoing work; a Homebrew tap is still unconfigured.
@@ -119,7 +119,7 @@ including children that have detached from their parent.
 
 The first Endpoint Security prototype cleans up while its custodian stays alive;
 killing that custodian left workloads running. A
-[reciprocal-custody prototype](https://github.com/monocursive/ouroboros/blob/dev/docs/benchmarks/jail/macos-reciprocal-custody.md) now
+[reciprocal-custody prototype](https://github.com/monocursive/ukai/blob/dev/docs/benchmarks/jail/macos-reciprocal-custody.md) now
 uses two independent clients. In 200 development VM trials, either one could
 fail and the surviving client cleaned up the known fixture. Killing both left
 every known fixture process running, and fail-closed exec authorization did
@@ -133,7 +133,7 @@ while this native lifetime question remains open with Apple.
 
 ## Available in source: durable records across runs
 
-The local `ouro-ledger` now reserves attempts, durably admits them
+The local `ukai-ledger` now reserves attempts, durably admits them
 before execution, ingests the jail's source events and records settlement.
 It includes inspection, local consistency verification, orphan reconciliation,
 bounded opt-in output capture, paginated evidence queries for one run, and
@@ -187,7 +187,7 @@ across rotation and writer restart without changing launch-owner authority.
 
 ## In progress: place trusted-operator batch jobs
 
-The Rust `ouro fleet` front door and separate Elixir coordinator now connect
+The Rust `ukai fleet` front door and separate Elixir coordinator now connect
 provisioned Linux workers, preserve request identities through retries, and route
 execution to the independent Rust launch owner. The
 [two-node validation](specs/fleet-v1/evidence/2026-10-07-two-node/README.md)
@@ -225,9 +225,9 @@ An agent preparing a report should collect those details for its user to
 review before posting anything.
 
 For the full acceptance criteria, see the
-[jail specification](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v2.md).
-The [north star](https://github.com/monocursive/ouroboros/blob/dev/north-star.md)
-and [managed-teams specification](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/managed-teams-v1.md)
-cover the later work. Ouroboros will continue to run other teams' agents;
+[jail specification](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v2.md).
+The [north star](https://github.com/monocursive/ukai/blob/dev/north-star.md)
+and [managed-teams specification](https://github.com/monocursive/ukai/blob/dev/docs/specs/managed-teams-v1.md)
+cover the later work. Ukai will continue to run other teams' agents;
 an agent loop, chat UI, vendor session protocol, and automatic merging or
 deployment are outside the current plan.

@@ -2,7 +2,7 @@
   "type": "object",
   "properties": {
     "runs": {
-      "$ref": "urn:ouro:schema:ledger-catalog-request:1#/$defs/filter"
+      "$ref": "urn:ukai:schema:ledger-catalog-request:1#/$defs/filter"
     },
     "filter": {
       "type": "object",
@@ -72,6 +72,6 @@
   ],
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-discovery-request:1",
+  "$id": "urn:ukai:schema:ledger-discovery-request:1",
   "title": "Filtered cross-run evidence request"
 }

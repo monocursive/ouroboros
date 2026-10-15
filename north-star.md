@@ -1,6 +1,11 @@
 # North star: three tools, September 2026
 
-Status: **specification, revision 22.** Written 2026-09-21, revised 2026-10-07. Revision 22
+Status: **specification, revision 23.** Written 2026-09-21, revised 2026-10-15. Revision 23
+renames the product from Ouroboros to Ukai: binaries and crates (`ukai-jail`, `ukai-ledger`, `ukai`), environment variables (`UKAI_*`), paths (`/run/ukai`, `~/.config/ukai`, `~/.local/share/ukai`, the protected `.ukai` segment) and record identifiers (`ukai.*`). Evidence recorded
+before the rename keeps the old names (`ouro-*`, `OURO_*`, `ouro.*`). The milestone-1
+freeze's tested run was recorded under those names and no longer validates against the
+renamed tree, so `cargo xtask freeze --check` fails until the next conformance run is
+recorded; no mechanism changes. Revision 22
 records ledger contract closeout and the first two-node fleet execution slice.
 Fleet membership provisioning and managed submission remain open. Revision 21
 adds NVIDIA's OpenShell to the §0 competitor list; no mechanism or milestone changes.
@@ -14,7 +19,7 @@ the jail require no host configuration (D9, §4.6). Revision 6 cut the
 product to a jail, a ledger, and a fleet around existing agents. Revision 7
 answered five review findings by specifying the mechanism that would close
 each hole. Revision 8 keeps the findings as named limits and stops there.
-Ouroboros ships no agent of its own. The first agents are Codex, Claude Code,
+Ukai ships no agent of its own. The first agents are Codex, Claude Code,
 and OpenCode. The jail owns audit observations. The ledger preserves its source
 events and records preparation, admission and settlement. Decisions settled with
 these revisions are dated in §2. The rest
@@ -76,10 +81,10 @@ or refutes it.
 
 ## 0. Why
 
-`core.md` §1 tried to say how an Ouroboros agent would differ from Claude Code,
+`core.md` §1 tried to say how an Ukai agent would differ from Claude Code,
 Codex, Cursor, and OpenCode. That agent is the thing this revision drops. Those
 products are the agents an operator already runs. Measured at `0d8d3cdf`, an
-Ouroboros-shaped agent is still the bulk of the tree:
+Ukai-shaped agent is still the bulk of the tree:
 
 | Plane | Lines | Serves |
 |---|---|---|
@@ -93,7 +98,7 @@ Ouroboros-shaped agent is still the bulk of the tree:
 | `provider/native/sandbox*` | 2,426 | the OS boundary |
 
 Codex, Claude Code, and OpenCode already ship the loop, the client, and the
-model. Ouroboros does not compete with them. It contains them, records them,
+model. Ukai does not compete with them. It contains them, records them,
 and places them on a machine the operator trusts. Removing the in-tree agent
 is a consequence of that. The criterion is §8.
 
@@ -111,15 +116,15 @@ and the integration in this spec pass the same gates.
 
 ## 1. The thesis
 
-**Ouroboros is not an agent.** It is tooling for people and companies running
+**Ukai is not an agent.** It is tooling for people and companies running
 Codex, Claude Code, OpenCode, and the same kind of agent after them. It does
 not call a model, does not keep a transcript, and does not decide the next
 tool call. Three tools wrap a process those agents already are:
 
 ```text
-ouro-jail    enforce a policy, report coverage, contain the tree     (one per attempt)
-ouro-ledger  admit, record, retain, and answer queries               (one daemon per node, one launch owner per attempt)
-ouro-fleet   place an agent on a trusted machine, sandbox optional   (one per node)
+ukai-jail    enforce a policy, report coverage, contain the tree     (one per attempt)
+ukai-ledger  admit, record, retain, and answer queries               (one daemon per node, one launch owner per attempt)
+ukai-fleet   place an agent on a trusted machine, sandbox optional   (one per node)
 child        codex, claude, opencode, or any other argv
 ```
 
@@ -145,9 +150,9 @@ Four rules govern every later question:
    boundary that cannot be applied refuses before exec. Missing observation is
    recorded as missing. An unreachable worker leaves the outcome unknown until
    reconciled.
-4. **A ledger-backed attempt has one launch owner, `ouro-ledger run`.** That owner
+4. **A ledger-backed attempt has one launch owner, `ukai-ledger run`.** That owner
    outlives the operator's session on a fleet node. Fleet liveness is not the
-   attempt's lifetime. Standalone `ouro-jail run` needs neither a ledger nor a fleet.
+   attempt's lifetime. Standalone `ukai-jail run` needs neither a ledger nor a fleet.
 
 **Enough.** Ship the product at the row "what ships." The remaining hole is
 accepted. A later review does not add a subsystem to close it; that is a new
@@ -161,7 +166,7 @@ proposal.
 | Vendor state | the managed directory is deleted after the tree is dead; `gc` retries leftovers | copies the agent made elsewhere, and leftover disk blocks, are out of scope |
 | Real agents | one recorded run of one agent before that profile is called supported, and before the cut | the other profiles stay experimental; milestones 1 and 2 do not wait on credentials |
 
-Out of the product, including as a reference implementation: an Ouroboros agent
+Out of the product, including as a reference implementation: an Ukai agent
 loop, a chat UI, prompt or context management, an MCP or ACP server, a plugin
 runtime. Another team's agent is the child. This tree does not grow a
 replacement for it.
@@ -202,7 +207,7 @@ who administers that same laptop. Company enforcement therefore depends on
 managed infrastructure and external services that protect company assets and
 credentials. Model processing permissions, data location and API actions are
 separate from a network allowlist; the company provisions those integrations.
-Ouroboros does not infer GDPR compliance from a sandbox or an EU worker.
+Ukai does not infer GDPR compliance from a sandbox or an EU worker.
 
 [Managed teams v1](docs/specs/managed-teams-v1.md) specifies the roles, policy
 intersection, admission, private input materialization, bounded artifact export,
@@ -214,28 +219,28 @@ remain outside the product. The single-worker pilot does not wait for fleet.
 
 | # | Decision | Recommendation | Accepted |
 |---|---|---|---|
-| D0 | What is the product | A jail, a ledger, and a fleet around existing agents. The first launch profiles are Codex, Claude Code, and OpenCode. Milestone 1 is the jail alone. Milestone 2 wraps it in the ledger. Milestone 3 places the agent through the fleet, with a jail policy or an explicit `none`. There is no Ouroboros agent beside them. | 2026-09-21 |
+| D0 | What is the product | A jail, a ledger, and a fleet around existing agents. The first launch profiles are Codex, Claude Code, and OpenCode. Milestone 1 is the jail alone. Milestone 2 wraps it in the ledger. Milestone 3 places the agent through the fleet, with a jail policy or an explicit `none`. There is no Ukai agent beside them. | 2026-09-21 |
 | D1 | The in-tree agent | Delete `provider/native/` (including its sandbox modules once the D8 implementation covers their contracts) and `interactive/` in the cut after milestone 3, once nothing in the three tools calls them. The cut also needs the one real-agent run in §7.4. Conformance tests use a scripted child. No reference agent remains. | 2026-09-21 |
 | D2 | Self-improvement | The archive is branch `legacy` at `f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82`, which holds `wasm/`, `upgrade/`, `self/`, capability tools, their Rust clients, bench and self-development assets, docs, skills and workflows in full, plus the tag `thesis-4-preserved` at that same commit. Both refs must exist on the remote before `dev` is replaced there (§9). No separate `thesis-4` branch is needed. Deletion of that code happens on the legacy line, in the cut after milestone 3, never from this tree. | 2026-09-21; restated 2026-09-22 |
 | D3 | Vendor boundary | Launch profiles are data: environment, credential files, allowed hosts, and a default jail. No adapter package and no vendor RPC. A dependency test asserts `jail/` and `ledger/` contain no vendor identifier outside the profile table and test fixtures. | 2026-09-21 |
 | D4 | Trust and credentials | One fleet is one trust domain; a connected node owns every other. Credentials are provisioned on each node by the operator or its approved issuer and no fleet verb moves them. The jail contains the child, not a peer. Managed developer clients are submitters, never fleet peers; only company-administered workers join that fleet. FLEET.md's first paragraph says both. | 2026-09-21 |
-| D5 | Ledger ownership | One canonical Rust ledger, one writer per stream (`ouro-ledger serve`). No dual-write and no merge-on-query. `audit/` and `agent/effect_ledger.ex` go in the cut, after the history export in §5.4. Independent witness custody is unscheduled. | 2026-09-21 |
-| D6 | Packaging | After milestone 3: three executables (`ouro`, `ouro-jail`, `ouro-ledger`), the pinned D8 dependencies, and a separately fetched BEAM runtime for nodes that run the fleet. `doctor` refuses a missing required component. Packaging is not a gate for milestone 1. The BEAM runtime is not embedded in the jail or the ledger. | 2026-09-21 |
-| D7 | Repository | One workspace, laid out as jail-v1 §4 specifies: Rust crates under `crates/` (one per process the north star names; `ouro-records` carved out of the jail only when the ledger becomes its second consumer; a test-only fixture crate; a BPF object crate outside the default members if J0 selects eBPF; `xtask` for repository tasks), the Elixir fleet as a sibling Mix project outside Cargo, contracts and measured evidence under `docs/specs/`, proposals under `docs/proposals/`, packaging under `packaging/` after milestone 3. Directories are created when their milestone starts; their names and split rules are fixed now. A tool moves to its own repository only after a later decision, once its CLI, contracts and tests stand alone. | 2026-09-21; layout 2026-09-22 |
-| D8 | Jail implementation | Before milestone 1 is declared green, evaluate pinned `srt`, Greywall and the existing in-tree sandbox against §4. Prefer reuse behind `ouro-jail`, with the smallest policy, admission and receipt integration that passes. The enforcement backend is not the audit sensor (§4.8). A backend that leaves no supervisor outside the child, or that hides descendant syscalls from a host probe, fails the evaluation. Implement or port a missing mechanism only when a named failing gate justifies it. Independent §4 fixtures are authoritative; differential runs against other candidates are supporting evidence, not an oracle and not a permanent shipping dependency. Recorded in [`backend-evaluation.md`](docs/specs/jail-v1/backend-evaluation.md) (jail-v1 revision 19): the native adapter over unprivileged bubblewrap 0.11.1, seccomp and cgroup v2 delegation, with the ptrace observer in the supervisor. On the stock reference host `srt` 0.0.77 cannot run `true` (its seccomp helper needs a nested user namespace the distribution's `unpriv_bwrap` profile denies), and Greywall 0.3.7 needs `socat` and a downloaded proxy, cannot create its TUN device, and its monitor reports nothing for a write it denied (no jail-owned observation, D10); the legacy sandbox needs BEAM. eBPF is withdrawn from v1: its capabilities are host configuration. | 2026-09-21; recorded 2026-09-25 |
+| D5 | Ledger ownership | One canonical Rust ledger, one writer per stream (`ukai-ledger serve`). No dual-write and no merge-on-query. `audit/` and `agent/effect_ledger.ex` go in the cut, after the history export in §5.4. Independent witness custody is unscheduled. | 2026-09-21 |
+| D6 | Packaging | After milestone 3: three executables (`ukai`, `ukai-jail`, `ukai-ledger`), the pinned D8 dependencies, and a separately fetched BEAM runtime for nodes that run the fleet. `doctor` refuses a missing required component. Packaging is not a gate for milestone 1. The BEAM runtime is not embedded in the jail or the ledger. | 2026-09-21 |
+| D7 | Repository | One workspace, laid out as jail-v1 §4 specifies: Rust crates under `crates/` (one per process the north star names; `ukai-records` carved out of the jail only when the ledger becomes its second consumer; a test-only fixture crate; a BPF object crate outside the default members if J0 selects eBPF; `xtask` for repository tasks), the Elixir fleet as a sibling Mix project outside Cargo, contracts and measured evidence under `docs/specs/`, proposals under `docs/proposals/`, packaging under `packaging/` after milestone 3. Directories are created when their milestone starts; their names and split rules are fixed now. A tool moves to its own repository only after a later decision, once its CLI, contracts and tests stand alone. | 2026-09-21; layout 2026-09-22 |
+| D8 | Jail implementation | Before milestone 1 is declared green, evaluate pinned `srt`, Greywall and the existing in-tree sandbox against §4. Prefer reuse behind `ukai-jail`, with the smallest policy, admission and receipt integration that passes. The enforcement backend is not the audit sensor (§4.8). A backend that leaves no supervisor outside the child, or that hides descendant syscalls from a host probe, fails the evaluation. Implement or port a missing mechanism only when a named failing gate justifies it. Independent §4 fixtures are authoritative; differential runs against other candidates are supporting evidence, not an oracle and not a permanent shipping dependency. Recorded in [`backend-evaluation.md`](docs/specs/jail-v1/backend-evaluation.md) (jail-v1 revision 19): the native adapter over unprivileged bubblewrap 0.11.1, seccomp and cgroup v2 delegation, with the ptrace observer in the supervisor. On the stock reference host `srt` 0.0.77 cannot run `true` (its seccomp helper needs a nested user namespace the distribution's `unpriv_bwrap` profile denies), and Greywall 0.3.7 needs `socat` and a downloaded proxy, cannot create its TUN device, and its monitor reports nothing for a write it denied (no jail-owned observation, D10); the legacy sandbox needs BEAM. eBPF is withdrawn from v1: its capabilities are host configuration. | 2026-09-21; recorded 2026-09-25 |
 | D9 | First lane | Linux (bubblewrap, seccomp, cgroup v2 where the host delegates one). Initial launch profiles for Codex, Claude Code, and OpenCode. A profile is experimental until its own §7.4 run. `--jail none` is a real run, still observed unless `--observe off`, and its evidence is unprotected. macOS execution, including Claude's Keychain credential, follows a separate platform implementation; shared contracts must accommodate it now. The jail requires no host configuration: every profile works on a stock install of a supported distribution, with no sysctl, AppArmor profile, file capability, setuid helper or systemd unit (2026-09-22, superseding that day's sysctl decision for the reference host, which stays stock). On Ubuntu 24.04+ that means one user-namespace layer, the one bubblewrap is allowed; nested user namespaces are an optional host capability that `doctor` measures and never a requirement. Optional accelerators may be offered only as opt-in remediations. `doctor` measures the sandbox, the cgroup, and the audit sensor, and never changes host policy. The initial conformance host is an operator-provisioned x86_64 virtual private server that runs its own Linux kernel under hardware virtualization, pinned to the release it runs: Ubuntu 26.04 LTS on the 7.0-series kernel, with the measured manifest recorded in jail-v1 §3.2. A container-based host that cannot create user namespaces, delegate a cgroup v2 subtree or attach the observer is ineligible, whatever the provider calls it. aarch64 is a later, separately conformed lane, not the reference host (jail-v1 §3.2). | 2026-09-21; host added 2026-09-22 |
 | D10 | Audit sensor | The jail supervisor is the only syscall sensor. It attaches before exec, outside the child, including when containment is `none`. The ledger is the store. The closed set and the `--observe` default are §4.8. Seccomp notification is not that sensor. | 2026-09-21 |
 | D11 | The five limits | `none` is labelled unprotected. Its tree kill is the supervisor's cgroup, and supervisor death is an unknown. Fleet I/O is batch with opt-in bounded capture. Vendor state is deleted after tree death. One real-agent run marks that profile supported. The accepted holes are the Enough table in §1. | 2026-09-21 |
 | D12 | Language and platform boundary | Rust owns the local CLI, jail and ledger; Elixir/OTP owns fleet coordination. Linux and macOS share policy semantics, lifecycle states, events and receipts. Containment, observation, process identity and tree termination have OS-specific implementations and measured capabilities. Linux mechanisms are not required fields in portable records. A missing required guarantee refuses; compilation on macOS is not execution support. | 2026-09-21 |
 | D13 | Managed teams | Company-controlled workers resolve organization/project/attempt policy, authenticate developers and enforce project access. Managed v1 requires contained execution, strict evidence, explicit limits and approved services. Rust owns the submission/composition path, private inputs and bounded artifacts; Elixir adds multi-worker placement. Existing company identity, model gateway and publishing systems remain external. The full contract and MT01–MT16 gates are in managed-teams-v1.md. | 2026-09-21 |
 
-## 3. `ouro`, the front door
+## 3. `ukai`, the front door
 
 | # | Functionality | Contract |
 |---|---|---|
-| O1 | Dispatch | `ouro jail …`, `ouro ledger …`, `ouro fleet …`, `ouro doctor`, `ouro version`; milestone 4 adds `ouro managed …`. `jail`, `ledger`, and the managed client/single-worker composition execute in Rust without BEAM. `fleet` execs the release launcher. Every inspection and control verb takes `--json`. |
+| O1 | Dispatch | `ukai jail …`, `ukai ledger …`, `ukai fleet …`, `ukai doctor`, `ukai version`; milestone 4 adds `ukai managed …`. `jail`, `ledger`, and the managed client/single-worker composition execute in Rust without BEAM. `fleet` execs the release launcher. Every inspection and control verb takes `--json`. |
 | O2 | Doctor | Sections for the tools that are installed: jail capabilities (§4.9), ledger daemon and store health, fleet membership and readiness (§6.2 F5). Each section is the same output as the tool's own `doctor`. Presence of a binary, a directory, or a peer is not readiness. |
-| O3 | Configuration | `~/.config/ouro/config.toml` with `[jail]`, `[ledger]`, `[fleet]`, overridable by `OURO_*`. A project `ouro.toml` at the workspace root may only narrow the operator's jail policy. Any widening key, any credential path, any extra allow-host, and `none` are refused with the key's path. The resolved policy is snapshotted and digested outside the workspace before launch. An edit by the child does not change an active attempt. |
+| O3 | Configuration | `~/.config/ukai/config.toml` with `[jail]`, `[ledger]`, `[fleet]`, overridable by `UKAI_*`. A project `ukai.toml` at the workspace root may only narrow the operator's jail policy. Any widening key, any credential path, any extra allow-host, and `none` are refused with the key's path. The resolved policy is snapshotted and digested outside the workspace before launch. An edit by the child does not change an active attempt. |
 | O4 | Streams and exit codes | Foreground execution passes child stdout and stderr unchanged. Diagnostics and ids go to stderr or `--control-fd N`. Exit codes: the child's code, or `128+signal`; 1 tool error; 2 usage; 125 pre-exec refusal. A receipt distinguishes a tool refusal from a child that exits 125. `fleet run [--json]` returns after durable admission with the job id. `fleet wait JOB --json` reports the process outcome and renders an unknown outcome as unknown. |
 
 Packaging, install, and update are D6. They follow milestone 3 and are not part of
@@ -243,13 +248,13 @@ the milestone 1 contract.
 
 O3 describes trusted operator configuration. For managed submission, local config
 selects the endpoint and client behavior only. The server owns immutable company
-policies and supplies the effective jail configuration; submitter `OURO_*`, paths
+policies and supplies the effective jail configuration; submitter `UKAI_*`, paths
 and CLI arguments never become operator overrides. Managed policy provenance and
 business authorization are bound to, but separate from, the canonical jail policy.
 
 Source seams: `tui/src/{cli,main,config,runtime}.rs`.
 
-## 4. `ouro-jail`
+## 4. `ukai-jail`
 
 The jail applies one policy to one process tree and writes a machine-readable
 account of what it applied, what it observed, and what it could not. The
@@ -264,15 +269,15 @@ are enforced by the composition described in managed teams v1.
 ### 4.1 Verbs
 
 ```text
-ouro-jail run     [--profile agent|tool|build|none|FILE] [--launch NAME]
+ukai-jail run     [--profile agent|tool|build|none|FILE] [--launch NAME]
                   [--workspace P] [--scratch P] [--rw P]… [--ro P]… [--deny-read P]…
                   [--allow-host H[:PORT]]… [--limit K=V]…
                   [--observe on|off] [--evidence strict|best-effort] [--trace-fd N]
                   [--receipt PATH] [--gate-fd N] [--control-fd N] [--attempt-id ID]
                   [--label-only] -- <argv>
-ouro-jail doctor  [--profile NAME|FILE] [--launch NAME] [--json]
-ouro-jail explain [--profile …] [same flags]     # rendered policy, no probe, no exec
-ouro-jail gc      [--dry-run] [--json]          # recover pending vendor-state cleanup
+ukai-jail doctor  [--profile NAME|FILE] [--launch NAME] [--json]
+ukai-jail explain [--profile …] [same flags]     # rendered policy, no probe, no exec
+ukai-jail gc      [--dry-run] [--json]          # recover pending vendor-state cleanup
 ```
 
 `run` prepares the boundary and writes the *prepared* receipt. With no `--gate-fd`,
@@ -311,7 +316,7 @@ grants, recorded in the receipt.
 | | `agent` | `tool` | `build` | `none` |
 |---|---|---|---|---|
 | Purpose | Codex, Claude Code, OpenCode, or another agent under the same shape | that agent's shell, or a test command it spawned | a package build | an explicit uncontained run |
-| Read-write | `<workspace>`, `<scratch>`, `<vendor-state>` (§4.5) | `<workspace>` with `.git` and `.ouroboros` segments denied (coverage §4.4); `<scratch>` | `<scratch>` only | the host, unchanged |
+| Read-write | `<workspace>`, `<scratch>`, `<vendor-state>` (§4.5) | `<workspace>` with `.git` and `.ukai` segments denied (coverage §4.4); `<scratch>` | `<scratch>` only | the host, unchanged |
 | Read-only | system roots (`/usr`, `/bin`, `/lib*`, `/etc/{ssl,resolv.conf,passwd,group,hosts,localtime}`), declared credential inputs | system roots | system roots, declared inputs | n/a |
 | Denied read | everything under `$HOME` not listed; `<data>/ledger` | same, plus every credential | same | n/a |
 | Network | proxy only; hosts from the launch profile plus `--allow-host` | none | none | the host network |
@@ -371,7 +376,7 @@ A profile declares the coverage it requires. The receipt states the coverage it 
 
 | Coverage | Meaning | Linux | Seatbelt |
 |---|---|---|---|
-| `existing_and_root` | protected segments that exist at launch, plus the workspace's own `.git` and `.ouroboros` when those literals are protected | yes | yes |
+| `existing_and_root` | protected segments that exist at launch, plus the workspace's own `.git` and `.ukai` when those literals are protected | yes | yes |
 | `all_descendants` | any protected segment created at any depth during the run | no; refuses if required | yes |
 
 The `tool` profile requires `existing_and_root` and prefers `all_descendants`. A
@@ -381,7 +386,7 @@ profile that requires `all_descendants` on Linux exits 125.
 
 A launch profile is operator data. It tells the jail how to start an existing
 agent without speaking that agent's protocol. Profiles live in
-`~/.config/ouro/launch/<name>.toml`, mode 0600. A profile inside the workspace is
+`~/.config/ukai/launch/<name>.toml`, mode 0600. A profile inside the workspace is
 refused. The resolved profile is copied outside the workspace and digested before
 launch.
 
@@ -407,7 +412,7 @@ allow = ["api.openai.com:443", "*.openai.com:443"]
 
 `argv` is always the operator's `--` arguments. The profile does not rewrite the
 command. `jail = "none"` inside a profile is refused; `none` is only a CLI flag,
-so the invocation shows it. A project `ouro.toml` cannot add a launch profile, a
+so the invocation shows it. A project `ukai.toml` cannot add a launch profile, a
 credential, or an allow-host.
 
 The per-attempt state directory is `<data>/attempts/<id>/vendor-state`, created
@@ -420,7 +425,7 @@ reaches the child. All managed state has the lifecycle in §4.5.1.
 The initial profiles are `codex`, `claude`, and `opencode`. An operator may add
 another file beside them. A profile is experimental until that agent's own run
 in §7.4 is recorded. Recording a version does not pin the operator's binary.
-Ouroboros speaks no vendor protocol.
+Ukai speaks no vendor protocol.
 
 | Name | State variable | Declared inputs (initial) | Mode (initial) |
 |---|---|---|---|
@@ -443,7 +448,7 @@ The jail registers the directory before the first copy. When the tree is dead,
 or when the run refuses before exec, it deletes that directory and does not
 follow links out of it. The operator's source files stay where they are.
 `state_cleanup` on the receipt is `pending` until that delete finishes, then
-`complete`. A failed delete stays `pending` and `ouro-jail gc` retries it.
+`complete`. A failed delete stays `pending` and `ukai-jail gc` retries it.
 `gc` deletes a directory only after pre-exec refusal and helper teardown, or
 verified termination within the receipt's declared lifetime scope. Detected
 boundary-integrity loss retains it; a live or unproved tree keeps its directory.
@@ -490,7 +495,7 @@ and does not claim to filter.
 
 - The child has no membership in the host network namespace. The proxy socket
   lives in the protected `<data>/attempts/<id>/proxy/proxy.sock`, exposed at
-  `/run/ouro/proxy/proxy.sock` through a dedicated read-only directory. The
+  `/run/ukai/proxy/proxy.sock` through a dedicated read-only directory. The
   bridge listens on `127.0.0.1:3128`; its namespace and pinned endpoint cannot
   be redirected by child path/mount replacement. Upper/lowercase HTTP_PROXY,
   HTTPS_PROXY and ALL_PROXY use `http://127.0.0.1:3128`; NO_PROXY is empty.
@@ -683,7 +688,7 @@ not prove that an unobserved action was allowed or denied.
 Source: `provider/native/sandbox/{sandbox_exec,bwrap}.ex`, the detect, label,
 refusal, and violation halves of `sandbox.ex`, and `core.md` §7.
 
-## 5. `ouro-ledger`
+## 5. `ukai-ledger`
 
 Implementation status 2026-10-07: the [local ledger implementation](docs/specs/ledger-v1.md)
 provides a durable single writer, preparation and replay identities, gated Linux
@@ -724,7 +729,7 @@ multi-project authorization system; MT01 and MT13 must pass before that claim.
 
 ### 5.1 Processes
 
-- **`ouro-ledger serve`**: one node-local daemon. It owns every stream under
+- **`ukai-ledger serve`**: one node-local daemon. It owns every stream under
   `<data>/ledger/` and is the only writer. It listens on `<data>/ledger/serve.sock`
   (mode 0600), authenticates peers by `SO_PEERCRED` and role credentials, and
   hands per-attempt producer tokens over a private authenticated channel or an
@@ -732,8 +737,8 @@ multi-project authorization system; MT01 and MT13 must pass before that claim.
   Roles are `owner` (the launch owner), `producer` (the jail), `operator` (fleet
   and CLI), and `reader`. The daemon is started on demand by a standalone verb.
   On a fleet node it survives a restart of the fleet worker.
-- **`ouro-ledger run`**: the launch owner, one per attempt (rule 4). It prepares
-  or adopts a run, spawns `ouro-jail run` as its direct child with the trace pipe
+- **`ukai-ledger run`**: the launch owner, one per attempt (rule 4). It prepares
+  or adopts a run, spawns `ukai-jail run` as its direct child with the trace pipe
   and the gate pipe, handles stdio, watches the deadline, holds the launch
   lease, and settles the run. `setsid` detaches the terminal. It does not put
   the owner in a process the fleet worker can take down with it. Foreground
@@ -758,19 +763,19 @@ reattach.
 ### 5.2 Verbs
 
 ```text
-ouro-ledger prepare  --request-id ID [--json]
-ouro-ledger run      [--prepared RUN] [--jail PROFILE …] [--launch NAME]
+ukai-ledger prepare  --request-id ID [--json]
+ukai-ledger run      [--prepared RUN] [--jail PROFILE …] [--launch NAME]
                      [--observe on|off] [--evidence strict|best-effort]
                      [--io foreground|batch]
                      [--capture stdout|stderr|argv]… [--capture-limit BYTES]
                      [--tag K=V]… [--control-fd N] [--json] -- <argv>
-ouro-ledger append   --run RUN --request-id ID
+ukai-ledger append   --run RUN --request-id ID
                      --kind admitted|denied|settled|note
                      --effect ID --body-file F [--json]
-ouro-ledger settle-orphans [--json]
-ouro-ledger runs | show RUN | tail -f RUN | query … | diff RUN RUN | verify [RUN] | bundle RUN
-ouro-ledger hold RUN | release RUN | gc [--dry-run] | export RUN --ndjson
-ouro-ledger serve | doctor
+ukai-ledger settle-orphans [--json]
+ukai-ledger runs | show RUN | tail -f RUN | query … | diff RUN RUN | verify [RUN] | bundle RUN
+ukai-ledger hold RUN | release RUN | gc [--dry-run] | export RUN --ndjson
+ukai-ledger serve | doctor
 ```
 
 `--io foreground` is the standalone default: inherited stdin and unchanged
@@ -807,7 +812,7 @@ untrusted; node signatures do not establish independent custody.
 
 ```json
 {
-  "schema": "ouro.ledger.run/1",
+  "schema": "ukai.ledger.run/1",
   "run_id": "run_01J…",
   "request_id": "fix-123",
   "attempt_id": "att_01J…",
@@ -846,8 +851,8 @@ recorded.
 
 This is the gate for trusting the ledger, and later for removing `audit/` and
 `agent/effect_ledger.ex`. Each property has a test. References:
-[`audit/store.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/audit/store.ex),
-[`agent/effect_ledger.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/agent/effect_ledger.ex).
+[`audit/store.ex`](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ukai/audit/store.ex),
+[`agent/effect_ledger.ex`](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ukai/agent/effect_ledger.ex).
 
 1. **One owner, and an honest label for `none`.** Under an enforced profile the
    child cannot reach `serve.sock`, the store, or a producer token: they are
@@ -892,7 +897,7 @@ empty, including when the outcome is unknown.
 
 Source: `audit/`, `agent/effect_ledger.ex`.
 
-## 6. `ouro-fleet`
+## 6. `ukai-fleet`
 
 The fleet places **jobs**. A job is one operator request to run Codex, Claude
 Code, OpenCode, or another `argv` on a machine they trust. Each execution is an
@@ -903,23 +908,23 @@ that staleness does not move ownership.
 ### 6.1 Verbs
 
 These are trusted infrastructure-operator verbs. A developer submission endpoint
-must not expose them directly. Milestone 4's `ouro managed` interface authorizes
+must not expose them directly. Milestone 4's `ukai managed` interface authorizes
 each operation, forbids uncontained/unobserved jobs and limits placement to
 company-administered eligible workers.
 
-Membership verbs stay as in [FLEET.md](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/FLEET.md) §2: `setup`, `add`, `leave`,
+Membership verbs stay as in [FLEET.md](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/FLEET.md) §2: `setup`, `add`, `leave`,
 `forget`, `status`, `doctor`, `devices`, `service`, `tag`.
 
 ```text
-ouro fleet run   --request-id ID [--on MACHINE|auto] [--dir PATH]
+ukai fleet run   --request-id ID [--on MACHINE|auto] [--dir PATH]
                  [--jail agent|tool|build|none|FILE] [--launch NAME]
                  [--observe on|off] [--limit K=V]… [--evidence strict|best-effort]
                  [--capture stdout|stderr]… [--capture-limit BYTES]
                  [--tag K=V]… [--json] -- <argv>
-ouro fleet wait JOB [--json]
-ouro fleet status [JOB]
-ouro fleet kill JOB [--signal S]
-ouro fleet ledger JOB <ledger query flags>       # routed to the owning worker
+ukai fleet wait JOB [--json]
+ukai fleet status [JOB]
+ukai fleet kill JOB [--signal S]
+ukai fleet ledger JOB <ledger query flags>       # routed to the owning worker
 ```
 
 `--jail` defaults to the launch profile's `jail` when `--launch` is set, and to
@@ -937,7 +942,7 @@ disconnecting does not close them or hang up the child. The admission response
 is the job id and the I/O settings, not the child's output. Changing capture
 settings under an existing `request_id` refuses.
 
-`ouro fleet ledger JOB show --with-transcript` returns the captured prefix, or
+`ukai fleet ledger JOB show --with-transcript` returns the captured prefix, or
 `not_captured` for a stream that was not selected. An unreachable worker is
 `unavailable`. This is byte output, not a parsed session and not a workspace
 export.
@@ -994,7 +999,7 @@ death; fleet only places and reconciles that owner. General workspace sync and
 publishing remain unscheduled. A launch profile that grew a protocol parser
 would violate D3.
 
-Source: `fleet/`, [FLEET.md](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/FLEET.md). Reuse membership. Do not keep
+Source: `fleet/`, [FLEET.md](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/FLEET.md). Reuse membership. Do not keep
 `cluster/`, `mesh/`, `session/`, or `gateway/` on the grounds that the fleet
 once used them (§9).
 
@@ -1005,7 +1010,7 @@ The jail's draft schemas live under `docs/specs/jail-v1/`: `jail-receipt.schema.
 canonical policy snapshot freeze at milestone 1, because the jail's trace is already
 the audit record. The future ledger implementation will define `run.schema.json`
 at milestone 2. Job and attempt records are frozen with milestone 3. Components announce the schema ranges they accept in
-`ouro version --json`. A mismatch refuses before dispatch. The ledger implements
+`ukai version --json`. A mismatch refuses before dispatch. The ledger implements
 the writer against the event schema the jail already froze.
 
 ### 7.1 Process tree and admission
@@ -1020,8 +1025,8 @@ with milestone 4, without changing the jail's canonical policy or gate schema.
 ```text
 fleet worker                         control client; not the parent's cgroup
 ledger daemon                        store only; survives the worker
-launch owner: ouro-ledger run        one per attempt; reads the trace, writes the store
-  └─ ouro-jail supervisor            sensor, proxy, and the none cgroup live here
+launch owner: ukai-ledger run        one per attempt; reads the trace, writes the store
+  └─ ukai-jail supervisor            sensor, proxy, and the none cgroup live here
        └─ child                      argv, contained or --profile none
 ```
 
@@ -1030,12 +1035,12 @@ launch owner: ouro-ledger run        one per attempt; reads the trace, writes th
    before this record.
 2. The worker reserves `attempt_id`, calls `ledger prepare`, and persists the
    cross-references. No child can execute from this reservation alone.
-3. The worker starts `ouro-ledger run` for that attempt. The owner takes the
+3. The worker starts `ukai-ledger run` for that attempt. The owner takes the
    exclusive launch lease under `<data>/attempts/<id>/` and checks the
    reservation. The daemon checks the peer's uid and pid birth identity before
    issuing the owner token. A duplicate start attaches to the existing owner. A
    dead owner enters reconciliation and is not restarted.
-4. The owner starts `ouro-jail run` with the gate closed. The jail writes the
+4. The owner starts `ukai-jail run` with the gate closed. The jail writes the
    *prepared* receipt and blocks on the gate. For `none`, preparation creates
    the cgroup and records `child_protection: unprotected`. For a fleet job,
    stdin is `/dev/null` and the output sinks exist. Failures here are `refused`.
@@ -1047,9 +1052,9 @@ launch owner: ouro-ledger run        one per attempt; reads the trace, writes th
    dead, including when the outcome is still unknown.
 
 On reconnect the worker recovers the attempt by id. It does not launch again
-because an acknowledgement is missing. Standalone `ouro-ledger run` performs
+because an acknowledgement is missing. Standalone `ukai-ledger run` performs
 preparation and steps 4–5 locally, without fleet records. Standalone
-`ouro-jail run` uses its local supervisor and does not perform this handshake.
+`ukai-jail run` uses its local supervisor and does not perform this handshake.
 The handshake prevents a duplicate launch. It does not promise exactly-once
 effects outside the machine. Every window between the steps has a
 fault-injection test.
@@ -1062,7 +1067,7 @@ this sketch omits some required envelope fields:
 
 ```json
 {
-  "schema": "ouro.event/1",
+  "schema": "ukai.event/1",
   "attempt_id": "att_01J…",
   "source": "proxy",
   "source_seq": 17,
@@ -1123,7 +1128,7 @@ skip is not a pass.
 Scripted fixtures are the milestone gates. Calling a profile supported, and
 deleting the in-tree agent, each wait on one further run: the real binary, with
 real credentials, recorded in `docs/specs/jail-v1/agent-compatibility.md`.
-The note names the Ouroboros revision, the profile, the vendor version, the OS,
+The note names the Ukai revision, the profile, the vendor version, the OS,
 and the jail mode. It stores no tokens and no vendor-state archive.
 
 The run is the agent's normal batch command. It reaches its API through the
@@ -1179,8 +1184,8 @@ freeze and the real-agent legacy-cut gate remain open.
 
 | Milestone | Deliverable | Exit |
 |---|---|---|
-| 1. Jail | `ouro-jail` on the D9 kernel: profiles including `none`, the audit sensor, the three launch profiles, enforcement, the supervisor cgroup, receipts, vendor-state cleanup, doctor, and the scripted nesting fixture. The event schema freezes here. | §4.10 passes. Profiles stay experimental. No other backend is a permanent test oracle. |
-| 2. Ledger | `ouro-ledger serve` and `run`, the verbs in §5.2, the §5.4 suite, bounded capture. | A contained child cannot write the store. `none` stays labelled unprotected. A killed writer leaves a gap or an explicit unknown. |
+| 1. Jail | `ukai-jail` on the D9 kernel: profiles including `none`, the audit sensor, the three launch profiles, enforcement, the supervisor cgroup, receipts, vendor-state cleanup, doctor, and the scripted nesting fixture. The event schema freezes here. | §4.10 passes. Profiles stay experimental. No other backend is a permanent test oracle. |
+| 2. Ledger | `ukai-ledger serve` and `run`, the verbs in §5.2, the §5.4 suite, bounded capture. | A contained child cannot write the store. `none` stays labelled unprotected. A killed writer leaves a gap or an explicit unknown. |
 | 3. Fleet | Batch jobs: admission, supervision, placement, reconciliation, `--capture`, `--jail` and `--jail none`. | §7.3 passes on two nodes. A lost reply does not start a second child. An unproved outcome stays unknown. |
 | 4. Managed teams | Authenticated Linux/macOS client, company/project policies, approved services, isolated inputs, bounded artifacts and project-scoped evidence. T1 uses one Linux worker; T2 adds fleet. | T1 passes MT01–MT14 plus actual internal-code, untrusted-contribution and confidential-model workflows. T2 adds MT15–MT16. A green jail suite alone does not establish managed readiness. |
 
@@ -1298,7 +1303,7 @@ radius per store; `docs/experiments/` is never added.
 
 The product proof is Codex, Claude Code, or OpenCode — or any other agent
 started the same way — contained, recorded, and placed on another machine,
-with uncertainty visible wherever the tools cannot see. Ouroboros does not
+with uncertainty visible wherever the tools cannot see. Ukai does not
 supply the agent.
 
 ## 12. References
@@ -1321,8 +1326,8 @@ Checked 2026-09-21. Revalidate a pinned backend when milestone 1 starts.
 - [systemd termination](https://github.com/systemd/systemd/blob/main/man/systemd.kill.xml):
   a child of a service dies with that service. The launch owner is not a child
   of the fleet worker.
-- Preserved implementation (branch `legacy`, tag `thesis-4-preserved`, commit f3b2dbfd): [`audit/store.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/audit/store.ex),
-  [`agent/effect_ledger.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/agent/effect_ledger.ex),
-  [`sandbox/bwrap.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/provider/native/sandbox/bwrap.ex),
-  [`sandbox/sandbox_exec.ex`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/provider/native/sandbox/sandbox_exec.ex),
-  [FLEET.md](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/FLEET.md), [`core.md`](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/proposals/core.md) §7.
+- Preserved implementation (branch `legacy`, tag `thesis-4-preserved`, commit f3b2dbfd): [`audit/store.ex`](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ukai/audit/store.ex),
+  [`agent/effect_ledger.ex`](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ukai/agent/effect_ledger.ex),
+  [`sandbox/bwrap.ex`](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ukai/provider/native/sandbox/bwrap.ex),
+  [`sandbox/sandbox_exec.ex`](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ukai/provider/native/sandbox/sandbox_exec.ex),
+  [FLEET.md](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/FLEET.md), [`core.md`](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/docs/proposals/core.md) §7.

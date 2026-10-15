@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-bundle:1",
+  "$id": "urn:ukai:schema:ledger-bundle:1",
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.ledger.bundle/1"
+      "const": "ukai.ledger.bundle/1"
     },
     "authenticity": {
       "const": "unsigned"
@@ -13,7 +13,7 @@
       "const": "bundle_time"
     },
     "run": {
-      "$ref": "urn:ouro:schema:ledger-run:1",
+      "$ref": "urn:ukai:schema:ledger-run:1",
       "properties": {
         "chain": {
           "properties": {

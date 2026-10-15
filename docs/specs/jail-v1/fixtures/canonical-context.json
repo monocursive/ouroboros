@@ -26,7 +26,7 @@
     "deny_read": [],
     "protected_segments": [
       ".git",
-      ".ouroboros"
+      ".ukai"
     ],
     "environment": {
       "inherit_host": false,

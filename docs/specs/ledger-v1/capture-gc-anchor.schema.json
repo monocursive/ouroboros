@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-capture-gc-anchor:1",
+  "$id": "urn:ukai:schema:ledger-capture-gc-anchor:1",
   "title": "Capture-only pruning authority; canonical event history remains available",
   "type": "object",
   "additionalProperties": false,
@@ -31,16 +31,16 @@
       ],
       "properties": {
         "schema": {
-          "const": "ouro.ledger.capture-gc-anchor/1"
+          "const": "ukai.ledger.capture-gc-anchor/1"
         },
         "run_id": {
-          "$ref": "urn:ouro:schema:ledger-run:1#/properties/run_id"
+          "$ref": "urn:ukai:schema:ledger-run:1#/properties/run_id"
         },
         "attempt_id": {
-          "$ref": "urn:ouro:schema:ledger-run:1#/properties/attempt_id"
+          "$ref": "urn:ukai:schema:ledger-run:1#/properties/attempt_id"
         },
         "chain": {
-          "$ref": "urn:ouro:schema:ledger-run:1#/properties/chain"
+          "$ref": "urn:ukai:schema:ledger-run:1#/properties/chain"
         },
         "capture": {
           "type": "object"

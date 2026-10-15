@@ -8,19 +8,19 @@
   },
   "external_custody": false,
   "local_consistency": true,
-  "manifest_digest": "sha256:de51e6806a902be791bb35f622b0628c50f58bb1eb7354144fcc0f414b144db4",
+  "manifest_digest": "sha256:ad93f70a670d6191c1302d213dc1a582ec8f45f0459095db458172a2e8befa32",
   "projection_rule": 2,
   "run_id": "run_9cea3548ea43417d9cae8fe3afb4afd5",
-  "schema": "ouro.ledger.bundle-verification/2",
+  "schema": "ukai.ledger.bundle-verification/2",
   "signature": {
     "algorithm": "ed25519",
-    "key_id": "sha256:ded302e6d3b4dd479c9f6bf716d51cedd4fecc5c9082071e7933e3644e66b2b6",
-    "public_key": "298436bf18df62c9258fda38fa4ac292abb07e8cd57dadf096bc91c8aac4e51d",
+    "key_id": "sha256:d0476f8baec444fb075126504c4b135b5f504487e9b480a6665cf2cb6bc4f7e6",
+    "public_key": "45b2ab4f6f2735ed3601d9689fcbb1d9a428d929533279a96ae9537d7803c10a",
     "trust": "untrusted",
     "valid": true
   },
   "snapshot": {
-    "head_digest": "sha256:679c7bc1b7356c15090d66cf0e3f76e15d9ce698214bd195abb1f303f205acba",
+    "head_digest": "sha256:30190716db157b277512de2e7eba4c9e8a935d825a71d8efac3bd1ac9ebefed5",
     "head_seq": 1
   },
   "state": "prepared"

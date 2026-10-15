@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reference-host manifest for Jail v1 (§3.2), collected with shell tools.
-# `ouro-jail doctor --json` produces the full host manifest; this script stays
+# `ukai-jail doctor --json` produces the full host manifest; this script stays
 # as the fallback for a host where the binary cannot run, and the conformance
 # driver records its output (evidence/host-manifest.txt) before it builds
 # anything there. Read-only: it probes nothing beyond one unprivileged
@@ -45,7 +45,7 @@ opt() {
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # The names in /etc/apparmor.d that mention user namespaces, bubblewrap or
-# ouro, space-separated. A glob, not `ls | grep`, so any file name is read
+# ukai, space-separated. A glob, not `ls | grep`, so any file name is read
 # as it is.
 apparmor_entries() {
   local entry name
@@ -53,7 +53,7 @@ apparmor_entries() {
     [ -e "$entry" ] || continue
     name=${entry##*/}
     case "${name,,}" in
-      *userns* | *bwrap* | *ouro*) printf '%s ' "$name" ;;
+      *userns* | *bwrap* | *ukai*) printf '%s ' "$name" ;;
     esac
   done
 }
@@ -78,7 +78,7 @@ via() {
   fi
 }
 
-say manifest_schema "ouro.jail.host-manifest/0 (manual, superseded by doctor --json)"
+say manifest_schema "ukai.jail.host-manifest/0 (manual, superseded by doctor --json)"
 req collected_at "$(via date date -u +%Y-%m-%dT%H:%M:%SZ)" "date is not installed"
 opt hostname "$(via hostname hostname)" "hostname is not installed"
 opt virtualization "$(via systemd-detect-virt systemd-detect-virt)" "systemd-detect-virt is not installed"
@@ -111,7 +111,7 @@ opt bwrap "$(via bwrap bwrap --version)" "bubblewrap is not installed"
 opt userns_unshare_test "$(have unshare && { unshare -U true 2>&1 && echo ok; })" "unshare is not installed"
 opt apparmor_enabled "$(via aa-enabled aa-enabled)" "aa-enabled is not installed"
 opt apparmor_profile_files "$(apparmor_entries)" "no /etc/apparmor.d entry matches"
-opt apparmor_loaded_bwrap_ouro "$(have sudo && sudo -n aa-status 2>/dev/null | grep -iE 'bwrap|ouro' | sed 's/^ *//' | tr '\n' ' ')" "aa-status needs privilege this account may not have"
+opt apparmor_loaded_bwrap_ukai "$(have sudo && sudo -n aa-status 2>/dev/null | grep -iE 'bwrap|ukai' | sed 's/^ *//' | tr '\n' ' ')" "aa-status needs privilege this account may not have"
 opt kconfig_bpf "$(grep -E '^CONFIG_(BPF_SYSCALL|BPF_JIT|DEBUG_INFO_BTF)=' "/boot/config-$(uname -r 2>/dev/null)" 2>/dev/null | tr '\n' ' ')" "no readable /boot/config-<release>"
 say btf_vmlinux "$([ -r /sys/kernel/btf/vmlinux ] && echo present || echo absent)"
 say beam_present "$(have erl && echo yes || echo no)"
@@ -119,7 +119,7 @@ opt rust_toolchain "$(PATH="$HOME/.cargo/bin:$PATH" cargo --version 2>/dev/null)
 # The conformance suite compiles a C helper with /usr/bin/gcc at test time
 # (observer_linux.rs), so the host needs it; record which one it has.
 opt gcc "$( [ -x /usr/bin/gcc ] && /usr/bin/gcc --version 2>/dev/null | head -1 )" "no /usr/bin/gcc: the conformance suite's observer tests compile a C helper with it"
-opt ouro_binaries_on_path "$(for b in ouro ouro-jail ouro-ledger ouro-fleet; do command -v "$b"; done 2>/dev/null | tr '\n' ' ')" "none on PATH"
+opt ukai_binaries_on_path "$(for b in ukai ukai-jail ukai-ledger ukai-fleet; do command -v "$b"; done 2>/dev/null | tr '\n' ' ')" "none on PATH"
 
 # The manifest is evidence only if the facts §3.2 requires are in it.
 if [ "$missing" -gt 0 ]; then

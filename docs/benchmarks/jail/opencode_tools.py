@@ -45,7 +45,7 @@ def main():
         work.mkdir(); config.mkdir()
         (work / 'numbers_task.py').write_text('# ouro_probe_marker\n')
         env = {'HOME': str(root), 'PATH': '/usr/bin:/bin',
-               'OURO_CONFIG_DIR': str(config), 'OURO_DATA_DIR': str(root / 'data'),
+               'UKAI_CONFIG_DIR': str(config), 'UKAI_DATA_DIR': str(root / 'data'),
                'XDG_RUNTIME_DIR': os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')}
         if supplied:
             env['PATH'] = str(tools) + os.pathsep + env['PATH']

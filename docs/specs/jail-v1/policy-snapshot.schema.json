@@ -2,7 +2,7 @@
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.jail.policy-snapshot/1"
+      "const": "ukai.jail.policy-snapshot/1"
     },
     "profile": {
       "enum": [
@@ -316,7 +316,7 @@
         "ruleset": {
           "enum": [
             null,
-            "ouro.jail.network/1"
+            "ukai.jail.network/1"
           ]
         },
         "translation_prefixes": {
@@ -894,6 +894,6 @@
   ],
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:jail-policy-snapshot:1",
+  "$id": "urn:ukai:schema:jail-policy-snapshot:1",
   "title": "Canonical jail policy snapshot v1"
 }

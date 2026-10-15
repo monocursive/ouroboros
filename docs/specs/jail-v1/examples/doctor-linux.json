@@ -5,8 +5,8 @@
       "sha256": "523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6",
       "version": "bubblewrap 0.11.1"
     },
-    "ouro-jail": {
-      "path": "/usr/local/bin/ouro-jail",
+    "ukai-jail": {
+      "path": "/usr/local/bin/ukai-jail",
       "sha256": "e5538a83fbcab9bca27d2070bde57d1f0e607e77404c11b6bd73f805f4856f84"
     }
   },
@@ -156,7 +156,7 @@
       "status": "available"
     },
     {
-      "evidence_ref": "entered ouro-jail-3772661-ed5c3fcf2a194b34.scope cgroup=/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-3772661-ed5c3fcf2a194b34.scope",
+      "evidence_ref": "entered ukai-jail-3772661-ed5c3fcf2a194b34.scope cgroup=/user.slice/user-1001.slice/user@1001.service/app.slice/ukai-jail-3772661-ed5c3fcf2a194b34.scope",
       "measured_at": "2026-09-24T21:42:34Z",
       "mechanism": "systemd-user-transient-scope",
       "name": "supervisor_scope",
@@ -255,7 +255,7 @@
       "status": "available"
     }
   ],
-  "component": "ouro-jail",
+  "component": "ukai-jail",
   "host": {
     "apparmor_enabled": true,
     "apparmor_userns_restriction": {
@@ -333,13 +333,13 @@
     "protected_coverage:existing_and_root",
     "limit:wall"
   ],
-  "schema": "ouro.jail.doctor/1",
+  "schema": "ukai.jail.doctor/1",
   "supervisor_scope": {
-    "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-3772661-ed5c3fcf2a194b34.scope",
+    "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ukai-jail-3772661-ed5c3fcf2a194b34.scope",
     "reason": null,
     "reason_code": null,
     "state": "entered",
-    "unit": "ouro-jail-3772661-ed5c3fcf2a194b34.scope"
+    "unit": "ukai-jail-3772661-ed5c3fcf2a194b34.scope"
   },
   "version": "0.1.0"
 }

@@ -1,10 +1,10 @@
 # Workspace per jail-v1 §4: one crate per process the north star names, the
 # shared records crate, the test-only fixture crate and the task runner. There
 # is no BPF object crate: v1 withdrew eBPF (§5.2), and the ptrace observer is
-# compiled into `ouro-jail`.
+# compiled into `ukai-jail`.
 [workspace]
 resolver = "3"
-members = ["crates/ouro", "crates/ouro-jail", "crates/ouro-records", "crates/ouro-ledger", "crates/ouro-fixture", "crates/xtask"]
+members = ["crates/ukai", "crates/ukai-jail", "crates/ukai-records", "crates/ukai-ledger", "crates/ukai-fixture", "crates/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -27,8 +27,8 @@ sha2 = "0.10.9"
 tempfile = "3.27.0"
 toml = "0.8.23"
 uuid = "1.24.0"
-ouro-fixture = { path = "crates/ouro-fixture" }
-ouro-records = { path = "crates/ouro-records" }
+ukai-fixture = { path = "crates/ukai-fixture" }
+ukai-records = { path = "crates/ukai-records" }
 
 [workspace.lints.clippy]
 # The group yields to the single lints below it.

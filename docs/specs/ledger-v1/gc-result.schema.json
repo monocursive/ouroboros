@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-gc-result:1",
+  "$id": "urn:ukai:schema:ledger-gc-result:1",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,7 +13,7 @@
   ],
   "properties": {
     "schema": {
-      "const": "ouro.ledger.gc-result/1"
+      "const": "ukai.ledger.gc-result/1"
     },
     "retain_days": {
       "type": "integer",
@@ -36,15 +36,15 @@
         ],
         "properties": {
           "run_id": {
-            "$ref": "urn:ouro:schema:ledger-run:1#/properties/run_id"
+            "$ref": "urn:ukai:schema:ledger-run:1#/properties/run_id"
           },
           "chain": {
-            "$ref": "urn:ouro:schema:ledger-run:1#/properties/chain"
+            "$ref": "urn:ukai:schema:ledger-run:1#/properties/chain"
           },
           "history": {
             "allOf": [
               {
-                "$ref": "urn:ouro:schema:ledger-run:1#/properties/history"
+                "$ref": "urn:ukai:schema:ledger-run:1#/properties/history"
               },
               {
                 "properties": {
@@ -75,7 +75,7 @@
       "items": {
         "allOf": [
           {
-            "$ref": "urn:ouro:schema:ledger-gc-plan:1#/properties/runs/items"
+            "$ref": "urn:ukai:schema:ledger-gc-plan:1#/properties/runs/items"
           },
           {
             "properties": {
@@ -100,7 +100,7 @@
         ],
         "properties": {
           "run_id": {
-            "$ref": "urn:ouro:schema:ledger-run:1#/properties/run_id"
+            "$ref": "urn:ukai:schema:ledger-run:1#/properties/run_id"
           },
           "message": {
             "type": "string",
@@ -141,10 +141,10 @@
         ],
         "properties": {
           "run_id": {
-            "$ref": "urn:ouro:schema:ledger-run:1#/properties/run_id"
+            "$ref": "urn:ukai:schema:ledger-run:1#/properties/run_id"
           },
           "chain": {
-            "$ref": "urn:ouro:schema:ledger-run:1#/properties/chain"
+            "$ref": "urn:ukai:schema:ledger-run:1#/properties/chain"
           },
           "removed_files": {
             "type": "integer",
@@ -159,7 +159,7 @@
           "capture_history": {
             "allOf": [
               {
-                "$ref": "urn:ouro:schema:ledger-run:1#/properties/history"
+                "$ref": "urn:ukai:schema:ledger-run:1#/properties/history"
               },
               {
                 "properties": {

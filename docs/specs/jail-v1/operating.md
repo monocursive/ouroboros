@@ -1,6 +1,6 @@
-# Operating `ouro-jail`
+# Operating `ukai-jail`
 
-A guide for the operator who runs `ouro-jail` on Linux, and for the owner
+A guide for the operator who runs `ukai-jail` on Linux, and for the owner
 that drives it through the managed gate. The contract is
 [jail-v1](../jail-v1.md) (revision 19); where this guide and the
 specification differ, the specification governs. The command syntax below
@@ -8,7 +8,7 @@ was checked against the built binary's `--help` and its macOS output; the
 Linux behaviour is taken from the specification and the conformance tests
 (the last section says which is which).
 
-`ouro-jail` runs a command you name under an explicit policy, owns its process
+`ukai-jail` runs a command you name under an explicit policy, owns its process
 tree, observes a documented set of operations, and writes a receipt that says
 what was applied, what happened and what is unknown. It is not an agent and
 talks to no model. The profiles are `agent`, `tool`, `build` and the
@@ -36,8 +36,8 @@ Build the binary from the workspace with the pinned toolchain
 (`rust-toolchain.toml`):
 
 ```sh
-cargo build --release -p ouro-jail
-install -m 0755 target/release/ouro-jail ~/.local/bin/ouro-jail   # any directory on your PATH
+cargo build --release -p ukai-jail
+install -m 0755 target/release/ukai-jail ~/.local/bin/ukai-jail   # any directory on your PATH
 ```
 
 Install bubblewrap from your distribution (the reference host has 0.11.1 at
@@ -47,7 +47,7 @@ introduced, so an older backend (Ubuntu 22.04 ships 0.6.1, Ubuntu 24.04
 ships 0.9.0) makes `doctor` report `bwrap_present` unavailable with reason
 `bwrap_too_old` and every run refuse before exec with the version
 comparison. Build 0.11.1 from source when the distribution is older.
-`ouro-jail` uses the bubblewrap your `PATH` provides,
+`ukai-jail` uses the bubblewrap your `PATH` provides,
 resolved once per process: the first **absolute** `PATH` entry holding an
 executable file named `bwrap`, canonicalized. Empty and relative entries
 (`::`, `.`, `bin`) are never searched, and an unset `PATH` provides no backend;
@@ -55,7 +55,7 @@ there is no built-in fallback path. With no backend, `doctor` is not ready and
 a contained `run` refuses with 125 before exec. `doctor --json` records the
 path, SHA-256 and version of the bubblewrap it resolved.
 
-No host configuration. `ouro-jail` needs no sysctl, AppArmor profile, file
+No host configuration. `ukai-jail` needs no sysctl, AppArmor profile, file
 capability, setuid helper or sudo, and it changes none of them. On Ubuntu 24.04
 and later the distribution's own `bwrap-userns-restrict` profile allows the
 one bubblewrap layer every contained profile uses; it denies a user namespace
@@ -106,22 +106,22 @@ but without lingering the scope ends, with the run, when your last session
 does:
 
 ```sh
-systemd-run --user --scope --quiet ouro-jail run -- make test
+systemd-run --user --scope --quiet ukai-jail run -- make test
 ```
 
 ## Commands
 
 ```text
-ouro-jail run [--profile agent|tool|build|none|FILE] [--launch NAME]
+ukai-jail run [--profile agent|tool|build|none|FILE] [--launch NAME]
   [--workspace PATH] [--scratch PATH] [--rw PATH]... [--ro PATH]...
   [--deny-read PATH]... [--allow-host HOST[:PORT]]... [--limit KEY=VALUE]...
   [--observe on|off] [--evidence strict|best-effort]
   [--receipt PATH] [--trace-fd N] [--control-fd N] [--gate-fd N]
   [--attempt-id ID] [--label-only] [-- PROGRAM [ARG]...]
-ouro-jail explain [--profile …] [--launch NAME] [the run overrides] [--json]
-ouro-jail doctor [--profile NAME|FILE] [--launch NAME] [--json]
-ouro-jail gc [--dry-run] [--json]
-ouro-jail version [--json]
+ukai-jail explain [--profile …] [--launch NAME] [the run overrides] [--json]
+ukai-jail doctor [--profile NAME|FILE] [--launch NAME] [--json]
+ukai-jail gc [--dry-run] [--json]
+ukai-jail version [--json]
 ```
 
 - **`run`** prepares the boundary, attaches the observer, writes a prepared
@@ -134,7 +134,7 @@ ouro-jail version [--json]
   profile `tool` (or the launch profile's), the invocation directory as
   workspace, a private scratch directory, observation on, strict evidence. The child's stdin, stdout and
   stderr are passed through untouched; `run` has no JSON mode. When stderr is
-  a terminal, `run` ends by printing `ouro-jail: receipt <path>`.
+  a terminal, `run` ends by printing `ukai-jail: receipt <path>`.
 - **`run --label-only`** resolves and probes, prints the proposed label and
   one `capability …` line per requirement, and executes nothing. It refuses
   `--gate-fd` and `--attempt-id` (exit 2).
@@ -175,7 +175,7 @@ safe message, an optional configuration key and a remediation category
 stderr it reads, for example:
 
 ```text
-ouro-jail: error invalid_config at resolving [configuration]: the `build` profile requires an explicit memory ceiling (key: limits.mem)
+ukai-jail: error invalid_config at resolving [configuration]: the `build` profile requires an explicit memory ceiling (key: limits.mem)
 ```
 
 The codes: `invalid_config`, `policy_widening`, `unsafe_state_path`,
@@ -207,7 +207,7 @@ discarded as a successful delivery.
 
 | Profile | Filesystem | Network | Default limits | Needs an execution boundary |
 |---|---|---|---|---|
-| `tool` | workspace and scratch writable, system roots read-only, existing `.git` and `.ouroboros` segments beneath writable roots protected (`existing_and_root`) | none | wall 30m (required), pids 256 (preferred) | only for explicit pids, mem or cpu |
+| `tool` | workspace and scratch writable, system roots read-only, existing `.git` and `.ukai` segments beneath writable roots protected (`existing_and_root`) | none | wall 30m (required), pids 256 (preferred) | only for explicit pids, mem or cpu |
 | `build` | the workspace's declared inputs read-only, scratch writable | none | wall 1h, pids 512 (preferred), an explicit `mem` is required | yes, for the memory ceiling |
 | `agent` | workspace, scratch and vendor state writable, system roots read-only | only through an outside HTTP proxy, allowed hosts from the launch profile and `--allow-host` | wall 2h, pids 512 (preferred) | only for explicit pids, mem or cpu |
 | `none` | the host's view, unchanged | the host's | wall 2h | always (observation on or off) |
@@ -224,19 +224,19 @@ attempt's own IPC works, and reaches the network only through the proxy
 (proxy variables point at a bridge on `127.0.0.1:3128`).
 
 `none` applies no containment: it closes the jail's private descriptors,
-removes every `OURO_*` variable, enforces the wall and tracks the tree through
+removes every `UKAI_*` variable, enforces the wall and tracks the tree through
 its execution leaf. Its receipts always say `child_protection: unprotected`,
 however clean the run.
 
 Hardened by the 2026-09-25 security audit: the host's proxy socket is
 connectable only by the jail's own bridge (a target that names
-`/run/ouro/proxy/proxy.sock` directly is refused), and the `/etc/resolv.conf`
+`/run/ukai/proxy/proxy.sock` directly is refused), and the `/etc/resolv.conf`
 the child sees is a sanitized copy that drops the host's `search`/`domain`
 lines (the child's resolver is unreachable in its network namespace anyway).
 
 `--profile FILE` selects an operator profile file that `extends` one built-in
 contained profile and may only narrow or add finite limits. A project's
-`ouro.toml` at the workspace root can only narrow: it may not select a
+`ukai.toml` at the workspace root can only narrow: it may not select a
 profile, add a grant, raise or remove a limit, weaken coverage or evidence,
 add credentials or select `none`; each refuses before anything is prepared,
 naming the key (`policy_widening`, or `invalid_config` for a key a project
@@ -250,11 +250,11 @@ spells it: the contained view has its own private `/proc` and `/dev`, and none
 of the host's pseudo filesystems. `--ro /` refuses too, because it would make
 the runtime state visible to the child.
 
-Configuration: `~/.config/ouro/config.toml` (`[jail]`, `[jail.limits]`;
+Configuration: `~/.config/ukai/config.toml` (`[jail]`, `[jail.limits]`;
 `jail.profile` may name a built-in or an operator profile file), launch
-profiles in `~/.config/ouro/launch/<name>.toml`, runtime state in
-`~/.local/share/ouro`. `OURO_CONFIG_DIR` and `OURO_DATA_DIR` move them;
-`OURO_JAIL_OBSERVE` and `OURO_JAIL_EVIDENCE` set the two modes. No other
+profiles in `~/.config/ukai/launch/<name>.toml`, runtime state in
+`~/.local/share/ukai`. `UKAI_CONFIG_DIR` and `UKAI_DATA_DIR` move them;
+`UKAI_JAIL_OBSERVE` and `UKAI_JAIL_EVIDENCE` set the two modes. No other
 environment variable changes policy. Runtime state must be a private local
 directory: mode 0700, owned by you, not a symlink, and outside every grant you
 give the child.
@@ -272,7 +272,7 @@ A launch profile is operator data for one vendor agent: environment mappings
 into vendor state, credential inputs, allowed hosts and a default contained
 profile (`jail`). It never supplies argv and cannot select `none`. It lives at
 `<config-dir>/launch/<name>.toml`, mode 0600, outside every child-writable
-grant. The starter files under `crates/ouro-jail/profiles/launch/` are
+grant. The starter files under `crates/ukai-jail/profiles/launch/` are
 experimental. The binary embeds all of them except the `*-vault` ones, and
 `--launch NAME` uses the embedded one only when `<config-dir>/launch/NAME.toml`
 does not exist; an operator file of that name replaces it whole.
@@ -287,7 +287,7 @@ were run and passed under which profile, platform and mode is recorded in
 
 Credentials (`[credentials.<id>]`, with `source`, `dest` and `mode`) are
 staged into the attempt's private vendor state, which the child sees at
-`/run/ouro/state`:
+`/run/ukai/state`:
 
 - `copy_rw` copies the file at launch; refreshed tokens are never written back.
 - `bind_ro` shows the exact source file read-only; it may prevent the vendor
@@ -314,14 +314,14 @@ header and prefix. For an Anthropic key:
 ```toml
 [credentials.anthropic]
 mode = "vault"
-source = "~/.config/ouro/credentials/anthropic"
+source = "~/.config/ukai/credentials/anthropic"
 hosts = ["https://api.anthropic.com"]
 header = { name = "x-api-key" }
 ```
 
-The child receives `OURO_VAULT_ANTHROPIC`, an attempt-scoped placeholder.
+The child receives `UKAI_VAULT_ANTHROPIC`, an attempt-scoped placeholder.
 Map it to the client's expected variable inside the contained command, for
-example `/bin/sh -c 'export ANTHROPIC_API_KEY="$OURO_VAULT_ANTHROPIC";
+example `/bin/sh -c 'export ANTHROPIC_API_KEY="$UKAI_VAULT_ANTHROPIC";
 exec claude "$@"' vault-client -p '…'`. Review the binary/library read-only
 grants for your installation as for any launch profile. The source remains
 outside those grants. An `authorization` placement with `prefix = "Bearer "`
@@ -364,7 +364,7 @@ For OAuth2, declare an operator-controlled endpoint and public client id:
 ```toml
 [credentials.codex]
 mode = "vault"
-source = "~/.config/ouro/credentials/codex-token.json"
+source = "~/.config/ukai/credentials/codex-token.json"
 hosts = ["https://chatgpt.com"]
 paths = ["/backend-api/"]
 binaries = ["/absolute/path/to/codex"]
@@ -418,7 +418,7 @@ It is ready only if the selected profile's requirements are met; otherwise it
 exits 125, and each row says why with a reason code. It never edits host
 policy, installs anything, enables lingering or starts a lasting service.
 
-`doctor --json` is the host manifest, the versioned record `ouro.jail.doctor/1`
+`doctor --json` is the host manifest, the versioned record `ukai.jail.doctor/1`
 ([schema](jail-doctor.schema.json), [example](examples/doctor-linux.json)):
 
 - `capabilities` and `requirements`: each probe's status, scope, mechanism and
@@ -467,19 +467,19 @@ direction, distinct from the others and from stdio, and owned by this
 invocation alone.
 
 ```text
-ouro-jail run --attempt-id att_<uuid> --gate-fd 3 --control-fd 4 \
+ukai-jail run --attempt-id att_<uuid> --gate-fd 3 --control-fd 4 \
   [--receipt PATH] [policy flags] -- PROGRAM [ARG]...
 ```
 
 1. Allocate the attempt id: `att_` plus a lowercase, random UUIDv4 with the
    RFC 9562 variant. `--attempt-id` is accepted only with `--gate-fd`.
 2. Compute your plan from your own inputs, never from the jail's output: the
-   policy digest and requirement names from `ouro-jail explain --json` with the
+   policy digest and requirement names from `ukai-jail explain --json` with the
    same profile, workspace and overrides you pass to `run`
    (`policy.digest`, `requirements[].name`), and the argv digest from the argv
    you asked for, framed as [canonicalization.md](canonicalization.md)
    specifies.
-3. Read the control stream: NDJSON `ouro.jail.control/1` messages numbered from
+3. Read the control stream: NDJSON `ukai.jail.control/1` messages numbered from
    1 (`seq`), each naming the receipt phase and its digest. Wait for
    `prepared`. Nothing of the command has run.
 4. Read the prepared receipt (`<data>/attempts/<id>/jail.json`, or your
@@ -489,7 +489,7 @@ ouro-jail run --attempt-id att_<uuid> --gate-fd 3 --control-fd 4 \
 5. On a match, release: write exactly one line and close the gate:
 
    ```json
-   {"schema":"ouro.jail.gate/1","action":"release","attempt_id":"att_…","policy_digest":"sha256:…"}
+   {"schema":"ukai.jail.gate/1","action":"release","attempt_id":"att_…","policy_digest":"sha256:…"}
    ```
 
    followed by one LF, at most 1,024 bytes including it. CRLF, a second line,
@@ -520,7 +520,7 @@ its permissions were authorized: authorization is yours.
 
 The canonical receipt is `<data>/attempts/<attempt-id>/jail.json`, replaced
 atomically at each phase (`--receipt PATH` adds a copy). It is
-`ouro.jail.receipt/1` ([schema](jail-receipt.schema.json),
+`ukai.jail.receipt/1` ([schema](jail-receipt.schema.json),
 [example](examples/receipt-tool.json)). Read, in this order:
 
 - **`phase`**: `prepared` (the boundary exists; `exec_observed` false),
@@ -552,7 +552,7 @@ atomically at each phase (`--receipt PATH` adds a copy). It is
 - **`errors`**, **`state_cleanup`** and **`credentials`**.
 
 The trace (`trace.ndjson` beside the receipt, or the `--trace-fd` stream) is
-NDJSON `ouro.event/1` events: audit results from the observer, proxy results,
+NDJSON `ukai.event/1` events: audit results from the observer, proxy results,
 and the jail's own wrapper notes. It is complete only if its last line is the
 `jail.receipt` note naming the final receipt; a last line that is not a whole
 JSON object is visibly incomplete, and the receipt then records the loss. The
@@ -625,7 +625,7 @@ with its evidence.
   run there. `io_uring` is refused in every contained profile and unobserved
   under `none`.
 - **Protected-path coverage under `tool` is `existing_and_root`:** `.git` and
-  `.ouroboros` segments that exist at launch, plus the root-level names; a new
+  `.ukai` segments that exist at launch, plus the root-level names; a new
   deep one created during the run is not covered, and `all_descendants`
   refuses on Linux.
 - **Strict evidence can stop a real program**: a signal handler that exits
@@ -644,7 +644,7 @@ with its evidence.
   external `SIGKILL` of the command.
 - **Credentials**: a `bind_ro` digest is recorded only on an immutable
   filesystem; `copy_rw` never writes refreshed tokens back.
-- **Test seams.** Every `OURO_JAIL_TEST_*` variable is a test-only knob that
+- **Test seams.** Every `UKAI_JAIL_TEST_*` variable is a test-only knob that
   the release binary honours and records in jail state and in every receipt
   with native details. Do not set them in production; a receipt that names
   one describes a test.

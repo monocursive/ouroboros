@@ -8,12 +8,12 @@
   },
   "external_custody": false,
   "local_consistency": true,
-  "manifest_digest": "sha256:b9762462ff2059b4eef6b6351085c530775967fe9f93dcdffd6b6d3d6dbdcd02",
+  "manifest_digest": "sha256:056d765d039377a106999d394d75576c5cfa59e2ac80f4eea2ad16101a99ad6d",
   "projection_rule": 2,
   "run_id": "run_2d907e8d3d464749940ba1d279460857",
-  "schema": "ouro.ledger.bundle-verification/1",
+  "schema": "ukai.ledger.bundle-verification/1",
   "snapshot": {
-    "head_digest": "sha256:f49adf648faf5945f331d1b0509eea692695354cc2019f20b2b4f42e135c089c",
+    "head_digest": "sha256:e2b676582024f6f9ef063e497c4751deb23427a923ebd3748b7aabf5e362942f",
     "head_seq": 1
   },
   "state": "prepared"

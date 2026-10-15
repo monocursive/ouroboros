@@ -801,81 +801,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "ouro"
-version = "0.1.0"
-dependencies = [
- "clap",
- "ouro-records",
- "serde_json",
-]
-
-[[package]]
-name = "ouro-fixture"
-version = "0.1.0"
-dependencies = [
- "clap",
- "libc",
- "ouro-records",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "ouro-jail"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "clap",
- "jsonschema",
- "libc",
- "ouro-fixture",
- "ouro-records",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "tempfile",
- "toml",
- "toml_edit",
- "ureq",
- "uuid",
- "webpki-roots",
- "zeroize",
-]
-
-[[package]]
-name = "ouro-ledger"
-version = "0.1.0"
-dependencies = [
- "clap",
- "jsonschema",
- "libc",
- "ouro-fixture",
- "ouro-records",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "toml",
- "uuid",
-]
-
-[[package]]
-name = "ouro-records"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1446,6 +1371,81 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "ukai"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde_json",
+ "ukai-records",
+]
+
+[[package]]
+name = "ukai-fixture"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ukai-records",
+]
+
+[[package]]
+name = "ukai-jail"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "clap",
+ "jsonschema",
+ "libc",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "toml",
+ "toml_edit",
+ "ukai-fixture",
+ "ukai-records",
+ "ureq",
+ "uuid",
+ "webpki-roots",
+ "zeroize",
+]
+
+[[package]]
+name = "ukai-ledger"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "jsonschema",
+ "libc",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
+ "ukai-fixture",
+ "ukai-records",
+ "uuid",
+]
+
+[[package]]
+name = "ukai-records"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "unicode-general-category"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1737,13 +1737,13 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "clap",
- "ouro-fixture",
- "ouro-jail",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "toml",
+ "ukai-fixture",
+ "ukai-jail",
 ]
 
 [[package]]

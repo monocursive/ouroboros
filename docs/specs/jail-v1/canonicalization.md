@@ -17,7 +17,7 @@ The byte encoding does not bypass redaction: trace paths still obey §11.3.
 
 ## Policy input
 
-The complete hash input is the `ouro.jail.policy-snapshot/1` object validated
+The complete hash input is the `ukai.jail.policy-snapshot/1` object validated
 by [policy-snapshot.schema.json](policy-snapshot.schema.json). The schema's
 `required` list and `additionalProperties: false` govern presence: every field
 the schema requires is present, optional values use null or empty arrays, and
@@ -29,7 +29,7 @@ apply project narrowing before constructing it:
 
 | Field | Canonical meaning |
 |---|---|
-| schema | `ouro.jail.policy-snapshot/1` |
+| schema | `ukai.jail.policy-snapshot/1` |
 | profile | Base `agent`, `tool`, `build`, or `none`; custom display/file names excluded |
 | profile_version | `1`, the built-in semantic contract version |
 | platform | `linux` or `macos`; never kernel/build/probe results |
@@ -65,7 +65,7 @@ host names the credential may be sent to, `allow_plaintext` a boolean. The
 vendor version and the input file's identity are provenance, not semantic
 values.
 
-For network=proxy, ruleset is `ouro.jail.network/1`; for none/host it is null,
+For network=proxy, ruleset is `ukai.jail.network/1`; for none/host it is null,
 allow/translation_prefixes are empty and tls_only is absent. Non-proxy policy
 changes cannot smuggle unused grants into the digest.
 
@@ -102,7 +102,7 @@ strings have no sign or leading zeroes, and positive values are bounded by
 unsigned 64-bit (a swap ceiling may be exactly `0`).
 
 The private `policy.json` envelope is
-`{schema:"ouro.jail.policy-file/1", snapshot, policy_digest, provenance}`.
+`{schema:"ukai.jail.policy-file/1", snapshot, policy_digest, provenance}`.
 Provenance carries file/CLI source and resolution diagnostics. Hash **only**
 snapshot: never this envelope, source filenames, timestamps, attempt ids,
 process identities, capability measurements, chosen backends, credential
@@ -114,7 +114,7 @@ Let `J` be the RFC 8785 canonical UTF-8 encoding of snapshot, without BOM or
 trailing newline. The policy preimage is these exact bytes:
 
 ```text
-ASCII("ouro.jail.policy/1") || 0x00 || J
+ASCII("ukai.jail.policy/1") || 0x00 || J
 ```
 
 `policy_digest = "sha256:" || lowercase_hex(SHA256(preimage))`.
@@ -122,7 +122,7 @@ ASCII("ouro.jail.policy/1") || 0x00 || J
 The argv preimage is:
 
 ```text
-ASCII("ouro.jail.argv/1") || 0x00 || U64BE(argc)
+ASCII("ukai.jail.argv/1") || 0x00 || U64BE(argc)
   || U64BE(len(argv[0])) || argv[0]
   || ...
   || U64BE(len(argv[argc-1])) || argv[argc-1]

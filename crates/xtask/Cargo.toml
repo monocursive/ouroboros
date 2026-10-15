@@ -17,10 +17,10 @@ serde_json.workspace = true
 # The freeze file hashes Cargo.lock and the evidence tables, and pins the
 # jail's own renderings of its baselines and backend plans.
 sha2.workspace = true
-ouro-jail = { path = "../ouro-jail" }
+ukai-jail = { path = "../ukai-jail" }
 # `perf` reads the fixture's perf-launch result through the type that writes
 # it. No cycle: the fixture depends on neither the jail nor this crate.
-ouro-fixture.workspace = true
+ukai-fixture.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

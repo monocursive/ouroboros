@@ -1,6 +1,6 @@
 [
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 1,
@@ -21,7 +21,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 2,
@@ -42,7 +42,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "audit",
     "source_seq": 1,
@@ -72,7 +72,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 3,
@@ -93,7 +93,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 4,
@@ -114,7 +114,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 6,
@@ -145,7 +145,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 7,
@@ -162,7 +162,7 @@
     },
     "fields": {
       "phase": "settled",
-      "receipt_digest": "sha256:55bccb7581384ca2dfc9dd9758ba976ba960e289a941a946b0707e10872343ef"
+      "receipt_digest": "sha256:ff724b742e32b64080d7746a6a101ba4ddaaa576c3401471d910383f780dcfc6"
     }
   }
 ]

@@ -30,9 +30,9 @@ def main():
     root = args.out.resolve(); root.mkdir()
     work = root / 'work'; work.mkdir()
     config = root / 'config'; config.mkdir()
-    shutil.copyfile(args.fixture, work / 'ouro-fixture'); (work / 'ouro-fixture').chmod(0o755)
+    shutil.copyfile(args.fixture, work / 'ukai-fixture'); (work / 'ukai-fixture').chmod(0o755)
     paths = {name: getattr(args, name).resolve() for name in ['before', 'after']}
-    env = {'HOME': str(Path.home()), 'PATH': '/usr/bin:/bin', 'OURO_CONFIG_DIR': str(config),
+    env = {'HOME': str(Path.home()), 'PATH': '/usr/bin:/bin', 'UKAI_CONFIG_DIR': str(config),
            'XDG_RUNTIME_DIR': os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')}
     meta = {'schema': 'ouro.jail.observer-pair/1', 'seed': 20261008, 'samples': args.samples,
             'warmups': 5, 'rounds': args.rounds, 'host': list(os.uname()),
@@ -51,9 +51,9 @@ def main():
             destination = root / name; destination.mkdir()
             data = destination / 'data'
             command = [paths[arm], 'run', '--profile', 'tool', '--workspace', work,
-                       '--limit', 'wall=30s', '--', work / 'ouro-fixture', 'fileops', str(args.rounds), '.']
+                       '--limit', 'wall=30s', '--', work / 'ukai-fixture', 'fileops', str(args.rounds), '.']
             start = time.monotonic_ns()
-            done = subprocess.run(command, env={**env, 'OURO_DATA_DIR': str(data)}, cwd=work,
+            done = subprocess.run(command, env={**env, 'UKAI_DATA_DIR': str(data)}, cwd=work,
                                   capture_output=True, timeout=45)
             elapsed = time.monotonic_ns() - start
             (destination / 'stdout.txt').write_bytes(done.stdout); (destination / 'stderr.txt').write_bytes(done.stderr)

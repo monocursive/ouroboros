@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-run:1",
+  "$id": "urn:ukai:schema:ledger-run:1",
   "title": "Rebuildable local run projection",
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.ledger.run/1"
+      "const": "ukai.ledger.run/1"
     },
     "run_id": {
       "type": "string",
@@ -22,7 +22,7 @@
       "pattern": "^[A-Za-z0-9_.:-]+$"
     },
     "payload": {
-      "$ref": "urn:ouro:schema:ledger-request:1"
+      "$ref": "urn:ukai:schema:ledger-request:1"
     },
     "state": {
       "enum": [
@@ -100,7 +100,7 @@
     "receipts": {
       "type": "array",
       "items": {
-        "$ref": "urn:ouro:schema:jail-receipt:1"
+        "$ref": "urn:ukai:schema:jail-receipt:1"
       }
     },
     "capture": {

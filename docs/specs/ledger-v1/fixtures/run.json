@@ -1,10 +1,10 @@
 {
-  "schema": "ouro.ledger.run/1",
+  "schema": "ukai.ledger.run/1",
   "run_id": "run_11111111111111111111111111111111",
   "attempt_id": "att_00000000-0000-4000-8000-000000000001",
   "request_id": "fixture",
   "payload": {
-    "schema": "ouro.ledger.request/1",
+    "schema": "ukai.ledger.request/1",
     "profile": "tool",
     "argv_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -52,6 +52,6 @@
   },
   "chain": {
     "head_seq": 3,
-    "head_digest": "sha256:59d00d8feb930504b847939bf9d7de18d82d331e1bb9c5160e413e23e6ff1ca5"
+    "head_digest": "sha256:a420b4c73b17ab4a26cf95e57495baa5735d7c68a6f8dbcc43320eaea68785d6"
   }
 }

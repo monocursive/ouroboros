@@ -1,0 +1,1046 @@
+//! Configuration files, the environment allow-list and limit parsing.
+//!
+//! Implements jail-v1 §6.2 (paths and precedence), the file keys of §6.3 and
+//! the limit grammar of §6.4.
+//!
+//! Unknown keys refuse rather than being ignored, so a future policy key can
+//! never be silently dropped by an older binary. Duplicate keys refuse because
+//! TOML itself forbids them and the parser reports them; a test pins that.
+//! Only the documented environment variables ([`ENVIRONMENT_ALLOW_LIST`]) are
+//! read; every other `UKAI_*` name is ignored, so a submitter cannot smuggle
+//! authority in.
+
+use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::net::Ipv6Addr;
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+
+use crate::network::{NetworkMode, Prefix};
+use crate::policy::{Ceiling, Ceilings, LimitKey, PolicyDelta, ProtectedCoverage};
+use crate::records::{
+    ErrorCode, ErrorStage, EvidenceMode, JailError, ObserveMode, Remediation, SCHEMA_POLICY,
+};
+
+/// Relocates the operator's configuration directory.
+pub const CONFIG_DIR_VAR: &str = "UKAI_CONFIG_DIR";
+/// Relocates the operator's data directory (jail state).
+pub const DATA_DIR_VAR: &str = "UKAI_DATA_DIR";
+/// The operator home: the default configuration and data directories, and
+/// what a leading `~/` in an operator file names.
+pub const HOME_VAR: &str = "HOME";
+/// `observation.mode` from the environment.
+pub const OBSERVE_VAR: &str = "UKAI_JAIL_OBSERVE";
+/// `observation.evidence` from the environment.
+pub const EVIDENCE_VAR: &str = "UKAI_JAIL_EVIDENCE";
+
+/// The documented environment allow-list (§6.2 step 3): every variable
+/// [`env_settings`] reads, and nothing else.
+pub const ENVIRONMENT_ALLOW_LIST: &[&str] = &[
+    CONFIG_DIR_VAR,
+    DATA_DIR_VAR,
+    OBSERVE_VAR,
+    EVIDENCE_VAR,
+    crate::trace::TRACE_CAP_ENV,
+];
+
+fn invalid(key: &str, message: impl Into<String>) -> JailError {
+    JailError::new(
+        ErrorCode::InvalidConfig,
+        ErrorStage::Resolving,
+        Remediation::Configuration,
+        message.into(),
+    )
+    .with_key_path(key)
+}
+
+/// `dir`, which the environment `variable` named, when it is absolute.
+///
+/// A relative operator directory would resolve against whatever directory
+/// the jail happens to run in, and paths beneath it would refuse as having
+/// "no directory to resolve against", naming neither the variable nor the
+/// cause; so it refuses here, naming both.
+///
+/// # Errors
+/// [`ErrorCode::InvalidConfig`] at key `variable` for a relative `dir`.
+pub fn absolute_dir<'a>(variable: &str, dir: &'a Path) -> Result<&'a Path, JailError> {
+    if dir.is_absolute() {
+        Ok(dir)
+    } else {
+        Err(invalid(
+            variable,
+            format!(
+                "{variable} is `{}`, which is not an absolute path; it must be absolute",
+                dir.display()
+            ),
+        ))
+    }
+}
+
+/// A TOML parse error as one line: the parser's message and where in `text`
+/// it points, as a 1-based line and column. The parser's own rendering also
+/// quotes the offending source line; that text is the file's, possibly the
+/// contained party's, so it is left out of an error that reaches receipts.
+#[must_use]
+pub(crate) fn toml_error(text: &str, error: &toml::de::Error) -> String {
+    let message = error.message().trim_end();
+    let Some(before) = error.span().and_then(|span| text.get(..span.start)) else {
+        return message.to_owned();
+    };
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count())
+        + 1;
+    format!("{message} (line {line}, column {column})")
+}
+
+/// A TOML scalar that may be written as an integer or as a string with a unit.
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Scalar {
+    /// An integer literal.
+    Integer(i64),
+    /// A string literal, possibly carrying a unit.
+    Text(String),
+}
+
+impl Scalar {
+    fn as_text(&self) -> String {
+        match self {
+            Scalar::Integer(value) => value.to_string(),
+            Scalar::Text(text) => text.clone(),
+        }
+    }
+}
+
+/// `[filesystem]` in a policy file.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilesystemSection {
+    /// `filesystem.read_write`.
+    #[serde(default)]
+    pub read_write: Vec<String>,
+    /// `filesystem.read_only`.
+    #[serde(default)]
+    pub read_only: Vec<String>,
+    /// `filesystem.deny_read`.
+    #[serde(default)]
+    pub deny_read: Vec<String>,
+    /// `filesystem.protected_coverage`.
+    pub protected_coverage: Option<String>,
+}
+
+/// `[network]` in a policy file.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkSection {
+    /// `network.mode`.
+    pub mode: Option<String>,
+    /// `network.allow`.
+    #[serde(default)]
+    pub allow: Option<Vec<String>>,
+}
+
+/// `[limits]` in a policy file.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LimitsSection {
+    /// `limits.wall`.
+    pub wall: Option<Scalar>,
+    /// `limits.pids`.
+    pub pids: Option<Scalar>,
+    /// `limits.mem`.
+    pub mem: Option<Scalar>,
+    /// `limits.swap` (zero disables swapping).
+    pub swap: Option<Scalar>,
+    /// `limits.storage`.
+    pub storage: Option<Scalar>,
+    /// `limits.inodes`.
+    pub inodes: Option<Scalar>,
+    /// `limits.cpu`.
+    pub cpu: Option<Scalar>,
+}
+
+/// `[observation]` in a policy file.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationSection {
+    /// `observation.mode`.
+    pub mode: Option<String>,
+    /// `observation.evidence`.
+    pub evidence: Option<String>,
+}
+
+/// A selected operator profile file (§6.3). `extends` is required.
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyFile {
+    /// Must be `ukai.jail.policy/1`.
+    pub schema: String,
+    /// Exactly one built-in contained profile.
+    pub extends: String,
+    /// Filesystem keys.
+    #[serde(default)]
+    pub filesystem: FilesystemSection,
+    /// Network keys.
+    #[serde(default)]
+    pub network: NetworkSection,
+    /// Limit keys.
+    #[serde(default)]
+    pub limits: LimitsSection,
+    /// Observation keys.
+    #[serde(default)]
+    pub observation: ObservationSection,
+}
+
+/// The `[jail]` table shared by `config.toml` and a project `ukai.toml`.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JailSection {
+    /// Operator-only argv accident filters.
+    #[serde(default)]
+    pub commands: crate::commands::Rules,
+    /// `jail.schema`.
+    pub schema: Option<String>,
+    /// `jail.profile`: a built-in name or an operator profile file path.
+    /// Forbidden in a project file.
+    pub profile: Option<String>,
+    /// `jail.extends`: forbidden in a project file and in `config.toml`.
+    pub extends: Option<String>,
+    /// Filesystem keys.
+    #[serde(default)]
+    pub filesystem: FilesystemSection,
+    /// Network keys.
+    #[serde(default)]
+    pub network: NetworkSection,
+    /// Limit keys.
+    #[serde(default)]
+    pub limits: LimitsSection,
+    /// Observation keys.
+    #[serde(default)]
+    pub observation: ObservationSection,
+}
+
+/// `[jail_host.network]`: host configuration, forbidden in project files.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JailHostNetwork {
+    /// Canonical IPv6 CIDRs of the provisioned network.
+    #[serde(default)]
+    pub translation_prefixes: Vec<String>,
+}
+
+/// `[jail_host]`.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JailHostSection {
+    /// Network host configuration.
+    pub network: Option<JailHostNetwork>,
+}
+
+/// The operator's `config.toml`.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorConfig {
+    /// Local ledger retention settings; execution does not apply them.
+    pub ledger: Option<ukai_records::retention::LedgerRetention>,
+    /// Jail defaults.
+    pub jail: Option<JailSection>,
+    /// Host configuration.
+    pub jail_host: Option<JailHostSection>,
+}
+
+/// The workspace-root `ukai.toml`.
+#[derive(Clone, Default, PartialEq, Eq, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectConfig {
+    /// The project's narrowing section.
+    pub jail: Option<JailSection>,
+}
+
+/// Parses a selected operator profile file.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key, a
+/// duplicate key or a wrong `schema` value.
+pub fn parse_policy_file(text: &str) -> Result<PolicyFile, JailError> {
+    let file: PolicyFile =
+        toml::from_str(text).map_err(|error| invalid("profile", toml_error(text, &error)))?;
+    if file.schema != SCHEMA_POLICY {
+        return Err(invalid(
+            "schema",
+            format!("expected schema `{SCHEMA_POLICY}`, found `{}`", file.schema),
+        ));
+    }
+    Ok(file)
+}
+
+/// Which file a `[jail]` table was read from: the table is shared, and so
+/// are the keys some of them may not carry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JailTable {
+    /// The operator's `config.toml`, a defaults file.
+    OperatorConfig,
+    /// A workspace-root `ukai.toml`, which may only narrow.
+    ProjectFile,
+}
+
+/// A `[jail]` key one file may not carry, and its refusal.
+struct ForbiddenKey {
+    /// The file it is refused in.
+    table: JailTable,
+    /// The key under `jail.`.
+    key: &'static str,
+    /// Whether the table carries it.
+    present: fn(&JailSection) -> bool,
+    /// The refusal's code.
+    code: ErrorCode,
+    /// The refusal's message.
+    message: &'static str,
+}
+
+/// Every `[jail]` key a file may not carry, refused where the file is read
+/// with its exact key path, in this order. `config.toml` is a defaults
+/// file, and only a profile file names the built-in profile it extends. A
+/// project file can only narrow: `profile` and `extends` would choose the
+/// base authority, which §6.3 refuses as widening, and command rules are
+/// the operator's.
+const FORBIDDEN_KEYS: [ForbiddenKey; 4] = [
+    ForbiddenKey {
+        table: JailTable::OperatorConfig,
+        key: "extends",
+        present: |jail| jail.extends.is_some(),
+        code: ErrorCode::InvalidConfig,
+        message: "`extends` belongs in a profile file, not in config.toml",
+    },
+    ForbiddenKey {
+        table: JailTable::ProjectFile,
+        key: "profile",
+        present: |jail| jail.profile.is_some(),
+        code: ErrorCode::PolicyWidening,
+        message: "`profile` may not appear in the project file, which can only narrow the \
+                  operator's policy",
+    },
+    ForbiddenKey {
+        table: JailTable::ProjectFile,
+        key: "extends",
+        present: |jail| jail.extends.is_some(),
+        code: ErrorCode::PolicyWidening,
+        message: "`extends` may not appear in the project file, which can only narrow the \
+                  operator's policy",
+    },
+    ForbiddenKey {
+        table: JailTable::ProjectFile,
+        key: "commands",
+        present: |jail| !jail.commands.is_empty(),
+        code: ErrorCode::InvalidConfig,
+        message: "command rules are operator-only",
+    },
+];
+
+/// Refuses the first key in `jail` that `table`'s file may not carry.
+fn refuse_forbidden_keys(table: JailTable, jail: &JailSection) -> Result<(), JailError> {
+    match FORBIDDEN_KEYS
+        .iter()
+        .find(|forbidden| forbidden.table == table && (forbidden.present)(jail))
+    {
+        Some(forbidden) => Err(JailError::new(
+            forbidden.code,
+            ErrorStage::Resolving,
+            Remediation::Configuration,
+            forbidden.message.to_owned(),
+        )
+        .with_key_path(format!("jail.{}", forbidden.key))),
+        None => Ok(()),
+    }
+}
+
+/// Parses the operator's `config.toml`.
+///
+/// The keys it may not carry ([`FORBIDDEN_KEYS`]) are refused here, where
+/// the file is read.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key, a
+/// duplicate key, a wrong `jail.schema` value or `jail.extends`.
+pub fn parse_operator_config(text: &str) -> Result<OperatorConfig, JailError> {
+    let config: OperatorConfig =
+        toml::from_str(text).map_err(|error| invalid("config", toml_error(text, &error)))?;
+    if let Some(jail) = &config.jail {
+        check_schema("jail.schema", jail.schema.as_deref())?;
+        refuse_forbidden_keys(JailTable::OperatorConfig, jail)?;
+    }
+    Ok(config)
+}
+
+/// Parses a project `ukai.toml`.
+///
+/// The `[jail]` table is shared with `config.toml`, so the keys a project
+/// file may not carry ([`FORBIDDEN_KEYS`]) are refused here, where the file
+/// is read, each with its exact key path. (`[jail_host]` is not part of a
+/// project file's grammar at all.)
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for a syntax error, an unknown key, a
+/// duplicate key or command rules, and [`ErrorCode::PolicyWidening`] for
+/// `jail.profile` or `jail.extends`.
+pub fn parse_project_config(text: &str) -> Result<ProjectConfig, JailError> {
+    let project: ProjectConfig =
+        toml::from_str(text).map_err(|error| invalid("jail", toml_error(text, &error)))?;
+    if let Some(jail) = &project.jail {
+        refuse_forbidden_keys(JailTable::ProjectFile, jail)?;
+    }
+    Ok(project)
+}
+
+/// Builds the semantic delta of a policy file's body.
+///
+/// `prefix` is the key-path prefix used when reporting an exact key path, so a
+/// project file reports `jail.limits.wall` and a profile file `limits.wall`.
+/// Every ceiling a file sets is required (§6.4: "Every explicit limit from
+/// CLI, operator or project config is required").
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for an unparsable value.
+pub fn delta_from_sections(
+    prefix: &str,
+    filesystem: &FilesystemSection,
+    network: &NetworkSection,
+    limits: &LimitsSection,
+    observation: &ObservationSection,
+) -> Result<PolicyDelta, JailError> {
+    let mut delta = PolicyDelta {
+        read_write: filesystem
+            .read_write
+            .iter()
+            .map(|p| p.as_bytes().to_vec())
+            .collect(),
+        read_only: filesystem
+            .read_only
+            .iter()
+            .map(|p| p.as_bytes().to_vec())
+            .collect(),
+        deny_read: filesystem
+            .deny_read
+            .iter()
+            .map(|p| p.as_bytes().to_vec())
+            .collect(),
+        ..PolicyDelta::default()
+    };
+    if let Some(coverage) = &filesystem.protected_coverage {
+        delta.protected_coverage = Some(ProtectedCoverage::parse(coverage).ok_or_else(|| {
+            invalid(
+                &format!("{prefix}filesystem.protected_coverage"),
+                format!("unknown protected coverage `{coverage}`"),
+            )
+        })?);
+    }
+    if let Some(mode) = &network.mode {
+        delta.network_mode = Some(NetworkMode::parse(mode).ok_or_else(|| {
+            invalid(
+                &format!("{prefix}network.mode"),
+                format!("unknown network mode `{mode}`"),
+            )
+        })?);
+    }
+    delta.network_allow_present = network.allow.is_some();
+    delta.network_allow = network.allow.clone().unwrap_or_default();
+    delta.limits = ceilings_from_section(prefix, limits, true)?;
+    if let Some(mode) = &observation.mode {
+        delta.observe = Some(parse_observe(&format!("{prefix}observation.mode"), mode)?);
+    }
+    if let Some(evidence) = &observation.evidence {
+        delta.evidence = Some(parse_evidence(
+            &format!("{prefix}observation.evidence"),
+            evidence,
+        )?);
+    }
+    Ok(delta)
+}
+
+/// Parses every ceiling a `[limits]` section sets.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for a zero, negative, unbounded,
+/// overflowing or unknown value.
+pub fn ceilings_from_section(
+    prefix: &str,
+    limits: &LimitsSection,
+    required: bool,
+) -> Result<Ceilings, JailError> {
+    let mut out = Ceilings::default();
+    for (key, scalar) in [
+        (LimitKey::Wall, &limits.wall),
+        (LimitKey::Pids, &limits.pids),
+        (LimitKey::Mem, &limits.mem),
+        (LimitKey::Swap, &limits.swap),
+        (LimitKey::Storage, &limits.storage),
+        (LimitKey::Inodes, &limits.inodes),
+        (LimitKey::Cpu, &limits.cpu),
+    ] {
+        let Some(scalar) = scalar else { continue };
+        let text = scalar.as_text();
+        let key_path = format!("{prefix}limits.{}", key.as_str());
+        let value = parse_limit_value(&key_path, key, &text)?;
+        let ceiling = Some(Ceiling {
+            value,
+            requested: text,
+            required,
+        });
+        out.set(key, ceiling);
+    }
+    Ok(out)
+}
+
+/// Parses one `--limit KEY=VALUE` argument list into ceilings.
+///
+/// Duplicate keys refuse (§6.4).
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for an unknown key, a duplicate key or
+/// an unparsable value.
+pub fn ceilings_from_cli(arguments: &[String]) -> Result<Ceilings, JailError> {
+    let mut out = Ceilings::default();
+    let mut seen: BTreeSet<&'static str> = BTreeSet::new();
+    for argument in arguments {
+        let Some((key, value)) = argument.split_once('=') else {
+            return Err(invalid("--limit", format!("`{argument}` is not KEY=VALUE")));
+        };
+        let Some(limit) = LimitKey::parse(key) else {
+            return Err(invalid(
+                "--limit",
+                format!(
+                    "unknown limit key `{key}`; expected wall, pids, mem, swap, storage, inodes or cpu"
+                ),
+            ));
+        };
+        if !seen.insert(limit.as_str()) {
+            return Err(invalid(
+                &format!("--limit {}", limit.as_str()),
+                format!("`{}` is supplied more than once", limit.as_str()),
+            ));
+        }
+        let key_path = format!("--limit {}", limit.as_str());
+        let parsed = parse_limit_value(&key_path, limit, value)?;
+        let ceiling = Some(Ceiling {
+            value: parsed,
+            requested: value.to_owned(),
+            required: true,
+        });
+        out.set(limit, ceiling);
+    }
+    Ok(out)
+}
+
+/// Parses one limit value in its key's grammar (§6.4).
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for a zero, negative, unbounded,
+/// overflowing or unknown value.
+pub fn parse_limit_value(key_path: &str, key: LimitKey, text: &str) -> Result<u64, JailError> {
+    match key {
+        LimitKey::Wall => parse_scaled(
+            key_path,
+            text,
+            &[("ms", 1), ("s", 1000), ("m", 60_000), ("h", 3_600_000)],
+            true,
+        ),
+        LimitKey::Swap if matches!(text, "0" | "0KiB" | "0MiB" | "0GiB") => Ok(0),
+        LimitKey::Mem | LimitKey::Swap | LimitKey::Storage => parse_scaled(
+            key_path,
+            text,
+            &[
+                ("KiB", 1024),
+                ("MiB", 1024 * 1024),
+                ("GiB", 1024 * 1024 * 1024),
+            ],
+            false,
+        ),
+        LimitKey::Pids | LimitKey::Cpu | LimitKey::Inodes => {
+            parse_scaled(key_path, text, &[], false)
+        }
+    }
+}
+
+/// Parses `<digits><unit>` with checked multiplication.
+///
+/// The units are tried longest-first so `ms` is not read as `m` followed by a
+/// stray `s`. `unit_required` is true for `wall`, whose grammar has no bare
+/// integer form.
+fn parse_scaled(
+    key_path: &str,
+    text: &str,
+    units: &[(&str, u64)],
+    unit_required: bool,
+) -> Result<u64, JailError> {
+    // §6.4's grammar is `<digits><unit>` with nothing around it. Trimming
+    // would quietly accept `"  1m  "`, and a narrowing file that is allowed to
+    // spell a ceiling two ways is a comparison waiting to disagree.
+    let trimmed = text;
+    let mut sorted: Vec<&(&str, u64)> = units.iter().collect();
+    sorted.sort_by_key(|(unit, _)| std::cmp::Reverse(unit.len()));
+    let (digits, multiplier) = match sorted
+        .iter()
+        .find(|(unit, _)| trimmed.len() > unit.len() && trimmed.ends_with(unit))
+    {
+        Some((unit, multiplier)) => (&trimmed[..trimmed.len() - unit.len()], *multiplier),
+        None => {
+            if unit_required {
+                return Err(invalid(
+                    key_path,
+                    format!("`{text}` needs one of the units ms, s, m or h"),
+                ));
+            }
+            (trimmed, 1)
+        }
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid(
+            key_path,
+            format!("`{text}` is not a positive integer with an accepted unit"),
+        ));
+    }
+    if digits.len() > 1 && digits.starts_with('0') {
+        return Err(invalid(key_path, format!("`{text}` has a leading zero")));
+    }
+    let base: u64 = digits
+        .parse()
+        .map_err(|_| invalid(key_path, format!("`{text}` does not fit in 64 bits")))?;
+    if base == 0 {
+        return Err(invalid(
+            key_path,
+            format!("`{text}` is zero; a ceiling must be positive"),
+        ));
+    }
+    base.checked_mul(multiplier)
+        .ok_or_else(|| invalid(key_path, format!("`{text}` overflows 64 bits")))
+}
+
+/// Validates a `schema` key wherever one may appear (§6.2).
+///
+/// An absent key is accepted: `config.toml` and `ukai.toml` may omit it. Any
+/// other value refuses, because a file declaring a schema this build does not
+/// implement is not a file whose keys this build may interpret.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for a value other than
+/// `ukai.jail.policy/1`.
+pub fn check_schema(key_path: &str, schema: Option<&str>) -> Result<(), JailError> {
+    match schema {
+        None => Ok(()),
+        Some(value) if value == SCHEMA_POLICY => Ok(()),
+        Some(value) => Err(invalid(
+            key_path,
+            format!("expected schema `{SCHEMA_POLICY}`, found `{value}`"),
+        )),
+    }
+}
+
+/// Parses `observation.mode`.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for an unknown value.
+pub fn parse_observe(key_path: &str, text: &str) -> Result<ObserveMode, JailError> {
+    match text {
+        "on" => Ok(ObserveMode::On),
+        "off" => Ok(ObserveMode::Off),
+        other => Err(invalid(
+            key_path,
+            format!("unknown observation mode `{other}`; expected on or off"),
+        )),
+    }
+}
+
+/// Parses `observation.evidence`.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] for an unknown value.
+pub fn parse_evidence(key_path: &str, text: &str) -> Result<EvidenceMode, JailError> {
+    match text {
+        "strict" => Ok(EvidenceMode::Strict),
+        "best-effort" => Ok(EvidenceMode::BestEffort),
+        other => Err(invalid(
+            key_path,
+            format!("unknown evidence mode `{other}`; expected strict or best-effort"),
+        )),
+    }
+}
+
+/// Canonicalizes `[jail_host.network] translation_prefixes` (§6.2).
+///
+/// Each entry must be an IPv6 CIDR `address/length`. It is parsed by the
+/// proxy's own [`Prefix::parse`] (so the snapshot never records a prefix the
+/// proxy would read differently): the length is canonical decimal without a
+/// leading zero, host bits beyond the length are cleared, and the address is
+/// re-rendered in RFC 5952 form. Equivalent spellings such as
+/// `2001:0db8::/96`, `2001:db8::/96` and `2001:db8::1/96` therefore produce
+/// one digest (§6.3: "equivalent semantic inputs have the same digest"). A
+/// zone-id, whitespace, an IPv4 prefix or anything else that is not an IPv6
+/// CIDR is refused instead of being carried into the snapshot as opaque text.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] naming `key_path` for an entry that
+/// is not an IPv6 CIDR with a prefix length of 0..=128.
+pub fn canonical_translation_prefixes(
+    key_path: &str,
+    entries: &[String],
+) -> Result<Vec<String>, JailError> {
+    entries
+        .iter()
+        .map(|entry| {
+            let refuse_entry = |reason: &str| {
+                invalid(key_path, format!("`{entry}` is not an IPv6 CIDR: {reason}"))
+            };
+            match Prefix::parse(entry).map_err(refuse_entry)? {
+                Prefix::V6(network, length) => Ok(format!("{}/{length}", Ipv6Addr::from(network))),
+                Prefix::V4(..) => Err(refuse_entry("it is an IPv4 prefix")),
+            }
+        })
+        .collect()
+}
+
+/// The operator settings read from the environment allow-list (§6.2 step 3).
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct EnvSettings {
+    /// `UKAI_CONFIG_DIR`.
+    pub config_dir: Option<PathBuf>,
+    /// `UKAI_DATA_DIR`.
+    pub data_dir: Option<PathBuf>,
+    /// `UKAI_JAIL_OBSERVE`.
+    pub observe: Option<ObserveMode>,
+    /// `UKAI_JAIL_EVIDENCE`.
+    pub evidence: Option<EvidenceMode>,
+    /// `UKAI_JAIL_TRACE_CAP`: the local trace budget in bytes.
+    pub trace_cap: Option<u64>,
+}
+
+/// Reads the allowed environment settings; ignores every other variable.
+///
+/// No environment-derived path or host grant is accepted (§6.2), so the two
+/// path variables only relocate the operator's own directories.
+///
+/// # Errors
+/// Returns [`ErrorCode::InvalidConfig`] when an allowed variable has an
+/// unparsable value.
+pub fn env_settings(lookup: &dyn Fn(&str) -> Option<OsString>) -> Result<EnvSettings, JailError> {
+    let text = |name: &str| -> Result<Option<String>, JailError> {
+        lookup(name)
+            .map(|value| {
+                value
+                    .into_string()
+                    .map_err(|_| invalid(name, "the value is not UTF-8"))
+            })
+            .transpose()
+    };
+    let directory = |name: &str| -> Result<Option<PathBuf>, JailError> {
+        lookup(name)
+            .map(|value| {
+                let dir = PathBuf::from(value);
+                absolute_dir(name, &dir)?;
+                Ok(dir)
+            })
+            .transpose()
+    };
+    let mut settings = EnvSettings {
+        config_dir: directory(CONFIG_DIR_VAR)?,
+        data_dir: directory(DATA_DIR_VAR)?,
+        ..EnvSettings::default()
+    };
+    if let Some(value) = text(OBSERVE_VAR)? {
+        settings.observe = Some(parse_observe(OBSERVE_VAR, &value)?);
+    }
+    if let Some(value) = text(EVIDENCE_VAR)? {
+        settings.evidence = Some(parse_evidence(EVIDENCE_VAR, &value)?);
+    }
+    let cap_var = crate::trace::TRACE_CAP_ENV;
+    if let Some(value) = text(cap_var)? {
+        let cap = value
+            .parse::<u64>()
+            .map_err(|_| invalid(cap_var, "the value must be plain decimal bytes"))?;
+        if !(crate::trace::TRACE_CAP_SEAM_MIN..=crate::trace::TRACE_CAP_MAX).contains(&cap) {
+            return Err(invalid(
+                cap_var,
+                format!(
+                    "the local trace budget must be {}..={} bytes",
+                    crate::trace::TRACE_CAP_SEAM_MIN,
+                    crate::trace::TRACE_CAP_MAX
+                ),
+            ));
+        }
+        settings.trace_cap = Some(cap);
+    }
+    Ok(settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_operator_retention_settings_do_not_become_jail_policy() {
+        let config = parse_operator_config("[ledger]\nretain='90d'\ncapture_retain='7d'").unwrap();
+        assert!(config.jail.is_none());
+        assert_eq!(
+            config
+                .ledger
+                .unwrap()
+                .resolve(None, None)
+                .unwrap()
+                .capture_retain_days,
+            7
+        );
+        assert!(parse_operator_config("[ledger]\nretian='7d'").is_err());
+    }
+
+    /// Each forbidden key is refused in its own file, with its code and key
+    /// path, and only there: `config.toml` may select a profile and carry
+    /// command rules.
+    #[test]
+    fn each_forbidden_key_is_refused_in_its_file_alone() {
+        for (text, key, code) in [
+            (
+                "[jail]\nprofile = \"tool\"\n",
+                "jail.profile",
+                ErrorCode::PolicyWidening,
+            ),
+            (
+                "[jail]\nextends = \"tool\"\n",
+                "jail.extends",
+                ErrorCode::PolicyWidening,
+            ),
+            (
+                "[jail.commands]\ndeny = [\"git push --force\"]\n",
+                "jail.commands",
+                ErrorCode::InvalidConfig,
+            ),
+        ] {
+            let error = parse_project_config(text).expect_err(key);
+            assert_eq!((error.code, error.key_path.as_deref()), (code, Some(key)));
+        }
+        let error = parse_operator_config("[jail]\nextends = \"tool\"\n").expect_err("extends");
+        assert_eq!(
+            (error.code, error.key_path.as_deref()),
+            (ErrorCode::InvalidConfig, Some("jail.extends"))
+        );
+        parse_operator_config(
+            "[jail]\nprofile = \"build\"\n[jail.commands]\ndeny = [\"git push --force\"]\n",
+        )
+        .expect("config.toml may select a profile and carry command rules");
+    }
+
+    /// `config.toml` names no base profile to extend, and its `[jail]` table
+    /// carries this build's schema or none; the parser refuses both by key.
+    #[test]
+    fn the_operator_config_refuses_extends_and_a_foreign_schema() {
+        let error = parse_operator_config("[jail]\nextends = \"tool\"\n")
+            .expect_err("extends belongs in a profile file");
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.key_path.as_deref(), Some("jail.extends"));
+        let error = parse_operator_config("[jail]\nschema = \"ukai.policy/0\"\n")
+            .expect_err("a foreign schema refuses");
+        assert_eq!(error.key_path.as_deref(), Some("jail.schema"));
+        let accepted = format!("[jail]\nschema = \"{SCHEMA_POLICY}\"\n");
+        assert!(parse_operator_config(&accepted).is_ok());
+    }
+
+    /// A project `ukai.toml` may not carry `[jail.commands]`: without this
+    /// refusal the operator-only rules would be silently dropped.
+    #[test]
+    fn a_project_file_may_not_carry_command_rules() {
+        let error = parse_project_config("[jail.commands]\ndeny = [\"git push --force\"]\n")
+            .expect_err("project command rules must refuse");
+        assert_eq!(error.key_path.as_deref(), Some("jail.commands"));
+        assert!(error.message.contains("operator-only"), "{}", error.message);
+        // Without the section the same shape parses.
+        assert!(parse_project_config("").is_ok());
+    }
+
+    #[test]
+    fn wall_units_scale_and_a_bare_integer_refuses() {
+        assert_eq!(
+            parse_limit_value("k", LimitKey::Wall, "5m").expect("parses"),
+            300_000
+        );
+        assert_eq!(
+            parse_limit_value("k", LimitKey::Wall, "300s").expect("parses"),
+            300_000
+        );
+        assert_eq!(
+            parse_limit_value("k", LimitKey::Wall, "2h").expect("parses"),
+            7_200_000
+        );
+        assert_eq!(
+            parse_limit_value("k", LimitKey::Wall, "250ms").expect("parses"),
+            250
+        );
+        assert!(parse_limit_value("k", LimitKey::Wall, "300").is_err());
+        assert!(parse_limit_value("k", LimitKey::Wall, "0s").is_err());
+        assert!(parse_limit_value("k", LimitKey::Wall, "-1s").is_err());
+        assert!(parse_limit_value("k", LimitKey::Wall, "forever").is_err());
+    }
+
+    #[test]
+    fn memory_units_are_binary_and_overflow_refuses() {
+        assert_eq!(
+            parse_limit_value("k", LimitKey::Mem, "512MiB").expect("parses"),
+            512 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_limit_value("k", LimitKey::Mem, "1024").expect("parses"),
+            1024
+        );
+        assert!(parse_limit_value("k", LimitKey::Mem, "18446744073709551615GiB").is_err());
+        assert!(parse_limit_value("k", LimitKey::Mem, "0KiB").is_err());
+    }
+
+    #[test]
+    fn swap_is_independent_and_allows_an_explicit_zero() {
+        for zero in ["0", "0KiB", "0MiB", "0GiB"] {
+            assert_eq!(parse_limit_value("swap", LimitKey::Swap, zero).unwrap(), 0);
+            assert!(parse_limit_value("mem", LimitKey::Mem, zero).is_err());
+        }
+        for bad in ["00", "-1", "max", " 0", "0 ", "18446744073709551615GiB"] {
+            assert!(parse_limit_value("swap", LimitKey::Swap, bad).is_err());
+        }
+        let limits = ceilings_from_cli(&["mem=64MiB".into(), "swap=0".into()]).unwrap();
+        assert_eq!(limits.mem.unwrap().value, 64 * 1024 * 1024);
+        assert_eq!(limits.swap.unwrap().value, 0);
+        assert!(ceilings_from_cli(&["swap=0".into(), "swap=1MiB".into()]).is_err());
+    }
+
+    #[test]
+    fn a_duplicate_cli_limit_refuses() {
+        let error = ceilings_from_cli(&["wall=1m".to_owned(), "wall=2m".to_owned()])
+            .expect_err("duplicates refuse");
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn an_unknown_cli_limit_key_refuses() {
+        let error = ceilings_from_cli(&["disk=1".to_owned()]).expect_err("an unknown key refuses");
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+    }
+
+    #[test]
+    fn translation_prefixes_are_canonicalized_or_refused() {
+        let key = "jail_host.network.translation_prefixes";
+        let canonical = canonical_translation_prefixes(
+            key,
+            &[
+                "2001:0db8::/96".to_owned(),
+                "FE80::/10".to_owned(),
+                "2001:db8:0:0:0:0:0:0/96".to_owned(),
+                "2001:db8::1/96".to_owned(),
+                "64:ff9b::ffff/0".to_owned(),
+            ],
+        )
+        .expect("every spelling parses");
+        assert_eq!(
+            canonical,
+            vec![
+                "2001:db8::/96".to_owned(),
+                "fe80::/10".to_owned(),
+                "2001:db8::/96".to_owned(),
+                "2001:db8::/96".to_owned(),
+                "::/0".to_owned(),
+            ],
+            "equivalent spellings, host bits included, render as one RFC 5952 form"
+        );
+        // The proxy reads the canonical form as the same prefix.
+        for entry in &canonical {
+            let rules = crate::network::Rules::new(Vec::new(), std::slice::from_ref(entry));
+            assert!(rules.is_ok(), "{entry}");
+        }
+
+        for entry in [
+            "banana",
+            "2001:db8::",
+            "10.0.0.0/8",
+            "fe80::1%eth0/64",
+            "2001:db8:: /96",
+            "2001:db8::/ 96",
+            "2001:db8::/129",
+            "2001:db8::/96/48",
+            "2001:db8::/096",
+            "2001:db8::/",
+        ] {
+            let error = canonical_translation_prefixes(key, &[entry.to_owned()])
+                .expect_err("a non-CIDR entry refuses");
+            assert_eq!(error.code, ErrorCode::InvalidConfig, "for `{entry}`");
+            assert_eq!(
+                error.key_path.as_deref(),
+                Some(key),
+                "the refusal names the exact key path"
+            );
+        }
+    }
+
+    #[test]
+    fn a_duplicate_toml_key_refuses() {
+        let error = parse_policy_file(
+            "schema = \"ukai.jail.policy/1\"\nextends = \"tool\"\n[limits]\nwall = \"1m\"\nwall = \"2m\"\n",
+        )
+        .expect_err("TOML forbids duplicate keys");
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+    }
+
+    #[test]
+    fn an_unknown_toml_key_refuses() {
+        let error = parse_policy_file(
+            "schema = \"ukai.jail.policy/1\"\nextends = \"tool\"\nfuture_key = 1\n",
+        )
+        .expect_err("unknown keys are never ignored");
+        assert_eq!(error.code, ErrorCode::InvalidConfig);
+        // One line, with the position and without the file's text.
+        assert!(error.message.contains("future_key"), "{}", error.message);
+        assert!(
+            error.message.ends_with("(line 3, column 1)"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains('\n'), "{}", error.message);
+    }
+
+    #[test]
+    fn the_environment_allow_list_ignores_everything_else() {
+        let lookup = |name: &str| match name {
+            "UKAI_JAIL_OBSERVE" => Some(OsString::from("off")),
+            "UKAI_JAIL_PROFILE" => Some(OsString::from("none")),
+            "UKAI_RW" => Some(OsString::from("/")),
+            _ => None,
+        };
+        let settings = env_settings(&lookup).expect("parses");
+        assert_eq!(settings.observe, Some(ObserveMode::Off));
+        assert_eq!(settings.config_dir, None);
+        assert_eq!(settings.data_dir, None);
+        assert_eq!(settings.evidence, None);
+        assert_eq!(settings.trace_cap, None);
+    }
+
+    /// The allow-list is the set of names `env_settings` reads: a variable
+    /// read without being listed, or listed without being read, fails.
+    #[test]
+    fn the_allow_list_is_exactly_what_is_read() {
+        let asked = std::cell::RefCell::new(BTreeSet::new());
+        let lookup = |name: &str| {
+            asked.borrow_mut().insert(name.to_owned());
+            None
+        };
+        env_settings(&lookup).expect("nothing set");
+        let listed: BTreeSet<String> = ENVIRONMENT_ALLOW_LIST
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        assert_eq!(asked.into_inner(), listed);
+        assert!(
+            ENVIRONMENT_ALLOW_LIST
+                .iter()
+                .all(|name| crate::environment::is_reserved(std::ffi::OsStr::new(name))),
+            "every setting is a reserved name, so none reaches a child"
+        );
+    }
+}

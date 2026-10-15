@@ -7,7 +7,7 @@
 Run: uv run docs/specs/jail-v1/validate_contract.py
 The checked-in fixture corpus is also input to the Rust P01/R01 suite.
 
-J5-C: the semantic rules below are the port of ouro_jail::records::semantic.
+J5-C: the semantic rules below are the port of ukai_jail::records::semantic.
 Both run fixtures/semantic-cases.json and must name the same rule for every
 case; both run fixtures/gate-frames.json against the §8.2 frame rules. The
 frozen wire schemas and the artifacts behind the other announced identifiers
@@ -123,7 +123,7 @@ def check_byte_objects(node):
 
 
 # ---------------------------------------------------------------------------
-# Semantic rules: the port of ouro_jail::records::semantic (J5-C). Each checker
+# Semantic rules: the port of ukai_jail::records::semantic (J5-C). Each checker
 # returns every violation as (rule, where, detail); the rule identifiers and
 # their citations are fixtures/semantic-cases.json's "rules".
 # ---------------------------------------------------------------------------
@@ -401,7 +401,7 @@ def check_semantic_corpus(validators):
 
 
 # ---------------------------------------------------------------------------
-# The gate frame (§8.2): the port of ouro_jail::records::parse_release.
+# The gate frame (§8.2): the port of ukai_jail::records::parse_release.
 # ---------------------------------------------------------------------------
 
 
@@ -448,7 +448,7 @@ def check_loader_refuses_duplicate_ids():
     import tempfile
     with tempfile.TemporaryDirectory() as directory:
         for name in ["a.schema.json", "b.schema.json"]:
-            (Path(directory) / name).write_text(json.dumps({"$id": "urn:ouro:schema:event:1"}))
+            (Path(directory) / name).write_text(json.dumps({"$id": "urn:ukai:schema:event:1"}))
         try:
             load_schemas(Path(directory))
         except AssertionError:
@@ -458,7 +458,7 @@ def check_loader_refuses_duplicate_ids():
 
 def check_frozen(schemas):
     manifest = tomllib.loads((ROOT / "frozen-schemas.toml").read_text())
-    check(manifest["schema"] == "ouro.jail.frozen-schemas/1")
+    check(manifest["schema"] == "ukai.jail.frozen-schemas/1")
     frozen = {entry["file"]: entry for entry in manifest["frozen"]}
     unfrozen = {entry["file"] for entry in manifest.get("unfrozen", [])}
     for file in sorted(ROOT.glob("*.schema.json")):
@@ -489,12 +489,12 @@ def hash_bytes(value):
 
 
 def policy_hash(snapshot):
-    return hash_bytes(b"ouro.jail.policy/1\0" + rfc8785.dumps(snapshot))
+    return hash_bytes(b"ukai.jail.policy/1\0" + rfc8785.dumps(snapshot))
 
 
 def argv_frame(argv):
     raw = [native_bytes(value) for value in argv]
-    return b"ouro.jail.argv/1\0" + struct.pack(">Q", len(raw)) + b"".join(
+    return b"ukai.jail.argv/1\0" + struct.pack(">Q", len(raw)) + b"".join(
         struct.pack(">Q", len(value)) + value for value in raw
     )
 
@@ -538,7 +538,7 @@ def check_canonical_fixtures(validators):
     context = read("fixtures/canonical-context.json")
     for filename in ["canonical-input.toml", "canonical-equivalent.toml"]:
         config = tomllib.loads((ROOT / "fixtures" / filename).read_text())
-        check(config["schema"] == "ouro.jail.policy/1")
+        check(config["schema"] == "ukai.jail.policy/1")
         check(config["extends"] == snapshot["profile"])
         duration = re.fullmatch(r"([1-9][0-9]*)(ms|s|m|h)", config["limits"]["wall"])
         units = {"ms": 1, "s": 1000, "m": 60000, "h": 3600000}
@@ -598,6 +598,20 @@ def check_network_fixtures():
     return len(cases)
 
 
+# Evidence receipts recorded before Ouroboros was renamed Ukai (2026-10-15)
+# carry the old schema and component names; the rest of each receipt is held
+# to the current contract unchanged.
+RENAMED = {"ouro.jail.receipt/1": "ukai.jail.receipt/1", "ouro-jail": "ukai-jail"}
+
+
+def renamed(value):
+    if isinstance(value, dict):
+        return {key: renamed(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [renamed(item) for item in value]
+    return RENAMED.get(value, value) if isinstance(value, str) else value
+
+
 def main():
     schemas = load_schemas(ROOT)
     check_loader_refuses_duplicate_ids()
@@ -610,6 +624,8 @@ def main():
     evidence = sorted((ROOT / "evidence").glob("*receipt*.json"))
     for file in examples + evidence:
         record = json.loads(file.read_text())
+        if file in evidence:
+            record = renamed(record)
         kind = "jail-receipt" if file in evidence else next(
             schema for prefix, schema in prefixes.items() if file.name.startswith(prefix))
         errors = [e.message for e in validators[kind].iter_errors(record)]

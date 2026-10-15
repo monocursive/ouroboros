@@ -49,10 +49,10 @@ def main():
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
     home = pathlib.Path.home()
-    binary = home / '.local/bin/ouro-jail'
+    binary = home / '.local/bin/ukai-jail'
     env = {'HOME': str(home), 'PATH': os.environ['PATH'],
-           'OURO_CONFIG_DIR': str(home / 'ouro-config'),
-           'OURO_DATA_DIR': str(home / 'ouro-data'),
+           'UKAI_CONFIG_DIR': str(home / 'ouro-config'),
+           'UKAI_DATA_DIR': str(home / 'ouro-data'),
            'XDG_RUNTIME_DIR': os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')}
     result = {'schema': 'ouro.jail.onboarding/1', 'status': 'blocked',
               'expected_revision': args.revision, 'rows': [],
@@ -107,7 +107,7 @@ def main():
             done = run(name, argv, check=False, timeout=330)
             if done.returncode == 0:
                 return done
-            if attempt or b'Bad Request:' not in done.stderr or b'ouro-jail: error' in done.stderr:
+            if attempt or b'Bad Request:' not in done.stderr or b'ukai-jail: error' in done.stderr:
                 raise RuntimeError(f'{name} failed with exit {done.returncode}; see {name}.stderr')
             label = name + '-provider-failure'
             result['rows'][-1]['name'] = label
@@ -128,7 +128,7 @@ def main():
         original = result['binary_sha256']
         bad = home / 'corrupt-artifacts'
         shutil.copytree(args.artifacts, bad)
-        archives = list(args.artifacts.glob('ouro-jail-*-x86_64-unknown-linux-gnu.tar.gz'))
+        archives = list(args.artifacts.glob('ukai-jail-*-x86_64-unknown-linux-gnu.tar.gz'))
         assert len(archives) == 1, 'expected exactly one versioned native archive'
         archive_name = archives[0].name
         with (bad / archive_name).open('ab') as file:
@@ -154,7 +154,7 @@ def main():
         rust = {name: shutil.which(name) for name in ['cargo', 'rustc', 'rustup']}
         result['rust_before'] = rust
         assert not any(rust.values()) and not (home / '.rustup').exists()
-        assert not binary.exists(), 'A fresh VM must not have ouro-jail installed.'
+        assert not binary.exists(), 'A fresh VM must not have ukai-jail installed.'
         assert not (home / '.opencode').exists(), 'A fresh VM must not have OpenCode installed.'
         assert os.uname().machine == 'x86_64' and os.uname().sysname == 'Linux'
         run('host', ['sh', '-c', 'uname -a; cat /etc/os-release; '

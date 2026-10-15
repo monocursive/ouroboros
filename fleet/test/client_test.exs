@@ -1,13 +1,13 @@
-defmodule OuroFleet.ClientTest do
+defmodule UkaiFleet.ClientTest do
   use ExUnit.Case, async: false
-  alias OuroFleet.{Client, Protocol}
+  alias UkaiFleet.{Client, Protocol}
 
-  # Stands in for the controller process behind `OuroFleet.Controller.call/1`.
+  # Stands in for the controller process behind `UkaiFleet.Controller.call/1`.
   defmodule StubController do
     use GenServer
 
     def start_link(version),
-      do: GenServer.start_link(__MODULE__, version, name: OuroFleet.Controller)
+      do: GenServer.start_link(__MODULE__, version, name: UkaiFleet.Controller)
 
     def init(version), do: {:ok, %{version: version, seen: []}}
 
@@ -32,6 +32,6 @@ defmodule OuroFleet.ClientTest do
 
   test "an unreachable controller leaves the outcome unknown and asks for the same retry" do
     assert {:error, "controller_unreachable_or_reply_lost_retry_same_request"} =
-             Client.call(:"ouro-missing@127.0.0.1", :doctor)
+             Client.call(:"ukai-missing@127.0.0.1", :doctor)
   end
 end

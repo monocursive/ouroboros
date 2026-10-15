@@ -1,8 +1,8 @@
-defmodule OuroFleet.WorkerTest do
+defmodule UkaiFleet.WorkerTest do
   use ExUnit.Case, async: false
-  alias OuroFleet.{Store, Worker}
+  alias UkaiFleet.{Store, Worker}
 
-  # The worker's margin for its reply (`@reply_margin` in `OuroFleet.Worker`): a call
+  # The worker's margin for its reply (`@reply_margin` in `UkaiFleet.Worker`): a call
   # with no more time than this leaves the worker none to work in.
   @reply_margin 5_000
 
@@ -10,7 +10,7 @@ defmodule OuroFleet.WorkerTest do
     root =
       Path.join(
         System.tmp_dir!(),
-        "ouro-fleet-worker-" <> Base.encode16(:crypto.strong_rand_bytes(8))
+        "ukai-fleet-worker-" <> Base.encode16(:crypto.strong_rand_bytes(8))
       )
 
     File.mkdir!(root)
@@ -32,7 +32,7 @@ defmodule OuroFleet.WorkerTest do
     key = "job_" <> String.duplicate("a", 64)
 
     request = %{
-      "schema" => "ouro.fleet.request/1",
+      "schema" => "ukai.fleet.request/1",
       "request_id" => "typo",
       "argv" => ["/bin/true"]
     }
@@ -64,7 +64,7 @@ defmodule OuroFleet.WorkerTest do
     key = "job_" <> String.duplicate("b", 64)
 
     request = %{
-      "schema" => "ouro.fleet.request/1",
+      "schema" => "ukai.fleet.request/1",
       "request_id" => "null",
       "argv" => ["/bin/true"],
       "jail" => nil,
@@ -83,7 +83,7 @@ defmodule OuroFleet.WorkerTest do
     key = "job_" <> String.duplicate("a", 64)
 
     request = %{
-      "schema" => "ouro.fleet.request/1",
+      "schema" => "ukai.fleet.request/1",
       "request_id" => "place",
       "argv" => ["/bin/true"]
     }
@@ -160,11 +160,11 @@ defmodule OuroFleet.WorkerTest do
   end
 
   defp request(id),
-    do: %{"schema" => "ouro.fleet.request/1", "request_id" => id, "argv" => ["/bin/true"]}
+    do: %{"schema" => "ukai.fleet.request/1", "request_id" => id, "argv" => ["/bin/true"]}
 
   defp attempt(root, letter, run) do
     key = "job_" <> String.duplicate(letter, 64)
-    record = %{"schema" => "ouro.fleet.attempt/1", "job_id" => key, "run_id" => run}
+    record = %{"schema" => "ukai.fleet.attempt/1", "job_id" => key, "run_id" => run}
     Store.write!(Path.join([root, "attempts", key <> ".json"]), record)
     key
   end
@@ -182,7 +182,7 @@ defmodule OuroFleet.WorkerTest do
       *" version --json "* | *" --plan-only "*) [ -e '#{slow}' ] && exec /bin/sleep 30 ;;
     esac
     case " $* " in
-      *" version --json "*) echo '{"schemas":{"run":"#{OuroFleet.Protocol.ledger_run()}"}}' ;;
+      *" version --json "*) echo '{"schemas":{"run":"#{UkaiFleet.Protocol.ledger_run()}"}}' ;;
       *" doctor --json "*) echo '{"ready":true,"detached_owner":{"available":true}}' ;;
       *" show run-live "*) echo '{"state":"admitted"}' ;;
       *" show "*) echo '{"state":"settled"}' ;;

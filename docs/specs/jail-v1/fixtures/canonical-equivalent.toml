@@ -1,5 +1,5 @@
 extends = "tool"
-schema = "ouro.jail.policy/1"
+schema = "ukai.jail.policy/1"
 [observation]
 evidence = "strict"
 mode = "on"

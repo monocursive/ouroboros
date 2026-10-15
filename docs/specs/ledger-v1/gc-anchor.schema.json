@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-gc-anchor:1",
+  "$id": "urn:ukai:schema:ledger-gc-anchor:1",
   "title": "Whole-run pruning authority; JCS checksum covers retained, not this envelope",
   "type": "object",
   "additionalProperties": false,
@@ -31,12 +31,12 @@
       ],
       "properties": {
         "schema": {
-          "const": "ouro.ledger.gc-anchor/1"
+          "const": "ukai.ledger.gc-anchor/1"
         },
         "run": {
           "allOf": [
             {
-              "$ref": "urn:ouro:schema:ledger-run:1"
+              "$ref": "urn:ukai:schema:ledger-run:1"
             },
             {
               "properties": {
@@ -62,7 +62,7 @@
           ]
         },
         "manifest": {
-          "$ref": "https://ouroboros.monocursive.com/schemas/ledger-v1/segments"
+          "$ref": "https://ukai.monocursive.com/schemas/ledger-v1/segments"
         },
         "replay": {
           "type": "object",

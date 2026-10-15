@@ -26,7 +26,7 @@ os.umask(0o077)
 root = pathlib.Path(tempfile.mkdtemp(prefix='.ouro-acceptance-', dir=pathlib.Path.home()))
 work, config, data = (root / name for name in ('work', 'config', 'data'))
 work.mkdir(); config.mkdir(); (config/'launch').mkdir()
-env = os.environ | {'OURO_CONFIG_DIR': str(config), 'OURO_DATA_DIR': str(data)}
+env = os.environ | {'UKAI_CONFIG_DIR': str(config), 'UKAI_DATA_DIR': str(data)}
 binary = args.binary.resolve()
 results = []
 receipts = args.out.with_suffix('')
@@ -175,7 +175,7 @@ allow_plaintext = true
 [network]
 allow = ["127.0.0.1:{port}"]
 ''')
-    p=command(['--launch','vault'], ['/bin/sh','-c',f'printf "%s\\n" "$OURO_VAULT_API"; curl -fsS --noproxy "" -H "Authorization: $OURO_VAULT_API" http://127.0.0.1:{port}/'],0,'http_vault_live')
+    p=command(['--launch','vault'], ['/bin/sh','-c',f'printf "%s\\n" "$UKAI_VAULT_API"; curl -fsS --noproxy "" -H "Authorization: $UKAI_VAULT_API" http://127.0.0.1:{port}/'],0,'http_vault_live')
     assert 'vault:' in p.stdout and 'vault-ok' in p.stdout and 'fixture-secret' not in p.stdout
     attempt=latest(); receipt=json.loads((attempt/'jail.json').read_text())
     assert receipt['credentials'][0]['never_staged'] is True

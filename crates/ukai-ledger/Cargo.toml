@@ -1,0 +1,28 @@
+[package]
+name = "ukai-ledger"
+description = "Durable admission and evidence for independently supervised jail attempts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+jsonschema.workspace = true
+ukai-records.workspace = true
+clap = { workspace = true, features = ["derive"] }
+libc.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled", "limits"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+toml.workspace = true
+sha2.workspace = true
+ring = "0.17.14"
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+ukai-fixture.workspace = true

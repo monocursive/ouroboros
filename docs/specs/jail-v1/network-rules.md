@@ -1,6 +1,6 @@
 # Jail v1 network rules
 
-Normative ruleset `ouro.jail.network/1`, referenced by [§10](../jail-v1.md#10-network-mediation).
+Normative ruleset `ukai.jail.network/1`, referenced by [§10](../jail-v1.md#10-network-mediation).
 The ruleset is frozen with the versioned data in
 [network-addresses.json](network-addresses.json). Updating that data or IDNA
 semantics requires a ruleset version change and conformance rerun; it is never
@@ -52,7 +52,7 @@ conservative refusal, not a claim those obsolete forms are normally routable.
 The checked-in prefix table is the union of the IANA IPv4/IPv6 special-purpose
 registry allocations retrieved on 2026-09-21 and explicit conservative
 additions. All listed prefixes are denied by default, including special-purpose
-allocations that IANA marks globally reachable; this is an Ouroboros policy,
+allocations that IANA marks globally reachable; this is an Ukai policy,
 not an interpretation of IANA's reachability column. Mapped addresses are
 classified after normalization. IPv6 outside 2000::/3 is also denied by default.
 IPv4 multicast, IPv6 multicast and known cloud service addresses are included.

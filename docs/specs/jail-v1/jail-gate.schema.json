@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:jail-gate:1",
-  "title": "Ouro jail gate release frame v1",
+  "$id": "urn:ukai:schema:jail-gate:1",
+  "title": "Ukai jail gate release frame v1",
   "description": "Frozen at jail milestone 1 (jail-v1 \u00a78.2, jail-v1.md:895-910). The one valid release object. The frame rules around it (one UTF-8 line ending in exactly one LF, no CR, at most 1,024 bytes including the LF, duplicate keys refuse, nothing after the LF) are checked on the bytes by the supervisor's parser and pinned by fixtures/gate-frames.json.",
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.jail.gate/1"
+      "const": "ukai.jail.gate/1"
     },
     "action": {
       "const": "release"

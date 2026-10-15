@@ -2,7 +2,7 @@
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.jail.receipt/1"
+      "const": "ukai.jail.receipt/1"
     },
     "attempt_id": {
       "type": "string",
@@ -47,7 +47,7 @@
       "type": "object",
       "properties": {
         "component": {
-          "const": "ouro-jail"
+          "const": "ukai-jail"
         },
         "version": {
           "type": "string"
@@ -1223,9 +1223,9 @@
   ],
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:jail-receipt:1",
-  "title": "Ouro jail receipt v1",
-  "description": "Frozen at jail milestone 1 (jail-v1 \u00a713.2, \u00a717). The shared shape, phase tuples and coverage invariants. The rules JSON Schema cannot state (native byte strings, unique ids and keys, gap interval order) are ouro_jail::records::semantic and validate_contract.py over fixtures/semantic-cases.json. lifetime.boundary is a per-OS vocabulary: pid_namespace and supervisor_cgroup on Linux, native_tree elsewhere.",
+  "$id": "urn:ukai:schema:jail-receipt:1",
+  "title": "Ukai jail receipt v1",
+  "description": "Frozen at jail milestone 1 (jail-v1 \u00a713.2, \u00a717). The shared shape, phase tuples and coverage invariants. The rules JSON Schema cannot state (native byte strings, unique ids and keys, gap interval order) are ukai_jail::records::semantic and validate_contract.py over fixtures/semantic-cases.json. lifetime.boundary is a per-OS vocabulary: pid_namespace and supervisor_cgroup on Linux, native_tree elsewhere.",
   "allOf": [
     {
       "if": {

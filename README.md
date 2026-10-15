@@ -1,29 +1,29 @@
-<p align="center">
-  <img src="assets/logo/ouroboros-readme-banner.png" width="100%" alt="Ouroboros">
-</p>
-
-# Ouroboros Jail
+# Ukai Jail
 
 **Give your agent only the access it needs.**
 
-Ouroboros Jail is a standalone Linux sandbox for AI agents and command-line
-tools. The `ouro-jail` executable restricts file access, network destinations,
+Ukai Jail is a standalone Linux sandbox for AI agents and command-line
+tools. The `ukai-jail` executable restricts file access, network destinations,
 and runtime for a command and its children. Each attempt produces a receipt
 of the policy applied, the outcome, and any gaps in observation. Your existing
 agent keeps its own models and workflow.
 
-[Website](https://ouroboros.monocursive.com/) · [User guide](docs/guide.md) ·
+[Website](https://ukai.monocursive.com/) · [User guide](docs/guide.md) ·
 [Roadmap](docs/roadmap.md) · [Operator reference](docs/specs/jail-v1/operating.md)
 
-**Developer preview 0.1.0-rc.2.** [Signed Linux x86_64 and ARM64 packages](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2)
+Ukai was called Ouroboros until 15 October 2026. The previews below were
+published under that name, as `ouro-jail` and `ouro-vm`; the next release is
+the first under the new name.
+
+**Developer preview 0.1.0-rc.2.** [Signed Linux x86_64 and ARM64 packages](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2)
 are available. The reference x86_64 conformance host and native Raspberry Pi
 checks are recorded; available profiles depend on the host's kernel capabilities.
-Native macOS `ouro-jail` builds provide inspection commands and refuse execution.
+Native macOS `ukai-jail` builds provide inspection commands and refuse execution.
 See the [platform requirements](docs/specs/jail-v1.md#32-initial-support-matrix)
 and [Linux acceptance record](docs/benchmarks/jail/release-preview-2026-10-10.md).
 
-**macOS VM preview 0.1.0-preview.1.** [Signed and notarized Apple Silicon DMG](https://github.com/monocursive/ouroboros/releases/tag/ouro-vm-v0.1.0-preview.1)
-is available for macOS 27+. `ouro-vm` runs offline Linux ARM64 commands in a
+**macOS VM preview 0.1.0-preview.1.** [Signed and notarized Apple Silicon DMG](https://github.com/monocursive/ukai/releases/tag/ouro-vm-v0.1.0-preview.1)
+is available for macOS 27+. `ukai-vm` runs offline Linux ARM64 commands in a
 disposable VM. See the [Mac quickstart](docs/guide.md#macos-vm-preview) for limits
 and examples; native Mac programs and online agents are outside this preview.
 
@@ -43,19 +43,19 @@ maintainer signing.
 
 ## Install and run
 
-The installer selects `ouro-jail` on Linux and `ouro-vm` on Apple Silicon.
+The installer selects `ukai-jail` on Linux and `ukai-vm` on Apple Silicon.
 On Linux, install your distribution's `bubblewrap` package first.
 The binaries require glibc 2.39 or newer; no Rust compiler or sudo is needed
 for the installer. Host enforcement still requires a successful `doctor` report.
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://ouroboros.monocursive.com/install.sh | bash
+curl --proto '=https' --tlsv1.2 -fsSL https://ukai.monocursive.com/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
-ouro-jail version --json
-ouro-jail doctor --profile tool --json
+ukai-jail version --json
+ukai-jail doctor --profile tool --json
 ```
 
-On macOS the command is `ouro-vm`: run `ouro-vm version` and `ouro-vm doctor`
+On macOS the command is `ukai-vm`: run `ukai-vm version` and `ukai-vm doctor`
 after installing, then follow the [Mac example](docs/guide.md#macos-vm-preview).
 
 See the [guide](docs/guide.md#install-the-developer-preview) for supported hosts,
@@ -65,15 +65,15 @@ Install Rust 1.98.1 and your distribution's bubblewrap package. Run as your
 normal user. The reference host uses Ubuntu 26.04.1 and bubblewrap 0.11.1.
 
 ```sh
-git clone --branch dev https://github.com/monocursive/ouroboros.git
-cd ouroboros
-cargo +1.98.1 build --release -p ouro-jail
+git clone --branch dev https://github.com/monocursive/ukai.git
+cd ukai
+cargo +1.98.1 build --release -p ukai-jail
 mkdir -p "$HOME/.local/bin"
-install -m 0755 target/release/ouro-jail "$HOME/.local/bin/ouro-jail"
+install -m 0755 target/release/ukai-jail "$HOME/.local/bin/ukai-jail"
 export PATH="$HOME/.local/bin:$PATH"
 
-ouro-jail version
-ouro-jail doctor --profile tool
+ukai-jail version
+ukai-jail doctor --profile tool
 ```
 
 Install the binary outside any workspace you intend to make writable. The jail
@@ -84,15 +84,15 @@ preferred limits are reported as unapplied.
 Try a command in a fresh directory:
 
 ```sh
-jail_demo="$(mktemp -d "$HOME/ouro-jail-demo.XXXXXX")"
+jail_demo="$(mktemp -d "$HOME/ukai-jail-demo.XXXXXX")"
 cd "$jail_demo"
 
-ouro-jail explain --profile tool --workspace "$PWD" --limit wall=30s --json
-ouro-jail run --profile tool --workspace "$PWD" --limit wall=30s -- \
+ukai-jail explain --profile tool --workspace "$PWD" --limit wall=30s --json
+ukai-jail run --profile tool --workspace "$PWD" --limit wall=30s -- \
   /bin/sh -c 'printf "hello from the jail\n" > greeting.txt'
 
 cat greeting.txt
-ouro-jail tail
+ukai-jail tail
 ```
 
 This grants a writable workspace, blocks network access, and sets a 30-second
@@ -113,7 +113,7 @@ The Rust supervisor applies permissions outside the agent:
   files remain available; your home directory and environment are not inherited
   wholesale. Use `--ro` and `--rw` for path grants, and `--deny-read` for exclusions.
 - **Kernel boundary:** contained profiles use seccomp, `no_new_privs`, and no
-  capabilities. Project-local `ouro.toml` configuration can narrow the operator's
+  capabilities. Project-local `ukai.toml` configuration can narrow the operator's
   policy but cannot add grants or weaken required controls.
 - **Network:** `tool` and `build` have no network access. `agent` uses an outside
   proxy with destination grants, supporting HTTP and SOCKS5 TCP connections.
@@ -138,7 +138,7 @@ gate. Inspect grants and review the resulting changes.
 
 | Profile | Starting policy |
 | --- | --- |
-| `tool` | Writable workspace and scratch, no network; existing `.git` and `.ouroboros` trees beneath writable roots are protected from writes. |
+| `tool` | Writable workspace and scratch, no network; existing `.git` and `.ukai` trees beneath writable roots are protected from writes. |
 | `agent` | Writable workspace, scratch, and temporary agent state; proxied network destinations require grants. Git metadata is writable. |
 | `build` | Read-only inputs and writable scratch; grant output paths explicitly. No network. Requires an explicit memory ceiling and host support. |
 | `none` | Uncontained host access. Receipts mark the child unprotected. |
@@ -157,7 +157,7 @@ combinations and remaining gaps.
 ## Receipts, journals, and integrations
 
 Each attempt saves a `jail.json` receipt, resolved policy, and `trace.ndjson`
-journal under `~/.local/share/ouro/attempts/` by default. `OURO_DATA_DIR` selects
+journal under `~/.local/share/ukai/attempts/` by default. `UKAI_DATA_DIR` selects
 a different private data directory. Receipts record `phase`, `outcome`, actual
 `containment` and `applied` controls, process `lifetime`, observation `coverage`,
 and `errors`. Missing evidence stays explicit; a zero count only means no
@@ -212,7 +212,7 @@ See the [method and raw results](docs/benchmarks/jail/README.md).
 
 ## Local ledger work
 
-The first `ouro-ledger` slice is available in source. It reserves one attempt,
+The first `ukai-ledger` slice is available in source. It reserves one attempt,
 records admission durably before releasing the jail's execution gate, stores
 source events and settlement, and supports `runs`, `show`, `verify`, and
 `settle-orphans`. Bounded single-run queries retain the stored source events and
@@ -289,5 +289,5 @@ quality standards, without explanation.**
 
 ## Licence
 
-Ouroboros Jail is licensed under the [MIT licence](LICENSE).
+Ukai Jail is licensed under the [MIT licence](LICENSE).
 Copyright © 2026 Monocursive.

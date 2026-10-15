@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:jail-event:1",
+  "$id": "urn:ukai:schema:jail-event:1",
   "title": "Jail v1 producer event",
   "allOf": [
     {
-      "$ref": "urn:ouro:schema:event:1"
+      "$ref": "urn:ukai:schema:event:1"
     },
     {
       "if": {
@@ -724,7 +724,7 @@
       }
     }
   ],
-  "description": "Frozen at jail milestone 1 (jail-v1 §13.1, §17). The restriction of ouro.event/1 to what ouro-jail writes: its wrapper notes, audit fields and proxy results. It carries no identifier of its own: its events are ouro.event/1 events.",
+  "description": "Frozen at jail milestone 1 (jail-v1 §13.1, §17). The restriction of ukai.event/1 to what ukai-jail writes: its wrapper notes, audit fields and proxy results. It carries no identifier of its own: its events are ukai.event/1 events.",
   "$defs": {
     "decimal": {
       "type": "string",

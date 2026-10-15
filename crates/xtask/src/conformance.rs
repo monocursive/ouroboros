@@ -1,10 +1,10 @@
 //! The conformance driver of jail-v1 §16 and contract §3.8.
 //!
 //! A GitHub-hosted runner, or a developer machine, drives the provisioned
-//! Linux reference host over SSH as the `ouro-ci` account. Nothing is
+//! Linux reference host over SSH as the `ukai-ci` account. Nothing is
 //! installed on the host and nothing there polls anything: the driver copies
 //! the tree into a per-run directory, builds, runs `doctor --json`, compares
-//! it with the pinned manifest, runs the suite with `OURO_CONFORMANCE=1` so a
+//! it with the pinned manifest, runs the suite with `UKAI_CONFORMANCE=1` so a
 //! skip is a failure, copies the evidence back and removes the run directory —
 //! on success only. A failed run keeps its directory and prints the path.
 //! The build and the suite run detached on the host and are watched with
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use ouro_jail::records::{OutcomeKind, Phase};
+use ukai_jail::records::{OutcomeKind, Phase};
 
 use crate::gates::{self, TestLog};
 use crate::manifest::{self, Manifest};
@@ -26,7 +26,7 @@ use crate::stamp;
 use crate::util::wire;
 
 /// The remote parent of every run directory, relative to the account's home.
-pub const REMOTE_RUNS: &str = "ouro-ci/runs";
+pub const REMOTE_RUNS: &str = "ukai-ci/runs";
 /// Cargo is not on the non-login PATH of the reference host.
 pub const REMOTE_CARGO: &str = "$HOME/.cargo/bin/cargo";
 /// rustup, which names the pinned toolchain's own binaries for the suite:
@@ -258,7 +258,7 @@ fn build_space_command() -> &'static str {
 }
 
 /// The build-provenance claims every cargo step that builds or tests the
-/// jail receives (`crates/ouro-jail/src/build_provenance.rs` states the
+/// jail receives (`crates/ukai-jail/src/build_provenance.rs` states the
 /// rule; its build.rs enforces it): the tested commit and whether the tree
 /// was dirty, from the suite's own revision marker. Cargo tracks both, so
 /// the build and test steps get identical values or the suite rebuilds the
@@ -266,7 +266,7 @@ fn build_space_command() -> &'static str {
 #[must_use]
 pub fn build_env(revision: &Revision) -> String {
     format!(
-        "OURO_BUILD_REVISION={} OURO_BUILD_DIRTY={}",
+        "UKAI_BUILD_REVISION={} UKAI_BUILD_DIRTY={}",
         revision.sha, revision.dirty
     )
 }
@@ -333,7 +333,7 @@ pub fn doctor_command(run_dir: &str) -> String {
     let p = run_path(run_dir);
     format!(
         "cd {p} && XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --scope --quiet \
-         ./target/release/ouro-jail doctor --json > doctor.json 2> doctor.stderr; \
+         ./target/release/ukai-jail doctor --json > doctor.json 2> doctor.stderr; \
          rc=$?; cat doctor.stderr 1>&2; exit $rc"
     )
 }
@@ -344,7 +344,7 @@ pub fn binary_hashes_command(run_dir: &str, check: bool) -> String {
     let command = if check {
         "sha256sum --check binaries.sha256"
     } else {
-        "sha256sum target/release/ouro-jail target/release/ouro-fixture target/release/ouro-ledger > binaries.sha256 && cat binaries.sha256"
+        "sha256sum target/release/ukai-jail target/release/ukai-fixture target/release/ukai-ledger > binaries.sha256 && cat binaries.sha256"
     };
     format!("cd {} && {command}", run_path(run_dir))
 }
@@ -353,14 +353,14 @@ pub fn binary_hashes_command(run_dir: &str, check: bool) -> String {
 /// stop exactly this run's processes and nothing else.
 #[must_use]
 pub fn suite_unit(run_dir: &str) -> String {
-    format!("ouro-conformance-{run_dir}.scope")
+    format!("ukai-conformance-{run_dir}.scope")
 }
 
 /// The remote test command, run by [`detached_start`] in the run directory
 /// with its output in `test.log`.
 ///
-/// `OURO_CONFORMANCE=1` turns every live skip into a failure (jail-v1 §16).
-/// `OURO_RELEASE_EVIDENCE=1` checks the recorded clean-VM and real-vendor
+/// `UKAI_CONFORMANCE=1` turns every live skip into a failure (jail-v1 §16).
+/// `UKAI_RELEASE_EVIDENCE=1` checks the recorded clean-VM and real-vendor
 /// evidence (K11, K27) against this build: the acceptance map's verdict
 /// requires those clauses, and a plain `cargo test` skips them.
 ///
@@ -376,9 +376,9 @@ pub fn test_command(run_dir: &str, jobs: u32, revision: &Revision) -> String {
         "C=$({REMOTE_RUSTUP} which cargo) && R=$({REMOTE_RUSTUP} which rustc) \
          && D=$({REMOTE_RUSTUP} which rustdoc) && \
          XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --scope --quiet --unit={} \
-         env OURO_CONFORMANCE=1 OURO_RELEASE_EVIDENCE=1 \
-         OURO_JAIL_BIN=$PWD/target/release/ouro-jail \
-         OURO_FIXTURE_BIN=$PWD/target/release/ouro-fixture \
+         env UKAI_CONFORMANCE=1 UKAI_RELEASE_EVIDENCE=1 \
+         UKAI_JAIL_BIN=$PWD/target/release/ukai-jail \
+         UKAI_FIXTURE_BIN=$PWD/target/release/ukai-fixture \
          RUSTC=$R RUSTDOC=$D {} \
          {}",
         suite_unit(run_dir),
@@ -419,7 +419,7 @@ pub fn with_suite_path(command: &str, revision: &Revision) -> String {
     // conformance flag as the suite really has it.
     format!(
         "PATH={SUITE_PATH} /bin/sh -c \"echo {}\\$PATH; \
-         echo {}{revision}; echo {}\\$OURO_CONFORMANCE; exec {command}\"",
+         echo {}{revision}; echo {}\\$UKAI_CONFORMANCE; exec {command}\"",
         gates::MARKER_PATH,
         gates::MARKER_REVISION,
         gates::MARKER_CONFORMANCE
@@ -435,9 +435,9 @@ pub fn suite_ran_with_the_scrubbed_path(log: &TestLog) -> bool {
 /// Names that must not be found on the suite's PATH: the rest of the
 /// ecosystem and every BEAM entry point.
 pub const I01_BINARIES: &[&str] = &[
-    "ouro",
-    "ouro-ledger",
-    "ouro-fleet",
+    "ukai",
+    "ukai-ledger",
+    "ukai-fleet",
     "erl",
     "erlc",
     "beam.smp",
@@ -615,16 +615,16 @@ pub fn contract_validation_argv() -> (String, Vec<String>) {
 #[must_use]
 pub fn smoke_command(run_dir: &str) -> String {
     let p = run_path(run_dir);
-    let env = "OURO_DATA_DIR=$PWD/smoke/data OURO_CONFIG_DIR=$PWD/smoke/config";
+    let env = "UKAI_DATA_DIR=$PWD/smoke/data UKAI_CONFIG_DIR=$PWD/smoke/config";
     format!(
         "cd {p} && rm -rf smoke && mkdir -p smoke/ws smoke/data smoke/config && \
          chmod 700 smoke/data smoke/config && \
          echo \"smoke cgroup $(cat /proc/self/cgroup)\" && \
          for profile in tool none; do \
-         {env} ./target/release/ouro-jail run --profile $profile --workspace $PWD/smoke/ws \
+         {env} ./target/release/ukai-jail run --profile $profile --workspace $PWD/smoke/ws \
          --receipt $PWD/smoke/$profile.json -- /usr/bin/true > smoke/$profile.out 2>&1; \
          echo \"smoke $profile $?\"; done; \
-         {env} ./target/release/ouro-jail doctor --json > smoke/doctor.json 2> smoke/doctor.err; \
+         {env} ./target/release/ukai-jail doctor --json > smoke/doctor.json 2> smoke/doctor.err; \
          echo \"smoke doctor $?\""
     )
 }
@@ -1264,7 +1264,7 @@ fn decide_doctor(
     manifest: Option<&Manifest>,
     failures: &mut Vec<String>,
 ) {
-    passed(failures, "`ouro-jail doctor --json`", &tested.doctor);
+    passed(failures, "`ukai-jail doctor --json`", &tested.doctor);
     let expected = manifest.map_or(0, |m| m.expected.len());
     let doctor = match (&tested.doctor_json, manifest) {
         (None, _) => {
@@ -1332,12 +1332,12 @@ fn decide_suite(tested: &Tested, failures: &mut Vec<String>) {
             if log.failed_binaries == 1 { "y" } else { "ies" }
         ));
     }
-    // The suite runs under OURO_CONFORMANCE=1, where a skip is already a
+    // The suite runs under UKAI_CONFORMANCE=1, where a skip is already a
     // failure; a skip note therefore means the rule was bypassed, and the
     // job must not be green.
     if !log.skips.is_empty() {
         failures.push(format!(
-            "{} live test(s) were skipped under OURO_CONFORMANCE=1: {}",
+            "{} live test(s) were skipped under UKAI_CONFORMANCE=1: {}",
             log.skips.len(),
             log.skips.join(" | ")
         ));
@@ -1724,7 +1724,7 @@ fn run_suite(
     revision: &Revision,
     evidence_errors: &mut Vec<String>,
 ) -> (Result<CommandResult, String>, Option<TestLog>) {
-    heading("run the conformance suite (OURO_CONFORMANCE=1)");
+    heading("run the conformance suite (UKAI_CONFORMANCE=1)");
     let unit = suite_unit(run_dir);
     let suite = run_detached(
         opts,
@@ -1905,7 +1905,7 @@ fn write_evidence(opts: &Options, name: &str, body: &str, errors: &mut Vec<Strin
 
 /// Remove run directories older than a week, by exact name.
 ///
-/// `~/ouro-ci/runs` is the driver's own directory and nothing prunes it; a
+/// `~/ukai-ci/runs` is the driver's own directory and nothing prunes it; a
 /// kept failure is a few hundred megabytes. Names are listed and matched
 /// against their own timestamp prefix: no wildcard reaches the host.
 fn prune_old_runs(opts: &Options) {
@@ -2011,8 +2011,8 @@ mod tests {
     fn target() -> Target {
         Target {
             host: "198.51.100.7".into(),
-            user: "ouro-ci".into(),
-            key: PathBuf::from("/home/runner/.ssh/ouro_ci"),
+            user: "ukai-ci".into(),
+            key: PathBuf::from("/home/runner/.ssh/ukai_ci"),
             known_hosts: None,
         }
     }
@@ -2024,7 +2024,7 @@ mod tests {
             opts,
             vec![
                 "-i",
-                "/home/runner/.ssh/ouro_ci",
+                "/home/runner/.ssh/ukai_ci",
                 "-o",
                 "BatchMode=yes",
                 "-o",
@@ -2057,7 +2057,7 @@ mod tests {
     #[test]
     fn the_ssh_argv_ends_with_the_destination_then_the_command() {
         let argv = ssh_argv(&target(), "echo hi");
-        assert_eq!(argv[argv.len() - 2], "ouro-ci@198.51.100.7");
+        assert_eq!(argv[argv.len() - 2], "ukai-ci@198.51.100.7");
         assert_eq!(argv[argv.len() - 1], "echo hi");
     }
 
@@ -2073,7 +2073,7 @@ mod tests {
         assert_eq!(argv[argv.len() - 2], "/w/tree/");
         assert_eq!(
             argv[argv.len() - 1],
-            "ouro-ci@198.51.100.7:ouro-ci/runs/20260922T000000Z-abc123/"
+            "ukai-ci@198.51.100.7:ukai-ci/runs/20260922T000000Z-abc123/"
         );
         let rsh = argv.iter().position(|a| a == "-e").unwrap();
         assert!(argv[rsh + 1].starts_with("ssh '-i' "));
@@ -2132,16 +2132,16 @@ mod tests {
         assert_eq!(
             b,
             format!(
-                "{} && env OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=false \
+                "{} && env UKAI_BUILD_REVISION={REV} UKAI_BUILD_DIRTY=false \
                  $HOME/.cargo/bin/cargo build --release --workspace -j2 && \
-                 env OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=false \
+                 env UKAI_BUILD_REVISION={REV} UKAI_BUILD_DIRTY=false \
                  $HOME/.cargo/bin/cargo test --release --workspace --no-run -j2",
                 build_space_command()
             )
         );
         let started = detached_start("d", "build", &b);
         assert!(
-            started.starts_with("cd $HOME/ouro-ci/runs/d && mkdir build.started &&"),
+            started.starts_with("cd $HOME/ukai-ci/runs/d && mkdir build.started &&"),
             "{started}"
         );
     }
@@ -2179,13 +2179,13 @@ mod tests {
     #[test]
     fn executable_measurement_covers_each_execution_binary_and_checks_afterwards() {
         let before = binary_hashes_command("d", false);
-        for name in ["ouro-jail", "ouro-fixture", "ouro-ledger"] {
+        for name in ["ukai-jail", "ukai-fixture", "ukai-ledger"] {
             assert!(before.contains(&format!("target/release/{name}")));
         }
         assert!(before.contains("> binaries.sha256 && cat binaries.sha256"));
         assert_eq!(
             binary_hashes_command("d", true),
-            "cd $HOME/ouro-ci/runs/d && sha256sum --check binaries.sha256"
+            "cd $HOME/ukai-ci/runs/d && sha256sum --check binaries.sha256"
         );
     }
 
@@ -2210,7 +2210,7 @@ mod tests {
                 dirty: true,
                 ..rev()
             }),
-            format!("OURO_BUILD_REVISION={REV} OURO_BUILD_DIRTY=true")
+            format!("UKAI_BUILD_REVISION={REV} UKAI_BUILD_DIRTY=true")
         );
     }
 
@@ -2256,21 +2256,21 @@ mod tests {
     #[test]
     fn the_test_command_forbids_skips_and_names_both_binaries() {
         let t = test_command("d", 2, &rev());
-        assert!(t.contains("OURO_CONFORMANCE=1"), "{t}");
+        assert!(t.contains("UKAI_CONFORMANCE=1"), "{t}");
         assert!(
-            t.contains("OURO_RELEASE_EVIDENCE=1"),
+            t.contains("UKAI_RELEASE_EVIDENCE=1"),
             "the verdict requires K11 and K27, whose tests skip without it: {t}"
         );
         assert!(
-            t.contains("--unit=ouro-conformance-d.scope"),
+            t.contains("--unit=ukai-conformance-d.scope"),
             "a driver that gives up stops exactly this scope: {t}"
         );
         assert!(
-            t.contains("OURO_JAIL_BIN=$PWD/target/release/ouro-jail"),
+            t.contains("UKAI_JAIL_BIN=$PWD/target/release/ukai-jail"),
             "{t}"
         );
         assert!(
-            t.contains("OURO_FIXTURE_BIN=$PWD/target/release/ouro-fixture"),
+            t.contains("UKAI_FIXTURE_BIN=$PWD/target/release/ukai-fixture"),
             "{t}"
         );
         assert!(
@@ -2323,10 +2323,10 @@ mod tests {
 
     #[test]
     fn a_stop_names_this_run_only() {
-        let s = detached_stop("d", "test", Some("ouro-conformance-d.scope"));
+        let s = detached_stop("d", "test", Some("ukai-conformance-d.scope"));
         assert!(s.contains("kill -s TERM -- -\"$(cat test.pid)\""), "{s}");
         assert!(
-            s.contains("systemctl --user stop ouro-conformance-d.scope"),
+            s.contains("systemctl --user stop ukai-conformance-d.scope"),
             "{s}"
         );
         assert!(!s.contains("pkill") && !s.contains("killall"), "{s}");
@@ -2680,10 +2680,10 @@ mod tests {
     /// A suite log that satisfies [`MINI_MAP`]: the PATH line, then one
     /// library binary and the one mapped test.
     const GOOD_LOG: &str = "\
-ouro-suite-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ouro-suite-revision=0123456789abcdef0123456789abcdef01234567
-ouro-suite-conformance=1
-     Running unittests src/lib.rs (target/release/deps/ouro_jail-1d54b8c75e2e48d1)
+ukai-suite-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ukai-suite-revision=0123456789abcdef0123456789abcdef01234567
+ukai-suite-conformance=1
+     Running unittests src/lib.rs (target/release/deps/ukai_jail-1d54b8c75e2e48d1)
 
 running 0 tests
 
@@ -2724,7 +2724,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ## 16. Next
 ";
     const MINI_MAP: &str = r#"
-schema = "ouro.jail.acceptance-map/1"
+schema = "ukai.jail.acceptance-map/1"
 
 [[gate]]
 id = "X01"
@@ -2747,7 +2747,7 @@ id = "X01.1"
 gate = "X01"
 clause = "spaces"
 tag = "live-cli"
-tests = ["ouro-jail/tests/conformance_j1.rs::x01_literal_argv"]
+tests = ["ukai-jail/tests/conformance_j1.rs::x01_literal_argv"]
 
 [[clause]]
 id = "R01.1"
@@ -2833,12 +2833,12 @@ smoke doctor 0
         let details = &mut receipt["lifetime"]["native"]["details"];
         details["supervisor_scope"] = serde_json::json!({
             "state": "entered",
-            "unit": "ouro-jail-3546133-b8e991b5ed034daf.scope",
+            "unit": "ukai-jail-3546133-b8e991b5ed034daf.scope",
             "reason_code": null,
-            "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ouro-jail-3546133-b8e991b5ed034daf.scope"
+            "cgroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/ukai-jail-3546133-b8e991b5ed034daf.scope"
         });
         details["execution_cgroup"] = serde_json::json!({
-            "path": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ouro-att_c38d4ec4-7acf-4eb9-be7a-9538b066f6e7.leaf"
+            "path": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/ukai-att_c38d4ec4-7acf-4eb9-be7a-9538b066f6e7.leaf"
         });
         receipt
     }
@@ -2846,7 +2846,7 @@ smoke doctor 0
     fn smoke_doctor() -> Value {
         serde_json::json!({
             "ready": true,
-            "supervisor_scope": {"state": "entered", "unit": "ouro-jail-3546172-781d4f78be14463e.scope"},
+            "supervisor_scope": {"state": "entered", "unit": "ukai-jail-3546172-781d4f78be14463e.scope"},
             "capabilities": [
                 {"name": "supervisor_scope", "status": "available", "reason_code": "entered"}
             ]
@@ -2992,7 +2992,7 @@ smoke doctor 0
     /// truly.
     #[test]
     fn the_remote_directorys_fate_is_reported_as_it_was() {
-        let dir = "ci@host:~/ouro-ci/runs/d";
+        let dir = "ci@host:~/ukai-ci/runs/d";
         let fate =
             |o: &RunOutcomes, config| remote_fate(&decide(o, Some(&a_manifest()), config), dir);
         assert_eq!(
@@ -3270,7 +3270,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     #[test]
     fn a_doctor_that_failed_or_produced_no_json_fails_the_run() {
         let mut o = a_clean_run();
-        tested(&mut o).doctor = failed(127, "ouro-jail: not found");
+        tested(&mut o).doctor = failed(127, "ukai-jail: not found");
         assert!(
             verdict(&o)
                 .failures
@@ -3398,10 +3398,10 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     fn no_local_path_reaches_a_failure_message() {
         // `evidence/summary.txt` is uploaded as a build artifact; ssh quotes
         // the identity file by path in its own diagnostics.
-        let raw = "Warning: Identity file /Users/someone/.ssh/ouro_key not accessible";
+        let raw = "Warning: Identity file /Users/someone/.ssh/ukai_key not accessible";
         let scrubbed = scrub(raw);
         assert!(!scrubbed.contains("/Users/someone"), "{scrubbed}");
-        assert!(!scrubbed.contains("ouro_key"), "{scrubbed}");
+        assert!(!scrubbed.contains("ukai_key"), "{scrubbed}");
 
         let plain = "Permission denied (publickey).";
         assert_eq!(scrub(plain), plain);
@@ -3437,7 +3437,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             c.contains("./target/release/xtask i02-scan --root ."),
             "{c}"
         );
-        assert!(c.starts_with("cd $HOME/ouro-ci/runs/d &&"), "{c}");
+        assert!(c.starts_with("cd $HOME/ukai-ci/runs/d &&"), "{c}");
         assert!(!c.contains("cargo"), "{c}");
     }
 
@@ -3579,7 +3579,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         {
             Ok(transfer) => transfer,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                ouro_fixture::harness::skip_or_fail(
+                ukai_fixture::harness::skip_or_fail(
                     "rsync is not installed: the inventory was checked, the copy it drives was not",
                 );
                 return;
@@ -3613,8 +3613,8 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
     #[test]
     fn the_printed_run_path_is_pasteable_and_the_shell_one_expands() {
-        assert_eq!(run_path("d"), "$HOME/ouro-ci/runs/d");
-        assert_eq!(run_path_for_humans("d"), "~/ouro-ci/runs/d");
+        assert_eq!(run_path("d"), "$HOME/ukai-ci/runs/d");
+        assert_eq!(run_path_for_humans("d"), "~/ukai-ci/runs/d");
         assert!(
             !run_path_for_humans("d").contains('$'),
             "a printed path must not carry an unexpanded shell variable"
@@ -3635,9 +3635,9 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let t = test_command("d", 2, &rev());
         assert!(
             t.contains(&format!(
-                "PATH={SUITE_PATH} /bin/sh -c \"echo ouro-suite-path=\\$PATH; \
-                 echo ouro-suite-revision={REV}; \
-                 echo ouro-suite-conformance=\\$OURO_CONFORMANCE; exec $C test"
+                "PATH={SUITE_PATH} /bin/sh -c \"echo ukai-suite-path=\\$PATH; \
+                 echo ukai-suite-revision={REV}; \
+                 echo ukai-suite-conformance=\\$UKAI_CONFORMANCE; exec $C test"
             )),
             "{t}"
         );
@@ -3667,12 +3667,12 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         assert!(scrubbed(&format!("{marker}\nrunning 1 test\n")));
         assert!(!scrubbed("running 1 test\n"), "no marker");
         assert!(
-            !scrubbed("ouro-suite-path=/home/ouro-ci/.cargo/bin:/usr/bin\n"),
+            !scrubbed("ukai-suite-path=/home/ukai-ci/.cargo/bin:/usr/bin\n"),
             "a PATH with the account's directories"
         );
         assert!(
             !scrubbed(&format!(
-                "{marker}\nouro-suite-path=/opt/erlang/bin:{SUITE_PATH}\n"
+                "{marker}\nukai-suite-path=/opt/erlang/bin:{SUITE_PATH}\n"
             )),
             "two markers that disagree"
         );
@@ -3684,19 +3684,19 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let _ = with_suite_path("echo \"hi\"", &rev());
     }
 
-    /// Review H6, the proof on the host: under `OURO_CONFORMANCE=1` this
+    /// Review H6, the proof on the host: under `UKAI_CONFORMANCE=1` this
     /// test process (like every test process cargo starts) has exactly the
     /// suite's PATH. Elsewhere the driver's PATH is not in force and there is
     /// nothing to check; a log without the conformance marker is refused by
     /// the verdict, so this cannot pass for a conformance run by skipping.
     ///
     /// Linux only: the scrubbed PATH is the Linux conformance driver's; the
-    /// macOS leg sets OURO_CONFORMANCE=1 for the verdict's sake with its own
+    /// macOS leg sets UKAI_CONFORMANCE=1 for the verdict's sake with its own
     /// PATH.
     #[cfg(target_os = "linux")]
     #[test]
     fn i01_under_conformance_the_test_process_has_exactly_the_suite_path() {
-        if std::env::var_os("OURO_CONFORMANCE").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        if std::env::var_os("UKAI_CONFORMANCE").as_deref() != Some(std::ffi::OsStr::new("1")) {
             return;
         }
         assert_eq!(
@@ -3730,11 +3730,11 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             d.failures
         );
         tested(&mut o).test_log = Some(gates::parse_log(
-            &GOOD_LOG.replace("ouro-suite-conformance=1", "ouro-suite-conformance="),
+            &GOOD_LOG.replace("ukai-suite-conformance=1", "ukai-suite-conformance="),
         ));
         let d = verdict(&o);
         assert!(
-            d.failures.iter().any(|f| f.contains("OURO_CONFORMANCE")),
+            d.failures.iter().any(|f| f.contains("UKAI_CONFORMANCE")),
             "{:?}",
             d.failures
         );
@@ -3781,9 +3781,9 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
                 "erl",
             ),
             (
-                "i01 binary ouro-ledger absent",
-                "i01 binary ouro-ledger /usr/local/bin/ouro-ledger",
-                "ouro-ledger",
+                "i01 binary ukai-ledger absent",
+                "i01 binary ukai-ledger /usr/local/bin/ukai-ledger",
+                "ukai-ledger",
             ),
             (
                 "i01 directory /usr/lib/erlang absent",
@@ -3824,7 +3824,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         );
         let other_path = clean_i01().replace(
             &format!("i01 path {SUITE_PATH}"),
-            "i01 path /home/ouro-ci/.cargo/bin:/usr/bin",
+            "i01 path /home/ukai-ci/.cargo/bin:/usr/bin",
         );
         assert!(
             i01_problems(&other_path).iter().any(|p| p.contains("PATH")),
@@ -3877,7 +3877,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     fn a_suite_log_without_the_scrubbed_path_fails_i01() {
         let mut o = a_clean_run();
         tested(&mut o).test_log = Some(gates::parse_log(&GOOD_LOG.replace(
-            "ouro-suite-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n",
+            "ukai-suite-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n",
             "",
         )));
         let d = verdict(&o);
@@ -3926,7 +3926,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     #[test]
     fn the_smoke_leg_runs_in_the_plain_session_and_never_in_a_driver_scope() {
         let c = smoke_command("d");
-        assert!(c.starts_with("cd $HOME/ouro-ci/runs/d && "), "{c}");
+        assert!(c.starts_with("cd $HOME/ukai-ci/runs/d && "), "{c}");
         assert!(
             !c.contains("systemd-run"),
             "the point is that nothing wraps it: {c}"
@@ -3935,7 +3935,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             !c.contains("XDG_RUNTIME_DIR"),
             "the session's own environment: {c}"
         );
-        assert!(!c.contains("OURO_JAIL_TEST_"), "no test seam: {c}");
+        assert!(!c.contains("UKAI_JAIL_TEST_"), "no test seam: {c}");
         assert!(
             c.contains("/proc/self/cgroup"),
             "it records where the session is: {c}"
@@ -3945,7 +3945,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             "run --profile $profile",
             "--receipt $PWD/smoke/$profile.json",
             "doctor --json > smoke/doctor.json",
-            "OURO_DATA_DIR=$PWD/smoke/data",
+            "UKAI_DATA_DIR=$PWD/smoke/data",
             "chmod 700 smoke/data smoke/config",
         ] {
             assert!(c.contains(needle), "{needle}: {c}");
@@ -3962,7 +3962,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let mut s = clean_smoke();
         s.transcript.stdout = SMOKE_TRANSCRIPT.replace(
             "session-6195.scope",
-            "user@1001.service/app.slice/ouro-conformance-x.scope",
+            "user@1001.service/app.slice/ukai-conformance-x.scope",
         );
         let p = smoke_problems(&s);
         assert!(p.iter().any(|p| p.contains("already inside")), "{p:?}");
@@ -4020,7 +4020,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
                 "none",
                 Box::new(|r: &mut Value| {
                     r["lifetime"]["native"]["details"]["test_seams"] =
-                        serde_json::json!({"OURO_TEST_X": "1"});
+                        serde_json::json!({"UKAI_TEST_X": "1"});
                 }),
                 "seam",
             ),

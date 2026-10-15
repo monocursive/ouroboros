@@ -1,14 +1,14 @@
-# Get started with Ouroboros Jail
+# Get started with Ukai Jail
 
 Start with a small command, see what the jail recorded, then use the same
 workflow for your own tools. You don't need to change agents or adopt a new
-way of working: `ouro-jail` wraps the command you already run.
+way of working: `ukai-jail` wraps the command you already run.
 
 You choose the files it can read or change, the services it can contact, and
 how long it can run. A receipt tells you which controls were applied and how
 the run ended.
 
-**Choose your host:** Linux x86_64/ARM64 runs `ouro-jail` directly. Apple Silicon
+**Choose your host:** Linux x86_64/ARM64 runs `ukai-jail` directly. Apple Silicon
 Macs can use the separate [macOS VM preview](#macos-vm-preview), which runs
 offline Linux commands in disposable VMs. Both are developer-preview software;
 native macOS programs and online agents are outside the Mac preview.
@@ -21,7 +21,11 @@ Writing an integration? Start with [agents and scripts](#for-agents-and-scripts)
 The same installer detects your platform. The following commands are for Linux;
 Mac users should follow the [Mac quickstart](#macos-vm-preview).
 
-[Ouroboros Jail 0.1.0-rc.2](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2)
+Ukai was called Ouroboros until 15 October 2026. The current previews were
+published under that name (`ouro-jail`, `ouro-vm`); this guide uses the names
+of the next release, the first published as Ukai.
+
+[Ouroboros Jail 0.1.0-rc.2](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2)
 ships Linux x86_64 and ARM64 packages. Install your distribution's
 `bubblewrap` package first. The binaries require glibc 2.39 or
 newer; Alpine/musl and macOS execution are unavailable in this preview.
@@ -30,10 +34,10 @@ Rust compiler or sudo is needed.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://ouroboros.monocursive.com/install.sh | bash
+  https://ukai.monocursive.com/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
-ouro-jail version --json
-ouro-jail doctor --profile tool --json
+ukai-jail version --json
+ukai-jail doctor --profile tool --json
 ```
 
 The installer embeds this preview's SHA-256 hashes for both architectures. It
@@ -50,12 +54,12 @@ The supported-host notes remain in the release: Ubuntu 26.04 is the x86_64
 reference host; stock Ubuntu 24 containment is refused. The tested Pi lacks
 memory cgroups and Landlock, so its default `build` profile remains unavailable.
 Run `doctor` before relying on a profile. Archived runtime releases are separate;
-use `ouro-jail-v...` tags for this distribution. The ledger and fleet are not
+use `ukai-jail-v...` tags for this distribution. The ledger and fleet are not
 included in these packages.
 
 ## macOS VM preview
 
-[Ouro VM 0.1.0-preview.1](https://github.com/monocursive/ouroboros/releases/tag/ouro-vm-v0.1.0-preview.1)
+[Ouro VM 0.1.0-preview.1](https://github.com/monocursive/ukai/releases/tag/ouro-vm-v0.1.0-preview.1)
 is a signed, notarized download for **Apple Silicon and macOS 27+**. Execution
 was tested on macOS 27.0.1; installation and CLI launch were also checked in a
 fresh macOS VM. Allow 8 GiB free APFS storage, two virtual CPUs and 2 GiB RAM per
@@ -63,15 +67,15 @@ running attempt. Intel Macs and nested VM execution are unsupported.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://ouroboros.monocursive.com/install.sh | bash
+  https://ukai.monocursive.com/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
-ouro-vm version
-ouro-vm doctor
+ukai-vm version
+ukai-vm doctor
 ```
 
 The installer checks an embedded SHA-256 pin before mounting the 512 MiB DMG.
 It installs the bundled runtime and guest image under
-`~/.local/share/ouro-vm/0.1.0-preview.1`, with a command in `~/.local/bin`.
+`~/.local/share/ukai-vm/0.1.0-preview.1`, with a command in `~/.local/bin`.
 Python, Rust, Swift, Homebrew, sudo and Endpoint Security approval are not needed.
 Use `bash -s -- --vm-prefix /absolute/path` to change the root containing `bin`
 and `share`. An already installed version is preserved and repeat installation
@@ -81,10 +85,10 @@ alias `--prefix`, and `--allow-downgrade` apply only to Linux.
 Run a small offline Linux command:
 
 ```sh
-vm_demo="$(mktemp -d "$HOME/ouro-vm-demo.XXXXXX")"
+vm_demo="$(mktemp -d "$HOME/ukai-vm-demo.XXXXXX")"
 mkdir "$vm_demo/input"
 printf 'hello\n' > "$vm_demo/input/input.txt"
-ouro-vm run --workspace "$vm_demo/input" --out "$vm_demo/result" \
+ukai-vm run --workspace "$vm_demo/input" --out "$vm_demo/result" \
   --profile build --wall 30 -- \
   /bin/sh -c 'cat input.txt; printf "created in Linux\n" > output.txt'
 cat "$vm_demo/result/workspace/output.txt"
@@ -108,7 +112,7 @@ second wall limit.
 A completed attempt requires a verified Linux Jail receipt and acknowledged
 VM stop. Incomplete evidence returns 125. Files and Linux receipts remain in
 `<out>/workspace/` and `<out>/evidence/`; `attempt.json` records Mac supervision.
-The [package qualification](https://github.com/monocursive/ouroboros/blob/dev/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
+The [package qualification](https://github.com/monocursive/ukai/blob/dev/docs/benchmarks/jail/macos-vm-preview-package-2026-10-11.md)
 passed all 14 measured teardown cases. Simultaneous suspension of all three
 host controllers, host sleep/wake, kernel failure and arbitrary guest compromise
 are outside qualified coverage. The native macOS cleanup blocker remains open.
@@ -119,8 +123,8 @@ is required. The DMG also contains a standalone installer and build-time notes;
 its notes describe the candidate before publication. The public release notes
 record publication of those exact tested bytes.
 
-To uninstall the default installation, remove `~/.local/bin/ouro-vm` and
-`~/.local/share/ouro-vm/0.1.0-preview.1`. Keep or delete attempt directories as
+To uninstall the default installation, remove `~/.local/bin/ukai-vm` and
+`~/.local/share/ukai-vm/0.1.0-preview.1`. Keep or delete attempt directories as
 needed. A crashed launcher can leave a disk there; never boot or reuse it.
 
 ## Build and check your host
@@ -130,15 +134,15 @@ reference host runs Ubuntu 26.04.1 and bubblewrap 0.11.1. Run as your normal
 user; the jail does not install a backend or change host security settings.
 
 ```sh
-git clone --branch dev https://github.com/monocursive/ouroboros.git
-cd ouroboros
-cargo +1.98.1 build --release -p ouro-jail
+git clone --branch dev https://github.com/monocursive/ukai.git
+cd ukai
+cargo +1.98.1 build --release -p ukai-jail
 mkdir -p "$HOME/.local/bin"
-install -m 0755 target/release/ouro-jail "$HOME/.local/bin/ouro-jail"
+install -m 0755 target/release/ukai-jail "$HOME/.local/bin/ukai-jail"
 export PATH="$HOME/.local/bin:$PATH"
 
-ouro-jail version
-ouro-jail doctor --profile tool
+ukai-jail version
+ukai-jail doctor --profile tool
 ```
 
 If you already have the checkout, start at the build command. Install the
@@ -149,29 +153,29 @@ that would let a child modify its executable.
 report before continuing. A required control must be available; a preferred
 limit may be left unapplied and reported as such. Explicit PID, memory, swap, and
 CPU limits require a delegated cgroup v2 scope. The
-[host setup reference](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/operating.md#lingering-and-the-scope-step)
+[host setup reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md#lingering-and-the-scope-step)
 explains that setup and its effect on process cleanup.
 
-For a source-built native `ouro-jail` on macOS, `version` and `explain` work; `doctor` reports why execution is
+For a source-built native `ukai-jail` on macOS, `version` and `explain` work; `doctor` reports why execution is
 unavailable. Other Linux architectures are not yet supported for execution.
 Signed Jail packages are linked above; a Homebrew tap remains unconfigured.
 Older `v0.1.x` releases belong to the archived agent runtime.
 
-The separate [VM preview source](https://github.com/monocursive/ouroboros/tree/dev/crates/ouro-jail/vm)
+The separate [VM preview source](https://github.com/monocursive/ukai/tree/dev/crates/ukai-jail/vm)
 documents its build process and lifetime design. Use the Mac quickstart above
 for the packaged release.
 
 ## Verify a supplied package
 
-For offline installation, save the [Bash installer](https://ouroboros.monocursive.com/install.sh)
-and the archive for your architecture from the [release](https://github.com/monocursive/ouroboros/releases/tag/ouro-jail-v0.1.0-rc.2).
+For offline installation, save the [Bash installer](https://ukai.monocursive.com/install.sh)
+and the archive for your architecture from the [release](https://github.com/monocursive/ukai/releases/tag/ouro-jail-v0.1.0-rc.2).
 The installer verifies its embedded SHA-256 pin even when the archive comes from
 a local directory. No checksum manifest or signature tool is needed:
 
 ```sh
 bash /path/to/install.sh --from-dir /path/to/artifacts
-ouro-jail version --json
-ouro-jail doctor --profile tool --json
+ukai-jail version --json
+ukai-jail doctor --profile tool --json
 ```
 
 Use `--bin-dir /absolute/path` for a different destination, or
@@ -187,14 +191,14 @@ Let's write a file in a fresh directory. This example needs no network or
 agent credentials.
 
 ```sh
-jail_demo="$(mktemp -d "$HOME/ouro-jail-demo.XXXXXX")"
+jail_demo="$(mktemp -d "$HOME/ukai-jail-demo.XXXXXX")"
 cd "$jail_demo"
 
-ouro-jail run --profile tool --workspace "$PWD" --limit wall=30s -- \
+ukai-jail run --profile tool --workspace "$PWD" --limit wall=30s -- \
   /bin/sh -c 'printf "hello from the jail\n" > greeting.txt'
 
 cat greeting.txt
-ouro-jail tail
+ukai-jail tail
 ```
 
 You should see `hello from the jail` when you read the file. `tail` then shows
@@ -215,7 +219,7 @@ only the paths and services it needs.
 
 | Profile | Good starting point for | Default access |
 | --- | --- | --- |
-| `tool` | Tests and local commands | Writable workspace and scratch; no network. Existing `.git` and `.ouroboros` trees are protected from writes. |
+| `tool` | Tests and local commands | Writable workspace and scratch; no network. Existing `.git` and `.ukai` trees are protected from writes. |
 | `agent` | Coding agents that call a provider | Writable workspace, scratch, and temporary agent state. Network destinations need explicit grants. Git metadata stays writable except the hooks and configs that exist at launch. That does not make git metadata safe to use after a run; see [Git metadata under `agent`](#git-metadata-under-agent). |
 | `build` | Builds from read-only inputs | Writable scratch; add read-only inputs and writable outputs. No network. Requires an explicit memory limit and host support. |
 | `none` | Deliberately uncontained execution | Host access. Filesystem and network containment are disabled. |
@@ -300,7 +304,7 @@ Contained profiles also expose system runtime files needed to execute
 programs. Inspect the resolved policy before running a new command:
 
 ```sh
-ouro-jail explain --profile tool --workspace "$PWD" --limit wall=30s --json
+ukai-jail explain --profile tool --workspace "$PWD" --limit wall=30s --json
 ```
 
 `explain` resolves configuration without probing the host or executing the
@@ -347,7 +351,7 @@ with user quota accounting and enforcement already enabled. For example,
 on a prepared quota filesystem, an operator with `quota-tools` can set a
 64 MiB block hard limit and 4096-inode hard limit with
 `sudo setquota -u WORKER 0 65536 0 4096 /WORKER_VOLUME` (block limits are KiB).
-Put both workspace and scratch there, owned by `WORKER`. Ouroboros queries
+Put both workspace and scratch there, owned by `WORKER`. Ukai queries
 the kernel as that user before releasing the target. Soft limits alone,
 disabled enforcement, foreign-owned writable files, idmapped writable mounts
 and XFS realtime volumes refuse. This budget covers that uid across the filesystem, including
@@ -359,7 +363,7 @@ into the writable tree; these seccomp denials have no observer event. Existing
 hard links within the admitted ownership rules remain usable. The storage ceiling covers
 allocated file data; use `mem` to bound charged RAM as well. A storage
 receipt's `hit=null` means saturation was not established, not that the limit
-was never reached. The [limit specification](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1.md#64-limits-and-errors)
+was never reached. The [limit specification](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1.md#64-limits-and-errors)
 defines the scope and remaining backend limitations. Project quotas and
 automatic volume provisioning are not implemented.
 
@@ -378,11 +382,11 @@ Here's an OpenCode example. It assumes OpenCode is already installed at
 ```sh
 git init
 rg --version
-ouro-jail doctor --launch opencode
-ouro-jail explain --launch opencode --workspace "$PWD" \
+ukai-jail doctor --launch opencode
+ukai-jail explain --launch opencode --workspace "$PWD" \
   --ro "$HOME/.opencode/bin" --json
 
-ouro-jail run --launch opencode --workspace "$PWD" \
+ukai-jail run --launch opencode --workspace "$PWD" \
   --ro "$HOME/.opencode/bin" -- \
   "$HOME/.opencode/bin/opencode" run "Create greeting.txt containing hello."
 ```
@@ -391,7 +395,7 @@ Review the resolved file and network grants before the run. Change the
 executable path and read-only grant to match your installation. A provider
 that needs authentication also needs explicit credential configuration in
 your launch profile; normal login state is not exposed automatically. See the
-[launch profile reference](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/operating.md#launch-profiles-and-credentials)
+[launch profile reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md#launch-profiles-and-credentials)
 for the configuration format.
 
 OpenCode 1.18.32 uses `rg` for file search. Without it, OpenCode attempts a
@@ -405,23 +409,23 @@ jail does not expose a private tool directory to the agent.
 verify every vendor tool dependency or provider availability.
 
 OpenCode has recorded live runs. The
-[compatibility table](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/agent-compatibility.md)
+[compatibility table](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/agent-compatibility.md)
 names the tested versions, jail builds, and remaining gaps. Check it before
 assuming a profile will work with your setup.
 
 ## Inspect a run
 
 Each attempt saves a `jail.json` receipt, its resolved policy, and an event
-journal. By default, these live under `~/.local/share/ouro/attempts/`.
-`OURO_DATA_DIR` can select a different private data directory.
+journal. By default, these live under `~/.local/share/ukai/attempts/`.
+`UKAI_DATA_DIR` can select a different private data directory.
 
 ```sh
-ouro-jail tail
-ouro-jail tail --follow
-ouro-jail tail --json
+ukai-jail tail
+ukai-jail tail --follow
+ukai-jail tail --json
 ```
 
-For a particular attempt, use `ouro-jail tail --attempt ID --json`, replacing
+For a particular attempt, use `ukai-jail tail --attempt ID --json`, replacing
 `ID` with its receipt's `attempt_id`. This matters when several commands run
 at once: the default follows the most recently updated attempt.
 
@@ -447,8 +451,8 @@ needs. It runs the command inside containment and writes a proposal from
 that run's evidence:
 
 ```sh
-ouro-jail learn --launch opencode --workspace "$PWD" \
-  --ro "$HOME/.opencode/bin" --out "$HOME/ouro-proposal.toml" -- \
+ukai-jail learn --launch opencode --workspace "$PWD" \
+  --ro "$HOME/.opencode/bin" --out "$HOME/ukai-proposal.toml" -- \
   "$HOME/.opencode/bin/opencode" run "Run this project's tests."
 ```
 
@@ -468,7 +472,7 @@ might ever need. Nothing is adopted automatically.
 ## When something doesn't work
 
 **The host check refuses the profile.** Read `doctor`'s missing requirements.
-Explicit resource limits need host support. For native `ouro-jail` on macOS, refusal is the current
+Explicit resource limits need host support. For native `ukai-jail` on macOS, refusal is the current
 expected behavior. Changing to `none` would remove containment.
 
 **The command cannot find a file, executable, or library.** Check `explain`
@@ -511,7 +515,7 @@ Roadmap entries describe future work, not commands available in the CLI.
 
 Use this sequence when integrating the jail:
 
-1. Read `ouro-jail version --json` to identify the build and its schemas.
+1. Read `ukai-jail version --json` to identify the build and its schemas.
 2. Run `doctor --profile NAME --json` or `doctor --launch NAME --json` and
    inspect the result. `doctor` does not accept run overrides such as
    `--workspace` or `--limit`; `run` checks the final requested policy.
@@ -525,17 +529,17 @@ Use this sequence when integrating the jail:
 For example, from the disposable workspace:
 
 ```sh
-jail_records="$(mktemp -d "$HOME/ouro-jail-records.XXXXXX")"
-ouro-jail version --json > "$jail_records/version.json"
-ouro-jail doctor --profile tool --json > "$jail_records/doctor.json"
-ouro-jail explain --profile tool --workspace "$PWD" --limit wall=30s \
+jail_records="$(mktemp -d "$HOME/ukai-jail-records.XXXXXX")"
+ukai-jail version --json > "$jail_records/version.json"
+ukai-jail doctor --profile tool --json > "$jail_records/doctor.json"
+ukai-jail explain --profile tool --workspace "$PWD" --limit wall=30s \
   --json > "$jail_records/policy.json"
 ```
 
 After inspecting those reports, run the command and save its receipt:
 
 ```sh
-ouro-jail run --profile tool --workspace "$PWD" --limit wall=30s \
+ukai-jail run --profile tool --workspace "$PWD" --limit wall=30s \
   --receipt "$jail_records/receipt.json" -- /usr/bin/true
 ```
 
@@ -553,8 +557,8 @@ proposal needs the same review as any other access change. Review output
 files and test results separately: containment does not establish that the
 agent completed its task correctly.
 
-The [receipt schema](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/jail-receipt.schema.json)
-and [exit code reference](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/operating.md#exit-codes)
+The [receipt schema](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/jail-receipt.schema.json)
+and [exit code reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md#exit-codes)
 cover the machine interfaces in detail.
 
 ## Performance
@@ -579,7 +583,7 @@ Across workloads and sessions, the highest p95 added startup time with
 observation off was 131 ms. The full benchmark includes 540 measured launches;
 all 60 observation-off no-op runs returned `exec_unconfirmed` and exit 1.
 Their timings are included, but they are not successful run receipts. The
-[full report](https://github.com/monocursive/ouroboros/blob/dev/docs/benchmarks/jail/followup-2026-09-29.md#k17-results)
+[full report](https://github.com/monocursive/ukai/blob/dev/docs/benchmarks/jail/followup-2026-09-29.md#k17-results)
 includes the method, build, host, raw data, and limitations.
 
 ## Understand the boundary
@@ -596,6 +600,6 @@ still return a secret in its response. Command deny-rules help catch mistakes;
 another program can perform the same operation under a different name.
 
 For more detail, use the
-[operator reference](https://github.com/monocursive/ouroboros/blob/dev/docs/specs/jail-v1/operating.md).
-See the [roadmap](https://github.com/monocursive/ouroboros/blob/dev/docs/roadmap.md)
+[operator reference](https://github.com/monocursive/ukai/blob/dev/docs/specs/jail-v1/operating.md).
+See the [roadmap](https://github.com/monocursive/ukai/blob/dev/docs/roadmap.md)
 for what we're working on next.

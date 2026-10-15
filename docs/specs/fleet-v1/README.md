@@ -1,7 +1,7 @@
 # Fleet v1: trusted-operator batch execution
 
 This is the first execution slice of North Star §6, implemented in the sibling
-`fleet/` Mix project and the Rust `crates/ouro` front door. The
+`fleet/` Mix project and the Rust `crates/ukai` front door. The
 [two-node evidence](evidence/2026-10-07-two-node/README.md) exercises the production
 CLI, TLS distribution, ledger and Jail on Linux x86_64 and Raspberry Pi aarch64.
 The records are versioned but **not frozen**. This is not full milestone-3 closure.
@@ -13,7 +13,7 @@ launch lease. Restarting the coordinator does not replace that owner.
 
 ## What is implemented
 
-- Rust `ouro fleet run`, `status`, `wait`, `kill`, `ledger`, and `doctor`.
+- Rust `ukai fleet run`, `status`, `wait`, `kill`, `ledger`, and `doctor`.
 - Fixed, operator-provisioned membership; mutually verified TLS distribution,
   a private cookie, fixed distribution ports and no EPMD daemon.
 - Capability checks for the resolved request; explicit machine selection or
@@ -40,7 +40,7 @@ Elixir 1.18+ and Erlang/OTP 27+. `mix` has no external dependencies.
 
 ```sh
 umask 077
-cargo build --release --locked -p ouro -p ouro-jail -p ouro-ledger
+cargo build --release --locked -p ukai -p ukai-jail -p ukai-ledger
 (cd fleet && mix compile --warnings-as-errors && mix test)
 ```
 
@@ -57,26 +57,26 @@ A node configuration has this shape (replace every example path and address):
 
 ```json
 {
-  "schema": "ouro.fleet.node/1",
+  "schema": "ukai.fleet.node/1",
   "fleet_id": "operator-test",
   "machine": "worker-a",
-  "node": "ouro-worker-a@10.0.0.1",
+  "node": "ukai-worker-a@10.0.0.1",
   "host": "10.0.0.1",
   "dist_port": 13720,
-  "controller": "ouro-worker-a@10.0.0.1",
+  "controller": "ukai-worker-a@10.0.0.1",
   "members": [
-    {"machine":"worker-a","node":"ouro-worker-a@10.0.0.1","dist_port":13720},
-    {"machine":"worker-b","node":"ouro-worker-b@10.0.0.2","dist_port":13720}
+    {"machine":"worker-a","node":"ukai-worker-a@10.0.0.1","dist_port":13720},
+    {"machine":"worker-b","node":"ukai-worker-b@10.0.0.2","dist_port":13720}
   ],
   "cookie": "/private/fleet/cookie",
   "tls": "/private/fleet/ssl_dist.conf",
   "state": "/private/fleet/state",
   "data": "/private/fleet/data",
-  "ledger_bin": "/opt/ouro/ouro-ledger",
-  "jail_bin": "/opt/ouro/ouro-jail",
+  "ledger_bin": "/opt/ukai/ukai-ledger",
+  "jail_bin": "/opt/ukai/ukai-jail",
   "elixir": "/usr/bin/elixir",
-  "ebin": "/opt/ouro/fleet/_build/dev/lib/ouro_fleet/ebin",
-  "client_script": "/opt/ouro/fleet/scripts/client.exs"
+  "ebin": "/opt/ukai/fleet/_build/dev/lib/ukai_fleet/ebin",
+  "client_script": "/opt/ukai/fleet/scripts/client.exs"
 }
 ```
 
@@ -84,17 +84,17 @@ Both `server` and `client` entries in the Erlang TLS option file must use
 `{verify,verify_peer}`, `certfile`, `keyfile`, and `cacertfile`; the server also
 requires `{fail_if_no_peer_cert,true}`. Startup refuses plaintext distribution
 and weaker verification. The TLS option-file path cannot contain whitespace.
-The fixed-port EPMD adapter, `OuroFleet.Epmd`, derives from the preserved legacy
+The fixed-port EPMD adapter, `UkaiFleet.Epmd`, derives from the preserved legacy
 implementation.
 
 Start the node with the following Erlang arguments, the compiled `ebin` path,
 and `fleet/scripts/node.exs /private/fleet/node.json`. Run it as its own user
-service; set `OURO_CONFIG_DIR` explicitly for any local Jail/launch profiles.
+service; set `UKAI_CONFIG_DIR` explicitly for any local Jail/launch profiles.
 Do not put this service in the owner or ledger service's lifetime unit.
 
 ```text
 +S 2:2 -proto_dist inet_tls -start_epmd false
--epmd_module Elixir.OuroFleet.Epmd
+-epmd_module Elixir.UkaiFleet.Epmd
 -ssl_dist_optfile /private/fleet/ssl_dist.conf
 ```
 
@@ -103,14 +103,14 @@ cannot create a lingering user manager or repair missing host capabilities.
 A client uses a private node configuration pointing at its trusted controller:
 
 ```sh
-ouro fleet --config /private/fleet/node.json doctor --json
-ouro fleet --config /private/fleet/node.json run \
+ukai fleet --config /private/fleet/node.json doctor --json
+ukai fleet --config /private/fleet/node.json run \
   --request-id example-1 --on worker-b --jail tool \
   --limit wall=30s --capture stdout --capture-limit 4096 --json \
   -- /bin/echo example
-ouro fleet --config /private/fleet/node.json status JOB --json
-ouro fleet --config /private/fleet/node.json wait JOB --timeout 60 --json
-ouro fleet --config /private/fleet/node.json ledger JOB show --with-transcript
+ukai fleet --config /private/fleet/node.json status JOB --json
+ukai fleet --config /private/fleet/node.json wait JOB --timeout 60 --json
+ukai fleet --config /private/fleet/node.json ledger JOB show --with-transcript
 ```
 
 Retry a lost admission response with the exact same request ID and inputs.

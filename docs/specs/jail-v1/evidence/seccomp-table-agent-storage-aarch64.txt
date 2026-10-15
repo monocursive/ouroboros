@@ -1,4 +1,4 @@
-ouro-jail `agent` seccomp baseline (aarch64), variant unprivileged_inner, with a storage ceiling
+ukai-jail `agent` seccomp baseline (aarch64), variant unprivileged_inner, with a storage ceiling
 jail-v1 §9.2 and §10; stacked with the mediation filter below
 
 arch != AUDIT_ARCH_AARCH64  EPERM   (0xc00000b7 required)

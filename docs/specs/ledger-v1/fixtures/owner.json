@@ -1,9 +1,9 @@
 {
-  "schema": "ouro.ledger.event/1",
+  "schema": "ukai.ledger.event/1",
   "run_id": "run_11111111111111111111111111111111",
   "attempt_id": "att_00000000-0000-4000-8000-000000000001",
   "seq": 2,
-  "prev": "sha256:995d8cffb5c2ab694a06451e7633a30230a77d6c65d3842acd3811a029cbcba6",
+  "prev": "sha256:33ef4ae030b36ce0b5acb2348d2b35fd2ee1adc08f2a3fba9485ecc72f6b7f71",
   "received_at": "2026-09-30T12:00:00Z",
   "provenance": {
     "role": "owner",

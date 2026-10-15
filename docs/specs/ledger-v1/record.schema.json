@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-record:1",
+  "$id": "urn:ukai:schema:ledger-record:1",
   "title": "Canonical durable ledger record",
   "oneOf": [
     {
@@ -96,7 +96,7 @@
           "pattern": "^[A-Za-z0-9_.:-]+$"
         },
         "schema": {
-          "const": "ouro.ledger.event/1"
+          "const": "ukai.ledger.event/1"
         },
         "attempt_id": {
           "type": "string",
@@ -440,7 +440,7 @@
       ]
     },
     {
-      "$ref": "urn:ouro:schema:ledger-source:1"
+      "$ref": "urn:ukai:schema:ledger-source:1"
     }
   ],
   "$defs": {
@@ -448,7 +448,7 @@
       "description": "A normal settled jail receipt or a proved exec failure after durable ledger admission. Neither denotes success by itself.",
       "allOf": [
         {
-          "$ref": "urn:ouro:schema:jail-receipt:1"
+          "$ref": "urn:ukai:schema:jail-receipt:1"
         },
         {
           "anyOf": [

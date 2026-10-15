@@ -2,7 +2,7 @@
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.event/1"
+      "const": "ukai.event/1"
     },
     "attempt_id": {
       "type": "string",
@@ -181,7 +181,7 @@
       "type": "object",
       "properties": {
         "schema": {
-          "const": "ouro.ledger.redaction/1"
+          "const": "ukai.ledger.redaction/1"
         },
         "fields": {
           "type": "array",
@@ -228,7 +228,7 @@
   ],
   "additionalProperties": false,
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-source:1",
+  "$id": "urn:ukai:schema:ledger-source:1",
   "title": "Canonical source envelope plus authenticated writer metadata",
   "description": "Frozen source envelope with authenticated writer metadata. Optional redaction identifies ledger minimization; policy binding and marker semantics are checked on append and replay.",
   "allOf": [

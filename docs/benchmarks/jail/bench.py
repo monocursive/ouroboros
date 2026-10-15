@@ -26,7 +26,7 @@ binary=args.binary.resolve()
 version=json.loads(subprocess.check_output([str(binary),'version','--json']))
 with tempfile.TemporaryDirectory(prefix='ouro-bench-') as directory:
     root=pathlib.Path(directory); work=root/'work'; work.mkdir(); config=root/'config'; config.mkdir()
-    env=os.environ|{'OURO_CONFIG_DIR':str(config),'OURO_DATA_DIR':str(root/'data')}
+    env=os.environ|{'UKAI_CONFIG_DIR':str(config),'UKAI_DATA_DIR':str(root/'data')}
     cases=[('direct_true',['/usr/bin/true'],0),('version',[str(binary),'version','--json'],0)]
     if platform.system()=='Linux':
         for profile in ['tool','agent']:

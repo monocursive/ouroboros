@@ -3,7 +3,7 @@
 Implemented on the named x86-64 Linux lane, 2026-09-22 to 2026-09-23, on a
 stock host: Ubuntu 26.04.1, kernel 7.0.0-31, bubblewrap 0.11.1, the
 distribution's user-namespace restriction left on, no sysctl, AppArmor
-profile, file capability or setuid helper. The unprivileged `ouro-ci` account
+profile, file capability or setuid helper. The unprivileged `ukai-ci` account
 runs everything. Live evidence is recorded under [`evidence/`](evidence/):
 
 - [`j3-test-log-2026-09-23-review-fixes-ouro-ci.txt`](evidence/j3-test-log-2026-09-23-review-fixes-ouro-ci.txt):
@@ -44,7 +44,7 @@ host configuration is required ([§3.2](../jail-v1.md#32-initial-support-matrix)
 systemd provides; run the supervisor inside a transient user scope, as the J2
 document describes. Launch profiles are operator files under
 `<config-dir>/launch/`, mode 0600; the bundled ones under
-`crates/ouro-jail/profiles/launch/` are experimental examples, copied only by
+`crates/ukai-jail/profiles/launch/` are experimental examples, copied only by
 the operator.
 
 ## What `agent` is on a stock host

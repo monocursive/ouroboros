@@ -19,7 +19,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
     <meta property="og:url" content={canonical} />
-    <meta property="og:site_name" content="Ouroboros Jail" />
+    <meta property="og:site_name" content="Ukai Jail" />
     <meta name="twitter:card" content="summary" />
     <link rel="canonical" href={canonical} />
     {markdown && <link rel="alternate" type="text/markdown" href={new URL(markdown, Astro.site)} title="Markdown version" />}
@@ -32,9 +32,9 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <a class="skip-link" href="#main">Skip to content</a>
     <header class="site-header">
       <div class="container navigation">
-        <a class="brand" href="/" aria-label="Ouroboros Jail home">
-          <img src="/brand/ouroboros.svg" width="36" height="36" alt="" />
-          <span>ouroboros<span class="brand-suffix"> / jail</span></span>
+        <a class="brand" href="/" aria-label="Ukai Jail home">
+          <img src="/brand/ukai.svg" width="36" height="36" alt="" />
+          <span>ukai<span class="brand-suffix"> / jail</span></span>
         </a>
         <nav aria-label="Main navigation">
           <a href="/guide/" aria-current={Astro.url.pathname.startsWith('/guide') ? 'page' : undefined}>Guide</a>

@@ -1,4 +1,4 @@
-ouro-jail `tool` seccomp baseline (x86_64), with a storage ceiling
+ukai-jail `tool` seccomp baseline (x86_64), with a storage ceiling
 jail-v1 §9.2, north-star §4.3
 
 precondition              action

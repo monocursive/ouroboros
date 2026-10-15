@@ -1,0 +1,16 @@
+[package]
+name = "ukai"
+description = "The local command line for trusted fleet operators."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+ukai-records.workspace = true
+serde_json.workspace = true

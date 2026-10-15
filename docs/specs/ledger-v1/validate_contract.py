@@ -252,10 +252,10 @@ def pruning_fixtures(validators, run, records):
     segment = {"name": "events-0001.ndjson", "first_seq": 1, "last_seq": len(records),
                "bytes": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
                "head_digest": run["chain"]["head_digest"]}
-    manifest = {"schema": "ouro.ledger.segments/2", "run_id": run["run_id"],
+    manifest = {"schema": "ukai.ledger.segments/2", "run_id": run["run_id"],
                 "attempt_id": run["attempt_id"], "segments": [segment],
                 "replay_digest": "sha256:" + replay_hash.hexdigest()}
-    retained = {"schema": "ouro.ledger.gc-anchor/1", "run": run, "manifest": manifest,
+    retained = {"schema": "ukai.ledger.gc-anchor/1", "run": run, "manifest": manifest,
                 "replay": replay, "strict_source_loss": False,
                 "last_activity_at": max(record["received_at"] for record in records),
                 "collected_at": "2026-10-05T12:00:00Z", "cutoff": "2026-10-04T12:00:00Z",
@@ -264,19 +264,19 @@ def pruning_fixtures(validators, run, records):
                            "device": 1, "inode": 1}]}
     envelope = {"digest": digest(retained), "retained": retained}
     validators["gc-anchor"].validate(envelope)
-    complete = {"schema": "ouro.ledger.gc-complete/1", "anchor_digest": envelope["digest"]}
+    complete = {"schema": "ukai.ledger.gc-complete/1", "anchor_digest": envelope["digest"]}
     validators["gc-complete"].validate(complete)
     # Capture-only authority binds a terminal chain but never inventories events.
     capture = {"stdout": {"state": "captured", "stored_bytes": 0},
                "stderr": {"state": "not_captured"}}
-    captured = {"schema": "ouro.ledger.capture-gc-anchor/1", "run_id": run["run_id"],
+    captured = {"schema": "ukai.ledger.capture-gc-anchor/1", "run_id": run["run_id"],
                 "attempt_id": run["attempt_id"], "chain": run["chain"], "capture": capture,
                 **{k: retained[k] for k in ["last_activity_at", "collected_at", "cutoff", "retain_days", "operator"]},
                 "files": [{"path": "artifacts/stdout.bin", "bytes": 0,
                            "digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "device": 1, "inode": 2}]}
     capture_envelope = {"digest": digest(captured), "retained": captured}
     validators["capture-gc-anchor"].validate(capture_envelope)
-    validators["capture-gc-complete"].validate({"schema": "ouro.ledger.capture-gc-complete/1", "anchor_digest": digest(captured)})
+    validators["capture-gc-complete"].validate({"schema": "ukai.ledger.capture-gc-complete/1", "anchor_digest": digest(captured)})
     all_captures = copy.deepcopy(capture_envelope)
     all_captures["retained"]["files"] = [
         {**captured["files"][0], "path": f"artifacts/{name}.bin"}
@@ -292,7 +292,7 @@ def pruning_fixtures(validators, run, records):
         expect_invalid(validators["capture-gc-anchor"], altered, "capture-only authority may not delete other files")
     history = {"state": "pruned", "anchor_digest": envelope["digest"],
                "collected_at": retained["collected_at"]}
-    result = {"schema": "ouro.ledger.gc-result/1", "retain_days": 1,
+    result = {"schema": "ukai.ledger.gc-result/1", "retain_days": 1,
               "pruned": [{"run_id": run["run_id"], "chain": run["chain"], "history": history,
                           "removed_files": 1, "removed_bytes": len(data)}],
               "kept": [], "failed": [], "next_after": None}
@@ -435,8 +435,8 @@ def signed_bundle_fixtures(validators):
 
 def transcript_fixtures(validators):
     absent = {"state": "not_captured", "displayed_bytes": 0, "display_truncated": False}
-    report = {"schema": "ouro.ledger.show/1", "run": read("run.json"), "transcript": {
-        "schema": "ouro.ledger.transcript/1", "limit_bytes_per_stream": 65536,
+    report = {"schema": "ukai.ledger.show/1", "run": read("run.json"), "transcript": {
+        "schema": "ukai.ledger.transcript/1", "limit_bytes_per_stream": 65536,
         "encoding": "escaped_bytes", "integrity": "unverified_local_artifact",
         "streams": {name: copy.deepcopy(absent) for name in ("stdout", "stderr", "argv")},
     }}
@@ -570,11 +570,11 @@ def main():
     redacted = copy.deepcopy(canonical_source)
     redacted.update(json.loads((JAIL / "examples/event-open.json").read_text()))
     redacted["fields"]["path"] = {"kind":"unavailable", "reason":"ledger_redacted"}
-    redacted["redaction"] = {"schema":"ouro.ledger.redaction/1", "fields":["path"]}
+    redacted["redaction"] = {"schema":"ukai.ledger.redaction/1", "fields":["path"]}
     validators["record"].validate(redacted)
     for marker in [{"schema":"wrong", "fields":["path"]},
-                   {"schema":"ouro.ledger.redaction/1", "fields":["outcome"]},
-                   {"schema":"ouro.ledger.redaction/1", "fields":["path","path"]}]:
+                   {"schema":"ukai.ledger.redaction/1", "fields":["outcome"]},
+                   {"schema":"ukai.ledger.redaction/1", "fields":["path","path"]}]:
         redacted["redaction"] = marker
         expect_invalid(validators["record"], redacted, "invalid redaction marker")
     for selectors in [["paths"], ["destinations"], ["destinations","paths"]]:
@@ -620,7 +620,7 @@ def main():
                                  "seq": record["seq"], "digest": digest(record)})
         replay_hash.update(len(identity).to_bytes(8, "little"))
         replay_hash.update(identity)
-    manifest = {"schema": "ouro.ledger.segments/1", "run_id": run["run_id"],
+    manifest = {"schema": "ukai.ledger.segments/1", "run_id": run["run_id"],
                 "attempt_id": run["attempt_id"],
                 "segment": {"name": "events-0001.ndjson", "first_seq": 1,
                             "last_seq": len(records), "bytes": len(bytes_expected),
@@ -636,7 +636,7 @@ def main():
 
     # Version 2 preserves the legacy anchors and adds an ordered segment array.
     rotated = copy.deepcopy(manifest)
-    rotated["schema"] = "ouro.ledger.segments/2"
+    rotated["schema"] = "ukai.ledger.segments/2"
     rotated["segments"] = [rotated.pop("segment")]
     validators["segments"].validate(rotated)
     for key, value in [("name", "../escape"), ("first_seq", 0),

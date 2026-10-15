@@ -19,7 +19,7 @@ its J0 measurements are kept below.
 
 ## 1. Reference host manifest
 
-Since J5, `doctor --json` produces the host manifest, `ouro.jail.doctor/1`
+Since J5, `doctor --json` produces the host manifest, `ukai.jail.doctor/1`
 ([schema](jail-doctor.schema.json); a measured example from the reference host
 is [examples/doctor-linux.json](examples/doctor-linux.json)). Every
 conformance run records it as `doctor.json`, and the milestone freeze copies
@@ -32,19 +32,19 @@ on, with the J5 values where they differ.
 | Virtualization (must be a VM with its own kernel; container-based hosts are ineligible) | kvm (`systemd-detect-virt`), 4 vCPU, 3.7 GiB RAM, 8 GiB swap file; manual 2026-09-22; `doctor` records `virtualization`, `cpus_online` and `memory` since J5 |
 | Kernel release and build | `7.0.0-31-generic` `#31-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 04:26:38 UTC 2026` after the operator applied pending updates and rebooted on 2026-09-22 (the pre-reboot manifest showed 7.0.0-28); BTF present; `CONFIG_BPF_SYSCALL=y CONFIG_BPF_JIT=y CONFIG_DEBUG_INFO_BTF=y`; manual 2026-09-22 |
 | Distribution and package versions: bubblewrap, selected backend, hashes | Ubuntu 26.04.1 LTS, systemd 259 (259.5-0ubuntu3.4); bubblewrap 0.11.1 at `/usr/bin/bwrap`, SHA-256 `523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6` (`doctor --json`, 2026-09-24, [example](examples/doctor-linux.json)); the same path, hash and version in the milestone run ([doctor](evidence/j5-doctor-2026-09-25-ouro-ci.json)) and in `milestone-1-freeze.toml` `[tested]` |
-| cgroup v2 delegation from the operator session; controllers pids, memory, cpu | cgroup2fs; `user@1001.service` for the `ouro-ci` conformance account present with `cpu memory pids` in controllers and subtree_control; account has no sudo, lingering on, `CapEff` 0 (manual 2026-09-22, [evidence/reference-host-2026-09-22-ouro-ci.txt](evidence/reference-host-2026-09-22-ouro-ci.txt)) |
+| cgroup v2 delegation from the operator session; controllers pids, memory, cpu | cgroup2fs; `user@1001.service` for the `ukai-ci` conformance account present with `cpu memory pids` in controllers and subtree_control; account has no sudo, lingering on, `CapEff` 0 (manual 2026-09-22, [evidence/reference-host-2026-09-22-ouro-ci.txt](evidence/reference-host-2026-09-22-ouro-ci.txt)) |
 | `kernel.apparmor_restrict_unprivileged_userns` | 1 (manual 2026-09-22); `unshare -U true` from a login shell succeeds |
 | `kernel.unprivileged_bpf_disabled` | 2 (manual 2026-09-22) |
 | `kernel.perf_event_paranoid` | 4 (manual 2026-09-22; Ubuntu's extra level, no `perf_event_open` without CAP_PERFMON) |
 | `kernel.yama.ptrace_scope` | 1 (manual 2026-09-22); `kernel.io_uring_disabled` 0 |
 | Kernel options | `SECURITY_LANDLOCK`, `SECCOMP_FILTER`, `USER_NS`, `SECURITY_APPARMOR`, `CGROUPS`, `BPF_LSM` all `y` (manual 2026-09-22, [evidence](evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt)) |
-| Operator-installed AppArmor profile: name, executables granted `userns` | none installed; AppArmor enabled with Ubuntu's `bwrap-userns-restrict`, `unprivileged_userns`, `lxc-usernsexec` files and `bwrap`, `unpriv_bwrap` loaded; the legacy `ouroboros-sandbox-fleet` profile was removed 2026-09-22 (manual) |
-| Tracing capability provisioning | None. The ptrace observer needs no capability under the default `ptrace_scope=1` of Ubuntu, Debian, Fedora and Arch. The file-capability path J0 described for eBPF is withdrawn with eBPF (§2). Login shell `CapEff` is 0 (manual 2026-09-22); `doctor` reports the operator identity category, `unprivileged` for `ouro-ci` |
-| Raw `doctor --json` output location | The milestone conformance run `20260925T065639Z-027de7d284b1`: [evidence/j5-doctor-2026-09-25-ouro-ci.json](evidence/j5-doctor-2026-09-25-ouro-ci.json), with the manual [host manifest](evidence/j5-host-manifest-2026-09-25-ouro-ci.txt) of the same run. Manual collections before `doctor` existed: [evidence/reference-host-2026-09-22.txt](evidence/reference-host-2026-09-22.txt) as the administrator account and [evidence/reference-host-2026-09-22-ouro-ci.txt](evidence/reference-host-2026-09-22-ouro-ci.txt) as `ouro-ci` |
+| Operator-installed AppArmor profile: name, executables granted `userns` | none installed; AppArmor enabled with Ubuntu's `bwrap-userns-restrict`, `unprivileged_userns`, `lxc-usernsexec` files and `bwrap`, `unpriv_bwrap` loaded; the legacy `ukai-sandbox-fleet` profile was removed 2026-09-22 (manual) |
+| Tracing capability provisioning | None. The ptrace observer needs no capability under the default `ptrace_scope=1` of Ubuntu, Debian, Fedora and Arch. The file-capability path J0 described for eBPF is withdrawn with eBPF (§2). Login shell `CapEff` is 0 (manual 2026-09-22); `doctor` reports the operator identity category, `unprivileged` for `ukai-ci` |
+| Raw `doctor --json` output location | The milestone conformance run `20260925T065639Z-027de7d284b1`: [evidence/j5-doctor-2026-09-25-ouro-ci.json](evidence/j5-doctor-2026-09-25-ouro-ci.json), with the manual [host manifest](evidence/j5-host-manifest-2026-09-25-ouro-ci.txt) of the same run. Manual collections before `doctor` existed: [evidence/reference-host-2026-09-22.txt](evidence/reference-host-2026-09-22.txt) as the administrator account and [evidence/reference-host-2026-09-22-ouro-ci.txt](evidence/reference-host-2026-09-22-ouro-ci.txt) as `ukai-ci` |
 
 ### 1.1 Unprivileged bubblewrap on the reference host
 
-Measured 2026-09-22 as `ouro-ci`, no operator change to AppArmor or sysctls
+Measured 2026-09-22 as `ukai-ci`, no operator change to AppArmor or sysctls
 ([evidence](evidence/bwrap-probe-2026-09-22-ouro-ci.txt)). This is a
 functionality probe of the mechanism the D9 lane builds on, not a §15 gate.
 
@@ -68,7 +68,7 @@ Decision 2026-09-22 (superseding the same day's sysctl decision): the jail
 requires no host configuration, and this host stays stock so that conformance
 proves it. `agent`'s nesting is therefore the unprivileged kind: an inner
 Landlock domain works inside one bwrap layer (measured 2026-09-22 as
-`ouro-ci`: `landlock_restrict_self` succeeded, a granted write succeeded, an
+`ukai-ci`: `landlock_restrict_self` succeeded, a granted write succeeded, an
 ungranted read was denied, `unshare -Urm` in the same layer was EPERM), and
 inner seccomp filters stack on the outer ones
 ([evidence/landlock-nesting-probe-2026-09-22-ouro-ci.txt](evidence/landlock-nesting-probe-2026-09-22-ouro-ci.txt),
@@ -108,14 +108,14 @@ rows below are not measurements of it.
 | Descendant tracking across fork, exec, PID namespace; PID reuse | not evaluated for eBPF; for ptrace see O02 in the [acceptance map](acceptance-map.toml) | |
 | Event loss accounting under the §11.4 bounds | not evaluated for eBPF; for ptrace see O03 | |
 | Child cannot reacquire tracing privileges (X06) | not evaluated for eBPF; for the shipped jail see X06 | |
-| Interference: AppArmor userns restriction, `perf_event_paranoid`, `unprivileged_bpf_disabled`; operator resolution | Unprovisioned attach is refused: as `ouro-ci`, bpftrace 0.25 fails reading `/sys/kernel/tracing/available_events` (permission denied), so tracefs access is part of the provisioning question, not only CAP_BPF/CAP_PERFMON. No operator resolution: v1 provisions nothing | [ptrace probe §1](evidence/ptrace-probe-2026-09-22-ouro-ci.txt) |
+| Interference: AppArmor userns restriction, `perf_event_paranoid`, `unprivileged_bpf_disabled`; operator resolution | Unprovisioned attach is refused: as `ukai-ci`, bpftrace 0.25 fails reading `/sys/kernel/tracing/available_events` (permission denied), so tracefs access is part of the provisioning question, not only CAP_BPF/CAP_PERFMON. No operator resolution: v1 provisions nothing | [ptrace probe §1](evidence/ptrace-probe-2026-09-22-ouro-ci.txt) |
 | Result: `attaches` or `blocked` | blocked without host provisioning; withdrawn | |
 
 ### 2.1 ptrace tracer (measured first, selected) and the fanotify supplement
 
 | Candidate | Closed-set coverage (§11.2) | Overhead | Known limits observed | Result |
 |---|---|---|---|---|
-| ptrace tracer with `SECCOMP_RET_TRACE` narrowing (stand-in: strace 6.19 `-f --seccomp-bpf`) | Attaches as `ouro-ci` with zero provisioning under `ptrace_scope=1`, including through bubblewrap's user and PID namespaces and its `unpriv_bwrap` confinement; sees the target's `execve` (with the PATH-search ENOENTs), `openat` with `O_CREAT`, `renameat2`, `unlinkat`, and the exec of each descendant, each with its return value and host pid; 15,000 of 15,000 closed-set events on the file workload, no loss by construction | Medians of 5 runs, strace as an upper bound (it decodes and formats every event): no-op 0.00→0.01 s; 200 fork+exec 0.14→0.21 s (+50%); 5,000 create/rename/unlink 0.15→0.78 s (+420%). Without narrowing: 0.03, 0.44, 1.25 s | Two stops per traced call even when narrowed; setup helpers (bubblewrap's own calls) appear before the target and need tagging as helpers; PID reuse and thread-group exit semantics not exercised | **Selected.** The purpose-built tracer (branch `j0-tracer-spike`, [evidence](evidence/tracer-spike-2026-09-22-ouro-ci.txt)) reproduces the same events through bubblewrap with exactly two stops per closed-set call (30,220 stops for 15,109 events) and zero gaps, and costs what strace costs: +31% on fork+exec, +440% on the syscall-dense file workload. The cost is the kernel's ptrace stop, about 22 µs each on this virtual host, not decoding. The productized tracer (J1 to J4) is tested against O01–O06 through the [acceptance map](acceptance-map.toml); the budget is adjusted (§4) |
+| ptrace tracer with `SECCOMP_RET_TRACE` narrowing (stand-in: strace 6.19 `-f --seccomp-bpf`) | Attaches as `ukai-ci` with zero provisioning under `ptrace_scope=1`, including through bubblewrap's user and PID namespaces and its `unpriv_bwrap` confinement; sees the target's `execve` (with the PATH-search ENOENTs), `openat` with `O_CREAT`, `renameat2`, `unlinkat`, and the exec of each descendant, each with its return value and host pid; 15,000 of 15,000 closed-set events on the file workload, no loss by construction | Medians of 5 runs, strace as an upper bound (it decodes and formats every event): no-op 0.00→0.01 s; 200 fork+exec 0.14→0.21 s (+50%); 5,000 create/rename/unlink 0.15→0.78 s (+420%). Without narrowing: 0.03, 0.44, 1.25 s | Two stops per traced call even when narrowed; setup helpers (bubblewrap's own calls) appear before the target and need tagging as helpers; PID reuse and thread-group exit semantics not exercised | **Selected.** The purpose-built tracer (branch `j0-tracer-spike`, [evidence](evidence/tracer-spike-2026-09-22-ouro-ci.txt)) reproduces the same events through bubblewrap with exactly two stops per closed-set call (30,220 stops for 15,109 events) and zero gaps, and costs what strace costs: +31% on fork+exec, +440% on the syscall-dense file workload. The cost is the kernel's ptrace stop, about 22 µs each on this virtual host, not decoding. The productized tracer (J1 to J4) is tested against O01–O06 through the [acceptance map](acceptance-map.toml); the budget is adjusted (§4) |
 | `fanotify` (filesystem classes only; cannot alone satisfy the set) | not evaluated: the tracer covers the whole closed set | not evaluated | not evaluated | not needed |
 
 ## 3. Enforcement candidates
@@ -126,7 +126,7 @@ rows below are not measurements of it.
 | Greywall | tag `v0.3.7` = `5581056d0523bfa244d8061008744ed9f72a0361` (released 2026-06-01); `main` head `60ab1b5bfd41c1683220435a85fc116dc29fd04f` on 2026-08-13 ([evidence](evidence/candidates-2026-09-22.txt)) | Apache-2.0 | release tarball `1a340a90…c5c7ff`, binary `9968afd2…e8f950` (release checksums; [evidence](evidence/d8-candidates-2026-09-24-ouro-ci.txt)) | Go binary; at run time `socat` (required, not installed on the stock host) and GreyProxy, an external proxy service `greywall setup` downloads; optional `xdg-dbus-proxy` and `secret-tool` |
 | Legacy sandbox | `f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82` (fixtures and code to inspect, not an oracle) | n/a | n/a | an Elixir module of the legacy runtime: needs BEAM |
 
-Each candidate was run on 2026-09-24 as `ouro-ci` on the stock host, with
+Each candidate was run on 2026-09-24 as `ukai-ci` on the stock host, with
 nothing installed: every tool lived in `~/j5/d8` and was removed afterwards,
 and the missing runtime packages were unpacked there from the Ubuntu archive
 (`apt-get download`, `dpkg -x`) rather than installed. The fixture was a
@@ -215,8 +215,8 @@ limits or an outside observer to reuse.
 
 ## 4. Performance (§5.2 budgets)
 
-Measured 2026-09-25, 07:19 to 07:27 UTC, on the reference host as `ouro-ci`,
-at the final milestone revision `027de7d2`, with the `ouro-jail` binary the
+Measured 2026-09-25, 07:19 to 07:27 UTC, on the reference host as `ukai-ci`,
+at the final milestone revision `027de7d2`, with the `ukai-jail` binary the
 conformance run tested (SHA-256 `aa2d77aa…724677`), by
 `cargo xtask perf run --launches 30 --warmup 1 --max-load 3.0 --revision 027de7d2…`
 started from a plain SSH session (the harness re-runs itself under
@@ -286,7 +286,7 @@ did not change. On a quiet host, 15 interleaved launches per arm after a
 warm-up, the fixed workload's work phase: direct 155.4 ms; bubblewrap alone
 with the `tool` profile's namespaces and no seccomp filter, still under
 Ubuntu's `bwrap-userns-restrict`/`unpriv_bwrap` AppArmor confinement, 185.0 ms
-(+19.0%); `ouro-jail run --profile tool --observe off` 189.9 ms (+22.2%).
+(+19.0%); `ukai-jail run --profile tool --observe off` 189.9 ms (+22.2%).
 About 19 of the jail's 22 points are bubblewrap's containment as the stock
 distribution confines it; the jail's filter and supervisor add about 3. The
 experiment does not separate the user namespace, the mount namespace and
@@ -328,7 +328,7 @@ rate; a representative workload (a build or a test run) is later work.
 
 ### 4.3 Preliminary numbers from the ptrace stand-in (J0)
 
-Five runs each as `ouro-ci`, medians, strace 6.19 as the tracer, `/usr/bin/time`
+Five runs each as `ukai-ci`, medians, strace 6.19 as the tracer, `/usr/bin/time`
 resolution 0.01 s ([evidence](evidence/ptrace-probe-2026-09-22-ouro-ci.txt)).
 Not the §4 measurement: fewer launches, a stand-in tracer, no RSS.
 
@@ -371,14 +371,14 @@ depend on the host:
 
 ## 6. Decision
 
-Selected enforcement integration: the native Rust adapter in `ouro-jail` over
+Selected enforcement integration: the native Rust adapter in `ukai-jail` over
 unprivileged bubblewrap 0.11.1 (the one on the operator's `PATH`, resolved once
 to an absolute canonical path and recorded with its SHA-256 by `doctor` and the
 freeze), seccomp filters whose digests the freeze pins, and cgroup v2
 delegation through the user manager. It is the "thin native Rust adapter over
 bubblewrap/seccomp" of jail-v1 §5.1, justified by the named failures in §3.
 
-Selected observer: the ptrace tracer compiled into `ouro-jail`, narrowed by a
+Selected observer: the ptrace tracer compiled into `ukai-jail`, narrowed by a
 `SECCOMP_RET_TRACE` filter to `linux-closed-v1` (narrowing-filter digest in
 [milestone-1-freeze.toml](milestone-1-freeze.toml)), with the unix-peer
 mediator's results for `agent`'s `connect`. Its build provenance is the

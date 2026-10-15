@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-show:1",
+  "$id": "urn:ukai:schema:ledger-show:1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "run", "transcript"],
   "properties": {
-    "schema": {"const": "ouro.ledger.show/1"},
-    "run": {"$ref": "urn:ouro:schema:ledger-run:1"},
+    "schema": {"const": "ukai.ledger.show/1"},
+    "run": {"$ref": "urn:ukai:schema:ledger-run:1"},
     "transcript": {
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "limit_bytes_per_stream", "encoding", "integrity", "streams"],
       "properties": {
-        "schema": {"const": "ouro.ledger.transcript/1"},
+        "schema": {"const": "ukai.ledger.transcript/1"},
         "limit_bytes_per_stream": {"const": 65536},
         "encoding": {"const": "escaped_bytes"},
         "integrity": {"const": "unverified_local_artifact"},

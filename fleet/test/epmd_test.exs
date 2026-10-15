@@ -1,11 +1,11 @@
-defmodule OuroFleet.EpmdTest do
+defmodule UkaiFleet.EpmdTest do
   use ExUnit.Case, async: false
-  alias OuroFleet.Epmd
+  alias UkaiFleet.Epmd
 
   @repository Path.expand("../..", __DIR__)
 
   setup do
-    saved = Map.new(["OUROBOROS_DIST_PORTS", "OUROBOROS_DIST_PORT"], &{&1, System.get_env(&1)})
+    saved = Map.new(["UKAI_DIST_PORTS", "UKAI_DIST_PORT"], &{&1, System.get_env(&1)})
 
     on_exit(fn ->
       Enum.each(saved, fn
@@ -16,8 +16,8 @@ defmodule OuroFleet.EpmdTest do
   end
 
   test "every launcher names this module, and it exports what distribution calls" do
-    # The node service (README) and the `ouro` client launcher spell the flag apart.
-    for source <- ["docs/specs/fleet-v1/README.md", "crates/ouro/src/main.rs"] do
+    # The node service (README) and the `ukai` client launcher spell the flag apart.
+    for source <- ["docs/specs/fleet-v1/README.md", "crates/ukai/src/main.rs"] do
       text = File.read!(Path.join(@repository, source))
       assert [_, module] = Regex.run(~r/-epmd_module (\S+)/, text), source
       assert String.to_atom(module) == Epmd, "#{source} passes -epmd_module #{module}"
@@ -38,7 +38,7 @@ defmodule OuroFleet.EpmdTest do
   end
 
   test "each registration draws a full-width creation, so a restart is told apart" do
-    creations = for _ <- 1..64, do: elem(Epmd.register_node(~c"ouro-a", 4370, :inet), 1)
+    creations = for _ <- 1..64, do: elem(Epmd.register_node(~c"ukai-a", 4370, :inet), 1)
     # 0..3 are never drawn, and 64 draws from four billion values collide with odds
     # below one in a million.
     assert Enum.all?(creations, &(&1 in 4..0xFFFFFFFF))
@@ -47,21 +47,21 @@ defmodule OuroFleet.EpmdTest do
 
   test "a member's port is keyed by its node name, and an unnamed node falls back" do
     System.put_env(
-      "OUROBOROS_DIST_PORTS",
-      "ouro-a@127.0.0.1=4370,ouro-b@localhost.=4371,127.0.0.1=4999,bad,ouro-a@127.0.0.1=1"
+      "UKAI_DIST_PORTS",
+      "ukai-a@127.0.0.1=4370,ukai-b@localhost.=4371,127.0.0.1=4999,bad,ukai-a@127.0.0.1=1"
     )
 
-    System.put_env("OUROBOROS_DIST_PORT", "4380")
+    System.put_env("UKAI_DIST_PORT", "4380")
 
-    assert {:ok, {127, 0, 0, 1}, 4370, 5} = Epmd.address_please(~c"ouro-a", ~c"127.0.0.1", :inet)
-    assert {:ok, {127, 0, 0, 1}, 4999, 5} = Epmd.address_please("ouro-z", "127.0.0.1", :inet)
-    assert {:ok, {127, 0, 0, 1}, 4371, 5} = Epmd.address_please(~c"ouro-b", ~c"localhost", :inet)
-    assert {:port, 4370, 5} = Epmd.port_please(~c"ouro-a", {127, 0, 0, 1})
-    assert {:ok, {127, 0, 0, 1}} = Epmd.address_please(~c"ouro-c", ~c"localhost", :inet)
-    assert {:port, 4380, 5} = Epmd.port_please(~c"ouro-c", ~c"localhost")
-    assert {:ok, 4380} = Epmd.listen_port_please(~c"ouro-a", ~c"127.0.0.1")
-    System.delete_env("OUROBOROS_DIST_PORT")
-    assert :noport = Epmd.port_please(~c"ouro-c", ~c"localhost")
-    assert {:ok, 0} = Epmd.listen_port_please(~c"ouro-c", ~c"localhost")
+    assert {:ok, {127, 0, 0, 1}, 4370, 5} = Epmd.address_please(~c"ukai-a", ~c"127.0.0.1", :inet)
+    assert {:ok, {127, 0, 0, 1}, 4999, 5} = Epmd.address_please("ukai-z", "127.0.0.1", :inet)
+    assert {:ok, {127, 0, 0, 1}, 4371, 5} = Epmd.address_please(~c"ukai-b", ~c"localhost", :inet)
+    assert {:port, 4370, 5} = Epmd.port_please(~c"ukai-a", {127, 0, 0, 1})
+    assert {:ok, {127, 0, 0, 1}} = Epmd.address_please(~c"ukai-c", ~c"localhost", :inet)
+    assert {:port, 4380, 5} = Epmd.port_please(~c"ukai-c", ~c"localhost")
+    assert {:ok, 4380} = Epmd.listen_port_please(~c"ukai-a", ~c"127.0.0.1")
+    System.delete_env("UKAI_DIST_PORT")
+    assert :noport = Epmd.port_please(~c"ukai-c", ~c"localhost")
+    assert {:ok, 0} = Epmd.listen_port_please(~c"ukai-c", ~c"localhost")
   end
 end

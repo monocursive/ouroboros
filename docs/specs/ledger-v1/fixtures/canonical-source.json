@@ -1,5 +1,5 @@
 {
-  "schema": "ouro.event/1",
+  "schema": "ukai.event/1",
   "attempt_id": "att_00000000-0000-4000-8000-000000000001",
   "source": "wrapper",
   "source_seq": 1,
@@ -20,7 +20,7 @@
   },
   "run_id": "run_11111111111111111111111111111111",
   "seq": 3,
-  "prev": "sha256:7f40e3e82ea735744e5dc36a75fd70ae58f176f4eecad2e5a9eb848bf3e0eeae",
+  "prev": "sha256:3b6b81a4c4ce33c993d199390d9f1cbac6dd360fd2e6924b908023ff8070cd5f",
   "received_at": "2026-09-30T12:00:00Z",
   "provenance": {
     "role": "producer",

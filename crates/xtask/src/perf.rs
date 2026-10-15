@@ -13,7 +13,7 @@
 //! `run` executes on the reference host, from a plain lingering login session:
 //! it takes the plain-session pass itself and re-executes itself under
 //! `systemd-run --user --scope` for the pre-entered-scope pass. Every launch
-//! goes through `ouro-fixture perf-launch`, which reads `CLOCK_MONOTONIC`
+//! goes through `ukai-fixture perf-launch`, which reads `CLOCK_MONOTONIC`
 //! just before `fork`, samples the launched process's `VmHWM` and the
 //! execution leaf's `memory.peak`, reaps with `wait4` and harvests the
 //! attempt directory (trace counts and the §13.3 completeness check). The
@@ -34,9 +34,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use clap::{Args, Subcommand, ValueEnum};
-use ouro_fixture::perf::{HarvestedAttempt, PerfLaunchResult, TraceHarvest};
-use ouro_jail::observer::CoverageClass;
-use ouro_jail::records::{
+use ukai_fixture::perf::{HarvestedAttempt, PerfLaunchResult, TraceHarvest};
+use ukai_jail::observer::CoverageClass;
+use ukai_jail::records::{
     Coverage, CoverageEntry, Gap, OutcomeKind, Phase, Receipt, SCHEMA_RECEIPT, SourceStatus,
     StateCleanup,
 };
@@ -143,10 +143,10 @@ pub struct RunArgs {
     /// Seed of the per-round arm order; default: from the clock. Recorded.
     #[arg(long, value_name = "N")]
     pub seed: Option<u64>,
-    /// `ouro-jail`; default `target/release/ouro-jail`.
+    /// `ukai-jail`; default `target/release/ukai-jail`.
     #[arg(long, value_name = "PATH")]
     pub jail: Option<PathBuf>,
-    /// `ouro-fixture`; default `target/release/ouro-fixture`.
+    /// `ukai-fixture`; default `target/release/ukai-fixture`.
     #[arg(long, value_name = "PATH")]
     pub fixture: Option<PathBuf>,
     /// Output directory; default `evidence/perf-<UTC stamp>`.
@@ -176,11 +176,11 @@ pub enum Session {
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum Workload {
-    /// `ouro-fixture spawn-tree 0`: start, report, exit.
+    /// `ukai-fixture spawn-tree 0`: start, report, exit.
     Noop,
-    /// `ouro-fixture spawn-tree N -- /usr/bin/true`.
+    /// `ukai-fixture spawn-tree N -- /usr/bin/true`.
     SpawnTree,
-    /// `ouro-fixture fileops N DIR`.
+    /// `ukai-fixture fileops N DIR`.
     Fileops,
 }
 
@@ -735,7 +735,7 @@ pub fn target_facts(stdout: &[u8], workload: Workload) -> TargetFacts {
 /// with no errors, no gaps and no coverage.
 ///
 /// # Errors
-/// Bytes that are not an `ouro.jail.receipt/1` record.
+/// Bytes that are not an `ukai.jail.receipt/1` record.
 pub fn read_receipt(bytes: &[u8]) -> Result<Receipt, String> {
     let receipt: Receipt =
         serde_json::from_slice(bytes).map_err(|e| format!("not a receipt: {e}"))?;
@@ -1936,7 +1936,7 @@ fn host_line(host: &Value) -> String {
     let s = |p: &str| host.pointer(p).and_then(Value::as_str).unwrap_or("unknown");
     format!(
         "Collected {} on `{}` ({}, kernel {}, {} CPUs, {} MiB) as `{}` (lingering: {}). \
-         Revision `{}`. `ouro-jail` sha256 `{}`; `ouro-fixture` sha256 `{}`; {}.",
+         Revision `{}`. `ukai-jail` sha256 `{}`; `ukai-fixture` sha256 `{}`; {}.",
         s("/collected_at"),
         s("/hostname"),
         s("/os_release"),
@@ -1964,8 +1964,8 @@ fn definitions() -> String {
         "\
 ## Definitions
 
-- **Launcher.** `ouro-fixture perf-launch`, outside the jail, forks the arm's \
-command: the workload itself (direct) or `ouro-jail run --profile P --observe \
+- **Launcher.** `ukai-fixture perf-launch`, outside the jail, forks the arm's \
+command: the workload itself (direct) or `ukai-jail run --profile P --observe \
 on|off --workspace WS -- workload`. It reads `CLOCK_MONOTONIC` just before \
 `fork` and again after `wait4` returns. While the command runs it samples \
 the launched process's `VmHWM` and, for a jailed arm only, looks up the \
@@ -2089,7 +2089,7 @@ pub fn render_markdown(summary: &Summary) -> String {
 /// parameters.
 fn write_preamble(md: &mut String, summary: &Summary) {
     let p = &summary.parameters;
-    let _ = writeln!(md, "# `ouro-jail` performance (jail-v1 §5)\n");
+    let _ = writeln!(md, "# `ukai-jail` performance (jail-v1 §5)\n");
     let _ = writeln!(md, "{}\n", host_line(&summary.host));
     if !summary.provenance.is_null() {
         let v = &summary.provenance;
@@ -2684,20 +2684,20 @@ fn resolve(args: &RunArgs) -> Result<Plan, String> {
     let jail = absolute(
         args.jail
             .as_deref()
-            .unwrap_or(Path::new("target/release/ouro-jail")),
+            .unwrap_or(Path::new("target/release/ukai-jail")),
     )?;
     let fixture = absolute(
         args.fixture
             .as_deref()
-            .unwrap_or(Path::new("target/release/ouro-fixture")),
+            .unwrap_or(Path::new("target/release/ukai-fixture")),
     )?;
-    for (name, p) in [("ouro-jail", &jail), ("ouro-fixture", &fixture)] {
+    for (name, p) in [("ukai-jail", &jail), ("ukai-fixture", &fixture)] {
         if !p.is_file() {
             return Err(format!(
-                "{name} is not at {}; build it with `cargo build --release -p ouro-jail -p \
-                 ouro-fixture` or name it with --{}",
+                "{name} is not at {}; build it with `cargo build --release -p ukai-jail -p \
+                 ukai-fixture` or name it with --{}",
                 p.display(),
-                if name == "ouro-jail" {
+                if name == "ukai-jail" {
                     "jail"
                 } else {
                     "fixture"
@@ -3078,7 +3078,7 @@ fn host_facts(plan: &Plan) -> Value {
         "xtask_cgroup": own_cgroup(),
         "loadavg": loadavg(),
         "revision": plan.args.revision.clone()
-            .or_else(|| std::env::var("OURO_BUILD_REVISION").ok()),
+            .or_else(|| std::env::var("UKAI_BUILD_REVISION").ok()),
         "jail": {
             "path": plan.jail,
             "sha256": sha256(&plan.jail),
@@ -3161,7 +3161,7 @@ fn run_pass(plan: &Plan, session: Session) -> Result<(), String> {
     let base = plan.out.join(session.name());
     let ws = base.join("ws");
     std::fs::create_dir_all(ws.join("fileops")).map_err(|e| format!("{}: {e}", ws.display()))?;
-    let target_bin = ws.join("ouro-fixture");
+    let target_bin = ws.join("ukai-fixture");
     std::fs::copy(&plan.fixture, &target_bin)
         .map_err(|e| format!("copy the fixture into the workspace: {e}"))?;
     let scratch = base.join("launch");
@@ -3348,7 +3348,7 @@ fn launch(
     Ok(rec)
 }
 
-/// `ouro-fixture perf-launch` for one launch of `arm`: the jail around the
+/// `ukai-fixture perf-launch` for one launch of `arm`: the jail around the
 /// target for a jailed arm, the target alone for direct.
 fn perf_launch_command(
     ctx: &PassCtx<'_>,
@@ -3371,8 +3371,8 @@ fn perf_launch_command(
     if let Arm::Jailed(profile, observe) = arm {
         cmd.arg("--data-dir")
             .arg(state.data())
-            .env("OURO_DATA_DIR", state.data())
-            .env("OURO_CONFIG_DIR", state.config())
+            .env("UKAI_DATA_DIR", state.data())
+            .env("UKAI_CONFIG_DIR", state.config())
             .arg("--")
             .arg(&plan.jail)
             .args([
@@ -3555,7 +3555,7 @@ mod tests {
     /// read strictly; a trace that could not be read stays an error.
     #[test]
     fn launcher_facts_come_from_the_fixtures_typed_result() {
-        use ouro_fixture::perf::{
+        use ukai_fixture::perf::{
             LaunchRusage, LaunchStatus, PERF_LAUNCH_SCHEMA, Sampling, TraceCompleteness,
             TraceCounts, WaitedVia,
         };
@@ -3637,7 +3637,7 @@ mod tests {
         // A result of another schema is not read as this one.
         let old = String::from_utf8(bytes)
             .unwrap()
-            .replace(PERF_LAUNCH_SCHEMA, "ouro.fixture.perf-launch/1");
+            .replace(PERF_LAUNCH_SCHEMA, "ukai.fixture.perf-launch/1");
         assert!(PerfLaunchResult::parse(old.as_bytes()).is_err());
     }
 
@@ -4431,7 +4431,7 @@ not json
             assert!(read_receipt(&bytes).is_err(), "{label} missing was read");
         }
         let mut other = good;
-        other["schema"] = "ouro.jail.receipt/0".into();
+        other["schema"] = "ukai.jail.receipt/0".into();
         assert!(read_receipt(&serde_json::to_vec(&other).unwrap()).is_err());
         assert!(read_receipt(b"{}").is_err());
     }
@@ -4450,12 +4450,12 @@ not json
         r.observer.gaps = vec![gap(Some(3)), gap(None)];
         r.coverage.fs_write.status = SourceStatus::Degraded;
         r.coverage.fs_write.gaps = vec![gap(Some(5))];
-        r.errors = vec![ouro_jail::records::ErrorObject {
-            code: ouro_jail::records::ErrorCode::EvidenceLost.into(),
-            stage: ouro_jail::records::ErrorStage::Running.into(),
+        r.errors = vec![ukai_jail::records::ErrorObject {
+            code: ukai_jail::records::ErrorCode::EvidenceLost.into(),
+            stage: ukai_jail::records::ErrorStage::Running.into(),
             message: "m".to_owned(),
             key_path: None,
-            remediation_category: ouro_jail::records::Remediation::InspectState,
+            remediation_category: ukai_jail::records::Remediation::InspectState,
         }];
         r.lifetime.tree_empty = None;
         let details = &mut r.lifetime.native.as_mut().unwrap().details;

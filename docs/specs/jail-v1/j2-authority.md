@@ -1,7 +1,7 @@
 # J2: Linux authority
 
 Implemented on the named x86-64 Linux lane, 2026-09-22. The lane uses
-bubblewrap 0.11.1 and the unprivileged `ouro-ci` account. Live evidence is
+bubblewrap 0.11.1 and the unprivileged `ukai-ci` account. Live evidence is
 committed under [`evidence/`](evidence/):
 
 - [`j2-doctor-2026-09-22-ouro-ci.json`](evidence/j2-doctor-2026-09-22-ouro-ci.json):
@@ -42,7 +42,7 @@ Run the supervisor inside a transient user scope:
 
 ```sh
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --scope --quiet \
-  /absolute/path/to/ouro-jail run --workspace /absolute/workspace \
+  /absolute/path/to/ukai-jail run --workspace /absolute/workspace \
   --limit pids=64 --limit mem=256MiB --limit cpu=100 -- /usr/bin/make
 ```
 
@@ -146,7 +146,7 @@ Landed after the first J2 measurement and measured live by run
   reason through the status pipe, so the refusal carries it.
 - Tests: the mechanism suite derives its cgroup-row expectation from the
   session's delegation facts and fails outside the scope only under
-  `OURO_CONFORMANCE=1`; the build fixture asserts the working directory is
+  `UKAI_CONFORMANCE=1`; the build fixture asserts the working directory is
   read-only; the OOM fixture covers both observation modes; the mount table
   has unit tests for the read-only and ungranted workspace shapes.
 

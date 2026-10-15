@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-bundle-verification:2",
+  "$id": "urn:ukai:schema:ledger-bundle-verification:2",
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.ledger.bundle-verification/2"
+      "const": "ukai.ledger.bundle-verification/2"
     },
     "run_id": {
       "type": "string",

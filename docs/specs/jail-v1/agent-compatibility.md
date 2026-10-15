@@ -1,6 +1,6 @@
 # Agent compatibility
 
-Real agent runs under `ouro-jail` (jail-v1 §15 row A01, north star §7.4). A
+Real agent runs under `ukai-jail` (jail-v1 §15 row A01, north star §7.4). A
 record marks only the tested profile, vendor version, platform and jail mode
 supported; every other combination stays experimental. The support claim
 lives here, not in the binary: `doctor` reports every launch profile
@@ -15,7 +15,7 @@ its successful cases do not establish general reliability.
 `doctor --launch` proves resolution and host capabilities, not vendor
 compatibility. The historical rows below retain their original scope.
 
-| Agent | Vendor version | Ouroboros revision | Platform | Backend | Jail mode | Credential | Result |
+| Agent | Vendor version | Ukai revision | Platform | Backend | Jail mode | Credential | Result |
 |---|---|---|---|---|---|---|---|
 | OpenCode | 1.18.32 | clean `16ee37fe`; current Jail inputs `2989fb4983de…` | Fresh Ubuntu 26.04.1 VM, Linux 7.0.0-34, x86_64 QEMU TCG | bubblewrap + ptrace; bubblewrap version unrecorded | `agent`, observation on, strict evidence; separate `learn` run | none (`opencode/big-pickle`) | Signed installation, contained `true`, real glob/read/write workflow and verified settlement passed in 62.2 s. Learning proposed an evidence-supported exact-read subset with receipt-bound coverage. Single fixture only; reliability remains experimental ([October 10 record](../../benchmarks/jail/release-preview-2026-10-10.md)) |
 | OpenCode | 1.18.32 | clean `f933105e`; inputs `0abe3b09146a…`, unchanged at `d0bc346d` | Fresh Ubuntu 26.04 VM, x86_64 | bubblewrap 0.11.1, ptrace | `agent`, observation on, strict evidence | none (`opencode/big-pickle`) | Signed install, real glob/read/write workflow and clean settlement passed in 82.85 s; exact fixture scope only ([October 8 evidence](../../benchmarks/jail/validation-2026-10-08.md)) |
@@ -62,15 +62,15 @@ profile `experimental`; this record carries the claim.
 
 - **What ran.** On 2026-09-25 at 07:28 UTC, on the reference host (Ubuntu
   26.04.1, kernel 7.0.0-31, x86_64, bubblewrap 0.11.1), as the account
-  `ubuntu` from a plain SSH session with lingering on. `ouro-jail` at revision
+  `ubuntu` from a plain SSH session with lingering on. `ukai-jail` at revision
   `027de7d284b19a8cb7ecc4a1ba496d4408b46627`, clean, optimised, SHA-256
   `aa2d77aa7efa322fef0afd3e3ae47a3da9ec2776bc91941d2c85ba7773724677`: the same
   binary the milestone conformance run and the performance run tested. OpenCode
   1.18.32 from `~/.opencode/bin`; the launch profile is the bundled
-  [`opencode.toml`](../../../crates/ouro-jail/profiles/launch/opencode.toml)
+  [`opencode.toml`](../../../crates/ukai-jail/profiles/launch/opencode.toml)
   at that revision, unchanged; a fresh git repository as the workspace; no
   credential (OpenCode Zen's free model `big-pickle`).
-- **Command.** `ouro-jail run --launch opencode --ro ~/.opencode/bin --receipt
+- **Command.** `ukai-jail run --launch opencode --ro ~/.opencode/bin --receipt
   ~/a01-j5-final-receipt.json -- ~/.opencode/bin/opencode run "Create a file named
   greeting.txt containing the single word hello."`
 - **Result.** The jail exited 0 after 12 seconds and `greeting.txt` contains
@@ -99,10 +99,10 @@ Evidence: [run record](evidence/a01-opencode-run-2026-09-23-ubuntu.txt) and
 [receipt](evidence/a01-opencode-receipt-2026-09-23-ubuntu.json).
 
 - **How it ran.** As the operator's own account, with the bundled
-  [`opencode` launch profile](../../../crates/ouro-jail/profiles/launch/opencode.toml)
-  copied to `~/.config/ouro/launch/`, the OpenCode install granted read-only
+  [`opencode` launch profile](../../../crates/ukai-jail/profiles/launch/opencode.toml)
+  copied to `~/.config/ukai/launch/`, the OpenCode install granted read-only
   (`--ro ~/.opencode/bin`) and a git repository as the workspace:
-  `ouro-jail run --launch opencode --ro ~/.opencode/bin -- ~/.opencode/bin/opencode run "…"`.
+  `ukai-jail run --launch opencode --ro ~/.opencode/bin -- ~/.opencode/bin/opencode run "…"`.
 - **What it did.** Its write tool created `greeting.txt` containing `hello`;
   the audit source recorded that `fs.create`. It reached `opencode.ai` (model
   API), `models.opencode.ai` (catalog) and `registry.npmjs.org` (packages it
@@ -116,7 +116,7 @@ Evidence: [run record](evidence/a01-opencode-run-2026-09-23-ubuntu.txt) and
   1026 passed, 0 failed).
 - **Known behaviour.** In 1 of 16 repeat runs a file operation was still in
   flight in a thread when OpenCode exited; strict evidence reported the loss
-  and `ouro-jail` exited 1, with the target's own exit 0 kept in the receipt.
+  and `ukai-jail` exited 1, with the target's own exit 0 kept in the receipt.
   Several runs stalled in OpenCode's start-up, after its run-time package
   installs, until the wall limit (the run record gives the counts); the cause
   is not established and is an open item (see also the credentialed run).

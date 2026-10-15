@@ -1,0 +1,49 @@
+[package]
+name = "ukai-jail"
+description = "Runs an operator-supplied argv under an explicit policy and records what it applied."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "ukai_jail"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ukai-jail"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ukai-records.workspace = true
+base64.workspace = true
+clap = { workspace = true, features = ["derive"] }
+libc.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+sha1 = "0.10.6"
+toml.workspace = true
+toml_edit = "0.22.27"
+zeroize = "1.8"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = "0.14.10"
+webpki-roots = "1.0"
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+uuid = { workspace = true, features = ["v4"] }
+
+# build.rs digests the build inputs (build provenance, jail-v1 §16).
+[build-dependencies]
+sha2.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true
+# The conformance suite drives the real jail through the shared harness and
+# runs the shared fixture inside it. No cycle: `ukai-fixture` does not depend
+# on `ukai-jail`, and this is a dev-dependency, so nothing ships with it.
+ukai-fixture.workspace = true
+tempfile.workspace = true

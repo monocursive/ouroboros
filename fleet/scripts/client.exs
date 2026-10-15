@@ -1,9 +1,9 @@
 [path] = System.argv()
-config = OuroFleet.Store.read!(OuroFleet.Boot.private!(path))
-OuroFleet.Boot.start(config, true)
+config = UkaiFleet.Store.read!(UkaiFleet.Boot.private!(path))
+UkaiFleet.Boot.start(config, true)
 input = IO.binread(:stdio, 524289)
 if not is_binary(input) or byte_size(input) > 524288, do: raise("invalid client frame")
-request = OuroFleet.JSON.decode(input)
+request = UkaiFleet.JSON.decode(input)
 message = case request do
   %{"operation" => "run", "request" => body} -> {:run, body}
   %{"operation" => "status", "job" => nil} -> :status
@@ -13,8 +13,8 @@ message = case request do
   %{"operation" => "doctor"} -> :doctor
   _ -> raise("unsupported operation")
 end
-result = OuroFleet.Client.call(String.to_atom(config["controller"]), message)
+result = UkaiFleet.Client.call(String.to_atom(config["controller"]), message)
 case result do
-  {:ok, value} -> IO.puts(OuroFleet.JSON.encode(%{"ok" => true, "result" => value}))
-  {:error, reason} -> IO.puts(OuroFleet.JSON.encode(%{"ok" => false, "error" => reason})); System.halt(1)
+  {:ok, value} -> IO.puts(UkaiFleet.JSON.encode(%{"ok" => true, "result" => value}))
+  {:error, reason} -> IO.puts(UkaiFleet.JSON.encode(%{"ok" => false, "error" => reason})); System.halt(1)
 end

@@ -1,6 +1,6 @@
 # Ledger v1: durable local admission and bounded evidence readers
 
-This specification implements [North Star §5](../../north-star.md#5-ouro-ledger)
+This specification implements [North Star §5](../../north-star.md#5-ukai-ledger)
 and its [launch handshake](../../north-star.md#71-process-tree-and-admission).
 The [milestone-2 acceptance map](ledger-v1/milestone-2-acceptance.md) binds the
 completed contracts to native evidence and the schema/fixture freeze. The jail still builds and runs without
@@ -31,7 +31,7 @@ provision the manager itself.
 
 ## 1. Processes and authority
 
-`ouro-ledger serve` owns `<data>/ledger/writer.lock` with a nonblocking exclusive
+`ukai-ledger serve` owns `<data>/ledger/writer.lock` with a nonblocking exclusive
 `flock` for its entire process lifetime. A second writer refuses before opening
 the serving socket. The daemon accepts Unix connections at
 `<data>/ledger/serve.sock`, owned by the daemon's effective uid and mode 0600.
@@ -88,7 +88,7 @@ protocol M; restart the writer once its runs settle` (a writer older than
 versioning speaks "an unversioned protocol"). `doctor` reports such a writer as
 `writer: incompatible` rather than unreachable, and neither on-demand start nor
 `serve --detach` starts a second writer beside it. A writer is never restarted
-implicitly, so the upgrade rule is: after upgrading `ouro-ledger`, restart the
+implicitly, so the upgrade rule is: after upgrading `ukai-ledger`, restart the
 writer once its runs settle. Clients from before versioning do not check; against
 a newer writer they fail on the first reply whose shape changed, for example
 `verify`, which answers with pages since protocol 1. A request a writer cannot
@@ -288,11 +288,11 @@ without re-executing work. Writer death retains strict fail-closed behavior.
 For example, on a provisioned worker:
 
 ```sh
-ouro-ledger --data-dir "$HOME/.local/share/ouro-batch" run \
+ukai-ledger --data-dir "$HOME/.local/share/ukai-batch" run \
   --request-id build-001 --io batch --detach --json \
   --workspace "$PWD" --limit wall=60s --capture stdout --capture stderr \
   -- /bin/sh -c 'make test'
-ouro-ledger --data-dir "$HOME/.local/share/ouro-batch" wait RUN_ID --json
+ukai-ledger --data-dir "$HOME/.local/share/ukai-batch" wait RUN_ID --json
 ```
 
 This is local operator authority on Linux. Remote callers can invoke the CLI
@@ -350,7 +350,7 @@ such stores.
 [Native validation evidence](ledger-v1/evidence/2026-10-07-control-fd/README.md)
 records the descriptor and disconnect checks on the Pi and VPS.
 
-`run --control-fd N` sends one compact, newline-terminated `ouro.ledger.run/1`
+`run --control-fd N` sends one compact, newline-terminated `ukai.ledger.run/1`
 record to the supplied descriptor when the CLI has a run result. It implies
 JSON for that descriptor; adding `--json` is allowed. The frame matches batch
 JSON output and retains its actual outcome, coverage, settlement and protection
@@ -386,7 +386,7 @@ This transport acknowledgement is not a disk synchronization or custody claim.
 
 ```sh
 umask 077
-ouro-ledger run --request-id foreground-001 --control-fd 3 -- \
+ukai-ledger run --request-id foreground-001 --control-fd 3 -- \
   /bin/sh -c 'printf "child output\n"; exit 7' 3> run-control.ndjson
 ```
 
@@ -400,9 +400,9 @@ whole record there. A record never spans files. Sealed files stay unchanged.
 Existing larger legacy files are preserved and rotate on the next append.
 The current bound is 4,096 segments per run; reaching it refuses new appends
 without deleting history. Preparation and owner bookkeeping records have
-`schema: ouro.ledger.event/1`, `run_id`, `attempt_id`, `seq`, `prev`,
+`schema: ukai.ledger.event/1`, `run_id`, `attempt_id`, `seq`, `prev`,
 `received_at`, `provenance`, `kind`, `request_id`, `body` and, for owner intents,
-`effect_id`. Canonical source records retain `schema: ouro.event/1` and every
+`effect_id`. Canonical source records retain `schema: ukai.event/1` and every
 validated source field directly on the record, adding `run_id`, `seq`, `prev`,
 `received_at`, `provenance`, `kind: source` and the derived replay request id.
 They do not nest the source envelope. Explicit structured minimization changes
@@ -580,7 +580,7 @@ same request id refuses. The policy is passed to detached owners too.
   `fields.connected_address` and `fields.origin` with null.
 
 Each changed source event gains a ledger-owned top-level `redaction` containing
-`schema: ouro.ledger.redaction/1` and the sorted names of changed fields. This
+`schema: ukai.ledger.redaction/1` and the sorted names of changed fields. This
 marker states that the envelope was transformed; it does not claim the retained
 bytes are the original Jail event. The transformation retains no digest of
 removed field values.
@@ -633,7 +633,7 @@ uses independent sinks.
 
 `show RUN --with-transcript` explicitly displays private capture content. The
 ordinary `show` response remains metadata only. With the flag, the CLI returns
-an [`ouro.ledger.show/1`](ledger-v1/show.schema.json) envelope containing the
+an [`ukai.ledger.show/1`](ledger-v1/show.schema.json) envelope containing the
 unchanged `run` projection and a `transcript`. Both pretty and `--json` output
 read at most 65,536 source bytes from each stdout/stderr/argv artifact on a
 terminal run.
@@ -979,16 +979,16 @@ terminal runs, including unknown outcomes, and share the ordinary append,
 rotation, synchronization and recovery barriers.
 
 ```sh
-ouro-ledger hold RUN_ID --request-id keep-investigation-1 --json
-ouro-ledger gc --dry-run --json
-ouro-ledger release RUN_ID --request-id release-investigation-1 --json
+ukai-ledger hold RUN_ID --request-id keep-investigation-1 --json
+ukai-ledger gc --dry-run --json
+ukai-ledger release RUN_ID --request-id release-investigation-1 --json
 ```
 
-The writer reads the operator's `~/.config/ouro/config.toml` (or
-`$OURO_CONFIG_DIR/config.toml`) at startup. Restart the writer after changing it;
+The writer reads the operator's `~/.config/ukai/config.toml` (or
+`$UKAI_CONFIG_DIR/config.toml`) at startup. Restart the writer after changing it;
 clients cannot replace an existing writer's configuration by changing their own
 environment. Detached writer services preserve an explicit absolute
-`OURO_CONFIG_DIR`. A missing file uses 90 days for history and captures. Invalid,
+`UKAI_CONFIG_DIR`. A missing file uses 90 days for history and captures. Invalid,
 oversized, linked or group/other-writable configuration refuses startup rather
 than silently selecting defaults. A `[ledger]` section is also accepted by the
 jail, which does not apply retention itself.
@@ -1000,7 +1000,7 @@ capture_retain = "7d"
 ```
 
 Create this file with mode `0600` (for example,
-`chmod 600 ~/.config/ouro/config.toml`, adjusting a relocated path).
+`chmod 600 ~/.config/ukai/config.toml`, adjusting a relocated path).
 
 Both values accept whole days `1d..36500d`. Omitted `capture_retain` follows the
 resolved history policy; an explicit capture policy cannot exceed history
@@ -1135,8 +1135,8 @@ though canonical export contains no capture bytes.
 ## 8.4. Unsigned portable evidence bundles
 
 ```sh
-ouro-ledger bundle RUN --output /absolute/new-bundle [--capture stdout] [--capture stderr] [--capture argv] --json
-ouro-ledger verify-bundle /absolute/new-bundle --json
+ukai-ledger bundle RUN --output /absolute/new-bundle [--capture stdout] [--capture stderr] [--capture argv] --json
+ukai-ledger verify-bundle /absolute/new-bundle --json
 ```
 
 `bundle` connects to an existing writer and exports one pinned snapshot. The
@@ -1207,11 +1207,11 @@ a separate milestone.
 
 ```sh
 # Choose a directory outside agent workspaces. Nothing is generated implicitly.
-ouro-ledger bundle-keygen --output /private/node-signing-key --json
-ouro-ledger bundle RUN --output /absolute/new-bundle --capture stdout \
+ukai-ledger bundle-keygen --output /private/node-signing-key --json
+ukai-ledger bundle RUN --output /absolute/new-bundle --capture stdout \
   --signing-key /private/node-signing-key/private-key.pk8 --json
 # Obtain this public key separately from the node operator.
-ouro-ledger verify-bundle /absolute/new-bundle \
+ukai-ledger verify-bundle /absolute/new-bundle \
   --trusted-key /trusted/node-public-key.json --json
 ```
 
@@ -1226,7 +1226,7 @@ No SSH, release, fleet or ambient credential is reused, and keys are never
 silently generated, replaced, copied into bundles or sent to the writer.
 
 Signed bundles use the [v2 manifest](ledger-v1/bundle-v2.schema.json):
-`schema: ouro.ledger.bundle/2`, `authenticity: signed`. All v1 record, receipt,
+`schema: ukai.ledger.bundle/2`, `authenticity: signed`. All v1 record, receipt,
 capture, resource, publication and offline replay rules still apply. One
 mandatory [signature envelope](ledger-v1/bundle-signature.schema.json),
 `signature.json`, is added to the flat directory. It is bounded to 4 KiB and
@@ -1234,7 +1234,7 @@ contains the algorithm, raw public key, key fingerprint, manifest digest and
 64-byte signature, encoded as lowercase hexadecimal. It is not a data inventory
 member. Old unsigned v1 bundles and verification reports remain supported.
 
-The signed message is the ASCII bytes `ouro.ledger.bundle-signature/1`, one NUL
+The signed message is the ASCII bytes `ukai.ledger.bundle-signature/1`, one NUL
 byte, then the **exact canonical `bundle.json` bytes including its final LF**.
 This domain binds the schema, authentication mode, complete historical run
 projection and all member hashes. Ed25519 uses the existing locked `ring`
@@ -1357,19 +1357,19 @@ provenance and project-scoped reader gates. None is implied by this slice.
 Build both local executables from the repository root:
 
 ```sh
-cargo +1.98.1 build --release -p ouro-jail -p ouro-ledger
+cargo +1.98.1 build --release -p ukai-jail -p ukai-ledger
 ```
 
 Use a private data directory outside the workspace. Substitute absolute paths
 for your checkout and workspace in this example:
 
 ```sh
-mkdir -m 700 /tmp/ouro-ledger-data
-mkdir -m 700 /tmp/ouro-ledger-work
-/absolute/checkout/target/release/ouro-ledger \
-  --data-dir /tmp/ouro-ledger-data run --request-id quickstart-1 \
-  --jail-bin /absolute/checkout/target/release/ouro-jail \
-  --jail tool --workspace /tmp/ouro-ledger-work --io batch \
+mkdir -m 700 /tmp/ukai-ledger-data
+mkdir -m 700 /tmp/ukai-ledger-work
+/absolute/checkout/target/release/ukai-ledger \
+  --data-dir /tmp/ukai-ledger-data run --request-id quickstart-1 \
+  --jail-bin /absolute/checkout/target/release/ukai-jail \
+  --jail tool --workspace /tmp/ukai-ledger-work --io batch \
   --capture stdout --capture-limit 32 --json -- \
   /bin/sh -c 'printf "recorded child output\\n"'
 ```
@@ -1378,15 +1378,15 @@ The daemon starts on demand. Read `run_id` from the JSON response, then inspect
 its independent outcome, coverage, protection and chain results:
 
 ```sh
-/absolute/checkout/target/release/ouro-ledger \
-  --data-dir /tmp/ouro-ledger-data show run_REPLACE_WITH_RETURNED_ID --json
-/absolute/checkout/target/release/ouro-ledger \
-  --data-dir /tmp/ouro-ledger-data verify run_REPLACE_WITH_RETURNED_ID --json
-/absolute/checkout/target/release/ouro-ledger \
-  --data-dir /tmp/ouro-ledger-data query --run run_REPLACE_WITH_RETURNED_ID \
+/absolute/checkout/target/release/ukai-ledger \
+  --data-dir /tmp/ukai-ledger-data show run_REPLACE_WITH_RETURNED_ID --json
+/absolute/checkout/target/release/ukai-ledger \
+  --data-dir /tmp/ukai-ledger-data verify run_REPLACE_WITH_RETURNED_ID --json
+/absolute/checkout/target/release/ukai-ledger \
+  --data-dir /tmp/ukai-ledger-data query --run run_REPLACE_WITH_RETURNED_ID \
   --execs --stage result --limit 100 --json
-/absolute/checkout/target/release/ouro-ledger \
-  --data-dir /tmp/ouro-ledger-data export run_REPLACE_WITH_RETURNED_ID \
+/absolute/checkout/target/release/ukai-ledger \
+  --data-dir /tmp/ukai-ledger-data export run_REPLACE_WITH_RETURNED_ID \
   --ndjson --json > records.ndjson 2> export-status.ndjson
 ```
 

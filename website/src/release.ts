@@ -1,5 +1,5 @@
 // Release coordinates come from the one file the packaging scripts also read.
-import release from '../../crates/ouro-jail/dist/release.json';
+import release from '../../crates/ukai-jail/dist/release.json';
 
 export const repositoryUrl = `https://github.com/${release.repository}`;
 const releases = `${repositoryUrl}/releases/tag`;

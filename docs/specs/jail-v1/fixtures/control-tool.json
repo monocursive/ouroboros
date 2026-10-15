@@ -1,6 +1,6 @@
 [
   {
-    "schema": "ouro.jail.control/1",
+    "schema": "ukai.jail.control/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "seq": 1,
     "kind": "prepared",
@@ -16,7 +16,7 @@
     "error": null
   },
   {
-    "schema": "ouro.jail.control/1",
+    "schema": "ukai.jail.control/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "seq": 2,
     "kind": "exec_confirmed",
@@ -32,12 +32,12 @@
     "error": null
   },
   {
-    "schema": "ouro.jail.control/1",
+    "schema": "ukai.jail.control/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "seq": 3,
     "kind": "settled",
     "receipt_phase": "settled",
-    "receipt_digest": "sha256:6377cf0a83e710ae364f2d24a64599a0557fc694faf5e8f19220218a33ded0d3",
+    "receipt_digest": "sha256:337d215497e1a7a2c640625bd2094d6c485e898495833b7760550c0247bb6543",
     "outcome": {
       "kind": "exited",
       "code": 0,

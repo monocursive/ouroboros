@@ -1,4 +1,4 @@
-schema = "ouro.jail.policy/1"
+schema = "ukai.jail.policy/1"
 extends = "tool"
 [filesystem]
 read_only = ["./fixtures"]

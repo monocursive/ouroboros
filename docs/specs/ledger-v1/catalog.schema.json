@@ -2,7 +2,7 @@
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.ledger.catalog/1"
+      "const": "ukai.ledger.catalog/1"
     },
     "snapshot": {
       "type": "string",
@@ -129,10 +129,10 @@
           ]
         },
         "coverage": {
-          "$ref": "urn:ouro:schema:ledger-read:1#/$defs/coverage"
+          "$ref": "urn:ukai:schema:ledger-read:1#/$defs/coverage"
         },
         "chain": {
-          "$ref": "urn:ouro:schema:ledger-read:1#/$defs/chain"
+          "$ref": "urn:ukai:schema:ledger-read:1#/$defs/chain"
         },
         "evidence_status": {
           "enum": [
@@ -144,7 +144,7 @@
         "history": {
           "anyOf": [
             {
-              "$ref": "urn:ouro:schema:ledger-run:1#/properties/history"
+              "$ref": "urn:ukai:schema:ledger-run:1#/properties/history"
             },
             {
               "type": "null"
@@ -154,7 +154,7 @@
         "capture_history": {
           "anyOf": [
             {
-              "$ref": "urn:ouro:schema:ledger-run:1#/properties/capture_history"
+              "$ref": "urn:ukai:schema:ledger-run:1#/properties/capture_history"
             },
             {
               "type": "null"
@@ -183,6 +183,6 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-catalog:1",
+  "$id": "urn:ukai:schema:ledger-catalog:1",
   "title": "Run catalog page from accepted writer state; not fresh disk verification"
 }

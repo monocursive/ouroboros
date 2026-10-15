@@ -1,9 +1,9 @@
 {
-  "schema": "ouro.ledger.event/1",
+  "schema": "ukai.ledger.event/1",
   "run_id": "run_11111111111111111111111111111111",
   "attempt_id": "att_00000000-0000-4000-8000-000000000001",
   "seq": 7,
-  "prev": "sha256:3590e0c36c1d45073698879d448a947d8c4ea2b55835ca2aa2e543091e5b6a1f",
+  "prev": "sha256:601bfdef3998bf2301a490e5abf7992bdef810a59d206817a0e6b5946c7ffca0",
   "received_at": "2026-09-30T12:00:01Z",
   "provenance": {
     "role": "owner",
@@ -16,7 +16,7 @@
   "request_id": "settlement",
   "body": {
     "receipt": {
-      "schema": "ouro.jail.receipt/1",
+      "schema": "ukai.jail.receipt/1",
       "attempt_id": "att_00000000-0000-4000-8000-000000000001",
       "revision": 2,
       "phase": "refused",
@@ -26,7 +26,7 @@
         "kernel": "fixture-kernel"
       },
       "jail": {
-        "component": "ouro-jail",
+        "component": "ukai-jail",
         "version": "0.0.0-fixture",
         "backend": "fixture-contained",
         "backend_version": "fixture-1"
@@ -201,7 +201,7 @@
       ],
       "credentials": []
     },
-    "receipt_digest": "sha256:8ab06fffe96b9d88339e04d30e070a1805f1c9a666e1123e61eb40f3bff16785",
+    "receipt_digest": "sha256:1a2593f96cf76460c2100de1b0331224582443fc907550de79ae15a45442d549",
     "outcome": {
       "kind": "exec_error",
       "code": null,

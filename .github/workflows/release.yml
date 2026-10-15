@@ -2,13 +2,13 @@
 name: release-candidate
 on:
   push:
-    tags: ['ouro-jail-v*']
+    tags: ['ukai-jail-v*']
   workflow_dispatch:
     inputs:
       version:
         # No default: a new candidate needs a new version, and the current
-        # one is recorded in crates/ouro-jail/dist/release.json.
-        description: 'Preview version without the ouro-jail-v prefix'
+        # one is recorded in crates/ukai-jail/dist/release.json.
+        description: 'Preview version without the ukai-jail-v prefix'
         required: true
         type: string
 permissions:
@@ -35,9 +35,9 @@ jobs:
         run: |
           python3 - <<'PY'
           import os, sys
-          sys.path.insert(0, 'crates/ouro-jail/dist')
+          sys.path.insert(0, 'crates/ukai-jail/dist')
           from package import VERSION
-          version = (os.environ['GITHUB_REF_NAME'].removeprefix('ouro-jail-v')
+          version = (os.environ['GITHUB_REF_NAME'].removeprefix('ukai-jail-v')
                      if os.environ['GITHUB_REF_TYPE'] == 'tag'
                      else os.environ['REQUESTED_VERSION'])
           if not VERSION.fullmatch(version):
@@ -58,7 +58,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
-      OURO_BUILD_DIRTY: 'false'
+      UKAI_BUILD_DIRTY: 'false'
       PREVIEW_VERSION: ${{ needs.coordinate.outputs.version }}
       PREVIEW_TARGET: ${{ matrix.target }}
     steps:
@@ -68,7 +68,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Bind provenance to the checked-out commit
-        run: printf 'OURO_BUILD_REVISION=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+        run: printf 'UKAI_BUILD_REVISION=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - name: Install build and signature tools
         run: |
           rustup toolchain install && rustup show
@@ -78,19 +78,19 @@ jobs:
         run: cargo run -q -p xtask -- freeze --check
       - name: Require the recorded release evidence (K11, K27)
         env:
-          OURO_RELEASE_EVIDENCE: '1'
-        run: cargo test --locked -p ouro-jail --test portable_release_evidence
+          UKAI_RELEASE_EVIDENCE: '1'
+        run: cargo test --locked -p ukai-jail --test portable_release_evidence
       - name: Build the native Jail executable
-        run: cargo build --locked --release -p ouro-jail
+        run: cargo build --locked --release -p ukai-jail
       - name: Exercise native signed installation
         # Temporary test key; package checks do not prove live containment.
-        run: python3 crates/ouro-jail/dist/test_install.py target/release/ouro-jail
+        run: python3 crates/ukai-jail/dist/test_install.py target/release/ukai-jail
       - name: Stage the native package and build record
         run: |
-          inputs=$(target/release/ouro-jail version --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["inputs"])')
-          python3 crates/ouro-jail/dist/prepare_release.py stage \
-            --binary target/release/ouro-jail --target "$PREVIEW_TARGET" \
-            --revision "$OURO_BUILD_REVISION" --inputs "$inputs" \
+          inputs=$(target/release/ukai-jail version --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["build"]["inputs"])')
+          python3 crates/ukai-jail/dist/prepare_release.py stage \
+            --binary target/release/ukai-jail --target "$PREVIEW_TARGET" \
+            --revision "$UKAI_BUILD_REVISION" --inputs "$inputs" \
             --version "$PREVIEW_VERSION" --out stage
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
@@ -115,7 +115,7 @@ jobs:
       - name: Assemble the unsigned candidate
         run: |
           inputs=$(python3 -c 'import json; print(json.load(open("stages/native-x86_64-unknown-linux-gnu/artifact.json"))["version"]["build"]["inputs"])')
-          python3 crates/ouro-jail/dist/prepare_release.py assemble \
+          python3 crates/ukai-jail/dist/prepare_release.py assemble \
             --stage stages/native-x86_64-unknown-linux-gnu \
             --stage stages/native-aarch64-unknown-linux-gnu \
             --revision "$(git rev-parse HEAD)" --inputs "$inputs" \
@@ -123,7 +123,7 @@ jobs:
           echo 'Unsigned candidate; publication requires production signing and exact-commit CI/conformance.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: ouro-jail-${{ needs.coordinate.outputs.version }}-candidate
+          name: ukai-jail-${{ needs.coordinate.outputs.version }}-candidate
           path: candidate/
           if-no-files-found: error
           retention-days: 14

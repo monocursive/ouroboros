@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-tail:1",
+  "$id": "urn:ukai:schema:ledger-tail:1",
   "title": "Bounded page in a growing canonical stream",
   "type": "object",
   "properties": {
@@ -35,7 +35,7 @@
       "minimum": 0
     },
     "schema": {
-      "const": "ouro.ledger.tail/1"
+      "const": "ukai.ledger.tail/1"
     },
     "head": {
       "$ref": "#/$defs/chain"

@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-read:1",
+  "$id": "urn:ukai:schema:ledger-read:1",
   "title": "Bounded local evidence reader page; not a custody assertion",
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.ledger.read/1"
+      "const": "ukai.ledger.read/1"
     },
     "run_id": {
       "type": "string",
@@ -73,7 +73,7 @@
       "type": "array",
       "maxItems": 1000,
       "items": {
-        "$ref": "urn:ouro:schema:ledger-record:1"
+        "$ref": "urn:ukai:schema:ledger-record:1"
       }
     },
     "ndjson": {

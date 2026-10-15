@@ -39,7 +39,7 @@ jobs:
           python3 docs/benchmarks/check_evidence_store.py
           python3 -m unittest discover -s docs/benchmarks -p test_check_evidence_store.py
       - name: VM transport boundary regressions (no live VM)
-        run: python3 -m unittest discover -s crates/ouro-jail/vm -p 'test_*.py'
+        run: python3 -m unittest discover -s crates/ukai-jail/vm -p 'test_*.py'
       - name: macOS mechanism evidence regressions (no live workloads)
         run: |
           python3 -m unittest discover -s docs/benchmarks/jail -p test_macos_es_pair_summary.py
@@ -50,11 +50,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends minisign shellcheck
-          shellcheck install.sh crates/ouro-jail/dist/install.sh
-          python3 -m unittest discover -s crates/ouro-jail/dist -p test_release.py
-          python3 -m unittest discover -s crates/ouro-jail/dist -p test_versions.py
-          python3 -m unittest discover -s crates/ouro-jail/dist -p test_bootstrap.py
-          python3 -m unittest discover -s crates/ouro-jail/dist -p test_publish.py
+          shellcheck install.sh crates/ukai-jail/dist/install.sh
+          python3 -m unittest discover -s crates/ukai-jail/dist -p test_release.py
+          python3 -m unittest discover -s crates/ukai-jail/dist -p test_versions.py
+          python3 -m unittest discover -s crates/ukai-jail/dist -p test_bootstrap.py
+          python3 -m unittest discover -s crates/ukai-jail/dist -p test_publish.py
       - name: Reference-host manifest fallback script
         run: shellcheck docs/specs/jail-v1/host-manifest.sh
   website:
@@ -77,4 +77,4 @@ jobs:
       - name: The site serves the repository's installer and release key
         run: |
           cmp dist/install.sh ../install.sh
-          cmp dist/release.pub ../crates/ouro-jail/dist/release.pub
+          cmp dist/release.pub ../crates/ukai-jail/dist/release.pub

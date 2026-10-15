@@ -1,5 +1,5 @@
 {
-  "schema": "ouro.jail.control/1",
+  "schema": "ukai.jail.control/1",
   "attempt_id": "att_00000000-0000-4000-8000-000000000001",
   "seq": 2,
   "kind": "exec_confirmed",

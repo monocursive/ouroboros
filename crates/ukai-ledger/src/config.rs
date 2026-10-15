@@ -1,0 +1,131 @@
+//! Retention is resolved by the writer from the operator configuration at startup.
+use crate::protocol::{LedgerError, Result};
+use std::{
+    fs::OpenOptions,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::Path,
+};
+use ukai_records::retention::LedgerRetention;
+
+/// The largest operator configuration file the writer reads.
+const MAX_CONFIG_BYTES: u64 = 65_536;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    ledger: Option<LedgerRetention>,
+    // Other consumers own validation of their own sections.
+    #[serde(rename = "jail")]
+    _jail: Option<toml::Value>,
+    #[serde(rename = "jail_host")]
+    _jail_host: Option<toml::Value>,
+}
+
+pub fn load() -> Result<LedgerRetention> {
+    let directory = std::env::var_os("UKAI_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|p| Path::new(&p).join(".config/ukai")))
+        .ok_or_else(|| {
+            LedgerError::refused("HOME or UKAI_CONFIG_DIR is required to locate retention settings")
+        })?;
+    load_path(&directory.join("config.toml"))
+}
+
+pub fn load_path(path: &Path) -> Result<LedgerRetention> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(LedgerRetention::default()),
+        Err(e) => return Err(e.into()),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != crate::fsx::euid()
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(LedgerError::refused(
+            "retention config must be an owned regular file without group/other write access",
+        ));
+    }
+    let bytes =
+        crate::protocol::read_bounded(file, MAX_CONFIG_BYTES, "retention config exceeds 64 KiB")?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| LedgerError::refused("retention config is not UTF-8"))?;
+    let config: Config = toml::from_str(&text).map_err(|e| {
+        LedgerError::new(
+            crate::protocol::ErrorKind::Decode,
+            format!("invalid operator config: {e}"),
+        )
+    })?;
+    let Config {
+        ledger,
+        _jail: _,
+        _jail_host: _,
+    } = config;
+    let retention = ledger.unwrap_or_default();
+    retention
+        .resolve(None, None)
+        .map_err(LedgerError::refused)?;
+    Ok(retention)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn config_is_bounded_strict_and_does_not_silently_default_invalid_retention() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        assert_eq!(
+            load_path(&path)
+                .unwrap()
+                .resolve(None, None)
+                .unwrap()
+                .retain_days,
+            90
+        );
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        for text in [
+            "[ledger]\nretain='0d'",
+            "[ledger]\nretain='36501d'",
+            "[ledger]\nretain='1h'",
+            "[ledger]\nretain=90",
+            "[ledger]\nretian='1d'",
+            "[ledger]\nretain='2d'\ncapture_retain='3d'",
+            "[ledger]\nretain='1d'\nretain='2d'",
+            "[ledger]\nretain='+1d'",
+            "[unknown]\nretain='1d'",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert!(load_path(&path).is_err(), "{text}");
+        }
+        std::fs::write(
+            &path,
+            "[jail]\nprofile='tool'\n[ledger]\nretain='30d'\ncapture_retain='2d'",
+        )
+        .unwrap();
+        let config = load_path(&path).unwrap();
+        assert_eq!(config.resolve(None, None).unwrap().capture_retain_days, 2);
+        assert_eq!(config.resolve(Some(60), Some(3)).unwrap().retain_days, 60);
+        assert!(config.resolve(Some(1), None).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(load_path(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("missing", &path).unwrap();
+        assert!(load_path(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, " ".repeat(65_537)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(load_path(&path).is_err());
+    }
+}

@@ -1,7 +1,7 @@
 {
   "binaries": {
-    "ouro-jail": {
-      "path": "/usr/local/bin/ouro-jail",
+    "ukai-jail": {
+      "path": "/usr/local/bin/ukai-jail",
       "sha256": "3c0ff0ecdac32c7638f527241c89e256c2d4b39db1bc49c0c841101fcc9a2c76"
     }
   },
@@ -79,7 +79,7 @@
       "status": "unsupported"
     }
   ],
-  "component": "ouro-jail",
+  "component": "ukai-jail",
   "launch": null,
   "platform": {
     "arch": "aarch64",
@@ -96,6 +96,6 @@
     "protected_coverage:existing_and_root",
     "limit:wall"
   ],
-  "schema": "ouro.jail.doctor/1",
+  "schema": "ukai.jail.doctor/1",
   "version": "0.1.0"
 }

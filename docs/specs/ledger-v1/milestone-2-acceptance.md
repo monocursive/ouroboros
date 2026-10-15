@@ -24,7 +24,7 @@ golden fixture. `python3 docs/specs/ledger-v1/freeze.py` checks exact bytes and
 the complete inventory; `validate_contract.py` runs it in CI. `--write` is an
 explicit contract revision, not an automatic repair of drift. Changes require
 review of compatibility and corresponding runtime/fixture validation.
-`ouro-ledger version --json` announces the frozen schema identifiers.
+`ukai-ledger version --json` announces the frozen schema identifiers.
 
 The project is pre-release, so a frozen ledger schema may be re-blessed in place
 under its identifier by an additive change, regenerating the freeze with its
@@ -32,7 +32,7 @@ fixtures and validators in one reviewable commit. Re-blessing record:
 
 - 2026-10-14 re-blessed `bundle-verification.schema.json` and
   `bundle-verification-v2.schema.json` in place under
-  `ouro.ledger.bundle-verification/1` and `/2`. Rationale: one additive optional
+  `ukai.ledger.bundle-verification/1` and `/2`. Rationale: one additive optional
   field, `projection_rule` (1 or 2), naming the run projection rule an embedded
   run matched, so a bundle exported before the `outcome_unknown` projection
   changed still verifies and says how (ledger-v1 §4, §8.4). No shared field

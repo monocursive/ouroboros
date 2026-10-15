@@ -10,7 +10,7 @@
     "source_seq_gap": "jail-v1.md \u00a713.1 \"its numbers are consecutive except after the stream's recorded transport loss\" and \u00a713.3 \"The first loss writes one wrapper `coverage_gap` note (`trace_transport_loss`)\": each source counts from 1; a missing number is lost evidence, which the stream's first loss records as a trace_transport_loss note",
     "receipt_note_order": "jail-v1.md \u00a78.1 \"Termination after target exec cannot be reclassified as a pre-exec refusal.\" and \u00a713.2 \"Normal phases are `prepared`, `enforced`, `settled`.\": receipt notes follow the lifecycle; nothing after exec is a refusal, nothing leaves settled or refused",
     "trace_final_receipt": "jail-v1.md \u00a713.1 \"Receipt updates are wrapper `jail.receipt` events referencing receipt digest and phase\" and \u00a713.3 \"A trace is complete only if its last frame is the `jail.receipt` note of the attempt's final receipt.\": a complete trace ends on the jail.receipt note naming the final receipt's phase and canonical digest",
-    "control_attempt_mixed": "jail-v1.md \u00a78.2 \"Control output uses NDJSON, with schema `ouro.jail.control/1`, attempt id\": control output carries one attempt's messages",
+    "control_attempt_mixed": "jail-v1.md \u00a78.2 \"Control output uses NDJSON, with schema `ukai.jail.control/1`, attempt id\": control output carries one attempt's messages",
     "control_seq_order": "jail-v1.md \u00a78.2 \"monotonically increasing message number starting at 1\": the message number increases monotonically",
     "trace_loss_recorded": "jail-v1.md \u00a713.3 \"Once a trace loss is known, every later receipt records it\" and \"starting from the last point every accepted frame had been delivered\": the first loss writes one trace_transport_loss note from the last healthy point, and every later receipt records that loss on each covered evidence class",
     "control_kind_order": "jail-v1.md \u00a78.2 \"`refused` is sent only while the target has not executed\" and \"once the target has executed, the terminal message is `settled` or `unsettled`\", and \u00a78.1 \"Termination after target exec cannot be reclassified as a pre-exec refusal.\": prepared, then exec_confirmed, then one terminal message; refused never after exec; nothing after a terminal message"
@@ -661,7 +661,7 @@
             1
           ],
           "value": {
-            "schema": "ouro.event/1",
+            "schema": "ukai.event/1",
             "attempt_id": "att_00000000-0000-4000-8000-000000000001",
             "source": "wrapper",
             "source_seq": 2,
@@ -804,7 +804,7 @@
             6
           ],
           "value": {
-            "schema": "ouro.event/1",
+            "schema": "ukai.event/1",
             "attempt_id": "att_00000000-0000-4000-8000-000000000001",
             "source": "proxy",
             "source_seq": 2,
@@ -848,7 +848,7 @@
             6
           ],
           "value": {
-            "schema": "ouro.event/1",
+            "schema": "ukai.event/1",
             "attempt_id": "att_00000000-0000-4000-8000-000000000001",
             "source": "wrapper",
             "source_seq": 6,
@@ -1087,7 +1087,7 @@
             2
           ],
           "value": {
-            "schema": "ouro.jail.control/1",
+            "schema": "ukai.jail.control/1",
             "attempt_id": "att_00000000-0000-4000-8000-000000000001",
             "seq": 3,
             "kind": "refused",
@@ -1128,7 +1128,7 @@
             1
           ],
           "value": {
-            "schema": "ouro.jail.control/1",
+            "schema": "ukai.jail.control/1",
             "attempt_id": "att_00000000-0000-4000-8000-000000000001",
             "seq": 2,
             "kind": "unsettled",
@@ -1159,7 +1159,7 @@
             1
           ],
           "value": {
-            "schema": "ouro.jail.control/1",
+            "schema": "ukai.jail.control/1",
             "attempt_id": "att_00000000-0000-4000-8000-000000000001",
             "seq": 2,
             "kind": "prepared",
@@ -1196,7 +1196,7 @@
             1
           ],
           "value": {
-            "schema": "ouro.jail.control/1",
+            "schema": "ukai.jail.control/1",
             "attempt_id": "att_00000000-0000-4000-8000-000000000001",
             "seq": 2,
             "kind": "refused",
@@ -1498,7 +1498,7 @@
             6
           ],
           "value": {
-            "schema": "ouro.event/1",
+            "schema": "ukai.event/1",
             "attempt_id": "att_00000000-0000-4000-8000-000000000001",
             "source": "wrapper",
             "source_seq": 6,
@@ -1557,7 +1557,7 @@
             6
           ],
           "value": {
-            "schema": "ouro.event/1",
+            "schema": "ukai.event/1",
             "attempt_id": "att_00000000-0000-4000-8000-000000000001",
             "source": "wrapper",
             "source_seq": 6,
@@ -1617,7 +1617,7 @@
             6
           ],
           "value": {
-            "schema": "ouro.event/1",
+            "schema": "ukai.event/1",
             "attempt_id": "att_00000000-0000-4000-8000-000000000001",
             "source": "wrapper",
             "source_seq": 6,
@@ -1667,7 +1667,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -1688,7 +1688,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -1722,7 +1722,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -1743,7 +1743,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -1777,7 +1777,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -1798,7 +1798,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -1832,7 +1832,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -1853,7 +1853,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -1887,7 +1887,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -1908,7 +1908,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -1944,7 +1944,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -1965,7 +1965,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -1999,7 +1999,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -2020,7 +2020,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -2054,7 +2054,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -2075,7 +2075,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -2111,7 +2111,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -2132,7 +2132,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -2168,7 +2168,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -2189,7 +2189,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -2225,7 +2225,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -2246,7 +2246,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -2280,7 +2280,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -2301,7 +2301,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -2337,7 +2337,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -2358,7 +2358,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -2394,7 +2394,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -2415,7 +2415,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -2451,7 +2451,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -2472,7 +2472,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -2508,7 +2508,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 1,
@@ -2529,7 +2529,7 @@
               }
             },
             {
-              "schema": "ouro.event/1",
+              "schema": "ukai.event/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "source": "wrapper",
               "source_seq": 2,
@@ -2563,7 +2563,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "prepared",
@@ -2579,7 +2579,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "prepared",
@@ -2610,7 +2610,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "prepared",
@@ -2626,7 +2626,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "exec_confirmed",
@@ -2655,7 +2655,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "prepared",
@@ -2671,7 +2671,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "refused",
@@ -2710,7 +2710,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "prepared",
@@ -2726,7 +2726,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "settled",
@@ -2755,7 +2755,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "prepared",
@@ -2771,7 +2771,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "unsettled",
@@ -2800,7 +2800,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "exec_confirmed",
@@ -2816,7 +2816,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "prepared",
@@ -2847,7 +2847,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "exec_confirmed",
@@ -2863,7 +2863,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "exec_confirmed",
@@ -2894,7 +2894,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "exec_confirmed",
@@ -2910,7 +2910,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "refused",
@@ -2951,7 +2951,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "exec_confirmed",
@@ -2967,7 +2967,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "settled",
@@ -2996,7 +2996,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "exec_confirmed",
@@ -3012,7 +3012,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "unsettled",
@@ -3041,7 +3041,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "refused",
@@ -3067,7 +3067,7 @@
               }
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "prepared",
@@ -3098,7 +3098,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "refused",
@@ -3124,7 +3124,7 @@
               }
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "exec_confirmed",
@@ -3155,7 +3155,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "refused",
@@ -3181,7 +3181,7 @@
               }
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "refused",
@@ -3222,7 +3222,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "refused",
@@ -3248,7 +3248,7 @@
               }
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "settled",
@@ -3279,7 +3279,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "refused",
@@ -3305,7 +3305,7 @@
               }
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "unsettled",
@@ -3336,7 +3336,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "settled",
@@ -3352,7 +3352,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "prepared",
@@ -3383,7 +3383,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "settled",
@@ -3399,7 +3399,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "exec_confirmed",
@@ -3430,7 +3430,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "settled",
@@ -3446,7 +3446,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "refused",
@@ -3487,7 +3487,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "settled",
@@ -3503,7 +3503,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "settled",
@@ -3534,7 +3534,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "settled",
@@ -3550,7 +3550,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "unsettled",
@@ -3581,7 +3581,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "unsettled",
@@ -3597,7 +3597,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "prepared",
@@ -3628,7 +3628,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "unsettled",
@@ -3644,7 +3644,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "exec_confirmed",
@@ -3675,7 +3675,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "unsettled",
@@ -3691,7 +3691,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "refused",
@@ -3732,7 +3732,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "unsettled",
@@ -3748,7 +3748,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "settled",
@@ -3779,7 +3779,7 @@
           "path": [],
           "value": [
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 1,
               "kind": "unsettled",
@@ -3795,7 +3795,7 @@
               "error": null
             },
             {
-              "schema": "ouro.jail.control/1",
+              "schema": "ukai.jail.control/1",
               "attempt_id": "att_00000000-0000-4000-8000-000000000001",
               "seq": 2,
               "kind": "unsettled",

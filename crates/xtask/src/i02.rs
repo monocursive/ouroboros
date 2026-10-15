@@ -38,13 +38,13 @@ pub const FORBIDDEN: &[&str] = &[
 ];
 
 /// The execution core (§4, §15 row I02): the crates that run, contain or
-/// record an attempt. `ouro-jail` and `ouro-ledger` are the ones §4 names;
-/// `ouro-records` is compiled into both, so a vendor name or protocol
-/// dependency there is in both. `ouro`, the fleet operator's command line,
+/// record an attempt. `ukai-jail` and `ukai-ledger` are the ones §4 names;
+/// `ukai-records` is compiled into both, so a vendor name or protocol
+/// dependency there is in both. `ukai`, the fleet operator's command line,
 /// is not in the core: it neither runs nor records an attempt, and the fleet
 /// it drives is outside it (§4: "`fleet/` is outside Cargo"). The fixture
 /// and `xtask` are test and repository tooling.
-pub const EXECUTION_CORE: &[&str] = &["ouro-records", "ouro-jail", "ouro-ledger"];
+pub const EXECUTION_CORE: &[&str] = &["ukai-records", "ukai-jail", "ukai-ledger"];
 
 /// The roots the scan covers, relative to the repository root: each core
 /// crate's `src`, its manifest and its build script. A root may be a
@@ -194,7 +194,7 @@ mod tests {
                 );
             }
         }
-        let path = Path::new("crates/ouro-ledger/src/main.rs");
+        let path = Path::new("crates/ukai-ledger/src/main.rs");
         for source in [
             "Command::new(\"cursor\");",
             "const VENDOR: &str = \"Cursor\";",
@@ -204,7 +204,7 @@ mod tests {
         }
         assert_eq!(
             scan_bytes(
-                Path::new("crates/ouro-ledger/Cargo.toml"),
+                Path::new("crates/ukai-ledger/Cargo.toml"),
                 b"cursor-protocol = \"1\""
             )
             .len(),
@@ -248,7 +248,7 @@ mod tests {
     fn a_planted_hit_in_a_temp_tree_is_reported_and_a_clean_tree_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
-        let src = base.join("crates/ouro-jail/src");
+        let src = base.join("crates/ukai-jail/src");
         std::fs::create_dir_all(src.join("platform/linux")).unwrap();
         std::fs::write(src.join("lib.rs"), b"pub mod policy;\n").unwrap();
 
@@ -285,7 +285,7 @@ mod tests {
         // manifest, and a build script can inject one into the build.
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
-        let crate_dir = base.join("crates/ouro-jail");
+        let crate_dir = base.join("crates/ukai-jail");
         std::fs::create_dir_all(crate_dir.join("src")).unwrap();
         std::fs::write(crate_dir.join("src/lib.rs"), b"pub mod policy;\n").unwrap();
         std::fs::write(
@@ -311,7 +311,7 @@ mod tests {
     fn a_directory_symlink_is_named_and_not_followed() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
-        let src = base.join("crates/ouro-jail/src");
+        let src = base.join("crates/ukai-jail/src");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("lib.rs"), b"pub mod policy;\n").unwrap();
         std::os::unix::fs::symlink("../src", src.join("selfloop")).unwrap();
@@ -345,16 +345,16 @@ mod tests {
     #[test]
     fn the_execution_core_dependencies_are_the_reviewed_set() {
         const REVIEWED: &[(&str, &[&str])] = &[
-            ("ouro-records", &["base64", "serde", "serde_json", "sha2"]),
+            ("ukai-records", &["base64", "serde", "serde_json", "sha2"]),
             (
-                "ouro-jail",
+                "ukai-jail",
                 &[
                     "base64",
                     "clap",
                     "libc",
                     // The frozen receipt/event types and canonical encoding,
                     // shared with the ledger.
-                    "ouro-records",
+                    "ukai-records",
                     // Shared HTTP vault transport and in-memory CA, no vendor
                     // protocol.
                     "rcgen",
@@ -379,11 +379,11 @@ mod tests {
                 ],
             ),
             (
-                "ouro-ledger",
+                "ukai-ledger",
                 &[
                     // Validates records against the frozen schemas.
                     "jsonschema",
-                    "ouro-records",
+                    "ukai-records",
                     "clap",
                     "libc",
                     // The local store: SQLite compiled in, no service.

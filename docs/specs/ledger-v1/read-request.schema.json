@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-read-request:1",
+  "$id": "urn:ukai:schema:ledger-read-request:1",
   "title": "Single-run bounded reader request; cursors are not authorization",
   "type": "object",
   "properties": {

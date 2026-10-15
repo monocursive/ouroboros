@@ -1,0 +1,533 @@
+//! Detached batch owners under an already provisioned lingering user manager.
+//!
+//! The unit command contains only bootstrap metadata. Launch arguments and the
+//! caller's environment cross a bounded private socket and are never spooled.
+use std::path::Path;
+
+use serde_json::{Value, json};
+
+use crate::{
+    daemon::Client,
+    protocol::{LedgerError, Result, RunRecord},
+    runner,
+};
+
+pub fn terminal(run: &RunRecord) -> bool {
+    run.state.is_terminal()
+}
+
+pub fn wait(data: &Path, run_id: &str, timeout: std::time::Duration) -> Result<RunRecord> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let mut client = Client::connect(data)?;
+        let run = client.show(run_id)?;
+        if terminal(&run) {
+            return Ok(run);
+        }
+        if run
+            .owner
+            .as_ref()
+            .is_some_and(|peer| !crate::daemon::peer_alive(peer))
+        {
+            return Err(LedgerError::refused(
+                "launch owner is gone; run settle-orphans to record the unknown outcome",
+            ));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(LedgerError::refused(
+                "wait timed out; the run was not cancelled",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub use linux::{cancel, cancel_requested, launch, prepare, probe, serve, start_writer};
+
+#[cfg(not(target_os = "linux"))]
+pub fn start_writer(_: &Path) -> Result<()> {
+    Err(LedgerError::refused(
+        "independent writer service requires Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn prepare(_: &runner::RunOptions) -> Result<RunRecord> {
+    Err(LedgerError::refused("detached preparation requires Linux"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn probe() -> Value {
+    json!({"available":false,"reason":"detached launch ownership requires Linux and a lingering systemd user manager"})
+}
+#[cfg(not(target_os = "linux"))]
+pub fn launch(_: &runner::RunOptions) -> Result<RunRecord> {
+    Err(LedgerError::refused(probe()["reason"].as_str().unwrap()))
+}
+#[cfg(not(target_os = "linux"))]
+/// # Safety
+/// Same entry-point-only contract as the Linux implementation.
+pub unsafe fn serve(_: &Path, _: &str) -> Result<()> {
+    Err(LedgerError::refused("detached owner requires Linux"))
+}
+#[cfg(not(target_os = "linux"))]
+pub fn cancel(_: &Path, _: &str) -> Result<Value> {
+    Err(LedgerError::refused("local cancellation requires Linux"))
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::*;
+    use crate::daemon::{peer_alive, peer_credentials, read_frame, write_frame};
+    use serde::{Deserialize, Serialize};
+    use std::{
+        ffi::OsString,
+        fs,
+        os::{
+            fd::{AsRawFd, FromRawFd, OwnedFd},
+            unix::{
+                ffi::OsStrExt,
+                fs::PermissionsExt,
+                net::{UnixListener, UnixStream},
+            },
+        },
+        path::PathBuf,
+        process::{Command, Stdio},
+        sync::atomic::{AtomicBool, Ordering},
+        time::{Duration, Instant},
+    };
+
+    const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+    /// The most a user-manager command may print before it is refused.
+    const MAX_MANAGER_OUTPUT_BYTES: u64 = 16_384;
+    const START_TIMEOUT: Duration = Duration::from_secs(45);
+    static CANCEL: AtomicBool = AtomicBool::new(false);
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Launch {
+        schema: String,
+        options: runner::RunOptions,
+        cwd: PathBuf,
+        environment: Vec<(OsString, OsString)>,
+    }
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+    enum Started {
+        Owned { run: Box<RunRecord> },
+        Refused { reason: String },
+    }
+
+    struct SocketPath(PathBuf);
+    impl Drop for SocketPath {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn command_output(command: &mut Command) -> Result<String> {
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                const REFUSAL: &str =
+                    "systemd user-manager command failed or exceeded its output bound";
+                let stdout = child.stdout.take().ok_or_else(|| {
+                    LedgerError::refused("systemd user-manager output unavailable")
+                })?;
+                let bytes =
+                    crate::protocol::read_bounded(stdout, MAX_MANAGER_OUTPUT_BYTES, REFUSAL)?;
+                if !status.success() {
+                    return Err(LedgerError::refused(REFUSAL));
+                }
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    LedgerError::refused("systemd user-manager output is not UTF-8")
+                })?;
+                return Ok(text.trim().to_owned());
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(LedgerError::refused(
+                    "systemd user-manager command timed out",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn ready() -> Result<()> {
+        let uid = crate::fsx::euid().to_string();
+        if command_output(Command::new("/usr/bin/loginctl").args([
+            "show-user",
+            &uid,
+            "--property=Linger",
+            "--value",
+        ]))? != "yes"
+        {
+            return Err(LedgerError::refused(
+                "detached runs require an operator-provisioned lingering user manager",
+            ));
+        }
+        command_output(Command::new("/usr/bin/systemctl").args([
+            "--user",
+            "show",
+            "--property=Version",
+            "--value",
+        ]))?;
+        Ok(())
+    }
+    pub fn probe() -> Value {
+        match ready() {
+            Ok(()) => {
+                json!({"available":true,"mechanism":"systemd_user_service","linger":true,"host_configuration_changed":false})
+            }
+            Err(error) => {
+                json!({"available":false,"reason":error.to_string(),"host_configuration_changed":false})
+            }
+        }
+    }
+
+    fn main_pid(unit: &str) -> Result<u32> {
+        command_output(Command::new("/usr/bin/systemctl").args([
+            "--user",
+            "show",
+            unit,
+            "--property=MainPID",
+            "--value",
+        ]))?
+        .parse()
+        .map_err(|_| LedgerError::refused("user manager did not identify the launch owner"))
+    }
+
+    fn unit_command(unit: &str) -> Command {
+        let mut command = Command::new("/usr/bin/systemd-run");
+        command
+            .args([
+                "--user",
+                "--quiet",
+                "--collect",
+                "--no-ask-password",
+                "--service-type=exec",
+                "--expand-environment=no",
+                "--property=KillMode=control-group",
+                "--property=StandardInput=null",
+                "--property=StandardOutput=null",
+                "--property=StandardError=null",
+                "--unit",
+            ])
+            .arg(unit);
+        command
+    }
+
+    pub fn prepare(options: &runner::RunOptions) -> Result<RunRecord> {
+        if !options.batch || !options.detached || options.prepared.is_some() {
+            return Err(LedgerError::refused(
+                "preparation requires detached batch mode and a request id",
+            ));
+        }
+        ready()?;
+        let request = runner::resolve_request(options)?;
+        ensure_writer(&options.data)?;
+        Client::connect(&options.data)?.prepare(&options.request_id, &request)
+    }
+
+    pub fn start_writer(data: &Path) -> Result<()> {
+        ready()?;
+        ensure_writer(data)
+    }
+
+    fn ensure_writer(data: &Path) -> Result<()> {
+        crate::fsx::create_dir_all(data)?;
+        crate::fsx::create_dir_all(&data.join("ledger"))?;
+        let digest = ukai_records::canonical::sha256_prefixed(
+            fs::canonicalize(data)?.as_os_str().as_bytes(),
+        );
+        let unit = format!("ukai-ledger-writer-{}.service", &digest[7..39]);
+        if Client::reachable(data)?.is_none() {
+            let mut command = unit_command(&unit);
+            if let Some(config) = std::env::var_os("UKAI_CONFIG_DIR") {
+                let config = PathBuf::from(config);
+                if !config.is_absolute() {
+                    return Err(LedgerError::refused(
+                        "UKAI_CONFIG_DIR must be absolute for a detached writer",
+                    ));
+                }
+                let mut setting = std::ffi::OsString::from("--setenv=UKAI_CONFIG_DIR=");
+                setting.push(config);
+                command.arg(setting);
+            }
+            let started = command_output(
+                command
+                    .arg("--")
+                    .arg(std::env::current_exe()?)
+                    .arg("--data-dir")
+                    .arg(data)
+                    .arg("serve"),
+            );
+            // Another submitter may have started this same deterministic unit.
+            if started.is_err() && main_pid(&unit).unwrap_or(0) == 0 {
+                started?;
+            }
+        }
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        loop {
+            if let Ok(stream) = UnixStream::connect(data.join("ledger/serve.sock")) {
+                let peer = peer_credentials(&stream)?;
+                if peer.uid != crate::fsx::euid()
+                    || peer.pid != main_pid(&unit)?
+                    || !peer_alive(&peer)
+                {
+                    return Err(LedgerError::refused(
+                        "the existing ledger writer is not an independent user service; stop it after active runs settle before using --detach",
+                    ));
+                }
+                Client::connect(data)?.ping()?;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(LedgerError::refused(
+                    "independent writer did not become ready",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn valid_unit(unit: &str) -> bool {
+        unit.strip_prefix("ukai-ledger-owner-")
+            .and_then(|s| s.strip_suffix(".service"))
+            .is_some_and(|s| crate::protocol::lower_hex(s, 32))
+    }
+
+    pub fn launch(options: &runner::RunOptions) -> Result<RunRecord> {
+        if !options.batch || !options.detached {
+            return Err(LedgerError::refused("--detach requires --io batch"));
+        }
+        ready()?;
+        // Start the writer before handing off. The service checks its continuing
+        // availability under the existing strict-evidence contract.
+        ensure_writer(&options.data)?;
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let unit = format!("ukai-ledger-owner-{nonce}.service");
+        let path = SocketPath(
+            options
+                .data
+                .join("ledger")
+                .join(format!("start-{nonce}.sock")),
+        );
+        let listener = UnixListener::bind(&path.0)?;
+        fs::set_permissions(&path.0, fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+        // Validate the whole frame before creating a service. No raw request
+        // values occur in its command, unit properties, logs or environment.
+        let launch = Launch {
+            schema: crate::schemas::OWNER_LAUNCH.into(),
+            options: options.clone(),
+            cwd: std::env::current_dir()?,
+            environment: std::env::vars_os().collect(),
+        };
+        let mut frame = Vec::new();
+        write_frame(&mut frame, &launch)?;
+        command_output(
+            unit_command(&unit)
+                .arg("--property=Delegate=yes")
+                .arg("--")
+                .arg(std::env::current_exe()?)
+                .args(["__owner", "--bootstrap"])
+                .arg(&path.0)
+                .arg("--unit")
+                .arg(&unit),
+        )?;
+        let mut stream = await_owner(&listener, &unit, Instant::now() + START_TIMEOUT)?;
+        stream.set_read_timeout(Some(START_TIMEOUT))?;
+        stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
+        let peer = peer_credentials(&stream)?;
+        if peer.uid != crate::fsx::euid() || peer.pid != main_pid(&unit)? || !peer_alive(&peer) {
+            return Err(LedgerError::refused(
+                "bootstrap peer is not the independent service owner",
+            ));
+        }
+        use std::io::Write as _;
+        stream.write_all(&frame)?;
+        match read_frame::<Started>(&mut stream)? {
+            Started::Owned { run } => Ok(*run),
+            Started::Refused { reason } => Err(LedgerError::refused(reason)),
+        }
+    }
+
+    /// The bootstrap connection from the owner service just started. One that
+    /// never connects is named, so the operator can inspect that unit.
+    fn await_owner(listener: &UnixListener, unit: &str, deadline: Instant) -> Result<UnixStream> {
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Ok(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(LedgerError::new(
+                            crate::protocol::ErrorKind::Io(std::io::ErrorKind::TimedOut),
+                            format!(
+                                "owner service {unit} did not connect within {} seconds; \
+                                 inspect it with `systemctl --user status {unit}`",
+                                START_TIMEOUT.as_secs()
+                            ),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    extern "C" fn request_cancel(_: libc::c_int) {
+        CANCEL.store(true, Ordering::Relaxed);
+    }
+    pub fn cancel_requested() -> bool {
+        CANCEL.load(Ordering::Relaxed)
+    }
+
+    /// Called only by the hidden CLI entry point, before creating any threads.
+    /// # Safety
+    /// Call only from the hidden process entry point before creating any threads.
+    pub unsafe fn serve(path: &Path, unit: &str) -> Result<()> {
+        if !valid_unit(unit) || main_pid(unit)? != std::process::id() {
+            return Err(LedgerError::refused(
+                "owner must be started by its independent user service",
+            ));
+        }
+        let mut stream = UnixStream::connect(path)?;
+        stream.set_read_timeout(Some(COMMAND_TIMEOUT))?;
+        stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
+        let peer = peer_credentials(&stream)?;
+        if peer.uid != crate::fsx::euid() {
+            return Err(LedgerError::refused("bootstrap peer uid mismatch"));
+        }
+        // Remove the rendezvous before receiving secrets; a killed caller leaves
+        // no abandoned socket once the service connects.
+        fs::remove_file(path)?;
+        let launch: Launch = read_frame(&mut stream)?;
+        if launch.schema != crate::schemas::OWNER_LAUNCH
+            || !launch.options.batch
+            || !launch.options.detached
+        {
+            return Err(LedgerError::refused("invalid detached launch frame"));
+        }
+        for (key, value) in &launch.environment {
+            if key.is_empty()
+                || key.as_bytes().iter().any(|b| *b == 0 || *b == b'=')
+                || value.as_bytes().contains(&0)
+            {
+                return Err(LedgerError::refused(
+                    "invalid bootstrap environment encoding",
+                ));
+            }
+        }
+        std::env::set_current_dir(&launch.cwd)?;
+        // SAFETY: this hidden entry point runs before any thread is created.
+        // Environment is restored only in this new process, never the submitter.
+        unsafe {
+            for (key, _) in std::env::vars_os() {
+                std::env::remove_var(key);
+            }
+            for (key, value) in launch.environment {
+                std::env::set_var(key, value);
+            }
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = request_cancel as *const () as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            if libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()) != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+        let mut announced = false;
+        let result = runner::run_notifying(&launch.options, &mut |run| {
+            announced = true;
+            // A lost acknowledgement does not cancel or replay an owned attempt.
+            let _ = write_frame(
+                &mut stream,
+                &Started::Owned {
+                    run: Box::new(run.clone()),
+                },
+            );
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        });
+        if let Err(error) = result {
+            if !announced {
+                let _ = write_frame(
+                    &mut stream,
+                    &Started::Refused {
+                        reason: error.to_string(),
+                    },
+                );
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn cancel(data: &Path, run_id: &str) -> Result<Value> {
+        let run = Client::connect(data)?.show(run_id)?;
+        if terminal(&run) {
+            return Ok(json!({"run_id":run_id,"status":"already_terminal","run":run}));
+        }
+        if run.payload["owner_lifetime"] != "systemd_user_service" {
+            return Err(LedgerError::refused(
+                "cancel requires a detached service owner",
+            ));
+        }
+        let peer = run
+            .owner
+            .ok_or_else(|| LedgerError::refused("attempt has no launch owner"))?;
+        // Open first, then validate birth. Signal the pinned task, never a reused pid.
+        // SAFETY: pidfd_open takes a pid and flags by value and reads no memory.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, peer.pid as libc::pid_t, 0) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: a successful pidfd_open returned a new descriptor owned only here.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        if peer.uid != crate::fsx::euid() || !peer_alive(&peer) {
+            return Err(LedgerError::refused(
+                "launch owner is gone; reconcile before reporting an outcome",
+            ));
+        }
+        // SAFETY: the pidfd stays open through the call; a null siginfo asks the
+        // kernel for the default kill(2)-style information and is never read.
+        if unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd.as_raw_fd(),
+                libc::SIGUSR1,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        } < 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(json!({"run_id":run_id,"status":"stop_requested","settlement":"pending"}))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn an_owner_that_never_connects_is_named_not_an_eagain() {
+            let temp = tempfile::tempdir().unwrap();
+            let listener = UnixListener::bind(temp.path().join("start.sock")).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let unit = "ukai-ledger-owner-00000000000000000000000000000000.service";
+            let refused = await_owner(&listener, unit, Instant::now()).unwrap_err();
+            assert!(refused.message().contains(unit), "{refused}");
+            assert!(refused.message().contains("did not connect"), "{refused}");
+        }
+    }
+}

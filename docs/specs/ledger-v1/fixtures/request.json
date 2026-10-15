@@ -1,5 +1,5 @@
 {
-  "schema": "ouro.ledger.request/1",
+  "schema": "ukai.ledger.request/1",
   "profile": "tool",
   "argv_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

@@ -1,5 +1,5 @@
 {
-  "schema": "ouro.ledger.gc-plan/1",
+  "schema": "ukai.ledger.gc-plan/1",
   "dry_run": true,
   "deletion_supported": true,
   "verification_required": true,
@@ -13,7 +13,7 @@
       "child_protection": "unprotected",
       "chain": {
         "head_seq": 3,
-        "head_digest": "sha256:59d00d8feb930504b847939bf9d7de18d82d331e1bb9c5160e413e23e6ff1ca5"
+        "head_digest": "sha256:a420b4c73b17ab4a26cf95e57495baa5735d7c68a6f8dbcc43320eaea68785d6"
       },
       "last_activity_at": "2026-10-05T11:00:00Z",
       "candidate": false,

@@ -9,9 +9,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ouro_jail::capability::Capability;
 use serde::Deserialize;
 use serde_json::Value;
+use ukai_jail::capability::Capability;
 
 use crate::util::wire;
 

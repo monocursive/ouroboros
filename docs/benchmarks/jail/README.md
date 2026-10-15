@@ -59,12 +59,12 @@ x86_64 Linux 7.0.0-31, bubblewrap 0.11.1. The local machine was an arm64 Mac
 running Darwin 27.0.0, Apple M5 Pro (18 CPUs, 64 GiB RAM). The reference VM exposed four AMD EPYC-Milan CPUs and 3.7 GiB RAM. Full host/build metadata accompanies benchmark samples.
 
 ```sh
-cargo +1.98.1 build -p ouro-jail -p ouro-fixture
-OURO_JAIL_BIN="$PWD/target/debug/ouro-jail" \
-OURO_FIXTURE_BIN="$PWD/target/debug/ouro-fixture" \
-OURO_CONFORMANCE=1 cargo +1.98.1 test --workspace -- --test-threads=1
-python3 docs/benchmarks/jail/acceptance.py --binary target/debug/ouro-jail --out acceptance.json
-python3 docs/benchmarks/jail/bench.py --binary target/release/ouro-jail --out timings.json
+cargo +1.98.1 build -p ukai-jail -p ukai-fixture
+UKAI_JAIL_BIN="$PWD/target/debug/ukai-jail" \
+UKAI_FIXTURE_BIN="$PWD/target/debug/ukai-fixture" \
+UKAI_CONFORMANCE=1 cargo +1.98.1 test --workspace -- --test-threads=1
+python3 docs/benchmarks/jail/acceptance.py --binary target/debug/ukai-jail --out acceptance.json
+python3 docs/benchmarks/jail/bench.py --binary target/release/ukai-jail --out timings.json
 ```
 
 Benchmarks use optimized builds, five warmup rounds and 30 measured rounds.
@@ -129,11 +129,11 @@ are development mechanism measurements, not production jail benchmarks.
 
 ## Distribution
 
-The [packager](../../../crates/ouro-jail/dist/package.py) signs SHA256SUMS with an
-explicit key. The [installer](../../../crates/ouro-jail/dist/install.sh) accepts
+The [packager](../../../crates/ukai-jail/dist/package.py) signs SHA256SUMS with an
+explicit key. The [installer](../../../crates/ukai-jail/dist/install.sh) accepts
 an explicit artifact directory or HTTPS base URL and a trusted public key,
 verifies signature and artifact checksum, and atomically replaces the binary
-only with `--upgrade`. It runs without a TTY. The [test](../../../crates/ouro-jail/dist/test_install.py)
+only with `--upgrade`. It runs without a TTY. The [test](../../../crates/ukai-jail/dist/test_install.py)
 checks corrupt archives/signatures and preservation of an existing installation.
 
 The operator deferred the release repository, tap and signing identity. No

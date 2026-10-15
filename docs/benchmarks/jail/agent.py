@@ -29,7 +29,7 @@ root=pathlib.Path(tempfile.mkdtemp(prefix='.ouro-agent-',dir=pathlib.Path.home()
 try:
     work=root/'work';config=root/'config';work.mkdir();config.mkdir()
     subprocess.run(['git','init','-q',str(work)],check=True)
-    env={'PATH':os.environ['PATH'],'HOME':str(pathlib.Path.home()),'XDG_RUNTIME_DIR':os.environ.get('XDG_RUNTIME_DIR',''), 'OURO_CONFIG_DIR':str(config),'OURO_DATA_DIR':str(root/'data')}
+    env={'PATH':os.environ['PATH'],'HOME':str(pathlib.Path.home()),'XDG_RUNTIME_DIR':os.environ.get('XDG_RUNTIME_DIR',''), 'UKAI_CONFIG_DIR':str(config),'UKAI_DATA_DIR':str(root/'data')}
     rows=[]
     for verb in ['run','learn']:
         output=work/'greeting.txt'

@@ -1,1 +1,1 @@
-{"algorithm":"ed25519","key_id":"sha256:ded302e6d3b4dd479c9f6bf716d51cedd4fecc5c9082071e7933e3644e66b2b6","public_key":"298436bf18df62c9258fda38fa4ac292abb07e8cd57dadf096bc91c8aac4e51d","schema":"ouro.ledger.signer/1"}
+{"algorithm":"ed25519","key_id":"sha256:d0476f8baec444fb075126504c4b135b5f504487e9b480a6665cf2cb6bc4f7e6","public_key":"45b2ab4f6f2735ed3601d9689fcbb1d9a428d929533279a96ae9537d7803c10a","schema":"ukai.ledger.signer/1"}

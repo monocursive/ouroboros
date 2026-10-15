@@ -1,4 +1,4 @@
-ouro-jail `agent` seccomp baseline (x86_64), variant namespace_inner
+ukai-jail `agent` seccomp baseline (x86_64), variant namespace_inner
 jail-v1 §9.2 and §10; stacked with the mediation filter below
 
 arch != AUDIT_ARCH_X86_64  EPERM   (0xc000003e required)

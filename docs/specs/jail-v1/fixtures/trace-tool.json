@@ -1,6 +1,6 @@
 [
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 1,
@@ -21,7 +21,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 2,
@@ -42,7 +42,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "audit",
     "source_seq": 1,
@@ -72,7 +72,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 3,
@@ -93,7 +93,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 4,
@@ -114,7 +114,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "audit",
     "source_seq": 2,
@@ -144,7 +144,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "audit",
     "source_seq": 3,
@@ -168,7 +168,7 @@
     }
   },
   {
-    "schema": "ouro.event/1",
+    "schema": "ukai.event/1",
     "attempt_id": "att_00000000-0000-4000-8000-000000000001",
     "source": "wrapper",
     "source_seq": 5,
@@ -185,7 +185,7 @@
     },
     "fields": {
       "phase": "settled",
-      "receipt_digest": "sha256:6377cf0a83e710ae364f2d24a64599a0557fc694faf5e8f19220218a33ded0d3"
+      "receipt_digest": "sha256:337d215497e1a7a2c640625bd2094d6c485e898495833b7760550c0247bb6543"
     }
   }
 ]

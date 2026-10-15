@@ -5,7 +5,7 @@ Implemented on the named x86-64 Linux lane, 2026-09-24 to 2026-09-25, on the
 same stock host as J3 and J4: Ubuntu 26.04.1, kernel 7.0.0-31, bubblewrap
 0.11.1, the distribution's user-namespace restriction left on, no sysctl,
 AppArmor profile, file capability or setuid helper. The unprivileged, lingering
-`ouro-ci` account runs everything.
+`ukai-ci` account runs everything.
 
 Milestone 1's evidence, all at the final revision
 `027de7d284b19a8cb7ecc4a1ba496d4408b46627`:
@@ -14,7 +14,7 @@ Milestone 1's evidence, all at the final revision
   verdict PASS. Linux lane on the reference host: 1690 passed, 0 failed, 14
   ignored, over 69 test binaries
   ([test log](evidence/j5-test-log-2026-09-25-ouro-ci.txt)). macOS lane at the
-  same revision, run with `OURO_CONFORMANCE=1` on a local Apple Silicon
+  same revision, run with `UKAI_CONFORMANCE=1` on a local Apple Silicon
   machine: 1001 passed, 0 failed, 6 ignored, over 69 test binaries
   ([test log](evidence/j5-test-log-2026-09-25-macos.txt); local paths in it
   are redacted).
@@ -22,7 +22,7 @@ Milestone 1's evidence, all at the final revision
   ([gates.txt](evidence/j5-gates-2026-09-25.txt),
   [gates.json](evidence/j5-gates-2026-09-25.json)); see
   [Acceptance verdict](#acceptance-verdict).
-- The run's host manifest, `doctor --json` (`ouro.jail.doctor/1`):
+- The run's host manifest, `doctor --json` (`ukai.jail.doctor/1`):
   [j5-doctor-2026-09-25-ouro-ci.json](evidence/j5-doctor-2026-09-25-ouro-ci.json),
   ready, 26 capability rows, all available except `nested_user_namespace`
   (unavailable, as on any stock Ubuntu 24.04 or later), with the manual
@@ -41,7 +41,7 @@ Milestone 1's evidence, all at the final revision
   installation directory or package is present.
 - The freeze with its tested run ([Freeze](#freeze)), the performance
   measurement ([Performance](#performance)) and the A01 run ([A01](#a01)).
-  The conformance run, the performance run and A01 ran the same `ouro-jail`
+  The conformance run, the performance run and A01 ran the same `ukai-jail`
   binary, SHA-256
   `aa2d77aa7efa322fef0afd3e3ae47a3da9ec2776bc91941d2c85ba7773724677`.
 - [`d8-candidates-2026-09-24-ouro-ci.txt`](evidence/d8-candidates-2026-09-24-ouro-ci.txt):
@@ -148,10 +148,10 @@ specification's revision 19.
 
 ## Acceptance verdict
 
-[acceptance-map.toml](acceptance-map.toml) (`ouro.jail.acceptance-map/1`)
+[acceptance-map.toml](acceptance-map.toml) (`ukai.jail.acceptance-map/1`)
 carries every §15 row verbatim, split into the clauses it makes, each with the
 tests or driver checks that assert it and a tag: `live-cli` (through
-`ouro-jail` on the reference host), `live-lib` (library internals on the
+`ukai-jail` on the reference host), `live-lib` (library internals on the
 host), `portable`, `simulated` (the real trigger is not produced),
 `recorded-limit` (a named limit with its document passage), `credential`, or
 `untested` (which fails). `cargo xtask conformance` evaluates it over the
@@ -168,7 +168,7 @@ slices' tests closed them.)
 
 The verdict ([gates.txt](evidence/j5-gates-2026-09-25.txt),
 [gates.json](evidence/j5-gates-2026-09-25.json)) combines the Linux and macOS
-lanes of revision `027de7d2`, both run with `OURO_CONFORMANCE=1`:
+lanes of revision `027de7d2`, both run with `UKAI_CONFORMANCE=1`:
 
 ```text
 gates: 1 credential, 43 pass, 7 pass+limits
@@ -208,7 +208,7 @@ prefixes, and a test checks the test process sees exactly the suite's PATH.
 | `x86_64-unknown-linux-gnu` | `rust` (hosted Ubuntu) and the reference host | portable suite on hosted Ubuntu; full suite on the reference host | yes, the reference host |
 | `aarch64-apple-darwin` | `rust` (macOS leg) and a local Apple Silicon machine | the shared portable tests and the macOS refusal tests (M01–M03); at the milestone revision 1001 passed, 0 failed, 6 ignored | inspection only; execution refuses 125 |
 | `x86_64-apple-darwin` | `rust` (compile-only check, all targets, warnings denied) | no | no |
-| `aarch64-unknown-linux-gnu` | `rust` (compile-only check, all targets, warnings denied) | the refusal only, on x86_64 through `OURO_JAIL_TEST_ARCH` | no |
+| `aarch64-unknown-linux-gnu` | `rust` (compile-only check, all targets, warnings denied) | the refusal only, on x86_64 through `UKAI_JAIL_TEST_ARCH` | no |
 
 A Linux build for an architecture the syscall tables do not cover reports
 `syscall_filter`, `closed_set_observation` and `network_proxy` unsupported
@@ -250,25 +250,25 @@ digests (x86_64):
 | closed-set narrowing | `sha256:9e63101563d550ff9aca317797385047c6af0e62ecfd1352cdbbb191135b0a66` |
 
 The frozen wire schemas ([frozen-schemas.toml](frozen-schemas.toml), which
-also pins the artifacts behind `ouro.jail.policy/1`, `ouro.jail.policy-file/1`
-and `ouro.jail.network/1` and the gate and semantic corpora):
+also pins the artifacts behind `ukai.jail.policy/1`, `ukai.jail.policy-file/1`
+and `ukai.jail.network/1` and the gate and semantic corpora):
 
 | File | Identifier | SHA-256 |
 |---|---|---|
-| `event.schema.json` | `ouro.event/1` | `f11a51654753f9db14bede36a33abee5a7fbfbb66901a9175fd7cd3e45296384` |
-| `jail-event.schema.json` | `ouro.event/1` (jail producer) | `08a17e1b2a9a33492038d57202b90acc2ccd1703800225c0cd1c68f35c24a137` |
-| `jail-receipt.schema.json` | `ouro.jail.receipt/1` | `7f20ea6830bb81e27d46dd7ac90c69a6d3a4f84b7613bcaa1a375192d59e2c5a` |
-| `policy-snapshot.schema.json` | `ouro.jail.policy-snapshot/1` | `94bc81e85522cfa3b81bc7f2dd9504a8a3fd5f412ccac3938c98bdd018c61da4` |
-| `jail-gate.schema.json` | `ouro.jail.gate/1` | `cc7156f417929e3e93e842b02ee7630a025025e0856cf6cc3d1eda26666ff201` |
-| `jail-control.schema.json` | `ouro.jail.control/1` | `1a7ca84c1839448806becf5e320987e56f373c8bce858841a39943b25e6d4740` |
-| `jail-doctor.schema.json` | `ouro.jail.doctor/1` | `bca76df7a6ee259955cfca3d39dd354757d21e9d5bff98f069558f761fbfbbb9` |
+| `event.schema.json` | `ukai.event/1` | `f11a51654753f9db14bede36a33abee5a7fbfbb66901a9175fd7cd3e45296384` |
+| `jail-event.schema.json` | `ukai.event/1` (jail producer) | `08a17e1b2a9a33492038d57202b90acc2ccd1703800225c0cd1c68f35c24a137` |
+| `jail-receipt.schema.json` | `ukai.jail.receipt/1` | `7f20ea6830bb81e27d46dd7ac90c69a6d3a4f84b7613bcaa1a375192d59e2c5a` |
+| `policy-snapshot.schema.json` | `ukai.jail.policy-snapshot/1` | `94bc81e85522cfa3b81bc7f2dd9504a8a3fd5f412ccac3938c98bdd018c61da4` |
+| `jail-gate.schema.json` | `ukai.jail.gate/1` | `cc7156f417929e3e93e842b02ee7630a025025e0856cf6cc3d1eda26666ff201` |
+| `jail-control.schema.json` | `ukai.jail.control/1` | `1a7ca84c1839448806becf5e320987e56f373c8bce858841a39943b25e6d4740` |
+| `jail-doctor.schema.json` | `ukai.jail.doctor/1` | `bca76df7a6ee259955cfca3d39dd354757d21e9d5bff98f069558f761fbfbbb9` |
 
 The tested run, copied from the milestone run's
 [doctor.json](evidence/j5-doctor-2026-09-25-ouro-ci.json) by
 `cargo xtask freeze --doctor`, is the file's `[tested]` table: revision
 `027de7d284b19a8cb7ecc4a1ba496d4408b46627`, `dirty = false`, `opt_level = "3"`,
 `debug_assertions = false`, `rustc 1.98.1 (48a229cea 2026-09-01)`, target
-`x86_64-unknown-linux-gnu`, `ready = true`, the `ouro-jail` binary's SHA-256
+`x86_64-unknown-linux-gnu`, `ready = true`, the `ukai-jail` binary's SHA-256
 `aa2d77aa7efa322fef0afd3e3ae47a3da9ec2776bc91941d2c85ba7773724677`, bubblewrap
 0.11.1 at `/usr/bin/bwrap` with SHA-256
 `523da3e7399044be5163aee6f57a77a6bef7454376e28f0a0627920bae1b76b6`, and the
@@ -286,7 +286,7 @@ packages).
 
 ## Performance
 
-Measured 2026-09-25, 07:19 to 07:27 UTC, on the reference host as `ouro-ci`
+Measured 2026-09-25, 07:19 to 07:27 UTC, on the reference host as `ukai-ci`
 at the final revision `027de7d2` with the tested binary, by
 `cargo xtask perf run --launches 30 --warmup 1 --max-load 3.0 --revision 027de7d2…`
 from a plain SSH session (the harness re-runs itself under
@@ -311,7 +311,7 @@ are `launches.ndjson.xz` beside it). The tables are in
   bubblewrap nor the distribution's confinement: on the fixed workload's work
   phase, direct 155.4 ms, bubblewrap alone with the `tool` namespaces under
   Ubuntu's `unpriv_bwrap` AppArmor confinement and no seccomp filter 185.0 ms
-  (+19.0%), `ouro-jail run --profile tool --observe off` 189.9 ms (+22.2%).
+  (+19.0%), `ukai-jail run --profile tool --observe off` 189.9 ms (+22.2%).
   About 19 of the 22 points are bubblewrap's containment as the stock
   distribution confines it; the jail's filter and supervisor add about 3. The
   jail's teardown (settlement, tree verification, receipts, trace flush) adds
@@ -352,24 +352,24 @@ the binary reports every launch profile `experimental` (jail-v1 §15).
 
 ## Test seams
 
-The release binary honours every `OURO_JAIL_TEST_*` variable (jail-v1 §6.2):
+The release binary honours every `UKAI_JAIL_TEST_*` variable (jail-v1 §6.2):
 the tested binary is the shipped binary. Each one set is recorded in jail
 state and in every receipt with native details.
 
 | Seam | What it does | Gates that rely on it |
 |---|---|---|
-| `OURO_JAIL_TEST_MEDIATION_QUEUE` | shrinks `agent`'s mediation record queue | a mediation-queue overflow is evidence loss |
-| `OURO_JAIL_TEST_TRACE_CAP` | shrinks the local trace cap | R03 local-cap loss |
-| `OURO_JAIL_TEST_ABORT_AT` | aborts at one named point of the `n`th write (J5: the optional `:<n>` ordinal) at one persistence site | R02 crash points, gc records (R02.3: gc's later records) |
-| `OURO_JAIL_TEST_GC_MAX_ENTRIES` | shrinks gc's per-invocation bound | C03 (portable) |
-| `OURO_JAIL_TEST_TRACER_INFLIGHT` | shrinks the observer's in-flight bound | O03 map exhaustion (the ptrace analogue), O05 directory-operation loss, R04 |
-| `OURO_JAIL_TEST_TRACER_QUEUE_BYTES` | shrinks the observer's queue | O03 ring loss (the ptrace analogue) |
-| `OURO_JAIL_TEST_SUPERVISOR_SCOPE` | takes the outside-a-scope branch of the scope step | L03 `none` without a usable cgroup; the scope tests |
-| `OURO_JAIL_TEST_ARCH` (J5) | refuses the table-bound probes as a build for another architecture would | the architecture refusal (platform compilation) |
-| `OURO_JAIL_TEST_MOUNT_SWAP` (J5) | holds the §9.1 mount handoff open, at most 10 s, so a test can replace a pinned source | F04 source-identity swap |
-| `OURO_JAIL_TEST_TRACER_TRUNCATE_PATH` (J5) | makes a path-marked covered call's path unreadable to the observer | O03 truncation |
-| `OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT` (J5) | follows a path-marked call's entry without recording it | O03 unmatched exit, which cannot occur on demand under ptrace |
-| `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX` (J5) | caps each `--trace-fd` write, so frames are written in pieces | R03.5: the wall under forced partial writes (simulated) |
+| `UKAI_JAIL_TEST_MEDIATION_QUEUE` | shrinks `agent`'s mediation record queue | a mediation-queue overflow is evidence loss |
+| `UKAI_JAIL_TEST_TRACE_CAP` | shrinks the local trace cap | R03 local-cap loss |
+| `UKAI_JAIL_TEST_ABORT_AT` | aborts at one named point of the `n`th write (J5: the optional `:<n>` ordinal) at one persistence site | R02 crash points, gc records (R02.3: gc's later records) |
+| `UKAI_JAIL_TEST_GC_MAX_ENTRIES` | shrinks gc's per-invocation bound | C03 (portable) |
+| `UKAI_JAIL_TEST_TRACER_INFLIGHT` | shrinks the observer's in-flight bound | O03 map exhaustion (the ptrace analogue), O05 directory-operation loss, R04 |
+| `UKAI_JAIL_TEST_TRACER_QUEUE_BYTES` | shrinks the observer's queue | O03 ring loss (the ptrace analogue) |
+| `UKAI_JAIL_TEST_SUPERVISOR_SCOPE` | takes the outside-a-scope branch of the scope step | L03 `none` without a usable cgroup; the scope tests |
+| `UKAI_JAIL_TEST_ARCH` (J5) | refuses the table-bound probes as a build for another architecture would | the architecture refusal (platform compilation) |
+| `UKAI_JAIL_TEST_MOUNT_SWAP` (J5) | holds the §9.1 mount handoff open, at most 10 s, so a test can replace a pinned source | F04 source-identity swap |
+| `UKAI_JAIL_TEST_TRACER_TRUNCATE_PATH` (J5) | makes a path-marked covered call's path unreadable to the observer | O03 truncation |
+| `UKAI_JAIL_TEST_TRACER_UNMATCHED_EXIT` (J5) | follows a path-marked call's entry without recording it | O03 unmatched exit, which cannot occur on demand under ptrace |
+| `UKAI_JAIL_TEST_TRACE_FD_WRITE_MAX` (J5) | caps each `--trace-fd` write, so frames are written in pieces | R03.5: the wall under forced partial writes (simulated) |
 
 ## Known gaps
 
@@ -401,7 +401,7 @@ simulation leaves out.
 - Suspend and clock steps are simulated, not produced (L04.5, L04.6, tagged
   `simulated`): the conformance account can neither suspend the shared VM nor
   set the clock (`CAP_SYS_TIME`). The deadlines are proved on the real
-  `ouro-jail run` with an `LD_PRELOAD` `clock_gettime` shim that, from exec on,
+  `ukai-jail run` with an `LD_PRELOAD` `clock_gettime` shim that, from exec on,
   advances only `CLOCK_BOOTTIME` (a suspend's signature: the boot clock moves,
   the monotonic clock does not) or steps only `CLOCK_REALTIME`: the execution
   wall expires with the first and ignores the second
@@ -409,7 +409,7 @@ simulation leaves out.
   `::l04_the_execution_wall_ignores_wall_clock_steps`), and the gate wait
   follows the boot clock (`::l04_the_gate_wait_follows_the_boot_clock`). The
   kernel's own suspend path, timers acted on at resume, is not exercised.
-- A leaf without the pids controller cannot be produced through `ouro-jail run`
+- A leaf without the pids controller cannot be produced through `ukai-jail run`
   on the stock reference host. The supervisor always creates its execution leaf
   directly beneath `user@<uid>.service`, whose `cgroup.subtree_control` enables
   `pids`; that file belongs to the account but is shared by every session and

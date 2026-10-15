@@ -6,7 +6,7 @@
 # themselves. §16 allows that ("without pretending they exercised a privileged
 # kernel feature") but a green `ok` says nothing about what was not run, so the
 # last step copies every `skipped:` line into the job summary. Set
-# OURO_CONFORMANCE=1 only where those tools exist; here a skip must stay a skip.
+# UKAI_CONFORMANCE=1 only where those tools exist; here a skip must stay a skip.
 name: rust
 on:
   push:
@@ -79,12 +79,12 @@ jobs:
         # to this revision, so its acceptance-map lane can be judged; the Ubuntu
         # leg must not: its live tests skip, which conformance mode fails.
         env:
-          OURO_CONFORMANCE: ${{ runner.os == 'macOS' && '1' || '' }}
+          UKAI_CONFORMANCE: ${{ runner.os == 'macOS' && '1' || '' }}
         run: |
           {
-            echo "ouro-suite-path=$PATH"
-            echo "ouro-suite-revision=$(git rev-parse HEAD)"
-            echo "ouro-suite-conformance=${OURO_CONFORMANCE}"
+            echo "ukai-suite-path=$PATH"
+            echo "ukai-suite-revision=$(git rev-parse HEAD)"
+            echo "ukai-suite-conformance=${UKAI_CONFORMANCE}"
             cargo test --workspace -- --test-threads=1 --nocapture
           } 2>&1 | tee test-output.txt
       # jail-v1 §15: the macOS-lane clauses of the acceptance map (M01, M03,
@@ -114,7 +114,7 @@ jobs:
                 echo "These are not failures here: §16 lets a generic runner"
                 echo "decline a privileged feature. They are listed so a green"
                 echo "job does not read as coverage. The conformance workflow"
-                echo "runs the same tests with OURO_CONFORMANCE=1, where a skip"
+                echo "runs the same tests with UKAI_CONFORMANCE=1, where a skip"
                 echo "fails the job."
               fi
             else

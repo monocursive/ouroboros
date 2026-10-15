@@ -1,6 +1,6 @@
-defmodule OuroFleet.ContractsTest do
+defmodule UkaiFleet.ContractsTest do
   use ExUnit.Case, async: true
-  alias OuroFleet.{Request, Store}
+  alias UkaiFleet.{Request, Store}
 
   test "JSON null remains null across wire and checkpoint round trips" do
     value = %{
@@ -10,16 +10,16 @@ defmodule OuroFleet.ContractsTest do
       "array" => [nil, false]
     }
 
-    bytes = value |> OuroFleet.JSON.encode() |> IO.iodata_to_binary()
-    assert OuroFleet.JSON.decode(bytes) == value
+    bytes = value |> UkaiFleet.JSON.encode() |> IO.iodata_to_binary()
+    assert UkaiFleet.JSON.decode(bytes) == value
     refute bytes =~ "\"nil\""
-    assert OuroFleet.JSON.decode(~s({"job":null})) == %{"job" => nil}
+    assert UkaiFleet.JSON.decode(~s({"job":null})) == %{"job" => nil}
   end
 
   test "request identities are stable, private and bind all execution inputs" do
     request =
       Request.validate!(%{
-        "schema" => "ouro.fleet.request/1",
+        "schema" => "ukai.fleet.request/1",
         "request_id" => "a",
         "argv" => ["/bin/echo", "private-value"]
       })
@@ -48,18 +48,18 @@ defmodule OuroFleet.ContractsTest do
           Map.put(request, "capture_limit", 16_777_217),
           Map.put(request, "argv", ["a\0b"])
         ] do
-      assert_raise OuroFleet.InvalidRequest, fn -> Request.validate!(changed) end
+      assert_raise UkaiFleet.InvalidRequest, fn -> Request.validate!(changed) end
     end
   end
 
   test "JSON null asks for a field's default; any other non-text value refuses" do
-    base = %{"schema" => "ouro.fleet.request/1", "request_id" => "a", "argv" => ["/bin/true"]}
+    base = %{"schema" => "ukai.fleet.request/1", "request_id" => "a", "argv" => ["/bin/true"]}
     defaults = Request.validate!(base)
 
     for key <- ~w(on jail observe evidence capture limits tags capture_limit) do
       assert Request.validate!(Map.put(base, key, nil)) == defaults
 
-      assert_raise OuroFleet.InvalidRequest, fn ->
+      assert_raise UkaiFleet.InvalidRequest, fn ->
         Request.validate!(Map.put(base, key, false))
       end
     end
@@ -67,7 +67,7 @@ defmodule OuroFleet.ContractsTest do
     assert Request.validate!(Map.put(base, "dir", nil))["dir"] == nil
 
     for key <- ["dir", "launch"] do
-      assert_raise OuroFleet.InvalidRequest, fn ->
+      assert_raise UkaiFleet.InvalidRequest, fn ->
         Request.validate!(Map.put(base, key, false))
       end
     end
@@ -77,7 +77,7 @@ defmodule OuroFleet.ContractsTest do
     root =
       Path.join(
         System.tmp_dir!(),
-        "ouro-fleet-store-" <> Base.encode16(:crypto.strong_rand_bytes(8))
+        "ukai-fleet-store-" <> Base.encode16(:crypto.strong_rand_bytes(8))
       )
 
     File.mkdir!(root)
@@ -98,17 +98,17 @@ defmodule OuroFleet.ContractsTest do
   end
 
   test "the subprocess adapter bounds output and distinguishes failed JSON from a reply" do
-    assert {:ok, %{"value" => 1}, 0} = OuroFleet.Command.json("/bin/echo", ["{\"value\":1}"])
+    assert {:ok, %{"value" => 1}, 0} = UkaiFleet.Command.json("/bin/echo", ["{\"value\":1}"])
 
     assert {:error, "component_response_invalid"} =
-             OuroFleet.Command.json("/bin/echo", ["not-json"])
+             UkaiFleet.Command.json("/bin/echo", ["not-json"])
   end
 
   test "a component past its time or output bound is killed, not only disconnected" do
     root =
       Path.join(
         System.tmp_dir!(),
-        "ouro-fleet-command-" <> Base.encode16(:crypto.strong_rand_bytes(8))
+        "ukai-fleet-command-" <> Base.encode16(:crypto.strong_rand_bytes(8))
       )
 
     File.mkdir!(root)
@@ -119,12 +119,12 @@ defmodule OuroFleet.ContractsTest do
     noisy = ~s(echo $$ > "$0"; head -c 1100000 /dev/zero; exec /bin/sleep 30)
 
     assert {:error, "component_timeout_outcome_unknown"} =
-             OuroFleet.Command.raw("/bin/sh", ["-c", silent, pidfile], 1_000)
+             UkaiFleet.Command.raw("/bin/sh", ["-c", silent, pidfile], 1_000)
 
     assert gone?(File.read!(pidfile))
 
     assert {:error, "component_response_too_large"} =
-             OuroFleet.Command.raw("/bin/sh", ["-c", noisy, pidfile], 20_000)
+             UkaiFleet.Command.raw("/bin/sh", ["-c", noisy, pidfile], 20_000)
 
     assert gone?(File.read!(pidfile))
     refute_received {_port, _message}
@@ -144,9 +144,9 @@ defmodule OuroFleet.ContractsTest do
   end
 end
 
-defmodule OuroFleet.StatusTest do
+defmodule UkaiFleet.StatusTest do
   use ExUnit.Case, async: true
-  alias OuroFleet.{Reader, Worker}
+  alias UkaiFleet.{Reader, Worker}
 
   test "routed readers cannot replace the owning run or data store" do
     assert {:ok, ["show", "run-own", "--with-transcript", "--json"]} =

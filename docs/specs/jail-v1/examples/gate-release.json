@@ -1,5 +1,5 @@
 {
-  "schema": "ouro.jail.gate/1",
+  "schema": "ukai.jail.gate/1",
   "action": "release",
   "attempt_id": "att_00000000-0000-4000-8000-000000000001",
   "policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

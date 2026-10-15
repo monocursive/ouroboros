@@ -1,0 +1,326 @@
+//! Attempt state: durable replacement, the lease and the unsafe-path refusals.
+//!
+//! §7 requires create-new temporary file, write, file sync, atomic rename and
+//! parent-directory sync, and says a successful rename alone is not a durable
+//! acknowledgment. The failure-window test abandons the write before the rename
+//! and checks that the previous file is intact: either the old or the new file
+//! is there, never a half-written one.
+//!
+//! The lease test runs a second process, because `flock` is per open file
+//! description and a same-process second lock would prove nothing about the
+//! exclusivity a second supervisor would see.
+
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
+
+use ukai_jail::records::ErrorCode;
+use ukai_jail::state::{self, AttemptDir, AttemptId, Lease, TempWrite};
+
+mod common;
+
+/// The environment variable that names the lock the child helper probes.
+const LOCK_PROBE: &str = "UKAI_TEST_LOCK_PROBE";
+
+fn private_dir(root: &Path, name: &str) -> std::path::PathBuf {
+    let path = root.join(name);
+    std::fs::create_dir_all(&path).expect("a directory");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+        .expect("private permissions");
+    path
+}
+
+#[test]
+fn a_durable_replacement_leaves_the_old_file_when_it_is_abandoned() {
+    let temp = common::private_tempdir();
+    let data = private_dir(temp.path(), "data");
+    let target = data.join("jail.json");
+    state::replace_atomically(&target, b"first").expect("the first write");
+    assert_eq!(std::fs::read(&target).expect("readable"), b"first");
+
+    // Simulate a failure between the sync and the rename.
+    let entries = || -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(&data)
+            .expect("listable")
+            .map(|entry| entry.expect("an entry").path())
+            .collect()
+    };
+    let pending = TempWrite::create_at(state::Site::Unnamed, &target, b"second", &state::RealIo)
+        .expect("a pending write");
+    let during = entries();
+    let pending_path = during
+        .iter()
+        .find(|path| **path != target)
+        .expect("the temporary file is a separate file")
+        .clone();
+    assert_eq!(during.len(), 2, "{during:?}");
+    assert_eq!(
+        std::fs::read(&target).expect("readable"),
+        b"first",
+        "the target is untouched until the rename"
+    );
+    drop(pending);
+    assert_eq!(
+        std::fs::read(&target).expect("readable"),
+        b"first",
+        "an abandoned replacement leaves the old file"
+    );
+    assert!(
+        !pending_path.exists(),
+        "the abandoned temporary file does not accumulate"
+    );
+    assert_eq!(entries(), std::slice::from_ref(&target));
+
+    state::replace_atomically(&target, b"second").expect("the second write");
+    assert_eq!(std::fs::read(&target).expect("readable"), b"second");
+    let mode = std::fs::metadata(&target)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "state files are private");
+}
+
+#[test]
+fn the_lease_is_exclusive_across_processes() {
+    let temp = common::private_tempdir();
+    let data = private_dir(temp.path(), "data");
+    let lock = data.join("jail.lock");
+
+    let probe = || {
+        let output =
+            common::rerun_self("lock_probe_child_helper", &[(LOCK_PROBE, lock.as_os_str())]);
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix("LEASE "))
+            .unwrap_or_else(|| panic!("the helper reported no lease: {output}"))
+            .to_owned()
+    };
+
+    let held = Lease::acquire(&lock)
+        .expect("the lock file opens")
+        .expect("the lease is free");
+    assert_eq!(probe(), "busy", "a second process cannot take a held lease");
+    drop(held);
+    assert_eq!(probe(), "taken", "the lease is released when it is dropped");
+}
+
+/// The child half of [`the_lease_is_exclusive_across_processes`]: reports
+/// whether this second process could take the lease.
+///
+/// Ignored so it never runs in an ordinary pass; the parent runs it by name.
+#[test]
+#[ignore = "child helper invoked by the_lease_is_exclusive_across_processes"]
+fn lock_probe_child_helper() {
+    if !common::running_helper("lock_probe_child_helper") {
+        return;
+    }
+    let path = std::env::var_os(LOCK_PROBE).expect("the parent names the lock");
+    let lease = Lease::acquire(Path::new(&path));
+    let verdict = match &lease {
+        Ok(Some(_)) => "taken",
+        Ok(None) => "busy",
+        Err(error) => panic!("the lock could not be probed: {error}"),
+    };
+    println!("LEASE {verdict}");
+}
+
+#[test]
+fn a_symlinked_state_root_refuses() {
+    let temp = common::private_tempdir();
+    let real = private_dir(temp.path(), "real");
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("a symlink");
+    let error = state::check_state_dir(&link).expect_err("a symlinked root refuses");
+    assert_eq!(error.code, ErrorCode::UnsafeStatePath);
+    assert_eq!(error.exit_code(), 125);
+    // The target itself is fine, so the refusal is about the link, not the mode.
+    state::check_state_dir(&real).expect("the real directory is private");
+}
+
+#[test]
+fn a_group_or_world_accessible_state_root_refuses() {
+    let temp = common::private_tempdir();
+    for mode in [0o755u32, 0o770, 0o701] {
+        let path = temp.path().join(format!("mode{mode:o}"));
+        std::fs::create_dir(&path).expect("a directory");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+            .expect("permissions");
+        let error = state::check_state_dir(&path)
+            .expect_err(&format!("mode {mode:o} is not a private state directory"));
+        assert_eq!(error.code, ErrorCode::UnsafeStatePath);
+        assert_eq!(error.exit_code(), 125);
+    }
+}
+
+#[test]
+fn a_file_where_a_state_directory_belongs_refuses() {
+    let temp = common::private_tempdir();
+    let path = temp.path().join("not-a-directory");
+    std::fs::write(&path, b"x").expect("a file");
+    let error = state::check_state_dir(&path).expect_err("a file is not a state directory");
+    assert_eq!(error.code, ErrorCode::UnsafeStatePath);
+}
+
+#[test]
+fn the_attempt_directory_has_the_layout_of_section_seven() {
+    let temp = common::private_tempdir();
+    let data = private_dir(temp.path(), "data");
+    let id = AttemptId::generate();
+    let dir = AttemptDir::new(&data, &id);
+    dir.create(&data).expect("the attempt root is created");
+
+    assert_eq!(dir.root(), data.join("attempts").join(id.as_str()));
+    for (path, name) in [
+        (dir.lock_path(), "jail.lock"),
+        (dir.state_path(), "jail-state.json"),
+        (dir.policy_path(), "policy.json"),
+        (dir.receipt_path(), "jail.json"),
+        (dir.trace_path(), "trace.ndjson"),
+        (dir.vendor_state_path(), "vendor-state"),
+        (dir.root().join(state::SCRATCH_NAME), "scratch"),
+    ] {
+        assert_eq!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some(name)
+        );
+        assert_eq!(path.parent(), Some(dir.root()));
+    }
+    for path in [&data, &data.join("attempts"), &dir.root().to_path_buf()] {
+        let mode = std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "{} is private", path.display());
+    }
+}
+
+// J4-R: §7's claim is an exclusive publication of a complete file.
+#[test]
+fn j4_r02_an_exclusive_publication_never_replaces_an_existing_file() {
+    let temp = common::private_tempdir();
+    let data = private_dir(temp.path(), "data");
+    let target = data.join("jail-state.json");
+    assert_eq!(
+        state::create_exclusively_at(state::Site::Claim, &target, b"{\"first\":true}").unwrap(),
+        state::Published::Created
+    );
+    assert_eq!(
+        state::create_exclusively_at(state::Site::Claim, &target, b"{\"second\":true}").unwrap(),
+        state::Published::Exists,
+        "a second claim is refused"
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"{\"first\":true}",
+        "the existing claim is untouched"
+    );
+    let leftover: Vec<String> = std::fs::read_dir(&data)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "no temporary file is left: {leftover:?}"
+    );
+}
+
+/// J4 W3, P1 (a), at the persistence worker: work given up on while one of
+/// its writes is in progress starts no further step once that write returns,
+/// even a write the loop would otherwise resume after a short count, and the
+/// job ends (a refusal the write loop retried would spin the worker forever)
+/// with its temporary file removed and the target untouched.
+#[test]
+fn j4_w3_p1a_work_given_up_mid_write_starts_no_further_step() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+    /// How long the worker thread may take to reach the step this test
+    /// waits for.
+    const WORKER_BOUND: Duration = Duration::from_secs(5);
+
+    use ukai_jail::state::{PersistIo, Persister, RealIo, Site};
+
+    /// The first write blocks until released, then writes half its bytes.
+    struct ShortWrite {
+        release: (Mutex<bool>, Condvar),
+        writes: AtomicUsize,
+        removed: AtomicBool,
+    }
+
+    impl PersistIo for ShortWrite {
+        fn write(
+            &self,
+            site: Site,
+            file: &mut std::fs::File,
+            bytes: &[u8],
+        ) -> std::io::Result<usize> {
+            if self.writes.fetch_add(1, Ordering::SeqCst) == 0 {
+                let (lock, wake) = &self.release;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+                return RealIo.write(site, file, &bytes[..bytes.len() / 2]);
+            }
+            RealIo.write(site, file, bytes)
+        }
+        fn remove(&self, site: Site, path: &Path) -> std::io::Result<()> {
+            let result = RealIo.remove(site, path);
+            self.removed.store(true, Ordering::SeqCst);
+            result
+        }
+    }
+
+    let temp = common::private_tempdir();
+    let data = private_dir(temp.path(), "data");
+    let target = data.join("jail.json");
+    state::replace_atomically(&target, b"first").expect("the first write");
+    let seam = Arc::new(ShortWrite {
+        release: (Mutex::new(false), Condvar::new()),
+        writes: AtomicUsize::new(0),
+        removed: AtomicBool::new(false),
+    });
+    let persister =
+        Persister::start_with(seam.clone(), Duration::from_secs(5)).expect("the worker");
+    let job_target = target.clone();
+    let ended = Arc::new(AtomicBool::new(false));
+    let job_ended = Arc::clone(&ended);
+    let pending = persister.submit(move || {
+        let result = state::replace_atomically(&job_target, b"second, and longer");
+        job_ended.store(true, Ordering::SeqCst);
+        result
+    });
+    common::eventually("the job to start writing", WORKER_BOUND, || {
+        seam.writes.load(Ordering::SeqCst) > 0
+    });
+    // The waiter gives up while the write is in the kernel, then it returns.
+    drop(pending);
+    *seam.release.0.lock().unwrap() = true;
+    seam.release.1.notify_all();
+    assert!(
+        common::within(WORKER_BOUND, || ended.load(Ordering::SeqCst)),
+        "the abandoned job never ended ({} writes)",
+        seam.writes.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        seam.writes.load(Ordering::SeqCst),
+        1,
+        "a step started after the job was given up on"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"first");
+    assert!(
+        seam.removed.load(Ordering::SeqCst),
+        "the temporary file was removed"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&data)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    drop(persister);
+}

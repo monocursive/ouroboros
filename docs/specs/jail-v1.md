@@ -1,7 +1,12 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 23, 2026-09-27. No implementation
-or backend conformance is claimed by this document. Revision 23 records the
+Status: implementation specification, revision 24, 2026-10-15. No implementation
+or backend conformance is claimed by this document. Revision 24 renames the
+product from Ouroboros to Ukai: binaries and crates (`ukai-jail`, `ukai-ledger`, `ukai`), environment variables (`UKAI_*`), paths (`/run/ukai`, `~/.config/ukai`, `~/.local/share/ukai`, the protected `.ukai` segment) and record identifiers (`ukai.*`).
+The frozen schemas, the seccomp and closed-set tables and their fixtures were
+re-blessed under the new identifiers (frozen-schemas.toml); evidence recorded
+before the rename keeps the old names, and the milestone-1 freeze records no
+tested run for the renamed tree until the next conformance run (§16). Revision 23 records the
 fourth security audit's fixes (docs/security-audit-2026-09-27.md): the whole
 config directory — whose `config.toml` is a trusted, widening layer read on
 every run — is isolated from child-visible roots on every run and read
@@ -38,7 +43,7 @@ longer silently drop a raced mutation (§11.3), the ptrace-class and
 mount-inspection syscalls join the denied set so the boundary no longer
 leans on `kernel.yama.ptrace_scope` (§9.2), the bridge's report channel is a
 `SOCK_SEQPACKET` pair a same-uid peer cannot reopen (§10), `deny_read` masks
-over `/run/ouro` are refused and every mask is sealed read-only (§9.1), gc
+over `/run/ukai` are refused and every mask is sealed read-only (§9.1), gc
 cleans vendor state of attempts whose owner died before any leaf was
 registered and before any receipt was written (§14.2), a coverage level that was never requested is recorded as
 `none` (§13.2), receipts carry no credential digest (§12), and the narrowing
@@ -52,7 +57,7 @@ milestone proof: the D8 decision (the native bubblewrap adapter and the ptrace
 observer; `srt` and Greywall disqualified by named failures; eBPF withdrawn
 from v1), the performance budgets' definitions and their adjustment, the
 portable requirement `execution_boundary`, `doctor --json` as the host
-manifest (`ouro.jail.doctor/1`), build provenance and the architecture refusal,
+manifest (`ukai.jail.doctor/1`), build provenance and the architecture refusal,
 which bubblewrap runs, the frozen wire schemas and milestone-1 inputs, the
 error codes `exec_interpreter_missing` and `exec_unconfirmed`, the
 preparation and gate budgets on the boot clock and the preparation budget's
@@ -123,7 +128,7 @@ without BEAM, a ledger daemon, a fleet, an agent SDK, or provider credentials.
 
 The complete milestone ships:
 
-- `ouro-jail run`, `explain`, `doctor`, `gc`, and `version`.
+- `ukai-jail run`, `explain`, `doctor`, `gc`, and `version`.
 - `agent`, `tool`, `build`, and explicit `none` profiles; operator policy files;
   narrowing-only project configuration; declarative launch profiles.
 - Linux filesystem, network and syscall enforcement; standalone supervision,
@@ -156,7 +161,7 @@ in §5, not a declaration that milestone 1 is complete.
 
 ## 2. Authority, threat model and invariants
 
-The operator, host kernel, installed Ouroboros binary and pinned backend are
+The operator, host kernel, installed Ukai binary and pinned backend are
 trusted. The child, its descendants, its workspace and project configuration
 are untrusted. A malicious administrator, compromised kernel, or another
 uncontained process with the operator's authority is outside the containment
@@ -249,7 +254,7 @@ that cannot create user namespaces, delegate a cgroup v2 subtree with the
 pids, memory and cpu controllers, or permit the observer's attachment is
 ineligible, whatever the provider calls it. `doctor --json` on that host
 produces the host manifest, which every conformance run records: the record
-`ouro.jail.doctor/1` ([schema](jail-v1/jail-doctor.schema.json)). On Linux its
+`ukai.jail.doctor/1` ([schema](jail-v1/jail-doctor.schema.json)). On Linux its
 `host` object carries the kernel release and build, the distribution, the
 virtualization, online CPUs, memory and swap, the systemd version, the sysctls
 `kernel.apparmor_restrict_unprivileged_userns`,
@@ -301,7 +306,7 @@ it; with none, the probes that would execute it are `unavailable`
  behind an empty diagnostic.
 
 Conformance runs on the host as a dedicated operator account,
-`ouro-ci`: no sudo, no capability, lingering enabled (a per-user logind
+`ukai-ci`: no sudo, no capability, lingering enabled (a per-user logind
 setting, §9.3) so its `user@` service delegates the cgroup controllers, and
 nothing else (§16). A VM is acceptable; a container that cannot delegate the required
 kernel features is not a substitute for the release runner.
@@ -380,18 +385,18 @@ creates it are fixed here so milestone 2 does not reopen them.
 Cargo.toml  Cargo.lock  rust-toolchain.toml  .cargo/config.toml  deny.toml
 LICENSE  .gitignore  README.md  north-star.md
 crates/
-  ouro-jail/          J1   library + the `ouro-jail` binary (this specification)
+  ukai-jail/          J1   library + the `ukai-jail` binary (this specification)
     src/{lib,main,cli,config,policy,profiles,capability,supervisor,observer,
          network,records,trace,state,cleanup}.rs
     src/platform/{mod.rs,linux/,macos/}
     build.rs          records the compiler, target, optimisation and build inputs for version/doctor
     profiles/launch/  codex.toml, claude.toml, opencode.toml: data only
     tests/            integration and conformance tests; tests/fixtures/
-  ouro-fixture/       J1   the conformance child binary (§15) and harness helpers
+  ukai-fixture/       J1   the conformance child binary (§15) and harness helpers
   xtask/              J1   repository tasks: I02 scan, conformance driver and acceptance verdict, freeze, perf
-  ouro-records/       M2   wire types, canonical bytes, schema identifiers
-  ouro-ledger/        M2   library + the `ouro-ledger` binary
-  ouro/               D6   the front door; `ouro managed` verbs join it at M4
+  ukai-records/       M2   wire types, canonical bytes, schema identifiers
+  ukai-ledger/        M2   library + the `ukai-ledger` binary
+  ukai/               D6   the front door; `ukai managed` verbs join it at M4
 fleet/                M3   standalone Mix project; no NIF; its own BEAM release (D6)
 docs/specs/           now  <name>.md beside <name>/ with schemas, fixtures, validators
 docs/specs/jail-v1/evidence/   host manifests, raw fixture output, performance reports
@@ -400,26 +405,26 @@ docs/proposals/       ad hoc  proposals for the north star's unscheduled items
 packaging/            D6   reserved; empty until after milestone 3
 ```
 
-- Start with one jail crate, library plus binary. `ouro-records` is carved
-  out of `ouro-jail` when `ouro-ledger` becomes its second consumer, not
-  before. `ouro` is created with D6 packaging, or earlier only if the managed
-  client needs a binary first. Managed composition code lives in `ouro` and
-  `ouro-ledger`; no `ouro-managed` crate exists until a second consumer does.
-- `ouro-fixture` is the compiled child §15 requires. Tests locate it through
+- Start with one jail crate, library plus binary. `ukai-records` is carved
+  out of `ukai-jail` when `ukai-ledger` becomes its second consumer, not
+  before. `ukai` is created with D6 packaging, or earlier only if the managed
+  client needs a binary first. Managed composition code lives in `ukai` and
+  `ukai-ledger`; no `ukai-managed` crate exists until a second consumer does.
+- `ukai-fixture` is the compiled child §15 requires. Tests locate it through
   Cargo's built-binary environment variable. It is never packaged, and it is
   exempt from I02 together with `profiles/launch/`, documentation and fixtures.
 - There is no BPF object crate: D8 selected the ptrace observer, which is
-  compiled into `ouro-jail`, and v1 withdraws eBPF (§5.2).
+  compiled into `ukai-jail`, and v1 withdraws eBPF (§5.2).
 - Schemas are single-sourced under `docs/specs/`. Rust tests read them by a
   path relative to the crate manifest, and the schema identifiers that
-  `ouro version --json` announces are constants tested against those files.
+  `ukai version --json` announces are constants tested against those files.
 - `fleet/` is outside Cargo. Nothing under `crates/` depends on it, which
   keeps I01 literally true; its own gates (north star §10) run only when it
   changes.
-- Every crate sets `publish = false`. Binaries are named exactly `ouro`,
-  `ouro-jail` and `ouro-ledger` (D6).
+- Every crate sets `publish = false`. Binaries are named exactly `ukai`,
+  `ukai-jail` and `ukai-ledger` (D6).
 - `xtask` owns checks that are not unit tests: the I02 vendor-name scan over
-  `crates/ouro-jail/src` and `crates/ouro-ledger/src`, the conformance driver
+  `crates/ukai-jail/src` and `crates/ukai-ledger/src`, the conformance driver
   and its per-gate verdict over [acceptance-map.toml](jail-v1/acceptance-map.toml)
   (`gates`, `gates-merge`), the milestone freeze file (`freeze`, §16) and the
   performance harness (`perf`, §5.2). The link check is
@@ -475,7 +480,7 @@ Evaluate pinned revisions of [sandbox-runtime](https://github.com/anthropics/san
 [Greywall](https://github.com/GreyhavenHQ/greywall), and the legacy sandbox
 implementation at commit `f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82`.
 The first two already wrap OS sandbox mechanisms; their integration remains
-subject to Ouroboros's own policy and lifecycle tests. Record exact commits,
+subject to Ukai's own policy and lifecycle tests. Record exact commits,
 licenses, binary/package hashes, transitive executables and runtime dependencies.
 
 For each candidate, record pass/fail/unsupported with fixture evidence for:
@@ -535,7 +540,7 @@ mediator the supervisor owns (§11.4).
 eBPF is withdrawn from the v1 contract. Attaching it needs `CAP_BPF`,
 `CAP_PERFMON` and tracefs access provisioned on the host, which the
 no-host-configuration requirement (§3.2) rules out: unprovisioned, as
-`ouro-ci`, attachment was refused
+`ukai-ci`, attachment was refused
 ([ptrace probe §1](jail-v1/evidence/ptrace-probe-2026-09-22-ouro-ci.txt)). The
 revision-15 working assumption of two observer backends (ptrace everywhere,
 eBPF where provisioned) is withdrawn with it, and so are the file-capability
@@ -685,18 +690,18 @@ jail's own overhead):
 ### 6.1 Commands
 
 ```text
-ouro-jail run [--profile agent|tool|build|none|FILE] [--launch NAME]
+ukai-jail run [--profile agent|tool|build|none|FILE] [--launch NAME]
   [--workspace PATH] [--scratch PATH] [--rw PATH]... [--ro PATH]...
   [--deny-read PATH]... [--allow-host HOST[:PORT]]... [--limit KEY=VALUE]...
   [--observe on|off] [--evidence strict|best-effort]
   [--receipt PATH] [--trace-fd N] [--control-fd N] [--gate-fd N]
   [--attempt-id ID]
   [--label-only] -- PROGRAM [ARG]...
-ouro-jail explain [policy selection and override flags] [--json]
-ouro-jail doctor [--profile NAME|FILE] [--launch NAME]
+ukai-jail explain [policy selection and override flags] [--json]
+ukai-jail doctor [--profile NAME|FILE] [--launch NAME]
   [--workspace PATH] [--scratch PATH] [--json]
-ouro-jail gc [--dry-run] [--json]
-ouro-jail version [--json]
+ukai-jail gc [--dry-run] [--json]
+ukai-jail version [--json]
 ```
 
 `PROGRAM` is mandatory except with `--label-only`. Execution accepts literal
@@ -759,7 +764,7 @@ stdio, not those channels. Fd validation fails before preparation.
 closed set (`observation.closed_set`: `linux-closed-v1` on a Linux build whose
 architecture the syscall tables cover, §3.2, otherwise null, as on macOS in
 this milestone) and a `build` object. `build` carries `revision` and `dirty`,
-the build environment's claims (`OURO_BUILD_REVISION`, `OURO_BUILD_DIRTY`),
+the build environment's claims (`UKAI_BUILD_REVISION`, `UKAI_BUILD_DIRTY`),
 validated: a revision is a full, non-zero 40-hex commit, `dirty` requires a
 revision, a malformed or contradictory pair fails the build, where the
 repository is present a claim that disagrees with it fails the build, and a
@@ -776,8 +781,8 @@ diagnostics: their shape can change without a new identifier.
 
 ### 6.2 Paths and precedence
 
-On both Unix platforms, configuration defaults to `~/.config/ouro/config.toml`
-and runtime state to `~/.local/share/ouro`. `OURO_CONFIG_DIR` and `OURO_DATA_DIR`
+On both Unix platforms, configuration defaults to `~/.config/ukai/config.toml`
+and runtime state to `~/.local/share/ukai`. `UKAI_CONFIG_DIR` and `UKAI_DATA_DIR`
 override these locations. Runtime state must be a private local directory owned
 by the operator and outside every child-visible grant. Files are mode 0600,
 directories 0700. Reject symlinked state roots, foreign ownership, unsafe parent
@@ -799,12 +804,12 @@ Apply configuration in this order:
 1. Built-in profile and operator config/selected operator profile.
 2. Operator launch profile, if any.
 3. Operator environment settings from a fixed documented allow-list:
-   `OURO_CONFIG_DIR`, `OURO_DATA_DIR`, `OURO_JAIL_OBSERVE`,
-   `OURO_JAIL_EVIDENCE` and `OURO_JAIL_TRACE_CAP` (the local trace budget
+   `UKAI_CONFIG_DIR`, `UKAI_DATA_DIR`, `UKAI_JAIL_OBSERVE`,
+   `UKAI_JAIL_EVIDENCE` and `UKAI_JAIL_TRACE_CAP` (the local trace budget
    in bytes, 4 KiB to 1 GiB; raising it can only preserve more evidence, and
    a sink under it names the override in every loss it records). No
    environment-derived path or host grants.
-   Every `OURO_JAIL_TEST_*` variable is a test-only knob: it can only shrink
+   Every `UKAI_JAIL_TEST_*` variable is a test-only knob: it can only shrink
    a bound, end an attempt early, make the product take a path it takes on
    other hosts or under a real loss, or hold one named point for a bounded
    time; it never widens authority and leaves the policy digest
@@ -815,53 +820,53 @@ Apply configuration in this order:
    the one `getenv` returns and every consumer applies), in `jail-state.json` `test_seams` and in
    `lifetime.native.details.test_seams` of every receipt that has native
    details (a refusal before a boundary exists has none, so there only jail
-   state records them). The knobs: `OURO_JAIL_TEST_MEDIATION_QUEUE` (the
-   unix-peer mediation record queue, 1 to 4096), `OURO_JAIL_TEST_TRACE_CAP`
+   state records them). The knobs: `UKAI_JAIL_TEST_MEDIATION_QUEUE` (the
+   unix-peer mediation record queue, 1 to 4096), `UKAI_JAIL_TEST_TRACE_CAP`
    (the local trace cap, 4096 bytes to 64 MiB, half of it at most 256 KiB
-   reserve, and named in every loss it causes), `OURO_JAIL_TEST_ABORT_AT`
+   reserve, and named in every loss it causes), `UKAI_JAIL_TEST_ABORT_AT`
    (`<site>:<point>[:<n>]` aborts at one named point, `temp_written`,
    `temp_synced`, `renamed` or `dir_synced`, of the `n`th write, 1 to 10,000
    and the first when omitted, at one persistence site),
-   `OURO_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
+   `UKAI_JAIL_TEST_GC_MAX_ENTRIES` (gc's per-invocation
    entry bound, reported in gc's `test_seams`), and
-   `OURO_JAIL_TEST_TRACER_INFLIGHT` (1 to 16,384) and
-   `OURO_JAIL_TEST_TRACER_QUEUE_BYTES` (1 to 4,194,304; the bound in force,
+   `UKAI_JAIL_TEST_TRACER_INFLIGHT` (1 to 16,384) and
+   `UKAI_JAIL_TEST_TRACER_QUEUE_BYTES` (1 to 4,194,304; the bound in force,
    recorded as `observer_plan.queue_bytes_max`, is at least 256 bytes), which
    are ignored
    unless the value is decimal digits in range and are also named in the
    receipt's `observer_plan.test_seams` with the value applied, or null when
-   ignored. `OURO_JAIL_TEST_SUPERVISOR_SCOPE` takes §9.3's outside-a-scope
+   ignored. `UKAI_JAIL_TEST_SUPERVISOR_SCOPE` takes §9.3's outside-a-scope
    branch of the supervisor scope step even inside the delegated subtree
    (`assume-outside`), with `busctl` treated as absent
    (`assume-outside-no-busctl`), with an unreachable bus
    (`assume-outside-no-bus`) or with lingering treated as off
    (`assume-outside-no-linger`); any other value is ignored; it is named in
    `supervisor_scope.test_seam`, with the value applied or null when
-   ignored. `OURO_JAIL_TEST_ARCH` makes the probes that rest on native
+   ignored. `UKAI_JAIL_TEST_ARCH` makes the probes that rest on native
    syscall tables refuse as a build for the named architecture would (§3.2);
    it can only add a refusal, and the refusal's evidence names it.
-   `OURO_JAIL_TEST_MOUNT_SWAP=<dir>` writes `<dir>/pinned` once every mount
+   `UKAI_JAIL_TEST_MOUNT_SWAP=<dir>` writes `<dir>/pinned` once every mount
    source is pinned and then waits, at most 10 seconds, for `<dir>/go` before
    §9.1's handoff verification, so a test can replace a pinned source; a value
    that is not a usable directory does nothing.
-   `OURO_JAIL_TEST_TRACER_TRUNCATE_PATH=<substring>` makes a covered non-exec
+   `UKAI_JAIL_TEST_TRACER_TRUNCATE_PATH=<substring>` makes a covered non-exec
    call whose path contains the substring report a path the observer could not
    read, so a successful one is a `path_unreadable` gap, and
-   `OURO_JAIL_TEST_TRACER_UNMATCHED_EXIT=<substring>` follows such a call's
+   `UKAI_JAIL_TEST_TRACER_UNMATCHED_EXIT=<substring>` follows such a call's
    entry without recording it, so its exit is an `unmatched_exit` gap; each
    manufactures only a gap the observer records for the real loss.
-   `OURO_JAIL_TEST_TRACE_FD_WRITE_MAX=<bytes>` makes the external
+   `UKAI_JAIL_TEST_TRACE_FD_WRITE_MAX=<bytes>` makes the external
    `--trace-fd` sink put at most that many bytes into each write, so a frame
    longer than it reaches the consumer in several partial writes, each
    resumed at its offset (§13.3); a value that is not decimal digits without
    a leading zero, from 1 to the event bound, is ignored.
 4. Explicit CLI grants and limits.
-5. The workspace-root `ouro.toml`, which can only narrow that resolved authority.
+5. The workspace-root `ukai.toml`, which can only narrow that resolved authority.
 
 Steps 1–4 are trusted operator inputs, not developer-submission authority. A
 managed owner must resolve company/project/attempt ceilings first, then supply
 the resulting grants through private operator configuration. It must not forward
-submitter `OURO_*`, CLI override flags, arbitrary host paths or credential source
+submitter `UKAI_*`, CLI override flags, arbitrary host paths or credential source
 paths into those layers. The jail does not load organization identity policy.
 
 Reject unknown keys and duplicate keys; do not silently ignore future policy
@@ -874,7 +879,7 @@ profile. Built-ins and operator files are separate from project data.
 `config.toml` stores jail defaults under `[jail]` and subordinate tables such
 as `[jail.limits]`; it may contain `jail.profile = "tool"` or an operator
 profile file path. The remaining jail keys are the policy keys below, without
-`extends`; `jail.schema` is `ouro.jail.policy/1`. A project `ouro.toml` uses the
+`extends`; `jail.schema` is `ukai.jail.policy/1`. A project `ukai.toml` uses the
 same `[jail]` shape but forbids `profile` and `extends`. Selected operator profile
 files use the top-level shape below. Launch files are
 `<config-dir>/launch/<name>.toml`; names match `[a-z][a-z0-9_-]{0,63}` and never
@@ -893,7 +898,7 @@ beside, and a `read_only` entry that lies outside every granted root is a
 widening, which refuses:
 
 ```toml
-schema = "ouro.jail.policy/1"
+schema = "ukai.jail.policy/1"
 extends = "tool"
 
 [filesystem]
@@ -930,7 +935,7 @@ command fragments and arbitrary environment entries are not policy keys.
 | Change proxy network to none, or shrink its allowed host set | Allow |
 | Enable observation or change best-effort to strict | Allow |
 | Add a host/path grant, remove a limit, weaken coverage/evidence, or raise a
-  ceiling in the untrusted project `ouro.toml` | Refuse with the exact key path |
+  ceiling in the untrusted project `ukai.toml` | Refuse with the exact key path |
 | Add credentials, a launch profile or `none` | Refuse |
 
 No v1 layer has an executable or backend key (the file keys above, §12), so no
@@ -1159,10 +1164,10 @@ Register resource ownership before populating credentials
 or launching helpers. The execution cgroup is registered in jail state by name
 before it is created (P15) and by device and inode right after, before anything
 is placed in it (P16); a failed registration refuses. The leaf is named
-`ouro-<attempt id>.leaf` after its attempt root, directly under the delegated
+`ukai-<attempt id>.leaf` after its attempt root, directly under the delegated
 subtree, and created exclusively; the name is the attempt association §9.3
 registers. A leaf that belongs to no attempt (a `doctor` probe's) is named
-`ouro-probe-<token>.leaf`. State updates use create-new temporary file, write,
+`ukai-probe-<token>.leaf`. State updates use create-new temporary file, write,
 file sync, atomic rename, and parent-directory sync. A successful rename alone
 is not a durable acknowledgment. Platform code defines and tests its sync
 guarantee. A failed write removes its temporary file; a crash can leave one
@@ -1255,7 +1260,7 @@ The inherited gate is a private pipe readable only by the supervisor. Its sole
 valid release is one UTF-8 NDJSON frame, followed by writer close:
 
 ```json
-{"schema":"ouro.jail.gate/1","action":"release","attempt_id":"att_00000000-0000-4000-8000-000000000001","policy_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"schema":"ukai.jail.gate/1","action":"release","attempt_id":"att_00000000-0000-4000-8000-000000000001","policy_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 ```
 
 Maximum frame: 1,024 bytes. Read through EOF before releasing, so an extra frame
@@ -1285,7 +1290,7 @@ race. Contained runs must have a tested death chain from owner to supervisor to
 namespace init. In `none`, owner/supervisor loss preserves the accepted unknown
 lifetime limit; there is no new watchdog.
 
-Control output uses NDJSON, with schema `ouro.jail.control/1`, attempt id,
+Control output uses NDJSON, with schema `ukai.jail.control/1`, attempt id,
 monotonically increasing message number starting at 1, and kind `prepared`, `exec_confirmed`,
 `refused`, `settled`, or `unsettled`. `refused` is sent only while the target
 has not executed: before release, or when the released target's `exec` fails,
@@ -1303,7 +1308,7 @@ interactive approval protocol.
 
 Foreground stdio is inherited without capture or parsing. The supervisor must
 not retain writable copies that postpone EOF: once the attempt is prepared and
-every child that needs stdout has it, the `ouro-jail` binary points its own
+every child that needs stdout has it, the `ukai-jail` binary points its own
 stdout at `/dev/null`, so under `none` the caller sees end-of-file on stdout
 when the target closes it, as in direct execution (a program that runs the
 library in-process keeps its stdout). Named limits: the supervisor keeps
@@ -1424,7 +1429,7 @@ backend cannot bind a validated object without a relevant race, that is a
 failing D8 gate. After launch, replacement/rename of host objects is outside
 the stable-path claim; the kernel's mounted objects remain the applied grant.
 
-For `tool`, enumerate existing `.git` and `.ouroboros` path segments beneath
+For `tool`, enumerate existing `.git` and `.ukai` path segments beneath
 each writable root without following symlinks out of it. Initial scan limits:
 100,000 directory entries and depth 128. Reaching a bound refuses instead of
 claiming complete `existing_and_root` coverage. Root-level protected literals
@@ -1473,7 +1478,7 @@ a moved-aside repository's replacement included; and bare repositories. Each
 nested repository costs two mount-table rows, so the 1024-row receipt bound
 refuses a workspace of more than about 500 of them.
 
-Vendor state is bound read-write at `/run/ouro/state`, and each `bind_ro`
+Vendor state is bound read-write at `/run/ukai/state`, and each `bind_ro`
 credential view read-only at its destination beneath it, after every operator
 grant; the attempt directory above it is never visible. Vendor state and
 scratch are attempt-private and removed at settlement, so the root-level
@@ -1599,7 +1604,7 @@ On Linux, `run` and `doctor` first make sure the supervisor itself is inside
 the operator-delegated subtree. Before any thread or other resource exists, a
 supervisor whose `/proc/self/cgroup` lies outside `user@<uid>.service` asks
 the systemd user manager for a transient scope containing its own pid
-(`StartTransientUnit` of `ouro-jail-<pid>-<random>.scope` with `PIDs` and
+(`StartTransientUnit` of `ukai-jail-<pid>-<random>.scope` with `PIDs` and
 `CollectMode=inactive-or-failed`, through `busctl` at `/usr/bin/busctl` or
 `/bin/busctl`, run as a child with only the bus variables in its environment,
 no inherited descriptor and a parent-death signal). The supervisor is never
@@ -1739,9 +1744,9 @@ and prefix grants are the operator's controls.
 The host socket is `<data>/attempts/<id>/proxy/proxy.sock`, under an
 operator-owned 0700 directory registered before creation, outside all shared
 workspace/scratch/vendor roots. Expose only its dedicated directory at
-`/run/ouro/proxy`, read-only to the child; retain pinned directory/socket
+`/run/ukai/proxy`, read-only to the child; retain pinned directory/socket
 identity. The bridge listens only on `127.0.0.1:3128` and connects to
-`/run/ouro/proxy/proxy.sock`. Its namespace and path resolution must not be
+`/run/ukai/proxy/proxy.sock`. Its namespace and path resolution must not be
 redirectable by child rename, unlink, symlink or mount changes. Test replacement
 before and after the first connection and in a nested namespace. Child-local
 overmounts must not alter the trusted bridge's view. Refuse on identity mismatch;
@@ -2340,7 +2345,7 @@ placement, absent `header`, is the complete `Authorization` value). The
 secret still never leaves for a host outside its `hosts`. `environment`
 accepts only named string values or managed-state
 path references, never commands. Reject every `LD_*` and `DYLD_*` name,
-backend-control names and variables carrying Ouroboros credentials.
+backend-control names and variables carrying Ukai credentials.
 Any runtime-library need belongs in an explicit evaluated launch configuration,
 not a general loader-injection escape hatch. Credential destinations must be
 relative paths beneath vendor state, with no `..`, absolute path or symlink
@@ -2386,8 +2391,8 @@ parent unavailable to the contained child. Generated HOME/state paths and
 proxy variables are recorded by name only. The contained environment starts
 empty and admits PATH, LANG, TERM, TZ, required generated paths and the explicit
 launch environment. Unlisted SSH/cloud/provider environment credentials are
-absent. `none` inherits the host environment except reserved Ouroboros state,
-socket and token names (every `OURO_*` name); the receipt lists the inherited
+absent. `none` inherits the host environment except reserved Ukai state,
+socket and token names (every `UKAI_*` name); the receipt lists the inherited
 and the removed names, never values, so an environment whose names a receipt
 cannot hold is refused before the claim (§6.1). This is hygiene and does not
 protect uncontained state. A launch
@@ -2423,23 +2428,23 @@ validated and recorded by the managed owner and registered service integration.
 
 The wire schemas are frozen at milestone 1:
 
-- [Event envelope](jail-v1/event.schema.json) (`ouro.event/1`).
+- [Event envelope](jail-v1/event.schema.json) (`ukai.event/1`).
 - [Jail producer restriction](jail-v1/jail-event.schema.json) (its events are
-  `ouro.event/1` events).
-- [Jail receipt](jail-v1/jail-receipt.schema.json) (`ouro.jail.receipt/1`).
+  `ukai.event/1` events).
+- [Jail receipt](jail-v1/jail-receipt.schema.json) (`ukai.jail.receipt/1`).
 - [Canonical policy snapshot](jail-v1/policy-snapshot.schema.json)
-  (`ouro.jail.policy-snapshot/1`) and
+  (`ukai.jail.policy-snapshot/1`) and
   [canonical byte rules](jail-v1/canonicalization.md).
-- [Gate release frame](jail-v1/jail-gate.schema.json) (`ouro.jail.gate/1`) and
-  [control message](jail-v1/jail-control.schema.json) (`ouro.jail.control/1`),
+- [Gate release frame](jail-v1/jail-gate.schema.json) (`ukai.jail.gate/1`) and
+  [control message](jail-v1/jail-control.schema.json) (`ukai.jail.control/1`),
   §8.2.
-- [Doctor report](jail-v1/jail-doctor.schema.json) (`ouro.jail.doctor/1`),
+- [Doctor report](jail-v1/jail-doctor.schema.json) (`ukai.jail.doctor/1`),
   §§3.2, 14.1.
 
 [frozen-schemas.toml](jail-v1/frozen-schemas.toml) pins each file by SHA-256,
 and `version --json` announces `"frozen": true`. The freeze covers every
 identifier `version` announces: the schemas above by their files, and
-`ouro.jail.policy/1`, `ouro.jail.policy-file/1` and `ouro.jail.network/1` by
+`ukai.jail.policy/1`, `ukai.jail.policy-file/1` and `ukai.jail.network/1` by
 the artifacts that define them (canonicalization.md and its golden fixtures,
 network-rules.md, network-addresses.json and the address fixtures), with the
 gate frame corpus and the semantic corpus (and the instances it changes) for
@@ -2459,7 +2464,7 @@ historical. `16336791` re-blessed `jail-receipt` and
 new snapshot fields and new receipt limit-row kinds — as additive fields. No two schema files may declare one `$id`. After
 freeze, a breaking semantic change needs a new schema identifier. Additive
 platform details cannot change a shared field's meaning. `explain --json`,
-`gc --json` and the private `jail-state.json` (`ouro.jail.state/1`) are not
+`gc --json` and the private `jail-state.json` (`ukai.jail.state/1`) are not
 wire records and are not frozen (§6.1).
 
 Synthetic examples: one per event kind (`examples/event-*.json`, for example
@@ -2489,7 +2494,7 @@ cannot state (canonical native strings, unique ids and keys, gap interval
 order, and across a stream: one attempt, `source_seq` from 1 per source with no
 hole the stream does not record as a loss, receipt notes in lifecycle order, a
 complete trace ending on the final receipt's note, control messages in order)
-are `ouro_jail::records::semantic`, ported in `validate_contract.py` and
+are `ukai_jail::records::semantic`, ported in `validate_contract.py` and
 pinned by the shared semantic corpus. Every live test that reads a receipt,
 trace or control transcript runs both. The line citations in the frozen
 schemas' `$comment`s and in the semantic rules name lines of revision 18 of
@@ -2543,7 +2548,7 @@ loss of lifetime integrity: `integrity`, `subject`, `reason`) and `helper`
 notes (an `agent` helper's end: `helper`, `transition`); the frozen producer
 schema pins the shapes of the first two only.
 
-The shared envelope `ouro.event/1` carries only source semantics that hold on
+The shared envelope `ukai.event/1` carries only source semantics that hold on
 every platform: an audit result states `ok`, return value, errno and a
 syscall-side completion; an exec transition is `proc.exec`'s success and a
 process exit is `proc.exit`'s; a syscall success has no errno and a failure
@@ -2788,7 +2793,7 @@ architecture, binary hashes/versions, operator identity category, relevant
 permissions and each result with safe remediation guidance. Aggregate result
 is ready only for the selected requirements; execution unsupported is a
 normal structured result on macOS, with nonzero readiness exit status.
-`doctor --json` is the host manifest `ouro.jail.doctor/1` (§3.2). The binary
+`doctor --json` is the host manifest `ukai.jail.doctor/1` (§3.2). The binary
 hashes are this binary's running image and the bubblewrap a run would execute.
 
 The operator identity category is, first match: `unknown` (credentials
@@ -2797,7 +2802,7 @@ capabilities are namespace-local), `root` (effective uid 0), `set_id` (real,
 effective and saved uids or gids differ, including a saved set-uid 0),
 `capable` (permitted, effective or ambient capabilities), `privileged_group`
 (a member of root, sudo, admin, wheel, docker, lxd, incus-admin, libvirt or
-disk), else `unprivileged`. The reference host's `ouro-ci` is `unprivileged`.
+disk), else `unprivileged`. The reference host's `ukai-ci` is `unprivileged`.
 
 Required Linux probes:
 
@@ -2880,7 +2885,7 @@ cgroup. In the same boot, a populated, positively identified orphan execution
 cgroup may be killed by this explicit GC invocation, as permitted by the north
 star. Positive identification: the registration names a direct child of the
 operator's delegated subtree with this attempt's execution-leaf name
-(`ouro-<attempt id>.leaf`), on cgroup v2, with the recorded device and inode,
+(`ukai-<attempt id>.leaf`), on cgroup v2, with the recorded device and inode,
 and every control file is opened relative to that pinned directory; a
 registration naming another attempt's leaf or no execution leaf, by identity or
 by name only, is retained, reported and never probed. A leaf is killed only
@@ -3021,7 +3026,7 @@ fleet scaffolding is needed to complete these steps.
 | J2: authority | Complete mounts/protected paths, filter families, native ABI checks, limits, gate faults and doctor probes. | F01–F04, S01–S02, S04, X02–X06, L01–L05 pass on the named Linux lane. |
 | J3: agent execution | Proxy, agent profile with unprivileged nesting, data-only launch profiles, credential modes/cleanup and explicit none, all on a stock host. | S03, N01–N05, C01–C02 and R05–R06 pass. Profiles remain experimental. |
 | J4: evidence/recovery | Complete closed set, loss handling, bounded trace, atomic records and GC. | O01–O06, R01–R06 and C03 pass, including failure injection. |
-| J5: milestone proof | Full independent suite, performance report, platform compilation, docs and schema freeze. | All noncredential gates pass, as computed from the suite's own output: the conformance driver evaluates [acceptance-map.toml](jail-v1/acceptance-map.toml) (`ouro.jail.acceptance-map/1`: every §15 row split into its clauses, each with the tests or driver checks that assert it and how) over the run's `test.log`, and the macOS leg evaluates the map's macOS clauses over its own log; a clause the stock reference host cannot produce is recorded by name (`recorded-limit`), never mapped to a weaker test. A01 is either recorded or explicitly skipped; no Linux mechanism leaks into portable requirements; `cargo xtask freeze --check` passes. The milestone report is [J5 authority](jail-v1/j5-authority.md). |
+| J5: milestone proof | Full independent suite, performance report, platform compilation, docs and schema freeze. | All noncredential gates pass, as computed from the suite's own output: the conformance driver evaluates [acceptance-map.toml](jail-v1/acceptance-map.toml) (`ukai.jail.acceptance-map/1`: every §15 row split into its clauses, each with the tests or driver checks that assert it and how) over the run's `test.log`, and the macOS leg evaluates the map's macOS clauses over its own log; a clause the stock reference host cannot produce is recorded by name (`recorded-limit`), never mapped to a weaker test. A01 is either recorded or explicitly skipped; no Linux mechanism leaks into portable requirements; `cargo xtask freeze --check` passes. The milestone report is [J5 authority](jail-v1/j5-authority.md). |
 
 J0 is the next change to this tree and begins on the reference host. It can
 use disposable spike code and fixtures. J1 must keep observations on in
@@ -3052,7 +3057,7 @@ evidence (`gates.txt`, `gates.json`). `rust` also compiles
 without pretending they exercised a privileged kernel feature.
 
 The conformance runner model: a GitHub-hosted runner drives the reference host
-over SSH as the `ouro-ci` account, with a repository secret for the key and
+over SSH as the `ukai-ci` account, with a repository secret for the key and
 repository variables for the address, the account and the pinned host key. No
 runner agent is installed on the host, nothing on the host polls GitHub, and
 the same driver runs from a developer machine. The job triggers on pushes to
@@ -3077,8 +3082,8 @@ invocation each contained profile's plan renders to, each bundled launch
 profile's state, credentials (source, destination, mode), `[environment]` and
 `network.allow`, every crate manifest's profiles, dependency selections and
 features, the frozen schemas, and the tested run (clean revision, `rustc`,
-target, the `ouro-jail` and bubblewrap hashes, the bubblewrap version, and the
-host). The observer is compiled into `ouro-jail`, so its build provenance is
+target, the `ukai-jail` and bubblewrap hashes, the bubblewrap version, and the
+host). The observer is compiled into `ukai-jail`, so its build provenance is
 that binary's. The tested run is recorded only for a ready, optimised x86_64
 Linux run of a clean revision built from exactly the frozen tree; with the
 repository present, the revision must be an ancestor of `HEAD`, its own build
@@ -3088,8 +3093,8 @@ file, whose fix is the conformance rerun and then a regenerated file;
 `cargo xtask freeze --check` is the milestone gate, and fails unless the file
 is exactly the tree's and records such a run.
 
-The future `ouro` executable can call the jail library in-process for dispatch;
-`ouro-jail` remains independently usable. Elixir fleet and Rust ledger integrate
+The future `ukai` executable can call the jail library in-process for dispatch;
+`ukai-jail` remains independently usable. Elixir fleet and Rust ledger integrate
 only after this CLI, gate, event and receipt contract is proved. No release
 installer or old-runtime migration is needed to claim the jail milestone.
 
@@ -3107,7 +3112,7 @@ installer or old-runtime migration is needed to claim the jail milestone.
 | §§4.2–4.7 policy, mounts, nesting, network | §§6, 9–10, 12; P/F/S/N tests |
 | §§4.8–4.10 evidence, limits and acceptance | §§9.3, 11, 13–16; O/L/R tests |
 | §7.1 future composition | §8.2; gated fixture owner without a ledger |
-| §16 freeze list | [milestone-1-freeze.toml](jail-v1/milestone-1-freeze.toml), `portable_freeze.rs`, `cargo xtask freeze --check`; `doctor --json` (`ouro.jail.doctor/1`); [frozen-schemas.toml](jail-v1/frozen-schemas.toml) |
+| §16 freeze list | [milestone-1-freeze.toml](jail-v1/milestone-1-freeze.toml), `portable_freeze.rs`, `cargo xtask freeze --check`; `doctor --json` (`ukai.jail.doctor/1`); [frozen-schemas.toml](jail-v1/frozen-schemas.toml) |
 
 Before J0 closes: select exact enforcement/observer integrations, privilege
 provisioning and initial Linux host manifest from measured results (recorded
@@ -3128,7 +3133,7 @@ engine is implied.
 ## 18. Source references and evidence status
 
 Reviewed 2026-09-21. Primary documentation informs mechanism constraints;
-none of these links establishes Ouroboros integration conformance.
+none of these links establishes Ukai integration conformance.
 
 - [North star](../../north-star.md): scope and accepted limits.
 - [bubblewrap](https://github.com/containers/bubblewrap): namespace/mount backend;
@@ -3154,8 +3159,8 @@ none of these links establishes Ouroboros integration conformance.
   and its [client entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.endpoint-security.client).
   The locally shipped Apple `sandbox-exec(1)` manual explicitly marks the CLI
   deprecated; this was checked as a platform constraint, not a macOS runtime test.
-- [Legacy Linux backend](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/provider/native/sandbox/bwrap.ex)
-  and [legacy macOS backend](https://github.com/monocursive/ouroboros/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ouroboros/provider/native/sandbox/sandbox_exec.ex):
+- [Legacy Linux backend](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ukai/provider/native/sandbox/bwrap.ex)
+  and [legacy macOS backend](https://github.com/monocursive/ukai/blob/f3b2dbfd5a92aa28a8f72dfcb9f2214ebf22ec82/lib/ukai/provider/native/sandbox/sandbox_exec.ex):
   historical mechanisms and fixtures to inspect selectively. No legacy runtime
   dependency is required in the new tree. Both links are reachable from branch
   `legacy` and tag `thesis-4-preserved`, which must be on the remote before

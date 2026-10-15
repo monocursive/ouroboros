@@ -1,5 +1,5 @@
 {
-  "schema": "ouro.jail.policy-snapshot/1",
+  "schema": "ukai.jail.policy-snapshot/1",
   "profile": "tool",
   "profile_version": 1,
   "platform": "linux",
@@ -46,7 +46,7 @@
     ],
     "protected_segments": [
       ".git",
-      ".ouroboros"
+      ".ukai"
     ],
     "protected_coverage": "existing_and_root"
   },

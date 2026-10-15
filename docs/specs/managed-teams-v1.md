@@ -106,7 +106,7 @@ or artifact digest is an identifier, not a bearer capability.
 ## 5. Policy authority and resolution
 
 Effective permissions are the intersection of organization policy, project
-policy and attempt request. An optional repository ouro.toml is a final untrusted
+policy and attempt request. An optional repository ukai.toml is a final untrusted
 narrowing input. Absence of a project restriction preserves the organization
 ceiling, never unlimited authority. Unknown keys or ambiguous subset relations
 refuse. Project requests cannot name a worker path, policy file, secret source,
@@ -173,7 +173,7 @@ service/pool eligibility, beyond the syntactic policy subset check.
 as a worker path. Its optional keys are the permission/limit groups in the policy
 schema, without identity, issuer, revision or validity fields; absence inherits.
 Explicit `--service ID` selects only that service's effective capabilities;
-restriction content can narrow them further. A repository `ouro.toml` retains
+restriction content can narrow them further. A repository `ukai.toml` retains
 the jail schema and can only narrow those compiled grants; its paths resolve
 within registered input roots and cannot introduce host paths. The managed
 request wire schema and native-argv framing freeze with M4 before implementation
@@ -209,21 +209,21 @@ agent execution and must not be labelled a compliant managed attempt.
 
 ## 6. Developer interface
 
-The following additions to the Rust ouro front door are the managed-v1 CLI
+The following additions to the Rust ukai front door are the managed-v1 CLI
 contract, not currently implemented commands:
 
 ```text
-ouro managed plan   --project ID --input REF --launch NAME [--narrow FILE]
+ukai managed plan   --project ID --input REF --launch NAME [--narrow FILE]
                     [--service ID]... [--json] -- PROGRAM [ARG]...
-ouro managed run    --request-id ID --project ID --input REF --launch NAME
+ukai managed run    --request-id ID --project ID --input REF --launch NAME
                     [--narrow FILE] [--service ID]... [--capture stdout|stderr]...
                     [--json] -- PROGRAM [ARG]...
-ouro managed status JOB [--json]
-ouro managed wait JOB [--json]
-ouro managed cancel JOB [--json]
-ouro managed artifacts JOB [--json]
-ouro managed fetch JOB ARTIFACT --output PATH
-ouro managed evidence JOB [bounded ledger query flags] [--json]
+ukai managed status JOB [--json]
+ukai managed wait JOB [--json]
+ukai managed cancel JOB [--json]
+ukai managed artifacts JOB [--json]
+ukai managed fetch JOB ARTIFACT --output PATH
+ukai managed evidence JOB [bounded ledger query flags] [--json]
 ```
 
 All inspection verbs support --json. `plan` authenticates and resolves current
@@ -361,7 +361,7 @@ Artifacts and captured output require project authorization at every read and
 inherit the most restrictive input classification; there is no automatic public
 download URL. The managed agent has no Git write, signing or production deployment
 credential. An existing review/CI/publishing system may consume an artifact after
-its own authorization and checks. Ouroboros v1 neither merges nor deploys it.
+its own authorization and checks. Ukai v1 neither merges nor deploys it.
 Do not rely on withholding credentials if the worker network already provides
 unauthenticated access to a consequential service: deny that route too.
 
@@ -381,7 +381,7 @@ request/token budgets, expiry and any content controls. These are external servi
 facts with their own conformance probes, not claims inferred by the jail. A vendor
 that requires broader credentials, unapproved login/telemetry/update endpoints or
 cannot use the approved gateway is unsupported for that policy; do not widen the
-allowlist silently. No vendor-specific model API is implemented in Ouroboros.
+allowlist silently. No vendor-specific model API is implemented in Ukai.
 
 Package/document/ticket services enforce their own repository, tenant and action
 permissions. HTTPS CONNECT allows a byte tunnel; it does not prove read-only
@@ -462,7 +462,7 @@ does not introduce employee productivity scoring or record conversation bodies.
 | Concern | Owner |
 |---|---|
 | Local containment, observation, lifetime and native platform mechanics | Rust jail |
-| Policy intersection, managed request validation, SSH client/dispatcher, isolated inputs and bounded artifacts | Rust composition code in ouro/ledger launch owner; no new daemon |
+| Policy intersection, managed request validation, SSH client/dispatcher, isolated inputs and bounded artifacts | Rust composition code in ukai/ledger launch owner; no new daemon |
 | Durable admission, provenance, evidence access and retention | Rust ledger |
 | Multiple trusted workers, eligibility, quotas and reconciliation across workers | Elixir fleet; local owner remains authoritative for execution |
 | SSO/SSH identities, credential issuance, model/tool permissions and publishing | Company-provisioned external services |

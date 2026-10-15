@@ -1,7 +1,7 @@
-# Ouroboros website
+# Ukai website
 
 The Astro site restored from `legacy:website/`, updated for the standalone
-`ouro-jail`. The archived agent runtime, release links, and demo recordings
+`ukai-jail`. The archived agent runtime, release links, and demo recordings
 are not part of this site.
 
 ```sh
@@ -17,9 +17,9 @@ have one source. The shared layout and styles retain the archived site's
 branding and locally hosted fonts.
 
 `/install.sh` and `/release.pub` are the repository's root `install.sh` and
-`crates/ouro-jail/dist/release.pub`, imported at build time, so the served
+`crates/ukai-jail/dist/release.pub`, imported at build time, so the served
 installer cannot drift from the reviewed one. Release links and versions come
-from `crates/ouro-jail/dist/release.json`.
+from `crates/ukai-jail/dist/release.json`.
 
 The documentation layout generates its section index from Markdown headings.
 `/guide.md` and `/roadmap.md` serve the exact source text. `/llms.txt` is a
@@ -32,7 +32,7 @@ automatic discovery of `llms.txt` is not assumed.
 After editing shared files under `docs/`, restart the development server if
 its Markdown cache is stale. `npm run build` regenerates all formats.
 
-The restored Cloudflare Pages configuration targets `ouroboros`. `npm run
+The restored Cloudflare Pages configuration targets `ukai`. `npm run
 deploy` publishes the built site and must only be used when publication is
 requested. Local builds do not update the live website.
 

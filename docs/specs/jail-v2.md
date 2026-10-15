@@ -40,14 +40,14 @@ Jail v2 ships, in dependency order:
   non-interactive installer, a Homebrew tap, and bundled launch
   profiles for the common agents and toolchains, validated by recorded
   compatibility rows.
-- **J8 — `ouro-jail learn`**: a least-privilege policy generator whose
+- **J8 — `ukai-jail learn`**: a least-privilege policy generator whose
   every proposal cites the receipt of the run that observed the need.
 - **J9 — network parity**: a SOCKS5 listener in the bridge, origin-bound
   allowlists for both listeners (closing C1's class), and credential
   vaulting without staging real secrets in child files or environment.
   An authorized upstream can still reflect a secret; vaulting cannot
   promise that the child will never learn it.
-- **J10 — live supervision**: `ouro-jail tail`, and opt-in command
+- **J10 — live supervision**: `ukai-jail tail`, and opt-in command
   deny-rules enforced at the exec gate.
 - **J11 — the macOS execution lane**: Seatbelt containment with the
   same bridge, receipts and profiles, with every unsupported mechanism
@@ -73,9 +73,9 @@ recorded A-row; zero open High/Medium audit findings at release.
 |---|---|---|
 | J6 | Fifth-audit fixes C1–C4 (+ C5–C10 hygiene) | Close demonstrated failures first; audit fix directions still require review and adversarial regression tests. |
 | J7 | Release pipeline, installer, tap, bundled profiles, compatibility rows | Unblocks adoption measurement for every later milestone; pure tooling plus data. |
-| J8 | `ouro-jail learn` | Reuses only J5 machinery (observer, receipts); no dependency on J9–J11. |
+| J8 | `ukai-jail learn` | Reuses only J5 machinery (observer, receipts); no dependency on J9–J11. |
 | J9 | SOCKS5, origin binding, credential vaulting | Add transports and optional vaulting after the shared destination checks ship in J6. |
-| J10 | `ouro-jail tail`, command deny-rules | Presentation plus one exec-gate hook; lands after the event stream is final (J9). |
+| J10 | `ukai-jail tail`, command deny-rules | Presentation plus one exec-gate hook; lands after the event stream is final (J9). |
 | J11 | macOS execution | Largest surface; benefits from J7 distribution and J8–J10 parity existing on Linux first. |
 
 Each milestone must leave a buildable tree, a green CI run (`contracts`,
@@ -130,7 +130,7 @@ variant planted a `config.toml` from a `none` run on a fresh
 configuration directory and every later contained run loaded it as
 trusted widening. Markers close that direction for the files the child
 writes directly. They are written to the data directory **and** the
-configuration directory, because `OURO_DATA_DIR` and `OURO_CONFIG_DIR`
+configuration directory, because `UKAI_DATA_DIR` and `UKAI_CONFIG_DIR`
 are chosen independently and a run sharing either must see them:
 
 - Before its target is released, an uncontained run writes a live marker
@@ -265,7 +265,7 @@ A `release` CI workflow (cargo-dist or equivalent) produces, per tag:
   HTTPS release base URL.
 - Provenance: the workflow records the git revision, rustc version and
   build-inputs digest into the artifacts' `version` output, so
-  `ouro-jail version` on an installed binary names exactly what ran.
+  `ukai-jail version` on an installed binary names exactly what ran.
 
 ### 4.2 The installer
 
@@ -280,14 +280,14 @@ A `release` CI workflow (cargo-dist or equivalent) produces, per tag:
   partial files and exits non-zero with a message naming the mismatched
   artifact.
 - Installs to `~/.local/bin` by default, prints the PATH hint, and ends
-  by running `ouro-jail version` as the install proof.
+  by running `ukai-jail version` as the install proof.
 - Does not install, configure or ask for a backend, privileged helper,
   sysctl or service (v1's no-host-configuration rule applies to the
   installer too).
 
 ### 4.3 Homebrew tap
 
-A future operator-selected tap with an `ouro-jail` formula built from the release
+A future operator-selected tap with an `ukai-jail` formula built from the release
 tarball and checksum. The formula installs no dependencies beyond
 `bubblewrap` on Linux (v1 §6.2's backend resolution rule stands; the
 formula does not vendor a backend).
@@ -297,7 +297,7 @@ formula does not vendor a backend).
 The bundled example files stop being dead examples and become **embedded
 profiles** the binary resolves:
 
-- `ouro-jail run --launch NAME` resolves NAME first as an operator file
+- `ukai-jail run --launch NAME` resolves NAME first as an operator file
   at `<config>/launch/NAME.toml` (which wins, with a receipt note that
   the operator file shadowed the bundled one), then as an embedded
   profile. Bundled profiles are compiled into the binary
@@ -330,12 +330,12 @@ tested by a corrupted-artifact fixture; every bundled profile has a
 (recorded) or an explicit `experimental, unrecorded` status in the
 compatibility table.
 
-## 5. J8 — `ouro-jail learn`
+## 5. J8 — `ukai-jail learn`
 
 ### 5.1 Command and semantics
 
 ```
-ouro-jail learn [--launch NAME] [--profile NAME] [--workspace PATH]
+ukai-jail learn [--launch NAME] [--profile NAME] [--workspace PATH]
   [--out FILE] [--adopt] [--min-hits N] [-- PROGRAM [ARG]...]
 ```
 
@@ -375,10 +375,10 @@ ouro-jail learn [--launch NAME] [--profile NAME] [--workspace PATH]
   meaning; a failed lookup (`ENOENT`) alone is not proof of a policy denial.
   The dangerous direction is never auto-widened.
 
-The output is a proposal document, schema `ouro.jail.learned-policy/1`
+The output is a proposal document, schema `ukai.jail.learned-policy/1`
 (§10), containing the proposals, the denied-writes report, and mandatory
 provenance: attempt id, receipt digest, event counts per class, the
-coverage summary of the learning run, and the ouro-jail revision. It is
+coverage summary of the learning run, and the ukai-jail revision. It is
 written `0600`, operator-owned, to `<config>/learned/<attempt>.toml` (or
 `--out`).
 
@@ -479,7 +479,7 @@ child-visible grant, budgeted). The stages:
 
 - **J9b — vault over plaintext HTTP**: no bytes are staged. The
   supervisor reads the secret at prepare, holds it in memory, injects
-  `OURO_VAULT_<ID>=vault:<attempt>:<id>` into the environment, and the
+  `UKAI_VAULT_<ID>=vault:<attempt>:<id>` into the environment, and the
   bridge substitutes the real value into `Authorization` headers of plaintext requests whose destination
   is in the credential's `hosts` list. Substitution is exact-value: the
   placeholder must be the whole header value. Credential bytes never
@@ -531,10 +531,10 @@ K-rows: K12–K18.
 
 ## 7. J10 — live supervision and command rules
 
-### 7.1 `ouro-jail tail`
+### 7.1 `ukai-jail tail`
 
 ```
-ouro-jail tail [--attempt ID] [--follow] [--json] [--since TIME]
+ukai-jail tail [--attempt ID] [--follow] [--json] [--since TIME]
 ```
 
 Reads an attempt's bounded trace journal (v1 §13.3) and prints events:
@@ -624,7 +624,7 @@ composed from the resolved policy snapshot:
   (`(deny default)` plus tested, explicit allowances) with explicit allowances: read-write subpaths for workspace,
   scratch and vendor state; read-only subpaths for the admitted system
   roots and grants; write-denials for protected segments (`.git`,
-  `.ouroboros`) over their writable parents. There is no mount
+  `.ukai`) over their writable parents. There is no mount
   namespace on macOS, so "closed view" means the profile's denial of
   everything unnamed — the receipt's containment record for macOS names
   the mechanism (`seatbelt_profile`) and does not claim a namespace

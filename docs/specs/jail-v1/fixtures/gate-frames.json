@@ -6,22 +6,22 @@
   "cases": [
     {
       "name": "one release frame",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
       "result": "release"
     },
     {
       "name": "JSON whitespace inside the line",
-      "frame": "{ \"schema\" : \"ouro.jail.gate/1\" ,\t\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }\n",
+      "frame": "{ \"schema\" : \"ukai.jail.gate/1\" ,\t\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }\n",
       "result": "release"
     },
     {
       "name": "exactly 1024 bytes with its LF",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             }\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             }\n",
       "result": "release"
     },
     {
       "name": "1025 bytes",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              }\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              }\n",
       "result": "gate_invalid"
     },
     {
@@ -31,32 +31,32 @@
     },
     {
       "name": "missing LF",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
       "result": "gate_invalid"
     },
     {
       "name": "CRLF",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\r\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\r\n",
       "result": "gate_invalid"
     },
     {
       "name": "an extra LF",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n\n",
       "result": "gate_invalid"
     },
     {
       "name": "a blank line first",
-      "frame": "\n{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
+      "frame": "\n{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
       "result": "gate_invalid"
     },
     {
       "name": "bytes after the LF",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\nx",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\nx",
       "result": "gate_invalid"
     },
     {
       "name": "a second frame",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
       "result": "gate_invalid"
     },
     {
@@ -66,57 +66,57 @@
     },
     {
       "name": "duplicate key",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"action\":\"release\"}\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"action\":\"release\"}\n",
       "result": "gate_invalid"
     },
     {
       "name": "wrong schema",
-      "frame": "{\"schema\":\"ouro.jail.gate/2\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/2\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
       "result": "gate_invalid"
     },
     {
       "name": "wrong action",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"withhold\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"withhold\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
       "result": "gate_invalid"
     },
     {
       "name": "another attempt",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000002\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000002\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
       "result": "gate_invalid"
     },
     {
       "name": "another policy digest",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}\n",
       "result": "gate_invalid"
     },
     {
       "name": "an extra key",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"argv\":[\"sh\"]}\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"argv\":[\"sh\"]}\n",
       "result": "gate_invalid"
     },
     {
       "name": "a missing key",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\"}\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\"}\n",
       "result": "gate_invalid"
     },
     {
       "name": "a number for a string",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":1,\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":1,\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
       "result": "gate_invalid"
     },
     {
       "name": "malformed JSON",
-      "frame": "{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+      "frame": "{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
       "result": "gate_invalid"
     },
     {
       "name": "an array",
-      "frame": "[{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]\n",
+      "frame": "[{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]\n",
       "result": "gate_invalid"
     },
     {
       "name": "a byte order mark",
-      "frame": "\ufeff{\"schema\":\"ouro.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
+      "frame": "\ufeff{\"schema\":\"ukai.jail.gate/1\",\"action\":\"release\",\"attempt_id\":\"att_00000000-0000-4000-8000-000000000001\",\"policy_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
       "result": "gate_invalid"
     },
     {

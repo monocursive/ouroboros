@@ -1,5 +1,5 @@
 {
-  "schema": "ouro.jail.receipt/1",
+  "schema": "ukai.jail.receipt/1",
   "attempt_id": "att_00000000-0000-4000-8000-000000000001",
   "revision": 1,
   "phase": "refused",
@@ -9,7 +9,7 @@
     "kernel": "fixture-darwin"
   },
   "jail": {
-    "component": "ouro-jail",
+    "component": "ukai-jail",
     "version": "0.0.0-fixture",
     "backend": null,
     "backend_version": null

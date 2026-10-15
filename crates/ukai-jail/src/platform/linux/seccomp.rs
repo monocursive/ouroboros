@@ -1,0 +1,1721 @@
+//! The `tool` seccomp baseline, built from [`super::bpf`].
+//!
+//! Spec: jail-v1 §9.2, north-star §4.3. The filter is architecture-aware and
+//! recorded by digest. Each baseline is one [`Shape`]: the program is
+//! assembled from it and the evidence table is printed from it, ending with
+//! that program's digest, and the table tests pin every table byte-for-byte
+//! against `docs/specs/jail-v1/evidence/seccomp-table-*.txt` (`tool`, both
+//! `agent` variants, and `tool` and the unprivileged-inner `agent` under a
+//! storage ceiling), so a rule cannot change without a visible diff. Many
+//! rules additionally have a live test on the reference host that makes the
+//! raw syscall inside the jail and reports its errno. Some rules are
+//! table-pinned only, with no live probe yet: `userfaultfd`, `*_handle_at`,
+//! `syslog`, `pidfd_send_signal`, `process_madvise`, `kcmp`, the `*_pages`
+//! rules, `statmount`, `listmount`, `quotactl*`, the clock setters, the
+//! `*xattrat` family, `open_tree_attr`, `file_getattr`, `file_setattr`,
+//! `listns`, and the storage `link`/`linkat` rule.
+//!
+//! Explicit x86_64 and aarch64 syscall numbers are selected by [`super::abi`].
+//! Native tests check the numbers against libc and exercise the installed
+//! filters. A foreign ABI never reaches the native syscall comparisons.
+
+use super::bpf::{Asm, BpfError, Program};
+
+pub(crate) use super::abi::AUDIT_ARCH;
+pub use super::abi::TABLE_ARCH;
+use super::abi::{self, nr};
+
+/// The reason code of a capability whose syscall tables do not cover the
+/// architecture this binary was built for.
+pub const REASON_UNSUPPORTED_ARCHITECTURE: &str = "unsupported_architecture";
+
+/// Whether the syscall tables cover `arch` (a `std::env::consts::ARCH`
+/// value).
+#[must_use]
+pub fn tables_cover(arch: &str) -> bool {
+    matches!(arch, "x86_64" | "aarch64")
+}
+/// Bit set in the syscall number for the x32 ABI (`__X32_SYSCALL_BIT`).
+pub const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+
+/// `SECCOMP_RET_ALLOW`.
+pub const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+/// `SECCOMP_RET_ERRNO`, to be combined with an errno in the low 16 bits.
+pub const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+/// `SECCOMP_RET_TRACE`, used by the observer's narrowing filter.
+pub const SECCOMP_RET_TRACE: u32 = 0x7ff0_0000;
+
+/// Linux `EPERM`. Spelled out because the filter targets the Linux ABI
+/// regardless of the host that builds it.
+pub const LINUX_EPERM: u32 = 1;
+/// Linux `ENOSYS`.
+pub const LINUX_ENOSYS: u32 = 38;
+/// Linux `EAFNOSUPPORT`: what a socket family outside the allow-list gets,
+/// the answer a kernel without that family would give.
+pub const LINUX_EAFNOSUPPORT: u32 = 97;
+
+/// Verdict for a denied syscall.
+#[must_use]
+pub const fn ret_errno(errno: u32) -> u32 {
+    SECCOMP_RET_ERRNO | (errno & 0x0000_ffff)
+}
+
+// Offsets into `struct seccomp_data`.
+/// Offset of `nr`.
+pub const SD_NR: u32 = 0;
+/// Offset of `arch`.
+pub const SD_ARCH: u32 = 4;
+
+/// Offset of the low 32 bits of `args[index]` on a little-endian host.
+#[must_use]
+pub const fn sd_arg_low(index: u32) -> u32 {
+    16 + 8 * index
+}
+
+// ---------------------------------------------------------------------------
+// The syscall table
+// ---------------------------------------------------------------------------
+
+/// Syscalls denied outright with `EPERM`, using native ABI numbers.
+///
+/// The list is jail-v1 §9.2 verbatim: host tracing and inspection, kernel
+/// replacement and modules, the keyring, all three `io_uring` entry points,
+/// every mount interface old and new, and namespace entry.
+pub const DENY_EPERM: &[(&str, u32)] = &[
+    ("ptrace", nr(101, 117)),
+    ("process_vm_readv", nr(310, 270)),
+    ("process_vm_writev", nr(311, 271)),
+    ("bpf", nr(321, 280)),
+    ("perf_event_open", nr(298, 241)),
+    ("kexec_load", nr(246, 104)),
+    ("kexec_file_load", nr(320, 294)),
+    ("init_module", nr(175, 105)),
+    ("finit_module", nr(313, 273)),
+    ("delete_module", nr(176, 106)),
+    ("keyctl", nr(250, 219)),
+    ("add_key", nr(248, 217)),
+    ("request_key", nr(249, 218)),
+    ("io_uring_setup", 425),
+    ("io_uring_enter", 426),
+    ("io_uring_register", 427),
+    ("mount", nr(165, 40)),
+    ("umount2", nr(166, 39)),
+    ("move_mount", 429),
+    ("open_tree", 428),
+    ("fsopen", 430),
+    ("fsmount", 432),
+    ("fspick", 433),
+    ("fsconfig", 431),
+    ("mount_setattr", 442),
+    ("pivot_root", nr(155, 41)),
+    ("chroot", nr(161, 51)),
+    ("unshare", nr(272, 97)),
+    ("setns", nr(308, 268)),
+    // Defense in depth beyond the spec's named list: page-fault control
+    // widens kernel race windows, handle-based opens can walk outside the
+    // bind view given a reachable mount fd, and the kernel log discloses
+    // host memory addresses where dmesg_restrict is lax.
+    ("userfaultfd", nr(323, 282)),
+    ("open_by_handle_at", nr(304, 265)),
+    ("name_to_handle_at", nr(303, 264)),
+    ("syslog", nr(103, 116)),
+    // The ptrace-class cousins
+    // of the denied `ptrace`/`process_vm_*`. Each is kernel-gated by a
+    // PTRACE_MODE_* check, but on a host with
+    // `kernel.yama.ptrace_scope=0` a same-uid peer is enough: `pidfd_getfd`
+    // would hand the target the bridge's descriptors (a direct proxy client
+    // that skips the bridge-only pin), and `process_madvise`/`kcmp`/
+    // `move_pages`/`migrate_pages` inspect or steer a peer's memory. The
+    // jail only records that sysctl; it must not depend on it. The sandbox
+    // has no legitimate use for any of them: the supervisor does its fd
+    // taking outside these filters.
+    ("pidfd_send_signal", 424),
+    ("pidfd_open", 434),
+    ("pidfd_getfd", 438),
+    ("process_madvise", 440),
+    ("kcmp", nr(312, 272)),
+    ("move_pages", nr(279, 239)),
+    ("migrate_pages", nr(256, 238)),
+    // `statmount`/`listmount` read the
+    // mount topology. Inside the jail they see only its own mount
+    // namespace, but §9.2's claim is "every mount interface old and new",
+    // and a default-allow table must not ship new kernel surface by
+    // accident.
+    ("statmount", 457),
+    ("listmount", 458),
+    // The quota interfaces. `quotactl` names a mounted filesystem by path and
+    // `quotactl_fd` by fd, and both set, clear and read per-filesystem
+    // accounting: inside the jail they reach its own mounts only, but §9.2's
+    // claim is "every mount interface old and new", and a default-allow
+    // table must not ship new kernel surface by accident — `quotactl_fd`'s
+    // fds come only from denied syscalls today, which is unreachability, not
+    // a deny.
+    ("quotactl", nr(179, 60)),
+    ("quotactl_fd", 443),
+    // The global clock-adjustment interfaces. Inside the jail they are stopped by the
+    // absent CAP_SYS_TIME rather than by a deny — unreachability, not a
+    // refusal, which is exactly the "new kernel surface ships allowed"
+    // shape §9.2's rationale names. `adjtimex`, `clock_adjtime` and
+    // `clock_settime` join the table; reading the clock stays allowed.
+    ("adjtimex", nr(159, 171)),
+    ("clock_settime", nr(227, 112)),
+    ("clock_adjtime", nr(305, 266)),
+    ("settimeofday", nr(164, 170)),
+    // The newest kernel surface, which a default-allow table would otherwise
+    // ship allowed by accident: `open_tree_attr` is a mount interface (§9.2:
+    // "every mount interface old and new"), `listns` enumerates namespaces
+    // the way `statmount`/`listmount` enumerate mounts, and the `*xattrat`
+    // family and `file_getattr`/`file_setattr` are new spellings of
+    // attribute calls whose older forms stay allowed. Each was measured to
+    // reach the kernel (an fd from `open_tree_attr`, `EFAULT`/`EINVAL` from
+    // the rest) before it joined this list.
+    ("setxattrat", 463),
+    ("getxattrat", 464),
+    ("listxattrat", 465),
+    ("removexattrat", 466),
+    ("open_tree_attr", 467),
+    ("file_getattr", 468),
+    ("file_setattr", 469),
+    ("listns", 470),
+];
+
+/// `clone3`. Denied with `ENOSYS` because seccomp cannot safely dereference
+/// its argument structure; glibc falls back to `clone`, which this filter can
+/// inspect (jail-v1 §9.2).
+pub const NR_CLONE3: u32 = 435;
+/// `clone`.
+pub const NR_CLONE: u32 = nr(56, 220);
+/// `socket`.
+pub const NR_SOCKET: u32 = nr(41, 198);
+/// `socketpair`.
+pub const NR_SOCKETPAIR: u32 = nr(53, 199);
+/// `ioctl`.
+pub const NR_IOCTL: u32 = nr(16, 29);
+/// `seccomp`.
+pub const NR_SECCOMP: u32 = nr(317, 277);
+/// `SECCOMP_FILTER_FLAG_NEW_LISTENER`, tested in argument 1 of `seccomp`.
+pub const SECCOMP_FILTER_FLAG_NEW_LISTENER: u32 = 1 << 3;
+
+/// `AF_UNIX`, compared against argument 0 of `socket` and `socketpair`.
+pub const AF_UNIX: u32 = 1;
+/// `AF_INET`.
+pub const AF_INET: u32 = 2;
+/// `AF_INET6`.
+pub const AF_INET6: u32 = 10;
+/// `AF_NETLINK`.
+pub const AF_NETLINK: u32 = 16;
+/// `NETLINK_SOCK_DIAG`, compared against argument 2 of `socket`: the one
+/// netlink protocol the `agent` launcher opens (the unix-peer mediation's
+/// identity half), before its mediation filter refuses every netlink socket
+/// for everything that runs after it.
+pub const NETLINK_SOCK_DIAG: u32 = 4;
+/// `TIOCSTI`, compared against argument 1 of `ioctl`.
+pub const TIOCSTI: u32 = 0x5412;
+
+/// Namespace bits in `clone`'s flags, checked as a mask against argument 0.
+pub const CLONE_NS_MASK: u32 = CLONE_NEWTIME
+    | CLONE_NEWNS
+    | CLONE_NEWCGROUP
+    | CLONE_NEWUTS
+    | CLONE_NEWIPC
+    | CLONE_NEWUSER
+    | CLONE_NEWPID
+    | CLONE_NEWNET;
+
+/// `CLONE_UNTRACED`, checked in argument 0 of `clone` by every contained
+/// baseline: a task the kernel does not attach to the observer's
+/// tracer would be a descendant nothing observes.
+pub const CLONE_UNTRACED: u32 = 0x0080_0000;
+
+const CLONE_NEWTIME: u32 = 0x0000_0080;
+const CLONE_NEWNS: u32 = 0x0002_0000;
+const CLONE_NEWCGROUP: u32 = 0x0200_0000;
+const CLONE_NEWUTS: u32 = 0x0400_0000;
+const CLONE_NEWIPC: u32 = 0x0800_0000;
+const CLONE_NEWUSER: u32 = 0x1000_0000;
+const CLONE_NEWPID: u32 = 0x2000_0000;
+const CLONE_NEWNET: u32 = 0x4000_0000;
+
+// ---------------------------------------------------------------------------
+// The program
+// ---------------------------------------------------------------------------
+
+const L_ALLOW: &str = "allow";
+const L_DENY_EPERM: &str = "deny_eperm";
+const L_DENY_ENOSYS: &str = "deny_enosys";
+const L_CLONE_FLAGS: &str = "clone_flags";
+const L_SOCKET: &str = "socket_family";
+const L_NETLINK: &str = "netlink_protocol";
+const L_DENY_FAMILY: &str = "deny_eafnosupport";
+const L_IOCTL: &str = "ioctl_arg";
+const L_SECCOMP_FLAGS: &str = "seccomp_flags";
+
+/// One contained baseline as data: what [`build`] assembles and what
+/// [`render_table`] prints, so the evidence table and the installed program
+/// are two readings of one description. Every baseline shares the
+/// architecture check, the x32 denial, `clone3` as `ENOSYS`, `clone` with
+/// `CLONE_UNTRACED` as `EPERM` and the terminal-injection rule; the shape
+/// says which of the rest apply.
+struct Shape {
+    /// The table's first line.
+    title: String,
+    /// The table's second line: the sections it follows.
+    source: &'static str,
+    /// The `EPERM` list in table order, each with whether this baseline
+    /// denies it. The namespace-inner `agent` variant lists the namespace
+    /// setup it permits in place, as allowed.
+    deny: Vec<(&'static str, u32, bool)>,
+    /// Deny `clone` with any namespace flag.
+    clone_namespaces_denied: bool,
+    /// Stacked with the `agent` mediation filter ([`mediation_filter`]),
+    /// installed by the launcher after this baseline. Such a baseline leaves
+    /// AF_UNIX to that filter (which admits only stream and seqpacket
+    /// sockets), admits `NETLINK_SOCK_DIAG` for the launcher's one socket
+    /// (the mediation filter refuses netlink after it), and leaves
+    /// `seccomp(2)` with `SECCOMP_FILTER_FLAG_NEW_LISTENER` allowed: the
+    /// jail's own mediation listener makes a child's second one fail with
+    /// `EBUSY`. Without it every AF_UNIX socket and every netlink socket is
+    /// refused, and so is a notification listener, which would outrank the
+    /// observer's trace stop and run a `CONTINUE`d call unobserved.
+    mediated: bool,
+}
+
+impl Shape {
+    /// The `EPERM` rows of `base`, each denied unless `permitted` names it,
+    /// then, under a storage ceiling, [`storage_link_denials`].
+    fn deny_list(
+        base: &[(&'static str, u32)],
+        permitted: &[(&str, u32)],
+        storage: bool,
+    ) -> Vec<(&'static str, u32, bool)> {
+        let extra: &[(&'static str, u32)] = if storage { storage_link_denials() } else { &[] };
+        base.iter()
+            .map(|&(name, nr)| (name, nr, !permitted.iter().any(|(p, _)| *p == name)))
+            .chain(extra.iter().map(|&(name, nr)| (name, nr, true)))
+            .collect()
+    }
+
+    fn tool(storage: bool) -> Shape {
+        Shape {
+            title: format!(
+                "ukai-jail `tool` seccomp baseline ({TABLE_ARCH}){}",
+                if storage {
+                    ", with a storage ceiling"
+                } else {
+                    ""
+                }
+            ),
+            source: "jail-v1 §9.2, north-star §4.3",
+            deny: Shape::deny_list(DENY_EPERM, &[], storage),
+            clone_namespaces_denied: true,
+            mediated: false,
+        }
+    }
+
+    fn agent(variant: AgentVariant, storage: bool) -> Shape {
+        let permitted: &[(&str, u32)] = match variant {
+            AgentVariant::UnprivilegedInner => &[],
+            AgentVariant::NamespaceInner => &NAMESPACE_SETUP,
+        };
+        Shape {
+            title: format!(
+                "ukai-jail `agent` seccomp baseline ({TABLE_ARCH}), variant {}{}",
+                variant.as_str(),
+                if storage {
+                    ", with a storage ceiling"
+                } else {
+                    ""
+                }
+            ),
+            source: "jail-v1 §9.2 and §10; stacked with the mediation filter below",
+            deny: Shape::deny_list(DENY_EPERM, permitted, storage),
+            clone_namespaces_denied: variant == AgentVariant::UnprivilegedInner,
+            mediated: true,
+        }
+    }
+
+    /// The netlink protocols `socket` may open.
+    fn netlink_protocols(&self) -> &'static [u32] {
+        if self.mediated {
+            &[NETLINK_SOCK_DIAG]
+        } else {
+            &[]
+        }
+    }
+}
+
+/// Build the `tool` baseline filter.
+///
+/// The architecture is checked before any syscall number is compared, so a
+/// number that means one thing on x86_64 and another elsewhere can never be
+/// matched against the wrong table (jail-v1 §9.2).
+///
+/// # Errors
+///
+/// Returns [`BpfError`] only if the table grows past what classic BPF can
+/// encode; with the current table it cannot fail, and a test asserts that.
+pub fn tool_baseline() -> Result<Program, BpfError> {
+    tool_baseline_with_storage(false)
+}
+
+/// The calls a storage ceiling adds to a contained baseline's `EPERM` list:
+/// a new hard link could import a foreign-owned inode from a read-only grant
+/// into the writable tree and charge a different user's quota. aarch64 has
+/// `linkat` only.
+#[must_use]
+pub fn storage_link_denials() -> &'static [(&'static str, u32)] {
+    if abi::AARCH64 {
+        &[("linkat", 37)]
+    } else {
+        &[("link", 86), ("linkat", 265)]
+    }
+}
+
+pub(crate) fn tool_baseline_with_storage(storage: bool) -> Result<Program, BpfError> {
+    build(&Shape::tool(storage))
+}
+
+fn build(shape: &Shape) -> Result<Program, BpfError> {
+    let mut asm = Asm::new();
+
+    // Architecture first. Anything outside this build's native ABI is denied.
+    asm.ld_w_abs(SD_ARCH)
+        .jeq(AUDIT_ARCH, None, Some(L_DENY_EPERM));
+
+    // Then the syscall number. x32 shares the x86_64 audit arch but uses a
+    // distinct numbering; deny it rather than mismatch the table.
+    asm.ld_w_abs(SD_NR)
+        .jset(X32_SYSCALL_BIT, Some(L_DENY_EPERM), None);
+
+    for (_, nr, _) in shape.deny.iter().filter(|(_, _, denied)| *denied) {
+        asm.jeq(*nr, Some(L_DENY_EPERM), None);
+    }
+    asm.jeq(NR_CLONE3, Some(L_DENY_ENOSYS), None);
+    asm.jeq(NR_CLONE, Some(L_CLONE_FLAGS), None);
+    asm.jeq(NR_SOCKET, Some(L_SOCKET), None);
+    asm.jeq(NR_SOCKETPAIR, Some(L_SOCKET), None);
+    asm.jeq(NR_IOCTL, Some(L_IOCTL), None);
+    if !shape.mediated {
+        asm.jeq(NR_SECCOMP, Some(L_SECCOMP_FLAGS), None);
+    }
+    asm.ja(L_ALLOW);
+
+    // clone: deny CLONE_UNTRACED in every contained profile — the
+    // observer's ptrace attachment is how every descendant is seen, and the
+    // kernel skips it for that flag — and any namespace bit where the shape
+    // says so. Every clone flag lives in the low 32 bits, so the low word is
+    // the whole question.
+    asm.label(L_CLONE_FLAGS)
+        .ld_w_abs(sd_arg_low(0))
+        .jset(CLONE_UNTRACED, Some(L_DENY_EPERM), None);
+    if shape.clone_namespaces_denied {
+        asm.jset(CLONE_NS_MASK, Some(L_DENY_EPERM), None);
+    }
+    asm.ja(L_ALLOW);
+
+    // socket/socketpair: an allow-list of address families. AF_UNIX as the
+    // profile says (tool: EPERM; agent: the mediation filter decides),
+    // AF_INET and AF_INET6 (the network namespace, not this rule, is what
+    // denies egress), and netlink only for the named protocols. Every other
+    // family — vsock, packet, alg, the rest — gets EAFNOSUPPORT: a family
+    // no namespace isolates is not a family the child needs.
+    asm.label(L_SOCKET).ld_w_abs(sd_arg_low(0));
+    if shape.mediated {
+        asm.jeq(AF_UNIX, Some(L_ALLOW), None);
+    } else {
+        asm.jeq(AF_UNIX, Some(L_DENY_EPERM), None);
+    }
+    asm.jeq(AF_INET, Some(L_ALLOW), None)
+        .jeq(AF_INET6, Some(L_ALLOW), None);
+    let netlink = shape.netlink_protocols();
+    if !netlink.is_empty() {
+        asm.jeq(AF_NETLINK, Some(L_NETLINK), None);
+    }
+    asm.ja(L_DENY_FAMILY);
+    if !netlink.is_empty() {
+        asm.label(L_NETLINK).ld_w_abs(sd_arg_low(2));
+        for protocol in netlink {
+            asm.jeq(*protocol, Some(L_ALLOW), None);
+        }
+        asm.ja(L_DENY_FAMILY);
+    }
+
+    // ioctl: deny terminal injection.
+    asm.label(L_IOCTL)
+        .ld_w_abs(sd_arg_low(1))
+        .jeq(TIOCSTI, Some(L_DENY_EPERM), None)
+        .ja(L_ALLOW);
+
+    if !shape.mediated {
+        // seccomp: deny a notification listener. `flags` is an `unsigned
+        // int`, so its low word is the whole question; a plain filter, the
+        // query operations and strict mode stay allowed.
+        asm.label(L_SECCOMP_FLAGS)
+            .ld_w_abs(sd_arg_low(1))
+            .jset(SECCOMP_FILTER_FLAG_NEW_LISTENER, Some(L_DENY_EPERM), None)
+            .ja(L_ALLOW);
+    }
+
+    asm.label(L_ALLOW).ret(SECCOMP_RET_ALLOW);
+    asm.label(L_DENY_EPERM).ret(ret_errno(LINUX_EPERM));
+    asm.label(L_DENY_ENOSYS).ret(ret_errno(LINUX_ENOSYS));
+    asm.label(L_DENY_FAMILY).ret(ret_errno(LINUX_EAFNOSUPPORT));
+
+    asm.assemble()
+}
+
+// ---------------------------------------------------------------------------
+// The `agent` filters (jail-v1 §9.2, §10)
+// ---------------------------------------------------------------------------
+
+/// Which `agent` baseline a run installs, chosen by the measured
+/// `nested_user_namespace` capability (jail-v1 §9.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentVariant {
+    /// The host denies a user namespace inside the outer one (a stock
+    /// Ubuntu host). The inner sandboxes that work anyway are the
+    /// unprivileged ones — `no_new_privs`, seccomp, Landlock — which the
+    /// baseline leaves allowed; namespace creation, every mount interface and
+    /// `clone3` stay exactly as `tool` has them, so an inner namespace
+    /// sandbox fails visibly with `EPERM`.
+    UnprivilegedInner,
+    /// The host permits nested user namespaces. The baseline additionally
+    /// permits the setup a namespace inner sandbox performs
+    /// ([`NAMESPACE_SETUP`] and namespace flags in `clone`). Every one of
+    /// them needs a capability the outer user namespace does not grant, so
+    /// it succeeds only inside a namespace the child creates, whose mounts
+    /// inherited from the outer view stay locked. Unit-tested only: the
+    /// reference host is stock and never selects it.
+    NamespaceInner,
+}
+
+impl AgentVariant {
+    /// The receipt spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentVariant::UnprivilegedInner => "unprivileged_inner",
+            AgentVariant::NamespaceInner => "namespace_inner",
+        }
+    }
+
+    /// The variant a measured nested-user-namespace capability selects.
+    #[must_use]
+    pub fn for_nested_user_namespace(available: bool) -> Self {
+        if available {
+            AgentVariant::NamespaceInner
+        } else {
+            AgentVariant::UnprivilegedInner
+        }
+    }
+
+    /// The inner-sandbox setup operations this variant permits, for the
+    /// receipt (jail-v1 §9.2: "Record the allowed setup operations").
+    #[must_use]
+    pub fn allowed_setup_operations(self) -> Vec<&'static str> {
+        let mut out = UNPRIVILEGED_SETUP.to_vec();
+        if self == AgentVariant::NamespaceInner {
+            out.extend(NAMESPACE_SETUP.iter().map(|(name, _)| *name));
+            out.push("clone_namespace_flags");
+        }
+        out
+    }
+}
+
+/// The unprivileged sandboxing every `agent` baseline leaves allowed, by
+/// name. None of them is in any deny list; they are named so the receipt
+/// and the table say what the inner sandbox may do.
+pub const UNPRIVILEGED_SETUP: [&str; 5] = [
+    "prctl(PR_SET_NO_NEW_PRIVS)",
+    "seccomp",
+    "landlock_create_ruleset",
+    "landlock_add_rule",
+    "landlock_restrict_self",
+];
+
+/// The namespace setup the `NamespaceInner` baseline removes from the
+/// deny list. `setns`, the new mount API, `clone3` and every host-inspection
+/// rule stay denied in both variants.
+pub const NAMESPACE_SETUP: [(&str, u32); 5] = [
+    ("mount", nr(165, 40)),
+    ("umount2", nr(166, 39)),
+    ("pivot_root", nr(155, 41)),
+    ("chroot", nr(161, 51)),
+    ("unshare", nr(272, 97)),
+];
+
+/// The `agent` baseline bubblewrap loads, in `variant`.
+///
+/// It is the `tool` baseline without the AF_UNIX denial (the mediation
+/// filter restricts AF_UNIX to stream and seqpacket and mediates every
+/// `connect`), with `NETLINK_SOCK_DIAG` added to the socket families for the
+/// launcher's one socket (the mediation filter, installed right after it,
+/// refuses every netlink socket), and, in [`AgentVariant::NamespaceInner`]
+/// only, without the namespace-setup denials. Architecture and x32 checks,
+/// the host inspection, kernel, keyring and io_uring denials, `clone3` as
+/// `ENOSYS`, the rest of the family allow-list and the terminal-injection
+/// rule are identical to `tool`.
+///
+/// # Errors
+///
+/// [`BpfError`] only if the table outgrows classic BPF; a test asserts it
+/// cannot with the current tables.
+pub fn agent_baseline(variant: AgentVariant) -> Result<Program, BpfError> {
+    agent_baseline_with_storage(variant, false)
+}
+
+pub(crate) fn agent_baseline_with_storage(
+    variant: AgentVariant,
+    storage: bool,
+) -> Result<Program, BpfError> {
+    build(&Shape::agent(variant, storage))
+}
+
+/// Native `connect`.
+pub const NR_CONNECT: u32 = nr(42, 203);
+/// `SOCK_TYPE_MASK`: the bits of a socket type below the creation flags.
+pub const SOCK_TYPE_MASK: u32 = 0xf;
+/// `SOCK_STREAM`.
+pub const SOCK_STREAM: u32 = 1;
+/// `SOCK_SEQPACKET`.
+pub const SOCK_SEQPACKET: u32 = 5;
+/// `SECCOMP_RET_USER_NOTIF`.
+pub const SECCOMP_RET_USER_NOTIF: u32 = 0x7fc0_0000;
+
+/// The `agent` mediation filter: `connect` notifies the supervisor's
+/// listener, AF_UNIX sockets are stream or seqpacket only (jail-v1 §10), and
+/// no netlink socket is created after it (the launcher opened its
+/// `NETLINK_SOCK_DIAG` socket before installing it).
+/// Installed by the trusted launcher with its own notification listener;
+/// see `unixpeer::mediation_program` for the decision it hands the
+/// supervisor.
+///
+/// # Errors
+///
+/// [`BpfError`] only if the assembler rejects the program, which a test
+/// asserts it does not.
+pub fn mediation_filter() -> Result<Program, BpfError> {
+    const ALLOW: &str = "allow";
+    const NOTIFY: &str = "notify";
+    const DENY: &str = "deny";
+    const SOCKET: &str = "socket_family";
+    const DENY_FAMILY: &str = "deny_family";
+    let mut asm = Asm::new();
+    asm.ld_w_abs(SD_ARCH).jeq(AUDIT_ARCH, None, Some(DENY));
+    asm.ld_w_abs(SD_NR)
+        .jset(X32_SYSCALL_BIT, Some(DENY), None)
+        .jeq(NR_CONNECT, Some(NOTIFY), None)
+        .jeq(NR_SOCKET, Some(SOCKET), None)
+        .jeq(NR_SOCKETPAIR, Some(SOCKET), None)
+        .ja(ALLOW);
+    // socket/socketpair: the baseline's family allow-list decides every
+    // family but two. Netlink is refused outright: the baseline admits
+    // NETLINK_SOCK_DIAG only for the launcher's socket, opened before this
+    // filter. AF_UNIX must be stream or seqpacket, with
+    // SOCK_CLOEXEC/SOCK_NONBLOCK masked off before the comparison.
+    asm.label(SOCKET)
+        .ld_w_abs(sd_arg_low(0))
+        .jeq(AF_NETLINK, Some(DENY_FAMILY), None)
+        .jeq(AF_UNIX, None, Some(ALLOW))
+        .ld_w_abs(sd_arg_low(1))
+        .and_k(SOCK_TYPE_MASK)
+        .jeq(SOCK_STREAM, Some(ALLOW), None)
+        .jeq(SOCK_SEQPACKET, Some(ALLOW), None)
+        .ja(DENY);
+    asm.label(ALLOW).ret(SECCOMP_RET_ALLOW);
+    asm.label(NOTIFY).ret(SECCOMP_RET_USER_NOTIF);
+    asm.label(DENY).ret(ret_errno(LINUX_EPERM));
+    asm.label(DENY_FAMILY).ret(ret_errno(LINUX_EAFNOSUPPORT));
+    asm.assemble()
+}
+
+/// The `agent` baseline's table, read from the same [`Shape`] as the filter,
+/// with the mediation filter stacked on it.
+#[must_use]
+pub fn agent_baseline_table(variant: AgentVariant) -> String {
+    render_table(&Shape::agent(variant, false))
+}
+
+/// A human-readable table of what the `tool` baseline does, for the evidence
+/// file the conformance run keeps. It is read from the same [`Shape`] the
+/// filter is built from, and ends with the filter's own digest and
+/// disassembly.
+#[must_use]
+pub fn tool_baseline_table() -> String {
+    render_table(&Shape::tool(false))
+}
+
+/// The `tool` baseline under a storage ceiling ([`storage_link_denials`]).
+#[must_use]
+pub fn tool_storage_baseline_table() -> String {
+    render_table(&Shape::tool(true))
+}
+
+/// The unprivileged-inner `agent` baseline under a storage ceiling; the
+/// namespace-inner variant permits new mounts, so a storage ceiling refuses
+/// it and it has no such table.
+#[must_use]
+pub fn agent_storage_baseline_table() -> String {
+    render_table(&Shape::agent(AgentVariant::UnprivilegedInner, true))
+}
+
+/// The evidence table of `shape`: its rules, then the digest of the program
+/// [`build`] assembles from the same shape.
+fn render_table(shape: &Shape) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "{}", shape.title);
+    let _ = writeln!(out, "{}\n", shape.source);
+    if !shape.mediated {
+        out.push_str("precondition              action\n");
+    }
+    let _ = writeln!(
+        out,
+        "arch != AUDIT_ARCH_{}  EPERM   (0x{AUDIT_ARCH:08x} required)",
+        TABLE_ARCH.to_uppercase()
+    );
+    let _ = writeln!(
+        out,
+        "nr & 0x{X32_SYSCALL_BIT:08x}           EPERM   (x32 ABI)"
+    );
+    out.push_str("\nsyscall                nr     action\n");
+    for (name, nr, denied) in &shape.deny {
+        if *denied {
+            let _ = writeln!(out, "{name:<22} {nr:<6} EPERM");
+        } else {
+            let _ = writeln!(out, "{name:<22} {nr:<6} ALLOW   (namespace inner sandbox)");
+        }
+    }
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} ENOSYS  (argument struct not inspectable)",
+        "clone3", NR_CLONE3
+    );
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} EPERM when args[0] & 0x{CLONE_UNTRACED:08x} != 0 (CLONE_UNTRACED)",
+        "clone", NR_CLONE
+    );
+    if shape.clone_namespaces_denied {
+        let _ = writeln!(
+            out,
+            "{:<22} {:<6} EPERM when args[0] & 0x{CLONE_NS_MASK:08x} != 0",
+            "clone", NR_CLONE
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "{:<22} {:<6} ALLOW   otherwise (namespace flags permitted)",
+            "clone", NR_CLONE
+        );
+    }
+    if shape.mediated {
+        render_mediated_rules(&mut out);
+    } else {
+        for (name, nr) in [("socket", NR_SOCKET), ("socketpair", NR_SOCKETPAIR)] {
+            let _ = writeln!(
+                out,
+                "{name:<22} {nr:<6} EPERM when args[0] == {AF_UNIX} (AF_UNIX); ALLOW when args[0] in {{{AF_INET} (AF_INET), {AF_INET6} (AF_INET6)}}; else EAFNOSUPPORT"
+            );
+        }
+        let _ = writeln!(
+            out,
+            "{:<22} {:<6} EPERM when args[1] == 0x{TIOCSTI:04x} (TIOCSTI)",
+            "ioctl", NR_IOCTL
+        );
+        let _ = writeln!(
+            out,
+            "{:<22} {:<6} EPERM when args[1] & 0x{SECCOMP_FILTER_FLAG_NEW_LISTENER:08x} (SECCOMP_FILTER_FLAG_NEW_LISTENER)",
+            "seccomp", NR_SECCOMP
+        );
+    }
+    out.push_str("\neverything else        ALLOW\n");
+    if let Ok(prog) = build(shape) {
+        let _ = writeln!(out, "\ninstructions: {}", prog.len());
+        let _ = writeln!(out, "digest: {}", prog.digest());
+        if !shape.mediated {
+            out.push_str("\ndisassembly\n");
+            for line in prog.disassemble() {
+                let _ = writeln!(out, "{line}");
+            }
+        }
+    }
+    if shape.mediated {
+        render_mediation_filter(&mut out);
+    }
+    out
+}
+
+/// The rules a baseline stacked with the mediation filter has in place of
+/// the plain one's AF_UNIX, netlink and listener rules.
+fn render_mediated_rules(out: &mut String) {
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} EPERM when args[1] == 0x{TIOCSTI:04x} (TIOCSTI)",
+        "ioctl", NR_IOCTL
+    );
+    for name in UNPRIVILEGED_SETUP {
+        let _ = writeln!(out, "{name:<30} ALLOW   (unprivileged inner sandbox)");
+    }
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} ALLOW when args[0] in {{{AF_UNIX} (AF_UNIX, restricted by the mediation filter), {AF_INET} (AF_INET), {AF_INET6} (AF_INET6)}}",
+        "socket, socketpair",
+        format!("{NR_SOCKET},{NR_SOCKETPAIR}")
+    );
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} ALLOW when args[0] == {AF_NETLINK} (AF_NETLINK) and args[2] == {NETLINK_SOCK_DIAG} (NETLINK_SOCK_DIAG; the launcher's, refused after it by the mediation filter)",
+        "", ""
+    );
+    let _ = writeln!(
+        out,
+        "{:<22} {:<6} EAFNOSUPPORT for every other family",
+        "", ""
+    );
+}
+
+/// The mediation filter's own rules and digest, after the baseline's.
+fn render_mediation_filter(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str("\nmediation filter (installed by the launcher with its own listener)\n");
+    let _ = writeln!(out, "connect                {NR_CONNECT:<6} USER_NOTIF");
+    let _ = writeln!(
+        out,
+        "socket, socketpair     AF_UNIX: ALLOW only (type & 0x{SOCK_TYPE_MASK:x}) in {{STREAM, SEQPACKET}}, else EPERM"
+    );
+    let _ = writeln!(
+        out,
+        "socket, socketpair     AF_NETLINK: EAFNOSUPPORT (any protocol)"
+    );
+    if let Ok(prog) = mediation_filter() {
+        let _ = writeln!(out, "instructions: {}", prog.len());
+        let _ = writeln!(out, "digest: {}", prog.digest());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handing the program to bubblewrap and to the kernel
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod linux_only {
+    use std::io;
+    use std::os::fd::OwnedFd;
+
+    use super::Program;
+
+    /// Write `program`'s raw bytes into a pipe and return its read end, which
+    /// is what `bwrap --seccomp FD` consumes.
+    ///
+    /// The write end is closed before returning, so bubblewrap sees EOF.
+    /// Nothing reads the pipe until bubblewrap runs, so the whole program
+    /// must fit in the pipe's buffer: that capacity is read from the pipe
+    /// itself (a user over `pipe-user-pages-soft` gets one page), and a
+    /// program that does not fit is refused rather than left to block.
+    ///
+    /// # Errors
+    ///
+    /// Any failure of `pipe2`, `fcntl` or `write`, or a program larger than
+    /// the pipe's buffer.
+    pub fn program_pipe(program: &Program) -> io::Result<OwnedFd> {
+        let bytes = program.to_bytes();
+        let (read_end, write_end) = super::super::sys::pipe()?;
+        // SAFETY: F_GETPIPE_SZ takes no argument and only reads the pipe's
+        // capacity; the descriptor is live.
+        let capacity = unsafe {
+            libc::fcntl(
+                std::os::fd::AsRawFd::as_raw_fd(&write_end),
+                libc::F_GETPIPE_SZ,
+            )
+        };
+        let capacity = usize::try_from(capacity).map_err(|_| io::Error::last_os_error())?;
+        if bytes.len() > capacity {
+            return Err(io::Error::other(format!(
+                "the {}-byte filter does not fit the {capacity}-byte pipe buffer",
+                bytes.len()
+            )));
+        }
+
+        super::super::sys::write_all(std::os::fd::AsRawFd::as_raw_fd(&write_end), &bytes)?;
+        drop(write_end);
+        Ok(read_end)
+    }
+
+    /// Install `program` on the calling thread with `SECCOMP_SET_MODE_FILTER`.
+    ///
+    /// The caller must already have set `no_new_privs`, or the kernel refuses
+    /// with `EACCES`.
+    ///
+    /// # Errors
+    ///
+    /// The raw errno from the `seccomp` syscall.
+    pub fn install(program: &Program) -> io::Result<()> {
+        let fprog = program.sock_fprog();
+        // SAFETY: `fprog` points at `program`'s instruction slice, which
+        // outlives this call; SECCOMP_SET_MODE_FILTER reads it and copies it
+        // into the kernel before returning.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_seccomp,
+                libc::SECCOMP_SET_MODE_FILTER,
+                0,
+                std::ptr::from_ref(&fprog),
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux_only::install;
+#[cfg(target_os = "linux")]
+pub use linux_only::program_pipe;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn baseline_numbers_match_the_native_libc_table() {
+        let expected = [
+            ("ptrace", libc::SYS_ptrace as u32),
+            ("process_vm_readv", libc::SYS_process_vm_readv as u32),
+            ("process_vm_writev", libc::SYS_process_vm_writev as u32),
+            ("bpf", libc::SYS_bpf as u32),
+            ("perf_event_open", libc::SYS_perf_event_open as u32),
+            ("kexec_load", libc::SYS_kexec_load as u32),
+            ("kexec_file_load", libc::SYS_kexec_file_load as u32),
+            ("init_module", libc::SYS_init_module as u32),
+            ("finit_module", libc::SYS_finit_module as u32),
+            ("delete_module", libc::SYS_delete_module as u32),
+            ("keyctl", libc::SYS_keyctl as u32),
+            ("add_key", libc::SYS_add_key as u32),
+            ("request_key", libc::SYS_request_key as u32),
+            ("io_uring_setup", libc::SYS_io_uring_setup as u32),
+            ("io_uring_enter", libc::SYS_io_uring_enter as u32),
+            ("io_uring_register", libc::SYS_io_uring_register as u32),
+            ("mount", libc::SYS_mount as u32),
+            ("umount2", libc::SYS_umount2 as u32),
+            ("move_mount", libc::SYS_move_mount as u32),
+            ("open_tree", libc::SYS_open_tree as u32),
+            ("fsopen", libc::SYS_fsopen as u32),
+            ("fsmount", libc::SYS_fsmount as u32),
+            ("fspick", libc::SYS_fspick as u32),
+            ("fsconfig", libc::SYS_fsconfig as u32),
+            ("mount_setattr", libc::SYS_mount_setattr as u32),
+            ("pivot_root", libc::SYS_pivot_root as u32),
+            ("chroot", libc::SYS_chroot as u32),
+            ("unshare", libc::SYS_unshare as u32),
+            ("setns", libc::SYS_setns as u32),
+            ("userfaultfd", libc::SYS_userfaultfd as u32),
+            ("open_by_handle_at", libc::SYS_open_by_handle_at as u32),
+            ("name_to_handle_at", libc::SYS_name_to_handle_at as u32),
+            ("syslog", libc::SYS_syslog as u32),
+            ("pidfd_send_signal", libc::SYS_pidfd_send_signal as u32),
+            ("pidfd_open", libc::SYS_pidfd_open as u32),
+            ("pidfd_getfd", libc::SYS_pidfd_getfd as u32),
+            ("process_madvise", libc::SYS_process_madvise as u32),
+            ("kcmp", libc::SYS_kcmp as u32),
+            ("move_pages", libc::SYS_move_pages as u32),
+            ("migrate_pages", libc::SYS_migrate_pages as u32),
+            ("quotactl", libc::SYS_quotactl as u32),
+            ("quotactl_fd", libc::SYS_quotactl_fd as u32),
+            ("adjtimex", libc::SYS_adjtimex as u32),
+            ("clock_settime", libc::SYS_clock_settime as u32),
+            ("clock_adjtime", libc::SYS_clock_adjtime as u32),
+            ("settimeofday", libc::SYS_settimeofday as u32),
+        ];
+        for (name, number) in expected {
+            assert_eq!(
+                DENY_EPERM.iter().find(|(n, _)| *n == name).map(|(_, n)| *n),
+                Some(number),
+                "{name}"
+            );
+        }
+        for (actual, expected) in [
+            (NR_CLONE, libc::SYS_clone),
+            (NR_SOCKET, libc::SYS_socket),
+            (NR_SOCKETPAIR, libc::SYS_socketpair),
+            (NR_CONNECT, libc::SYS_connect),
+            (NR_IOCTL, libc::SYS_ioctl),
+            (NR_SECCOMP, libc::SYS_seccomp),
+        ] {
+            assert_eq!(actual as i64, expected);
+        }
+    }
+
+    #[test]
+    fn the_tables_cover_both_native_64_bit_abis() {
+        assert!(tables_cover("x86_64"));
+        assert!(tables_cover("aarch64"));
+        for other in ["x86", "riscv64", "arm", "powerpc64", "s390x", ""] {
+            assert!(!tables_cover(other), "{other}");
+        }
+        assert_eq!(REASON_UNSUPPORTED_ARCHITECTURE, "unsupported_architecture");
+    }
+
+    use super::*;
+
+    #[test]
+    fn the_baseline_assembles() {
+        let prog = tool_baseline().expect("the table fits classic BPF");
+        assert!(prog.len() > DENY_EPERM.len());
+        assert!(prog.len() < 4096);
+    }
+
+    #[test]
+    fn storage_baselines_deny_importing_inodes_through_hard_links() {
+        for (plain, bounded) in [
+            (
+                tool_baseline().unwrap(),
+                tool_baseline_with_storage(true).unwrap(),
+            ),
+            (
+                agent_baseline(AgentVariant::UnprivilegedInner).unwrap(),
+                agent_baseline_with_storage(AgentVariant::UnprivilegedInner, true).unwrap(),
+            ),
+        ] {
+            for &(_, nr) in storage_link_denials() {
+                assert_eq!(run(&plain, NATIVE, nr, [0; 2]), SECCOMP_RET_ALLOW);
+                assert_eq!(run(&bounded, NATIVE, nr, [0; 2]), EPERM);
+                assert_eq!(run(&bounded, NATIVE, nr | X32_SYSCALL_BIT, [0; 2]), EPERM);
+                for arch in FOREIGN {
+                    assert_eq!(run(&bounded, arch, nr, [0; 2]), EPERM);
+                }
+            }
+            // Unrelated calls retain their verdicts, including write-open,
+            // directory creation, rename and already-forbidden quota changes.
+            for (name, nr) in [
+                ("write", nr(1, 64)),
+                ("openat", nr(257, 56)),
+                ("mkdirat", nr(258, 34)),
+                ("renameat2", nr(316, 276)),
+                ("quotactl", nr(179, 60)),
+                ("quotactl_fd", 443),
+            ] {
+                assert_eq!(
+                    run(&bounded, NATIVE, nr, [0; 2]),
+                    run(&plain, NATIVE, nr, [0; 2]),
+                    "{name}"
+                );
+            }
+            assert_ne!(plain.digest(), bounded.digest());
+        }
+    }
+
+    #[test]
+    fn architecture_is_checked_before_any_syscall_number() {
+        let prog = tool_baseline().unwrap();
+        let insns = prog.insns();
+        assert_eq!(insns[0].code, super::super::bpf::CODE_LD_W_ABS);
+        assert_eq!(insns[0].k, SD_ARCH, "the first load is the architecture");
+        assert_eq!(insns[1].code, super::super::bpf::CODE_JEQ_K);
+        assert_eq!(insns[1].k, AUDIT_ARCH);
+        assert_eq!(insns[2].k, SD_NR, "the syscall number is loaded second");
+    }
+
+    #[test]
+    fn the_four_verdicts_are_the_last_four_instructions() {
+        let prog = tool_baseline().unwrap();
+        let insns = prog.insns();
+        let n = insns.len();
+        assert_eq!(insns[n - 4].k, SECCOMP_RET_ALLOW);
+        assert_eq!(insns[n - 3].k, ret_errno(LINUX_EPERM));
+        assert_eq!(insns[n - 2].k, ret_errno(LINUX_ENOSYS));
+        assert_eq!(insns[n - 1].k, ret_errno(LINUX_EAFNOSUPPORT));
+    }
+
+    #[test]
+    fn the_namespace_mask_is_the_eight_namespace_flags() {
+        assert_eq!(CLONE_NS_MASK, 0x7e02_0080);
+        // The flags glibc uses to create a thread must not be caught by it.
+        const CLONE_VM: u32 = 0x0000_0100;
+        const CLONE_FS: u32 = 0x0000_0200;
+        const CLONE_FILES: u32 = 0x0000_0400;
+        const CLONE_SIGHAND: u32 = 0x0000_0800;
+        const CLONE_THREAD: u32 = 0x0001_0000;
+        const CLONE_SYSVSEM: u32 = 0x0004_0000;
+        const CLONE_SETTLS: u32 = 0x0008_0000;
+        const CLONE_PARENT_SETTID: u32 = 0x0010_0000;
+        const CLONE_CHILD_CLEARTID: u32 = 0x0020_0000;
+        let thread_flags = CLONE_VM
+            | CLONE_FS
+            | CLONE_FILES
+            | CLONE_SIGHAND
+            | CLONE_THREAD
+            | CLONE_SYSVSEM
+            | CLONE_SETTLS
+            | CLONE_PARENT_SETTID
+            | CLONE_CHILD_CLEARTID;
+        assert_eq!(thread_flags & CLONE_NS_MASK, 0);
+    }
+
+    #[test]
+    fn seccomp_data_offsets_follow_the_struct() {
+        assert_eq!(SD_NR, 0);
+        assert_eq!(SD_ARCH, 4);
+        assert_eq!(sd_arg_low(0), 16);
+        assert_eq!(sd_arg_low(1), 24);
+        assert_eq!(sd_arg_low(5), 56);
+    }
+
+    #[test]
+    fn the_table_lists_every_rule_the_filter_encodes() {
+        let table = tool_baseline_table();
+        for (name, _) in DENY_EPERM {
+            assert!(table.contains(name), "table omits {name}");
+        }
+        for name in [
+            "clone3",
+            "clone",
+            "socket",
+            "socketpair",
+            "ioctl",
+            "seccomp",
+        ] {
+            assert!(table.contains(name), "table omits {name}");
+        }
+        assert!(table.contains(&tool_baseline().unwrap().digest()));
+    }
+
+    #[test]
+    fn no_syscall_number_appears_twice() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, nr) in DENY_EPERM {
+            assert!(seen.insert(*nr), "{name} ({nr}) listed twice");
+        }
+        for nr in [
+            NR_CLONE3,
+            NR_CLONE,
+            NR_SOCKET,
+            NR_SOCKETPAIR,
+            NR_IOCTL,
+            NR_SECCOMP,
+        ] {
+            assert!(seen.insert(nr), "{nr} listed twice");
+        }
+    }
+
+    // -- agent: the agent baseline and the mediation filter ---------------
+
+    /// [`run3`] with a zero third argument.
+    fn run(prog: &Program, arch: u32, nr: u32, args: [u32; 2]) -> u32 {
+        run3(prog, arch, nr, [args[0], args[1], 0])
+    }
+
+    /// A classic-BPF interpreter over the fields these filters read, so the
+    /// tests check the jump arithmetic rather than restating it.
+    fn run3(prog: &Program, arch: u32, nr: u32, args: [u32; 3]) -> u32 {
+        use super::super::bpf::{
+            CODE_ALU_AND_K, CODE_JA, CODE_JEQ_K, CODE_JSET_K, CODE_LD_W_ABS, CODE_RET_K,
+        };
+        let insns = prog.insns();
+        let mut pc = 0usize;
+        let mut acc = 0u32;
+        for _ in 0..4096 {
+            let insn = insns[pc];
+            match insn.code {
+                CODE_LD_W_ABS => {
+                    acc = match insn.k {
+                        SD_ARCH => arch,
+                        SD_NR => nr,
+                        k if k == sd_arg_low(0) => args[0],
+                        k if k == sd_arg_low(1) => args[1],
+                        k if k == sd_arg_low(2) => args[2],
+                        other => panic!("the filter read an unexpected offset {other}"),
+                    };
+                    pc += 1;
+                }
+                CODE_ALU_AND_K => {
+                    acc &= insn.k;
+                    pc += 1;
+                }
+                CODE_JEQ_K => {
+                    pc += 1 + usize::from(if acc == insn.k { insn.jt } else { insn.jf });
+                }
+                CODE_JSET_K => {
+                    pc += 1 + usize::from(if acc & insn.k != 0 { insn.jt } else { insn.jf });
+                }
+                CODE_JA => pc += 1 + insn.k as usize,
+                CODE_RET_K => return insn.k,
+                other => panic!("unexpected opcode {other:#x}"),
+            }
+            assert!(pc < insns.len(), "jumped past the program");
+        }
+        panic!("the filter did not terminate");
+    }
+
+    const EPERM: u32 = SECCOMP_RET_ERRNO | LINUX_EPERM;
+    const ENOSYS: u32 = SECCOMP_RET_ERRNO | LINUX_ENOSYS;
+    const EAFNOSUPPORT: u32 = SECCOMP_RET_ERRNO | LINUX_EAFNOSUPPORT;
+    /// Families outside every allow-list, the ones the reference host
+    /// supports among them: AF_PACKET 17, AF_ALG 38, AF_VSOCK 40,
+    /// AF_QIPCRTR 42; then AF_KEY 15, AF_BRIDGE 7, AF_TIPC 30, AF_XDP 44,
+    /// AF_UNSPEC 0, one past the last (46) and a negative int.
+    const OUTSIDE: [u32; 11] = [17, 38, 40, 42, 15, 7, 30, 44, 0, 46, 0xffff_ffff];
+    const NETLINK_ROUTE: u32 = 0;
+    /// This build's own audit architecture.
+    const NATIVE: u32 = AUDIT_ARCH;
+    /// Non-native ABIs the reference host accepts or could: i386, aarch64,
+    /// 32-bit arm, garbage.
+    const FOREIGN: [u32; 5] = [
+        0x4000_0003,
+        if abi::AARCH64 {
+            0xc000_003e
+        } else {
+            0xc000_00b7
+        },
+        0x4000_0028,
+        0,
+        0xffff_ffff,
+    ];
+
+    /// Regenerates the pinned evidence tables after a deliberate change to
+    /// the deny set. Run
+    /// deliberately; the byte-for-byte tests above then pin the new tables.
+    #[test]
+    #[ignore = "writes the evidence files; run deliberately"]
+    fn bless_the_pinned_seccomp_tables() {
+        let base = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/specs/jail-v1/evidence/"
+        );
+        #[cfg(target_os = "linux")]
+        std::fs::write(
+            format!("{base}closed-set-{TABLE_ARCH}.txt"),
+            super::super::tracer::closed_set_table(),
+        )
+        .unwrap();
+        std::fs::write(
+            format!("{}seccomp-table-tool-{TABLE_ARCH}.txt", base),
+            tool_baseline_table(),
+        )
+        .unwrap();
+        std::fs::write(
+            format!("{}seccomp-table-agent-{TABLE_ARCH}.txt", base),
+            agent_baseline_table(AgentVariant::UnprivilegedInner),
+        )
+        .unwrap();
+        std::fs::write(
+            format!("{}seccomp-table-agent-namespace-{TABLE_ARCH}.txt", base),
+            agent_baseline_table(AgentVariant::NamespaceInner),
+        )
+        .unwrap();
+        std::fs::write(
+            format!("{base}seccomp-table-tool-storage-{TABLE_ARCH}.txt"),
+            tool_storage_baseline_table(),
+        )
+        .unwrap();
+        std::fs::write(
+            format!("{base}seccomp-table-agent-storage-{TABLE_ARCH}.txt"),
+            agent_storage_baseline_table(),
+        )
+        .unwrap();
+    }
+
+    /// The storage-ceiling variants are pinned like the base tables: the
+    /// `link`/`linkat` rule is in the table, and the table's digest is the
+    /// digest of the program a storage ceiling installs.
+    #[test]
+    fn the_storage_baselines_are_byte_for_byte_the_checked_in_ones() {
+        let checked_in = |name: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../docs/specs/jail-v1/evidence/seccomp-table-{name}-{TABLE_ARCH}.txt",
+                env!("CARGO_MANIFEST_DIR"),
+            ))
+            .unwrap()
+        };
+        let tool = tool_storage_baseline_table();
+        let agent = agent_storage_baseline_table();
+        assert_eq!(tool, checked_in("tool-storage"));
+        assert_eq!(agent, checked_in("agent-storage"));
+        assert!(tool.contains(&tool_baseline_with_storage(true).unwrap().digest()));
+        assert!(
+            agent.contains(
+                &agent_baseline_with_storage(AgentVariant::UnprivilegedInner, true)
+                    .unwrap()
+                    .digest()
+            )
+        );
+        for (name, _) in storage_link_denials() {
+            for table in [&tool, &agent] {
+                assert!(
+                    table
+                        .lines()
+                        .any(|line| line.starts_with(name) && line.ends_with("EPERM")),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tool_baseline_is_byte_for_byte_the_checked_in_one() {
+        // The shared builder must not have moved a single instruction of the
+        // `tool` filter: its digest is pinned by the evidence
+        // file the conformance run compares, checked here on every host.
+        let checked_in = std::fs::read_to_string(format!(
+            "{}/../../docs/specs/jail-v1/evidence/seccomp-table-tool-{}.txt",
+            env!("CARGO_MANIFEST_DIR"),
+            TABLE_ARCH
+        ))
+        .unwrap();
+        assert_eq!(tool_baseline_table(), checked_in);
+    }
+
+    /// Both `agent` baselines' tables are kept as evidence beside the `tool`
+    /// one and pinned the same way, so a change to either digest is a
+    /// visible diff.
+    #[test]
+    fn the_agent_baselines_are_byte_for_byte_the_checked_in_ones() {
+        let unprivileged = std::fs::read_to_string(format!(
+            "{}/../../docs/specs/jail-v1/evidence/seccomp-table-agent-{}.txt",
+            env!("CARGO_MANIFEST_DIR"),
+            TABLE_ARCH
+        ))
+        .unwrap();
+        let namespace = std::fs::read_to_string(format!(
+            "{}/../../docs/specs/jail-v1/evidence/seccomp-table-agent-namespace-{}.txt",
+            env!("CARGO_MANIFEST_DIR"),
+            TABLE_ARCH
+        ))
+        .unwrap();
+        assert_eq!(
+            agent_baseline_table(AgentVariant::UnprivilegedInner),
+            unprivileged
+        );
+        assert_eq!(
+            agent_baseline_table(AgentVariant::NamespaceInner),
+            namespace
+        );
+    }
+
+    #[test]
+    fn both_agent_variants_and_the_mediation_filter_assemble_and_differ() {
+        let unpriv = agent_baseline(AgentVariant::UnprivilegedInner).unwrap();
+        let ns = agent_baseline(AgentVariant::NamespaceInner).unwrap();
+        let tool = tool_baseline().unwrap();
+        let mediation = mediation_filter().unwrap();
+        let digests = [
+            tool.digest(),
+            unpriv.digest(),
+            ns.digest(),
+            mediation.digest(),
+        ];
+        for (i, left) in digests.iter().enumerate() {
+            for right in &digests[i + 1..] {
+                assert_ne!(left, right, "two filters share a digest");
+            }
+        }
+        for prog in [&unpriv, &ns, &mediation] {
+            assert_eq!(prog.insns()[0].k, SD_ARCH, "architecture is checked first");
+        }
+    }
+
+    #[test]
+    fn the_unprivileged_agent_baseline_is_tool_without_the_af_unix_rule() {
+        let agent = agent_baseline(AgentVariant::UnprivilegedInner).unwrap();
+        let tool = tool_baseline().unwrap();
+        // Every syscall tool denies, agent denies the same way, except AF_UNIX
+        // socket creation, which the mediation filter owns.
+        for (name, nr) in DENY_EPERM {
+            assert_eq!(run(&agent, NATIVE, *nr, [0, 0]), EPERM, "{name}");
+            assert_eq!(run(&tool, NATIVE, *nr, [0, 0]), EPERM, "{name}");
+        }
+        assert_eq!(run(&agent, NATIVE, NR_CLONE3, [0, 0]), ENOSYS);
+        assert_eq!(run(&agent, NATIVE, NR_CLONE, [CLONE_NEWUSER_BIT, 0]), EPERM);
+        assert_eq!(
+            run(&agent, NATIVE, NR_CLONE, [0x0001_0f00, 0]),
+            SECCOMP_RET_ALLOW
+        );
+        assert_eq!(run(&agent, NATIVE, NR_IOCTL, [0, TIOCSTI]), EPERM);
+        assert_eq!(run(&tool, NATIVE, NR_SOCKET, [AF_UNIX, SOCK_STREAM]), EPERM);
+        assert_eq!(
+            run(&agent, NATIVE, NR_SOCKET, [AF_UNIX, SOCK_STREAM]),
+            SECCOMP_RET_ALLOW,
+            "the agent baseline leaves AF_UNIX to the mediation filter"
+        );
+        // The unprivileged inner sandbox: no_new_privs (prctl 157), seccomp
+        // (317) and the three Landlock calls (444-446) are allowed.
+        for nr in [nr(157, 167), NR_SECCOMP, 444, 445, 446] {
+            assert_eq!(
+                run(&agent, NATIVE, nr, [0, 0]),
+                SECCOMP_RET_ALLOW,
+                "nr {nr}"
+            );
+        }
+        for arch in FOREIGN {
+            for nr in [NR_CONNECT, NR_SOCKET, 1, 11, 102] {
+                assert_eq!(run(&agent, arch, nr, [0, 0]), EPERM, "{arch:#x}/{nr}");
+            }
+        }
+        assert_eq!(run(&agent, NATIVE, X32_SYSCALL_BIT | 59, [0, 0]), EPERM);
+    }
+
+    const CLONE_NEWUSER_BIT: u32 = 0x1000_0000;
+
+    #[test]
+    fn the_namespace_variant_permits_only_the_namespace_setup() {
+        let ns = agent_baseline(AgentVariant::NamespaceInner).unwrap();
+        for (name, nr) in NAMESPACE_SETUP {
+            assert_eq!(run(&ns, NATIVE, nr, [0, 0]), SECCOMP_RET_ALLOW, "{name}");
+        }
+        assert_eq!(
+            run(&ns, NATIVE, NR_CLONE, [CLONE_NS_MASK, 0]),
+            SECCOMP_RET_ALLOW
+        );
+        for (name, nr) in DENY_EPERM {
+            if NAMESPACE_SETUP.iter().any(|(setup, _)| setup == name) {
+                continue;
+            }
+            assert_eq!(run(&ns, NATIVE, *nr, [0, 0]), EPERM, "{name} stays denied");
+        }
+        // setns, the new mount API and clone3 are never part of it.
+        for nr in [nr(308, 268), 428, 429, 430, 431, 432, 433, 442] {
+            assert_eq!(run(&ns, NATIVE, nr, [0, 0]), EPERM, "nr {nr}");
+        }
+        assert_eq!(run(&ns, NATIVE, NR_CLONE3, [0, 0]), ENOSYS);
+        for arch in FOREIGN {
+            assert_eq!(run(&ns, arch, nr(165, 40), [0, 0]), EPERM, "{arch:#x}");
+        }
+        assert_eq!(
+            AgentVariant::for_nested_user_namespace(true),
+            AgentVariant::NamespaceInner
+        );
+        assert_eq!(
+            AgentVariant::for_nested_user_namespace(false),
+            AgentVariant::UnprivilegedInner
+        );
+        let ops = AgentVariant::NamespaceInner.allowed_setup_operations();
+        assert!(ops.contains(&"unshare") && ops.contains(&"landlock_restrict_self"));
+        assert!(
+            !AgentVariant::UnprivilegedInner
+                .allowed_setup_operations()
+                .contains(&"mount")
+        );
+    }
+
+    #[test]
+    fn the_mediation_filter_notifies_connect_and_admits_only_stream_af_unix() {
+        let m = mediation_filter().unwrap();
+        assert_eq!(run(&m, NATIVE, NR_CONNECT, [0, 0]), SECCOMP_RET_USER_NOTIF);
+        for ty in [2, 3, 2 | 0x80000, 3 | 0x800, 4, 6, 10] {
+            assert_eq!(
+                run(&m, NATIVE, NR_SOCKET, [AF_UNIX, ty]),
+                EPERM,
+                "type {ty:#x}"
+            );
+            assert_eq!(
+                run(&m, NATIVE, NR_SOCKETPAIR, [AF_UNIX, ty]),
+                EPERM,
+                "type {ty:#x}"
+            );
+        }
+        for ty in [SOCK_STREAM, SOCK_SEQPACKET, SOCK_STREAM | 0x80000 | 0x800] {
+            assert_eq!(
+                run(&m, NATIVE, NR_SOCKET, [AF_UNIX, ty]),
+                SECCOMP_RET_ALLOW,
+                "type {ty:#x}"
+            );
+        }
+        assert_eq!(
+            run(&m, NATIVE, NR_SOCKET, [2, 2]),
+            SECCOMP_RET_ALLOW,
+            "AF_INET dgram"
+        );
+        assert_eq!(
+            run(&m, NATIVE, nr(1, 64), [0, 0]),
+            SECCOMP_RET_ALLOW,
+            "write"
+        );
+        for arch in FOREIGN {
+            for nr in [NR_CONNECT, NR_SOCKET, 102, 362] {
+                assert_eq!(run(&m, arch, nr, [AF_UNIX, 2]), EPERM, "{arch:#x}/{nr}");
+            }
+        }
+        assert_eq!(run(&m, NATIVE, X32_SYSCALL_BIT | NR_CONNECT, [0, 0]), EPERM);
+        assert!(
+            m.disassemble()
+                .iter()
+                .any(|line| line.contains("and   #0x0000000f"))
+        );
+    }
+
+    #[test]
+    fn the_agent_table_names_every_rule_and_both_digests() {
+        for variant in [
+            AgentVariant::UnprivilegedInner,
+            AgentVariant::NamespaceInner,
+        ] {
+            let table = agent_baseline_table(variant);
+            assert!(table.contains(variant.as_str()));
+            assert!(table.contains(&agent_baseline(variant).unwrap().digest()));
+            assert!(table.contains(&mediation_filter().unwrap().digest()));
+            for (name, _) in DENY_EPERM {
+                assert!(table.contains(name), "{name}");
+            }
+            for name in UNPRIVILEGED_SETUP {
+                assert!(table.contains(name), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_contained_baseline_admits_only_the_listed_socket_families() {
+        let tool = tool_baseline().unwrap();
+        let agents = [
+            agent_baseline(AgentVariant::UnprivilegedInner).unwrap(),
+            agent_baseline(AgentVariant::NamespaceInner).unwrap(),
+        ];
+        let m = mediation_filter().unwrap();
+        for nr in [NR_SOCKET, NR_SOCKETPAIR] {
+            for family in OUTSIDE {
+                for ty in [SOCK_STREAM, 2, 3, 5] {
+                    assert_eq!(
+                        run3(&tool, NATIVE, nr, [family, ty, 0]),
+                        EAFNOSUPPORT,
+                        "tool {nr}/{family:#x}/{ty}"
+                    );
+                    for agent in &agents {
+                        assert_eq!(
+                            run3(agent, NATIVE, nr, [family, ty, 0]),
+                            EAFNOSUPPORT,
+                            "agent {nr}/{family:#x}/{ty}"
+                        );
+                    }
+                }
+            }
+            for family in [AF_INET, AF_INET6] {
+                for ty in [SOCK_STREAM, 2, 3] {
+                    assert_eq!(run3(&tool, NATIVE, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
+                    for agent in &agents {
+                        assert_eq!(run3(agent, NATIVE, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
+                    }
+                    assert_eq!(run3(&m, NATIVE, nr, [family, ty, 0]), SECCOMP_RET_ALLOW);
+                }
+            }
+            // AF_UNIX: tool refuses it (EPERM); agent leaves
+            // it to the mediation filter.
+            assert_eq!(run3(&tool, NATIVE, nr, [AF_UNIX, SOCK_STREAM, 0]), EPERM);
+            for agent in &agents {
+                assert_eq!(
+                    run3(agent, NATIVE, nr, [AF_UNIX, SOCK_STREAM, 0]),
+                    SECCOMP_RET_ALLOW
+                );
+            }
+            // Netlink: never for tool; for agent the baseline admits exactly
+            // NETLINK_SOCK_DIAG (the launcher's), and the mediation filter,
+            // installed after the launcher opened it, refuses every protocol.
+            for protocol in [NETLINK_ROUTE, NETLINK_SOCK_DIAG, 9, 15, 0xffff_ffff] {
+                assert_eq!(
+                    run3(&tool, NATIVE, nr, [AF_NETLINK, 3, protocol]),
+                    EAFNOSUPPORT,
+                    "tool netlink {protocol}"
+                );
+                let expected = if protocol == NETLINK_SOCK_DIAG {
+                    SECCOMP_RET_ALLOW
+                } else {
+                    EAFNOSUPPORT
+                };
+                for agent in &agents {
+                    assert_eq!(
+                        run3(agent, NATIVE, nr, [AF_NETLINK, 3, protocol]),
+                        expected,
+                        "agent netlink {protocol}"
+                    );
+                }
+                assert_eq!(
+                    run3(&m, NATIVE, nr, [AF_NETLINK, 3, protocol]),
+                    EAFNOSUPPORT,
+                    "mediation netlink {protocol}"
+                );
+            }
+            // The mediation filter leaves every other family to the baseline.
+            for family in OUTSIDE {
+                assert_eq!(run3(&m, NATIVE, nr, [family, 1, 0]), SECCOMP_RET_ALLOW);
+            }
+        }
+    }
+
+    /// `tool` and `build` refuse `seccomp(2)` asking for a
+    /// notification listener. A child's own listener outranks the observer's
+    /// trace stop, and a `CONTINUE` reply runs the call unobserved. Only the
+    /// flag decides: the other operations and a plain filter stay allowed,
+    /// and the flags argument is an `unsigned int`, so only its low word is
+    /// read. `agent` is untouched: its launcher installs the jail's own
+    /// mediation listener after this baseline, and that listener is what
+    /// makes a child's second one fail with `EBUSY` (jail-v1 §9.2).
+    #[test]
+    fn j4_d1_the_tool_baseline_refuses_a_notification_listener() {
+        const SECCOMP: u32 = NR_SECCOMP;
+        const SET_MODE_FILTER: u32 = 1;
+        const NEW_LISTENER: u32 = 1 << 3;
+        const TSYNC: u32 = 1;
+        let tool = tool_baseline().unwrap();
+        for flags in [
+            NEW_LISTENER,
+            NEW_LISTENER | TSYNC,
+            NEW_LISTENER | (1 << 4),
+            0xffff_ffff,
+        ] {
+            assert_eq!(
+                run3(&tool, NATIVE, SECCOMP, [SET_MODE_FILTER, flags, 0]),
+                EPERM,
+                "flags {flags:#x}"
+            );
+        }
+        for (op, flags) in [
+            (SET_MODE_FILTER, 0),
+            (SET_MODE_FILTER, TSYNC),
+            (SET_MODE_FILTER, 1 << 2),
+            (0, 0),
+            (2, 0),
+            (3, 0),
+        ] {
+            assert_eq!(
+                run3(&tool, NATIVE, SECCOMP, [op, flags, 0]),
+                SECCOMP_RET_ALLOW,
+                "op {op} flags {flags:#x}"
+            );
+        }
+        for variant in [
+            AgentVariant::UnprivilegedInner,
+            AgentVariant::NamespaceInner,
+        ] {
+            let agent = agent_baseline(variant).unwrap();
+            assert_eq!(
+                run3(&agent, NATIVE, SECCOMP, [SET_MODE_FILTER, NEW_LISTENER, 0]),
+                SECCOMP_RET_ALLOW,
+                "the agent launcher installs the jail's own listener after its baseline"
+            );
+        }
+        let table = tool_baseline_table();
+        assert!(
+            table.contains("SECCOMP_FILTER_FLAG_NEW_LISTENER"),
+            "the table names the rule"
+        );
+        assert_eq!(
+            (NR_SECCOMP, SECCOMP_FILTER_FLAG_NEW_LISTENER),
+            (SECCOMP, NEW_LISTENER)
+        );
+    }
+
+    /// Every contained baseline refuses `clone` with
+    /// `CLONE_UNTRACED` (EPERM), whatever else the flags carry, in both
+    /// `agent` variants too: `agent` is observed by the same ptrace tracer.
+    /// The flags glibc uses for threads, `fork` and `posix_spawn` stay
+    /// allowed, and the namespace variant keeps its namespace flags.
+    #[test]
+    fn j4_s4_every_contained_baseline_refuses_an_untraced_clone() {
+        const SIGCHLD: u32 = 17;
+        const THREAD: u32 = 0x003d_0f00;
+        const VFORK: u32 = 0x0000_4100 | SIGCHLD;
+        let baselines = [
+            ("tool", tool_baseline().unwrap()),
+            (
+                "agent",
+                agent_baseline(AgentVariant::UnprivilegedInner).unwrap(),
+            ),
+            (
+                "agent-namespace",
+                agent_baseline(AgentVariant::NamespaceInner).unwrap(),
+            ),
+        ];
+        for (name, prog) in &baselines {
+            for flags in [
+                CLONE_UNTRACED,
+                CLONE_UNTRACED | SIGCHLD,
+                CLONE_UNTRACED | THREAD,
+                CLONE_UNTRACED | VFORK,
+            ] {
+                assert_eq!(
+                    run(prog, NATIVE, NR_CLONE, [flags, 0]),
+                    EPERM,
+                    "{name}: clone {flags:#x}"
+                );
+            }
+            for flags in [SIGCHLD, THREAD, VFORK] {
+                assert_eq!(
+                    run(prog, NATIVE, NR_CLONE, [flags, 0]),
+                    SECCOMP_RET_ALLOW,
+                    "{name}: clone {flags:#x}"
+                );
+            }
+            assert_eq!(run(prog, NATIVE, NR_CLONE3, [0, 0]), ENOSYS, "{name}");
+            // The flag means nothing to another call (getpid).
+            assert_eq!(
+                run(prog, NATIVE, nr(39, 172), [CLONE_UNTRACED, 0]),
+                SECCOMP_RET_ALLOW,
+                "{name}"
+            );
+        }
+        let ns = &baselines[2].1;
+        assert_eq!(
+            run(ns, NATIVE, NR_CLONE, [CLONE_NS_MASK, 0]),
+            SECCOMP_RET_ALLOW
+        );
+        assert_eq!(
+            run(ns, NATIVE, NR_CLONE, [CLONE_NS_MASK | CLONE_UNTRACED, 0]),
+            EPERM
+        );
+        assert_eq!(CLONE_NS_MASK & CLONE_UNTRACED, 0);
+        for table in [
+            tool_baseline_table(),
+            agent_baseline_table(AgentVariant::UnprivilegedInner),
+            agent_baseline_table(AgentVariant::NamespaceInner),
+        ] {
+            assert!(table.contains("CLONE_UNTRACED"), "{table}");
+        }
+    }
+
+    /// The assembler admits exactly `MAX_INSNS` instructions (32768 bytes);
+    /// a program at that limit is piped whole, not refused by a panic.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_program_at_the_instruction_limit_is_piped_whole() {
+        use std::io::Read as _;
+        let mut asm = Asm::new();
+        for _ in 0..super::super::bpf::MAX_INSNS {
+            asm.ret(SECCOMP_RET_ALLOW);
+        }
+        let program = asm.assemble().expect("the limit itself assembles");
+        let pipe = program_pipe(&program).expect("a default pipe holds 32 KiB");
+        let mut bytes = Vec::new();
+        std::fs::File::from(pipe).read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, program.to_bytes());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_spelled_out_errnos_match_this_kernel() {
+        assert_eq!(LINUX_EPERM, u32::try_from(libc::EPERM).unwrap());
+        assert_eq!(LINUX_ENOSYS, u32::try_from(libc::ENOSYS).unwrap());
+        assert_eq!(
+            LINUX_EAFNOSUPPORT,
+            u32::try_from(libc::EAFNOSUPPORT).unwrap()
+        );
+        assert_eq!(i64::from(NR_SECCOMP), libc::SYS_seccomp);
+        assert_eq!(i64::from(NR_CLONE), libc::SYS_clone);
+        assert_eq!(CLONE_UNTRACED, u32::try_from(libc::CLONE_UNTRACED).unwrap());
+        assert_eq!(
+            u64::from(SECCOMP_FILTER_FLAG_NEW_LISTENER),
+            libc::SECCOMP_FILTER_FLAG_NEW_LISTENER
+        );
+        for (ours, theirs) in [
+            (AF_UNIX, libc::AF_UNIX),
+            (AF_INET, libc::AF_INET),
+            (AF_INET6, libc::AF_INET6),
+            (AF_NETLINK, libc::AF_NETLINK),
+            (NETLINK_SOCK_DIAG, libc::NETLINK_SOCK_DIAG),
+        ] {
+            assert_eq!(ours, u32::try_from(theirs).unwrap());
+        }
+    }
+}

@@ -1,6 +1,6 @@
 # Expected capabilities on the reference host (jail-v1 §16).
 #
-# `cargo xtask conformance` compares every row here with `ouro-jail doctor
+# `cargo xtask conformance` compares every row here with `ukai-jail doctor
 # --json` on the provisioned Linux host. This file is the pinned expectation,
 # so ANY deviation fails the job and has to be changed deliberately: a host
 # that silently gained a capability is as much a change as one that lost it.
@@ -14,7 +14,7 @@
 # prerequisites are missing; `unsupported` means the implementation lacks it.
 #
 # Host: Ubuntu 26.04.1 LTS, kernel 7.0.0-31-generic, x86_64 KVM, bubblewrap
-# 0.11.1, account `ouro-ci` (uid 1001, no sudo, CapEff 0), measured 2026-09-22.
+# 0.11.1, account `ukai-ci` (uid 1001, no sudo, CapEff 0), measured 2026-09-22.
 # Every row cites the J0 evidence that justifies it. Re-measure and re-pin when
 # the kernel, the distribution, bubblewrap or the account changes (§16).
 
@@ -63,7 +63,7 @@ ptrace_seize_descendant = "available"
 observer_closed_set = "available"
 
 # J2 runs doctor/tests inside `systemd-run --user --scope`, with
-# XDG_RUNTIME_DIR=/run/user/$(id -u). Remeasured as ouro-ci 2026-09-22:
+# XDG_RUNTIME_DIR=/run/user/$(id -u). Remeasured as ukai-ci 2026-09-22:
 # the delegated user@1001.service has cpu/memory/pids enabled. Each doctor
 # probe creates a unique leaf, sets/reads its control, places a fixture,
 # invokes cgroup.kill, verifies populated=0, reaps and removes the leaf.
@@ -101,8 +101,8 @@ apparmor_userns_restriction = "available"
 # proves its Landlock and seccomp nesting instead.
 nested_user_namespace = "unavailable"
 
-# J3 (`agent`), measured live as ouro-ci on a stock host with no host
-# configuration changed: `ouro-jail doctor --json` inside the delegated scope,
+# J3 (`agent`), measured live as ukai-ci on a stock host with no host
+# configuration changed: `ukai-jail doctor --json` inside the delegated scope,
 # evidence/j3-doctor-2026-09-23-review-fixes-ouro-ci.json (each row's `evidence_ref` carries
 # the measured facts), and the live suite in
 # evidence/j3-test-log-2026-09-23-review-fixes-ouro-ci.txt, run
@@ -117,7 +117,7 @@ seccomp_user_notification = "available"
 # Opening the netlink socket is insufficient: an AF_UNIX VFS dump must work.
 unix_socket_diagnostics = "available"
 
-# One real `ouro-jail run --profile agent`: through 127.0.0.1:3128 an allowed
+# One real `ukai-jail run --profile agent`: through 127.0.0.1:3128 an allowed
 # loopback origin (numeric grant) answers 200 and the proxy records
 # allow/relayed; an ungranted port answers 403 (deny/host_not_allowed) and its
 # listener sees no connection; direct TCP egress is ENETUNREACH.

@@ -20,7 +20,7 @@ mod stamp;
 mod util;
 
 #[derive(Parser)]
-#[command(name = "xtask", about = "Repository tasks for the ouro workspace")]
+#[command(name = "xtask", about = "Repository tasks for the ukai workspace")]
 struct Cli {
     #[command(subcommand)]
     task: Task,

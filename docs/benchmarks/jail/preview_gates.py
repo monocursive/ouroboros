@@ -30,7 +30,7 @@ def main():
         work, config, data = (root / name for name in ['work', 'config', 'data'])
         work.mkdir(); config.mkdir(); (config / 'launch').mkdir()
         env = {'PATH': os.environ['PATH'], 'HOME': str(Path.home()),
-               'OURO_CONFIG_DIR': str(config), 'OURO_DATA_DIR': str(data)}
+               'UKAI_CONFIG_DIR': str(config), 'UKAI_DATA_DIR': str(data)}
 
         def run(verb, flags, argv=(), expected=0):
             command = [str(binary), verb, '--workspace', str(work), *map(str, flags)]
@@ -195,7 +195,7 @@ def main():
                 assert not (work / 'executed').exists() and not received
                 profile.write_text(prefix + f'hosts=["{origin}"]\n[network]\nallow=["127.0.0.1:{server.server_port}"]\n')
                 result = run('run', ['--launch', 'vault'], ['/bin/sh', '-c',
-                             f'printf "%s\\n" "$OURO_VAULT_API"; curl -fsS --noproxy "" -H "Authorization: $OURO_VAULT_API" {origin}/'])
+                             f'printf "%s\\n" "$UKAI_VAULT_API"; curl -fsS --noproxy "" -H "Authorization: $UKAI_VAULT_API" {origin}/'])
                 assert received == ['Bearer preview-fixture-secret'] and b'vault-ok' in result.stdout
                 attempt = latest()
                 receipt = settled(attempt)

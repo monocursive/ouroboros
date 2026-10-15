@@ -115,7 +115,7 @@ def main():
             artifacts = root / 'artifacts'
             script_dir = pathlib.Path(__file__).resolve().parent
             repo = script_dir.parents[2]
-            execute(['python3', repo / 'crates/ouro-jail/dist/package.py', '--binary',
+            execute(['python3', repo / 'crates/ukai-jail/dist/package.py', '--binary',
                      args.binary.resolve(), '--target', 'x86_64-unknown-linux-gnu', '--out',
                      artifacts, '--version', args.release_version, '--signing-key', signing_key], stdout=setup, stderr=subprocess.STDOUT)
         (out / 'artifacts').mkdir()
@@ -160,7 +160,7 @@ def main():
         options[options.index('StrictHostKeyChecking=accept-new')] = 'StrictHostKeyChecking=yes'
         ssh = ['ssh', '-T', '-p', str(port)] + options + ['ubuntu@127.0.0.1']
         execute(['scp', '-r', '-P', str(port)] + options +
-                [artifacts, repo / 'crates/ouro-jail/dist/install.sh',
+                [artifacts, repo / 'crates/ukai-jail/dist/install.sh',
                  script_dir / 'onboarding_guest.py', 'ubuntu@127.0.0.1:'])
         with (out / 'workflow.log').open('wb') as workflow:
             guest_args = ['python3', 'onboarding_guest.py', '--artifacts', 'artifacts',

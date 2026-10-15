@@ -5,31 +5,38 @@
 # historical milestone evidence remains historical, not proof for this tree.
 #
 # Re-blessing record:
+# - 2026-10-15 re-blessed every frozen schema and artifact for the rename from
+#   Ouroboros to Ukai: each `ouro.*` identifier became `ukai.*` and each
+#   `urn:ouro:schema:*` `$id` became `urn:ukai:schema:*`, with the receipt,
+#   policy and argv digests in the fixtures recomputed for the new domain
+#   strings. No field changed meaning. Evidence recorded before the rename
+#   keeps the old identifiers; validate_contract.py reads its receipts
+#   through that rename.
 # - 16336791 re-blessed jail-receipt.schema.json and
 #   policy-snapshot.schema.json in place under their existing identifiers
-#   (ouro.jail.receipt/1, ouro.jail.policy-snapshot/1). Rationale: additive
+#   (ukai.jail.receipt/1, ukai.jail.policy-snapshot/1). Rationale: additive
 #   fields only — the swap, storage and inodes limit ceilings (new snapshot
 #   fields; new receipt limit-row kinds, with the receipt's limit-row
 #   maximum raised from 4 to 7) plus their enforcement-loss handling. No
 #   shared field changed meaning, so no new identifier was required.
 # - audit 2026-10-08 (L21) re-blessed network-rules.md in place under
-#   ouro.jail.network/1. Rationale: the §Normalization text now states the
+#   ukai.jail.network/1. Rationale: the §Normalization text now states the
 #   enforced rule — plaintext HTTP requires a grant that named its port
 #   explicitly; the omitted-port expansion to 443 is the TLS shape. The
-#   wire vocabulary (ouro.jail.network/1) is unchanged; the change brings
+#   wire vocabulary (ukai.jail.network/1) is unchanged; the change brings
 #   the prose in line with what the proxy enforces.
 # - 2026-10-10 re-blessed policy-snapshot.schema.json in place under
-#   ouro.jail.policy-snapshot/1. Rationale: additive field only — a vault
+#   ukai.jail.policy-snapshot/1. Rationale: additive field only — a vault
 #   credential may declare the header its placeholder belongs in (`header`
 #   with `name` and an optional `prefix`, issue draft 08). No shared field
 #   changed meaning.
 # - 2026-10-10 re-blessed jail-receipt.schema.json in place under
-#   ouro.jail.receipt/1. Rationale: additive field only — a coverage entry
+#   ukai.jail.receipt/1. Rationale: additive field only — a coverage entry
 #   may carry `resolver_refused`, counting proxy connections refused for
 #   resolver capacity separately from policy denials (issue draft 04). No
 #   shared field changed meaning.
 # - 2026-10-10 re-blessed jail-event.schema.json in place under
-#   ouro.event/1. Rationale: additive branch only — a classified path may be
+#   ukai.event/1. Rationale: additive branch only — a classified path may be
 #   `root_relative` to a named root (an operator grant or a system read-only
 #   root, issue draft 10). The denial rules also admit write-class
 #   EROFS/EBUSY and mediated EACCES/EPERM net.connect results, matching
@@ -47,8 +54,8 @@
 #   changed, so no shared field changed meaning.
 # - 2026-10-14 re-blessed policy-snapshot.schema.json, jail-receipt.schema.json,
 #   canonicalization.md and network-rules.md in place under their existing
-#   identifiers (ouro.jail.policy-snapshot/1, ouro.jail.receipt/1,
-#   ouro.jail.policy/1, ouro.jail.network/1). Rationale: additive fields
+#   identifiers (ukai.jail.policy-snapshot/1, ukai.jail.receipt/1,
+#   ukai.jail.policy/1, ukai.jail.network/1). Rationale: additive fields
 #   only — an optional snapshot set `network.tls_only` (omitted when empty)
 #   and an optional receipt list `applied.network.tls_only` name the allow
 #   rules every grant of which omitted its port, the bit that decides
@@ -58,187 +65,187 @@
 #   inspected. No shared field changed meaning: a policy with no
 #   omitted-port grant keeps its bytes and digest, and one with such a
 #   grant now digests that grant's shape.
-schema = "ouro.jail.frozen-schemas/1"
+schema = "ukai.jail.frozen-schemas/1"
 milestone = "milestone-1"
 
 # §13.1: the shared source-event envelope
 [[frozen]]
 file = "event.schema.json"
-id = "urn:ouro:schema:event:1"
-identifier = "ouro.event/1"
-sha256 = "f11a51654753f9db14bede36a33abee5a7fbfbb66901a9175fd7cd3e45296384"
+id = "urn:ukai:schema:event:1"
+identifier = "ukai.event/1"
+sha256 = "912d2f344762ffc08700195a10b692aae986c4d2397cdfad993e87f70a937702"
 
-# §13.1: the jail producer's restriction of ouro.event/1 (no identifier of its own)
+# §13.1: the jail producer's restriction of ukai.event/1 (no identifier of its own)
 [[frozen]]
 file = "jail-event.schema.json"
-id = "urn:ouro:schema:jail-event:1"
-identifier = "ouro.event/1"
-sha256 = "491707ab300953f809dc34010f1c564995479247c16680a8043809ca5dc98c46"
+id = "urn:ukai:schema:jail-event:1"
+identifier = "ukai.event/1"
+sha256 = "bc63bd5feb57d96ad3675adacbc8f25f62d4ccfc22294cc6000930a04c750153"
 
 # §13.2: the receipt
 [[frozen]]
 file = "jail-receipt.schema.json"
-id = "urn:ouro:schema:jail-receipt:1"
-identifier = "ouro.jail.receipt/1"
-sha256 = "101fcaa7a343eb5eb01e144943fd946e8dc5d631e1a67e518f9b0a3ffbf57fa7"
+id = "urn:ukai:schema:jail-receipt:1"
+identifier = "ukai.jail.receipt/1"
+sha256 = "f3adeff7682cfd0ddb865b99abbde73b9ec6a72161982719359ae44a1041518a"
 
 # §6.3, canonicalization.md: the canonical policy snapshot
 [[frozen]]
 file = "policy-snapshot.schema.json"
-id = "urn:ouro:schema:jail-policy-snapshot:1"
-identifier = "ouro.jail.policy-snapshot/1"
-sha256 = "b9b09f9a66e2b582863a6ad5c857762bb9586fa2707a627ba869f081b0e231e6"
+id = "urn:ukai:schema:jail-policy-snapshot:1"
+identifier = "ukai.jail.policy-snapshot/1"
+sha256 = "623d251e8cb9fcecc418fcfd1f6fe3f8f8bfee10b406d5a431a808a90d71fc10"
 
 # §8.2: the managed gate release frame
 [[frozen]]
 file = "jail-gate.schema.json"
-id = "urn:ouro:schema:jail-gate:1"
-identifier = "ouro.jail.gate/1"
-sha256 = "cc7156f417929e3e93e842b02ee7630a025025e0856cf6cc3d1eda26666ff201"
+id = "urn:ukai:schema:jail-gate:1"
+identifier = "ukai.jail.gate/1"
+sha256 = "74b14935dcb5832fc1fa13a0246de11294da7c23cc16dcb9417d7b13311bfe71"
 
 # §8.2: the control message
 [[frozen]]
 file = "jail-control.schema.json"
-id = "urn:ouro:schema:jail-control:1"
-identifier = "ouro.jail.control/1"
-sha256 = "1a7ca84c1839448806becf5e320987e56f373c8bce858841a39943b25e6d4740"
+id = "urn:ukai:schema:jail-control:1"
+identifier = "ukai.jail.control/1"
+sha256 = "3258c99bd153e3b53697a4915fbed9f63414aa4aca172f4969931b46c5c025c7"
 
 # §3.2, §14.1: doctor --json, which supersedes the manual host manifest and
 # is recorded with every conformance run and the milestone report
 [[frozen]]
 file = "jail-doctor.schema.json"
-id = "urn:ouro:schema:jail-doctor:1"
-identifier = "ouro.jail.doctor/1"
-sha256 = "edf4136339056ea2905c1f6507bc93600288417d42757fabc1acb8bd3ea835a9"
+id = "urn:ukai:schema:jail-doctor:1"
+identifier = "ukai.jail.doctor/1"
+sha256 = "7a88618579fce5e5b9e54668ae59c7bd6922f1eb71f7a39abd90e3dedf65b09f"
 
 # the canonical bytes, the policy and argv digest preimages and the private policy.json envelope
 [[frozen_artifact]]
 file = "canonicalization.md"
-identifiers = ["ouro.jail.policy/1", "ouro.jail.policy-file/1", "ouro.jail.policy-snapshot/1"]
-sha256 = "7e682b829cc499c4b47c4770b996a0bd27eeb6f80058faa82610088a06166463"
+identifiers = ["ukai.jail.policy/1", "ukai.jail.policy-file/1", "ukai.jail.policy-snapshot/1"]
+sha256 = "fb6ca3944ceddb06a7da8e0721b5974e9fee86e12262abdaca80af8e5a001564"
 
 # the golden snapshot
 [[frozen_artifact]]
 file = "fixtures/policy-snapshot.json"
-identifiers = ["ouro.jail.policy/1"]
-sha256 = "bcb787d7294e2971466c1233882616a5ef3f88c8a687eea0a0d37e6a4c557187"
+identifiers = ["ukai.jail.policy/1"]
+sha256 = "c89ef67e5da5538dedb54c313e164a76190ea3a79b46ae278e6d85a8b94ae13f"
 
 # its golden RFC 8785 bytes
 [[frozen_artifact]]
 file = "fixtures/policy.jcs"
-identifiers = ["ouro.jail.policy/1"]
-sha256 = "5ac06fe87661d497f95be1af7d7dbc8a584f5312b145f7d37467a9d0b1a8debe"
+identifiers = ["ukai.jail.policy/1"]
+sha256 = "1973373901af3b5ea8f82ab08d3a7a093d85a8ac901701c91dd38f8f6657e7fc"
 
 # the golden policy and argv digests
 [[frozen_artifact]]
 file = "fixtures/digests.json"
-identifiers = ["ouro.jail.policy/1"]
-sha256 = "ff361096e68e18b34f8866b2c86ac47a29db4b966a03d1214de7f89d76b3b14b"
+identifiers = ["ukai.jail.policy/1"]
+sha256 = "0ebe6d80ec7f05d67f07f4cc7b8e1b2aa23ec4efea7bf7ddb0ede0f324c9d3e5"
 
 # the host-rule set
 [[frozen_artifact]]
 file = "network-rules.md"
-identifiers = ["ouro.jail.network/1"]
-sha256 = "ff01b0df42a4785b92103024f6532db67828d34a8b1344c15989963f662ca105"
+identifiers = ["ukai.jail.network/1"]
+sha256 = "77221944081f3acd412a2216d0bb0eb75b870aca541a6e562abe361d0b573bab"
 
 # the address table
 [[frozen_artifact]]
 file = "network-addresses.json"
-identifiers = ["ouro.jail.network/1"]
-sha256 = "60d9e0c44ae54d711d8ad8cbf0ae9f7cad66c3b3ce118bb3dfc8e05b7c897d49"
+identifiers = ["ukai.jail.network/1"]
+sha256 = "afb3f7a6269a2d158e7a23837b92e171b8c91523c2341a3521c52f9449103a8c"
 
 # the frozen address fixtures (N03)
 [[frozen_artifact]]
 file = "fixtures/network-cases.json"
-identifiers = ["ouro.jail.network/1"]
+identifiers = ["ukai.jail.network/1"]
 sha256 = "0ec74d81e3cdc9125f879d564d4fe2e1bd17bee053879da8fd9b3ba5e3cd7134"
 
 # the frame rules no schema states
 [[frozen_artifact]]
 file = "fixtures/gate-frames.json"
-identifiers = ["ouro.jail.gate/1"]
-sha256 = "105ba35ff476bebfe7ee1df74c98ceb15514f7a2fcca7203a0a3f839e6ec2f75"
+identifiers = ["ukai.jail.gate/1"]
+sha256 = "fdd7b9d4054192056c9de703fd9d78fec8f98e16543f9e354f358cb417b65581"
 
 # the record rules no schema states, and their citations
 [[frozen_artifact]]
 file = "fixtures/semantic-cases.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "56b74ce2ad9af80f6b46275d9dea41bdf1dd473350990c0a8409ce07b3961185"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "d4e00038535847e3efe6511d2ae65e34e384c77818d4e6b4a3de66c13ba8c686"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "examples/receipt-agent-proxy-only.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "50bc375795b32a2c0af9a29c5d2e32e6b34bfa66be6eed377387deedba273f39"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "25dabad54ef606af926c816cd4f02b380df3a5cf083d308d5d22f7d01184cbf0"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "examples/receipt-exec-refused.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "23b1cff4cddd0a10b9b524cdf596d57530fdac7a662d879a185751783f1bb567"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "c87bbeb5f1ba1ba76750604be9b88d0f6db592de1de279a2e597b8b046510c13"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "examples/receipt-macos-refused.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "6c7ccd81445f73be174bed300ec818cf513264ce993f7067cc05e4a641a4be99"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "89272d75fe47c95ba91a592e17cf3f759cbd86c3a5d4f4f571f10e5c2eeef2c1"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "examples/receipt-native-path.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "4f0129c535273d4bbd4c73087c177dba32eac7b1a6c0288b15ec7de94daeb4f0"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "489e60d6af11e93b6f72d04b167a465ccd5e3bdd5485cde0d84e5d8e01ecdb2b"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "examples/receipt-none.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "fd0900054d8741f44d0473b7ae55a9f21e984e9747d698f8f0ddaa4ba9e80b62"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "f813fe5049c47261e49f5c814f86ae7d39f910921d397032de7a78478c8c79ae"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "examples/receipt-prepared.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "81a79512f19e4a1534f9760daf1f11156d3fecb5e2857bec3eee1f2a9eda45ab"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "ea5ed887f964fe7099a9413627763f9de8a914f83da0fe8281cf1dc180c0e1c0"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "examples/receipt-settled-unknown.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "9bdb84ba3f7c8844c6c07133043cf41a9b3d1655b15c5e788ef9d9d0e61ef705"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "c7b426a9497c42c2eecd1cf90fd921ef0649fa9b33f3feb378a6e01806689c2b"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "examples/receipt-tool.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "20fb2a33bbede8be0c836d183c159f52d1f13c132081263d54690e7bf42c7dd7"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "0c77cf47e2ea3b1980b4c4347a5b86e1f10a20cab4f11b1fd93b69204bd4e3e9"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "fixtures/control-tool.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "e81bbdfb5fe0fc5b9ba67a680d5cdc90383d3bf2ef52adb2cc7e1cd77d28ae76"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "d79d0ac702f1555d4efe81999d2e335b31d20a511e0140b1eb0cdf5dbb087894"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "fixtures/receipt-trace-loss.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "7fb8b38686ff9feb9b0f31875e4126b7e45cc7883ab1cb878d8818c39c417f65"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "7de51960551450c431302f09d7bf401d98a6d79ffd020be40fd265c9c8b43646"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "fixtures/trace-loss.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "83a7442ff668aff3d885c2560dd6217f86387cbc26271eb62c84741648244310"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "4bf6b7b9a1ff973dcfe1504c837039dc3323234fffa778692d05a2a7af4c91fb"
 
 # an instance the semantic corpus changes
 [[frozen_artifact]]
 file = "fixtures/trace-tool.json"
-identifiers = ["ouro.jail.receipt/1", "ouro.event/1", "ouro.jail.control/1"]
-sha256 = "9eee4083254560f1eacc59a3df0d803133002c98cb5197f6d2836d35315087a5"
+identifiers = ["ukai.jail.receipt/1", "ukai.event/1", "ukai.jail.control/1"]
+sha256 = "1c93bdf014b5508d5abf0b2c17b31ea863e8de87d0af18416194dc93206cbd33"
 
 [[frozen]]
 file = "learned-policy.schema.json"
-id = "urn:ouro:schema:learned-policy:1"
-identifier = "ouro.jail.learned-policy/1"
-sha256 = "06829945e11e550153798627fa34ac7ead3591c64a446b16e1248f282bf19211"
+id = "urn:ukai:schema:learned-policy:1"
+identifier = "ukai.jail.learned-policy/1"
+sha256 = "e9004dad9c5aeb9d6abfa088dbd092a5d112af64cff76c95f5d7a77da8dc45b7"

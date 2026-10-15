@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-export:1",
+  "$id": "urn:ukai:schema:ledger-export:1",
   "title": "NDJSON export status on stderr, separate from original canonical bytes",
   "type": "object",
   "properties": {
     "schema": {
-      "const": "ouro.ledger.export/1"
+      "const": "ukai.ledger.export/1"
     },
     "run_id": {
       "type": "string",
       "pattern": "^run_[0-9a-f]{32}$"
     },
     "snapshot": {
-      "$ref": "urn:ouro:schema:ledger-read:1#/$defs/chain"
+      "$ref": "urn:ukai:schema:ledger-read:1#/$defs/chain"
     },
     "state": {
       "enum": [
@@ -30,7 +30,7 @@
       ]
     },
     "coverage": {
-      "$ref": "urn:ouro:schema:ledger-read:1#/$defs/coverage"
+      "$ref": "urn:ukai:schema:ledger-read:1#/$defs/coverage"
     },
     "local_consistency": {
       "type": "boolean"

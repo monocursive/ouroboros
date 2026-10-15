@@ -1,13 +1,13 @@
 {
   "done": false,
   "matched_runs": 2,
-  "next_after": "{\"schema\":\"ouro.ledger.catalog-position/1\",\"snapshot\":\"sha256:babe44c2c571aecdd02235d24ecf7826b065e209c2e277f9b049bd95f57000cf\",\"scope\":\"sha256:b9ec109eac00da4709172904bada02cbc8bec107f9f8afaf5ee54b3c52bc99d1\",\"last_run\":\"run_11111111111111111111111111111111\"}",
+  "next_after": "{\"schema\":\"ukai.ledger.catalog-position/1\",\"snapshot\":\"sha256:06457b716efb2dc3307340a915eab45a3f22175a883835c1e10a172cc9e88ebc\",\"scope\":\"sha256:b9ec109eac00da4709172904bada02cbc8bec107f9f8afaf5ee54b3c52bc99d1\",\"last_run\":\"run_11111111111111111111111111111111\"}",
   "runs": [
     {
       "attempt_id": "att_00000000-0000-4000-8000-000000000001",
       "capture_history": null,
       "chain": {
-        "head_digest": "sha256:c0680f83c34c0ccd35722190b6afcada817feeb060327a2ebbca4a1a363e02c0",
+        "head_digest": "sha256:5aef31cfdb7da57f775a8f7f7aa9cfbc60843224801629532e1ca5524b280a23",
         "head_seq": 7
       },
       "child_protection": "enforced",
@@ -81,6 +81,6 @@
     }
   ],
   "scanned_runs": 2,
-  "schema": "ouro.ledger.catalog/1",
-  "snapshot": "sha256:babe44c2c571aecdd02235d24ecf7826b065e209c2e277f9b049bd95f57000cf"
+  "schema": "ukai.ledger.catalog/1",
+  "snapshot": "sha256:06457b716efb2dc3307340a915eab45a3f22175a883835c1e10a172cc9e88ebc"
 }

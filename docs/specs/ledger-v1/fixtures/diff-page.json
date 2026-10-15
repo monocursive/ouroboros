@@ -130,13 +130,13 @@
     "problem": null,
     "run_id": "run_11111111111111111111111111111111",
     "snapshot": {
-      "head_digest": "sha256:a18a27f12601e2a6276294d3cbf3905c911589d7544246af85cf813908c08e30",
+      "head_digest": "sha256:b037e9b266f56629115919fb4c74cf601ae1bc9c16fdb7e8ccafae9b2260c22e",
       "head_seq": 7
     },
     "state": "settled"
   },
   "mode": "event_counts",
-  "next_after": "{\"left_run\":\"run_11111111111111111111111111111111\",\"right_run\":\"run_22222222222222222222222222222222\",\"left_head\":{\"head_seq\":7,\"head_digest\":\"sha256:a18a27f12601e2a6276294d3cbf3905c911589d7544246af85cf813908c08e30\"},\"right_head\":{\"head_seq\":7,\"head_digest\":\"sha256:de3b9ac62e6a1af5b14d43e4b5c1b20768c6e365fe766de769d892f293e81066\"},\"offset\":1}",
+  "next_after": "{\"left_run\":\"run_11111111111111111111111111111111\",\"right_run\":\"run_22222222222222222222222222222222\",\"left_head\":{\"head_seq\":7,\"head_digest\":\"sha256:b037e9b266f56629115919fb4c74cf601ae1bc9c16fdb7e8ccafae9b2260c22e\"},\"right_head\":{\"head_seq\":7,\"head_digest\":\"sha256:de3b9ac62e6a1af5b14d43e4b5c1b20768c6e365fe766de769d892f293e81066\"},\"offset\":1}",
   "right": {
     "child_protection": "enforced",
     "complete": true,
@@ -203,6 +203,6 @@
     },
     "state": "settled"
   },
-  "schema": "ouro.ledger.diff/1",
+  "schema": "ukai.ledger.diff/1",
   "total_changes": 2
 }

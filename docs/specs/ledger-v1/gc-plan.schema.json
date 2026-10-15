@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ouro:schema:ledger-gc-plan:1",
+  "$id": "urn:ukai:schema:ledger-gc-plan:1",
   "title": "Non-destructive retention preview, not deletion authorization",
   "type": "object",
   "additionalProperties": false,
@@ -17,7 +17,7 @@
   ],
   "properties": {
     "schema": {
-      "const": "ouro.ledger.gc-plan/1"
+      "const": "ukai.ledger.gc-plan/1"
     },
     "dry_run": {
       "const": true

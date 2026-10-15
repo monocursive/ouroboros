@@ -15,7 +15,7 @@ pub fn utc_stamp_from_unix(secs: i64) -> String {
 /// `YYYY-mm-ddTHH:MM:SSZ`, the RFC 3339 form, for report text.
 #[must_use]
 pub fn rfc3339_from_unix(secs: i64) -> String {
-    ouro_jail::records::rfc3339_utc_from_unix(secs)
+    ukai_jail::records::rfc3339_utc_from_unix(secs)
 }
 
 /// The current UTC stamp.
