@@ -1,0 +1,9 @@
+---
+interface Props { number: string; title: string; text: string; }
+const { number, title, text } = Astro.props;
+---
+<article class="boundary-step">
+  <p class="step-number" aria-hidden="true">{number}</p>
+  <h3>{title}</h3>
+  <p>{text}</p>
+</article>

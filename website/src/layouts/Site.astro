@@ -1,5 +1,7 @@
 ---
 import '@fontsource-variable/manrope';
+import '@fontsource/cormorant-garamond/latin-500.css';
+import '@fontsource/dm-mono/latin-400.css';
 import '../styles/global.css';
 import { releasedDocument, repositoryUrl } from '../release';
 
@@ -13,42 +15,39 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={description} />
-    <meta name="theme-color" content="#0b0d0c" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#f6f3eb" />
+    <meta name="color-scheme" content="light" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
     <meta property="og:url" content={canonical} />
-    <meta property="og:site_name" content="Ukai Jail" />
+    <meta property="og:site_name" content="Ukai" />
     <meta name="twitter:card" content="summary" />
     <link rel="canonical" href={canonical} />
     {markdown && <link rel="alternate" type="text/markdown" href={new URL(markdown, Astro.site)} title="Markdown version" />}
     <link rel="alternate" type="text/plain" href="/llms.txt" title="Documentation for agents" />
     <link rel="icon" href="/favicon.ico" sizes="16x16 24x24 32x32 48x48" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" sizes="any" />
-    <link rel="preload" href="/fonts/DepartureMono-Regular.woff2" as="font" type="font/woff2" crossorigin />
     <title>{title}</title>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
     <header class="site-header">
       <div class="container navigation">
-        <a class="brand" href="/" aria-label="Ukai Jail home">
-          <img src="/favicon.svg" width="36" height="36" alt="" />
-          <span>ukai<span class="brand-suffix"> / jail</span></span>
-        </a>
+        <a class="brand" href="/" aria-label="Ukai home">ukai</a>
         <nav aria-label="Main navigation">
           <a href="/guide/" aria-current={Astro.url.pathname.startsWith('/guide') ? 'page' : undefined}>Guide</a>
           <a href="/roadmap/" aria-current={Astro.url.pathname.startsWith('/roadmap') ? 'page' : undefined}>Roadmap</a>
-          <a class="github-link" href={`${repositoryUrl}/tree/dev`}>GitHub <span aria-hidden="true">↗</span></a>
+          <a class="github-link" href={`${repositoryUrl}/tree/dev`}>GitHub <span aria-hidden="true">→</span></a>
         </nav>
       </div>
     </header>
     <main id="main"><slot /></main>
     <footer class="site-footer">
       <div class="container footer-row">
-        <p>An open-source sandbox for AI agents. Currently in development.</p>
-        <div><a href={releasedDocument('LICENSE')}>MIT license</a><a href="https://monocursive.com">By Monocursive ↗</a></div>
+        <a class="brand" href="/" aria-label="Ukai home">ukai</a>
+        <p class="footer-story">Open-source sandbox for coding agents. Named after ukai, Japanese cormorant fishing: the bird works freely on a line, and the fisher keeps the catch.</p>
+        <div><a href={releasedDocument('LICENSE')}>MIT license</a><a href="https://monocursive.com">By Monocursive <span aria-hidden="true">→</span></a></div>
       </div>
     </footer>
   </body>

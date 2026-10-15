@@ -1,115 +1,212 @@
 ---
 import Site from '../layouts/Site.astro';
-import { jailCommand, jailReleaseUrl, releasedDocument, vmCommand, vmReleaseUrl, vmVersion } from '../release';
-const command = `curl --proto '=https' --tlsv1.2 -fsSL https://ukai.sh/install.sh | bash
-export PATH="$HOME/.local/bin:$PATH"
-# Linux: ${jailCommand} doctor --profile tool
-# macOS: ${vmCommand} doctor`;
-const capabilities = [
-  { title: 'File access', text: 'Give the process a workspace and specific read-only or writable paths. Your home directory is not exposed by default. System runtime files remain available so programs can execute.' },
-  { title: 'Network access', text: 'Local tools and builds run without a network. Agents connect through a proxy that checks destinations against your allowlist. You choose which services they can reach.' },
-  { title: 'Runtime limits', text: 'Set a deadline for the command. Add memory, CPU, and process limits on hosts with delegated cgroup controls. If a required control is unavailable, the jail refuses the run.' },
-  { title: 'A record of the run', text: 'A receipt records the policy that was applied, the result, and any missing evidence. Observation is on by default and logs a defined set of operations; it does not capture every action.' },
+import ActionLink from '../components/ActionLink.astro';
+import BoundaryStep from '../components/BoundaryStep.astro';
+import InstallCommand from '../components/InstallCommand.astro';
+import { jailCommand, releasedDocument, repositoryUrl, vmCommand } from '../release';
+
+const protections = [
+  { title: 'Your home directory', text: 'SSH keys, cloud credentials and your other projects do not exist inside the sandbox unless you grant them. The agent sees the system’s programs, its workspace and a scratch directory.' },
+  { title: 'Your network', text: 'No network by default. Agent profiles reach only the hosts you name, such as your model provider and package registry, through Ukai’s proxy.' },
+  { title: 'Your time', text: 'A hard deadline for the whole process tree. When the run ends, Ukai confirms every process is gone before it writes the final receipt.' },
 ];
-const useCases = [
-  { profile: 'agent', title: 'Let a coding agent work on a project', text: 'Make the checkout writable and allow the model endpoints it needs. Keep unrelated projects and credentials outside its file grants. Review the diff when it finishes.' },
-  { profile: 'tool', title: 'Run tests from an unfamiliar repository', text: 'Use a disposable checkout with no network access and a time limit. Grant installed dependencies as read-only paths when needed.' },
-  { profile: 'build', title: 'Build from read-only source', text: 'Give a build command read-only inputs, a writable output directory, and scratch space. Set a memory limit and keep the network closed.' },
+const questions = [
+  { title: 'What was allowed?', field: 'applied', text: 'The boundary actually in force. Here: no network and a 30-second deadline.' },
+  { title: 'How did it end?', field: 'outcome', text: 'The exit status, and in lifetime, confirmation that no process outlived the run.' },
+  { title: 'What couldn’t Ukai see?', field: 'coverage', text: 'What was observed, class by class, and every gap. A gap is reported, never hidden.' },
 ];
-const upcoming = [
-  { status: 'Next', title: 'Broader host compatibility', text: 'Extend clean-machine installation and enforcement records beyond the reference Linux hosts.' },
-  { status: 'Next', title: 'More tested agents', text: 'Run each agent and version against a current jail build, then publish the compatibility results and updated benchmarks.' },
-  { status: 'Research', title: 'Native macOS execution', text: 'Resolve process cleanup when the supervising helper dies. Apple entitlement approval is also pending; approval alone will not make execution ready.' },
+const reasons = [
+  { title: 'One tool for every agent.', text: 'The same flags work for Claude Code, Codex, OpenCode or npm test.' },
+  { title: 'Enforced outside the agent.', text: 'You set the limits at launch and the Linux kernel enforces them, so the agent can’t loosen its own rules.' },
+  { title: 'Nothing to build.', text: 'No container image, no daemon and no sudo to run. One binary wraps the command you already use.' },
+  { title: 'A record you can check.', text: 'Every run leaves a receipt, on your laptop, your servers or in CI.' },
 ];
-// The figures below are this record's, as published with the Linux release.
+const steps = [
+  { number: '01', title: 'Set limits.', text: 'Start from a profile, then grant the paths, hosts and time the task needs.' },
+  { number: '02', title: 'Run your command.', text: 'Run your agent or CLI tool as usual. Ukai applies the limits to it and its child processes.' },
+  { number: '03', title: 'Review the run.', text: 'Read the receipt for the policy applied, the result and any gaps in observation. Then review the file changes.' },
+];
+const limits = [
+  'An agent can still change the files you make writable and send readable data to the hosts you allow. Keep grants small and review the changes.',
+  'Observation covers a defined set of operations, not every read. The receipt says which ones it covered.',
+  'Containment relies on the host kernel. Ukai is a developer preview, and its security review is still pending.',
+  'The Mac preview runs offline Linux commands in a VM. It does not run native Mac programs or online agents.',
+];
+// A real run on the Linux reference host (x86_64, Ubuntu 26.04), 15 October 2026,
+// recorded in docs/benchmarks/jail/website-sample-run-2026-10-15.md. The output
+// lines are verbatim; the receipt is an excerpt of that run's jail.json.
+const run = `$ ukai-jail run --profile tool --workspace . --limit wall=30s -- \\
+    sh -c "cat $HOME/.ssh/authorized_keys; curl -sS https://example.com; echo ok > result.txt"
+cat: /home/ubuntu/.ssh/authorized_keys: No such file or directory
+curl: (6) Could not resolve host: example.com
+$ cat result.txt
+ok`;
+const receipt = `{
+  "schema": "ukai.jail.receipt/1",
+  "phase": "settled",
+  "containment": "enforced",
+  "outcome": { "kind": "exited", "code": 0, … },
+  "applied": {
+    "network": { "mode": "none", "mechanism": "network-namespace", … },
+    "limits": [
+      { "key": "wall", "requested": "30000", "applied": true, "hit": false, … },
+      …
+    ],
+    …
+  },
+  "lifetime": { "tree_empty": true, "integrity": "verified", … },
+  "coverage": {
+    "exec": { "status": "active", "observed_count": 7, "gaps": [], … },
+    "fs.write": { "status": "active", "observed_count": 1, "gaps": [], … },
+    "net": { "status": "active", "observed_count": 2, "gaps": [], … },
+    …
+  },
+  "errors": []
+}`;
+const compatibility = `${releasedDocument('docs/specs/jail-v1/agent-compatibility.md')}`;
 const benchmark = `${releasedDocument('docs/benchmarks/jail/followup-2026-09-29.md')}#k17-results`;
+const runRecord = `${repositoryUrl}/blob/dev/docs/benchmarks/jail/website-sample-run-2026-10-15.md`;
+const renamedPreview = jailCommand !== 'ukai-jail';
 ---
-<Site title="Ukai Jail — A Linux sandbox for AI agents" description="Give your AI agent only the access it needs. Restrict files, network destinations, and runtime, with receipts and recorded Linux benchmarks.">
+<Site title="Ukai — Sandbox for coding agents on Linux" description="Ukai sandboxes Claude Code, Codex, OpenCode and any CLI on Linux: limit files, network and runtime, and get a receipt of every run.">
   <section class="hero container" aria-labelledby="hero-heading">
     <div class="hero-copy">
-      <p class="eyebrow status"><span class="status-dot" aria-hidden="true"></span> Developer previews · Linux + macOS VM</p>
-      <h1 id="hero-heading">Give your agent only the access it needs.</h1>
-      <p class="introduction">Ukai Jail is a Linux sandbox for AI agents and command-line tools. Limit which files they can change, which services they can contact, and how long they can run. On Apple Silicon, try offline Linux commands in a disposable VM.</p>
-      <div class="hero-actions"><a class="button" href="/guide/">Get started <span aria-hidden="true">↗</span></a><a class="text-link" href="#security">How it works <span aria-hidden="true">↓</span></a></div>
+      <p class="eyebrow">Open-source sandbox for coding agents</p>
+      <h1 id="hero-heading">Give your agent a repo, not your machine.</h1>
+      <p class="introduction">Ukai wraps Claude Code, Codex, OpenCode or any command-line tool on Linux. You choose which files it can touch, which hosts it can reach and how long it can run. Every run ends with a receipt: what was allowed, what happened, and what Ukai couldn’t see.</p>
+      <InstallCommand id="hero-install" label="Install" compact />
+      <p class="preview-label">Linux x86_64 and ARM64 · Mac: offline VM preview · MIT · Developer preview</p>
+      <div class="hero-actions">
+        <ActionLink href="/guide/" primary>Read the quickstart</ActionLink>
+        <ActionLink href="#run" direction="down">See a real run</ActionLink>
+      </div>
     </div>
-    <div class="emblem" aria-hidden="true">
-      <img class="hero-mark" src="/brand/ukai-on-dark.svg" width="440" height="440" alt="" fetchpriority="high" />
+    <img class="hero-mark" src="/brand/ukai.svg" width="400" height="400" alt="" fetchpriority="high" />
+  </section>
+
+  <section class="boundary-section" id="security" aria-labelledby="protect-heading">
+    <div class="container section-stack">
+      <div class="section-intro">
+        <p class="eyebrow">What stays protected</p>
+        <h2 id="protect-heading">Your machine stays yours.</h2>
+        <p>Coding agents run with your user account. Ukai gives them a workspace and nothing else you didn’t choose.</p>
+      </div>
+      <div class="boundary-steps">
+        {protections.map((item) => (
+          <article class="boundary-step">
+            <h3>{item.title}</h3>
+            <p>{item.text}</p>
+          </article>
+        ))}
+      </div>
     </div>
   </section>
 
-  <section class="container example" aria-labelledby="example-heading">
+  <section class="run-section container" id="run" aria-labelledby="run-heading">
+    <div class="section-intro">
+      <p class="eyebrow">A real run</p>
+      <h2 id="run-heading">One command. One receipt.</h2>
+      <p>We ran this on our Linux reference host. The command tries to read an SSH file, reach the internet and write a file in its workspace. Only the write goes through.</p>
+    </div>
     <div class="terminal">
-      <div class="terminal-heading"><h2 class="eyebrow" id="example-heading">Install the developer preview</h2><span class="eyebrow">Detects your platform</span></div>
-      <pre tabindex="0"><code>{command}</code></pre>
+      <div class="terminal-heading"><p class="eyebrow" id="run-terminal-heading">Terminal</p></div>
+      <pre tabindex="0" aria-labelledby="run-terminal-heading"><code>{run}</code></pre>
     </div>
-    <div class="example-notes"><p>Linux: glibc 2.39+ and bubblewrap. Mac: Apple Silicon, macOS 27+, and 8 GiB free APFS storage. SHA-256 hashes are pinned in the installer. No compiler or sudo needed. These previews were published before the Ukai rename and retain their original command names.</p><a href="/guide/#install-the-developer-preview">Install &amp; host requirements ↗</a></div>
-    <div class="workflow-note"><h3>New: Ukai VM for Mac</h3><p>The signed, notarized <a href={vmReleaseUrl}>{vmVersion} release</a> runs offline Linux ARM64 commands with <code>tool</code> and <code>build</code> profiles. It copies inputs into a disposable VM and returns files and receipts for review. Native Mac programs, Xcode and online agents are outside this preview.</p><a class="text-link" href="/guide/#macos-vm-preview">Mac quickstart and preview limits <span aria-hidden="true">↗</span></a></div>
-  </section>
-
-  <section class="section" id="security" aria-labelledby="security-heading">
-    <div class="container">
-      <p class="eyebrow section-eyebrow">Security</p>
-      <div class="section-heading"><h2 id="security-heading">Enforce permissions outside the agent.</h2><p>The <code>ukai-jail</code> command uses bubblewrap and Linux kernel controls to restrict a process and its children. Your existing agent keeps its own models and workflow.</p></div>
-      <div class="capabilities">{capabilities.map((item) => <article class="capability"><h3>{item.title}</h3><p>{item.text}</p></article>)}</div>
-      <div class="workflow-note"><h3>The grants still matter.</h3><p>An agent can change files you make writable and send readable data to services you allow. Start with a small set of permissions and inspect the result. Containment relies on the host kernel; this is pre-release software with security review still ahead of release.</p><a class="text-link" href="/guide/#understand-the-boundary">Understand the boundary <span aria-hidden="true">↗</span></a></div>
-    </div>
-  </section>
-
-  <section class="section" id="use-cases" aria-labelledby="use-cases-heading">
-    <div class="container">
-      <p class="eyebrow section-eyebrow">Use cases</p>
-      <div class="section-heading"><h2 id="use-cases-heading">Where the jail helps</h2><p>Pick a profile for the job, then grant the paths and services that command needs.</p></div>
-      <div class="use-case-grid">{useCases.map((item) => <article><p class="eyebrow">{item.profile} profile</p><h3>{item.title}</h3><p>{item.text}</p></article>)}</div>
-      <a class="text-link section-link" href="/guide/#choose-a-profile">Choose a profile <span aria-hidden="true">↗</span></a>
-    </div>
-  </section>
-
-  <section class="section" id="performance" aria-labelledby="performance-heading">
-    <div class="container">
-      <p class="eyebrow section-eyebrow">Performance</p>
-      <div class="section-heading"><h2 id="performance-heading">What does the sandbox cost?</h2><p>On Linux, processes run on the host kernel. Setting up containment takes time, and observing operations adds work while the command runs. The Mac preview boots a VM for each attempt; measured startup was about 22 seconds.</p></div>
-      <div class="performance-grid">
-        <div class="performance-copy">
-          <p>In our recorded Linux benchmark, the highest p95 added startup time across the tested workloads was <strong>131 ms with observation off</strong>.</p>
-          <p><strong>Observation is on by default.</strong> In the file-heavy fixture shown here, it raised median total runtime from 375 ms to 1,167 ms. Expect the cost to depend on what your command does.</p>
-          <p class="measurement-note">Recorded on 29 September 2026 on the Ubuntu reference host, using an earlier development build. These are synthetic workloads, not an agent speed estimate.</p>
-        </div>
-        <div class="benchmark-table">
-          <table>
-            <caption>5,000 file-operation rounds<br /><span>Median total runtime · plain session · 30 samples per mode</span></caption>
-            <thead><tr><th scope="col">Execution mode</th><th scope="col">Time</th></tr></thead>
-            <tbody>
-              <tr><th scope="row">Direct, without the jail</th><td>190 ms</td></tr>
-              <tr><th scope="row">Jailed, observation off</th><td>375 ms</td></tr>
-              <tr class="default-mode"><th scope="row">Jailed, observation on <span>Default</span></th><td>1,167 ms</td></tr>
-            </tbody>
-          </table>
-        </div>
+    <div class="receipt-grid">
+      <div class="terminal receipt">
+        <div class="terminal-heading"><p class="eyebrow" id="receipt-heading">jail.json · excerpt</p></div>
+        <pre tabindex="0" aria-labelledby="receipt-heading"><code>{receipt}</code></pre>
       </div>
-      <p class="benchmark-note">The full benchmark contains 540 measured launches. All 60 observation-off no-op runs finished too quickly for the jail to confirm execution and returned <code>exec_unconfirmed</code> with exit code 1. Their startup timings are included; they are not successful run receipts.</p>
-      <a class="text-link" href={benchmark}>Read the method, raw results, and limitations <span aria-hidden="true">↗</span></a>
+      <div class="questions">
+        <p class="questions-heading">The receipt answers three questions.</p>
+        {questions.map((item) => (
+          <article class="question">
+            <h3>{item.title}</h3>
+            <p><code>{item.field}</code> · {item.text}</p>
+          </article>
+        ))}
+      </div>
+    </div>
+    <div class="run-record">
+      <p class="install-note">Fields trimmed for length (…). Each run also keeps an event journal; read it with <code>ukai-jail tail</code>. The run record holds this run’s full output, receipt, policy and journal, with the build and host it ran on.</p>
+      <ActionLink href={runRecord}>Full record of this run</ActionLink>
     </div>
   </section>
 
-  <section class="section" aria-labelledby="status-heading">
-    <div class="container status-grid">
-      <div><p class="eyebrow section-eyebrow">Availability</p><h2 id="status-heading">Choose your host.</h2></div>
-      <div class="status-copy">
-        <p><strong>Signed developer packages are available for Linux x86_64 and ARM64.</strong> Read the <a href={jailReleaseUrl}>Linux release notes</a> and use <code>{jailCommand} doctor</code> to check your host.</p>
-        <p><strong>Apple Silicon Macs have a separate offline VM preview.</strong> Follow the <a href="/guide/#macos-vm-preview">Mac quickstart</a> for the published <code>{vmCommand}</code> command. Native macOS execution remains research; this preview runs Linux inside a VM and does not require Endpoint Security approval.</p>
-        <p>On Linux, fourteen starter launch profiles are included. OpenCode has recorded live runs; other agent and version combinations still need testing.</p>
-        <p>When a command needs more access, <code>learn</code> can propose missing read and network permissions from an observed run. You review the proposal before applying it.</p>
-        <a class="text-link" href="/guide/#run-an-existing-agent">Run an existing agent <span aria-hidden="true">↗</span></a>
+  <section class="boundary-section" id="agents" aria-labelledby="agents-heading">
+    <div class="container agents-grid">
+      <div class="section-intro">
+        <p class="eyebrow">Works with</p>
+        <h2 id="agents-heading">The agent you already use.</h2>
+        <p>Launch profiles for 14 agents, including Claude Code, Codex, OpenCode and Gemini CLI, plus any command-line tool. All profiles are experimental; OpenCode has recorded live runs.</p>
+        <ActionLink href={compatibility}>Compatibility records</ActionLink>
+      </div>
+      <div class="reasons">
+        <h3>Why not Docker, or your agent’s own sandbox?</h3>
+        <ul>
+          {reasons.map((item) => <li><strong>{item.title}</strong> {item.text}</li>)}
+        </ul>
       </div>
     </div>
   </section>
 
-  <section class="section" aria-labelledby="next-heading">
-    <div class="container">
-      <p class="eyebrow section-eyebrow">Planned work</p>
-      <div class="section-heading"><h2 id="next-heading">What we’re working on next</h2><a class="text-link" href="/roadmap/">Read the roadmap <span aria-hidden="true">↗</span></a></div>
-      <div class="roadmap-grid">{upcoming.map((item) => <article><p class="eyebrow">{item.status}</p><h3>{item.title}</h3><p>{item.text}</p></article>)}</div>
-      <p class="later-note">Shared run records and company-managed Linux workers are planned further out. There are no release dates for these yet.</p>
+  <section class="install-section container" aria-labelledby="steps-heading">
+    <div class="section-intro">
+      <p class="eyebrow">How it works</p>
+      <h2 id="steps-heading">Set limits. Run. Review.</h2>
+    </div>
+    <div class="boundary-steps" id="use-cases">{steps.map((step) => <BoundaryStep {...step} />)}</div>
+  </section>
+
+  <section class="boundary-section" id="get-started" aria-labelledby="install-heading">
+    <div class="container install-content">
+      <div class="section-intro">
+        <p class="eyebrow">Developer preview</p>
+        <h2 id="install-heading">Install Ukai</h2>
+        <p>Install the developer preview, then follow the quickstart for your platform.</p>
+      </div>
+      <InstallCommand id="install" />
+      <p class="install-note">The installer detects your platform and verifies SHA-256 hashes. No compiler or sudo required.</p>
+      <div class="platforms">
+        <article class="platform">
+          <p class="eyebrow">Linux</p>
+          <h3>Run agents and CLI tools.</h3>
+          <p>Signed x86_64 and ARM64 packages. Requires glibc 2.39+ and bubblewrap.</p>
+          <ActionLink href="/guide/#install-the-developer-preview">Linux quickstart</ActionLink>
+        </article>
+        <article class="platform">
+          <p class="eyebrow">macOS VM preview</p>
+          <h3>Run offline Linux commands.</h3>
+          <p>Runs in a disposable VM. Requires Apple Silicon, macOS 27+, and 8 GiB free APFS storage.</p>
+          <ActionLink href="/guide/#macos-vm-preview">Mac quickstart &amp; limits</ActionLink>
+        </article>
+      </div>
+      {renamedPreview && (
+        <p class="preview-note">Ukai was called Ouroboros until October 2026. The current preview still installs the <code>{jailCommand}</code> and <code>{vmCommand}</code> commands; the next release installs <code>ukai-jail</code>.</p>
+      )}
+    </div>
+  </section>
+
+  <section class="install-section container" id="limits" aria-labelledby="limits-heading">
+    <div class="section-intro">
+      <p class="eyebrow">Limits</p>
+      <h2 id="limits-heading">What Ukai doesn’t do</h2>
+    </div>
+    <ul class="limits-list">
+      {limits.map((item) => <li>{item}</li>)}
+    </ul>
+    <ActionLink href="/guide/#understand-the-boundary">Security limits in the guide</ActionLink>
+  </section>
+
+  <section class="evidence-section" id="performance" aria-labelledby="evidence-heading">
+    <div class="container evidence-content">
+      <h2 id="evidence-heading">Read the guide and the evidence</h2>
+      <p>Follow the setup guide, check benchmark results and their limitations, or see what we’re building next.</p>
+      <div class="evidence-links">
+        <ActionLink href="/guide/">Read the guide</ActionLink>
+        <ActionLink href={benchmark}>Benchmarks &amp; limitations</ActionLink>
+        <ActionLink href="/roadmap/">View the roadmap</ActionLink>
+      </div>
     </div>
   </section>
 </Site>
